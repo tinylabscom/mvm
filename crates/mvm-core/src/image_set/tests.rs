@@ -177,6 +177,7 @@ fn manifest_at(set_version: &str) -> ImageSetManifest {
         compatibility: ImageSetCompatibility {
             guest_agent_protocol: ProtocolRange::new(2, 2).unwrap(),
             builder_cache_contract: 4,
+            builder_boot_abi: None,
         },
         nix_inputs: NixInputs {
             flake_locks: vec![FlakeLockIdentity {
@@ -255,7 +256,13 @@ fn host() -> HostProtocolSupport {
     HostProtocolSupport {
         guest_agent_protocol: ProtocolRange::new(2, 3).unwrap(),
         builder_cache_contract: 4,
+        builder_boot_abi: payload_capable(),
     }
+}
+
+/// A host that can hand builder boots the boot payload.
+fn payload_capable() -> BuilderBootAbiRange {
+    BuilderBootAbiRange::WITH_PAYLOAD
 }
 
 fn digest(manifest: &ImageSetManifest) -> Sha256Hex {
@@ -750,11 +757,11 @@ mod structure {
 
     #[test]
     fn a_set_carrying_per_arch_initramfs_members_is_well_formed_and_complete() {
-        let mut manifest = manifest();
+        let manifest = manifest();
         for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
-            manifest
-                .members
-                .push(member(ImageSetRole::Initramfs, MemberTarget::Arch(arch)));
+            assert!(manifest.members.iter().any(|member| {
+                member.role == ImageSetRole::Initramfs && member.target == MemberTarget::Arch(arch)
+            }));
         }
         validate_structure(&manifest).unwrap();
         require_complete(&manifest, &ImageSetRequirement::current_train()).unwrap();
@@ -771,17 +778,25 @@ mod structure {
         );
     }
 
-    /// Published sets carry no initramfs member yet, so requiring one would
-    /// refuse every set a released CLI pins. The role joins the requirement
-    /// with the lock that first selects a set carrying it.
+    /// The initramfs is a required member on both architectures: a set that
+    /// omits it is refused as incomplete, naming each missing member.
     #[test]
-    fn the_current_train_does_not_yet_require_an_initramfs() {
-        assert!(
-            ImageSetRequirement::current_train()
-                .members()
-                .iter()
-                .all(|required| required.role != ImageSetRole::Initramfs)
-        );
+    fn the_current_train_requires_an_initramfs_on_both_arches() {
+        let mut manifest = manifest();
+        manifest
+            .members
+            .retain(|member| member.role != ImageSetRole::Initramfs);
+        match require_complete(&manifest, &ImageSetRequirement::current_train()) {
+            Err(ImageSetError::Incomplete { missing }) => {
+                for arch in [GuestArch::X86_64, GuestArch::Aarch64] {
+                    assert!(missing.contains(&RequiredMember {
+                        role: ImageSetRole::Initramfs,
+                        target: MemberTarget::Arch(arch),
+                    }));
+                }
+            }
+            other => panic!("a set without an initramfs must be incomplete, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1028,7 +1043,7 @@ mod completeness {
     fn current_train_requires_every_role_on_both_arches_plus_the_smoke_pack() {
         let requirement = ImageSetRequirement::current_train();
         let members = requirement.members();
-        assert_eq!(members.len(), 19);
+        assert_eq!(members.len(), 21);
         for arch in [X86, ARM] {
             for profile in [
                 WorkloadImageProfile::DefaultTenant,
@@ -1053,6 +1068,7 @@ mod completeness {
                 ImageSetRole::SdkSidecar(GuestLibc::Glibc),
                 ImageSetRole::SdkSidecar(GuestLibc::Musl),
                 ImageSetRole::Stage0BootstrapKernel,
+                ImageSetRole::Initramfs,
             ] {
                 assert!(members.contains(&RequiredMember { role, target: arch }));
             }
@@ -1139,6 +1155,68 @@ mod protocol {
                 "{min}..={max}"
             );
         }
+    }
+
+    /// A release published before the field existed carries none, and meant
+    /// the legacy image that bakes its own builder binaries.
+    #[test]
+    fn a_release_without_a_builder_boot_abi_is_the_legacy_abi() {
+        let manifest = manifest();
+        assert_eq!(manifest.compatibility.builder_boot_abi, None);
+        assert_eq!(
+            manifest.compatibility.builder_boot_abi_or_legacy(),
+            BuilderBootAbi::LEGACY
+        );
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+        let baked_only = HostProtocolSupport {
+            builder_boot_abi: BuilderBootAbiRange::LEGACY_ONLY,
+            ..host()
+        };
+        check_protocol_compatibility(&manifest, &baked_only).unwrap();
+    }
+
+    #[test]
+    fn an_unknown_builder_boot_abi_is_refused() {
+        let mut manifest = manifest();
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::new(7));
+        let error = check_protocol_compatibility(&manifest, &host()).unwrap_err();
+        assert!(
+            matches!(error, ImageSetError::BuilderBootAbiUnsupported { set, .. } if set == BuilderBootAbi::new(7)),
+            "{error}"
+        );
+        assert_eq!(error.stage(), ImageSetStage::ProtocolCompatibility);
+        assert!(error.to_string().contains("0..=1"), "{error}");
+    }
+
+    /// An image with no builder binaries of its own needs a host that can
+    /// supply them in the boot payload.
+    #[test]
+    fn a_payload_abi_set_is_refused_by_a_host_without_a_payload() {
+        let mut manifest = manifest();
+        manifest.compatibility.builder_boot_abi = Some(BuilderBootAbi::PAYLOAD);
+        check_protocol_compatibility(&manifest, &host()).unwrap();
+        let baked_only = HostProtocolSupport {
+            builder_boot_abi: BuilderBootAbiRange::LEGACY_ONLY,
+            ..host()
+        };
+        assert!(matches!(
+            check_protocol_compatibility(&manifest, &baked_only),
+            Err(ImageSetError::BuilderBootAbiUnsupported { set, .. }) if set == BuilderBootAbi::PAYLOAD
+        ));
+    }
+
+    #[test]
+    fn the_builder_boot_abi_round_trips_as_a_bare_integer() {
+        let mut declared = manifest();
+        declared.compatibility.builder_boot_abi = Some(BuilderBootAbi::PAYLOAD);
+        let json = serde_json::to_value(&declared.compatibility).unwrap();
+        assert_eq!(json["builder_boot_abi"], serde_json::json!(1));
+        let back: ImageSetCompatibility = serde_json::from_value(json).unwrap();
+        assert_eq!(back, declared.compatibility);
+        // Absent stays absent rather than being written back as a 0 the set
+        // never declared.
+        let legacy = serde_json::to_value(&manifest().compatibility).unwrap();
+        assert!(legacy.get("builder_boot_abi").is_none(), "{legacy}");
     }
 
     #[test]
@@ -1730,6 +1808,7 @@ mod verification {
         let incompatible = HostProtocolSupport {
             guest_agent_protocol: ProtocolRange::new(7, 8).unwrap(),
             builder_cache_contract: 4,
+            builder_boot_abi: payload_capable(),
         };
 
         verify_checked(&set.request(), accept_signature)

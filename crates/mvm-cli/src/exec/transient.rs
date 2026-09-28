@@ -119,8 +119,13 @@ pub(super) fn boot_transient_vm(
 
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
+        let phase = mvm_runtime::ui::activity::start(format!(
+            "Booting the VM ({})",
+            attempt.backend.name()
+        ));
         sub.start(SubPhase::VmmCreate);
         if let Err(e) = attempt.backend.start(attempt.start_config) {
+            drop(phase);
             emit_guest_console_diagnostic(&vm_name);
             remove_transient_state_dir(&mvm_core::config::vm_state_dir(&vm_name).to_string_lossy());
             return Err(e).context("starting transient microVM");
@@ -131,6 +136,7 @@ pub(super) fn boot_transient_vm(
         // needs marks inside the driver, not here.
         sub.finish(SubPhase::VmmCreate);
         sub.start(SubPhase::GuestKernelEntry);
+        phase.finish();
     }
     let launch_mode = if warm_claimed {
         crate::commands::vm::phase_timing::LaunchMode::Warm

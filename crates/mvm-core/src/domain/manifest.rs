@@ -18,6 +18,12 @@
 //! mem = "1024M"
 //! data_disk = "0"
 //! name = "openclaw"       # optional, display only
+//!
+//! # Stored secrets this project binds to every run. Names and destinations
+//! # only — a value is refused by the schema, never read.
+//! [secrets]
+//! anthropic = {}                               # the stored allow-list whole
+//! gitlab = { hosts = ["gitlab.com"] }          # narrowed to these hosts
 //! ```
 //!
 //! The schema is strict: unknown keys are rejected (`deny_unknown_fields`),
@@ -186,6 +192,20 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "ManifestGrants::is_empty")]
     pub grants: ManifestGrants,
 
+    /// Stored secrets every run of this project binds, by name, with the
+    /// destinations each may reach. Names and destinations only: the schema
+    /// has no field a value could go in, and a manifest that tries is refused
+    /// at parse. Merged with `--secret` under the same narrowing rules — a
+    /// flag can narrow a declared secret, never widen it.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub secrets: std::collections::BTreeMap<String, ManifestSecret>,
+
+    /// Who answers a runtime approval (`[approval]`): an endpoint route rule
+    /// or a secret binding whose decision is `ask`. Empty means the launch
+    /// default — the terminal when the run is interactive, deny otherwise.
+    #[serde(default, skip_serializing_if = "ManifestApproval::is_empty")]
+    pub approval: ManifestApproval,
+
     /// Human-readable data disk size; `"0"` means no data disk.
     #[serde(default = "default_data_disk")]
     pub data_disk: String,
@@ -203,6 +223,7 @@ impl Manifest {
     /// Validation runs immediately so broken manifests fail before
     /// any I/O (e.g. before `nix build` is invoked).
     pub fn from_toml_str(text: &str) -> Result<Self> {
+        check_secrets_carry_no_value(text)?;
         let m: Self = toml::from_str(text).context("Failed to parse manifest TOML")?;
         m.validate()?;
         Ok(m)
@@ -316,6 +337,8 @@ impl Manifest {
         for entry in &self.network.allow_hosts {
             parse_allow_host(entry)?;
         }
+        mvm_contract::policy::routes::RouteSet::new(self.network.routes.clone())
+            .context("invalid `[[network.routes]]`")?;
         // Two authored allow-lists are two answers to one question, and
         // whichever the enforcement path happens to read becomes the real
         // policy. Refuse the ambiguity instead of picking a winner silently.
@@ -340,6 +363,14 @@ impl Manifest {
         if let Some(name) = self.name.as_deref() {
             validate_template_name(name)
                 .with_context(|| format!("invalid `name` field: {:?}", name))?;
+        }
+        for (name, secret) in &self.secrets {
+            crate::crypto::keystore::validate_shell_id(name)
+                .with_context(|| format!("invalid `[secrets]` name {name:?}"))?;
+            for host in &secret.hosts {
+                validate_secret_host(host)
+                    .with_context(|| format!("invalid `[secrets.{name}].hosts` entry {host:?}"))?;
+            }
         }
         Ok(())
     }
@@ -456,6 +487,87 @@ fn validate_volume_spec(spec: &str) -> Result<()> {
     Ok(())
 }
 
+/// Refuse a `[secrets]` table shaped to hold anything but names and hosts,
+/// with an error that quotes none of it.
+///
+/// The typed parse would refuse the same manifests, but its errors quote the
+/// offending text — `invalid type: string "sk-…"` — and a key pasted into a
+/// manifest is exactly the mistake this table invites. So the shape is checked
+/// first, over the untyped document, naming only the secret and the line.
+fn check_secrets_carry_no_value(text: &str) -> Result<()> {
+    let table: toml::Table = match text.parse() {
+        Ok(table) => table,
+        Err(error) if text.contains("[secrets") => {
+            let error: toml::de::Error = error;
+            let line = error
+                .span()
+                .map(|span| text[..span.start.min(text.len())].lines().count().max(1))
+                .unwrap_or(0);
+            return Err(anyhow!(
+                "Failed to parse manifest TOML near line {line}: {}",
+                error.message()
+            ));
+        }
+        // No secrets table: the typed parse reports the error as it always has.
+        Err(_) => return Ok(()),
+    };
+    let Some(secrets) = table.get("secrets") else {
+        return Ok(());
+    };
+    let refuse = |what: &str| {
+        Err(anyhow!(
+            "`[secrets]` {what}; an entry carries only `hosts`, and a secret's value is \
+             stored with `mvmctl secret set`, never in the manifest"
+        ))
+    };
+    let Some(secrets) = secrets.as_table() else {
+        return refuse("must be a table of secret names");
+    };
+    for (name, entry) in secrets {
+        let Some(entry) = entry.as_table() else {
+            return refuse(&format!("entry {name:?} is not a table"));
+        };
+        for (key, value) in entry {
+            let hosts_ok = key == "hosts"
+                && value
+                    .as_array()
+                    .is_some_and(|hosts| hosts.iter().all(toml::Value::is_str));
+            if !hosts_ok {
+                return refuse(&format!("entry {name:?} has a field other than `hosts`"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One `[secrets]` entry: where a stored secret may go on this project's runs.
+// allow(secret-debug): destination hosts only; the schema has no field a value can occupy
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestSecret {
+    /// Destinations the secret may reach on these runs. Empty keeps the
+    /// stored allow-list whole; entries must each lie inside it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hosts: Vec<String>,
+}
+
+/// A secret destination is a host name or `*.suffix` wildcard: no port (which
+/// ports are reachable is the network policy's decision), no scheme or path.
+fn validate_secret_host(host: &str) -> Result<()> {
+    if host.trim().is_empty() {
+        return Err(anyhow!("host must not be empty"));
+    }
+    if host.contains(':') {
+        return Err(anyhow!(
+            "name the host only; which ports are reachable is `[grants].allow_hosts`' decision"
+        ));
+    }
+    if host.chars().any(char::is_whitespace) || host.contains('/') {
+        return Err(anyhow!("not a host name"));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestNetwork {
@@ -464,12 +576,56 @@ pub struct ManifestNetwork {
     /// Optional AI egress metering and budget policy for this workload.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiPolicy>,
+    /// Endpoint routes: what a request to a destination may do, by method and
+    /// path (`[[network.routes]]`). A route host is admitted as if
+    /// allow-listed. See `mvm_contract::policy::routes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<mvm_contract::policy::routes::EgressRoute>,
 }
 
 impl ManifestNetwork {
     fn is_empty(&self) -> bool {
-        self.allow_hosts.is_empty() && self.ai.is_none()
+        self.allow_hosts.is_empty() && self.ai.is_none() && self.routes.is_empty()
     }
+}
+
+/// The `[approval]` table: which backends answer a runtime approval, and how
+/// several combine.
+///
+/// ```toml
+/// [approval]
+/// backends = ["tty", "webhook=https://approvals.example.com/mvm"]
+/// mode = "any"
+/// ```
+///
+/// A backend is `tty`, `deny`, or `webhook=URL`; the launch parses and
+/// validates them, and `--approval` on the command line replaces the list.
+/// Nothing is ever written back here: an approval lives in the running
+/// session and nowhere else.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestApproval {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub backends: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ApprovalChainMode>,
+}
+
+impl ManifestApproval {
+    fn is_empty(&self) -> bool {
+        self.backends.is_empty() && self.mode.is_none()
+    }
+}
+
+/// How several approval backends combine.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalChainMode {
+    /// Every backend must approve.
+    #[default]
+    All,
+    /// One approving backend is enough.
+    Any,
 }
 
 /// The `[grants]` table: what this project's workload is permitted to consume
@@ -961,6 +1117,94 @@ mod tests {
             mem = "1024M"
             data_disk = "0"
         "#
+    }
+
+    #[test]
+    fn network_routes_parse_and_validate() {
+        let text = format!(
+            "{}\n[[network.routes]]\nid = \"github\"\nhost = \"api.github.com\"\nintercept = true\nrules = [{{ method = \"GET\", path = \"/repos/org/**\", outcome = \"allow\" }}]\n",
+            minimal_manifest_toml()
+        );
+        let m = Manifest::from_toml_str(&text).expect("parses");
+        assert_eq!(m.network.routes.len(), 1);
+        assert_eq!(m.network.routes[0].port, 443);
+        assert!(m.network.routes[0].intercept);
+
+        for bad in [
+            "[[network.routes]]\nid = \"g\"\nhost = \"api.github.com\"\nupstream = \"http://x\"\n",
+            "[[network.routes]]\nid = \"g\"\nhost = \"*.com\"\n",
+            "[[network.routes]]\nid = \"g\"\nhost = \"api.github.com\"\nrules = [{ path = \"repos\", outcome = \"allow\" }]\n",
+        ] {
+            let text = format!("{}\n{bad}", minimal_manifest_toml());
+            assert!(Manifest::from_toml_str(&text).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn a_secrets_table_names_secrets_and_their_destinations() {
+        let text = format!(
+            "{}\n[secrets]\nanthropic = {{}}\ngitlab = {{ hosts = [\"gitlab.com\"] }}\n",
+            minimal_manifest_toml()
+        );
+        let m = Manifest::from_toml_str(&text).expect("parses");
+        assert_eq!(m.secrets.len(), 2);
+        assert!(m.secrets["anthropic"].hosts.is_empty());
+        assert_eq!(m.secrets["gitlab"].hosts, ["gitlab.com"]);
+    }
+
+    #[test]
+    fn a_secrets_table_has_nowhere_to_put_a_value() {
+        for body in [
+            "[secrets]\nanthropic = { value = \"sk-ant-inline\" }\n",
+            "[secrets]\nanthropic = \"sk-ant-inline\"\n",
+            "[secrets.anthropic]\nhosts = [\"api.anthropic.com\"]\nfrom = \"env://K\"\n",
+            "[secrets]\nanthropic = sk-ant-inline\n",
+        ] {
+            let text = format!("{}\n{body}", minimal_manifest_toml());
+            let err = Manifest::from_toml_str(&text).expect_err(body);
+            assert!(!format!("{err:#}").contains("sk-ant-inline"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn a_secret_destination_with_a_port_or_a_bad_name_is_refused() {
+        for body in [
+            "[secrets]\nanthropic = { hosts = [\"api.anthropic.com:443\"] }\n",
+            "[secrets]\nanthropic = { hosts = [\"https://api.anthropic.com\"] }\n",
+            "[secrets]\nanthropic = { hosts = [\"\"] }\n",
+            "[secrets]\n\"bad name\" = {}\n",
+        ] {
+            let text = format!("{}\n{body}", minimal_manifest_toml());
+            assert!(Manifest::from_toml_str(&text).is_err(), "{body}");
+        }
+    }
+
+    #[test]
+    fn the_approval_table_parses_and_refuses_what_it_does_not_know() {
+        let text = format!(
+            "{}\n[approval]\nbackends = [\"tty\", \"webhook=https://a.example/hook\"]\nmode = \"any\"\n",
+            minimal_manifest_toml()
+        );
+        let m = Manifest::from_toml_str(&text).expect("parses");
+        assert_eq!(
+            m.approval.backends,
+            ["tty", "webhook=https://a.example/hook"]
+        );
+        assert_eq!(m.approval.mode, Some(ApprovalChainMode::Any));
+        assert!(
+            Manifest::from_toml_str(minimal_manifest_toml())
+                .unwrap()
+                .approval
+                .is_empty()
+        );
+
+        for bad in [
+            "[approval]\nmode = \"most\"\n",
+            "[approval]\nremember = true\n",
+        ] {
+            let text = format!("{}\n{bad}", minimal_manifest_toml());
+            assert!(Manifest::from_toml_str(&text).is_err(), "{bad}");
+        }
     }
 
     #[test]

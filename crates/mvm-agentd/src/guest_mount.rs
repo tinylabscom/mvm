@@ -34,18 +34,18 @@ pub const WORKLOAD_HOME_REL: &str = "home/mvm-worker";
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
 /// Linux capability used by the authenticated guest agent to signal PID 1.
-pub const CAP_KILL: u32 = 5;
+pub const CAP_KILL: u32 = mvm_setpriv::CAP_KILL;
 /// Linux capability used by the guest agent's optional loopback DNS helper.
-pub const CAP_NET_BIND_SERVICE: u32 = 10;
+pub const CAP_NET_BIND_SERVICE: u32 = mvm_setpriv::CAP_NET_BIND_SERVICE;
 /// Linux capability used by the guest agent to correct a restored wall clock.
-pub const CAP_SYS_TIME: u32 = 25;
+pub const CAP_SYS_TIME: u32 = mvm_setpriv::CAP_SYS_TIME;
 /// Linux capability `PR_CAPBSET_DROP` itself requires. Never retained — which
 /// is exactly why the bounding set has to be narrowed before the capability
 /// sets are, and not after.
 pub const CAP_SETPCAP: u32 = 8;
 /// Linux capability `RNDRESEEDCRNG` requires. Held only by the CRNG reseed
 /// helper, never by the agent.
-pub const CAP_SYS_ADMIN: u32 = 21;
+pub const CAP_SYS_ADMIN: u32 = mvm_setpriv::CAP_SYS_ADMIN;
 /// Capabilities explicitly retained by the guest agent after boot setup.
 pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SYS_TIME);
 /// Capabilities retained by the CRNG reseed helper, and nothing else.
@@ -1244,7 +1244,7 @@ fn dm_control_open_error(e: std::io::Error) -> MountError {
             "/dev/mapper/control is absent, so this guest kernel has no device-mapper and \
              cannot bring up a dm-verity target. devtmpfs creates the node when device-mapper \
              registers, so this is the kernel's configuration (CONFIG_BLK_DEV_DM), not a \
-             missing mount. A kernel built by a user flake rather than by nix/images/kernel/ \
+             missing mount. A kernel built by a user flake rather than the mvm-images kernel \
              is the usual way to get here. ({e})"
         ));
     }

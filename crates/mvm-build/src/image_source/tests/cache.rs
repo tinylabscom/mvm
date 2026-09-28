@@ -98,10 +98,24 @@ impl Fixture {
         self.key_for(&kernel_target(), GuestArch::Aarch64)
     }
 
+    /// The checkouts a set built for `key` records: the keyed image checkout,
+    /// and the keyed mvm checkout or, for a key naming only the mvm sources
+    /// the image reads, the mvm checkout as it is now.
+    fn recorded(&self, key: &LocalImageCacheKey) -> LocalCheckouts {
+        let mvm = match &key.mvm {
+            MvmSourceIdentity::Checkout(identity) => identity.clone(),
+            MvmSourceIdentity::ConsumedInputs(_) => probe_identity(&self.mvm()).unwrap(),
+        };
+        LocalCheckouts {
+            images: key.images.clone(),
+            mvm,
+        }
+    }
+
     /// Stage a set for `key` recording the key's checkouts, as a build would.
     fn stage_set(&self, key: &LocalImageCacheKey) -> StagedEntry {
         let staged = self.cache.stage(key).unwrap();
-        emit(staged.dir(), &key.checkouts, key.arch, KERNEL);
+        emit(staged.dir(), &self.recorded(key), key.arch, KERNEL);
         staged
     }
 
@@ -164,7 +178,8 @@ fn manifest_json(
         "mvm_source_commit": checkouts.mvm.commit,
         "compatibility": {
             "guest_agent_protocol": {"min": 2, "max": 2},
-            "builder_cache_contract": 1
+            "builder_cache_contract": 1,
+            "builder_boot_abi": 0
         },
         "nix_inputs": {
             "flake_locks": [{
@@ -257,8 +272,11 @@ fn the_key_names_every_input_it_was_derived_from() {
     let fx = Fixture::new();
     let key = fx.key();
 
-    assert_eq!(&key.checkouts.images, fx.images.identity());
-    assert_eq!(key.checkouts.mvm, probe_identity(&fx.mvm()).unwrap());
+    assert_eq!(&key.images, fx.images.identity());
+    assert_eq!(
+        key.mvm,
+        MvmSourceIdentity::Checkout(probe_identity(&fx.mvm()).unwrap())
+    );
     assert_eq!(key.target, kernel_target());
     assert_eq!(key.arch, GuestArch::Aarch64);
     assert_eq!(key.toolchain.zig, "0.14.1");
@@ -403,7 +421,7 @@ fn a_stale_set_cannot_be_published_under_a_fresh_key() {
     write(&fx.mvm().join("src.rs"), "fn main() {}\n");
     let fresh = fx.key();
     let staged = fx.cache.stage(&fresh).unwrap();
-    emit(staged.dir(), &old.checkouts, GuestArch::Aarch64, KERNEL);
+    emit(staged.dir(), &fx.recorded(&old), GuestArch::Aarch64, KERNEL);
 
     let err = fx.cache.publish(staged, &fx.ctx()).unwrap_err();
 
@@ -428,6 +446,47 @@ fn a_crash_mid_publish_leaves_no_visible_entry() {
     assert!(matches!(fx.publish(&key), PublishOutcome::Published(_)));
     expect_hit(fx.lookup(&key));
     assert!(orphan.is_dir(), "a young orphan may belong to a live build");
+}
+
+/// A producer ahead of this build emits a manifest the parser refuses. The
+/// refused publish must leave nothing behind — no staging directory, no entry
+/// — so the next run, against a producer this build understands, publishes
+/// under the same key as though the refusal never happened.
+#[test]
+fn a_publish_refused_at_the_parse_stage_leaves_nothing_and_a_retry_publishes() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    let staged = fx.cache.stage(&key).unwrap();
+    let staged_dir = staged.dir().to_path_buf();
+    std::fs::write(staged.dir().join(kernel_name(key.arch)), KERNEL).unwrap();
+    let mut manifest = manifest_json(&fx.recorded(&key), key.arch, &kernel_name(key.arch), KERNEL);
+    manifest["compatibility"]["a_field_no_build_knows"] = serde_json::json!(1);
+    std::fs::write(
+        staged.dir().join(LOCAL_SET_MANIFEST_NAME),
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let err = fx.cache.publish(staged, &fx.ctx()).unwrap_err();
+
+    let rendered = err.to_string();
+    assert!(rendered.contains("a_field_no_build_knows"), "{rendered}");
+    assert!(
+        rendered.contains(&staged_dir.display().to_string()),
+        "the refusal names the staged entry: {rendered}"
+    );
+    assert!(
+        !staged_dir.exists(),
+        "the refused staging directory is removed"
+    );
+    assert!(fx.staging_children().is_empty(), "no staging left behind");
+    assert!(!fx.cache.entry_dir(&key).exists(), "nothing was published");
+    assert!(matches!(fx.lookup(&key), CacheLookup::Miss));
+
+    assert!(matches!(fx.publish(&key), PublishOutcome::Published(_)));
+    let entry = expect_hit(fx.lookup(&key));
+    assert_eq!(entry.dir, fx.cache.entry_dir(&key));
+    assert!(fx.staging_children().is_empty());
 }
 
 #[test]
@@ -540,7 +599,7 @@ fn an_artifact_name_that_leaves_the_entry_is_refused() {
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
     std::fs::write(fx.tmp.path().join("cache/v1/escape"), KERNEL).unwrap();
-    let manifest = manifest_json(&key.checkouts, key.arch, "../escape", KERNEL);
+    let manifest = manifest_json(&fx.recorded(&key), key.arch, "../escape", KERNEL);
     std::fs::write(
         staged.dir().join(LOCAL_SET_MANIFEST_NAME),
         serde_json::to_vec(&manifest).unwrap(),
@@ -567,7 +626,7 @@ fn a_staged_set_claiming_a_release_is_refused() {
         "repository": "tinylabscom/mvm-images",
         "workflow": ".github/workflows/release.yml",
         "release_tag": "v1.0.0",
-        "source_commit": key.checkouts.images.commit,
+        "source_commit": key.images.commit,
     });
     std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
@@ -585,7 +644,7 @@ fn a_set_for_another_architecture_is_refused() {
     let fx = Fixture::new();
     let key = fx.key();
     let staged = fx.cache.stage(&key).unwrap();
-    emit(staged.dir(), &key.checkouts, GuestArch::X86_64, KERNEL);
+    emit(staged.dir(), &fx.recorded(&key), GuestArch::X86_64, KERNEL);
 
     let err = fx.cache.publish(staged, &fx.ctx()).unwrap_err();
 

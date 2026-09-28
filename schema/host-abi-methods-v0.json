@@ -1,12 +1,24 @@
 {
   "abi_major": 1,
-  "abi_minor": 1,
+  "abi_minor": 3,
   "methods": [
     {
       "classification": "prod_safe",
       "key": "backend_capabilities",
       "name": "backend.capabilities",
       "summary": "Reports what the backend can do."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "entrypoint_call",
+      "name": "entrypoint.call",
+      "summary": "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_create",
+      "name": "machine.create",
+      "summary": "Persists a machine definition without booting it."
     },
     {
       "classification": "prod_safe",
@@ -19,6 +31,12 @@
       "key": "machine_inspect",
       "name": "machine.inspect",
       "summary": "Inspects one machine."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_inventory",
+      "name": "machine.inventory",
+      "summary": "Lists every machine on this host with its dev/prod posture."
     },
     {
       "classification": "prod_safe",
@@ -40,9 +58,63 @@
     },
     {
       "classification": "prod_safe",
+      "key": "machine_logs_stream_close",
+      "name": "machine.logs.stream.close",
+      "summary": "Closes a captured-output stream. Idempotent."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_logs_stream_next",
+      "name": "machine.logs.stream.next",
+      "summary": "Returns the captured output that has arrived."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_logs_stream_open",
+      "name": "machine.logs.stream.open",
+      "summary": "Opens a stream over a machine's captured output, replayed then followed."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_run",
+      "name": "machine.run",
+      "summary": "Boots a machine through the admitted local launch."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_start",
+      "name": "machine.start",
+      "summary": "Boots a persisted machine definition."
+    },
+    {
+      "classification": "prod_safe",
       "key": "machine_stop",
       "name": "machine.stop",
       "summary": "Stops a machine. Idempotent."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_call",
+      "name": "session.call",
+      "summary": "Calls the entrypoint in a running session's microVM."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_info",
+      "name": "session.info",
+      "summary": "Reports a session's record."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_start",
+      "name": "session.start",
+      "summary": "Boots a warm session for a workload, admitted under a signed plan."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "session_stop",
+      "name": "session.stop",
+      "summary": "Stops a session and tears down its microVM."
     },
     {
       "classification": "dev_only",
@@ -121,6 +193,24 @@
       "key": "guest_proc_stdin",
       "name": "guest.proc.stdin",
       "summary": "Writes a tracked process's stdin, base64-encoded."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_stream_close",
+      "name": "guest.proc.stream.close",
+      "summary": "Closes a process output stream. Idempotent."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_stream_next",
+      "name": "guest.proc.stream.next",
+      "summary": "Returns the process output that has arrived, and how it ended."
+    },
+    {
+      "classification": "dev_only",
+      "key": "guest_proc_stream_open",
+      "name": "guest.proc.stream.open",
+      "summary": "Opens a stream over a guest process's output."
     },
     {
       "classification": "dev_only",

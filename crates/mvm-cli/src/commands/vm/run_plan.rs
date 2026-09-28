@@ -10,13 +10,12 @@
 //!   is that admission gates (signature, validity window, replay
 //!   store, policy resolution) fire end-to-end without the cost of
 //!   booting and tearing down a VM.
-//! - **live** (this module's other half): spawns
-//!   the user's script with `MVM_SDK_MODE=live` and
-//!   `MVM_CLI_BIN=<path-to-mvmctl>` so the SDK shells each
-//!   `Sandbox` operation to existing `mvmctl up` / `proc start` /
-//!   `fs write` / `down` against a real microVM. No plan
-//!   synthesis here — the SDK drives admission once per
-//!   per-call shell via the wrapped verbs.
+//! - **live** (this module's other half): spawns the user's script with
+//!   `MVM_SDK_MODE=live`, so the SDK drives each `Sandbox` operation
+//!   in-process through `libmvm_hostlib` against a real microVM. When the
+//!   library is installed beside this binary, `MVM_HOSTLIB_PATH` names it so
+//!   the script drives the same build. No plan synthesis here — the library
+//!   admits each launch through the client's admitted-boot path.
 //!
 //! ## How it works
 //!
@@ -57,7 +56,7 @@
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::commands::build::trace_secret_scan::SecretFinding;
 use mvm_contract::ir::{App, PortProto, PortTransform, Workload};
@@ -89,22 +88,21 @@ pub(in crate::commands) fn dispatch_sdk_mode(
     }
 }
 
-/// Spawn the user's Sandbox-shaped script with `MVM_SDK_MODE=live` and the
-/// resolved `mvmctl` binary path on the env so the SDK shells each `Sandbox`
-/// operation to `mvmctl up` / `proc start` / `fs write` / `down`
-/// against a real microVM.
+/// Spawn the user's Sandbox-shaped script with `MVM_SDK_MODE=live`, so the
+/// SDK drives each `Sandbox` operation in-process through `libmvm_hostlib`
+/// against a real microVM. The script is the user's program; the SDK inside
+/// it never runs `mvmctl`.
 ///
-/// The wire shape — the env-var contract:
+/// The env-var contract:
 ///
-/// - `MVM_SDK_MODE=live` — branch in the SDK toggling the
-///   subprocess transport on.
-/// - `MVM_CLI_BIN=<absolute-path>` — the binary the SDK shells to.
-///   We pass our own absolute path (resolved via
-///   [`std::env::current_exe`]) so a `cargo run -- run --mode
-///   live` flow finds the same `mvmctl` it invoked through.
+/// - `MVM_SDK_MODE=live` — selects the SDK's live transport.
+/// - `MVM_HOSTLIB_PATH=<absolute-path>` — set only when the host library
+///   sits beside this binary, as it does in an installed bundle and in a
+///   cargo target directory, so the script loads the library this `mvmctl`
+///   was built with. Absent otherwise, and the SDK's own lookup decides.
 /// - `MVM_SDK_RUN_PROFILE=<profile>` — the explicit security profile
 ///   selected on this outer command. The language SDK validates it and
-///   passes it to the nested `machine run`.
+///   passes it to the machine it launches.
 /// - Inherited stdio + env — the SDK prints its own output;
 ///   nothing is captured here.
 ///
@@ -122,20 +120,29 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
     })?;
 
     let interpreter = crate::commands::build::sandbox_record::resolve_interpreter(lang)?;
-    let mvmctl_bin = std::env::current_exe()
-        .context("resolving the running mvmctl binary path for MVM_CLI_BIN")?;
+    let host_library = std::env::current_exe()
+        .ok()
+        .and_then(|exe| host_library_beside(&exe));
 
-    eprintln!(
-        "mvmctl run --mode live: spawning {} {} (MVM_CLI_BIN={})",
-        interpreter.display(),
-        script.display(),
-        mvmctl_bin.display(),
-    );
+    match &host_library {
+        Some(library) => eprintln!(
+            "mvmctl run --mode live: spawning {} {} ({}={})",
+            interpreter.display(),
+            script.display(),
+            mvm_sdk::env::MVM_HOSTLIB_PATH_ENV,
+            library.display(),
+        ),
+        None => eprintln!(
+            "mvmctl run --mode live: spawning {} {} (host library resolved by the SDK)",
+            interpreter.display(),
+            script.display(),
+        ),
+    }
 
     let mut cmd = std::process::Command::new(&interpreter);
-    // Deno's default sandbox refuses fs + subprocess; the SDK's
-    // live mode shells to `mvmctl`, so opt out explicitly. The
-    // same opt-out lives in `auto_exec_record_script`.
+    // Deno's default sandbox refuses the filesystem and native library
+    // loading the SDK needs, so opt out explicitly. The same opt-out lives
+    // in `auto_exec_record_script`.
     let basename = interpreter
         .file_name()
         .and_then(|s| s.to_str())
@@ -143,30 +150,47 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
     if basename.starts_with("deno") {
         cmd.arg("run").arg("--allow-all");
     }
-    let status = cmd
-        .arg(&script)
+    cmd.arg(&script)
         .env(mvm_sdk::env::MVM_SDK_MODE_ENV, "live")
-        .env(mvm_sdk::env::MVM_CLI_BIN_ENV, &mvmctl_bin)
-        .env(mvm_sdk::env::MVM_SDK_RUN_PROFILE_ENV, args.profile.as_str())
-        .status()
-        .with_context(|| {
-            format!(
-                "spawning {} to run live-mode script {}",
-                interpreter.display(),
-                script.display()
-            )
-        })?;
+        .env(mvm_sdk::env::MVM_SDK_RUN_PROFILE_ENV, args.profile.as_str());
+    if let Some(library) = &host_library {
+        cmd.env(mvm_sdk::env::MVM_HOSTLIB_PATH_ENV, library);
+    }
+    let status = cmd.status().with_context(|| {
+        format!(
+            "spawning {} to run live-mode script {}",
+            interpreter.display(),
+            script.display()
+        )
+    })?;
 
     if !status.success() {
         anyhow::bail!(
-            "live-mode script {} exited with {:?}; the SDK's subprocess transport reports each \
-             failed `mvmctl` shell in its own diagnostic. Re-run the script directly to see the \
+            "live-mode script {} exited with {:?}; the SDK reports each refused host-library \
+             call as a typed error in its own diagnostic. Re-run the script directly to see the \
              unfiltered output.",
             script.display(),
             status.code(),
         );
     }
     Ok(())
+}
+
+/// The host library's file name on this platform.
+const fn host_library_file_name() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "libmvm_hostlib.dylib"
+    } else {
+        "libmvm_hostlib.so"
+    }
+}
+
+/// The host library installed beside the binary at `exe`, when there is one.
+/// The release bundle ships them side by side, and cargo writes both into
+/// the same target directory.
+fn host_library_beside(exe: &Path) -> Option<PathBuf> {
+    let library = exe.parent()?.join(host_library_file_name());
+    library.is_file().then_some(library)
 }
 
 fn run_plan_mode(args: &RunArgs, sdk: &super::exec::SdkTransportArgs) -> Result<()> {
@@ -471,6 +495,26 @@ mod tests {
     use mvm_hostd::supervisor::secrets_scanner::SecretsScanner;
     use mvm_sdk::runtime::{Divergence, RecordedOp, RuntimeRecording, SandboxCreate};
     use std::collections::BTreeMap;
+
+    /// A library installed beside the binary is what a live script loads.
+    #[test]
+    fn the_host_library_beside_the_binary_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("mvmctl");
+        std::fs::write(&exe, b"").unwrap();
+        assert_eq!(host_library_beside(&exe), None, "no library, no override");
+        let library = dir.path().join(host_library_file_name());
+        std::fs::write(&library, b"").unwrap();
+        assert_eq!(host_library_beside(&exe), Some(library));
+    }
+
+    /// A directory with the library's name is not the library.
+    #[test]
+    fn a_directory_named_like_the_library_is_not_used() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(host_library_file_name())).unwrap();
+        assert_eq!(host_library_beside(&dir.path().join("mvmctl")), None);
+    }
 
     // A realistic-shaped fake OpenAI key that matches the DEFAULT_RULES
     // openai_api_key regex (sk- + 48 alnum). Not a real credential.

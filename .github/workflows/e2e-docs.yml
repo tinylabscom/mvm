@@ -83,8 +83,7 @@ jobs:
       # Fetch the pinned, signed builder image, as the macOS lane does. Building
       # it from source here put 37 minutes of Stage 0 ahead of every scenario on
       # a good run, and a two-hour hang ahead of none on a bad one; no scenario
-      # examines the image itself. The cold source path has its own nightly
-      # witness in Extended CI (`source-bootstrap-linux`).
+      # examines the image itself, and building images is mvm-images' job.
       #
       # There are deliberately no Stage 0 grants below: no readable /boot
       # kernel, no vhost-vsock, no QEMU. A regression that drifts this lane back
@@ -94,6 +93,7 @@ jobs:
       # the unembedded binary re-executes chooses QEMU when the variable is
       # unset, and QEMU can only reach a builder through Stage 0.
       MVM_BUILDER_BACKEND: firecracker
+      MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/free-disk
@@ -115,6 +115,29 @@ jobs:
       - uses: ./.github/actions/rust-cache
         with:
           key: e2e-docs-linux
+
+      # The SDK sidecar the service-plane scenarios load is built from this
+      # tree through the mvm-images recipe. It is checked out inside the
+      # workspace, not beside it, so no other step discovers it as an image
+      # checkout and every other image still comes from the pinned set.
+      #
+      # At the commit that produced the image set images.lock pins, never at
+      # mvm-images `main`: this lane gates releases, and v0.18.0's failed after
+      # it was tagged because `main` had gained a manifest field this tree did
+      # not parse yet. The pair's `main`s are compared by the non-blocking
+      # `image-pair.yml` canary instead.
+      - name: Resolve the mvm-images commit images.lock pins
+        id: images-ref
+        run: |
+          ref="$(cargo run -q -p xtask -- image-source-ref)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out mvm-images for the source-matched SDK sidecar
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ steps.images-ref.outputs.ref }}
+          path: .e2e-mvm-images
 
       - name: Set up Node
         uses: actions/setup-node@v6
@@ -281,6 +304,7 @@ jobs:
       # macOS 26+ default, and the fetched builder image is self-contained, so
       # source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
+      MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
     steps:
       - uses: actions/checkout@v6
 
@@ -297,6 +321,29 @@ jobs:
       - uses: ./.github/actions/rust-cache
         with:
           key: e2e-docs-macos
+
+      # The SDK sidecar the service-plane scenarios load is built from this
+      # tree through the mvm-images recipe. It is checked out inside the
+      # workspace, not beside it, so no other step discovers it as an image
+      # checkout and every other image still comes from the pinned set.
+      #
+      # At the commit that produced the image set images.lock pins, never at
+      # mvm-images `main`: this lane gates releases, and v0.18.0's failed after
+      # it was tagged because `main` had gained a manifest field this tree did
+      # not parse yet. The pair's `main`s are compared by the non-blocking
+      # `image-pair.yml` canary instead.
+      - name: Resolve the mvm-images commit images.lock pins
+        id: images-ref
+        run: |
+          ref="$(cargo run -q -p xtask -- image-source-ref)"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+      - name: Check out mvm-images for the source-matched SDK sidecar
+        uses: actions/checkout@v6
+        with:
+          repository: tinylabscom/mvm-images
+          ref: ${{ steps.images-ref.outputs.ref }}
+          path: .e2e-mvm-images
 
       - name: Set up Node
         uses: actions/setup-node@v6

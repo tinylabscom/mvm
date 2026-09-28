@@ -318,8 +318,26 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         signer integration tests pass, as do all 69 rebuilt repository gates
         and declared backing. PR #3472 is published; CI and queued delivery
         remain open.
-- [ ] Prove wrong boot/VM/generation, replay, tamper, unknown versions, oversize,
+- [x] Prove wrong boot/VM/generation, replay, tamper, unknown versions, oversize,
       malformed lengths/IDs and unauthenticated peers fail without payload leakage.
+      Every named family is now witnessed by a refusal test asserting a terminal
+      error whose diagnostics carry no payload bytes. Wrong boot/VM/generation is
+      covered by the mvm-vmm registration-gate tests; replay, cross-session,
+      tamper, truncated/oversize declared lengths and unauthenticated or
+      mispinned peers were already covered by the mvm-core transport tests and
+      the mvm-hostd signer refusal ladder; the record contract tests cover
+      unknown record versions/variants and invalid producer/epoch/trace IDs at
+      decode. This item adds the previously missing transport-seam witnesses in
+      `crates/mvm-core/src/net/telemetry/tests.rs`:
+      `unknown_sealed_frame_versions_and_algorithms_are_refused_terminally`,
+      `an_unknown_handshake_version_cannot_authenticate_a_pinned_host`,
+      `an_oversize_decrypted_record_is_refused_without_quoting_payload`,
+      `malformed_frame_bytes_under_an_honest_length_prefix_are_refused_terminally`
+      and
+      `forged_identity_fields_inside_an_authenticated_frame_are_refused_without_quoting`.
+      These are component witnesses over socket pairs and in-memory streams, not
+      runtime VM acceptance; the over-the-wire port-5254 and real-backend
+      witnesses remain open in W2b and the routing bullet below.
 - [ ] Prove independent service routing and absence of raw/direct-guest-export
       fallback through mock I/O and real backend witnesses.
 

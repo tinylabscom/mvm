@@ -193,15 +193,26 @@ gap = "Driver diagnostics and forwarded workload output reach the developer term
 required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
 
 [[script_source]]
-path = "crates/mvm-sdk/sdks/python/mvm/_session.py"
-anchor = "warnings.warn"
+path = "crates/mvm-sdk/sdks/python/mvm/_machine.py"
+anchor = "sys.stderr"
 language = "python"
 [script_source.capture]
 kind = "runtime-gap"
 role = "host"
 owner = "language SDK host driver"
-gap = "Abandoned-session warnings surface only through the Python warnings machinery."
-required_witness = "Host-local collection receives session-lifecycle diagnostics."
+gap = "A machine teardown that fails after a one-shot run is reported on the developer terminal only; a detached observer sees nothing."
+required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/typescript/src/_machine.ts"
+anchor = "console.error"
+language = "typescript"
+[script_source.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "language SDK host driver"
+gap = "A machine teardown that fails after a one-shot run is reported on the developer terminal only; a detached observer sees nothing."
+required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
 
 [[script_source]]
 path = "crates/mvm-sdk/sdks/python/mvm/_remote.py"
@@ -244,12 +255,6 @@ category = "developer-tool"
 reason = "Output pattern appears only inside a docstring example; the module itself emits nothing."
 
 # --- Launch edges: which launcher starts which guest/builder producer --------
-
-[[launch_edge]]
-producer = "mvm-agentd/mvm-guest-agent"
-launcher = "nix/images/initramfs/flake.nix"
-anchor = "mvm-guest-agent"
-activation = "always"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-guest-agent"
@@ -314,14 +319,14 @@ anchor = "seccomp-apply"
 activation = "on-demand"
 
 [[launch_edge]]
-producer = "mvm-agentd/mvm-setpriv"
+producer = "mvm-setpriv/mvm-setpriv"
 launcher = "nix/lib/mk-guest.nix"
 anchor = "mvm-setpriv"
 activation = "always"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-display-bridge"
-launcher = "nix/images/runtime-overlay/flake.nix"
+launcher = "crates/mvm-build/src/runtime_overlay.rs"
 anchor = "display-bridge"
 activation = "on-demand"
 
@@ -339,8 +344,8 @@ activation = "legacy"
 
 [[launch_edge]]
 producer = "mvm-build/mvm-host-vm-init"
-launcher = "nix/images/builder-vm/flake.nix"
-anchor = "chain_init"
+launcher = "crates/mvm-cli/src/commands/env/builder_vm.rs"
+anchor = "mvm.chain_init=/sbin/mvm-host-vm-init"
 activation = "always"
 
 [[launch_edge]]

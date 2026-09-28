@@ -38,10 +38,9 @@ pub fn warn(msg: &str) {
     mvm_runtime::ui::warn(msg);
 }
 
-/// Print an always-on liveness/notice line: `[mvm]` message. Unlike [`info`],
-/// this is *not* gated on verbosity — it's for the rare case where a periodic
-/// line is the only signal a long, silent blocking step is alive (the Stage 0
-/// builder-image build), so it must show even in the default quiet mode.
+/// Print an always-on notice line: `[mvm]` message. Unlike [`info`], this is
+/// *not* gated on verbosity. For a phase that takes a while, prefer
+/// [`mvm_runtime::ui::activity::start`], which also keeps a live line going.
 pub fn notice(msg: &str) {
     mvm_runtime::ui::notice(msg);
 }
@@ -62,27 +61,6 @@ pub fn format_timed(label: &str, elapsed: std::time::Duration) -> String {
 /// actual per-step wall-clock. Opt-in chatter (routes through [`info`]).
 pub fn timed_step(label: &str, elapsed: std::time::Duration) {
     info(&format_timed(label, elapsed));
-}
-
-/// Format a liveness heartbeat for a long, silent blocking step: `<activity>
-/// still running — <secs>s elapsed …`. The Stage 0 builder-image build runs
-/// `nix` inside the guest with no host-visible output until it completes, so a
-/// periodic line is the only way to distinguish "working" from "hung". Pure
-/// (testable); the ticker routes it through [`notice`] — an always-on liveness
-/// signal, not gated chatter, since it's the *only* feedback during the block.
-pub fn format_heartbeat(activity: &str, elapsed: std::time::Duration) -> String {
-    format!(
-        "{activity} still running — {}s elapsed (the in-guest nix build is silent until it finishes; this is normal, not a hang)",
-        elapsed.as_secs()
-    )
-}
-
-/// Spinner message for a long, silent blocking step: `<activity> — <secs>s
-/// elapsed`. Used on a TTY where the animated spinner already conveys liveness,
-/// so the message stays terse (no need for the [`format_heartbeat`] "not a
-/// hang" reassurance the non-TTY text line carries). Pure (testable).
-pub fn format_build_progress(activity: &str, elapsed: std::time::Duration) -> String {
-    format!("{activity} — {}s elapsed", elapsed.as_secs())
 }
 
 // ---------------------------------------------------------------------------
@@ -144,28 +122,5 @@ mod tests {
             format_timed("nix build", std::time::Duration::from_millis(12_345)),
             "nix build … 12.3s"
         );
-    }
-
-    #[test]
-    fn format_heartbeat_names_activity_whole_seconds_and_reassures() {
-        let line = format_heartbeat("Builder VM image build", std::time::Duration::from_secs(40));
-        assert!(line.starts_with("Builder VM image build still running — 40s elapsed"));
-        // Reassurance text is the whole point — it must say silence is expected.
-        assert!(line.contains("not a hang"));
-        // Whole seconds, no fractional noise.
-        assert!(!line.contains("40.0"));
-    }
-
-    #[test]
-    fn format_build_progress_is_terse_with_whole_seconds() {
-        assert_eq!(
-            format_build_progress("Builder VM image build", std::time::Duration::from_secs(23)),
-            "Builder VM image build — 23s elapsed"
-        );
-        // The spinner conveys liveness, so the verbose "not a hang" reassurance
-        // is intentionally absent here.
-        let line = format_build_progress("x", std::time::Duration::from_millis(7_900));
-        assert_eq!(line, "x — 7s elapsed");
-        assert!(!line.contains("hang"));
     }
 }

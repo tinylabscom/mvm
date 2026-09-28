@@ -42,12 +42,10 @@
 //! }
 //! ```
 //!
-//! Machine lifecycle wrappers are available through [`MachineRun`],
-//! [`MachineCreate`], [`MachineCheckArtifact`], and [`Machine`]. They shell to
-//! `mvmctl machine ...` so OCI pull, admission, artifact verification,
-//! networking, receipts, audit, and persistent machine state remain owned by
-//! the CLI path. The optional `client-facade` feature also exposes a
-//! subprocess-backed `MvmClient` implementation.
+//! This crate authors workloads; it does not drive machines. A Rust program
+//! that boots, drives or stops a machine uses `mvm-client`, which re-exports
+//! this crate's authoring surface as `mvm_client::authoring`, so one
+//! dependency covers both.
 
 mod builder;
 mod ctor;
@@ -56,9 +54,6 @@ mod emit;
 pub mod env;
 mod error;
 pub mod error_taxonomy;
-#[cfg(feature = "client-facade")]
-pub mod facade;
-pub mod machine;
 
 /// The canonical `Workload` IR — validate, canonicalize, hash, hooks,
 /// addon, version. Lives in the `no_std` foundation crate `mvm-contract`
@@ -123,13 +118,6 @@ pub use ctor::resources::resources;
 pub use ctor::source::{local_path, nix_derivation, oci_image};
 pub use emit::{emit, emit_json};
 pub use error::{BuildError, EmitError};
-pub use machine::{
-    MVM_CLI_BIN_ENV, Machine, MachineCheckArtifact, MachineCheckArtifactBuilder, MachineClient,
-    MachineCreate, MachineCreateBuilder, MachineError, MachineExecBuilder, MachineInspect,
-    MachineInspectBuilder, MachineLogs, MachineLogsBuilder, MachineLs, MachineLsBuilder,
-    MachineResult, MachineRm, MachineRmBuilder, MachineRun, MachineRunBuilder, MachineShellBuilder,
-    MachineStartBuilder, MachineStopBuilder,
-};
 
 // Runtime record-mode lowering. The CLI's
 // `mvmctl compile --from-recording` and the auto-exec path both

@@ -33,9 +33,26 @@ curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
 
 ### From source
 
+To run from the checkout, one build is enough:
+
 ```bash
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm
+cargo build --release
+./target/release/mvmctl machine run --image alpine -- echo ok
+```
+
+A root `cargo build` produces only `mvmctl`. The per-VM helpers it spawns —
+`mvm-hvf-supervisor`, `mvm-network-endpoint` — are separate executables, and a
+contributor `mvmctl` builds each one into its own `target/<profile>/` the first
+time it needs it, signs the supervisor with the hypervisor entitlement, and
+announces the build. It rebuilds a helper the same way whenever one of the
+helper's sources is newer than it, so a helper never lags the checkout. An
+official release binary never does this; it ships its helpers.
+
+To install the binaries somewhere else, build the helpers explicitly:
+
+```bash
 cargo build --release --bin mvmctl
 cargo build --release -p mvm-hostd \
   --bin mvm-hvf-supervisor
@@ -57,7 +74,7 @@ is useful for CLI-only inspection or development.
 cargo install mvmctl
 ```
 
-`mvmctl` is a regular Mach-O binary on macOS — no codesigning surprises in the typical install path. Hypervisor.framework requires the process that owns the VM to hold the `com.apple.security.hypervisor` entitlement, and that process is the per-VM `mvm-hvf-supervisor`, not `mvmctl` itself. `install.sh` ad-hoc-signs each binary with the right profile: `assets/mvmctl.entitlements` (`com.apple.security.virtualization`) for `mvmctl`, and `assets/mvm-supervisor.entitlements` (`com.apple.security.hypervisor`) for the supervisor. Set `MVM_SKIP_CODESIGN=1` to skip that step. **No build script signs anything** — a `cargo build` from source produces unsigned binaries, so sign them yourself after building.
+`mvmctl` is a regular Mach-O binary on macOS — no codesigning surprises in the typical install path. Hypervisor.framework requires the process that owns the VM to hold the `com.apple.security.hypervisor` entitlement, and that process is the per-VM `mvm-hvf-supervisor`, not `mvmctl` itself. `install.sh` ad-hoc-signs each binary with the right profile: `assets/mvmctl.entitlements` (`com.apple.security.virtualization`) for `mvmctl`, and `assets/mvm-supervisor.entitlements` (`com.apple.security.hypervisor`) for the supervisor. Set `MVM_SKIP_CODESIGN=1` to skip that step. **No build script signs anything** — a `cargo build` from source produces unsigned binaries. A contributor `mvmctl` run from its checkout signs the supervisor it builds; sign copies you install elsewhere yourself.
 
 ## Linux Builds On macOS
 
@@ -94,7 +111,7 @@ mvmctl machine build
 mvmctl machine run --manifest .
 ```
 
-`mvmctl init` scaffolds the project. (Bare `mvmctl run` is the transient verb and needs a command, e.g. `mvmctl run --image alpine -- uname -a`; without one it exits with an error.) On the first `mvmctl machine build`, mvm bootstraps the builder VM if needed and runs `nix build` inside it; `mvmctl machine run` boots the resulting rootfs with the selected macOS runtime backend. Expected runtime cold boot is measured after the image is already built. When developing from this source checkout, the builder VM image is local-build only; the cache is reused only when its source fingerprint matches `nix/images/builder-vm/{flake.nix,flake.lock}`, its recorded artifact digests still match the cached files, and its provenance summary matches the same source and artifact filename set. Cache misses, fingerprint drift, artifact drift, or provenance drift build from the local `nix/images/builder-vm/` flake using a local dev image as Stage 0, validate the staged artifacts, and only then promote them into the live cache. Run with `--verbose` to see the safe source-cache reason code, for example `hit`, `fingerprint_mismatch`, `artifact_digest_mismatch`, or `provenance_mismatch`. mvm will not download a published builder image to hide local flake changes.
+`mvmctl init` scaffolds the project. (Bare `mvmctl run` is the transient verb and needs a command, e.g. `mvmctl run --image alpine -- uname -a`; without one it exits with an error.) On the first `mvmctl machine build`, mvm bootstraps the builder VM if needed and runs `nix build` inside it; `mvmctl machine run` boots the resulting rootfs with the selected macOS runtime backend. Expected runtime cold boot is measured after the image is already built. The builder VM image is built in [mvm-images](https://github.com/tinylabscom/mvm-images): when developing from this source checkout with an mvm-images checkout selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), it is built from that checkout, and otherwise fetched from the signed image set `images.lock` pins. The cache is reused only when its recorded fingerprint matches the selected source, its recorded artifact digests still match the cached files, and its provenance summary matches the same source and artifact filename set; on a miss or any drift the image is rebuilt or refetched, validated in staging, and only then promoted into the live cache. Run with `--verbose` to see the safe cache reason code, for example `hit`, `fingerprint_mismatch`, `artifact_digest_mismatch`, or `provenance_mismatch`.
 
 ## Troubleshooting
 

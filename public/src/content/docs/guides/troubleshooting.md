@@ -34,8 +34,18 @@ is not a reset: `env uninstall` removes `mvmctl` itself.
 
 The shared Nix store image is locked to one writer at a time. A second
 `mvmctl machine build` now queues instead of failing, waiting up to
-`MVM_BUILDER_LOCK_WAIT_SECS` (default `3600`). The wait message names the
-process that holds the lock.
+`MVM_BUILDER_LOCK_WAIT_SECS` (default `3600`). The same applies to the Stage 0
+locks (the builder image, the workload kernel, the SDK sidecar) and the guest
+runtime build locks: a second `mvmctl` that needs the artifact another one is
+producing waits for it, then reuses it. The status line names the holder:
+
+```text
+[mvm] waiting for the builder VM image — held by pid 4242 (`mvmctl machine build --flake .`) since 14:02:11…
+```
+
+There is never a lock file to delete. The locks are `flock(2)` locks, which
+the kernel releases when the holding process exits, crash included; the next
+waiter takes the lock over on its own.
 
 **Fix**: wait, or reduce the wait budget:
 
@@ -293,7 +303,8 @@ Typical message:
 **Fix**:
 
 - If you set `MVM_HVF_SUPERVISOR_PATH`, point it at a real `mvm-hvf-supervisor` binary.
-- In a source checkout, ensure the workspace can build the helper binary.
+- In a source checkout, `mvmctl` run from `target/<profile>/` builds the helper
+  itself on first use; if that build fails, the error carries cargo's output.
 - On release installs, make sure `mvm-hvf-supervisor` is present alongside `mvmctl`.
 
 This path is intentionally fail-closed: `--allow-host` on OCI images never
@@ -374,6 +385,30 @@ mvmctl machine logs <name>  # guest-side boot + networking errors
 
 Remember networking is deny-by-default: a transient `machine run` needs
 `--net` or `--allow-host` before outbound traffic works at all.
+
+### A request fails inside the guest and the host prints `egress blocked`
+
+The host refused the destination, and the line names why and what to do:
+
+```text
+[mvm] egress blocked: api.example.com:443 (not in the allow-list) — allow with --allow-host api.example.com:443
+```
+
+Re-run with the flag it names. The exit summary collects every such flag into
+one line. When the line says `never reachable from a workload` (cloud metadata,
+loopback, link-local) or names the SSH port, no flag admits it and none is
+offered: the refusal is the boundary working, not a missing grant. A private
+address is denied by default and admitted only by naming the exact address.
+
+No line at all? A run with no egress whatsoever — the default: no `--net`, no
+`--allow-host`, no `--secret`, no published port — starts no network endpoint,
+so the guest has no channel to ask for a destination on and the host never
+decides anything to report. The guest's own error (`Could not resolve host`)
+is the signal there; add `--allow-host HOST:PORT`. Otherwise, notices print
+only for a foreground run and for `mvmctl machine logs -f`; a `--json` run
+carries them in its `egress_denials` array instead. For a run that already ended, `mvmctl explain <run>` lists its
+refusals. The full reason table is in
+[Network egress policy](/guides/network-egress-policy/#when-a-destination-is-refused).
 
 ### Can't access project files inside microVM
 
@@ -477,11 +512,12 @@ RUST_LOG=debug mvmctl <command>
 RUST_LOG=mvm=trace mvmctl <command>
 ```
 
-## Builder Pack Signature Verification
+## Builder Image Signature Verification
 
-The builder VM image ships as a release artifact (the "builder pack") under
-the same cosign-signed-manifest + SHA-256 + revocation model that used to
-also cover the now-removed dev-image fetch path.
+The builder VM image is a member of the signed image set `images.lock` pins
+(see [Verifying boot images](verify-release#verifying-boot-images-the-image-set)).
+The sections below also cover the builder manifests CLI releases up to v0.18
+attached, which an older `mvmctl` still fetches.
 
 ### "Cosign verification failed for builder-vm-{arch}.manifest.json"
 
@@ -515,7 +551,7 @@ The manifest pins `manifest.version` to `mvmctl --version` exactly. Either:
 
 SHA-256 of the downloaded artifact doesn't match the manifest's recorded digest. Possible causes, in order:
 
-1. Mid-flight corruption — retry with `mvmctl bootstrap` (or `mvmctl pack download builder`) to re-download.
+1. Mid-flight corruption — retry with `mvmctl bootstrap` to re-download.
 2. Mirror/CDN cache poisoning — rare but real; open a security issue with the SHA-256 you got vs what the manifest says.
 3. The release was re-uploaded after the manifest was signed (publishing process bug) — wait for the next tag.
 

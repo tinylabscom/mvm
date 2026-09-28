@@ -11,7 +11,7 @@ layers (per ADR-0003 / ADR-0004):
 Per ADR-0003, the v0 DSL uses keyword-argument style on a decorator. User code
 registers a single-app workload and emits IR via ``mvm.emit_json()`` (or
 by running ``mvm emit entry.py`` from the host, which honors ADR-0002's
-subprocess contract).
+emit contract).
 
 Plan 60 Phase 5 Slice D1: the declarative DSL + ``@mvm.func`` decorator
 + ``RemoteFunction`` invoke path are wired here. The libkrun-shaped
@@ -99,20 +99,36 @@ from mvm._helpers import (
 # the whole of the 'absent from Python' divergence the TypeScript SDK
 # recorded against them.
 from mvm._env import (
+    MVM_HOSTLIB_PATH_ENV,
     MVM_SDK_MODE_ENV,
     MVM_SDK_OUT_PATH_ENV,
     MVM_SDK_RUN_PROFILE_ENV,
 )
+
+# What the host library raises. Live `Sandbox` and `Machine` calls let these
+# propagate unchanged, so a caller can catch a policy refusal, a missing
+# machine or a retryable backend failure by type.
+from mvm._errors import (
+    HostLibraryAbiError,
+    HostLibraryEmbedderError,
+    HostLibraryError,
+    HostLibraryInputError,
+    HostLibraryInternalError,
+    MachineBackendError,
+    MachineConflictError,
+    MachineNotFoundError,
+    MachineRejectedError,
+    MachineSpecError,
+    MachineUnauthorizedError,
+    MachineUnavailableError,
+)
 from mvm._machine import (
-    MVM_MACHINE_MAX_OUTPUT_ENV,
-    MVM_MACHINE_TIMEOUT_ENV,
     Machine,
     MachineError,
     MachineResult,
 )
 from mvm._sandbox import (
     DEFAULT_TTL_SECONDS,
-    MVM_CLI_BIN_ENV,
     ExecResult,
     FsEntry,
     FsStat,
@@ -149,9 +165,7 @@ __all__ = [
     "host",
     "kv",
     "DEFAULT_TTL_SECONDS",
-    "MVM_CLI_BIN_ENV",
-    "MVM_MACHINE_MAX_OUTPUT_ENV",
-    "MVM_MACHINE_TIMEOUT_ENV",
+    "MVM_HOSTLIB_PATH_ENV",
     "MVM_SDK_MODE_ENV",
     "MVM_SDK_OUT_PATH_ENV",
     "MVM_SDK_RUN_PROFILE_ENV",
@@ -174,9 +188,21 @@ __all__ = [
     "ExecResult",
     "FsEntry",
     "FsStat",
+    "HostLibraryAbiError",
+    "HostLibraryEmbedderError",
+    "HostLibraryError",
+    "HostLibraryInputError",
+    "HostLibraryInternalError",
     "Machine",
+    "MachineBackendError",
+    "MachineConflictError",
     "MachineError",
+    "MachineNotFoundError",
+    "MachineRejectedError",
     "MachineResult",
+    "MachineSpecError",
+    "MachineUnauthorizedError",
+    "MachineUnavailableError",
     "MsgpackUnavailable",
     "MvmTransportError",
     "NoVmIntrospectionError",

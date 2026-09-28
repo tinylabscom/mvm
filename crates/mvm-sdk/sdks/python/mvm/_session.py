@@ -1,23 +1,29 @@
-"""Warm-VM sessions for function-entrypoint workloads (plan-0010 W7).
+"""Sessions for function-entrypoint workloads.
 
-A session holds a single VM warm across multiple ``await f(...)`` calls
-so each call doesn't pay the cold-boot tax. The boundary is explicit in
-the SDK so callers understand state persists across calls within a
-session (per ADR-0009 / mvm M5).
-
-Both async-first and sync usage patterns are supported::
+A session is the explicit boundary inside which calls to one workload share
+state: on a microVM, a warm VM reused across ``await f(...)`` calls instead
+of one cold boot per call. Both async and sync forms are supported::
 
     async with mv.session("adder") as sess:
-        await add(2, 3)            # boots the VM, dispatches
-        await add(4, 5)            # reuses the warm VM
+        await add(2, 3)
+        await add(4, 5)
 
     with mv.session("adder") as sess:
         add.sync(2, 3)
         add.sync(4, 5)
 
-Outside a session, ``await f(...)`` shells out to ``mvmctl invoke``
-without ``--session``; the substrate decides whether to spin up a
-one-shot VM or fail fast.
+Where a session lives follows from where calls run (see ``mvm._remote``):
+
+- ``MVM_NO_VM=1``: calls run in this process, so a session is a local scope.
+  It has an id of the form ``local-<hex>``, :func:`current_session_id`
+  reports it inside the body, and there is no VM behind it; its methods act
+  locally.
+- Otherwise: entering the session boots the workload's microVM through the
+  host library (``session.start``), every call to that workload inside the
+  body is dispatched into it (``session.call``), and leaving the session stops
+  it (``session.stop``). The VM is admitted and audited exactly as
+  ``mvmctl machine session start`` admits one. A warm VM is not a warm
+  interpreter: each call still runs the function's wrapper afresh.
 """
 
 from __future__ import annotations
@@ -25,180 +31,106 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import re
-import warnings
-import weakref
+import secrets
 from typing import TYPE_CHECKING, Any
 
-from mvm._cli import resolve_cli_bin
+from mvm import _hostlib
+from mvm._errors.types import MvmTransportError
+from mvm._hostabi.methods import SESSION_INFO, SESSION_START, SESSION_STOP
+from mvm._remote import (
+    _check_emitting_context,
+    _check_id,
+    _no_vm,
+)
 
 if TYPE_CHECKING:
     from mvm._remote import RemoteFunction
 
-_VALID_ID = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-
-
-def _check_id(label: str, value: str) -> None:
-    if not _VALID_ID.match(value):
-        raise ValueError(
-            f"{label} must match ^[a-z][a-z0-9-]{{0,62}}$ (got {value!r})"
-        )
-
-from mvm._subprocess import (
-    DEFAULT_MAX_OUTPUT_BYTES,
-    DEFAULT_SESSION_START_TIMEOUT_SEC,
-    DEFAULT_SESSION_STOP_TIMEOUT_SEC,
-    TransportOutputOverflow,
-    TransportTimeout,
-    env_float,
-    env_int,
-    run_capped,
-)
-
 __all__ = ["Session", "session", "current_session_id"]
 
+# What the host mints as a session id: base32, lower case.
+_HOST_SESSION_ID = re.compile(r"^[a-z2-7]{16,64}$")
 
-_active_session: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+_active_session: contextvars.ContextVar["Session | None"] = contextvars.ContextVar(
     "mvm_session", default=None
 )
 
 
 def current_session_id() -> str | None:
     """Return the session id active in the current context, or ``None``."""
-    return _active_session.get()
+    active = _active_session.get()
+    return active.id if active is not None else None
 
 
-def _locate_mvmctl() -> str:
-    return resolve_cli_bin(
-        purpose="session management",
-        include_legacy_env=True,
-    )
-
-
-def _start(workload_id: str) -> str:
-    _check_id("workload_id", workload_id)
-    bin_path = _locate_mvmctl()
-    timeout = env_float(
-        "MVM_SESSION_START_TIMEOUT_SEC", DEFAULT_SESSION_START_TIMEOUT_SEC
-    )
-    cap = env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
-    try:
-        proc = run_capped(
-            [bin_path, "session", "start", "--", workload_id],
-            input_bytes=None,
-            timeout=timeout,
-            max_output_bytes=cap,
-        )
-    except TransportTimeout as exc:
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} timed out after {timeout}s"
-        ) from exc
-    except TransportOutputOverflow as exc:
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} exceeded {cap}-byte output cap"
-        ) from exc
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} exited {proc.returncode}: "
-            f"{stderr or '(no stderr)'}"
-        )
-    sid = proc.stdout.decode("utf-8", errors="replace").strip()
-    if not sid:
-        raise RuntimeError(
-            f"mvmctl session start {workload_id} returned an empty session id"
-        )
-    return sid
-
-
-def _verb(session_id: str, verb: str, *extra_args: str, timeout_env: str = "MVM_SESSION_STOP_TIMEOUT_SEC", default_timeout: float = DEFAULT_SESSION_STOP_TIMEOUT_SEC) -> bytes:
-    """Dispatch ``mvmctl session <verb> <session_id> [extras...]`` synchronously.
-
-    Returns stdout bytes on success; raises ``RuntimeError`` on failure or
-    transport error. Used by ``stop|set-timeout|kill|info`` paths.
-    """
-    _check_id("session_id", session_id)
-    bin_path = _locate_mvmctl()
-    timeout = env_float(timeout_env, default_timeout)
-    cap = env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
-    argv = [bin_path, "session", verb]
-    argv += list(extra_args)
-    argv += ["--", session_id]
-    try:
-        proc = run_capped(
-            argv,
-            input_bytes=None,
-            timeout=timeout,
-            max_output_bytes=cap,
-        )
-    except TransportTimeout as exc:
-        raise RuntimeError(
-            f"mvmctl session {verb} {session_id} timed out after {timeout}s"
-        ) from exc
-    except TransportOutputOverflow as exc:
-        raise RuntimeError(
-            f"mvmctl session {verb} {session_id} exceeded {cap}-byte output cap"
-        ) from exc
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()
-        raise RuntimeError(
-            f"mvmctl session {verb} {session_id} exited {proc.returncode}: "
-            f"{stderr or '(no stderr)'}"
-        )
-    return proc.stdout
-
-
-def _stop(session_id: str) -> None:
-    _verb(session_id, "stop")
-
-
-def _best_effort_stop(session_id: str) -> None:
-    """Best-effort teardown for abandonment finalizer; never raises."""
-    try:
-        _stop(session_id)
-    except Exception:
-        pass
+def _host_session_for(workload_id: str) -> str | None:
+    """The host session a call to ``workload_id`` goes into, if one is open
+    in this context. A call to another workload inside a session runs in a
+    VM of its own."""
+    active = _active_session.get()
+    if (
+        active is None
+        or not active._host_backed
+        or not active._active
+        or active._id is None
+        or active.workload_id != workload_id
+    ):
+        return None
+    return active._id
 
 
 class Session:
-    """Typed handle for a warm-VM session.
+    """Typed handle for a session.
 
-    Use as a context manager — ``async with`` is the canonical form when
-    you're already in async code; ``with`` works for synchronous callers
-    that pair with :meth:`RemoteFunction.sync`. ``str(sess)`` returns the
-    underlying session id so logs/breadcrumbs stay readable.
+    Use as a context manager — ``async with`` when you're already in async
+    code; ``with`` for synchronous callers that pair with
+    :meth:`RemoteFunction.sync`. ``str(sess)`` returns the session id so
+    logs stay readable.
 
-    Within the ``with`` body, ``await f(...)`` and ``f.sync(...)`` calls
-    auto-attach to this session via context-vars.
+    Within the ``with`` body, :func:`current_session_id` returns this
+    session's id; the binding is a context variable, so it does not leak into
+    other threads or tasks.
 
     Cross-workload guard: :meth:`invoke` raises if the supplied
     ``RemoteFunction``'s ``workload_id`` doesn't match the session's.
-
-    Abandonment: if a ``Session`` is dropped without ``with``/``async
-    with`` lifecycle, a ``weakref.finalize`` fires a best-effort stop and
-    emits a :class:`ResourceWarning`. The canonical pattern is the
-    context-manager form.
     """
 
-    __slots__ = ("_workload_id", "_id", "_token", "_active", "_finalizer", "__weakref__")
+    __slots__ = (
+        "_workload_id",
+        "_id",
+        "_token",
+        "_active",
+        "_timeout",
+        "_host_backed",
+        "_vm_name",
+    )
 
     def __init__(self, workload_id: str, session_id: str):
+        _check_id("session_id", session_id)
         self._workload_id = workload_id
-        self._id = session_id
-        self._token: contextvars.Token[str | None] | None = None
+        self._id: str | None = session_id
+        self._token: contextvars.Token[Session | None] | None = None
         self._active = True
-        # Finalizer fires on GC if the user dropped the handle without
-        # closing it. Best-effort stop + warning so leaked sessions
-        # don't pile up against the substrate's session-pool budget.
-        self._finalizer = weakref.finalize(
-            self,
-            _abandonment_finalizer,
-            workload_id,
-            session_id,
-        )
+        self._timeout: float | None = None
+        self._host_backed = False
+        self._vm_name: str | None = None
+
+    @classmethod
+    def _on_host(cls, workload_id: str, idle_timeout_secs: int | None) -> "Session":
+        """A session whose microVM boots when it is entered."""
+        handle = cls.__new__(cls)
+        handle._workload_id = workload_id
+        handle._id = None
+        handle._token = None
+        handle._active = False
+        handle._timeout = None if idle_timeout_secs is None else float(idle_timeout_secs)
+        handle._host_backed = True
+        handle._vm_name = None
+        return handle
 
     @property
-    def id(self) -> str:
-        """The substrate-issued session identifier."""
+    def id(self) -> str | None:
+        """The session identifier. ``None`` for a host session that has not
+        been entered yet: the host mints the id when it boots the VM."""
         return self._id
 
     @property
@@ -207,34 +139,63 @@ class Session:
         return self._workload_id
 
     def __str__(self) -> str:
-        return self._id
+        return self._id or ""
 
     def __repr__(self) -> str:
         return f"Session(workload_id={self._workload_id!r}, id={self._id!r})"
 
+    # --- host lifecycle --------------------------------------------------
+
+    def _start(self) -> None:
+        if not self._host_backed or self._id is not None:
+            return
+        request: dict[str, Any] = {"workload": self._workload_id}
+        if self._timeout is not None:
+            request["idle_timeout_secs"] = int(self._timeout)
+        reply = _hostlib.call(SESSION_START, request)
+        session_id = reply.get("session_id") if isinstance(reply, dict) else None
+        if not isinstance(session_id, str) or not _HOST_SESSION_ID.match(session_id):
+            raise MvmTransportError(f"session.start returned no usable session id: {reply!r}")
+        self._id = session_id
+        self._vm_name = reply.get("vm_name")
+        self._active = True
+
+    def _stop(self) -> None:
+        if self._host_backed and self._active and self._id is not None:
+            self._active = False
+            _hostlib.call(SESSION_STOP, {"session_id": self._id})
+        self._active = False
+
     # --- sync context-manager (for use with f.sync(...)) ----------------
 
     def __enter__(self) -> "Session":
-        self._token = _active_session.set(self._id)
+        self._start()
+        self._token = _active_session.set(self)
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self._reset_contextvar()
-        self._teardown()
+        # A failure to stop never masks the body's own exception.
+        try:
+            self._stop()
+        except Exception:
+            if exc_type is None:
+                raise
 
     # --- async context-manager (for use with await f(...)) --------------
 
     async def __aenter__(self) -> "Session":
-        self._token = _active_session.set(self._id)
+        await asyncio.to_thread(self._start)
+        self._token = _active_session.set(self)
         return self
 
     async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        # Reset the contextvar in the same task that set it (Token must
-        # be reset in its originating Context — asyncio.to_thread runs in
-        # a different Context). The synchronous stop can safely run in a
-        # thread.
         self._reset_contextvar()
-        await asyncio.to_thread(self._teardown)
+        try:
+            await asyncio.to_thread(self._stop)
+        except Exception:
+            if exc_type is None:
+                raise
 
     def _reset_contextvar(self) -> None:
         if self._token is not None:
@@ -246,25 +207,10 @@ class Session:
                 pass
             self._token = None
 
-    def _teardown(self) -> None:
-        if not self._active:
-            return
-        self._active = False
-        # Detach the finalizer first so it doesn't double-fire.
-        self._finalizer.detach()
-        try:
-            _stop(self._id)
-        except RuntimeError:
-            # Teardown errors must not mask a body exception. The
-            # session-timeout reaper on the substrate side will reap
-            # the VM regardless. Tests assert teardown was *invoked*,
-            # not that it succeeded.
-            pass
-
     # --- explicit lifecycle methods ------------------------------------
 
     async def invoke(self, fn: "RemoteFunction", /, *args: Any, **kwargs: Any) -> Any:
-        """Dispatch ``fn`` against this session.
+        """Dispatch ``fn`` within this session.
 
         Equivalent to entering this session's context and calling
         ``await fn(*args, **kwargs)`` — surfaced as an explicit method
@@ -277,73 +223,87 @@ class Session:
                 f"bound to workload {fn.workload_id!r}. Hint: open a session "
                 "for the right workload, or invoke without a session."
             )
-        prev = _active_session.set(self._id)
+        if self._host_backed and (self._id is None or not self._active):
+            raise MvmTransportError(
+                f"Session({self._workload_id!r}) has no running microVM: enter it with "
+                "`with` or `async with` before invoking through it"
+            )
+        prev = _active_session.set(self)
         try:
             return await fn(*args, **kwargs)
         finally:
             _active_session.reset(prev)
 
     async def set_timeout(self, seconds: float) -> None:
-        """Update the substrate-side idle timeout for this session."""
-        if seconds < 0:
-            raise ValueError("set_timeout seconds must be non-negative")
-        await asyncio.to_thread(_verb, self._id, "set-timeout", str(seconds))
+        """Set this session's idle timeout.
+
+        A local session records it and reports it from :meth:`info`. A host
+        session takes it when it boots; once its VM is running the timeout is
+        fixed, so pass it to :func:`session` or set it before entering."""
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+            raise ValueError("set_timeout seconds must be a non-negative number")
+        if self._host_backed and self._id is not None:
+            raise MvmTransportError(
+                "a host session's idle timeout is fixed when its microVM boots; pass "
+                "idle_timeout_secs to mvm.session(...) instead"
+            )
+        self._timeout = float(seconds)
 
     async def kill(self) -> None:
-        """Terminate the session immediately. Inflight invokes resolve as failures."""
-        await asyncio.to_thread(_verb, self._id, "kill")
-        self._active = False
+        """End the session, stopping its microVM when it has one. Later
+        :meth:`info` calls report it inactive."""
+        await asyncio.to_thread(self._stop)
 
     async def info(self) -> dict[str, Any]:
-        """Return substrate-reported metadata for the session."""
-        import json
-
-        out = await asyncio.to_thread(_verb, self._id, "info")
-        text = out.decode("utf-8", errors="replace").strip()
-        if not text:
-            return {}
-        try:
-            value = json.loads(text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(
-                f"mvmctl session info {self._id} returned non-JSON: {text!r}"
-            ) from exc
-        if not isinstance(value, dict):
-            raise RuntimeError(
-                f"mvmctl session info {self._id} returned non-object: {value!r}"
+        """What is known about this session: for a host session that has
+        booted, the host's own record under ``record``."""
+        if self._host_backed and self._id is not None:
+            record = await asyncio.to_thread(
+                _hostlib.call, SESSION_INFO, {"session_id": self._id}
             )
-        return value
+            fields = record if isinstance(record, dict) else {}
+            return {
+                "id": self._id,
+                "workload_id": self._workload_id,
+                "active": fields.get("state") == "running",
+                "idle_timeout_secs": fields.get("idle_timeout_secs"),
+                "local": False,
+                "record": record,
+            }
+        return {
+            "id": self._id,
+            "workload_id": self._workload_id,
+            "active": self._active,
+            "idle_timeout_secs": self._timeout,
+            "local": not self._host_backed,
+        }
 
 
-def _abandonment_finalizer(workload_id: str, session_id: str) -> None:
-    warnings.warn(
-        f"Session(workload_id={workload_id!r}, id={session_id!r}) was not "
-        "closed via with/async-with; firing best-effort cleanup. Use "
-        "`async with mv.session(...)` (or `with mv.session(...)`) to bound "
-        "the session lifetime explicitly.",
-        ResourceWarning,
-        stacklevel=2,
-    )
-    _best_effort_stop(session_id)
-
-
-def session(workload_id: str) -> Session:
-    """Open a warm-VM session bound to ``workload_id``.
+def session(workload_id: str, *, idle_timeout_secs: int | None = None) -> Session:
+    """Open a session bound to ``workload_id``.
 
     Returns a :class:`Session` you can use as either ``with`` or
-    ``async with``. Within the body, ``await f(...)`` and ``f.sync(...)``
-    auto-attach to this session via context-vars.
+    ``async with``. Under ``MVM_NO_VM=1`` this is a local scope; otherwise
+    entering it boots the workload's microVM and leaving it stops the VM (see
+    the module docstring). ``idle_timeout_secs`` bounds how long the host
+    keeps an idle session VM; the host's default applies when it is omitted.
 
-    Raises :class:`mvm.EmittingContextError` if called inside an
-    ``mvm emit`` subprocess (``MVM_EMITTING=1``). Layer-3
-    calls are dev-only by design (ADR-0010).
+    Raises :class:`mvm.EmittingContextError` if called while ``mvm emit`` is
+    running (``MVM_EMITTING=1``).
     """
-    # ADR-0010 §2 Layer-3 guard. Imported here to avoid a circular
-    # import between _session and _remote at module-load time.
-    from mvm._remote import _check_emitting_context
-
     _check_emitting_context("mv.session(...)")
     if not workload_id:
         raise ValueError("session(workload_id) requires a non-empty id")
-    sid = _start(workload_id)
-    return Session(workload_id, sid)
+    _check_id("workload_id", workload_id)
+    if idle_timeout_secs is not None and (
+        isinstance(idle_timeout_secs, bool)
+        or not isinstance(idle_timeout_secs, int)
+        or idle_timeout_secs <= 0
+    ):
+        raise ValueError("idle_timeout_secs must be a positive integer")
+    if _no_vm():
+        handle = Session(workload_id, f"local-{secrets.token_hex(8)}")
+        if idle_timeout_secs is not None:
+            handle._timeout = float(idle_timeout_secs)
+        return handle
+    return Session._on_host(workload_id, idle_timeout_secs)

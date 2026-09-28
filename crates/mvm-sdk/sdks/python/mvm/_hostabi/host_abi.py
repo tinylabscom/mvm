@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
@@ -67,6 +67,22 @@ class CopyDirection2(Enum):
 
 
 CopyDirection = Union[CopyDirection1, CopyDirection2]
+
+
+@dataclass
+class EgressTarget:
+    host: str
+    port: int
+
+
+@dataclass
+class EntrypointCallRequest:
+    payload_b64: str
+    cpus: Optional[int] = None
+    manifest: Optional[str] = None
+    memory_mib: Optional[int] = None
+    timeout_secs: Optional[int] = None
+    workload: Optional[str] = None
 
 
 class FsEntryKind(Enum):
@@ -231,6 +247,34 @@ class GuestProcStdinRequest:
 
 
 @dataclass
+class GuestProcStreamCloseReply:
+    pass
+
+
+@dataclass
+class GuestProcStreamCloseRequest:
+    stream: int
+
+
+@dataclass
+class GuestProcStreamNextRequest:
+    stream: int
+    wait_ms: Optional[int] = None
+
+
+@dataclass
+class GuestProcStreamOpenReply:
+    stream: int
+
+
+@dataclass
+class GuestProcStreamOpenRequest:
+    id: str
+    token: str
+    timeout_secs: Optional[int] = None
+
+
+@dataclass
 class GuestProcWaitRequest:
     id: str
     token: str
@@ -300,6 +344,21 @@ InstanceReadiness = Union[
 
 
 @dataclass
+class MachineCreateRequest:
+    name: str
+    backend: Optional[str] = None
+    cpus: Optional[int] = None
+    egress: Optional[List[EgressTarget]] = None
+    force: Optional[bool] = False
+    image: Optional[str] = None
+    manifest: Optional[str] = None
+    memory_mib: Optional[int] = None
+    ports: Optional[List[str]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    template: Optional[str] = None
+
+
+@dataclass
 class MachineExecReply:
     exit_code: int
     stderr_b64: str
@@ -320,6 +379,14 @@ class MachineInspectRequest:
     id: str
 
 
+MachineInventoryReply = List[Dict[str, Any]]
+
+
+@dataclass
+class MachineInventoryRequest:
+    pass
+
+
 @dataclass
 class MachineLogsReply:
     data_b64: str
@@ -332,12 +399,38 @@ class MachineLogsRequest:
 
 
 @dataclass
+class MachineLogsStreamCloseReply:
+    pass
+
+
+@dataclass
+class MachineLogsStreamCloseRequest:
+    stream: int
+
+
+@dataclass
+class MachineLogsStreamNextRequest:
+    stream: int
+    wait_ms: Optional[int] = None
+
+
+@dataclass
+class MachineLogsStreamOpenReply:
+    stream: int
+
+
+@dataclass
 class MachineRmReply:
     pass
 
 
 @dataclass
 class MachineRmRequest:
+    id: str
+
+
+@dataclass
+class MachineStartRequest:
     id: str
 
 
@@ -390,6 +483,140 @@ class ProcState4(Enum):
 
 
 ProcState = Union[ProcState1, ProcState2, ProcState3, ProcState4]
+
+
+@dataclass
+class RemoteErrorReply:
+    error_id: str
+    kind: str
+    message: str
+
+
+class RunEntrypointError1(Enum):
+    PayloadCap = 'PayloadCap'
+
+
+class RunEntrypointError2(Enum):
+    Timeout = 'Timeout'
+
+
+class RunEntrypointError3(Enum):
+    Canceled = 'Canceled'
+
+
+class RunEntrypointError4(Enum):
+    Busy = 'Busy'
+
+
+class RunEntrypointError5(Enum):
+    WrapperCrashed = 'WrapperCrashed'
+
+
+class RunEntrypointError6(Enum):
+    NotReady = 'NotReady'
+
+
+class RunEntrypointError7(Enum):
+    EntrypointInvalid = 'EntrypointInvalid'
+
+
+class RunEntrypointError8(Enum):
+    SessionKilled = 'SessionKilled'
+
+
+class RunEntrypointError9(Enum):
+    InternalError = 'InternalError'
+
+
+RunEntrypointError = Union[
+    RunEntrypointError1,
+    RunEntrypointError2,
+    RunEntrypointError3,
+    RunEntrypointError4,
+    RunEntrypointError5,
+    RunEntrypointError6,
+    RunEntrypointError7,
+    RunEntrypointError8,
+    RunEntrypointError9,
+]
+
+
+class RunMode1(Enum):
+    transient = 'transient'
+
+
+class RunMode2(Enum):
+    persistent = 'persistent'
+
+
+RunMode = Union[RunMode1, RunMode2]
+
+
+@dataclass
+class SessionCallRequest:
+    payload_b64: str
+    session_id: str
+    timeout_secs: Optional[int] = None
+
+
+@dataclass
+class SessionInfoReply:
+    ephemeral: bool
+    idle_timeout_secs: int
+    invoke_count: int
+    mode: str
+    session_id: str
+    started_at: str
+    state: str
+    vm_name: str
+    workload_id: str
+    last_invoke_at: Optional[str] = None
+
+
+@dataclass
+class SessionInfoRequest:
+    session_id: str
+
+
+@dataclass
+class SessionStartReply:
+    session_id: str
+    vm_name: str
+
+
+@dataclass
+class SessionStartRequest:
+    cpus: Optional[int] = None
+    idle_timeout_secs: Optional[int] = None
+    manifest: Optional[str] = None
+    memory_mib: Optional[int] = None
+    workload: Optional[str] = None
+
+
+@dataclass
+class SessionStopReply:
+    pass
+
+
+@dataclass
+class SessionStopRequest:
+    session_id: str
+
+
+class StreamName1(Enum):
+    stdout = 'stdout'
+    stderr = 'stderr'
+
+
+class StreamName2(Enum):
+    trace = 'trace'
+
+
+class StreamName3(Enum):
+    frame = 'frame'
+
+
+StreamName = Union[StreamName1, StreamName2, StreamName3]
 
 
 class Kind(Enum):
@@ -497,15 +724,39 @@ class GuestProcStdin:
 
 
 @dataclass
+class GuestProcStreamClose:
+    reply: GuestProcStreamCloseReply
+    request: GuestProcStreamCloseRequest
+
+
+@dataclass
+class GuestProcStreamOpen:
+    reply: GuestProcStreamOpenReply
+    request: GuestProcStreamOpenRequest
+
+
+@dataclass
 class MachineExec:
     reply: MachineExecReply
     request: MachineExecRequest
 
 
 @dataclass
+class MachineInventory:
+    reply: MachineInventoryReply
+    request: MachineInventoryRequest
+
+
+@dataclass
 class MachineLogs:
     reply: MachineLogsReply
     request: MachineLogsRequest
+
+
+@dataclass
+class MachineLogsStreamClose:
+    reply: MachineLogsStreamCloseReply
+    request: MachineLogsStreamCloseRequest
 
 
 @dataclass
@@ -518,6 +769,40 @@ class MachineRm:
 class MachineStop:
     reply: MachineStopReply
     request: MachineStopRequest
+
+
+@dataclass
+class SessionInfo:
+    reply: SessionInfoReply
+    request: SessionInfoRequest
+
+
+@dataclass
+class SessionStart:
+    reply: SessionStartReply
+    request: SessionStartRequest
+
+
+@dataclass
+class SessionStop:
+    reply: SessionStopReply
+    request: SessionStopRequest
+
+
+@dataclass
+class AgentErrorReply:
+    kind: RunEntrypointError
+    message: str
+
+
+@dataclass
+class EntrypointCallReply:
+    exit_code: int
+    output_truncated: bool
+    stderr_b64: str
+    stdout_b64: str
+    agent_error: Optional[AgentErrorReply] = None
+    error: Optional[RemoteErrorReply] = None
 
 
 @dataclass
@@ -550,6 +835,27 @@ class GuestProcWaitReply:
     stderr_b64: str
     stdout_b64: str
     truncated: bool
+
+
+@dataclass
+class MachineCreateReply:
+    id: MachineId
+    name: str
+    status: MachineStatus
+    auto_resume: Optional[bool] = True
+    backend: Optional[str] = ''
+    cpus: Optional[int] = 0
+    expires_at: Optional[str] = None
+    flake_ref: Optional[str] = None
+    guest_ip: Optional[str] = None
+    last_readiness_change_at: Optional[str] = None
+    memory_mib: Optional[int] = 0
+    ports: Optional[List[PortMapping]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    readiness: Optional[InstanceReadiness] = None
+    revision: Optional[str] = None
+    status_detail: Optional[str] = None
+    tags: Optional[Dict[str, str]] = field(default_factory=lambda: {})
 
 
 @dataclass
@@ -604,6 +910,98 @@ class MachineListRequest:
 
 
 @dataclass
+class MachineLogsStreamOpenRequest:
+    id: str
+    follow: Optional[bool] = True
+    streams: Optional[List[StreamName]] = field(default_factory=lambda: [])
+    tail_lines: Optional[int] = None
+
+
+@dataclass
+class MachineRunRequest:
+    backend: Optional[str] = None
+    command: Optional[List[str]] = field(default_factory=lambda: [])
+    cpus: Optional[int] = None
+    cwd: Optional[str] = None
+    egress: Optional[List[EgressTarget]] = None
+    env: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+    force: Optional[bool] = False
+    image: Optional[str] = None
+    manifest: Optional[str] = None
+    memory_mib: Optional[int] = None
+    mode: Optional[RunMode] = None
+    name: Optional[str] = None
+    ports: Optional[List[str]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    template: Optional[str] = None
+    ttl_seconds: Optional[int] = None
+
+
+@dataclass
+class MachineStartReply:
+    id: MachineId
+    name: str
+    status: MachineStatus
+    auto_resume: Optional[bool] = True
+    backend: Optional[str] = ''
+    cpus: Optional[int] = 0
+    expires_at: Optional[str] = None
+    flake_ref: Optional[str] = None
+    guest_ip: Optional[str] = None
+    last_readiness_change_at: Optional[str] = None
+    memory_mib: Optional[int] = 0
+    ports: Optional[List[PortMapping]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    readiness: Optional[InstanceReadiness] = None
+    revision: Optional[str] = None
+    status_detail: Optional[str] = None
+    tags: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+
+
+@dataclass
+class MachineState:
+    id: MachineId
+    name: str
+    status: MachineStatus
+    auto_resume: Optional[bool] = True
+    backend: Optional[str] = ''
+    cpus: Optional[int] = 0
+    expires_at: Optional[str] = None
+    flake_ref: Optional[str] = None
+    guest_ip: Optional[str] = None
+    last_readiness_change_at: Optional[str] = None
+    memory_mib: Optional[int] = 0
+    ports: Optional[List[PortMapping]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    readiness: Optional[InstanceReadiness] = None
+    revision: Optional[str] = None
+    status_detail: Optional[str] = None
+    tags: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+
+
+@dataclass
+class SessionCallReply:
+    exit_code: int
+    output_truncated: bool
+    stderr_b64: str
+    stdout_b64: str
+    agent_error: Optional[AgentErrorReply] = None
+    error: Optional[RemoteErrorReply] = None
+
+
+@dataclass
+class StreamEvent:
+    data_b64: str
+    stream: StreamName
+
+
+@dataclass
+class EntrypointCall:
+    reply: EntrypointCallReply
+    request: EntrypointCallRequest
+
+
+@dataclass
 class GuestFsList:
     reply: GuestFsListReply
     request: GuestFsListRequest
@@ -622,6 +1020,12 @@ class GuestProcWait:
 
 
 @dataclass
+class MachineCreate:
+    reply: MachineCreateReply
+    request: MachineCreateRequest
+
+
+@dataclass
 class MachineInspect:
     reply: MachineInspectReply
     request: MachineInspectRequest
@@ -634,8 +1038,67 @@ class MachineList:
 
 
 @dataclass
+class MachineLogsStreamOpen:
+    reply: MachineLogsStreamOpenReply
+    request: MachineLogsStreamOpenRequest
+
+
+@dataclass
+class MachineStart:
+    reply: MachineStartReply
+    request: MachineStartRequest
+
+
+@dataclass
+class SessionCall:
+    reply: SessionCallReply
+    request: SessionCallRequest
+
+
+@dataclass
+class GuestProcStreamNextReply:
+    done: bool
+    events: List[StreamEvent]
+    outcome: Optional[WaitOutcome] = None
+
+
+@dataclass
+class MachineLogsStreamNextReply:
+    done: bool
+    events: List[StreamEvent]
+    outcome: Optional[WaitOutcome] = None
+
+
+@dataclass
+class MachineRunReply:
+    build_mode: str
+    machine: MachineState
+    plan_id: str
+    process: Optional[str] = None
+
+
+@dataclass
+class GuestProcStreamNext:
+    reply: GuestProcStreamNextReply
+    request: GuestProcStreamNextRequest
+
+
+@dataclass
+class MachineLogsStreamNext:
+    reply: MachineLogsStreamNextReply
+    request: MachineLogsStreamNextRequest
+
+
+@dataclass
+class MachineRun:
+    reply: MachineRunReply
+    request: MachineRunRequest
+
+
+@dataclass
 class HostAbi:
     backend_capabilities: BackendCapabilities
+    entrypoint_call: EntrypointCall
     guest_cp: GuestCp
     guest_fs_list: GuestFsList
     guest_fs_mkdir: GuestFsMkdir
@@ -649,10 +1112,24 @@ class HostAbi:
     guest_proc_signal: GuestProcSignal
     guest_proc_start: GuestProcStart
     guest_proc_stdin: GuestProcStdin
+    guest_proc_stream_close: GuestProcStreamClose
+    guest_proc_stream_next: GuestProcStreamNext
+    guest_proc_stream_open: GuestProcStreamOpen
     guest_proc_wait: GuestProcWait
+    machine_create: MachineCreate
     machine_exec: MachineExec
     machine_inspect: MachineInspect
+    machine_inventory: MachineInventory
     machine_list: MachineList
     machine_logs: MachineLogs
+    machine_logs_stream_close: MachineLogsStreamClose
+    machine_logs_stream_next: MachineLogsStreamNext
+    machine_logs_stream_open: MachineLogsStreamOpen
     machine_rm: MachineRm
+    machine_run: MachineRun
+    machine_start: MachineStart
     machine_stop: MachineStop
+    session_call: SessionCall
+    session_info: SessionInfo
+    session_start: SessionStart
+    session_stop: SessionStop

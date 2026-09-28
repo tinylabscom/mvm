@@ -60,14 +60,69 @@ pub(super) fn scan_and_record_base_image(
     unpacked_root: &Path,
     prod: bool,
 ) -> Result<()> {
+    // One OSV request per matched advisory, in sequence: an image with a large
+    // package set spends real time here, and it used to spend it silently.
+    let phase =
+        mvm_runtime::ui::activity::start("Scanning the base image for known vulnerabilities");
+    let report = |detail: &str| phase.set_detail(detail);
+    let osv = BlockingOsvClient::default();
+    let client = ReportingOsvClient::new(&osv, &report);
     scan_and_record_base_image_with(
         cache_root,
         reference,
         resolved_digest,
         unpacked_root,
         prod,
-        &BlockingOsvClient::default(),
-    )
+        &client,
+    )?;
+    phase.finish();
+    Ok(())
+}
+
+/// An [`OsvClient`] that reports how far through the advisory fetches a scan
+/// is, and otherwise defers to `inner`.
+struct ReportingOsvClient<'a> {
+    inner: &'a dyn OsvClient,
+    report: &'a dyn Fn(&str),
+    total: std::cell::Cell<usize>,
+    fetched: std::cell::Cell<usize>,
+}
+
+impl<'a> ReportingOsvClient<'a> {
+    fn new(inner: &'a dyn OsvClient, report: &'a dyn Fn(&str)) -> Self {
+        Self {
+            inner,
+            report,
+            total: std::cell::Cell::new(0),
+            fetched: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl OsvClient for ReportingOsvClient<'_> {
+    fn query_batch(
+        &self,
+        components: &[mvm_fs::os_inventory::OsComponent],
+    ) -> Result<Vec<Vec<String>>, mvm_build::base_image_scan::ScanError> {
+        (self.report)(&format!("querying OSV for {} packages", components.len()));
+        let matched = self.inner.query_batch(components)?;
+        self.total.set(matched.iter().map(Vec::len).sum());
+        Ok(matched)
+    }
+
+    fn fetch_vulnerability(
+        &self,
+        id: &str,
+    ) -> Result<mvm_build::base_image_scan::OsvVulnerability, mvm_build::base_image_scan::ScanError>
+    {
+        let fetched = self.fetched.get().saturating_add(1);
+        self.fetched.set(fetched);
+        (self.report)(&format!(
+            "fetching advisory {fetched}/{}",
+            self.total.get().max(fetched)
+        ));
+        self.inner.fetch_vulnerability(id)
+    }
 }
 
 /// Test-visible driver: the [`OsvClient`] is a parameter so tests
@@ -179,6 +234,41 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| ScanError::MalformedResponse(format!("no record for {id}")))
         }
+    }
+
+    #[test]
+    fn the_reporting_client_counts_advisories_against_the_batch_total() {
+        let inner = MockOsv {
+            batch: BTreeMap::from([("openssl".to_string(), vec!["A".into(), "B".into()])]),
+            records: BTreeMap::from([
+                ("A".to_string(), OsvVulnerability::default()),
+                ("B".to_string(), OsvVulnerability::default()),
+            ]),
+        };
+        let seen = std::cell::RefCell::new(Vec::new());
+        let record = |detail: &str| seen.borrow_mut().push(detail.to_string());
+        let client = ReportingOsvClient::new(&inner, &record);
+        let component = OsComponent {
+            name: "openssl".into(),
+            version: "3.0.11".into(),
+            ecosystem: "Debian:12".into(),
+            source: "var/lib/dpkg/status".into(),
+        };
+
+        let matched = client
+            .query_batch(std::slice::from_ref(&component))
+            .expect("batch");
+        for id in &matched[0] {
+            client.fetch_vulnerability(id).expect("record");
+        }
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                "querying OSV for 1 packages",
+                "fetching advisory 1/2",
+                "fetching advisory 2/2",
+            ]
+        );
     }
 
     fn empty_osv() -> MockOsv {

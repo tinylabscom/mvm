@@ -182,6 +182,7 @@ pub const GATES: &[Gate] = &[
         "check-core-runtime-free",
         crate::check_core_runtime_free::run,
     ),
+    ("check-no-cli-shellout", crate::check_no_cli_shellout::run),
     (
         "check-sdk-transport-free",
         crate::check_sdk_transport_free::run,
@@ -228,10 +229,6 @@ pub const GATES: &[Gate] = &[
     (
         "check-guest-entropy-seed",
         crate::check_guest_entropy_seed::run,
-    ),
-    (
-        "check-runtime-overlay-version",
-        crate::check_runtime_overlay_version::run,
     ),
     ("check-file-size", crate::check_file_size::run),
     ("check-stubs", stubs_match_schemas),
@@ -322,10 +319,6 @@ mod tests {
         (
             "check-declared-backing",
             "runs --self-test alongside itself, so it stays a step of its own",
-        ),
-        (
-            "check-kernel-config-budget",
-            "takes a path to a resolved kernel .config; belongs to the kernel lane",
         ),
         (
             "check-kernel-pin-freshness",

@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 1
+ABI_MINOR: Final = 3
 
 
 class Classification(str, Enum):
@@ -34,12 +34,25 @@ class Method:
 BACKEND_CAPABILITIES: Final = "backend.capabilities"
 
 
+#: Calls a workload's entrypoint in a transient microVM, admitted
+#: under a signed plan.
+ENTRYPOINT_CALL: Final = "entrypoint.call"
+
+
+#: Persists a machine definition without booting it.
+MACHINE_CREATE: Final = "machine.create"
+
+
 #: Runs one non-interactive command in a machine.
 MACHINE_EXEC: Final = "machine.exec"
 
 
 #: Inspects one machine.
 MACHINE_INSPECT: Final = "machine.inspect"
+
+
+#: Lists every machine on this host with its dev/prod posture.
+MACHINE_INVENTORY: Final = "machine.inventory"
 
 
 #: Lists machines, optionally filtered.
@@ -54,8 +67,45 @@ MACHINE_LOGS: Final = "machine.logs"
 MACHINE_RM: Final = "machine.rm"
 
 
+#: Closes a captured-output stream. Idempotent.
+MACHINE_LOGS_STREAM_CLOSE: Final = "machine.logs.stream.close"
+
+
+#: Returns the captured output that has arrived.
+MACHINE_LOGS_STREAM_NEXT: Final = "machine.logs.stream.next"
+
+
+#: Opens a stream over a machine's captured output, replayed then
+#: followed.
+MACHINE_LOGS_STREAM_OPEN: Final = "machine.logs.stream.open"
+
+
+#: Boots a machine through the admitted local launch.
+MACHINE_RUN: Final = "machine.run"
+
+
+#: Boots a persisted machine definition.
+MACHINE_START: Final = "machine.start"
+
+
 #: Stops a machine. Idempotent.
 MACHINE_STOP: Final = "machine.stop"
+
+
+#: Calls the entrypoint in a running session's microVM.
+SESSION_CALL: Final = "session.call"
+
+
+#: Reports a session's record.
+SESSION_INFO: Final = "session.info"
+
+
+#: Boots a warm session for a workload, admitted under a signed plan.
+SESSION_START: Final = "session.start"
+
+
+#: Stops a session and tears down its microVM.
+SESSION_STOP: Final = "session.stop"
 
 
 #: Copies a file between the host and the guest.
@@ -110,18 +160,42 @@ GUEST_PROC_START: Final = "guest.proc.start"
 GUEST_PROC_STDIN: Final = "guest.proc.stdin"
 
 
+#: Closes a process output stream. Idempotent.
+GUEST_PROC_STREAM_CLOSE: Final = "guest.proc.stream.close"
+
+
+#: Returns the process output that has arrived, and how it ended.
+GUEST_PROC_STREAM_NEXT: Final = "guest.proc.stream.next"
+
+
+#: Opens a stream over a guest process's output.
+GUEST_PROC_STREAM_OPEN: Final = "guest.proc.stream.open"
+
+
 #: Waits for a guest process to end, returning its output.
 GUEST_PROC_WAIT: Final = "guest.proc.wait"
 
 
 METHODS: dict[str, Method] = {
     "backend.capabilities": Method(key="backend_capabilities", classification=Classification.PROD_SAFE, summary="Reports what the backend can do."),
+    "entrypoint.call": Method(key="entrypoint_call", classification=Classification.PROD_SAFE, summary="Calls a workload's entrypoint in a transient microVM, admitted under a signed plan."),
+    "machine.create": Method(key="machine_create", classification=Classification.PROD_SAFE, summary="Persists a machine definition without booting it."),
     "machine.exec": Method(key="machine_exec", classification=Classification.PROD_SAFE, summary="Runs one non-interactive command in a machine."),
     "machine.inspect": Method(key="machine_inspect", classification=Classification.PROD_SAFE, summary="Inspects one machine."),
+    "machine.inventory": Method(key="machine_inventory", classification=Classification.PROD_SAFE, summary="Lists every machine on this host with its dev/prod posture."),
     "machine.list": Method(key="machine_list", classification=Classification.PROD_SAFE, summary="Lists machines, optionally filtered."),
     "machine.logs": Method(key="machine_logs", classification=Classification.PROD_SAFE, summary="Returns captured console output, base64-encoded."),
     "machine.rm": Method(key="machine_rm", classification=Classification.PROD_SAFE, summary="Removes a machine, stopping it first when needed."),
+    "machine.logs.stream.close": Method(key="machine_logs_stream_close", classification=Classification.PROD_SAFE, summary="Closes a captured-output stream. Idempotent."),
+    "machine.logs.stream.next": Method(key="machine_logs_stream_next", classification=Classification.PROD_SAFE, summary="Returns the captured output that has arrived."),
+    "machine.logs.stream.open": Method(key="machine_logs_stream_open", classification=Classification.PROD_SAFE, summary="Opens a stream over a machine's captured output, replayed then followed."),
+    "machine.run": Method(key="machine_run", classification=Classification.PROD_SAFE, summary="Boots a machine through the admitted local launch."),
+    "machine.start": Method(key="machine_start", classification=Classification.PROD_SAFE, summary="Boots a persisted machine definition."),
     "machine.stop": Method(key="machine_stop", classification=Classification.PROD_SAFE, summary="Stops a machine. Idempotent."),
+    "session.call": Method(key="session_call", classification=Classification.PROD_SAFE, summary="Calls the entrypoint in a running session's microVM."),
+    "session.info": Method(key="session_info", classification=Classification.PROD_SAFE, summary="Reports a session's record."),
+    "session.start": Method(key="session_start", classification=Classification.PROD_SAFE, summary="Boots a warm session for a workload, admitted under a signed plan."),
+    "session.stop": Method(key="session_stop", classification=Classification.PROD_SAFE, summary="Stops a session and tears down its microVM."),
     "guest.cp": Method(key="guest_cp", classification=Classification.DEV_ONLY, summary="Copies a file between the host and the guest."),
     "guest.fs.list": Method(key="guest_fs_list", classification=Classification.DEV_ONLY, summary="Lists a directory in the guest."),
     "guest.fs.mkdir": Method(key="guest_fs_mkdir", classification=Classification.DEV_ONLY, summary="Creates a directory in the guest."),
@@ -135,17 +209,32 @@ METHODS: dict[str, Method] = {
     "guest.proc.signal": Method(key="guest_proc_signal", classification=Classification.DEV_ONLY, summary="Signals a tracked guest process."),
     "guest.proc.start": Method(key="guest_proc_start", classification=Classification.DEV_ONLY, summary="Starts a process in the guest."),
     "guest.proc.stdin": Method(key="guest_proc_stdin", classification=Classification.DEV_ONLY, summary="Writes a tracked process's stdin, base64-encoded."),
+    "guest.proc.stream.close": Method(key="guest_proc_stream_close", classification=Classification.DEV_ONLY, summary="Closes a process output stream. Idempotent."),
+    "guest.proc.stream.next": Method(key="guest_proc_stream_next", classification=Classification.DEV_ONLY, summary="Returns the process output that has arrived, and how it ended."),
+    "guest.proc.stream.open": Method(key="guest_proc_stream_open", classification=Classification.DEV_ONLY, summary="Opens a stream over a guest process's output."),
     "guest.proc.wait": Method(key="guest_proc_wait", classification=Classification.DEV_ONLY, summary="Waits for a guest process to end, returning its output."),
 }
 
 __all__ = [
     "BACKEND_CAPABILITIES",
+    "ENTRYPOINT_CALL",
+    "MACHINE_CREATE",
     "MACHINE_EXEC",
     "MACHINE_INSPECT",
+    "MACHINE_INVENTORY",
     "MACHINE_LIST",
     "MACHINE_LOGS",
     "MACHINE_RM",
+    "MACHINE_LOGS_STREAM_CLOSE",
+    "MACHINE_LOGS_STREAM_NEXT",
+    "MACHINE_LOGS_STREAM_OPEN",
+    "MACHINE_RUN",
+    "MACHINE_START",
     "MACHINE_STOP",
+    "SESSION_CALL",
+    "SESSION_INFO",
+    "SESSION_START",
+    "SESSION_STOP",
     "GUEST_CP",
     "GUEST_FS_LIST",
     "GUEST_FS_MKDIR",
@@ -159,6 +248,9 @@ __all__ = [
     "GUEST_PROC_SIGNAL",
     "GUEST_PROC_START",
     "GUEST_PROC_STDIN",
+    "GUEST_PROC_STREAM_CLOSE",
+    "GUEST_PROC_STREAM_NEXT",
+    "GUEST_PROC_STREAM_OPEN",
     "GUEST_PROC_WAIT",
     "ABI_MAJOR",
     "ABI_MINOR",

@@ -177,14 +177,17 @@ pub struct CliWorld {
     pub sdk_output: Option<Output>,
     /// SDK fixture surface most recently exercised (`decorator` or `runtime`).
     pub sdk_surface: Option<String>,
-    /// `mvmctl` argv the recording double captured, one entry per invocation,
-    /// keyed by the language whose fixture produced it.
+    /// Public-surface name lists the surface fixtures emitted, keyed by
+    /// `<language>-surface`.
     pub sdk_recorded_argv: BTreeMap<String, Vec<Vec<String>>>,
+    /// Host-library calls a live fixture made, each a `[method, request]`
+    /// pair, keyed by the language whose fixture made them.
+    pub sdk_recorded_calls: BTreeMap<String, Vec<serde_json::Value>>,
 
     /// Per-language JSON emitted by the Tier A constructor fixtures,
     /// keyed by language, for comparison against the golden document.
     pub sdk_ctor_docs: BTreeMap<String, String>,
-    /// Scenario-local directory holding the recording double's argv logs.
+    /// Scenario-local directory holding the recorded host-library call logs.
     pub sdk_argv_log_dir: Option<tempfile::TempDir>,
     /// Result of exercising the signed-plan share gate with an attachment the
     /// plan did not authorize.
@@ -304,9 +307,12 @@ pub struct CliWorld {
     /// Per-scenario SDK-sidecar cache root, so a developer's populated cache
     /// can never satisfy a scenario for the wrong reason.
     pub sdk_sidecar_cache: Option<tempfile::TempDir>,
-    /// Per-scenario staged release directory the acquire scenarios fetch from,
-    /// so the download path runs against local bytes and never the network.
+    /// Per-scenario directory serving the image set the acquire scenarios
+    /// fetch from, so the download path runs against local bytes and never the
+    /// network.
     pub sdk_sidecar_release: Option<tempfile::TempDir>,
+    /// Where that set is served from, and the lock pinning its root.
+    pub sdk_sidecar_image_set: Option<mvm_build::published_image_set::ImageSetSource>,
     /// Host-service bindings the scenario's plan carries.
     pub sdk_sidecar_services: Vec<mvm_contract::protocol::broker::ServiceId>,
     /// Ordinary workload mounts assembled beside the reserved SDK sidecar.

@@ -128,6 +128,9 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 pub struct HardenedForwarder {
     timeout_secs: u64,
     proxy: Option<mvm_http::ProxyConfig>,
+    /// Resolves only to what the egress gate admitted for the request. See
+    /// `pinned_dns`. `None` keeps the SSRF-filtering system resolver.
+    gate_resolver: Option<std::sync::Arc<dyn mvm_http::resolve::Resolve>>,
     /// A test's stand-in for the network: where names resolve, and which
     /// anchors the upstream certificate is verified against. Verification
     /// itself is never switched off — a test that wants a failure supplies an
@@ -148,9 +151,24 @@ impl HardenedForwarder {
         Ok(Self {
             timeout_secs,
             proxy: None,
+            gate_resolver: None,
             #[cfg(test)]
             test_transport: None,
         })
+    }
+
+    /// Connect only to addresses the VM's egress gate admitted: the answer
+    /// it recorded when the request was decided, or a fresh gate decision.
+    #[must_use]
+    pub(crate) fn with_gate_resolver(
+        mut self,
+        admitted: std::sync::Arc<super::pinned_dns::AdmittedAddresses>,
+        gate: std::sync::Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
+    ) -> Self {
+        self.gate_resolver = Some(std::sync::Arc::new(super::pinned_dns::GateResolver::new(
+            admitted, gate,
+        )));
+        self
     }
 
     /// Resolve every name through `transport.resolver` and verify upstream
@@ -164,6 +182,10 @@ impl HardenedForwarder {
 
     fn client_builder(&self) -> mvm_http::ClientBuilder {
         let builder = hardened_client_builder_via(self.timeout_secs, self.proxy.as_ref());
+        let builder = match &self.gate_resolver {
+            Some(resolver) => builder.resolver(std::sync::Arc::clone(resolver)),
+            None => builder,
+        };
         #[cfg(test)]
         let builder = match &self.test_transport {
             Some(transport) => builder

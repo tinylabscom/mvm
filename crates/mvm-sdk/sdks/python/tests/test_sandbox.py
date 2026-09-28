@@ -14,18 +14,11 @@ import mvm
 @pytest.fixture(autouse=True)
 def _isolate() -> None:
     """Each test starts with a clean recording + record mode."""
-    path = os.environ.get("PATH")
     mvm.reset_recording()
-    os.environ.pop("MVM_CLI_BIN", None)
     os.environ.pop("MVM_SDK_MODE", None)
     yield
     mvm.reset_recording()
-    os.environ.pop("MVM_CLI_BIN", None)
     os.environ.pop("MVM_SDK_MODE", None)
-    if path is None:
-        os.environ.pop("PATH", None)
-    else:
-        os.environ["PATH"] = path
 
 
 # ── basic recording shape ────────────────────────────────────────────
@@ -166,14 +159,28 @@ def test_context_manager_records_kill_on_exit() -> None:
 # ── modes ────────────────────────────────────────────────────────────
 
 
-def test_live_mode_requires_host_cli() -> None:
-    """MVM_SDK_MODE=live without the host CLI must fail with an
-    actionable hint."""
+def test_live_mode_sends_a_template_to_the_host_library(monkeypatch) -> None:
+    """A template boots in live mode: it reaches the host library as the
+    launch's `template` source, which the library resolves among the images
+    built on this host."""
+    import json
+
+    from mvm import _hostlib
+
+    seen = []
+
+    def answer(method, request):
+        seen.append((method, json.loads(request)))
+        return 0, json.dumps(
+            {"machine": {"name": "sb"}, "plan_id": "p", "build_mode": "dev"}
+        ).encode()
+
+    monkeypatch.setattr(_hostlib, "_invoke", answer)
     os.environ["MVM_SDK_MODE"] = "live"
-    os.environ.pop("MVM_CLI_BIN", None)
-    os.environ["PATH"] = ""
-    with pytest.raises(mvm.SandboxModeError, match="mvmctl"):
-        mvm.Sandbox.create("python-3.12")
+    sb = mvm.Sandbox.create("python-3.12")
+    assert seen[0][0] == "machine.run"
+    assert seen[0][1]["template"] == "python-3.12"
+    sb.kill()
 
 
 def test_plan_mode_redirects_to_host_cli() -> None:

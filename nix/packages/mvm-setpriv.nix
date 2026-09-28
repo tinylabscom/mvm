@@ -1,4 +1,9 @@
 # Minimal static-musl privilege-drop helper used by the guest PID 1.
+#
+# Built from its own leaf package (`crates/mvm-setpriv`, whose closure is
+# `libc`), not from `mvm-agentd`: the builder image's cache key hashes the
+# closure this recipe compiles, so the narrower the package, the fewer edits
+# rebuild that image.
 
 {
   pkgs,
@@ -24,7 +29,7 @@ rustPlatform.buildRustPackage {
   HOME = "/tmp";
   cargoBuildFlags = [
     "--package"
-    "mvm-agentd"
+    "mvm-setpriv"
     "--bin"
     "mvm-setpriv"
   ];

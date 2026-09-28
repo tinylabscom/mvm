@@ -15,11 +15,6 @@ pub(super) use mvm_client::admission::{
     attach_guest_boot_config_for_plan, emit_failed, emit_launched, guest_profile_for_boot,
     record_transient_outcome,
 };
-// Referenced only from `invoke.rs`'s test module (asserting the attached
-// security-policy config-drive file name) — cfg-gated so a non-test build
-// doesn't carry an unused re-export.
-#[cfg(test)]
-pub(super) use mvm_client::admission::SECURITY_POLICY_FILENAME;
 
 pub(in crate::commands) use kernel::resolve_kernel_pin_path;
 pub(super) use kernel::resolve_workload_kernel;

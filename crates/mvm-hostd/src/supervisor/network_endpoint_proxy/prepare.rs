@@ -121,6 +121,13 @@ pub(crate) fn destination_host(url: &str) -> Result<String, ProxyError> {
 /// The `host:port` the egress gate decides on, using the scheme's default port
 /// when the URL omits one. `None` when the URL has no parseable host or port —
 /// which the caller treats as a claim-10 refusal (fail closed).
+/// The host and port the forward leg will dial for `url`, keyed the way the
+/// HTTP client asks its resolver.
+fn url_host_and_port(url: &str) -> Option<(String, u16)> {
+    let u = Url::parse(url).ok()?;
+    Some((u.host_str()?.to_string(), u.port_or_known_default()?))
+}
+
 fn url_host_port(url: &str) -> Option<String> {
     let u = Url::parse(url).ok()?;
     match (u.host_str(), u.port_or_known_default()) {
@@ -194,18 +201,33 @@ impl BodyPlaceholderScan {
 /// `target` is the request's `host:port`, and `None` when the URL has no
 /// parseable one. The returned label is chosen here from a fixed set, so the
 /// chain entry built from it carries nothing the workload sent.
+#[cfg(test)]
 fn claim10_refusal(
     gate: &mvm_runtime::vmm::egress_gate::EgressGate,
     target: Option<&str>,
 ) -> Option<&'static str> {
+    claim10_decision(gate, target).err()
+}
+
+/// The gate's decision for `target`: the addresses it admitted, or the fixed
+/// label of why not. A restricted address records its class
+/// (`cloud_metadata`, `private_range`), every other policy refusal
+/// `policy_denied`.
+fn claim10_decision(
+    gate: &mvm_runtime::vmm::egress_gate::EgressGate,
+    target: Option<&str>,
+) -> Result<Vec<std::net::IpAddr>, &'static str> {
     use mvm_runtime::vmm::egress_gate::EgressVerdict;
     let Some(target) = target else {
-        return Some(REASON_MALFORMED);
+        return Err(REASON_MALFORMED);
     };
     match gate.decide_request(target) {
-        EgressVerdict::Allow { .. } => None,
-        EgressVerdict::Malformed => Some(REASON_MALFORMED),
-        EgressVerdict::Deny(_) => Some(REASON_POLICY_DENIED),
+        EgressVerdict::Allow { ips, .. } => Ok(ips),
+        EgressVerdict::Malformed => Err(REASON_MALFORMED),
+        EgressVerdict::Deny(reason) => Err(match reason.audit_label() {
+            "policy_denied" => REASON_POLICY_DENIED,
+            label => label,
+        }),
     }
 }
 
@@ -237,6 +259,49 @@ pub(super) struct PreparedFlow {
 }
 
 impl SubstitutionService {
+    /// Hold a request that carries the placeholder of a secret bound with
+    /// `approve = "ask"` until an approval backend answers. Only a placeholder
+    /// that would actually be substituted here asks: one the destination is
+    /// not bound for is refused later without bothering anyone.
+    async fn approve_secret_use(
+        &self,
+        headers: &[(String, String)],
+        destination: Option<&str>,
+    ) -> Result<(), &'static str> {
+        if self.approval_required.is_empty() {
+            return Ok(());
+        }
+        let Some(destination) = destination else {
+            return Ok(());
+        };
+        let mut asked: Vec<&str> = Vec::new();
+        for (_, value) in headers {
+            let Some(placeholder) = find_placeholder(value) else {
+                continue;
+            };
+            let Some(secret) = self.registry.resolve(placeholder) else {
+                continue;
+            };
+            if !self.approval_required.contains(&secret.name)
+                || !mvm_contract::ir::host_is_bound(&secret.allowed_hosts, destination)
+                || asked.contains(&secret.name.as_str())
+            {
+                continue;
+            }
+            asked.push(&secret.name);
+            let subject = crate::supervisor::runtime_approval::ApprovalSubject::SecretUse {
+                secret: secret.name.clone(),
+                destination: destination.to_string(),
+            };
+            if let crate::supervisor::runtime_approval::ApprovalVerdict::Denied { reason } =
+                self.approver.decide(&subject).await
+            {
+                return Err(reason);
+            }
+        }
+        Ok(())
+    }
+
     /// Apply every pre-connect security decision once, returning the prepared
     /// request plus the state needed to transform and audit its response.
     pub(super) async fn prepare_flow(
@@ -260,7 +325,8 @@ impl SubstitutionService {
         // Per-request endpoint: two refs, cheap; the registry is read-only
         // after admission minted its placeholders.
         let registry: &SubstitutionRegistry = &self.registry;
-        let endpoint = NetworkEndpoint::new(registry, self.resolver.as_ref());
+        let endpoint =
+            NetworkEndpoint::new(registry, self.resolver.as_ref()).observed_by(&self.reflection);
         // Capture audit metadata (name + auth-type per substituted secret, and
         // the destination) before `prepare_request` consumes `req`.
         let destination = destination_host(&req.url).ok();
@@ -286,15 +352,37 @@ impl SubstitutionService {
             });
         }
         let target = url_host_port(&req.url);
-        if let Some(reason) = claim10_refusal(&self.egress_gate, target.as_deref()) {
-            let recorded = target
-                .as_deref()
-                .or(destination.as_deref())
-                .unwrap_or(UNPARSEABLE_DESTINATION);
-            self.audit_flow_refused(recorded, reason).await;
-            return Err(WireResponse::Refused {
-                message: "egress destination not admitted by network policy (claim-10)".into(),
-            });
+        match claim10_decision(&self.egress_gate, target.as_deref()) {
+            Ok(ips) => {
+                // The forward leg connects to exactly these; see `pinned_dns`.
+                if let Some((host, port)) = url_host_and_port(&req.url) {
+                    self.admitted.record(&host, port, ips);
+                    // Then what the request may do there. The path is the
+                    // URL's own, the one the forward leg will send.
+                    let path = Url::parse(&req.url)
+                        .map(|u| u.path().to_string())
+                        .unwrap_or_default();
+                    if let Err(reason) = self.enforce_routes(&host, port, &req.method, &path).await
+                    {
+                        return Err(WireResponse::Refused {
+                            message: format!(
+                                "egress route refused {} {host}:{port} ({reason})",
+                                super::routing::method_label(&req.method)
+                            ),
+                        });
+                    }
+                }
+            }
+            Err(reason) => {
+                let recorded = target
+                    .as_deref()
+                    .or(destination.as_deref())
+                    .unwrap_or(UNPARSEABLE_DESTINATION);
+                self.audit_flow_refused(recorded, reason).await;
+                return Err(WireResponse::Refused {
+                    message: "egress destination not admitted by network policy (claim-10)".into(),
+                });
+            }
         }
         // A placeholder is substituted only in a header. Anywhere else it would
         // go to the destination as the token itself, so the request is refused
@@ -357,7 +445,25 @@ impl SubstitutionService {
         // host-reserved) survives to be substituted, while an undeclared secret
         // the guest put in the body or a non-placeholder header is masked and
         // never reaches the wire.
+        if let Err(reason) = self
+            .approve_secret_use(&req.headers, destination.as_deref())
+            .await
+        {
+            self.audit_flow_refused(
+                destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
+                reason,
+            )
+            .await;
+            return Err(WireResponse::Refused {
+                message: format!("use of a secret that needs approval was refused ({reason})"),
+            });
+        }
         let mut req = req;
+        if self.registry.injects_a_credential() {
+            // A value this VM substitutes can come back in a response, which
+            // has to be readable to be scrubbed. Ask for it unencoded.
+            super::reflection::request_identity_encoding(&mut req.headers);
+        }
         let mut replacement_flow = self
             .replacement_engine
             .start_flow(&self.tenant, &replacement_action);

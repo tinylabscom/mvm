@@ -63,12 +63,41 @@ secret is bound to is relayed opaquely, so a placeholder sent down one leaves
 the VM as the meaningless token it is — the endpoint does not see inside it,
 and there is no value in it to leak.
 
+### The response path
+
+Substituting a value puts it on the wire, and a destination can send it
+back: an echo endpoint, an error page quoting the request, an API listing
+the caller's own key. The endpoint therefore remembers every value it has
+substituted in the VM and replaces each occurrence in a response — header or
+body, on every terminated and typed flow — with that binding's placeholder
+before a byte reaches the guest, recording `secret.reflection_scrubbed`
+(name, destination, count; never the value). The set is VM-wide, so a value
+returned on a later request, or by another bound destination, is caught too.
+The body scrub is streaming and carries one value's length across chunk
+boundaries, so a split value is still found.
+
+A compressed body cannot be scanned without decompressing it, and the
+endpoint does not decompress. Of the two fail-closed answers — refuse every
+encoded response, or ask for none — it does both, in that order of
+preference: a VM holding an injected credential sends `Accept-Encoding:
+identity` upstream in place of the client's, which costs bandwidth and nothing
+else, and a response that arrives encoded anyway is refused rather than
+relayed unread. HTTP/2 does not arise: neither the guest-facing terminator
+nor the forward leg negotiates it.
+
+The scrub matches the bytes that were sent. A value returned transformed —
+base64-encoded, split by markup — is not caught, and values under 8 bytes are
+not scrubbed because they cannot be told apart from content. Both are stated
+limits, not holes the design closes.
+
 ### Where the destinations come from
 
 `mvmctl secret set` records a secret's destination allow-list and auth type in
 the host binding store. A run binds a stored secret with `--secret
-NAME[:HOST,...]` on `mvmctl run` / `mvmctl machine run`, or through a
-Workload IR declaration. The binding the signed `ExecutionPlan` carries names
+NAME[:HOST,...]` on `mvmctl run` / `mvmctl machine run`, through a `[secrets]`
+table in the project's `mvm.toml` (names and destinations only; the schema has
+no field for a value), or through a Workload IR declaration. A flag naming a
+secret the manifest declares narrows that entry and cannot widen it. The binding the signed `ExecutionPlan` carries names
 the guest variable, the keystore address and, optionally, a destination list.
 At assembly the endpoint reads the stored allow-list and narrows it to the
 plan's destinations; a plan destination the stored allow-list does not admit
@@ -85,6 +114,11 @@ allowed-hosts) to material at substitution time. The local backend is the
 OS keyring or an encrypted file (`KeyProvider` in `mvm-core::crypto`:
 `KeyringProvider` layered over a file fallback), configured with `mvmctl
 secret set <NAME> --host <allowed-host> --type sigv4|hmac|bearer|basic`.
+The value can be read, on the host and once, from where it already lives —
+`--from env://…`, `file://…`, `keychain://…`, `op://…` or `bw://…` — instead of
+being typed. The password-manager CLIs run only from `PATH` directories
+outside the current project and `MVM_HOME`, with validated arguments, a
+scrubbed environment and a timeout.
 A fleet-backed resolver implements the same trait against a tenant
 control plane. The placeholder, the egress flow, and the audit trail are
 identical on top; the resolver is an implementation detail the workload
@@ -205,6 +239,10 @@ the request's destination. Three invariants back this:
   to host A and routed to host B is refused before the forward leg runs.
 - **The audit chain carries no secret bytes.** A successful substitution
   records name, destination, and auth-type — never the value.
+- **A value the destination sends back reaches the guest as its
+  placeholder.** Every substituted value is replaced in response headers and
+  bodies before delivery; an encoded response the endpoint cannot read is
+  refused.
 
 ### CI gate that ratifies the claim
 
@@ -212,8 +250,12 @@ the request's destination. Three invariants back this:
 canary secret through the path on every PR, with three witnesses:
 `fn:handed_placeholders_never_contain_the_secret_value`,
 `fn:substitution_endpoint_refuses_unbound_destination`, and
-`fn:audit_chain_carries_no_secret_value`. `xtask check-claim-catalog`
-resolves these against the tree on every PR.
+`fn:audit_chain_carries_no_secret_value`. The fourth invariant is witnessed
+on the terminated path by
+`fn:a_value_echoed_in_a_header_and_a_split_body_reaches_the_guest_as_its_placeholder`
+and `fn:an_encoded_response_is_refused_rather_than_relayed_unread`
+(`crates/mvm-hostd/src/supervisor/terminator/flow/tests/reflection.rs`).
+`xtask check-claim-catalog` resolves these against the tree on every PR.
 
 ### Status
 

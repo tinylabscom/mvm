@@ -124,14 +124,12 @@ witness = "suites/s31_launch_e2e/documented_setup.feature::the documented worklo
 
 [[example]]
 command = "mvmctl build kernel build --which workload --source compile"
-exempt = """compiles a Linux kernel inside the builder VM — tens of minutes, against an \
-artifact the download arm fetches ready-made. Nothing executes this code path. Both \
-kernel lanes (`ci.yml`'s `Build kernels` and `kernel-build.yml`'s `Publish kernels`) run \
-`scripts/build-kernel-artifacts.sh`, which calls `nix build` directly and never goes \
-through `mvmctl`, so they witness the artifact and not the command. An earlier revision \
-of this entry claimed the builder-VM image lane covered it; that lane builds the \
-builder-VM image, which is a different derivation. Covering this properly needs a \
-nightly lane with a builder VM and a budget for the compile, and is tracked rather \
+exempt = """compiles a Linux kernel inside the builder VM from an mvm-images checkout — \
+tens of minutes, against an artifact the download arm fetches ready-made. The only lane \
+that runs it is Extended CI's nightly `no-kvm-bootstrap`, which needs the bzImage \
+sibling for QEMU and does not examine this documented invocation's output; kernel \
+artifacts themselves are built and witnessed in mvm-images. Covering this properly \
+needs a lane with a builder VM and a budget for the compile, and is tracked rather \
 than asserted."""
 
 [[example]]

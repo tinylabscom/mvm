@@ -40,8 +40,8 @@ pub(super) fn slot_kernel_source(
     // A workload guest needs the workload kernel, on every arch.
     //
     // The builder kernel has no device-mapper, and not by accident:
-    // `nix/images/kernel/builder.nix` lists `BLK_DEV_DM` and `DM_VERITY` among
-    // the options it force-drops, because the builder VM boots `ro` with no
+    // mvm-images' builder kernel lists `BLK_DEV_DM` and `DM_VERITY` among the
+    // options it force-drops, because the builder VM boots `ro` with no
     // roothash and never opens a dm device — "verified boot is a
     // workload-kernel concern", in its words. So a workload booted on it dies
     // in activation the moment dm-verity reaches for /dev/mapper/control, which
@@ -119,11 +119,7 @@ pub(super) fn install_revision_artifacts(
         copy_artifact(initrd, &rev_dst.join("initrd"))?;
     }
 
-    let rootfs_dst = rev_dst.join("rootfs.ext4");
-    copy_artifact(&sources.rootfs, &rootfs_dst)?;
-    // Nix store outputs are read-only; the running microVM needs to
-    // open the installed rootfs read-write.
-    make_owner_writable(&rootfs_dst)?;
+    copy_artifact(&sources.rootfs, &rev_dst.join("rootfs.ext4"))?;
 
     copy_artifact(
         &sources.sidecar,
@@ -140,24 +136,18 @@ pub(super) fn install_revision_artifacts(
     relink_current(current_symlink, revision_hash)
 }
 
-/// `cp -a <src> <dst>` minus the VM shell hop: both paths are already
-/// host paths. `std::fs::copy` preserves the source's permission
-/// bits, matching `cp -a`'s mode-preserving behavior.
+/// Installs one build output into the revision directory, owner-writable.
+///
+/// The sources are Nix store outputs and so read-only, and a revision is
+/// reinstalled whenever a build resolves to a revision that is already
+/// installed — the dev-build cache hands back the same revision for unchanged
+/// inputs, and an image build keys its revision by rootfs content. A copy
+/// that kept the source's mode would leave a read-only file the reinstall
+/// cannot overwrite; the running microVM also opens the installed rootfs
+/// read-write.
 fn copy_artifact(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
-    std::fs::copy(src, dst)
-        .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+    mvm_core::util::atomic_io::copy_writable(src, dst)?;
     Ok(())
-}
-
-/// `chmod u+w <path>`: adds the owner-write bit without disturbing
-/// the rest of the mode.
-fn make_owner_writable(path: &std::path::Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let metadata =
-        std::fs::metadata(path).with_context(|| format!("statting {}", path.display()))?;
-    let mut perms = metadata.permissions();
-    perms.set_mode(perms.mode() | 0o200);
-    std::fs::set_permissions(path, perms).with_context(|| format!("chmod u+w {}", path.display()))
 }
 
 /// Repoints `current_symlink` at `artifacts/revisions/<revision_hash>`
@@ -518,7 +508,7 @@ mod tests {
     /// aarch64.
     ///
     /// This test asserted the opposite, and the behaviour it pinned is the
-    /// bug: `nix/images/kernel/builder.nix` force-drops `BLK_DEV_DM` and
+    /// bug: mvm-images' builder kernel force-drops `BLK_DEV_DM` and
     /// `DM_VERITY` because the builder VM boots `ro` with no roothash and
     /// never opens a dm device — "verified boot is a workload-kernel concern".
     /// So a sealed workload booted on the builder kernel died in activation on
@@ -708,6 +698,62 @@ mod tests {
         let target = std::fs::read_link(&current_link).unwrap();
         assert_eq!(
             target,
+            std::path::PathBuf::from("artifacts/revisions/rev-1")
+        );
+    }
+
+    /// Reinstalling a revision that is already installed — what a dev-build
+    /// cache hit does — must succeed even though every source is a read-only
+    /// Nix output. The first install used to copy `mvm-meta.json` in at 0444,
+    /// and the second was refused with "Permission denied" opening it.
+    #[cfg(unix)]
+    #[test]
+    fn install_revision_artifacts_reinstalls_over_read_only_nix_outputs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let files: [(&str, &[u8]); 5] = [
+            ("vmlinux", b"K"),
+            ("initrd", b"I"),
+            ("rootfs.ext4", b"R"),
+            (mvm_build::builder_vm::SIDECAR_FILENAME, b"{\"v\":1}"),
+            ("image.tar.gz", b"OCI"),
+        ];
+        for (name, bytes) in files {
+            let path = build.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+
+        let slot_dir = tmp.path().join("slot");
+        let rev_dst = slot_dir.join("artifacts").join("revisions").join("rev-1");
+        let current_link = slot_dir.join("current");
+        let sources = fake_sources(&build);
+
+        install_revision_artifacts(&sources, &rev_dst, &current_link, "rev-1").unwrap();
+        install_revision_artifacts(&sources, &rev_dst, &current_link, "rev-1")
+            .expect("reinstalling an already-installed revision must succeed");
+
+        for (name, bytes) in files {
+            let dest = rev_dst.join(name);
+            assert_eq!(
+                std::fs::read(&dest).unwrap(),
+                bytes,
+                "{} must carry the source's bytes",
+                dest.display()
+            );
+            let mode = std::fs::metadata(&dest).unwrap().permissions().mode();
+            assert_eq!(
+                mode & 0o200,
+                0o200,
+                "{} must be owner-writable",
+                dest.display()
+            );
+        }
+        assert_eq!(
+            std::fs::read_link(&current_link).unwrap(),
             std::path::PathBuf::from("artifacts/revisions/rev-1")
         );
     }

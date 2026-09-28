@@ -1,5 +1,6 @@
-//! `mvmctl build runtime-overlay build` — explicitly populate the
-//! version-matched read-only runtime-overlay cache without booting a VM.
+//! `mvmctl build runtime-overlay build` — explicitly populate the read-only
+//! runtime-overlay cache without booting a VM: a source build at this CLI's
+//! version, or the member of the image set this build pins.
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
@@ -22,7 +23,7 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 enum Cmd {
-    /// Populate the local cache with the version-matched runtime overlay.
+    /// Populate the local cache with the runtime overlay this host boots.
     Build(BuildArgs),
 }
 
@@ -38,8 +39,10 @@ struct BuildArgs {
     #[arg(long, value_parser = ["aarch64", "x86_64"])]
     arch: Option<String>,
 
-    /// Override the expected overlay version. Defaults to this `mvmctl` build's
-    /// version, which is what ordinary boots require.
+    /// Override the expected overlay version of a source build. Defaults to
+    /// this `mvmctl` build's version, which is what ordinary source-built
+    /// boots require. A download installs the pinned image set's member,
+    /// whose version is the member's own.
     #[arg(long)]
     version: Option<String>,
 
@@ -72,9 +75,9 @@ fn run_build(args: BuildArgs) -> Result<()> {
     };
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     // A selected checkout is the overlay's source; fetching the published
-    // artifact under one is refused, with the way out named. `--force` is an
-    // in-tree concept: the pair answers from its content-addressed cache, so
-    // an unchanged pair has nothing to force.
+    // artifact under one is refused, with the way out named. `--force` is a
+    // source-build concept: the pair answers from its content-addressed
+    // cache, so an unchanged pair has nothing to force.
     #[cfg(feature = "builder-vm")]
     if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
         if args.source == Source::Download {
@@ -101,7 +104,7 @@ fn run_build(args: BuildArgs) -> Result<()> {
             }
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
                 if let Ok(artifact) =
-                    mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(&resolver, arch)
+                    mvm_build::runtime_overlay::resolve_cached_runtime_overlay(&resolver, arch)
                 {
                     announce_cached_overlay(&artifact);
                     return Ok(());
@@ -111,13 +114,16 @@ fn run_build(args: BuildArgs) -> Result<()> {
     }
 
     let source_checkout_root = match mode {
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => Some(
-            runtime_overlay_source_checkout_root().ok_or_else(|| {
+        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+            Some(runtime_overlay_source_checkout_root().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "--source build requires a source checkout with nix/images/runtime-overlay/flake.nix"
+                    "--source build assembles the overlay from guest binaries cargo builds in an \
+                     mvm source checkout, and this binary has none; run it from a contributor \
+                     build, set {} to an mvm checkout, or use --source download",
+                    mvm_build::image_source::GUEST_RUNTIME_SOURCE_ROOT_ENV,
                 )
-            })?,
-        ),
+            })?)
+        }
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => None,
     };
 
@@ -126,7 +132,9 @@ fn run_build(args: BuildArgs) -> Result<()> {
             ui::info("Building the version-matched runtime overlay from the source checkout...");
         }
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-            ui::info("Downloading the version-matched runtime overlay into the local cache...");
+            ui::info(
+                "Downloading the runtime overlay from the pinned image set into the local cache...",
+            );
         }
     }
 
@@ -234,34 +242,9 @@ mod pair_routing_tests {
         env
     }
 
-    #[test]
-    fn download_is_refused_while_a_checkout_is_selected() {
-        let pair = Pair::new();
-        let mut env = selector_env(&pair);
-        let home = pair.tmp.path().join("home");
-        env.isolate_mvm_home(&home);
-        std::fs::create_dir_all(&home).unwrap();
-        let err = run_build(BuildArgs {
-            source: Source::Download,
-            arch: None,
-            version: None,
-            force: false,
-        })
-        .expect_err("fetching the published overlay under a selected checkout must refuse");
-        assert!(
-            err.to_string()
-                .contains(mvm_build::image_source::MVM_IMAGES_DIR_ENV),
-            "{err:#}"
-        );
-    }
-
-    #[test]
-    fn the_pair_overlay_installs_into_the_cache_with_its_identity_stamped() {
-        let pair = Pair::new();
-        let mut env = selector_env(&pair);
-        let home = pair.tmp.path().join("home");
-        env.isolate_mvm_home(&home);
-        std::fs::create_dir_all(&home).unwrap();
+    /// Publish a pair `runtime-overlay.default` target whose overlay carries
+    /// `version` in its `VERSION` file.
+    fn publish_pair_overlay(pair: &Pair, version: &str) {
         pair.publish(
             mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
             "default",
@@ -301,13 +284,44 @@ mod pair_routing_tests {
                     },
                     TestArtifact {
                         name: "VERSION",
-                        bytes: format!("{}\n", env!("CARGO_PKG_VERSION")).into_bytes(),
+                        bytes: format!("{version}\n").into_bytes(),
                         format: "text",
                     },
                 ],
                 &["virtio_blk", "dm_verity"],
             )],
         );
+    }
+
+    #[test]
+    fn download_is_refused_while_a_checkout_is_selected() {
+        let pair = Pair::new();
+        let mut env = selector_env(&pair);
+        let home = pair.tmp.path().join("home");
+        env.isolate_mvm_home(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let err = run_build(BuildArgs {
+            source: Source::Download,
+            arch: None,
+            version: None,
+            force: false,
+        })
+        .expect_err("fetching the published overlay under a selected checkout must refuse");
+        assert!(
+            err.to_string()
+                .contains(mvm_build::image_source::MVM_IMAGES_DIR_ENV),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn the_pair_overlay_installs_into_the_cache_with_its_identity_stamped() {
+        let pair = Pair::new();
+        let mut env = selector_env(&pair);
+        let home = pair.tmp.path().join("home");
+        env.isolate_mvm_home(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        publish_pair_overlay(&pair, env!("CARGO_PKG_VERSION"));
 
         run_build(BuildArgs {
             source: Source::Auto,
@@ -364,6 +378,37 @@ mod pair_routing_tests {
         })
         .expect("launch resolves the stamped pair install");
         assert!(sc.runtime_overlay_path.is_some(), "overlay attached");
+    }
+
+    /// A pair build keeps exact equality with this CLI's version: an overlay
+    /// the selected checkout built at another version is refused, not
+    /// installed.
+    #[test]
+    fn a_pair_overlay_at_another_version_is_refused() {
+        let pair = Pair::new();
+        let mut env = selector_env(&pair);
+        let home = pair.tmp.path().join("home");
+        env.isolate_mvm_home(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let other = "0.0.1-member";
+        assert_ne!(other, env!("CARGO_PKG_VERSION"));
+        publish_pair_overlay(&pair, other);
+
+        let err = run_build(BuildArgs {
+            source: Source::Auto,
+            arch: None,
+            version: None,
+            force: false,
+        })
+        .expect_err("a pair overlay at another version must be refused");
+        assert!(
+            err.to_string().contains("but version"),
+            "the refusal must name the version mismatch: {err:#}"
+        );
+        assert!(
+            !home.join("cache/runtime-overlay").join(other).exists(),
+            "nothing may be installed under the pair's version"
+        );
     }
 }
 

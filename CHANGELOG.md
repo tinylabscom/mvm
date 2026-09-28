@@ -2,6 +2,83 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.18.3] — 2026-09-28
+
+### Fixed
+- **hostlib**: The SDK run reply's build_mode answers the declared profile
+
+## [0.18.2] — 2026-09-28
+
+### Added
+- **image-set**: Accept builder_boot_abi in the compatibility section
+
+### Documentation
+- **plans**: Record the stopped branches, a resume brief, and the comparison research
+
+### Fixed
+- **initramfs**: Recover from a partial version-keyed cache dir on boot
+- **hostd**: Attach the universal initramfs on in-process local boots
+
+## [0.18.1] — 2026-09-28
+
+### Added
+- **build**: Identify image-set members by the pinned root, not the CLI version
+
+### Changed
+- **features**: Delete never-enabled feature flags and record the full inventory (PS-19)
+
+### Documentation
+- **prompts**: Record what the builder-boot-ABI break taught
+- **plans**: Execution log and handoff for the agent-sandbox product surface
+
+### Fixed
+- **build**: Install a pair-built SDK sidecar from its canonical names, and name the path in every io error
+- **e2e**: Build the SDK host library beside mvmctl
+- **CI**: Address all CI lane failures
+
+### Refactored
+- **client**: Move snapshot, live-readiness, and backend selection behind mvm-client (PS-21)
+
+### Testing
+- **release**: The first-run smoke boots twice
+
+## [0.18.0] — 2026-09-27
+
+### Added
+- **mcp**: Expose grant-gated drive tools and deny unclassified ones
+- **contract**: Signed cumulative action budget carrier (MVM-SEC-22)
+- **contract**: Signed protected-paths policy and matcher (MVM-SEC-23)
+- **cli**: One mvmctl, one command — release builds embed the host payload; a payload-less mvmctl builds it in-process
+- **fs**: Refuse collected output trees touching a protected path class
+- **core**: Environment hygiene — one denylist for guest env and host helper spawns
+- **image-set**: Accept the initramfs as an image-set root role
+- **run**: --secret on the run surface, scoped per binding and signed into the plan
+- **builder**: Stop unrelated commits rebuilding the builder image — setpriv leaf crate + consumed-input pair key
+- **egress**: Endpoint routes — method/path rules decided at the gate, explicit interception, ask seam
+- **sdk**: Drive machines in-process through libmvm_hostlib; never run mvmctl (PS-01)
+- **secrets**: Scrub reflected credentials; --from sources, provider headers, [secrets] in mvm.toml
+
+### Changed
+- **image-set**: Pin image-set/v0.2.1 and require its initramfs
+
+### Documentation
+- **k8s**: Park the Kubernetes-in-microVM lane with its W4 progress
+- **plans**: Agent-sandbox product surface — close every gap on the security core
+- **plan**: Close the W7 image window with its evidence
+- **plan**: W8 Wave 0 — re-scan the in-tree image inventory and re-sequence the waves
+
+### Fixed
+- **install**: A fresh install must boot a microVM — resolve CLI releases only, gate promotion on a first-run smoke
+- **grants**: Refuse the CLI boot when the admitted grants cannot be applied
+- **ci**: Pin cargo-mutants and fail shard files the mutation run never measured
+- **builder**: Key the builder image on the host binaries it bakes
+- **checkpoint**: Reap a restored HVF machine's state dir on stop and carry its identity drive in the checkpoint
+- **test**: Wait for the sleep child to exec before signalling it
+- **egress**: Private-range default deny at the gate; pin DNS for the forward leg
+
+### Other
+- Hand off the image-repository extraction
+
 ## [0.18.0-rc.2] — 2026-09-15
 
 ### Added

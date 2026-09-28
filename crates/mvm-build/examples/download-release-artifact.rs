@@ -1,10 +1,13 @@
-//! Drive the real end-user acquisition path against a staged release.
+//! Drive the CLI-release acquisition path against a staged release.
 //!
-//! Runs the production `download_runtime_overlay` / `download_sdk_sidecar`
-//! unchanged — the whole ladder: fetch the checksum, fetch the archive, verify
+//! Installed clients acquire the runtime overlay and SDK sidecar as members of
+//! the signed image set. The CLI release still publishes both per version for
+//! clients that predate the image set, and this proves those archives survive
+//! the ladder such a client runs: fetch the checksum, fetch the archive, verify
 //! its digest, verify its cosign signature against the tagged release identity,
-//! safe-extract, re-check the archive's own manifest, install atomically, and
-//! re-resolve the installed entry.
+//! then the production install half unchanged — safe-extract, re-check the
+//! archive's own manifest, install atomically, and re-resolve the installed
+//! entry.
 //!
 //! `release.yml` points this at its own about-to-be-published artifacts over a
 //! `file://` URL before `gh release create` runs. That is the one context where
@@ -101,33 +104,71 @@ fn main() -> ExitCode {
         }
     };
 
-    // `release_base_url` appends `/v<version>` itself, so the caller supplies
-    // the prefix — exactly as an operator pointing at a private mirror would.
-    // SAFETY: single-threaded example, set before any download runs.
-    unsafe { std::env::set_var("MVM_OVERLAY_BASE_URL", &args.base_url) };
+    // The caller supplies the release prefix, as an operator pointing at a
+    // private mirror would; the per-version directory is `v<version>` under it.
+    let release_url = format!("{}/v{}", args.base_url.trim_end_matches('/'), args.version);
+    let stage = match tempfile::tempdir() {
+        Ok(stage) => stage,
+        Err(e) => {
+            eprintln!("error: create a staging directory: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    // The two downloaders return different error types. Render each at its own
-    // call site rather than coercing one into the other — a wrong-variant
+    // The two install halves return different error types. Render each at its
+    // own call site rather than coercing one into the other — a wrong-variant
     // coercion would print a reason that misnames what actually failed.
     let outcome: Result<String, String> = match args.kind {
-        Kind::Overlay => mvm_build::runtime_overlay::download_runtime_overlay(
-            &args.version,
-            args.arch,
-            &args.cache,
-        )
-        .map(|a| format!("runtime overlay {} roothash {}", a.version, a.roothash))
-        .map_err(|e| e.to_string()),
+        Kind::Overlay => {
+            let asset = mvm_build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch(
+                &args.arch.to_string(),
+            )
+            .archive;
+            let archive = stage.path().join(&asset);
+            mvm_build::runtime_overlay::fetch_cli_release_archive(
+                &release_url,
+                &args.version,
+                &asset,
+                &archive,
+            )
+            .and_then(|()| {
+                mvm_build::runtime_overlay::install_runtime_overlay_archive(
+                    &archive,
+                    &args.version,
+                    args.arch,
+                    &args.cache,
+                )
+            })
+            .map(|a| format!("runtime overlay {} roothash {}", a.version, a.roothash))
+            .map_err(|e| e.to_string())
+        }
         Kind::Sidecar => {
             let Some(libc) = args.libc else {
                 eprintln!("error: --libc is required for --kind sidecar");
                 return ExitCode::FAILURE;
             };
-            mvm_build::sdk_sidecar::download_sdk_sidecar(
-                &args.version,
-                args.arch,
+            let asset = mvm_build::sdk_sidecar::SdkSidecarArtifactNames::for_target(
+                &args.arch.to_string(),
                 libc,
-                &args.cache,
             )
+            .archive;
+            let archive = stage.path().join(&asset);
+            mvm_build::runtime_overlay::fetch_cli_release_archive(
+                &release_url,
+                &args.version,
+                &asset,
+                &archive,
+            )
+            .map_err(mvm_build::sdk_sidecar::SdkSidecarBuildError::from)
+            .and_then(|()| {
+                mvm_build::sdk_sidecar::install_sdk_sidecar_archive(
+                    &archive,
+                    &args.version,
+                    args.arch,
+                    libc,
+                    &args.cache,
+                )
+            })
             .map(|a| format!("sdk sidecar {} sha256 {}", a.version, a.image_sha256))
             .map_err(|e| e.to_string())
         }

@@ -18,8 +18,13 @@ use serde::Serialize;
 
 use crate::dispatch::{
     BACKEND_CAPABILITIES, Empty as DispatchEmpty, ExecReply, ExecRequest, LogsReply, LogsRequest,
-    MACHINE_EXEC, MACHINE_INSPECT, MACHINE_LIST, MACHINE_LOGS, MACHINE_RM, MACHINE_STOP,
-    MachineRef, RemoveRequest as DispatchRemoveRequest, StopRequest,
+    MACHINE_EXEC, MACHINE_INSPECT, MACHINE_INVENTORY, MACHINE_LIST, MACHINE_LOGS, MACHINE_RM,
+    MACHINE_START, MACHINE_STOP, MachineRef, RemoveRequest as DispatchRemoveRequest, StopRequest,
+};
+use crate::entrypoint::{
+    ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, SESSION_CALL, SESSION_INFO,
+    SESSION_START, SESSION_STOP, SessionCallRequest, SessionInfoReply, SessionRef,
+    SessionStartReply, SessionStartRequest,
 };
 use crate::guest::{
     AcceptedReply, CP, CopyRequest, DataReply, FS_LIST, FS_MKDIR, FS_READ, FS_REMOVE, FS_RENAME,
@@ -27,6 +32,11 @@ use crate::guest::{
     PROC_START, PROC_STDIN, PROC_WAIT, PathRequest, ProcessRequest, ReadRequest, RemoveRequest,
     RemovedReply, RenameRequest, SignalRequest, StartRequest, StartedReply, StatRequest,
     StdinRequest, WaitReply, WaitRequest, WriteRequest, WrittenReply,
+};
+use crate::launch::{CreateRequest, MACHINE_CREATE, MACHINE_RUN, RunReply, RunRequest};
+use crate::stream::{
+    CloseRequest, Empty as StreamEmpty, LOGS_CLOSE, LOGS_NEXT, LOGS_OPEN, LogsOpenRequest,
+    NextReply, NextRequest, OpenReply, OpenRequest, STREAM_CLOSE, STREAM_NEXT, STREAM_OPEN,
 };
 
 /// How a method is classified for admission policy. `DevOnly` methods are
@@ -118,6 +128,22 @@ fn any_json() -> SchemaAndDefs {
     }
 }
 
+/// The records behind `machine.inventory` are owned by the client inventory
+/// module and read as untyped JSON, like the capability report: re-modeling
+/// them here would be a second definition that could drift.
+fn inventory_records() -> SchemaAndDefs {
+    SchemaAndDefs {
+        root: serde_json::json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "description": "A machine inventory record; the shape is owned by the client inventory module. `name` and `build_mode` (`dev` or `prod`) are always present.",
+            },
+        }),
+        defs: Vec::new(),
+    }
+}
+
 /// Every method the ABI answers, in dotted-name order within each family.
 pub const REGISTRY: &[MethodDef] = &[
     MethodDef {
@@ -127,6 +153,22 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::ProdSafe,
         request: schema_of::<DispatchEmpty>,
         reply: any_json,
+    },
+    MethodDef {
+        name: ENTRYPOINT_CALL,
+        key: "entrypoint_call",
+        summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<EntrypointCallRequest>,
+        reply: schema_of::<EntrypointCallReply>,
+    },
+    MethodDef {
+        name: MACHINE_CREATE,
+        key: "machine_create",
+        summary: "Persists a machine definition without booting it.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<CreateRequest>,
+        reply: schema_of::<MachineState>,
     },
     MethodDef {
         name: MACHINE_EXEC,
@@ -143,6 +185,14 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::ProdSafe,
         request: schema_of::<MachineRef>,
         reply: schema_of::<MachineState>,
+    },
+    MethodDef {
+        name: MACHINE_INVENTORY,
+        key: "machine_inventory",
+        summary: "Lists every machine on this host with its dev/prod posture.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<DispatchEmpty>,
+        reply: inventory_records,
     },
     MethodDef {
         name: MACHINE_LIST,
@@ -169,11 +219,83 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: schema_of::<crate::guest::Empty>,
     },
     MethodDef {
+        name: LOGS_CLOSE,
+        key: "machine_logs_stream_close",
+        summary: "Closes a captured-output stream. Idempotent.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<CloseRequest>,
+        reply: schema_of::<StreamEmpty>,
+    },
+    MethodDef {
+        name: LOGS_NEXT,
+        key: "machine_logs_stream_next",
+        summary: "Returns the captured output that has arrived.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<NextRequest>,
+        reply: schema_of::<NextReply>,
+    },
+    MethodDef {
+        name: LOGS_OPEN,
+        key: "machine_logs_stream_open",
+        summary: "Opens a stream over a machine's captured output, replayed then followed.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<LogsOpenRequest>,
+        reply: schema_of::<OpenReply>,
+    },
+    MethodDef {
+        name: MACHINE_RUN,
+        key: "machine_run",
+        summary: "Boots a machine through the admitted local launch.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<RunRequest>,
+        reply: schema_of::<RunReply>,
+    },
+    MethodDef {
+        name: MACHINE_START,
+        key: "machine_start",
+        summary: "Boots a persisted machine definition.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<MachineRef>,
+        reply: schema_of::<MachineState>,
+    },
+    MethodDef {
         name: MACHINE_STOP,
         key: "machine_stop",
         summary: "Stops a machine. Idempotent.",
         classification: Classification::ProdSafe,
         request: schema_of::<StopRequest>,
+        reply: schema_of::<crate::guest::Empty>,
+    },
+    MethodDef {
+        name: SESSION_CALL,
+        key: "session_call",
+        summary: "Calls the entrypoint in a running session's microVM.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionCallRequest>,
+        reply: schema_of::<EntrypointCallReply>,
+    },
+    MethodDef {
+        name: SESSION_INFO,
+        key: "session_info",
+        summary: "Reports a session's record.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionRef>,
+        reply: schema_of::<SessionInfoReply>,
+    },
+    MethodDef {
+        name: SESSION_START,
+        key: "session_start",
+        summary: "Boots a warm session for a workload, admitted under a signed plan.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionStartRequest>,
+        reply: schema_of::<SessionStartReply>,
+    },
+    MethodDef {
+        name: SESSION_STOP,
+        key: "session_stop",
+        summary: "Stops a session and tears down its microVM.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SessionRef>,
         reply: schema_of::<crate::guest::Empty>,
     },
     MethodDef {
@@ -279,6 +401,30 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::DevOnly,
         request: schema_of::<StdinRequest>,
         reply: schema_of::<AcceptedReply>,
+    },
+    MethodDef {
+        name: STREAM_CLOSE,
+        key: "guest_proc_stream_close",
+        summary: "Closes a process output stream. Idempotent.",
+        classification: Classification::DevOnly,
+        request: schema_of::<CloseRequest>,
+        reply: schema_of::<StreamEmpty>,
+    },
+    MethodDef {
+        name: STREAM_NEXT,
+        key: "guest_proc_stream_next",
+        summary: "Returns the process output that has arrived, and how it ended.",
+        classification: Classification::DevOnly,
+        request: schema_of::<NextRequest>,
+        reply: schema_of::<NextReply>,
+    },
+    MethodDef {
+        name: STREAM_OPEN,
+        key: "guest_proc_stream_open",
+        summary: "Opens a stream over a guest process's output.",
+        classification: Classification::DevOnly,
+        request: schema_of::<OpenRequest>,
+        reply: schema_of::<OpenReply>,
     },
     MethodDef {
         name: PROC_WAIT,
@@ -404,6 +550,10 @@ mod tests {
         let mut runtime: Vec<&str> = crate::dispatch::METHODS
             .iter()
             .chain(crate::guest::METHODS.iter())
+            .chain(crate::launch::METHODS.iter())
+            .chain(crate::entrypoint::METHODS.iter())
+            .chain(crate::stream::METHODS.iter())
+            .chain(crate::stream::LOG_METHODS.iter())
             .copied()
             .collect();
         runtime.sort_unstable();

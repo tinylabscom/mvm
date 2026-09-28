@@ -23,6 +23,7 @@ mod receipt;
 pub(crate) mod runtime;
 mod spec_ops;
 mod start_create_flags;
+mod volume_profile;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -67,6 +68,9 @@ pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
 use spec_ops::{create_machine, inspect_machine, remove_machine, run_reconfigure};
 pub(in crate::commands) use start_create_flags::MachineStartCreateFlags;
+use volume_profile::{
+    enforce_persisted_volume_profile, enforce_volume_profile, persistent_dir_share_refusal,
+};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -530,32 +534,21 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
     }
 }
 
-/// A writable (`:rw`) host share needs a dev-capable profile, matching the
-/// transient-run gate and the `dev.init` rule.
-fn profile_allows_writable_volume(profile: RunProfile) -> bool {
-    profile.grants().writable_shares_when_persistent
-}
-
 /// Validate `--mount`/`--volume` specs and normalise them for storage in a managed
-/// `MachineSpec`. Each spec is run through the shared
-/// `vm_volume_from_spec_validated` choke point (protected-dir deny-list +
-/// guest-mount validation, claim 1) and its host path is canonicalised to an
-/// **absolute** path so a later reconnect from a different working directory
-/// still resolves the same share. `:rw` requires a dev-capable profile. The
-/// boot path re-validates via `build_machine_volume_cfg`, so this is the
-/// early, user-facing gate, not the only one.
+/// `MachineSpec`. Each spec is checked against the profile's grants and run
+/// through the shared `vm_volume_from_spec_validated` choke point
+/// (protected-dir deny-list + guest-mount validation, claim 1), and its host
+/// path is canonicalised to an **absolute** path so a later reconnect from a
+/// different working directory still resolves the same disk. The boot path
+/// re-validates via `build_machine_volume_cfg`, so this is the early,
+/// user-facing gate, not the only one.
 fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
-    let profile = args.run.profile;
+    enforce_volume_profile(args.run.profile, &args.run.mounts)?;
     let mut out = Vec::with_capacity(args.run.mounts.len());
     for raw in &args.run.mounts {
         let spec = super::shared::parse_volume_spec(raw)?;
         let vmv = super::shared::vm_volume_from_spec_validated(&spec)
             .with_context(|| format!("volume {raw:?}"))?;
-        if !vmv.read_only && !profile_allows_writable_volume(profile) {
-            bail!(
-                "volume {raw:?} requests ':rw', which needs --profile dev or --profile permissive"
-            );
-        }
         // Pin the canonical absolute host path; keep the guest[:size][:mode]
         // tail verbatim so disk volumes and modifiers survive the round-trip.
         let (_, tail) = raw
@@ -617,6 +610,13 @@ fn machine_run_spec(
                  `--runtime-pack` to create machine {name:?}"
         );
     };
+    if !args.run.allow_endpoint.is_empty() {
+        bail!(
+            "--allow-endpoint is not yet supported on a persistent machine: its routes \
+             would not be recorded beside the spec, so a restart would drop them. Use a \
+             transient `run`/`machine run` without --name, or --allow-host"
+        );
+    }
     let config = mvm_core::user_config::load(None);
     let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
     let resolved = super::shared::resolve_run_grants(super::shared::GrantInputs {
@@ -1147,6 +1147,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     // explicitly opts into a stricter profile. The daemon is the only
     // producer that should supply a non-dev production profile by policy.
     let profile = inputs.profile.unwrap_or(RunProfile::Dev);
+    enforce_volume_profile(profile, inputs.volumes)?;
     let profile_name = run_profile_name(profile).to_string();
     enforce_dev_init_profile(&profile_name, inputs.init)?;
     Ok(MachineSpec {
@@ -1244,6 +1245,13 @@ fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifestSource> {
         .with_context(|| format!("resolving machine manifest {}", arg.display()))?;
     let manifest = Manifest::read_file(&manifest_path)
         .with_context(|| format!("reading machine manifest {}", manifest_path.display()))?;
+    if !manifest.network.routes.is_empty() {
+        bail!(
+            "{} declares [[network.routes]], which a persistent machine does not record yet; \
+             a restart would drop them. Run it transiently, or remove the routes",
+            manifest_path.display()
+        );
+    }
     let workflow = manifest.machine_workflow().ok_or_else(|| {
         anyhow!(
             "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl machine run --flake`"
@@ -1505,18 +1513,15 @@ fn build_machine_volume_cfg(
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
     for volume in volume_specs {
         let spec = super::shared::parse_volume_spec(volume)?;
+        // The spec-time gate refuses this too; a spec saved before it existed
+        // must still not reach boot with a directory it cannot attach.
         if let super::shared::VolumeSpec::DirShare {
             host_dir,
             guest_mount,
             ..
         } = &spec
         {
-            bail!(
-                "persistent machine volume '{host_dir}' -> '{guest_mount}' cannot be attached: \
-                 a live host-directory share can't be expressed. Snapshot and register it with \
-                 `mvmctl machine volume mount <machine> --volume <name> --host {host_dir} \
-                 --guest {guest_mount}` before starting the machine."
-            );
+            bail!(persistent_dir_share_refusal(host_dir, guest_mount));
         }
         let vmv = super::shared::vm_volume_from_spec_validated(&spec)
             .with_context(|| format!("volume {volume:?}"))?;

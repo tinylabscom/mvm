@@ -54,6 +54,7 @@ pub mod egress;
 pub mod entropy_scanner;
 pub mod event_bus;
 pub mod firewall;
+pub mod runtime_approval;
 // Per-VM gateway flow-event subscriber sink. Lives next to
 // `event_bus` and `firewall` as a peer fan-out substrate; the gateway
 // bridge emits each FlowEvent through here in parallel with the signer

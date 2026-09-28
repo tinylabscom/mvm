@@ -8,11 +8,16 @@
  *
  * Resolution order for the library file:
  *
- * 1. `MVM_HOSTLIB_PATH`, the library file itself.
- * 2. Beside `mvmctl` on `PATH` (the release ships them side by side; the
+ * 1. `MVM_HOSTLIB_PATH`, the library file itself. Set and missing is an
+ *    error, never a reason to keep looking: an explicit path that silently
+ *    falls through would load some other build than the one named.
+ * 2. Packaged with the SDK, in `native/` under the package root (the
+ *    directory above the one holding this compiled module, so `dist/../native`
+ *    for the published layout and `src/../native` for a source checkout).
+ * 3. Beside `mvmctl` on `PATH` (the release ships them side by side; the
  *    binary is located, never run), including beside the real file after
  *    resolving symlinks.
- * 3. Otherwise {@link MvmTransportError}, naming both.
+ * 4. Otherwise {@link MvmTransportError}, naming all three.
  *
  * Before the first call the binding tells the library which ABI it was built
  * for, and the library refuses every call until that succeeds, so a binding
@@ -23,7 +28,9 @@
 import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
+import { MVM_HOSTLIB_PATH_ENV } from "./_env/vars.js";
 import {
   CODE_ERRORS,
   HostLibraryAbiError,
@@ -33,8 +40,8 @@ import {
 } from "./_errors/types.js";
 import { ABI_MAJOR, ABI_MINOR } from "./hostabi/methods.js";
 
-/** Environment variable naming the library file. */
-export const LIB_PATH_ENV = "MVM_HOSTLIB_PATH";
+/** Environment variable naming the library file; the registry owns the name. */
+export const LIB_PATH_ENV = MVM_HOSTLIB_PATH_ENV;
 
 export { HostLibraryError } from "./_errors/types.js";
 
@@ -56,6 +63,19 @@ export interface PathSeams {
   /** Resolve symlinks; defaults to `fs.realpathSync`. */
   realpath?: (p: string) => string;
   platform?: string;
+  /** The package root holding `native/`; defaults to this module's. */
+  packageRoot?: string;
+}
+
+/** The directory above the one holding this module: the package root. */
+function defaultPackageRoot(): string {
+  return path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+}
+
+/** Where a package that ships the library puts it. */
+export function packagedLibraryPath(seams: PathSeams = {}): string {
+  const root = seams.packageRoot ?? defaultPackageRoot();
+  return path.join(root, "native", libraryFileName(seams.platform ?? process.platform));
 }
 
 function defaultWhich(bin: string): string | null {
@@ -77,15 +97,26 @@ export function candidatePaths(seams: PathSeams = {}): string[] {
   const platform = seams.platform ?? process.platform;
   const explicit = env[LIB_PATH_ENV];
   if (explicit) return [explicit];
+  const paths = [packagedLibraryPath(seams)];
   const found = which("mvmctl");
-  if (!found) return [];
+  if (!found) return paths;
   const name = libraryFileName(platform);
-  const paths = [path.join(path.dirname(found), name)];
+  const besideLink = path.join(path.dirname(found), name);
+  paths.push(besideLink);
   // A package manager usually links `mvmctl` into its bin directory; the
-  // library sits beside the real file.
+  // library sits beside the real file. A dangling link has no real file, so
+  // there is nothing more to look beside.
   const realpath = seams.realpath ?? ((p: string) => fs.realpathSync(p));
-  const besideReal = path.join(path.dirname(realpath(found)), name);
-  if (besideReal !== paths[0]) paths.push(besideReal);
+  let real: string | null = null;
+  try {
+    real = realpath(found);
+  } catch {
+    real = null;
+  }
+  if (real !== null) {
+    const besideReal = path.join(path.dirname(real), name);
+    if (besideReal !== besideLink) paths.push(besideReal);
+  }
   return paths;
 }
 
@@ -106,7 +137,8 @@ export function resolveLibraryPath(seams: PathSeams = {}): string {
   }
   throw new MvmTransportError(
     `the host library ${libraryFileName(seams.platform ?? process.platform)} was not found: ` +
-      `set ${LIB_PATH_ENV} to its path, or put the directory holding it and mvmctl on PATH`,
+      `set ${LIB_PATH_ENV} to its path, ship it in the SDK package's native/ directory, ` +
+      `or install it beside mvmctl on PATH (looked in: ${candidates.join(", ")})`,
   );
 }
 
@@ -120,9 +152,20 @@ export interface HostLibraryFailure extends Error {
 /** The C-call seam: `(method, requestJson) -> [status, body]`. */
 export type InvokeFn = (method: string, requestJson: Buffer) => [number, Buffer];
 
-interface CallOptions {
-  /** Override the C-call seam (used by tests; defaults to the koffi loader). */
+export interface CallOptions {
+  /** Override the C-call seam for this call only. */
   invoke?: InvokeFn;
+}
+
+let invokeOverride: InvokeFn | null = null;
+
+/**
+ * Route every {@link call} that names no `opts.invoke` through `fn`, so a
+ * test can drive the whole SDK against canned replies without a library.
+ * `null` restores the real library.
+ */
+export function setInvokeForTesting(fn: InvokeFn | null): void {
+  invokeOverride = fn;
 }
 
 interface LoadedLib {
@@ -163,16 +206,16 @@ function loadLib(): LoadedLib {
   return lib;
 }
 
-/**
- * Call the C ABI once and return `[status, body]`. The single test seam:
- * the marshalling layer is driven through `opts.invoke` without a library.
- */
+/** Call the C ABI once and return `[status, body]`. */
 function realInvoke(method: string, requestJson: Buffer): [number, Buffer] {
   const handle = loadLib();
   const out: { data: unknown; len: number } = { data: null, len: 0 };
+  // The ABI takes the method as bytes plus a length, not a C string, so koffi
+  // needs a buffer here; it refuses a JS string for `const uint8_t*`.
+  const methodBytes = Buffer.from(method, "utf8");
   const status = handle.call(
-    method,
-    Buffer.byteLength(method, "utf8"),
+    methodBytes,
+    methodBytes.length,
     requestJson,
     requestJson.length,
     out,
@@ -194,7 +237,7 @@ function realInvoke(method: string, requestJson: Buffer): [number, Buffer] {
  * names, carrying `code`, `retryable`, and the library status.
  */
 export function call(method: string, request?: unknown, opts: CallOptions = {}): any {
-  const invoke = opts.invoke ?? realInvoke;
+  const invoke = opts.invoke ?? invokeOverride ?? realInvoke;
   const requestJson =
     request === undefined || request === null
       ? Buffer.alloc(0)

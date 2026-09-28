@@ -89,8 +89,9 @@ const DEFAULT_DIR_MODE: u32 = 0o755;
 
 /// The guest operations the methods call. One production implementation,
 /// over `mvm_client::guest`; the tests use a recording double, so dispatch is
-/// checkable without a running machine.
-pub(crate) trait GuestOps {
+/// checkable without a running machine. `Send + Sync` because a process
+/// stream's reader thread holds the operations for the life of the wait.
+pub(crate) trait GuestOps: Send + Sync {
     fn start_process(&self, id: &str, start: ProcStart) -> Result<String>;
     fn list_processes(&self, id: &str) -> Result<Vec<ProcInfo>>;
     fn signal_process(&self, id: &str, token: &str, signum: i32) -> Result<()>;
@@ -650,7 +651,7 @@ fn decode(data_b64: &str) -> Result<Vec<u8>, Outcome> {
 /// A guest operation that failed: the agent refused it, the transport could
 /// not reach the machine, or the machine name was invalid. All are the
 /// backend's answer to the request, so they carry its code.
-fn guest_error(error: anyhow::Error) -> Outcome {
+pub(crate) fn guest_error(error: anyhow::Error) -> Outcome {
     Outcome::from(mvm_core::client::MvmError::Backend {
         reason: format!("{error:#}"),
     })
@@ -660,20 +661,20 @@ fn guest_error(error: anyhow::Error) -> Outcome {
 mod tests {
     use super::*;
     use crate::status::{MVM_HOSTLIB_BACKEND, MVM_HOSTLIB_INVALID_INPUT, MVM_HOSTLIB_OK};
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     /// Records each call it receives and answers from fixed values, so a test
     /// sees exactly what dispatch passed down.
     #[derive(Default)]
     struct Recording {
-        calls: RefCell<Vec<String>>,
+        calls: Mutex<Vec<String>>,
         wait_events: Vec<ProcWaitEvent>,
         fail: bool,
     }
 
     impl Recording {
         fn note(&self, call: String) -> Result<()> {
-            self.calls.borrow_mut().push(call);
+            self.calls.lock().unwrap().push(call);
             if self.fail {
                 anyhow::bail!("the agent refused");
             }
@@ -784,7 +785,7 @@ mod tests {
         assert_eq!(status, MVM_HOSTLIB_OK);
         assert_eq!(body, serde_json::json!({"token": "tok-1"}));
         assert_eq!(
-            ops.calls.borrow().as_slice(),
+            ops.calls.lock().unwrap().as_slice(),
             [r#"start web ["ls", "-l"] {"A": "1"} Some("/w")"#]
         );
     }
@@ -812,7 +813,7 @@ mod tests {
             (MVM_HOSTLIB_OK, serde_json::json!({"bytes_written": 3}))
         );
         assert_eq!(
-            ops.calls.borrow().last().unwrap(),
+            ops.calls.lock().unwrap().last().unwrap(),
             "write web /f [97, 98, 99] 644 false false",
             "a write names no mode, so the default applies, and never follows a symlink by default"
         );
@@ -827,7 +828,7 @@ mod tests {
             serde_json::json!({"id": "web", "path": "/f", "data_b64": "***"}),
         );
         assert_eq!(status, MVM_HOSTLIB_INVALID_INPUT);
-        assert!(ops.calls.borrow().is_empty());
+        assert!(ops.calls.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -840,7 +841,10 @@ mod tests {
         );
         assert_eq!(status, MVM_HOSTLIB_OK);
         assert_eq!(body["data_b64"], B64.encode(b"hello"));
-        assert_eq!(ops.calls.borrow().last().unwrap(), "read web /f 0 5 true");
+        assert_eq!(
+            ops.calls.lock().unwrap().last().unwrap(),
+            "read web /f 0 5 true"
+        );
     }
 
     #[test]
@@ -972,7 +976,7 @@ mod tests {
             MVM_HOSTLIB_OK
         );
         assert_eq!(
-            ops.calls.borrow().as_slice(),
+            ops.calls.lock().unwrap().as_slice(),
             ["mkdir web /d 755 true", "rm web /d true", "mv web /a /b"]
         );
     }
@@ -998,7 +1002,7 @@ mod tests {
             "{}",
             String::from_utf8_lossy(&outcome.body)
         );
-        let calls = ops.calls.borrow();
+        let calls = ops.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert!(
             calls[0].starts_with("write web /tmp/payload.bin [99, 111, 112, 121, 32, 109, 101]"),
@@ -1030,7 +1034,7 @@ mod tests {
         // Recording answers five bytes per read; a five-byte chunk is short,
         // so one read ends the copy.
         assert_eq!(std::fs::read(&host_path).expect("host file"), b"hello");
-        let calls = ops.calls.borrow();
+        let calls = ops.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "{calls:?}");
         assert!(calls[0].starts_with("read web /var/out.bin 0"), "{calls:?}");
         std::fs::remove_dir_all(&dir).ok();
@@ -1059,7 +1063,7 @@ mod tests {
             serde_json::json!({"id": "web", "token": "t", "force": true}),
         );
         assert_eq!(status, MVM_HOSTLIB_INVALID_INPUT);
-        assert!(ops.calls.borrow().is_empty());
+        assert!(ops.calls.lock().unwrap().is_empty());
     }
 
     #[test]

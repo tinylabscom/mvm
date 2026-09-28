@@ -40,14 +40,11 @@ pub fn inject_host_binaries(req: &InjectRequest<'_>) -> Result<()> {
     std::fs::create_dir_all(req.work_dir)
         .with_context(|| format!("create inject work dir {}", req.work_dir.display()))?;
 
-    // A writable copy the patcher edits; the source is never touched.
-    std::fs::copy(req.base_rootfs, req.out_rootfs).with_context(|| {
-        format!(
-            "copy base rootfs {} -> {}",
-            req.base_rootfs.display(),
-            req.out_rootfs.display()
-        )
-    })?;
+    // A writable copy the patcher edits; the source is never touched. The
+    // base rootfs can be a read-only Nix output, and the patcher VM opens this
+    // copy read-write, so it must not inherit that mode.
+    mvm_core::util::atomic_io::copy_writable(req.base_rootfs, req.out_rootfs)
+        .context("copying the base rootfs for the patcher")?;
 
     let initramfs = build_inject_initramfs(req.patcher, req.binaries);
     let initramfs_path = req.work_dir.join("inject-initramfs.cpio");

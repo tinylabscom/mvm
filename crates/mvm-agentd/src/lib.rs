@@ -44,8 +44,9 @@ pub mod entrypoint;
 pub mod entrypoint_stream;
 /// Boot-validated optional extension executables.
 pub mod extension;
-/// Closing inherited descriptors in a child before it execs.
-pub mod fd_hygiene;
+/// Closing inherited descriptors in a child before it execs. Owned by the
+/// privilege-drop helper's crate, which applies it too.
+pub use mvm_setpriv::fd_hygiene;
 /// Guest-wide filesystem flush shared by forced-shutdown paths.
 pub mod filesystem_sync;
 /// Guest-side FlowMux client for the converged single networking path.

@@ -7,7 +7,8 @@
 //!
 //! Layout mirrors the runtime overlay's cache, and the integrity discipline is
 //! the same one: the artifact directory carries a `sha256sum`-format manifest
-//! over every canonical file, a `VERSION` that must match the running binary,
+//! over every canonical file, a `VERSION` that must match the version the
+//! caller expects (the running binary's, or a pinned image-set member's own),
 //! and an ext4 payload whose required in-image path is proven present before an
 //! attachment is offered. Every failure path returns `Err`; there is no
 //! degraded attach, because a workload that was admitted to call a host service
@@ -147,9 +148,25 @@ pub enum SdkSidecarError {
         found: Vec<String>,
     },
 
-    /// Underlying io failure during a file read.
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    /// An io failure, naming the operation and the path it failed on. A bare
+    /// `ENOENT` tells an operator nothing about which of the artifact's files
+    /// was absent.
+    #[error("{op} {}: {source}", .path.display())]
+    Io {
+        /// What was being done: "reading", "hashing", ...
+        op: &'static str,
+        /// The file the operation failed on.
+        path: PathBuf,
+        /// The underlying failure.
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+/// Map an io failure on `path` into [`SdkSidecarError::Io`].
+pub fn io_at(op: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> SdkSidecarError {
+    let path = path.to_path_buf();
+    move |source| SdkSidecarError::Io { op, path, source }
 }
 
 /// Filesystem layout for one sidecar artifact. Pure path construction — no I/O
@@ -345,7 +362,7 @@ impl SdkSidecarResolver {
 /// the image digest without re-hashing.
 pub fn verify_sidecar_dir_integrity(dir: &Path) -> Result<Vec<(String, String)>, SdkSidecarError> {
     let manifest_path = dir.join(CHECKSUM_MANIFEST_FILE);
-    let body = std::fs::read_to_string(&manifest_path)?;
+    let body = std::fs::read_to_string(&manifest_path).map_err(io_at("reading", &manifest_path))?;
     let expected = parse_checksums_manifest(&body);
     let mut verified = Vec::with_capacity(MANIFEST_COVERED_FILES.len());
     for name in MANIFEST_COVERED_FILES {
@@ -355,7 +372,8 @@ pub fn verify_sidecar_dir_integrity(dir: &Path) -> Result<Vec<(String, String)>,
                 name: name.to_string(),
             });
         };
-        let actual = compute_file_sha256(&dir.join(name))?;
+        let path = dir.join(name);
+        let actual = compute_file_sha256(&path).map_err(io_at("hashing", &path))?;
         if actual != *expected_hash {
             return Err(SdkSidecarError::ChecksumManifestMismatch {
                 name: name.to_string(),
@@ -433,7 +451,7 @@ pub fn validate_sidecar_payload(image: &Path, expected: GuestLibc) -> Result<(),
 }
 
 fn read_version_file(path: &Path) -> Result<String, SdkSidecarError> {
-    let raw = std::fs::read_to_string(path)?;
+    let raw = std::fs::read_to_string(path).map_err(io_at("reading", path))?;
     let trimmed = raw.trim().to_string();
     if trimmed.is_empty() {
         return Err(SdkSidecarError::InvalidVersionFile {
@@ -884,5 +902,47 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("SDK sidecar"), "{rendered}");
         assert!(!rendered.contains("ELF"), "{rendered}");
+    }
+
+    /// The failure the explicit sidecar verb used to surface as a bare
+    /// "No such file or directory": the directory it was handed held the
+    /// sidecar under other names, so the manifest read found nothing. The
+    /// error must say what it was reading and where.
+    #[test]
+    fn a_missing_checksum_manifest_names_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = verify_sidecar_dir_integrity(dir.path()).unwrap_err();
+        let manifest = dir.path().join(CHECKSUM_MANIFEST_FILE);
+        let rendered = err.to_string();
+        assert!(
+            rendered.starts_with(&format!("reading {}:", manifest.display())),
+            "{rendered}"
+        );
+        assert!(
+            matches!(&err, SdkSidecarError::Io { source, .. }
+                if source.kind() == std::io::ErrorKind::NotFound),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_the_manifest_covers_but_the_directory_lacks_names_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(CHECKSUM_MANIFEST_FILE),
+            format!(
+                "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
+                sha256_hex(b"image"),
+                sha256_hex(b"1.2.3\n"),
+            ),
+        )
+        .unwrap();
+        let err = verify_sidecar_dir_integrity(dir.path()).unwrap_err();
+        let image = dir.path().join(SDK_SIDECAR_IMAGE_FILE);
+        assert!(
+            err.to_string()
+                .starts_with(&format!("hashing {}:", image.display())),
+            "{err}"
+        );
     }
 }

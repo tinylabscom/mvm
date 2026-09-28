@@ -455,6 +455,19 @@ jobs:
         # never passes its window, and a refused frame moves nothing.
         run: cargo fuzz run fuzz_network_flow_state -- -max_total_time="$DURATION"
 
+      - name: Fuzz egress routes (fuzz_egress_routes)
+        working-directory: crates/mvm-contract
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        # A route set arrives in a signed plan and every request on a
+        # terminated flow is decided against it with a guest-chosen method and
+        # path. Asserts decode/validate/decide never panic, a path that cannot
+        # be canonicalised is refused rather than matched, a decision is a
+        # function of its inputs, and a parsed `--allow-endpoint` spec always
+        # builds a valid route.
+        run: cargo fuzz run fuzz_egress_routes -- -max_total_time="$DURATION"
+
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:
@@ -736,52 +749,98 @@ jobs:
         run: cargo test -p mvm-cli --lib hash_verify_tests
 
   # ── Lane 6: Verified boot artifact gate ────────────────────────────
-  # ADR-001 §W3.4 — the production verity-sealed image must emit its
-  # ext4 + `*.verity` + `*.roothash` sidecars. If a refactor disables
-  # the dm-verity seal on the prod path, this gate fails the merge
-  # before the verity claim breaks silently. Witnesses the shipped seal
-  # via the runtime overlay (the bundled prod-rootfs image this lane
-  # once built was retired by Plan 115; the rootfs/OCI seal itself is
-  # unit-tested in `mvm_build::oci_to_rootfs::verity`).
+  # ADR-001 §W3.4 — the production verity-sealed image must ship its
+  # ext4 + `*.verity` + `*.roothash` sidecars, and the roothash must
+  # actually authenticate the ext4 through that hash tree. If the seal is
+  # disabled or broken on the prod path, this gate fails before the
+  # verity claim breaks silently. Images are built and signed in
+  # mvm-images, so the subject is the bytes every installed mvmctl boots:
+  # the runtime overlay member of the image set `images.lock` pins, which
+  # every microVM attaches at boot and which is sealed the same way the
+  # rootfs is. The rootfs/OCI seal itself is unit-tested in
+  # `mvm_build::oci_to_rootfs::verity`.
   verified-boot-artifacts:
     name: Verified boot artifacts (ADR-001 §W3.4)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
-      - name: Build runtime overlay and assert verity output
+      # veritysetup, to check the roothash against the tree rather than
+      # only its shape.
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: cryptsetup-bin
+
+      - name: Resolve the locked image set
+        # The one pin, read rather than copied, exactly as ci.yml's
+        # boot-latency lane reads it.
         run: |
           set -euo pipefail
-          # Plan 115 retired the bundled default-tenant prod image this lane
-          # used to build. The dm-verity sealing pipeline it witnessed —
-          # `mvm_build::oci_to_rootfs::verity::seal_with_verity` (veritysetup
-          # format + a 64-hex roothash) — is unchanged and unit-tested in
-          # mvm-build, and is exercised end-to-end by the verity-sealed
-          # runtime overlay (ADR-018: "sealed the same way it seals rootfs"),
-          # which every microVM attaches at boot. Assert that sealed image
-          # emits its ext4 + verity sidecar + a valid roothash.
-          nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          out=$(head -1 /tmp/store-path.txt)
+          {
+            echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)"
+            echo "IMAGE_REPO=$(./scripts/locked-image-tag.sh image_set repository)"
+            echo "IMAGE_MANIFEST=$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+            echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
+            echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
+            echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch and verify the locked runtime overlay
+        # Root digest against the lock, root signature against the lock's
+        # identity, member digest against the root, then the archive's own
+        # manifest — the chain an installed mvmctl walks before it boots these
+        # bytes. A substituted overlay fails here rather than being asserted on.
+        env:
+          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/locked-overlay && cd /tmp/locked-overlay
+          base="https://github.com/${IMAGE_REPO}/releases/download/${IMAGE_TAG}"
+          curl -fL --retry 3 -o image-set.json "$base/${IMAGE_MANIFEST}"
+          curl -fL --retry 3 -o image-set.json.bundle "$base/${IMAGE_MANIFEST}.bundle"
+          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" image-set.json | sha256sum -c -
+          cosign verify-blob \
+            --bundle image-set.json.bundle \
+            --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            image-set.json
+          f=runtime-overlay-x86_64.tar.gz
+          curl -fL --retry 3 -o "$f" "$base/$f"
+          jq -r --arg name "$f" '
+            .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
+            select(.name == $name) | "\(.sha256)  \(.name)"
+          ' image-set.json > expected.txt
+          test -s expected.txt
+          sha256sum -c expected.txt
+          mkdir -p overlay && tar -C overlay -xzf "$f"
+          ( cd overlay && sha256sum -c checksums-sha256.txt )
+
+      - name: Assert the overlay's verity seal authenticates it
+        run: |
+          set -euo pipefail
+          out=/tmp/locked-overlay/overlay
           for f in overlay.ext4 overlay.verity overlay.roothash; do
-            if [ ! -f "$out/$f" ]; then
-              echo "::error::missing $f in $out" >&2
+            if [ ! -s "$out/$f" ]; then
+              echo "::error::missing $f in the locked runtime overlay" >&2
               echo "ADR-001 §W3.4 requires the production verity-sealed image" >&2
-              echo "to emit {ext4,verity,roothash}; a missing sidecar usually" >&2
+              echo "to ship {ext4,verity,roothash}; a missing sidecar usually" >&2
               echo "means the dm-verity seal was disabled on the prod path." >&2
               exit 1
             fi
           done
-          # Sanity: roothash must be a 64-char hex string.
-          hash=$(tr -d '\n' < "$out/overlay.roothash")
+          hash=$(tr -d '[:space:]' < "$out/overlay.roothash")
           if [[ ! "$hash" =~ ^[0-9a-f]{64}$ ]]; then
             echo "::error::roothash is not a 64-char lowercase hex string: ${hash}" >&2
             exit 1
           fi
-          echo "ok: overlay.{ext4,verity,roothash} present, roothash=${hash:0:12}…"
+          # A present-but-wrong sidecar passes every check above. Walking the
+          # tree from the roothash down to each data block is what proves the
+          # three files are one seal and not three unrelated files.
+          sudo veritysetup verify "$out/overlay.ext4" "$out/overlay.verity" "$hash"
+          echo "ok: overlay.{ext4,verity,roothash} present and consistent, roothash=${hash:0:12}…"
 
   # ── Lane 6b: Sealed-prod rootfs has no SSH (plan 76 Phase 8) ──────
   # Plan 76 §Phase 8 + ADR-001 §"No SSH inside microVMs". The vsock-
@@ -789,8 +848,9 @@ jobs:
   # dispatcher (Plan 76 Phase 1 + the `sealed-prod-allowlist` CI
   # lane in `ci.yml`). This lane is the static counterpart: it
   # mounts the verity-sealed runtime overlay (the mvm-controlled
-  # filesystem attached to every microVM) and refuses to merge if any
-  # SSH artifact is present.
+  # filesystem attached to every microVM) — the locked, signed image-set
+  # member an installed mvmctl boots — and fails if any SSH artifact is
+  # present.
   #
   # No untrusted GitHub event input flows into any step; all
   # commands below are static literals.
@@ -806,24 +866,59 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
 
-      - name: Build runtime overlay and assert no SSH on the sealed image
+      - name: Resolve the locked image set
+        # The one pin, read rather than copied, exactly as ci.yml's
+        # boot-latency lane reads it.
         run: |
           set -euo pipefail
-          # Plan 115 retired the bundled default-tenant rootfs this lane
-          # used to mount. The mvm-controlled, verity-sealed runtime overlay
-          # is the prod-tier filesystem attached to every microVM; assert it
-          # ships no SSH artifacts anywhere. (Workload-rootfs no-SSH is also
-          # enforced at runtime by the agent dispatcher + the
-          # ci.yml::sealed-prod-allowlist lane.)
-          nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
-            --no-link --print-out-paths > /tmp/store-path.txt
-          out=$(head -1 /tmp/store-path.txt)
-          rootfs="$out/overlay.ext4"
+          {
+            echo "IMAGE_TAG=$(./scripts/locked-image-tag.sh)"
+            echo "IMAGE_REPO=$(./scripts/locked-image-tag.sh image_set repository)"
+            echo "IMAGE_MANIFEST=$(./scripts/locked-image-tag.sh image_set manifest_asset)"
+            echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
+            echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
+            echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
+          } >> "$GITHUB_ENV"
+
+      - name: Fetch and verify the locked runtime overlay
+        # Root digest against the lock, root signature against the lock's
+        # identity, member digest against the root, then the archive's own
+        # manifest — the chain an installed mvmctl walks before it boots these
+        # bytes. A substituted overlay fails here rather than being asserted on.
+        env:
+          COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/locked-overlay && cd /tmp/locked-overlay
+          base="https://github.com/${IMAGE_REPO}/releases/download/${IMAGE_TAG}"
+          curl -fL --retry 3 -o image-set.json "$base/${IMAGE_MANIFEST}"
+          curl -fL --retry 3 -o image-set.json.bundle "$base/${IMAGE_MANIFEST}.bundle"
+          printf '%s  %s\n' "$IMAGE_MANIFEST_SHA256" image-set.json | sha256sum -c -
+          cosign verify-blob \
+            --bundle image-set.json.bundle \
+            --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
+            --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+            image-set.json
+          f=runtime-overlay-x86_64.tar.gz
+          curl -fL --retry 3 -o "$f" "$base/$f"
+          jq -r --arg name "$f" '
+            .members[] | select(.target.arch? == "x86_64") | .artifacts[] |
+            select(.name == $name) | "\(.sha256)  \(.name)"
+          ' image-set.json > expected.txt
+          test -s expected.txt
+          sha256sum -c expected.txt
+          mkdir -p overlay && tar -C overlay -xzf "$f"
+          ( cd overlay && sha256sum -c checksums-sha256.txt )
+
+      - name: Assert no SSH on the sealed overlay
+        run: |
+          set -euo pipefail
+          rootfs=/tmp/locked-overlay/overlay/overlay.ext4
           if [ ! -f "$rootfs" ]; then
-            echo "::error::overlay.ext4 missing in $out (rebuild verified-boot-artifacts lane)" >&2
+            echo "::error::overlay.ext4 missing from the locked runtime overlay" >&2
             exit 1
           fi
 
@@ -934,430 +1029,6 @@ jobs:
             -not -path './*/resources/template_scaffold/*' \
             -not -path './tests/fixtures/plan-89-baseline/*')
           exit "$fail"
-
-  # ── Lane 9: Builder-VM image reproducibility (Plan 107 A2.5) ───────
-  # Build the `nix/images/builder-vm` image twice and assert the four
-  # committed outputs are byte-identical. Plan 25 W5.3 pattern, applied
-  # to the symmetric host VM rootfs. Plan 107 A2.1 baked `firecracker`
-  # into this rootfs; a non-reproducible firecracker closure (embedded
-  # build timestamps, host paths) would surface here rather than as a
-  # silent rootfs-hash drift across contributor machines. Heavy (the
-  # builder-vm kernel + rootfs double build), so PR-skipped like Lane 8
-  # — runs on release-tag pushes, the nightly schedule, and
-  # workflow_dispatch. The `builder-vm-image-linux` CI lane prints the
-  # single-build hash on every PR for diff-grade visibility.
-  builder-vm-image-reproducibility:
-    name: Builder-VM image reproducibility (Plan 107 A2.5)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-
-      # Plan 115 / ADR-065 — the builder-vm rootfs embeds the cross-compiled,
-      # statically-musl-linked host-vm binaries, read from MVM_HOST_BIN_DIR at
-      # eval time under `--impure`. The runner is x86_64 and the builder VM is
-      # same-arch as its host (build.rs §"x86_64 mvmctl embeds x86_64 bins"), so
-      # cross-compile to x86_64-unknown-linux-musl. The bins are `[[bin]]`s in
-      # mvm-build (not standalone packages), built exactly as `crates/mvm-cli/
-      # build.rs::run_cargo_zigbuild` does: `-p mvm-build --bin <name>`.
-      - uses: ./.github/actions/install-zigbuild
-        id: install_zigbuild
-      - name: Cross-compile host-vm binaries (MVM_HOST_BIN_DIR contract)
-        run: |
-          set -euo pipefail
-          RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild --release --locked --target x86_64-unknown-linux-musl \
-            -p mvm-build --bin mvm-host-vm-init --bin mvm-builderd
-          # The flake reads `$MVM_HOST_BIN_DIR/<name>` (flat, by manifest name);
-          # the cargo --bin outputs land here under those exact names.
-          echo "MVM_HOST_BIN_DIR=$PWD/target/x86_64-unknown-linux-musl/release" >> "$GITHUB_ENV"
-
-      - name: Build A
-        run: |
-          set -euo pipefail
-          nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
-            --impure --no-link --print-out-paths > /tmp/bvm-path-a.txt
-          out=$(head -1 /tmp/bvm-path-a.txt)
-          # Hash the four outputs the flake commits to under stable
-          # relative names so the store-path component (input-hash, not
-          # output) doesn't pollute the comparison.
-          ( cd "$out" && sha256sum vmlinux rootfs.ext4 cmdline.txt manifest.json ) > /tmp/bvm-hash-a.txt
-          cat /tmp/bvm-hash-a.txt
-
-      - name: Build B (force rebuild)
-        run: |
-          set -euo pipefail
-          nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
-            --rebuild --impure --no-link --print-out-paths > /tmp/bvm-path-b.txt
-          out=$(head -1 /tmp/bvm-path-b.txt)
-          ( cd "$out" && sha256sum vmlinux rootfs.ext4 cmdline.txt manifest.json ) > /tmp/bvm-hash-b.txt
-          cat /tmp/bvm-hash-b.txt
-
-      - name: Compare hashes
-        run: |
-          set -euo pipefail
-          if ! diff -q /tmp/bvm-hash-a.txt /tmp/bvm-hash-b.txt > /dev/null; then
-            echo "::error::Builder-VM image is non-deterministic — two clean builds produced different artifacts" >&2
-            echo "Plan 107 A2.5 requires the builder-vm rootfs (now carrying firecracker, A2.1) to reproduce" >&2
-            echo "byte-for-byte so contributors and CI agree on the same rootfs hash. Investigate before merging" >&2
-            echo "— non-determinism can mask supply-chain injection (ADR-001 §W5.3)." >&2
-            echo >&2
-            echo "Build A:" >&2
-            cat /tmp/bvm-hash-a.txt >&2
-            echo >&2
-            echo "Build B:" >&2
-            cat /tmp/bvm-hash-b.txt >&2
-            echo >&2
-            echo "Diff:" >&2
-            diff -u /tmp/bvm-hash-a.txt /tmp/bvm-hash-b.txt >&2 || true
-            exit 1
-          fi
-          echo "ok: builder-vm image reproduces byte-identically across two clean builds"
-          cat /tmp/bvm-hash-a.txt
-
-  # ── Lane 10: Published builder-pack reproducibility ────────────────
-  # Complements Lane 9 (same-run double build) by rebuilding a builder
-  # pack that was actually published on a release and diffing its
-  # content-addressed output hashes against the published attested
-  # manifest. Lane 9 catches non-determinism the day it's introduced;
-  # this lane catches drift between "what CI built at tag time" and
-  # "what building the same tag from scratch produces today" (toolchain
-  # upgrades, flake input drift, etc). Heavy (Nix build per arch) and
-  # requires a published release to compare against, so it is
-  # PR-skipped like Lane 9 and only runs on release-tag pushes, the
-  # nightly schedule, and workflow_dispatch.
-  #
-  # The target release is discovered independently of the ref that
-  # triggered this run (via `gh release list`/`gh release view`), not
-  # read from `github.ref_name` — this workflow's tag-push trigger fires
-  # in parallel with the release workflow that publishes the pack, so
-  # the just-pushed tag's assets may not exist yet. Looking up the most
-  # recent release that already carries the expected pack manifest and
-  # checking out that tag's commit before rebuilding sidesteps the race
-  # entirely; on a quiet nightly run it simply finds the latest release.
-  #
-  # No untrusted GitHub event input flows into any step — `matrix.arch`
-  # and `github.repository` are workflow-defined, and the release tag
-  # used in later steps is read back out of `GITHUB_ENV` after the
-  # discovery step, not interpolated from any PR-controlled value.
-  pack-reproducibility-builder:
-    name: Published builder-pack reproducibility (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            musl_target: aarch64-unknown-linux-musl
-          - arch: x86_64
-            runner: ubuntu-latest
-            musl_target: x86_64-unknown-linux-musl
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          # A full history + tags checkout — the target release's tag is
-          # discovered at runtime (see above) and may not be the ref that
-          # triggered this workflow, so an arbitrary tag must be
-          # checkable-out later in the job.
-          fetch-depth: 0
-
-      - name: Determine target release tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          TARGET_TAG=""
-          while IFS= read -r TAG; do
-            if gh release view "$TAG" --repo "$REPO" --json assets \
-                --jq '.assets[].name' | grep -qx "builder-vm-${ARCH}.pack-manifest.json"; then
-              TARGET_TAG="$TAG"
-              break
-            fi
-          done < <(gh release list --repo "$REPO" --exclude-drafts --exclude-pre-releases \
-                      --limit 30 --json tagName --jq '.[].tagName')
-          if [ -z "$TARGET_TAG" ]; then
-            echo "::notice::No published release carries a builder-vm-${ARCH} attested pack manifest yet; skipping reproducibility check for this arch."
-          fi
-          echo "TARGET_TAG=${TARGET_TAG}" >> "$GITHUB_ENV"
-
-      - name: Checkout target release commit
-        if: env.TARGET_TAG != ''
-        run: git checkout "$TARGET_TAG"
-
-      - name: Install Nix
-        if: env.TARGET_TAG != ''
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-
-      - name: Install Rust toolchain
-        if: env.TARGET_TAG != ''
-        uses: dtolnay/rust-toolchain@1.97.1
-
-      - uses: ./.github/actions/install-zigbuild
-        id: install_zigbuild
-        if: env.TARGET_TAG != ''
-
-      - name: Cross-compile host-vm binaries (MVM_HOST_BIN_DIR contract)
-        if: env.TARGET_TAG != ''
-        env:
-          MUSL_TARGET: ${{ matrix.musl_target }}
-        run: |
-          set -euo pipefail
-          RUSTUP_TOOLCHAIN="${{ steps.install_zigbuild.outputs.rust_version }}" cargo zigbuild --release --locked --target "$MUSL_TARGET" \
-            -p mvm-build --bin mvm-host-vm-init --bin mvm-builderd
-          echo "MVM_HOST_BIN_DIR=$PWD/target/${MUSL_TARGET}/release" >> "$GITHUB_ENV"
-
-      - name: Rebuild builder VM image from source at the target tag
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/builder-vm#packages.${SYSTEM}.default" \
-            --impure --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
-
-      - name: Download the published builder pack
-        if: env.TARGET_TAG != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          mkdir -p downloaded
-          gh release download "$TARGET_TAG" --repo "$REPO" --dir downloaded \
-            --pattern "builder-vm-vmlinux-${ARCH}" \
-            --pattern "builder-vm-rootfs-${ARCH}.ext4" \
-            --pattern "builder-vm-${ARCH}.pack-manifest.json" \
-            --pattern "builder-vm-${ARCH}-checksums-sha256.txt"
-
-      - name: Verify downloaded assets against published checksums
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          cd downloaded
-          sha256sum --ignore-missing -c "builder-vm-${ARCH}-checksums-sha256.txt"
-
-      - name: Produce a manifest from the rebuilt artifacts
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          mkdir -p rebuilt
-          nix-store --query --requisites "$STORE_PATH" > rebuilt/sbom.txt
-          # `--keyless` here is not standing in for a real release signature —
-          # it is the hash-recompute path: the producer copies the rebuilt
-          # vmlinux/rootfs.ext4 into place, hashes them, and assembles a
-          # manifest without touching any signing key. `--identity` only
-          # feeds `trust.signing_key_id`, which this check never compares.
-          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
-            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
-            --arch "$ARCH" --channel stable \
-            --keyless --identity "pack-reproducibility-check" \
-            --out-dir rebuilt \
-            --sbom rebuilt/sbom.txt \
-            --revocation-channel "https://example.invalid/unused-in-reproducibility-check.json"
-
-      - name: Compare rebuilt pack hashes against the published manifest
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          PUBLISHED="downloaded/builder-vm-${ARCH}.pack-manifest.json"
-          REBUILT="rebuilt/manifest.json"
-
-          # `outputs.pack_hash` and the provenance/trust fields legitimately
-          # differ between this run and the original release build (build
-          # timestamp, signer identity, SBOM uri) even when the artifacts
-          # reproduce byte-for-byte — the pack_hash folds the whole manifest
-          # minus signatures into one digest. The fields that depend only on
-          # the artifact bytes are `outputs.kernel_hash`,
-          # `outputs.builder_image_hash`, and each `outputs.files[].sha256`;
-          # those are what this check compares.
-          jq '.outputs | {kernel_hash, builder_image_hash, files: (.files | sort_by(.path))}' \
-            "$PUBLISHED" > /tmp/published-outputs.json
-          jq '.outputs | {kernel_hash, builder_image_hash, files: (.files | sort_by(.path))}' \
-            "$REBUILT" > /tmp/rebuilt-outputs.json
-
-          if ! diff -q /tmp/published-outputs.json /tmp/rebuilt-outputs.json > /dev/null; then
-            echo "::error::Rebuilding the builder pack for ${ARCH} at ${TARGET_TAG} from source did not reproduce the published artifact hashes" >&2
-            echo "Published (from release ${TARGET_TAG}):" >&2
-            cat /tmp/published-outputs.json >&2
-            echo >&2
-            echo "Rebuilt (from source at the same tag):" >&2
-            cat /tmp/rebuilt-outputs.json >&2
-            echo >&2
-            echo "Diff:" >&2
-            diff -u /tmp/published-outputs.json /tmp/rebuilt-outputs.json >&2 || true
-            exit 1
-          fi
-          echo "ok: builder pack for ${ARCH} at ${TARGET_TAG} reproduces byte-identically from source"
-
-      - name: Report skip (no eligible release yet)
-        if: env.TARGET_TAG == ''
-        run: echo "::notice::pack-reproducibility-builder (${{ matrix.arch }}) skipped — no published release with an attested builder pack manifest was found."
-
-  # ── Lane 11: Published runtime-pack reproducibility ────────────────
-  # Same shape as Lane 10, applied to the runtime pack the `default-
-  # microvm` release job produces from `nix/images/default-tenant`. A
-  # runtime pack is keyless-only (`mvm-builder-pack-tool --kind
-  # runtime` refuses an ed25519 signing key), so the rebuilt-manifest
-  # step below always uses `--keyless` regardless.
-  pack-reproducibility-runtime:
-    name: Published runtime-pack reproducibility (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-            musl_target: aarch64-unknown-linux-musl
-          - arch: x86_64
-            runner: ubuntu-latest
-            musl_target: x86_64-unknown-linux-musl
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Determine target release tag
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          TARGET_TAG=""
-          while IFS= read -r TAG; do
-            if gh release view "$TAG" --repo "$REPO" --json assets \
-                --jq '.assets[].name' | grep -qx "default-microvm-${ARCH}.pack-manifest.json"; then
-              TARGET_TAG="$TAG"
-              break
-            fi
-          done < <(gh release list --repo "$REPO" --exclude-drafts --exclude-pre-releases \
-                      --limit 30 --json tagName --jq '.[].tagName')
-          if [ -z "$TARGET_TAG" ]; then
-            echo "::notice::No published release carries a default-microvm-${ARCH} attested pack manifest yet; skipping reproducibility check for this arch."
-          fi
-          echo "TARGET_TAG=${TARGET_TAG}" >> "$GITHUB_ENV"
-
-      - name: Checkout target release commit
-        if: env.TARGET_TAG != ''
-        run: git checkout "$TARGET_TAG"
-
-      - name: Install Nix
-        if: env.TARGET_TAG != ''
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-
-      - name: Install Rust toolchain
-        if: env.TARGET_TAG != ''
-        uses: dtolnay/rust-toolchain@1.97.1
-
-      - name: Rebuild the default microVM image from source at the target tag
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          SYSTEM="${ARCH}-linux"
-          nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
-            --impure --no-link --print-out-paths > /tmp/store-path.txt
-          STORE_PATH=$(head -1 /tmp/store-path.txt)
-          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
-
-      - name: Download the published runtime pack
-        if: env.TARGET_TAG != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          mkdir -p downloaded
-          gh release download "$TARGET_TAG" --repo "$REPO" --dir downloaded \
-            --pattern "default-microvm-vmlinux-${ARCH}" \
-            --pattern "default-microvm-rootfs-${ARCH}.ext4" \
-            --pattern "default-microvm-rootfs-${ARCH}.verity" \
-            --pattern "default-microvm-rootfs-${ARCH}.roothash" \
-            --pattern "default-microvm-${ARCH}.pack-manifest.json" \
-            --pattern "default-microvm-${ARCH}-checksums-sha256.txt"
-
-      - name: Verify downloaded assets against published checksums
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          cd downloaded
-          sha256sum --ignore-missing -c "default-microvm-${ARCH}-checksums-sha256.txt"
-
-      - name: Produce a manifest from the rebuilt artifacts
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          mkdir -p rebuilt
-          nix-store --query --requisites "$STORE_PATH" > rebuilt/sbom.txt
-          # Runtime packs have no ed25519 producer path (see the pack tool's
-          # own usage text) — `--keyless` is the only way to invoke this
-          # kind, and it never touches a signing key here either.
-          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
-            --kind runtime \
-            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
-            --verity "$STORE_PATH/rootfs.verity" --roothash "$STORE_PATH/rootfs.roothash" \
-            --arch "$ARCH" --channel stable \
-            --keyless --identity "pack-reproducibility-check" \
-            --out-dir rebuilt \
-            --sbom rebuilt/sbom.txt \
-            --revocation-channel "https://example.invalid/unused-in-reproducibility-check.json"
-
-      - name: Compare rebuilt pack hashes against the published manifest
-        if: env.TARGET_TAG != ''
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          PUBLISHED="downloaded/default-microvm-${ARCH}.pack-manifest.json"
-          REBUILT="rebuilt/manifest.json"
-
-          # Same rationale as the builder-pack lane: compare only the
-          # content-addressed output fields, not `outputs.pack_hash` (which
-          # folds in the build timestamp / signer identity / SBOM uri and so
-          # legitimately differs run to run).
-          jq '.outputs | {kernel_hash, agent_rootfs_hash, files: (.files | sort_by(.path))}' \
-            "$PUBLISHED" > /tmp/published-outputs.json
-          jq '.outputs | {kernel_hash, agent_rootfs_hash, files: (.files | sort_by(.path))}' \
-            "$REBUILT" > /tmp/rebuilt-outputs.json
-
-          if ! diff -q /tmp/published-outputs.json /tmp/rebuilt-outputs.json > /dev/null; then
-            echo "::error::Rebuilding the runtime pack for ${ARCH} at ${TARGET_TAG} from source did not reproduce the published artifact hashes" >&2
-            echo "Published (from release ${TARGET_TAG}):" >&2
-            cat /tmp/published-outputs.json >&2
-            echo >&2
-            echo "Rebuilt (from source at the same tag):" >&2
-            cat /tmp/rebuilt-outputs.json >&2
-            echo >&2
-            echo "Diff:" >&2
-            diff -u /tmp/published-outputs.json /tmp/rebuilt-outputs.json >&2 || true
-            exit 1
-          fi
-          echo "ok: runtime pack for ${ARCH} at ${TARGET_TAG} reproduces byte-identically from source"
-
-      - name: Report skip (no eligible release yet)
-        if: env.TARGET_TAG == ''
-        run: echo "::notice::pack-reproducibility-runtime (${{ matrix.arch }}) skipped — no published release with an attested runtime pack manifest was found."
 
   # Claim 11's witness. ADR-001's ledger cites this job by name, and until
   # now it lived in ci-full.yml — a workflow-dispatch-only lane that had

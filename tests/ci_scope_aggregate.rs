@@ -7,10 +7,10 @@
 //! produce. A change that breaks the gate for out-of-scope PRs therefore
 //! passes on the PR that makes it, and fails on everyone else's.
 //!
-//! That is not hypothetical. Removing the kernel job's job-level `if:` made it
-//! always run and always report `success`, while the aggregate still required
-//! `skipped` when out of scope — which failed every PR not touching a kernel
-//! path. The breaking change touched `ci.yml`, which puts the kernel lane *in*
+//! That is not hypothetical. A lane that lost its job-level `if:` once
+//! reported `success` on every run, while the aggregate still required
+//! `skipped` when out of scope — which failed every PR not touching that
+//! lane's paths. The breaking change touched `ci.yml`, which put the lane *in*
 //! scope, so it went green and merged.
 //!
 //! So these run the extracted script itself rather than restating its rules.
@@ -56,7 +56,7 @@ fn aggregate_script() -> String {
         "the aggregate script must be driven purely by env, found an Actions expression:\n{script}"
     );
     assert!(
-        script.contains("KERNEL_RESULT"),
+        script.contains("GUEST_IMAGE_RESULT"),
         "extracted the wrong block:\n{script}"
     );
     script
@@ -71,8 +71,6 @@ struct Verdict {
     /// Kept separate from `lanes` even though it now shares their scope, so
     /// "the BDD lane skipped while in scope" stays expressible on its own.
     bdd: &'static str,
-    kernel_scope: &'static str,
-    kernel: &'static str,
     boot: &'static str,
     nix: &'static str,
     guest_image: &'static str,
@@ -87,16 +85,13 @@ impl Verdict {
             code: "true",
             lanes: "success",
             bdd: "success",
-            kernel_scope: "true",
-            kernel: "success",
             boot: "skipped",
             nix: "skipped",
             guest_image: "skipped",
         }
     }
 
-    /// A docs-only run: every lane it should skips. The kernel job has no
-    /// job-level `if:`, so it still runs and still reports `success`.
+    /// A docs-only run: every lane it should skips.
     fn out_of_scope() -> Self {
         Self {
             event_name: "pull_request",
@@ -104,8 +99,6 @@ impl Verdict {
             code: "false",
             lanes: "skipped",
             bdd: "skipped",
-            kernel_scope: "false",
-            kernel: "success",
             boot: "skipped",
             nix: "skipped",
             guest_image: "skipped",
@@ -151,8 +144,6 @@ impl Verdict {
             .env("RELEASE_WITNESS_RESULT", self.lanes)
             .env("EBPF_RESULT", self.lanes)
             .env("BDD_RESULT", self.bdd)
-            .env("KERNEL_SCOPE", self.kernel_scope)
-            .env("KERNEL_RESULT", self.kernel)
             .env("BOOT_RESULT", self.boot)
             .env("NIX_RESULT", self.nix)
             .env("GUEST_IMAGE_RESULT", self.guest_image)
@@ -173,15 +164,14 @@ impl Verdict {
 
 /// The regression that motivated this file, stated as the property it broke.
 ///
-/// A docs-only PR skips every lane it should and still runs the kernel job,
-/// which succeeds with its steps skipped. That must be admitted. Requiring
-/// `skipped` from a job that no longer skips left the entire open-PR backlog
-/// unmergeable while every individual lane reported green.
+/// A docs-only PR skips every lane it should. That must be admitted: a gate
+/// that demanded otherwise once left the entire open-PR backlog unmergeable
+/// while every individual lane reported green.
 #[test]
 fn a_fully_out_of_scope_run_is_admitted() {
     assert!(
         Verdict::out_of_scope().accepts(),
-        "a PR touching no code, no bdd and no kernel path must pass the aggregate"
+        "a PR touching no code and no bdd path must pass the aggregate"
     );
 }
 
@@ -196,7 +186,7 @@ fn a_fully_in_scope_green_run_is_admitted() {
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 13] = [
+    let cases: [(&str, Verdict); 11] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -205,20 +195,6 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             "a bdd lane that ran while out of scope",
             Verdict {
                 bdd: "success",
-                ..Verdict::out_of_scope()
-            },
-        ),
-        (
-            "a failing kernel build, in scope",
-            Verdict {
-                kernel: "failure",
-                ..Verdict::in_scope()
-            },
-        ),
-        (
-            "a failing kernel build, out of scope",
-            Verdict {
-                kernel: "failure",
                 ..Verdict::out_of_scope()
             },
         ),

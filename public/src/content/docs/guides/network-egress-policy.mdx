@@ -57,6 +57,198 @@ mvmctl machine run --flake . --name api-dev --port 8080:8080
 Opening a host port does not mean the guest should have outbound internet
 access.
 
+## Endpoint rules
+
+An allow-list says which destinations a workload may reach. An endpoint rule
+narrows what it may do there, by HTTP method and path:
+
+```sh
+mvmctl machine run --flake . --name triage \
+  --allow-endpoint "GET https://api.github.com/repos/my-org/**" \
+  --allow-endpoint "POST https://api.github.com/repos/my-org/*/issues"
+```
+
+Each `--allow-endpoint` admits its host as `--allow-host` would and adds a
+rule for it. Every flag for one host becomes one route: its rules are tried in
+order, the first that matches decides, and a request no rule matches is
+refused. `**` matches any number of path segments and `*` any run of
+characters within one; the query string is not part of the match. Without a
+method, a rule matches every method.
+
+A project can declare routes in its `mvm.toml`:
+
+```toml
+[[network.routes]]
+id = "github"
+host = "api.github.com"
+intercept = true
+rules = [
+  { method = "GET", path = "/repos/my-org/**", outcome = "allow" },
+  { method = "DELETE", path = "/**", outcome = "deny" },
+  { method = "POST", path = "/repos/my-org/*/issues", outcome = "ask" },
+]
+```
+
+| Field | Meaning |
+| --- | --- |
+| `id` | Recorded on every decision the route makes. `[a-z0-9._-]`. |
+| `host` | An exact host, or a `*.suffix` wildcard over two or more labels. |
+| `port` | Default `443`. |
+| `rules` | `{ id?, method?, path, outcome }`, tried in order. `outcome` is `allow`, `deny` or `ask`. |
+| `otherwise` | What a request no rule matches gets. Default `deny`. |
+| `intercept` | Whether the host may terminate this destination's TLS to read requests. |
+
+A run reads the manifest `--manifest` points at, or the one in a local `--flake`
+directory, and admits each route host. An `--allow-endpoint` for a destination
+the manifest already routes is refused rather than merged, because adding an
+allow rule would widen what the project declared. Routes are not yet recorded
+on a persistent machine; `machine run --name`, `-d` and `machine create` refuse
+them.
+
+Rules can only be enforced where the host reads the request. A destination a
+secret is bound to is terminated already. Any other destination is terminated
+for its rules only when its route says `intercept = true` — `--allow-endpoint`
+sets it, because writing the flag is the grant — and the per-VM egress
+certificate then covers that host. A route with rules but no interception
+grant is never relayed opaquely with its rules unchecked: the connection is
+refused and recorded as `endpoint_rules_unenforceable`.
+
+A path the host cannot read unambiguously is refused, not matched: a `.` or
+`..` segment, an empty segment, a backslash, or a percent-encoded `/`, `\` or
+`.`. Encoded letters and digits are decoded first, so `/%61dmin` cannot pass a
+rule written for `/admin`.
+
+`ask` holds the request on the host and asks the `mvmctl` that launched the
+run — on your terminal, through a webhook, or not at all — and refuses it
+unless the answer is yes. [Runtime approvals](/guides/runtime-approvals/)
+covers the backends, the timeout, session approvals and the audit entries. A
+run nobody can answer for, such as a detached machine, refuses every `ask`.
+
+Every decision — allow, deny or ask — is a `host.route.decided` entry in the
+chain-signed audit log, carrying the route id, the rule that decided (its `id`,
+`rule-N` by position, `otherwise` or `ambiguous_path`), the outcome, the
+destination and the method. The path is never recorded.
+
+## Internal addresses
+
+Every policy, including an unrestricted one, refuses these destinations:
+
+| Refused | Ranges | Can a grant re-admit it? |
+| --- | --- | --- |
+| Cloud metadata | `169.254.169.254`, `169.254.170.2`, `100.100.100.200`, `fd00:ec2::254` | Never |
+| Loopback, unspecified | `127.0.0.0/8`, `::1`, `0.0.0.0/8`, `::` | Never |
+| Link-local, carrier-grade NAT | `169.254.0.0/16`, `fe80::/10`, `100.64.0.0/10` | Never |
+| Private ranges | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7` | Yes, by naming it |
+| Multicast, reserved, broadcast | `224.0.0.0/4`, `ff00::/8`, `240.0.0.0/4` | Yes, by naming it |
+
+A private address is reachable only when a grant names it: the literal address
+or a CIDR inside that private range, or an allow-listed host that resolved to
+it when the run was admitted.
+
+```sh
+mvmctl machine run --flake . --name db-client --allow-host 10.20.30.40:5432
+```
+
+`--net`, an unrestricted policy, or a rule for `0.0.0.0/0` names no private
+address, so none of them reaches one. An IPv6 address that carries an IPv4 one
+(`::ffff:10.0.0.1`, NAT64 `64:ff9b::…`, 6to4 `2002:…`, Teredo) is judged by the
+IPv4 address it reaches; a restricted one inside a translation prefix is never
+re-admitted.
+
+A host name is resolved once, by the host. The workload connects to exactly the
+addresses that decision admitted, so a name cannot answer the policy check with
+a public address and the connection with an internal one.
+
+Each refusal is recorded in the chain-signed audit log with its class —
+`cloud_metadata`, `loopback`, `private_range`, `unique_local` — rather than a
+generic denial, so a workload reaching for the metadata service stands out.
+
+## When a destination is refused
+
+A refused connection fails inside the guest, and the host records the refusal
+in the chain-signed audit log. A foreground `mvmctl run` or `mvmctl machine
+run`, and `mvmctl machine logs -f`, read those records back for the machine on
+screen and print each distinct refusal on stderr as it happens, once, with the
+remedy for that reason. Here a run allowed only `api.github.com` also reaches
+for `example.com` twice, for the cloud metadata service, and for an address on
+a private network:
+
+```sh
+mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/; curl -sS http://10.0.0.5:8080/'
+```
+
+```text
+curl: (7) CONNECT tunnel failed, response 403
+curl: (7) CONNECT tunnel failed, response 403
+[mvm] egress blocked: example.com:443 (not in the allow-list) — allow with --allow-host example.com:443
+[mvm] egress blocked: 169.254.169.254:80 (a cloud instance-metadata endpoint) — never reachable from a workload; no grant admits it
+[mvm] egress blocked: 10.0.0.5:8080 (an RFC1918 private range) — denied by default; admitted only by naming it exactly: --allow-host 10.0.0.5:8080
+[mvm] egress denied: 3 destinations, 4 attempts
+[mvm]   example.com:443        2×  not in the allow-list
+[mvm]   169.254.169.254:80     1×  a cloud instance-metadata endpoint — never reachable from a workload; no grant admits it
+[mvm]   10.0.0.5:8080          1×  an RFC1918 private range — denied by default; admitted only by naming it exactly: --allow-host 10.0.0.5:8080
+[mvm] to allow what the allow-list refused, re-run with:
+[mvm]   --allow-host example.com:443
+[mvm] or, for a machine created with `machine create --manifest`, in its mvm.toml:
+[mvm]   [network]
+[mvm]   allow_hosts = ["example.com:443"]
+[mvm] denied by default, and admitted only by naming each exactly — do so only if the workload should reach it:
+[mvm]   --allow-host 10.0.0.5:8080
+```
+
+The block at the end is the exit summary: every refused destination with how
+often it was refused, then the exact flags that admit the ones a grant can
+admit. The metadata service is listed and never offered; the private address is
+kept out of the allow command and named apart.
+
+A run with no egress at all — the default: no `--net`, no `--allow-host`, no
+`--secret`, no published port — starts no network endpoint. The guest has no
+channel to ask for a destination on, the host decides nothing, and there is
+nothing to print; the guest's own `Could not resolve host` is the signal. Add
+the destination and run again:
+
+```sh
+mvmctl run --allow-host api.example.com:443 -- curl -sS https://api.example.com/
+```
+
+The reason comes from the host's own decision, and so does the remedy. Some
+refusals have none, and the notice says so rather than offering a flag:
+
+| Recorded reason | What the notice says | Remedy |
+| --- | --- | --- |
+| `policy_denied` | not in the allow-list | `--allow-host HOST:PORT` |
+| `cloud_metadata`, `loopback`, `link_local`, `unspecified`, `shared_address_space`, `embedded_restricted` | the address class | none — never reachable from a workload |
+| TCP/22 | SSH port | none — SSH never reaches a workload |
+| `private_range`, `unique_local`, `multicast`, `reserved` | the address class | denied by default; admitted only by naming the exact address (`--allow-host 10.0.0.5:5432`). Listed apart from the allow flags in the summary |
+| `route_denied` | refused by an endpoint route | change that route's method/path rules |
+| `ambiguous_path` | ambiguous request path | none — send the canonical path |
+| `endpoint_rules_unenforceable` | endpoint rules need interception | set `intercept = true` on the route |
+| `approval_unavailable` | needs approval, no approver | none yet — an `ask` rule with no approver refuses |
+| `rate_limited`, `resource_exhausted`, `termination_exhausted` | the limit reached | fewer connections at once |
+| `typed_transform_required`, `termination_unavailable`, `placeholder_in_url`, `placeholder_in_body`, `placeholder_dropped` | the secret-substitution rule it broke | see [Secrets and credentials](/guides/secrets-and-credentials/) |
+
+A restricted address the host recorded under the generic `policy_denied` is
+still read by its address, so the metadata service is never offered an allow.
+
+With `mvmctl run --json`, nothing prints live; the summary's records are in the
+document's `egress_denials` array, each with the destination, the recorded
+event and reason, a count, first and last timestamps, and a `remedy` whose
+`kind` is `allow_host`, `name_explicitly`, `edit_route`, `never` or `advice`.
+An interactive `--pty` run also prints nothing live, because a line written
+over a raw-mode terminal would corrupt it; its summary prints after the
+session ends.
+
+After the fact, `mvmctl explain` lists a run's refusals the same way, joined to
+the run by its machine name and bounded by the run's own start and exit:
+
+```sh
+mvmctl explain agent-sandbox
+```
+
+This is observation only. The per-VM network endpoint is still the only place
+an egress decision is made; the notices read what it recorded and change
+nothing it decides.
+
 ## SDK declaration pattern
 
 Static declarations should make network posture reviewable:

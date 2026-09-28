@@ -299,10 +299,18 @@ fi
 echo "==> building the per-VM host helpers"
 just build-supervisors
 
+# The language SDKs drive machines in-process through the host library and find
+# it beside the `mvmctl` on PATH, which the live steps put first. `cargo build
+# --bin mvmctl` never builds it, so without this the runtime-SDK scenarios fail
+# with "the host library ... was not found" before a machine is asked for.
+echo "==> building the SDK host library beside mvmctl"
+cargo build -p mvm-hostlib
+
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
   find "$root" -type f -name mvm-network-endpoint 2>/dev/null | grep -q . || return 1
   find "$root" -type f -name mvm-gpu-endpoint 2>/dev/null | grep -q . || return 1
+  find "$root" -type f \( -name libmvm_hostlib.so -o -name libmvm_hostlib.dylib \) 2>/dev/null | grep -q . || return 1
   if [[ "$(uname -s)" == "Darwin" ]]; then
     find "$root" -type f -name mvm-hvf-supervisor 2>/dev/null | grep -q . || return 1
   fi
@@ -395,11 +403,10 @@ echo "==> warming artifacts in $E2E_HOME"
 # only after compiling first; acquiring it here keeps the sidecar step to the
 # sidecar.
 #
-# A cold *source* bootstrap — Stage 0, and the unembedded command handing the
-# whole build to its helper — is not this lane's to prove. Doing it here made a
-# 313-scenario release gate wait on 37 minutes of image preparation that no
-# scenario examines, and on a bad day on a Stage 0 that hung for two hours.
-# `scripts/e2e-source-bootstrap.sh` witnesses that path on its own, nightly.
+# Building the builder image is not this lane's to prove: images are built in
+# mvm-images. Doing a cold Stage 0 here made a 313-scenario release gate wait on
+# 37 minutes of image preparation that no scenario examines, and on a bad day on
+# a Stage 0 that hung for two hours.
 e2e_phase builder-image
 if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   echo
@@ -410,13 +417,33 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   BOOTSTRAP_FAILED=1
 fi
 
-# The sidecar is still built from this tree: its fingerprint watches the host
-# services crate, so a published sidecar would test an older C ABI. Running it
-# through the unembedded binary keeps the hand-off to the embedded helper
-# covered on every release.
+# The service-plane scenarios load this sidecar from the version-matched cache,
+# so it is built from this tree rather than fetched: a published sidecar carries
+# the C ABI of the mvm commit its image set was built from, not this one. The
+# recipe lives in mvm-images, and the build compiles it against this checkout.
+# The checkout is handed to this step alone, so every other step keeps resolving
+# images from the pinned set, and it is kept out of the sibling path an image
+# checkout is discovered at for the same reason.
 e2e_phase sdk-sidecar
-echo "==> warming source-matched SDK sidecar through unembedded mvmctl"
-MVM_HOME="$E2E_HOME" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
+if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
+  echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the SDK sidecar is built from" >&2
+  echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout." >&2
+  exit 1
+fi
+echo "==> building the source-matched SDK sidecar through unembedded mvmctl"
+MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+
+# The dev default image (`mvmctl run` with no image) is built from an image
+# checkout too; without one, and with nothing cached, `run` refuses. The one
+# scenario that boots it is Firecracker-only (the cached dev rootfs must stay
+# byte-identical across launches), so only the Linux lane builds it, once, into
+# the warm home every scenario shares, through the same single-step hand-off.
+if [[ "$(uname -s)" == Linux ]]; then
+  e2e_phase dev-image
+  echo "==> building the dev default image through the mvm-images checkout"
+  MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" "$MVMCTL" run --no-detect -- /bin/true
+fi
 
 # ---------------------------------------------------------------------------
 # Warm the launch artifacts, even when bootstrap did not get that far.

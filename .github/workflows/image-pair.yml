@@ -6,6 +6,13 @@ name: Image pair
 # companion commit before either side lands — check out both SHAs, run the
 # same drift gate the sibling's CI runs, and only then merge either half.
 #
+# This is the cross-repository canary, and the one workflow allowed to check
+# mvm-images out at `main`: every gating lane takes its ref from images.lock
+# through `xtask image-source-ref`, so a red run here says the next pin advance
+# needs work, and blocks nothing. `xtask check-image-lock` fails the build if
+# this workflow gains a pull-request, merge-queue, push or workflow_call
+# trigger.
+#
 # The gate itself lives in mvm-images (scripts/check-source-drift.sh): it
 # knows which files it copied from mvm and the documented rewrites. This
 # workflow only supplies the two explicit checkouts.

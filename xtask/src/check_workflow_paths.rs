@@ -788,24 +788,20 @@ mod tests {
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
              test-release-witness, test-ebpf-telemetry, bdd-conformance, \
-             boot-latency, guest-image-boot, kernel, nix-flake-check]"
+             boot-latency, guest-image-boot, nix-flake-check]"
         ));
 
         // Every lane the aggregate names must also be read back in the loop that
         // compares results against the scope decision. A lane in `needs` but not
         // in the loop is gated on nothing but its own scheduling.
-        // `kernel` is the only lane still keying off its own narrower scope, so
-        // it is matched against `$KERNEL_SCOPE` outside the loop rather than
-        // folded into it — but it still has to be read back somewhere, which is
-        // what this pins. `bdd-conformance` joined the loop when it took the
-        // Gherkin suite, and the `code` scope, off the Linux lane.
+        // `bdd-conformance` joined the loop when it took the Gherkin suite, and
+        // the `code` scope, off the Linux lane.
         for expected in [
             "\"$WORKSPACE_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
-            "\"$KERNEL_RESULT\"",
             "\"$BOOT_RESULT\"",
             "\"$GUEST_IMAGE_RESULT\"",
             "\"$NIX_RESULT\"",
@@ -912,7 +908,6 @@ mod tests {
             "code=true",
             "nix=true",
             "architecture=true",
-            "kernel=true",
         ] {
             assert!(
                 scope.contains(expected),
@@ -970,6 +965,11 @@ mod tests {
             guest.contains("tinylabscom/mvm-images"),
             "the guest-image witness must consume the external image source"
         );
+        assert!(
+            guest.contains("ref: ${{ steps.images-ref.outputs.ref }}"),
+            "the guest-image witness gates the merge queue, so it must build the image \
+             sources images.lock pins rather than mvm-images main"
+        );
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
         assert!(
             guest.contains("nix build --rebuild"),
@@ -981,12 +981,6 @@ mod tests {
             !website.contains("merge_group:"),
             "the non-required Website workflow must not consume every merge-group runner slot"
         );
-
-        let kernel = job_block(&ci, "kernel");
-        assert!(kernel.contains("needs: [scope]"));
-        assert!(kernel.contains("if: needs.scope.outputs.kernel == 'true'"));
-        assert!(kernel.contains("name: Build kernels (${{ matrix.arch }})"));
-        assert!(kernel.contains("needs.scope.outputs.kernel == 'true'"));
 
         for aggregate in ["lint", "test"] {
             let block = job_block(&ci, aggregate);
@@ -1057,7 +1051,8 @@ mod tests {
         assert!(
             build.contains(r#"image_tag="$(./scripts/locked-image-tag.sh)""#)
                 && build.contains(r#"image boot update --tag "$image_tag" --force"#)
-                && bootstrap.contains("mv nix/images/builder-vm.hidden nix/images/builder-vm")
+                && bootstrap.contains("repository: tinylabscom/mvm-images")
+                && bootstrap.contains("MVM_IMAGES_DIR: ${{ github.workspace }}/mvm-images")
                 && bootstrap.contains("sudo chmod 0666 /dev/kvm")
                 && bootstrap.contains("sudo chmod a+r")
                 && bootstrap.contains("/boot/vmlinuz-$(uname -r)")
@@ -1083,9 +1078,11 @@ mod tests {
             "the exit-code fixture must bake a shebang marker at mode 0755 — \
              the only shape the guest agent's sealed-marker policy accepts"
         );
-        let restore_source_flake = bootstrap
-            .find("mv nix/images/builder-vm.hidden nix/images/builder-vm")
-            .expect("the source builder flake must be restored after published bootstrap");
+        // Kernel sources live in mvm-images, and a compile without a checkout
+        // of it refuses, so the checkout has to land before the compile.
+        let images_checkout = bootstrap
+            .find("repository: tinylabscom/mvm-images")
+            .expect("the kernel compile needs an mvm-images checkout");
         let source_kernel_build = bootstrap
             .find("kernel build --which workload --source compile -v")
             .expect("the source QEMU kernel must be built");
@@ -1096,10 +1093,10 @@ mod tests {
             .find("sudo chmod a+r")
             .expect("source artifact compilation must make the host boot inputs readable");
         assert!(
-            restore_source_flake < restore_kvm
+            images_checkout < restore_kvm
                 && restore_kvm < grant_boot_read
                 && grant_boot_read < source_kernel_build,
-            "the source builder flake, KVM acceleration, and readable boot inputs must be restored before source kernel compilation"
+            "the mvm-images checkout, KVM acceleration, and readable boot inputs must be in place before source kernel compilation"
         );
         let deny_kvm_position = smoke
             .find(deny_kvm)
@@ -1181,7 +1178,6 @@ mod tests {
             "name: Test",
             "name: Invariant",
             "name: Nix flake check (Linux eval)",
-            "name: Build kernels (${{ matrix.arch }})",
         ] {
             assert!(ci.contains(required_name), "required check name drifted");
         }
@@ -1190,12 +1186,6 @@ mod tests {
         assert!(!architecture.contains("pull_request:"));
         assert!(!architecture.contains("merge_group:"));
         assert!(architecture.contains("workflow_dispatch:"));
-
-        let kernel = workflow("kernel-build.yml");
-        assert!(!kernel.contains("pull_request:"));
-        assert!(!kernel.contains("merge_group:"));
-        assert!(kernel.contains("workflow_dispatch:"));
-        assert!(kernel.contains("push:"));
     }
 
     /// A branch ref re-resolves on every run, so what executes is whatever
@@ -1374,6 +1364,45 @@ mod tests {
         }
     }
 
+    /// Claim 3's `ci:` witness and its no-SSH companion assert properties of
+    /// the image every installed mvmctl boots, which is built in mvm-images.
+    /// So each must fetch the runtime overlay the lock pins and verify it the
+    /// way the CLI does before asserting anything; building an overlay here
+    /// would witness bytes no user receives. The verity lane also has to
+    /// check the seal, not only that three files exist.
+    #[test]
+    fn image_witnesses_assert_on_the_locked_image_set() {
+        let security = workflow("security.yml");
+        for lane in ["verified-boot-artifacts", "sealed-prod-no-ssh"] {
+            let body = job_body(&security, lane)
+                .unwrap_or_else(|| panic!("{lane} must stay in security.yml under its name"));
+            for fetch in [
+                "./scripts/locked-image-tag.sh image_set manifest_sha256",
+                "sha256sum -c -",
+                "cosign verify-blob",
+                "runtime-overlay-x86_64.tar.gz",
+                "sha256sum -c expected.txt",
+                "sha256sum -c checksums-sha256.txt",
+            ] {
+                assert!(
+                    body.contains(fetch),
+                    "{lane} must verify the locked overlay before asserting on it: missing {fetch:?}"
+                );
+            }
+            assert!(
+                !body.contains("nix build"),
+                "{lane} must not build an image in-tree; images are built in mvm-images"
+            );
+        }
+        let verity = job_body(&security, "verified-boot-artifacts").expect("checked above");
+        assert!(
+            verity.contains("veritysetup verify"),
+            "the verity witness must check the roothash against the hash tree"
+        );
+        let no_ssh = job_body(&security, "sealed-prod-no-ssh").expect("checked above");
+        assert!(no_ssh.contains("mount -o ro,loop"));
+    }
+
     #[test]
     fn extended_ci_macos_builds_install_libkrun_from_a_trusted_tap() {
         let extended = workflow("ci-full.yml");
@@ -1418,44 +1447,6 @@ mod tests {
     }
 
     #[test]
-    fn extended_ci_builder_image_stubs_every_manifest_binary() {
-        let extended = workflow("ci-full.yml");
-        let body =
-            job_body(&extended, "builder-vm-image-linux").expect("builder VM image job must exist");
-        for binary in ["mvm-host-vm-init", "mvm-builderd"] {
-            assert!(
-                body.contains(&format!("$HOST_BIN_DIR/{binary}")),
-                "builder VM image smoke must provide the manifest binary {binary}"
-            );
-        }
-    }
-
-    /// Only one workflow may publish a required check's name.
-    ///
-    /// Both of these build kernels from the same script, and both once
-    /// declared `name: Build kernels (<arch>)` — a required status check.
-    /// It resolved unambiguously only because their triggers happen not to
-    /// overlap: give `kernel-build.yml` a `pull_request` or `merge_group`
-    /// trigger and two runs answer to one required context, with branch
-    /// protection reading whichever reported last. The test above pins the
-    /// triggers apart; this pins the names apart, so neither half of the
-    /// arrangement can quietly go away.
-    #[test]
-    fn only_one_workflow_claims_the_required_kernel_check_name() {
-        const REQUIRED: &str = "name: Build kernels (${{ matrix.arch }})";
-
-        assert!(
-            workflow("ci.yml").contains(REQUIRED),
-            "ci.yml owns the required kernel check name"
-        );
-        assert!(
-            !workflow("kernel-build.yml").contains(REQUIRED),
-            "kernel-build.yml must not publish the same check name as ci.yml — \
-             it is the tag-time publisher, not the required PR gate"
-        );
-    }
-
-    #[test]
     fn trusted_main_warms_workspace_and_nix_outputs_for_validation() {
         let cache_action = workflow("../actions/rust-cache/action.yml");
         assert!(cache_action.contains("prefix-key: v1-rust"));
@@ -1479,25 +1470,6 @@ mod tests {
     }
 
     #[test]
-    fn kernel_validation_and_release_reuse_one_builder_script() {
-        let ci = ci_workflow();
-        let ci_kernel = job_block(&ci, "kernel");
-        let release = workflow("kernel-build.yml");
-        let expected = "bash scripts/build-kernel-artifacts.sh \"$ARCH\"";
-        assert!(ci_kernel.contains(expected));
-        assert!(release.contains(expected));
-
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let status = std::process::Command::new("bash")
-            .arg("scripts/build-kernel-artifacts.sh")
-            .arg("not-an-architecture")
-            .current_dir(workspace)
-            .status()
-            .expect("kernel builder input validation must execute");
-        assert_eq!(status.code(), Some(2));
-    }
-
-    #[test]
     fn test_support_source_owners_match_the_targeted_ci_lane() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let mut unexpected = Vec::new();
@@ -1510,6 +1482,7 @@ mod tests {
                 .expect("workspace-relative path");
             let owned = [
                 "crates/mvm-backends/",
+                "crates/mvm-build/",
                 "crates/mvm-cli/",
                 "crates/mvm-client/",
                 "crates/mvm-core/",

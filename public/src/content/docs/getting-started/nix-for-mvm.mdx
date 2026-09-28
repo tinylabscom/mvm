@@ -321,9 +321,13 @@ mvmctl machine run --flake . --name hello --port 8080:8080
 Volumes let you pass files from your host into the microVM at boot — config files, secrets, or persistent data:
 
 ```bash
-# Mount host directories into the VM
-mvmctl machine run --flake . --name hello --port 8080:8080 \
+# A transient run: snapshot a host directory, keep state in a disk image
+mvmctl machine run --flake . \
     --mount ./config:/data/config \
+    --mount ./disk.img:/data/store:1024:rw
+
+# A persistent machine (--port makes it one) takes disk images only
+mvmctl machine run --flake . --name hello --port 8080:8080 \
     --mount ./disk.img:/data/store:1024:rw
 ```
 
@@ -340,15 +344,20 @@ Inside the guest, the files appear at the mount paths:
 
 | Mount | Access | Kind |
 |-------|--------|------|
-| `./config:/data/config` | Read-only (default) | Live host-directory share |
-| `./config:/data/config:rw` | Read-write | Live host-directory share |
+| `./config:/data/config` | Read-only (default) | Host-directory snapshot, transient runs only |
 | `./disk.img:/data/store:1024` | Read-only (default) | Persistent ext4 disk image |
 | `./disk.img:/data/store:1024:rw` | Read-write | Persistent ext4 disk image |
 
 **Every mount is read-only unless you write `:rw`** — writing from a
 (potentially untrusted) guest to a host path is an explicit grant, not a
-default. `:rw` needs `--profile dev` or `--profile permissive`; a *transient*
-run's share is read-only under every profile.
+default. A writable disk image is accepted under every profile that allows
+volumes, the default `standard` included, because the guest writes into its own
+image file rather than a host directory. No profile makes a host directory
+writable: a *transient* run's directory share is a read-only snapshot, and a
+persistent machine (`-d`, or `--name` with `--port`) refuses a directory
+`--mount` outright. To bring a directory into a persistent machine, register a
+snapshot with `mvmctl machine volume mount <machine> --volume <name> --host
+<absolute-dir> --guest <path>`.
 
 The three-part form `host:guest:SIZE` selects an **empty disk image**: the host
 path is a file mvm creates and attaches as virtio-blk, sized in MB. Add `:rw`

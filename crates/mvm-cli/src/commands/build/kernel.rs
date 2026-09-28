@@ -1,17 +1,16 @@
 //! `mvmctl kernel` — build the custom microVM kernels.
 //!
 //! The builder-VM and workload microVM kernels are slim custom Linux
-//! builds (`nix/images/builder-vm/kernel/base.nix` + per-variant
-//! deltas). Because the
+//! builds (the `mvm-images` kernel canon: a shared base + per-variant
+//! deltas), compiled from the selected `mvm-images` checkout. Because the
 //! config is custom, `cache.nixos.org` has no substitute, so a fresh
 //! machine compiles from source — the slow, memory-heavy step a first
 //! build otherwise hits implicitly. This command makes that
 //! compile explicit and one-time: build the kernel once into the
 //! persistent nix store, and every later build reuses it.
 //!
-//! `--source download` (fetch a hash-verified published prebuilt) lands
-//! with the kernel-build publish workflow, which is what produces the
-//! artifact to download.
+//! `--source download` fetches the kernel from the signed image set the
+//! image lock pins, verified against that set's root.
 //!
 //! Progress: the compile path prints an elapsed-time heartbeat every
 //! ~20s; `--verbose` streams the builder VM's `console.log` (the inner
@@ -70,13 +69,12 @@ struct BuildArgs {
 enum Which {
     Builder,
     Workload,
-    /// In-guest-orchestrator variant (rootless Kubernetes guests):
-    /// cgroup/namespace/netfilter/bridge plumbing on top of the workload
-    /// kernel's verified-boot delta.
+    /// In-guest-orchestrator variant (rootless Kubernetes guests). The
+    /// mvm-images kernel canon does not define it, so a compile is refused;
+    /// a cached one is still selectable at boot.
     WorkloadK8s,
     /// Generic rootless-container floor (no network namespace) — the
-    /// control kernel for datapath bisects. Defined only in the mvm-images
-    /// kernel canon; a build from the in-repo flake fails at evaluation.
+    /// control kernel for datapath bisects, from the mvm-images kernel canon.
     Rootless,
 }
 
@@ -176,9 +174,8 @@ fn source_from_policy(policy: Option<crate::commands::env::builder_vm::KernelSou
     }
 }
 
-/// JSON metrics emitted next to the cached kernel — the same shape the
-/// `kernel-build` CI lane uploads (sans gz, which needs a compressor), so a
-/// contributor sees `=y` count + size locally without a CI round-trip.
+/// JSON metrics emitted next to the cached kernel, so a contributor sees the
+/// `=y` count and size of what they compiled without a CI round-trip.
 #[cfg(feature = "builder-vm")]
 #[derive(serde::Serialize)]
 struct KernelMetrics<'a> {
@@ -189,8 +186,8 @@ struct KernelMetrics<'a> {
 }
 
 /// Count built-in (`=y`) symbols in a resolved kernel `.config` — the metric
-/// the `check-kernel-config-budget` gate ratchets on. Matches CI's
-/// `grep -c '=y$'`.
+/// the kernel config budget ratchets on (`xtask perf footprint
+/// --kernel-config`). Matches `grep -c '=y$'`.
 #[cfg(feature = "builder-vm")]
 fn count_builtin_symbols(config: &str) -> usize {
     config

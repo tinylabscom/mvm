@@ -8,8 +8,10 @@
 //! boot) and typed secret references are validated fail-closed and recorded
 //! as metadata-only sidecars before any boot.
 
+pub mod detached;
 pub mod grants_report;
 pub mod machine_start;
+pub mod manifest_ref;
 pub mod pair_stage;
 pub mod persistent;
 mod request;
@@ -20,8 +22,8 @@ pub mod start_params;
 mod tests;
 
 pub use request::{
-    AccessMode, LaunchNetworkPolicy, LaunchRequest, LaunchRequestBuilder, LaunchVolumeSpec,
-    LifecycleMode, MachineSecretRef,
+    AccessMode, LaunchNetworkPolicy, LaunchRequest, LaunchRequestBuilder, LaunchSource,
+    LaunchVolumeSpec, LifecycleMode, MachineSecretRef,
 };
 
 use std::path::PathBuf;
@@ -59,6 +61,9 @@ pub struct LaunchOutcome {
     pub machine: MachineState,
     /// Content-addressed id of the admitted plan.
     pub plan_id: String,
+    /// The token naming the request's command in the guest, when it carried
+    /// one; the command keeps running after the launch returns.
+    pub process: Option<String>,
     /// The admitted authority object used for this boot.
     ///
     /// Fleet stream orchestration needs the exact admitted plan to open the
@@ -121,6 +126,27 @@ fn build_audit_emitter() -> Option<AuditEmitter> {
             tracing::warn!(error = %e, "audit emitter unavailable; skipping chain audit emission");
             None
         }
+    }
+}
+
+/// Seal the session of a persistent machine that was just stopped, then publish
+/// the closing root over it. Best-effort for the same reason as at exit: the
+/// machine is already stopped, and a missing seal is reported by
+/// `trust audit verify` as `UNSEALED` rather than hidden.
+pub(crate) fn seal_stopped_session(plan: &mvm_core::plan::ExecutionPlan, machine: &str) {
+    let Some(emitter) = build_audit_emitter() else {
+        return;
+    };
+    if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Stopped) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            machine,
+            "could not seal the stopped machine's session"
+        );
+        return;
+    }
+    if let Err(e) = emitter.publish_root(&plan.tenant.0) {
+        tracing::warn!(error = %format!("{e:#}"), machine, "could not publish an audit root at stop");
     }
 }
 
@@ -227,34 +253,9 @@ impl LocalBackend {
     /// the backend that carries real workloads on Linux booted whatever sat at
     /// the expected filename while HVF next door required a digest match.
     pub(crate) fn resolve_workload_kernel(backend: &AnyBackend) -> Result<Option<PathBuf>> {
-        use mvm_core::protocol::vm_backend::BackendKind;
-        let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
-        let arch = mvm_core::arch::GuestArch::host().to_string();
-        match backend.kind() {
-            // Bundled-kernel backends: libkrun boots the libkrunfw kernel and
-            // the hermetic mock boots nothing — no host kernel path needed.
-            BackendKind::Mock | BackendKind::Libkrun => Ok(None),
-            // Cache-hit-or-error; populating the cache is a CLI concern. A hit
-            // means the bytes matched their recorded digest, and an entry that
-            // fails to verify is evicted by the resolve — so the hint below is
-            // the right next step for a rejected kernel as much as a missing
-            // one.
-            _ => {
-                let (resolution, label) =
-                    mvm_build::kernel_fetch::resolve_kernel_for_workload(&cache, &arch, false);
-                match resolution {
-                    mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-                        Ok(Some(verified.path().to_path_buf()))
-                    }
-                    _ => Err(crate::local::backend_err(format!(
-                        "{} needs a verified workload kernel at {} — create it once with \
-                         `mvmctl kernel build --which {label}`, then retry",
-                        backend.name(),
-                        mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, label).display()
-                    ))),
-                }
-            }
-        }
+        machine_start::cached_workload_kernel(backend.name())
+            .map(|kernel| kernel.map(PathBuf::from))
+            .map_err(|e| crate::local::backend_err(format!("{e:#}")))
     }
 
     /// Boot one machine through the canonical signed-plan admission seam.
@@ -458,31 +459,6 @@ impl LocalBackend {
     }
 }
 
-/// Rebuild the launch request for a persistent start from the stored
-/// definition.
-///
-/// Every field a start needs comes from the spec, `grants` included. A start
-/// that reassembled the request from sizing alone would let a permission set
-/// hold for the machine's first boot and lapse on every one after — deny-all
-/// for egress, and simply unbounded for CPU and wall clock. Split out from
-/// `start_persistent` so that is checkable without booting a VM.
-fn start_request_from_spec(
-    name: &str,
-    image: RootfsSource,
-    memory_mib: u32,
-    spec: &mp::MachineSpec,
-) -> Result<LaunchRequest> {
-    let mut builder = LaunchRequest::builder(LifecycleMode::Persistent, image)
-        .name(name)
-        .cpus(spec.cpus)
-        .memory_mib(memory_mib)
-        .profile(spec.profile.clone());
-    if let Some(grants) = spec.grants.clone() {
-        builder = builder.grants(grants);
-    }
-    builder.build()
-}
-
 /// Build the persisted declarative spec a persistent launch writes.
 fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::MachineSpec {
     mp::MachineSpec {
@@ -490,8 +466,14 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         name: name.to_string(),
         // The persisted record carries the written form — the same token the
         // caller declared, so a spec read back reconstructs the same value.
-        image: Some(request.image.to_string()),
-        manifest: None,
+        image: match &request.source {
+            LaunchSource::Image(image) => Some(image.to_string()),
+            LaunchSource::Built { .. } => None,
+        },
+        manifest: match &request.source {
+            LaunchSource::Image(_) => None,
+            LaunchSource::Built { slot_hash } => Some(slot_hash.clone()),
+        },
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
@@ -635,6 +617,15 @@ impl LocalBackend {
                 reason: "create (persist without boot) requires a persistent request".into(),
             });
         }
+        if !request.command.is_empty() {
+            // The command is started on the machine once it is up, not
+            // recorded in its definition; accepting one here would drop it.
+            return Err(MvmError::InvalidSpec {
+                reason: "create persists a definition without booting it, so it has no \
+                         command to start; pass the command when running the machine"
+                    .into(),
+            });
+        }
         let name = request
             .name
             .clone()
@@ -677,7 +668,10 @@ impl LocalBackend {
         self.ensure_transient_name_free(&name)?;
         self.validate_and_record_secret_refs(&name, &request.secret_refs)?;
 
-        let result = self.attach_lease_and_boot(&name, &request, true).await;
+        let result = match self.attach_lease_and_boot(&name, &request, true).await {
+            Ok(outcome) => self.start_requested_command(outcome, &request),
+            Err(e) => Err(e),
+        };
         match result {
             Ok(outcome) => Ok(outcome),
             Err(e) => {
@@ -704,10 +698,118 @@ impl LocalBackend {
                 reason: format!("machine {name:?} is already running"),
             });
         }
-        let spec = mp::load_machine_spec(name).map_err(crate::local::backend_err)?;
+        let mut spec = mp::load_machine_spec(name).map_err(crate::local::backend_err)?;
         ensure_spec_bootable_in_process(&spec)?;
         self.validate_sidecar_refs(name)?;
-        self.attach_lease_and_boot(name, request, false).await
+        let launched_at = std::time::Instant::now();
+        let (started, backend) = self
+            .boot_spec(
+                &mut spec,
+                request.backend.as_deref(),
+                !request.command.is_empty(),
+            )
+            .await?;
+        if let Some(ttl) = request.ttl_seconds {
+            detached::apply_ttl(name, std::time::Duration::from_secs(ttl))?;
+        }
+        let plan = started.admitted.plan().clone();
+        let outcome = LaunchOutcome {
+            machine: MachineState {
+                id: MachineId(name.to_string()),
+                name: name.to_string(),
+                status: MachineStatus::Running,
+                backend,
+                cpus: spec.cpus,
+                memory_mib: request.memory_mib,
+                profile: Some(spec.profile.clone()),
+                expires_at: expires_at_from_ttl(request.ttl_seconds),
+                ..Default::default()
+            },
+            plan_id: started.admitted.plan_id().0.clone(),
+            process: None,
+            admitted: started.admitted,
+            mode: LifecycleMode::Persistent,
+            plan,
+            launched_at: Some(launched_at),
+        };
+        self.start_requested_command(outcome, request)
+    }
+
+    /// Boot a persisted definition through the admitted start the CLI's
+    /// `machine run -d` and `machine start` use, resolving an image source to
+    /// a rootfs first. Returns the start and the backend it booted on.
+    ///
+    /// Crash leftovers in the per-VM runtime dir (a stale substitution-endpoint
+    /// socket above all) make the fresh endpoint die binding it, so a machine
+    /// that is not running starts from an empty dir.
+    async fn boot_spec(
+        &self,
+        spec: &mut mp::MachineSpec,
+        backend_override: Option<&str>,
+        has_ad_hoc_argv: bool,
+    ) -> Result<(machine_start::MachineStart, String)> {
+        let backend = backend_override
+            .map(str::to_string)
+            .unwrap_or_else(|| self.backend.name().to_string());
+        if !self.machine_running(&spec.name) {
+            remove_vm_runtime_dirs(&spec.name)?;
+        }
+        let image = match spec.image.clone() {
+            Some(reference) => Some(
+                machine_start::resolve_boot_image(&reference, &spec.name)
+                    .await
+                    .map_err(|e| crate::local::backend_err(format!("{e:#}")))?,
+            ),
+            None => None,
+        };
+        let host = machine_start::EmbedderStartHost::new(image, &spec.profile)
+            .with_secret_service(self.secrets()?)
+            .with_backend(&self.backend);
+        let started = detached::boot_recorded(
+            spec,
+            &host,
+            machine_start::MachineStartParams {
+                hypervisor: &backend,
+                has_ad_hoc_argv,
+            },
+        )
+        .map_err(|e| crate::local::backend_err(format!("{e:#}")))?;
+        Ok((started, backend))
+    }
+
+    /// Start the request's command in the machine the launch just booted, and
+    /// record its token on the outcome. A command that will not start fails
+    /// the launch and stops the machine: the caller asked for a machine
+    /// running that command, not an idle one.
+    fn start_requested_command(
+        &self,
+        mut outcome: LaunchOutcome,
+        request: &LaunchRequest,
+    ) -> Result<LaunchOutcome> {
+        if request.command.is_empty() {
+            return Ok(outcome);
+        }
+        let name = outcome.machine.name.clone();
+        let started = self.command_starter.start(
+            &name,
+            detached::BootCommand {
+                argv: request.command.clone(),
+                env: request.env.clone(),
+                cwd: request.cwd.clone(),
+            },
+        );
+        match started {
+            Ok(token) => {
+                outcome.process = Some(token);
+                Ok(outcome)
+            }
+            Err(e) => {
+                self.stop_for_recreate(&name);
+                Err(MvmError::Backend {
+                    reason: format!("{e:#}"),
+                })
+            }
+        }
     }
 
     /// Re-validate the secret references recorded in `name`'s sidecar —
@@ -757,7 +859,17 @@ impl LocalBackend {
         let started = self
             .boot_admitted(BootParams {
                 name: name.to_string(),
-                image: request.image.clone(),
+                image: match &request.source {
+                    LaunchSource::Image(image) => image.clone(),
+                    // `build` refuses a built workload on the transient path.
+                    LaunchSource::Built { .. } => {
+                        return Err(MvmError::InvalidSpec {
+                            reason: "a workload built from a manifest boots as a persistent \
+                                     machine"
+                                .into(),
+                        });
+                    }
+                },
                 cpus: request.cpus,
                 memory_mib: request.memory_mib,
                 backend_override: request.backend.clone(),
@@ -827,6 +939,7 @@ impl LocalBackend {
                 ..Default::default()
             },
             plan_id: started.admitted.plan_id().0.clone(),
+            process: None,
             admitted: started.admitted,
             mode: if transient {
                 LifecycleMode::Transient
@@ -839,27 +952,20 @@ impl LocalBackend {
     }
 }
 
-/// Refusals for persisted-spec shapes the in-process backend cannot honor
-/// (fail closed, never silently ignore a persisted field).
-fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<RootfsSource> {
+/// Refusals for persisted-spec shapes a library start cannot honor (fail
+/// closed, never silently ignore a persisted field): the start path boots an
+/// image, a built manifest or a deployment, and its volumes arrive as typed
+/// attachments; the CLI-only shapes stay with `mvmctl machine start`.
+fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<()> {
     let unsupported = |what: &str| MvmError::InvalidSpec {
         reason: format!(
-            "machine {:?} declares {what}, which the in-process local backend cannot \
-             honor; use the CLI's `machine start`",
+            "machine {:?} declares {what}, which a library start cannot honor; use the CLI's \
+             `machine start`",
             spec.name
         ),
     };
-    if spec.manifest.is_some() {
-        return Err(unsupported("a manifest-backed source"));
-    }
-    if spec.deployment.is_some() {
-        return Err(unsupported("an attested-deployment source"));
-    }
     if spec.runtime_pack {
         return Err(unsupported("a runtime-pack source"));
-    }
-    if spec.net || !spec.allow_host.is_empty() {
-        return Err(unsupported("a network policy other than deny-all"));
     }
     if !spec.volumes.is_empty() {
         return Err(unsupported(
@@ -869,17 +975,15 @@ fn ensure_spec_bootable_in_process(spec: &mp::MachineSpec) -> Result<RootfsSourc
     if !spec.init.is_empty() {
         return Err(unsupported("init commands"));
     }
-    let image = spec.image.as_deref().ok_or_else(|| MvmError::InvalidSpec {
-        reason: format!("machine {:?} has no image source", spec.name),
-    })?;
-    // The on-disk record stores the written form; a start reconstructs the
-    // declaration from it rather than passing the bytes on unread.
-    image.parse().map_err(|e| MvmError::InvalidSpec {
-        reason: format!(
-            "machine {:?} declares an unusable image source: {e}",
-            spec.name
-        ),
-    })
+    if spec.image.is_none() && spec.manifest.is_none() && spec.deployment.is_none() {
+        return Err(MvmError::InvalidSpec {
+            reason: format!(
+                "machine {:?} has no image, manifest or deployment source",
+                spec.name
+            ),
+        });
+    }
+    Ok(())
 }
 
 impl LocalBackend {
@@ -900,13 +1004,21 @@ impl LocalBackend {
                 ..Default::default()
             });
         }
-        let image = ensure_spec_bootable_in_process(&spec)?;
+        ensure_spec_bootable_in_process(&spec)?;
         self.validate_sidecar_refs(name)?;
-        let memory_mib =
-            mvm_core::util::parse_human_size(&spec.memory).map_err(crate::local::backend_err)?;
-        let request = start_request_from_spec(name, image, memory_mib, &spec)?;
-        let outcome = self.attach_lease_and_boot(name, &request, false).await?;
-        Ok(outcome.machine)
+        let mut spec = spec;
+        let (_, backend) = self.boot_spec(&mut spec, None, false).await?;
+        let memory_mib = mvm_core::util::parse_human_size(&spec.memory).unwrap_or_default();
+        Ok(MachineState {
+            id: MachineId(name.to_string()),
+            name: name.to_string(),
+            status: MachineStatus::Running,
+            backend,
+            cpus: spec.cpus,
+            memory_mib,
+            profile: Some(spec.profile.clone()),
+            ..Default::default()
+        })
     }
 
     /// Restart a persistent machine: stop it when running (spec kept), then
@@ -1072,6 +1184,16 @@ impl LocalBackend {
                 },
             ) {
                 tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
+            }
+            // Seal before the closing root, so the root covers the seal.
+            if let Err(e) =
+                emitter.seal_session(&outcome.plan, mvm_hostd::audit::session::SealReason::Exited)
+            {
+                tracing::warn!(
+                    error = %format!("{e:#}"),
+                    machine = name,
+                    "could not seal the session at exit; `trust audit verify` will report it unsealed"
+                );
             }
             // The closing bracket of the run. Admission published the opening
             // one, so a verifier can prove the log only grew across the whole

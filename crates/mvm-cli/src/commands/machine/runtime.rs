@@ -1,7 +1,6 @@
 use super::*;
 use crate::commands::shared;
 use crate::commands::vm::{invoke, logs};
-use mvm_client::MvmClient;
 
 pub(super) fn resolve_persistent_spec(
     args: &MachineRunArgs,
@@ -15,21 +14,21 @@ pub(super) fn resolve_persistent_spec(
         || args.run.deployment.is_some()
         || resolved_manifest_slot.is_some()
         || direct_boot;
-    if !has_source {
-        return match existing {
-            Some(spec) => Ok((spec, SpecReconcile::Reuse)),
-            None => anyhow::bail!(
-                "machine {name:?} does not exist; pass --image, --manifest, --deployment, or --flake to create it"
-            ),
-        };
+    if !has_source && existing.is_none() {
+        anyhow::bail!(
+            "machine {name:?} does not exist; pass --image, --manifest, --deployment, or --flake to create it"
+        );
     }
-    let desired = machine_run_spec(args, name.to_string(), resolved_manifest_slot)?;
-    let action = reconcile_machine_spec(existing.as_ref(), &desired, args.force)?;
-    let spec = match action {
-        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
-        SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
+    let desired = if has_source {
+        Some(machine_run_spec(
+            args,
+            name.to_string(),
+            resolved_manifest_slot,
+        )?)
+    } else {
+        None
     };
-    Ok((spec, action))
+    mvm_client::launch::detached::resolve_spec(name, desired, existing, args.force)
 }
 
 fn run_persistent(
@@ -64,12 +63,31 @@ fn run_persistent(
         return Ok(());
     }
 
-    let booted = persist_and_boot_machine(
-        &name,
-        &spec,
-        action,
-        start_args_for_run(&args, &name),
-        secret_refs.as_deref(),
+    // Watch for egress refusals from before the boot, so one the workload
+    // hits while it starts is not lost to the moment before the attach.
+    let denials = (args.run.argv.is_empty() && post_start_action(&args) == PostStart::Attach)
+        .then(|| {
+            super::super::vm::egress_denials::watch_machine(
+                &name,
+                super::super::vm::egress_denials::Live::Notices,
+            )
+        })
+        .flatten();
+
+    if let SpecReconcile::Recreate { changed } = &action {
+        eprintln!(
+            "machine {name:?}: config changed ({changed}) — stopping the old instance and recreating it"
+        );
+    }
+    let start = start_args_for_run(&args, &name);
+    let booted = mvm_client::launch::detached::persist_and_boot(
+        mvm_client::launch::detached::DetachedBoot {
+            name: &name,
+            spec: &spec,
+            action,
+            secret_refs: secret_refs.as_deref(),
+        },
+        || lifecycle::start_machine(start),
     )?;
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
@@ -79,7 +97,7 @@ fn run_persistent(
         apply_machine_ttl(&name, dur_str)?;
     }
 
-    run_persistent_post_start(cli, cfg, &args, &name)
+    run_persistent_post_start(cli, cfg, &args, &name, denials)
 }
 
 /// The secret references a persistent machine records beside its spec: those
@@ -94,8 +112,10 @@ fn persistent_secret_refs(
             .map(|workload| {
                 mvm_client::admission::secrets::workload_machine_refs(&workload, "local")
             });
-    let flagged =
-        mvm_client::admission::run_secrets::resolve_run_secret_flags(&args.run.secret, "local")?;
+    let flagged = mvm_client::admission::run_secrets::resolve_run_secret_specs(
+        crate::commands::vm::run_secrets::merged_secret_specs(&args.run)?,
+        "local",
+    )?;
     if declared.is_none() && flagged.is_empty() {
         return Ok(None);
     }
@@ -110,55 +130,12 @@ fn persistent_secret_refs(
     Ok(Some(references))
 }
 
-fn persist_and_boot_machine(
-    name: &str,
-    spec: &MachineSpec,
-    action: SpecReconcile,
-    start: MachineStartArgs,
-    secret_refs: Option<&[mvm_client::secret::MachineSecretRef]>,
-) -> Result<bool> {
-    match action {
-        SpecReconcile::Reuse => {}
-        SpecReconcile::Create => save_machine_spec(spec, false)?,
-        SpecReconcile::Recreate { changed } => {
-            eprintln!(
-                "machine {name:?}: config changed ({changed}) — stopping the old instance and recreating it"
-            );
-            lifecycle::stop_running_machine(name);
-            overwrite_machine_spec(spec)?;
-        }
-    }
-    if lifecycle::machine_is_running(name) && secret_refs.is_some() {
-        anyhow::bail!(
-            "machine {name:?} is already running; stop it before changing its secret bindings"
-        );
-    }
-    if let Some(references) = secret_refs {
-        let service = mvm_client::secret::SecretService::local()
-            .context("opening the local secret service")?;
-        if references.is_empty() {
-            service
-                .clear_machine_references(name)
-                .context("clearing persistent-machine secret references")?;
-        } else {
-            service
-                .record_machine_references(name, references)
-                .context("recording persistent-machine secret references")?;
-        }
-    }
-    if lifecycle::machine_is_running(name) {
-        Ok(false)
-    } else {
-        lifecycle::start_machine(start)?;
-        Ok(true)
-    }
-}
-
 fn run_persistent_post_start(
     cli: &Cli,
     cfg: &MvmConfig,
     args: &MachineRunArgs,
     name: &str,
+    denials: Option<super::super::vm::egress_denials::DenialWatch>,
 ) -> Result<()> {
     if !args.run.argv.is_empty() {
         if !shared::wait_for_guest_agent(name, 30) {
@@ -192,7 +169,7 @@ fn run_persistent_post_start(
             println!("{name}");
             Ok(())
         }
-        PostStart::Attach => attach_to_output(name),
+        PostStart::Attach => attach_to_output(name, denials),
     }
 }
 
@@ -268,13 +245,21 @@ pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
 ///
 /// A machine with no capture is a note, not a failure: the machine booted, and
 /// that is what `machine run` was asked to do.
-fn attach_to_output(name: &str) -> Result<()> {
+///
+/// Egress refusals the machine hits while attached print as they happen, and
+/// once more as a summary if its output ends.
+fn attach_to_output(
+    name: &str,
+    denials: Option<super::super::vm::egress_denials::DenialWatch>,
+) -> Result<()> {
     // Say what attaching means before it blocks. The machine is persistent, so
     // interrupting detaches from the output and leaves it running — the
     // opposite of what Ctrl-C does to a foreground transient run, and worth
     // stating rather than leaving to be discovered.
     eprintln!("attached to machine {name}; press Ctrl-C to detach (it keeps running)");
-    match logs::attach(name)? {
+    let attached = logs::attach(name);
+    super::super::vm::egress_denials::finish_and_summarize(denials);
+    match attached? {
         logs::AttachOutcome::Followed => Ok(()),
         logs::AttachOutcome::NoCapture => {
             eprintln!(
@@ -327,20 +312,11 @@ pub(super) fn transient_volume_warning(name: &str, count: usize) -> String {
 }
 
 fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
-    // Duration parsing stays a CLI concern; the facade's `set_ttl` applies the
-    // resolved `expires_at` to the host registry (same op the `set-ttl` verb
-    // routes through), so the machine path stays off the registry internals.
+    // Parsing the flag is a CLI concern; recording the expiry is the library
+    // step every detached run shares.
     let dur = mvm_core::crypto::policy::parse_ttl(dur_str)
         .with_context(|| format!("Invalid --ttl value {dur_str:?}"))?;
-    let expires_at = mvm_core::util::time::utc_plus_duration(dur);
-    let client = mvm_client::LocalBackend::new();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build runtime for machine TTL")?;
-    match runtime
-        .block_on(client.set_ttl(&mvm_client::MachineId(name.to_string()), Some(expires_at)))
-    {
+    match mvm_client::launch::detached::apply_ttl(name, dur) {
         Ok(()) => Ok(()),
         Err(mvm_client::MvmError::NotFound { .. }) => {
             anyhow::bail!("machine {name:?} is not registered")
@@ -427,13 +403,16 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
     let machine_name = resolve_entrypoint_machine_name(&args)?;
     // Resolve `--net` / `--allow-host` into the egress policy exactly as the
     // transient argv path does, so a baked entrypoint enforces the same posture.
+    let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
+    crate::approval::configure(crate::commands::vm::run_routes::launch_approval(&args.run)?);
     let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
         args.run.net,
         args.run.network_preset,
-        &args.run.allow_host,
+        &routes.with_allow_host(&args.run.allow_host),
         &[],
     )?
-    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget));
+    .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget))
+    .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
         source,
@@ -443,6 +422,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         memory_mib,
         from_workload_ir: args.run.from_workload_ir.clone(),
         secret_flags: args.run.secret.clone(),
+        manifest_secrets: crate::commands::vm::run_secrets::project_secret_specs(&args.run)?,
         agent_verb_override: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
         machine_name,

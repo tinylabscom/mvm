@@ -1,27 +1,52 @@
 # Refactor status
 
-Last updated: 2026-09-25
+Last updated: 2026-09-27
 
 ## In progress
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
       microVM / vsock / signed-plan security core and close every
-      product-surface gap on top of it. One issue per workstream:
-  - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
+      product-surface gap on top of it. Resume from the plan's "Execution
+      log and handoff" section (landed PRs, open PRs, decisions, known
+      defects). One issue per workstream:
+  - [x] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
+    - [x] hostlib ABI 1.2: `machine.run`/`create`/`start`/`inventory`, streamed process output
+    - [x] Python and TypeScript facades on hostlib; every subprocess transport deleted (Rust `mvm-sdk` clients too)
+    - [x] `xtask check-no-cli-shellout`, in `check-all`
+    - [x] `mvm-client` re-exports the embedder surface; Rust quickstart on `mvm-client` alone
+    - [x] library lookup documented (`MVM_HOSTLIB_PATH` → packaged → beside `mvmctl`)
+    - [x] command override / guest env / template sources in the in-process launcher (persistent launch on the CLI's start); in-VM function dispatch (`entrypoint.call`, `session.*` over `mvm_client::entrypoint`); log follow (`machine.logs.stream.*`, ABI 1.3); live-boot SDK scenario on HVF
   - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
+    - [x] private-range default deny at the `EgressGate`, metadata never re-admitted, DNS pinned for the forward leg
+    - [x] route + endpoint-rule model (fuzzed), L7 enforcement with explicit interception grant, `ask` seam, `--allow-endpoint`, `[[network.routes]]`
+    - [ ] injection modes (`query_param`, `url_path`, `basic_auth`)
+    - [ ] endpoint routes on persistent machines
   - [ ] PS-03 credential injection UX (`--secret`, TLS termination for bound destinations, source refs, OAuth) — #3713
     - [x] `--secret NAME[:HOST,...]` on `run` / `machine run`, fail-closed before boot
     - [x] TLS termination for plan-bound destinations only; destinations signed into the plan, one placeholder per binding
     - [x] `examples/claude-code` binds the key with `--secret`; no raw key in the guest
-    - [ ] secret source references, provider routes, `[secrets]` in `mvm.toml`, OAuth2
+    - [x] response-path scrub of reflected values (`secret.reflection_scrubbed`)
+    - [x] secret source references (`--from env://|file://|keychain://|op://|bw://`)
+    - [x] provider routes with credential headers (gitlab, gemini added)
+    - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
+    - [ ] OAuth2 — #3743
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+    - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
+    - [ ] denial → policy draft selector (Grant / Skip)
+    - [ ] `mvmctl why` against a resolved policy
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+    - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
+    - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
+    - [ ] tool calls (PS-13), SDK callback through hostlib (PS-01), a broker for detached machines
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
+    - [x] per-session seal, derived session ledger, `trust audit sessions|show|verify <session>`
+    - [x] fsync policy stated and tested; anchoring documented; rotation default confirmed
+    - [ ] snapshot roots in the ledger (waits on PS-08)
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
   - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723
@@ -29,9 +54,9 @@ Last updated: 2026-09-25
   - [ ] PS-16 Nix developer experience — #3725
   - [ ] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
-  - [ ] PS-19 fewer feature flags — #3728
+  - [x] PS-19 fewer feature flags — #3728
   - [ ] PS-20 unreachable CLI surface and stale references — #3729
-  - [ ] PS-21 CLI thin over `mvm-client` — #3730
+  - [x] PS-21 CLI thin over `mvm-client` — #3730
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by
@@ -597,10 +622,12 @@ Last updated: 2026-09-25
       executable example (#3258) is complete: one pinned native-agent recipe
       feeds both example flakes, signed Workload IR carries the `SecretRef`,
       `mvm.toml` admits only the model API, and the documented-surface suite
-      owns an offline live smoke witness and audit verification. Open: the
-      SDK's argv transport (#3261, whose host library, `crates/mvm-hostlib`, has landed
-      with its versioned ABI and read-only machine methods; the bindings that
-      replace the argv transport are next), and the rest of WS-S. WS3's MCP
+      owns an offline live smoke witness and audit verification. The SDK's argv
+      transport (#3261) is gone: both SDKs load `libmvm_hostlib` in-process
+      (ABI 1.2, launch and streamed output included) and `xtask
+      check-no-cli-shellout` holds the line (#3711). Open: converging the
+      in-process launcher with the CLI's `machine run` front half, and the rest
+      of WS-S. WS3's MCP
       surface (#3262) is done: `mvmctl ops mcp stdio --machine <name>` binds
       the six `mvm.drive.*` tools to one machine's verified drive grant through
       `mvm_client::drive::LocalDrive`; they are not listed without the grant,
@@ -3921,5 +3948,14 @@ resume` takes a `current_head` and refuses when it differs from the
             - [x] Wave 0: deletion inventory re-scanned from `main` (80
                   files, four classes); waves re-sequenced to 0.5a/0.5b,
                   1+2, 3, 4.
-            - [ ] Wave 0.5a: initramfs accepted as an image-set role in
-                  `mvm-core`; `image-set/v0.2.1` and its pin pending.
+            - [x] Wave 0.5a: the initramfs is a required signed root
+                  member; `images.lock` pins `image-set/v0.2.1`.
+            - [x] Wave 0.5b: runtime overlay, SDK sidecar and initramfs
+                  come from the pinned set, not the CLI's own release.
+            - [x] Waves 1+2: no mvm code path builds an image in-tree; an
+                  in-tree build refuses with "image construction lives in
+                  mvm-images".
+            - [x] Waves 3+4: no workflow builds, mirrors or re-signs an
+                  image; `nix/images/` is deleted.
+            - [x] Release decoupling: image-set members are cached by the
+                  pinned root, so a CLI version bump needs no image rebuild.

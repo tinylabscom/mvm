@@ -629,11 +629,13 @@ pub fn resolve_supervisor_path_verified() -> Result<PathBuf> {
 }
 
 fn libkrun_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
-    mvm_vmm::host::aux_bin::AuxBin {
-        bin: "mvm-libkrun-supervisor",
-        env_var: "MVM_LIBKRUN_SUPERVISOR_PATH",
-        rebuild_package: "mvm-hostd",
-    }
+    mvm_vmm::host::aux_bin::AuxBin::new(
+        "mvm-libkrun-supervisor",
+        "MVM_LIBKRUN_SUPERVISOR_PATH",
+        "mvm-hostd",
+    )
+    .requiring_features(&["libkrun-sys"])
+    .signed_with(mvm_vmm::host::codesign::RequiredEntitlement::Hypervisor)
 }
 
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {

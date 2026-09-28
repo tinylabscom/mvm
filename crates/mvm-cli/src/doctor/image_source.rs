@@ -110,15 +110,6 @@ fn image_source_line(
                 ),
             )
         }
-        Ok(source @ ImageSource::InTree { root }) => (
-            true,
-            format!(
-                "{} — in-tree image flakes under {}/nix/images — {}",
-                source.tier(),
-                root.display(),
-                mvm_with_digests,
-            ),
-        ),
         Err(error) => (false, format!("refused — {error} — {mvm_with_digests}")),
     };
     Check {
@@ -152,20 +143,6 @@ mod tests {
         assert!(c.info.contains(&"a".repeat(40)), "{}", c.info);
         assert!(c.info.contains("(clean)"), "{}", c.info);
         assert_eq!(c.info.matches(" — ").count(), 2, "{}", c.info);
-    }
-
-    #[test]
-    fn a_contributor_build_reports_its_in_tree_images_as_local_dev() {
-        let c = image_source_line(
-            &Ok(ImageSource::InTree {
-                root: std::path::PathBuf::from("/src/mvm"),
-            }),
-            &mvm_checkout(),
-            None,
-        );
-        assert!(c.ok);
-        assert!(c.info.starts_with("local-dev — in-tree"), "{}", c.info);
-        assert!(c.info.contains("/src/mvm/nix/images"), "{}", c.info);
     }
 
     #[test]

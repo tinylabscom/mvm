@@ -19,6 +19,16 @@
 //! anything: the `image-set/v*` push-tag glob that fires the publishing
 //! workflow, and the `image-set/v.*` wildcard inside a keyless signing
 //! identity, which constrains who may have signed rather than what to fetch.
+//!
+//! The same reasoning covers source checkouts of the image repository. A
+//! workflow that checks it out to build from it must take the ref from `xtask
+//! image-source-ref`, the commit that produced the locked set. A checkout of
+//! `main`, or of no ref at all, is a finding: v0.18.0's release failed after
+//! it was tagged because the image repository's `main` gained a manifest field
+//! this tree did not parse yet. A workflow whose purpose is to test the two
+//! `main`s together is listed as a canary, and must not be reachable from a
+//! pull request, the merge queue, a push or another workflow — so it can go
+//! red without blocking anything.
 
 use anyhow::{Context, Result, bail};
 use std::path::Path;
@@ -40,6 +50,27 @@ const SCANNED_DIRS: [&str; 3] = [".github/workflows", "scripts", "tests"];
 
 /// The prefix every image-set tag starts with.
 const TAG_PREFIX: &str = "image-set/v";
+
+/// Where a source checkout of the image repository can be declared.
+const WORKFLOW_DIR: &str = ".github/workflows";
+
+/// The command whose output every source checkout of the image repository
+/// must take its ref from.
+const SOURCE_REF_RESOLVER: &str = "xtask -- image-source-ref";
+
+/// Workflows that check the image repository out at its `main` on purpose:
+/// they exist to find out, before a pin advances, whether the two `main`s
+/// still work together. Each must stay off every gating path.
+const CANARY_WORKFLOWS: [&str; 1] = [".github/workflows/image-pair.yml"];
+
+/// Triggers that make a workflow's result block a merge or a release.
+const GATING_TRIGGERS: [&str; 5] = [
+    "pull_request",
+    "pull_request_target",
+    "merge_group",
+    "push",
+    "workflow_call",
+];
 
 /// How one `image-set/v…` mention behaves.
 #[derive(Debug, PartialEq, Eq)]
@@ -102,14 +133,28 @@ pub fn run(workspace: &Path) -> Result<()> {
             findings.extend(findings_in(&relative, &text, locked));
         })?;
     }
+    let images_repository = lock.image_set.repository.as_str();
+    crate::fs_walk::walk_files(&workspace.join(WORKFLOW_DIR), &mut |path| {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return;
+        };
+        let relative = path
+            .strip_prefix(workspace)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        findings.extend(checkout_findings(&relative, &text, images_repository));
+    })?;
 
     if !findings.is_empty() {
         let rendered: Vec<String> = findings.iter().map(Finding::render).collect();
         bail!(
-            "check-image-lock: {} image-set pin(s) do not come from {LOCK_FILE} (locked tag: {locked}):\n{}\n\n\
+            "check-image-lock: {} image pin(s) do not come from {LOCK_FILE} (locked tag: {locked}):\n{}\n\n\
              Read the pin instead of copying it: `$({READER})` from shell or YAML, \
              `cargo run -p xtask -- release-boot-image tag` where a toolchain is available, \
-             or `mvm_core::config::default_boot_image_tag()` from Rust.",
+             or `mvm_core::config::default_boot_image_tag()` from Rust. Check the image \
+             repository out at `ref: ${{{{ steps.<id>.outputs.ref }}}}`, where step <id> \
+             writes `ref=$(cargo run -q -p xtask -- image-source-ref)` to $GITHUB_OUTPUT.",
             findings.len(),
             rendered.join("\n")
         );
@@ -174,6 +219,165 @@ fn findings_in(file: &str, text: &str, locked: &str) -> Vec<Finding> {
         }
     }
     findings
+}
+
+/// Every source checkout of `images_repository` in one workflow that does not
+/// take its ref from the lock, and every gating trigger on a canary.
+fn checkout_findings(file: &str, text: &str, images_repository: &str) -> Vec<Finding> {
+    let lines: Vec<&str> = text.lines().collect();
+    let finding = |line: usize, detail: String| Finding {
+        file: file.to_string(),
+        line: line + 1,
+        detail,
+    };
+    if CANARY_WORKFLOWS.contains(&file) {
+        return triggers(&lines)
+            .into_iter()
+            .filter(|(_, trigger)| GATING_TRIGGERS.contains(&trigger.as_str()))
+            .map(|(line, trigger)| {
+                finding(
+                    line,
+                    format!(
+                        "is a canary that checks out {images_repository} at a ref the lock does \
+                         not pin, so it must not run on `{trigger}`: a canary on a gating path \
+                         lets the other repository's `main` block this one"
+                    ),
+                )
+            })
+            .collect();
+    }
+
+    let mut findings = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if yaml_value(line, "repository") != Some(images_repository) {
+            continue;
+        }
+        let step = &lines[step_bounds(&lines, index)];
+        let Some(reference) = step.iter().find_map(|l| yaml_value(l, "ref")) else {
+            findings.push(finding(
+                index,
+                format!(
+                    "checks out {images_repository} with no ref, which is its default branch; \
+                     take the ref from `{SOURCE_REF_RESOLVER}`"
+                ),
+            ));
+            continue;
+        };
+        let Some(id) = resolver_step_id(reference) else {
+            findings.push(finding(
+                index,
+                format!(
+                    "checks out {images_repository} at {reference:?}, which {LOCK_FILE} does not \
+                     pin; take the ref from `{SOURCE_REF_RESOLVER}`"
+                ),
+            ));
+            continue;
+        };
+        if !step_runs_resolver(&lines, id) {
+            findings.push(finding(
+                index,
+                format!(
+                    "checks out {images_repository} at the output of step {id:?}, which does not \
+                     run `{SOURCE_REF_RESOLVER}`"
+                ),
+            ));
+        }
+    }
+    findings
+}
+
+/// The value of a `key: value` line, unquoted, or `None` when the line assigns
+/// another key. A list item's leading `- ` is part of the indentation.
+fn yaml_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let trimmed = line.trim_start().trim_start_matches("- ").trim_start();
+    let value = trimmed.strip_prefix(key)?.strip_prefix(':')?.trim();
+    Some(value.trim_matches(|c| c == '"' || c == '\''))
+}
+
+/// `step-id` from `${{ steps.step-id.outputs.ref }}`, the only ref spelling a
+/// resolver step can feed.
+fn resolver_step_id(reference: &str) -> Option<&str> {
+    let inner = reference
+        .strip_prefix("${{")?
+        .strip_suffix("}}")?
+        .trim()
+        .strip_prefix("steps.")?
+        .strip_suffix(".outputs.ref")?;
+    (!inner.is_empty() && !inner.contains(char::is_whitespace)).then_some(inner)
+}
+
+/// Whether the step declaring `id: <id>` runs the resolver.
+fn step_runs_resolver(lines: &[&str], id: &str) -> bool {
+    lines.iter().enumerate().any(|(index, line)| {
+        yaml_value(line, "id") == Some(id)
+            && lines[step_bounds(lines, index)]
+                .iter()
+                .any(|l| l.contains(SOURCE_REF_RESOLVER))
+    })
+}
+
+fn indentation(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// The lines of the list item — the workflow step — that contains `index`:
+/// from its `- ` to the next line at or left of that dash.
+fn step_bounds(lines: &[&str], index: usize) -> std::ops::Range<usize> {
+    let key_indent = indentation(lines[index]);
+    let is_item = |i: usize| lines[i].trim_start().starts_with("- ");
+    let start = (0..=index)
+        .rev()
+        .find(|&i| is_item(i) && (i == index || indentation(lines[i]) < key_indent))
+        .unwrap_or(index);
+    let dash = indentation(lines[start]);
+    let end = (start + 1..lines.len())
+        .find(|&i| {
+            let trimmed = lines[i].trim_start();
+            !trimmed.is_empty() && !trimmed.starts_with('#') && indentation(lines[i]) <= dash
+        })
+        .unwrap_or(lines.len());
+    start..end
+}
+
+/// A workflow's triggers, each with the line it is declared on. Covers the
+/// block form (`on:` then one key per line) and the inline forms
+/// (`on: push`, `on: [push, pull_request]`).
+fn triggers(lines: &[&str]) -> Vec<(usize, String)> {
+    let Some(on) = lines
+        .iter()
+        .position(|line| line.starts_with("on:") || line.starts_with("\"on\":"))
+    else {
+        return Vec::new();
+    };
+    let inline = lines[on]
+        .split_once(':')
+        .map_or("", |(_, rest)| rest)
+        .trim();
+    if !inline.is_empty() {
+        return inline
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .split(',')
+            .map(|trigger| (on, trigger.trim().to_string()))
+            .filter(|(_, trigger)| !trigger.is_empty())
+            .collect();
+    }
+    let mut found = Vec::new();
+    for (index, line) in lines.iter().enumerate().skip(on + 1) {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if indentation(line) == 0 {
+            break;
+        }
+        if indentation(line) == 2
+            && let Some((key, _)) = trimmed.split_once(':')
+        {
+            found.push((index, key.trim().to_string()));
+        }
+    }
+    found
 }
 
 /// Classify every `image-set/v…` on one line.
@@ -314,6 +518,117 @@ mod tests {
                 classify(after),
                 TagMention::Enumeration,
                 "{after:?} matches more than one release"
+            );
+        }
+    }
+
+    const IMAGES: &str = "tinylabscom/mvm-images";
+
+    fn checkout_workflow(reference: Option<&str>, resolver: &str) -> String {
+        let reference = reference.map_or(String::new(), |r| format!("          ref: {r}\n"));
+        format!(
+            "on:\n  merge_group:\njobs:\n  build:\n    steps:\n\
+             \x20     - uses: actions/checkout@v6\n\
+             \x20     - name: Resolve\n        id: images-ref\n        run: |\n\
+             \x20         ref=\"$(cargo run -q -p {resolver})\"\n\
+             \x20         echo \"ref=$ref\" >> \"$GITHUB_OUTPUT\"\n\
+             \x20     - name: Check out mvm-images\n        uses: actions/checkout@v6\n\
+             \x20       with:\n          repository: {IMAGES}\n{reference}\
+             \x20         path: mvm-images\n\
+             \x20     - name: Build\n        run: nix build\n"
+        )
+    }
+
+    const LOCKED_REF: &str = "${{ steps.images-ref.outputs.ref }}";
+
+    #[test]
+    fn a_checkout_at_the_resolved_ref_passes() {
+        let text = checkout_workflow(Some(LOCKED_REF), "xtask -- image-source-ref");
+        assert_eq!(
+            checkout_findings(".github/workflows/ci.yml", &text, IMAGES),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_checkout_of_main_fails_and_names_the_line() {
+        let text = checkout_workflow(Some("main"), "xtask -- image-source-ref");
+        let findings = checkout_findings(".github/workflows/e2e-docs.yml", &text, IMAGES);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        let line = text.lines().nth(findings[0].line - 1).unwrap();
+        assert!(
+            line.contains("repository: tinylabscom/mvm-images"),
+            "{line}"
+        );
+        assert!(
+            findings[0].detail.contains("\"main\""),
+            "{}",
+            findings[0].detail
+        );
+    }
+
+    /// No `ref:` is the repository's default branch, which is `main` by
+    /// another spelling.
+    #[test]
+    fn a_checkout_without_a_ref_fails() {
+        let text = checkout_workflow(None, "xtask -- image-source-ref");
+        let findings = checkout_findings(".github/workflows/ci.yml", &text, IMAGES);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("default branch"));
+    }
+
+    #[test]
+    fn a_ref_from_a_step_that_does_not_resolve_the_lock_fails() {
+        let text = checkout_workflow(Some(LOCKED_REF), "xtask -- release-boot-image tag");
+        let findings = checkout_findings(".github/workflows/ci.yml", &text, IMAGES);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("\"images-ref\""));
+    }
+
+    #[test]
+    fn a_hardcoded_commit_fails() {
+        let text = checkout_workflow(Some(&"a".repeat(40)), "xtask -- image-source-ref");
+        assert_eq!(
+            checkout_findings(".github/workflows/ci.yml", &text, IMAGES).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_checkout_of_another_repository_is_not_a_finding() {
+        let text = checkout_workflow(Some("main"), "true").replace(IMAGES, "tinylabscom/mvmd");
+        assert_eq!(
+            checkout_findings(".github/workflows/ci.yml", &text, IMAGES),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn a_canary_on_schedule_and_dispatch_passes() {
+        let text = "on:\n  schedule:\n    - cron: \"0 0 * * *\"\n  workflow_dispatch:\n\
+                    jobs:\n  pair:\n    steps:\n      - uses: actions/checkout@v6\n\
+                    \x20       with:\n          repository: tinylabscom/mvm-images\n\
+                    \x20         ref: main\n";
+        assert_eq!(checkout_findings(CANARY_WORKFLOWS[0], text, IMAGES), vec![]);
+    }
+
+    #[test]
+    fn a_canary_on_a_gating_trigger_fails_in_either_form() {
+        for (text, trigger) in [
+            (
+                "on:\n  schedule:\n  pull_request:\njobs: {}\n",
+                "pull_request",
+            ),
+            ("on:\n  workflow_call:\njobs: {}\n", "workflow_call"),
+            ("on: [schedule, merge_group]\njobs: {}\n", "merge_group"),
+            ("on: push\njobs: {}\n", "push"),
+        ] {
+            let findings = checkout_findings(CANARY_WORKFLOWS[0], text, IMAGES);
+            assert_eq!(findings.len(), 1, "{text:?}: {findings:?}");
+            assert!(
+                findings[0].detail.contains(trigger),
+                "{}",
+                findings[0].detail
             );
         }
     }

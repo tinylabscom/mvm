@@ -51,17 +51,14 @@ pub use build::{
 pub use cache::{
     CacheLookup, CachedImageSet, ENTRY_RECORD_NAME, EntryContext, FlakeAttr, FlakeLockDigest,
     ImageBuildRole, ImageBuildTarget, KeyInputs, LOCAL_IMAGE_CACHE_DIR, LocalImageCache,
-    LocalImageCacheError, LocalImageCacheKey, PublishOutcome, StagedEntry, ToolchainPins,
+    LocalImageCacheError, LocalImageCacheKey, MvmSourceIdentity, PublishOutcome, StagedEntry,
+    ToolchainPins,
 };
 pub use git::{RepoIdentity, WorktreeState, probe_identity};
 pub use local_set::{LocalSetError, LocalSetRequest};
 
 /// The variable naming a local `mvm-images` checkout.
 pub const MVM_IMAGES_DIR_ENV: &str = "MVM_IMAGES_DIR";
-
-/// The in-tree builder image flake, whose presence marks an mvm checkout that
-/// still builds its own images.
-const IN_TREE_IMAGE_MARKER: &str = "nix/images/builder-vm/flake.nix";
 
 /// Files every `mvm-images` checkout carries at its root, relative paths. A
 /// directory missing any of them is not one, whatever else it holds.
@@ -147,30 +144,50 @@ pub enum ImageSourceError {
     },
 }
 
+/// A request to build an image when no `mvm-images` checkout is selected.
+///
+/// This repository no longer carries image sources, so a build that only an
+/// image checkout can perform has nothing to fall back on. The refusal says
+/// where the sources went and both ways to select them, instead of leaving the
+/// caller to discover a missing flake. `what` names the image asked for.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error(
+    "{what} is built from an mvm-images checkout, and none is selected: image construction \
+     lives in mvm-images. Set ${MVM_IMAGES_DIR_ENV} to an mvm-images checkout, or clone \
+     tinylabscom/mvm-images beside this mvm checkout so it is found as a sibling"
+)]
+pub struct ImageConstructionRefused {
+    what: String,
+}
+
+impl ImageConstructionRefused {
+    /// Refuse building `what`, e.g. "the dev default image".
+    pub fn new(what: impl Into<String>) -> Self {
+        Self { what: what.into() }
+    }
+}
+
 /// Where the images come from, once selected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageSource {
     /// The set the checked-in image lock pins, admitted only after its manifest
     /// verifies.
     Released,
-    /// A local image checkout, named explicitly.
+    /// A local image checkout, named explicitly or found beside the mvm
+    /// checkout a contributor build was compiled from.
     LocalCheckout(LocalImageCheckout),
-    /// The image flakes still inside the mvm checkout a contributor build was
-    /// compiled from. The default for such a build until those flakes are
-    /// removed; never selected for a release build.
-    InTree { root: PathBuf },
 }
 
 impl ImageSource {
     /// The tier this source is classified into. The released source is
     /// classified `verified-release` because the only path that consumes it
     /// verifies the manifest first; nothing here verifies anything. Anything
-    /// built locally, in either checkout, is `local-dev`.
+    /// built from a local checkout is `local-dev`.
     #[must_use]
     pub fn tier(&self) -> ImageTrustTier {
         match self {
             Self::Released => ImageTrustTier::VerifiedRelease,
-            Self::LocalCheckout(_) | Self::InTree { .. } => ImageTrustTier::LocalDev,
+            Self::LocalCheckout(_) => ImageTrustTier::LocalDev,
         }
     }
 }
@@ -249,38 +266,17 @@ pub fn configured_images_dir() -> Option<PathBuf> {
 /// checkout path.
 ///
 /// A configured path is either a valid local checkout or an error; it never
-/// falls back to another source. Without one, a contributor build whose
-/// checkout still carries the in-tree image flakes builds from those, and
-/// every other binary uses the released set.
+/// falls back to another source. Without one, every binary uses the released
+/// set: image construction lives in `mvm-images`, so there is no third source.
 pub fn resolve_image_source(
     channel: DistributionChannel,
     configured: Option<&Path>,
-) -> Result<ImageSource, ImageSourceError> {
-    select_image_source(channel, configured, in_tree_images(channel))
-}
-
-/// [`resolve_image_source`] with the in-tree answer passed in, so the choice
-/// is testable without depending on the checkout the tests run from.
-pub fn select_image_source(
-    channel: DistributionChannel,
-    configured: Option<&Path>,
-    in_tree: Option<PathBuf>,
 ) -> Result<ImageSource, ImageSourceError> {
     if let Some(path) = configured {
         refuse_in_release_build(channel, Some(path))?;
         return LocalImageCheckout::open(path).map(ImageSource::LocalCheckout);
     }
-    Ok(match in_tree {
-        Some(root) if channel.permits_automatic_builds() => ImageSource::InTree { root },
-        _ => ImageSource::Released,
-    })
-}
-
-/// The mvm checkout of a contributor build, when it still carries the in-tree
-/// image flakes.
-#[must_use]
-pub fn in_tree_images(channel: DistributionChannel) -> Option<PathBuf> {
-    mvm_source_checkout(channel).filter(|root| root.join(IN_TREE_IMAGE_MARKER).is_file())
+    Ok(ImageSource::Released)
 }
 
 /// A release build refuses a configured local checkout, valid or not.
@@ -392,10 +388,31 @@ pub fn mvm_source_checkout(channel: DistributionChannel) -> Option<PathBuf> {
     mvm_source_checkout_at(root)
 }
 
-/// Whether `root` is an mvm source checkout, independent of whether it still
-/// carries the in-tree image flakes: the probe is the workspace manifest, not
-/// `nix/images`. Removing the image flakes must not turn a contributor build
-/// into an installed one.
+/// Variable naming the mvm checkout a contributor build compiles its guest
+/// runtime from, when it is not the checkout the binary was compiled from.
+pub const GUEST_RUNTIME_SOURCE_ROOT_ENV: &str = "MVM_RUNTIME_OVERLAY_SOURCE_ROOT";
+
+/// The mvm checkout a contributor build compiles its guest runtime from: the
+/// runtime overlay and the universal initramfs are assembled from guest
+/// binaries cargo builds in that checkout, with no image flake involved. The
+/// override wins when it names an mvm checkout; otherwise it is the checkout
+/// this binary was compiled from. A release build has none.
+#[must_use]
+pub fn guest_runtime_source_checkout() -> Option<PathBuf> {
+    let channel = crate::artifact_acquisition::compiled_channel();
+    if !channel.permits_automatic_builds() {
+        return None;
+    }
+    if let Some(root) = std::env::var_os(GUEST_RUNTIME_SOURCE_ROOT_ENV)
+        && let Some(checkout) = mvm_source_checkout_at(Path::new(&root))
+    {
+        return Some(checkout);
+    }
+    mvm_source_checkout(channel)
+}
+
+/// Whether `root` is an mvm source checkout. The probe is the workspace
+/// manifest: a contributor build stays one whatever image sources it can see.
 pub(crate) fn mvm_source_checkout_at(root: &Path) -> Option<PathBuf> {
     root.join("Cargo.toml")
         .is_file()
@@ -412,10 +429,9 @@ pub(crate) fn mvm_source_checkout_at(root: &Path) -> Option<PathBuf> {
 ///    checkout (the standard two-repository layout) — the contributor
 ///    default, so a normal image-backed launch consumes the external image
 ///    source without an environment variable. A discovered checkout that
-///    fails validation warns and falls through to the in-tree window rather
+///    fails validation warns and falls through to the released set rather
 ///    than breaking the build; release builds never look.
-/// 3. The in-tree flakes, while a contributor checkout still carries them;
-///    otherwise the released set.
+/// 3. The released set the lock pins.
 pub fn resolve_current_source() -> Result<ImageSource, ImageSourceError> {
     let channel = crate::artifact_acquisition::compiled_channel();
     let configured = configured_images_dir();
@@ -437,9 +453,8 @@ fn select_with_discovery(
     configured: Option<&Path>,
     workspace_root: Option<&Path>,
 ) -> Result<ImageSource, ImageSourceError> {
-    if let Some(path) = configured {
-        refuse_in_release_build(channel, Some(path))?;
-        return LocalImageCheckout::open(path).map(ImageSource::LocalCheckout);
+    if configured.is_some() {
+        return resolve_image_source(channel, configured);
     }
     if channel.permits_automatic_builds()
         && let Some(root) = workspace_root
@@ -451,15 +466,12 @@ fn select_with_discovery(
                 tracing::warn!(
                     sibling = %candidate.display(),
                     %error,
-                    "the sibling mvm-images checkout is not usable; building from the                      in-tree flakes instead — set MVM_IMAGES_DIR to override or fix the                      checkout"
+                    "the sibling mvm-images checkout is not usable; using the released image set instead — set MVM_IMAGES_DIR to override or fix the checkout"
                 );
             }
         }
     }
-    Ok(match in_tree_images(channel) {
-        Some(root) if channel.permits_automatic_builds() => ImageSource::InTree { root },
-        _ => ImageSource::Released,
-    })
+    Ok(ImageSource::Released)
 }
 
 /// The sibling image checkout the layout implies — `<workspace
@@ -469,36 +481,6 @@ fn select_with_discovery(
 fn sibling_images_checkout(workspace_root: &Path) -> Option<PathBuf> {
     let candidate = workspace_root.parent()?.join("mvm-images");
     candidate.join("flake.nix").is_file().then_some(candidate)
-}
-
-/// The compiled-from mvm checkout while it still carries the in-tree image
-/// flakes. In-tree image consumers — the runtime overlay and SDK sidecar
-/// source builds — probe this in one place instead of each re-deriving it:
-/// the override hook, the workspace layout, and the flake's presence are one
-/// fact, not three. Deliberately independent of the selector: a configured
-/// checkout routes those consumers through the pair instead, and this probe
-/// stays the answer for the selector-unset window.
-pub fn in_tree_overlay_checkout_root() -> Option<PathBuf> {
-    if !crate::artifact_acquisition::compiled_channel().permits_automatic_builds() {
-        return None;
-    }
-    if let Ok(override_root) = std::env::var("MVM_RUNTIME_OVERLAY_SOURCE_ROOT") {
-        let path = PathBuf::from(override_root);
-        if in_tree_overlay_at(&path) {
-            return Some(path);
-        }
-    }
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir.parent()?.parent()?;
-    in_tree_overlay_at(workspace_root).then(|| workspace_root.to_path_buf())
-}
-
-fn in_tree_overlay_at(root: &Path) -> bool {
-    root.join("nix")
-        .join("images")
-        .join("runtime-overlay")
-        .join("flake.nix")
-        .is_file()
 }
 
 fn canonical_directory(requested: &Path) -> Result<PathBuf, ImageSourceError> {

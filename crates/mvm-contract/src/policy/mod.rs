@@ -9,6 +9,7 @@
 
 pub mod action_budget;
 pub mod approval;
+pub mod approval_prompt;
 pub mod audit;
 pub mod bundle;
 /// Strict DNS answer filtering for SSRF and rebinding defense.
@@ -20,5 +21,7 @@ pub mod projection;
 pub mod protected_paths;
 pub mod redaction;
 pub mod resolver;
+pub mod restricted_address;
 pub mod reversible_replacement;
+pub mod routes;
 pub mod security;

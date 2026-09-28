@@ -157,6 +157,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         SpecReconcile::Reuse => {}
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
+    enforce_persisted_volume_profile(&spec.profile, &spec.volumes)?;
     let effective_hypervisor = args
         .hypervisor
         .as_deref()
@@ -165,9 +166,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let started = mvm_client::launch::machine_start::start_machine_spec(
         &spec,
-        &CliStartHost {
-            kernel_pinned: args.kernel_pin.is_some(),
-        },
+        &CliStartHost::for_spec(&spec, args.kernel_pin.is_some()),
         mvm_client::launch::machine_start::MachineStartParams {
             hypervisor: &effective_hypervisor,
             has_ad_hoc_argv: args.has_ad_hoc_argv,
@@ -212,16 +211,36 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
 /// How the CLI supplies a machine start with what differs by process: it may
 /// build the workload kernel through the builder VM, and it prepares volumes
 /// through its mount cache.
-struct CliStartHost {
+pub(super) struct CliStartHost {
     /// `--kernel-pin` was passed: boot the pinned kernel.
     kernel_pinned: bool,
+    /// The profile the machine's stored spec names. Its registered volumes
+    /// are leased under it, so a writable one is admitted exactly where a
+    /// writable `--mount` disk image is; a name that is not a profile admits
+    /// nothing writable.
+    profile: mvm_client::volume::AdmittedProfile,
+}
+
+impl CliStartHost {
+    pub(super) fn for_spec(spec: &MachineSpec, kernel_pinned: bool) -> Self {
+        let profile = mvm_client::profile::RunProfile::from_name(&spec.profile)
+            .map(mvm_client::volume::AdmittedProfile::new)
+            .unwrap_or_default();
+        Self {
+            kernel_pinned,
+            profile,
+        }
+    }
 }
 
 impl mvm_client::launch::machine_start::StartHost for CliStartHost {
-    fn workload_kernel(&self) -> Result<String> {
+    /// The CLI boots an explicit kernel on every backend: the pinned one, or
+    /// the workload kernel, built through the builder VM when the cache has
+    /// none.
+    fn workload_kernel(&self, _backend: &str) -> Result<Option<String>> {
         match up::resolve_kernel_pin_path(self.kernel_pinned)? {
-            Some(kernel_path) => Ok(kernel_path),
-            None => crate::commands::env::builder_vm::ensure_workload_kernel(),
+            Some(kernel_path) => Ok(Some(kernel_path)),
+            None => crate::commands::env::builder_vm::ensure_workload_kernel().map(Some),
         }
     }
 
@@ -256,7 +275,11 @@ impl mvm_client::launch::machine_start::StartHost for CliStartHost {
         volume_specs: &[String],
     ) -> Result<mvm_client::volume::LaunchPreparation> {
         let volume_cfg = build_machine_volume_cfg(volume_specs)?;
-        crate::commands::vm::volume::merge_registered_volumes_for_launch(name, &volume_cfg)
+        crate::commands::vm::volume::merge_registered_volumes_for_launch(
+            name,
+            &volume_cfg,
+            self.profile,
+        )
     }
 }
 
@@ -402,20 +425,4 @@ pub(super) fn confirm_stop(
     Ok(())
 }
 
-pub(super) fn machine_is_running(name: &str) -> bool {
-    mvm_client::backend_is_running(&shared::resolve_effective_hypervisor("firecracker"), name)
-}
-
-pub(super) fn stop_running_machine(name: &str) {
-    let hypervisor = shared::resolve_effective_hypervisor("firecracker");
-    match mvm_client::backend_stop_by_name(&hypervisor, name) {
-        Ok(()) => {
-            if let Err(err) = crate::commands::vm::volume::release_volume_leases_for_vm(name) {
-                tracing::warn!(error = %err, machine = name, "releasing volume leases after stop failed");
-            }
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
-        }
-    }
-}
+pub(super) use mvm_client::launch::detached::{machine_is_running, stop_running_machine};

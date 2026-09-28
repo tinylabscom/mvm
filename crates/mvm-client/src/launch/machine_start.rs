@@ -13,18 +13,22 @@
 //! builder VM; a library embedder never builds.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
+use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::machine::persist as mp;
 
 use super::persistent::{PersistentImageStartParams, start_persistent_oci_machine};
+use crate::secret::SecretService;
 use crate::volume::LaunchPreparation;
 
 /// What the process starting a machine supplies that differs between the CLI
 /// and a library embedder.
 pub trait StartHost {
-    /// The workload kernel to boot.
-    fn workload_kernel(&self) -> Result<String>;
+    /// The workload kernel to boot on `backend`, or `None` when that backend
+    /// carries its own.
+    fn workload_kernel(&self, backend: &str) -> Result<Option<String>>;
 
     /// The bootable rootfs for the OCI image `reference`, pulling and
     /// materializing it if it is not cached.
@@ -33,6 +37,20 @@ pub trait StartHost {
     /// `name`'s volumes, from the spec's volume declarations, merged with the
     /// machine's registered volumes and leased for this launch.
     fn prepare_volumes(&self, name: &str, volume_specs: &[String]) -> Result<LaunchPreparation>;
+
+    /// The secret service the machine's recorded secret references are
+    /// validated against before admission: the host's own unless the caller
+    /// was handed a different one.
+    fn secret_service(&self) -> Result<Arc<SecretService>> {
+        Ok(Arc::new(
+            SecretService::local().context("opening the local secret service")?,
+        ))
+    }
+
+    /// The backend that starts the machine on `hypervisor`.
+    fn backend(&self, hypervisor: &str) -> AnyBackend {
+        AnyBackend::from_hypervisor(hypervisor)
+    }
 }
 
 /// A bootable rootfs and what it came from.
@@ -202,7 +220,7 @@ pub fn start_machine_spec(
     host: &dyn StartHost,
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
-    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
+    AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
     // A granted allow-list is what the gate enforces; the legacy
     // `net`/`allow_host` fields decide the policy only for a spec that granted
     // no egress. Deriving it from the same spec the plan is admitted under is
@@ -218,9 +236,13 @@ pub fn start_machine_spec(
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let boot = resolve_boot_source(spec, host)?;
     let kernel_path = match boot.kernel {
-        Some(kernel) => kernel,
-        None => host.workload_kernel()?,
+        Some(kernel) => Some(kernel),
+        None => host.workload_kernel(params.hypervisor)?,
     };
+    // Validated before any volume is leased, so a missing secret refuses the
+    // start without leaving a lease behind.
+    let secrets =
+        crate::admission::secrets::resolve_machine_secrets(&spec.name, &*host.secret_service()?)?;
     let prepared_volumes = host
         .prepare_volumes(&spec.name, &spec.volumes)
         .context("resolving registered local volumes before admission")?;
@@ -244,11 +266,41 @@ pub fn start_machine_spec(
         grants: spec.grants.clone(),
         gpu: spec.gpu,
         gpu_device: spec.gpu_device,
+        secrets,
+        backend: host.backend(params.hypervisor),
     })?;
     Ok(MachineStart {
         resolved_digest: boot.digest,
         admitted,
     })
+}
+
+/// The workload kernel a process that never builds one can boot on
+/// `backend`: `None` for a backend that carries its own kernel (libkrun boots
+/// libkrunfw's, the mock boots nothing), otherwise the verified kernel in the
+/// cache. A cache hit means the bytes matched their recorded digest; a miss,
+/// or an entry that failed to verify and was evicted, is refused with the
+/// command that fills it.
+pub fn cached_workload_kernel(backend: &str) -> Result<Option<String>> {
+    use mvm_core::protocol::vm_backend::BackendKind;
+    match crate::backend_kind_for(backend) {
+        BackendKind::Mock | BackendKind::Libkrun => return Ok(None),
+        _ => {}
+    }
+    let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = mvm_core::arch::GuestArch::host().to_string();
+    let (resolution, label) =
+        mvm_build::kernel_fetch::resolve_kernel_for_workload(&cache, &arch, false);
+    match resolution {
+        mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+            Ok(Some(verified.path().display().to_string()))
+        }
+        _ => bail!(
+            "{backend} needs a verified workload kernel at {}, and this process does not \
+             build one — create it once with `mvmctl kernel build --which {label}`, then retry",
+            mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, label).display()
+        ),
+    }
 }
 
 /// How a library embedder supplies a start.
@@ -262,6 +314,8 @@ pub fn start_machine_spec(
 pub struct EmbedderStartHost {
     image: Option<BootImage>,
     profile: crate::volume::AdmittedProfile,
+    secrets: Option<Arc<SecretService>>,
+    backend: Option<AnyBackend>,
 }
 
 impl EmbedderStartHost {
@@ -271,33 +325,54 @@ impl EmbedderStartHost {
         Self {
             image,
             profile: crate::volume::AdmittedProfile::from_profile_name(profile),
+            secrets: None,
+            backend: None,
         }
+    }
+
+    /// Start on `backend` when the machine's hypervisor is the one it runs,
+    /// so a caller holding a backend sees the machines started through this
+    /// host.
+    #[must_use]
+    pub fn with_backend(mut self, backend: &AnyBackend) -> Self {
+        self.backend = Some(backend.handle());
+        self
+    }
+
+    /// Validate the machine's secret references against `service` rather
+    /// than the host's own.
+    #[must_use]
+    pub fn with_secret_service(mut self, service: Arc<SecretService>) -> Self {
+        self.secrets = Some(service);
+        self
     }
 }
 
 impl StartHost for EmbedderStartHost {
-    fn workload_kernel(&self) -> Result<String> {
-        let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
-        let arch = mvm_core::arch::GuestArch::host().to_string();
-        let (resolution, label) =
-            mvm_build::kernel_fetch::resolve_kernel_for_workload(&cache, &arch, false);
-        match resolution {
-            mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-                Ok(verified.path().display().to_string())
-            }
-            _ => bail!(
-                "starting a machine needs a verified workload kernel at {}, and this process \
-                 does not build one — create it once with `mvmctl kernel build --which \
-                 {label}`, then retry",
-                mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, label).display()
-            ),
-        }
+    fn workload_kernel(&self, backend: &str) -> Result<Option<String>> {
+        cached_workload_kernel(backend)
     }
 
     fn resolve_image(&self, reference: &str) -> Result<BootImage> {
         match &self.image {
             Some(image) if image.label == reference => Ok(image.clone()),
             _ => bail!("the image {reference:?} was not resolved before the start"),
+        }
+    }
+
+    fn secret_service(&self) -> Result<Arc<SecretService>> {
+        match &self.secrets {
+            Some(service) => Ok(Arc::clone(service)),
+            None => Ok(Arc::new(
+                SecretService::local().context("opening the local secret service")?,
+            )),
+        }
+    }
+
+    fn backend(&self, hypervisor: &str) -> AnyBackend {
+        match &self.backend {
+            Some(backend) if backend.name() == hypervisor => backend.handle(),
+            _ => AnyBackend::from_hypervisor(hypervisor),
         }
     }
 
@@ -386,7 +461,7 @@ mod tests {
     }
 
     impl StartHost for ImageOnlyHost {
-        fn workload_kernel(&self) -> Result<String> {
+        fn workload_kernel(&self, _: &str) -> Result<Option<String>> {
             bail!("not asked for a kernel")
         }
 
@@ -513,6 +588,65 @@ mod tests {
         );
     }
 
+    /// Register a writable attachment of an unlocked managed block volume
+    /// for `owner`, under the default library profile.
+    fn register_writable_managed_volume(home: &crate::volume::test_support::TestVolumeHome) {
+        use crate::volume::VolumeService as _;
+        home.create_block("state", 16);
+        let volumes = crate::volume::LocalVolumeService::new();
+        volumes.unlock_volume("state").expect("unlock");
+        let request = crate::volume::AttachmentRequest::builder("web", "state")
+            .and_then(|b| {
+                b.guest_path("/data/state")
+                    .access(crate::volume::AccessMode::ReadWrite)
+                    .profile(crate::volume::AdmittedProfile::from_profile_name(
+                        "standard",
+                    ))
+                    .build()
+            })
+            .expect("standard registers a writable managed volume");
+        volumes.prepare_attachment(&request).expect("attach");
+    }
+
+    /// An embedder starting a machine under the default `standard` profile
+    /// gets its writable managed volume, as `dev` and `permissive` do: the
+    /// guest writes into the volume's own disk image.
+    #[test]
+    fn the_embedder_host_leases_a_writable_managed_volume_under_standard() {
+        let home = crate::volume::test_support::TestVolumeHome::new();
+        register_writable_managed_volume(&home);
+        for profile in ["standard", "dev", "permissive"] {
+            let prepared = EmbedderStartHost::new(None, profile)
+                .prepare_volumes("web", &[])
+                .unwrap_or_else(|e| panic!("{profile}: {e:#}"));
+            assert_eq!(prepared.volumes.len(), 1, "{profile}");
+            assert_eq!(prepared.volumes[0].guest, "/data/state");
+            assert!(!prepared.volumes[0].read_only, "{profile}");
+            // Dropped uncommitted, so the next profile can take the lease.
+        }
+    }
+
+    /// `restrictive` grants no writable disk image, and a profile name that
+    /// is not a preset grants nothing; both refuse the writable volume.
+    #[test]
+    fn the_embedder_host_refuses_a_writable_managed_volume_under_restrictive() {
+        let home = crate::volume::test_support::TestVolumeHome::new();
+        register_writable_managed_volume(&home);
+        for (profile, named) in [
+            ("restrictive", "profile \"restrictive\""),
+            ("prod", "no recognised profile"),
+        ] {
+            let message = format!(
+                "{:#}",
+                EmbedderStartHost::new(None, profile)
+                    .prepare_volumes("web", &[])
+                    .expect_err("no writable volume without the grant")
+            );
+            assert!(message.contains("does not permit writable"), "{message}");
+            assert!(message.contains(named), "{message}");
+        }
+    }
+
     /// With nothing in the kernel cache the embedder refuses and says how to
     /// fill it, rather than building one.
     #[test]
@@ -521,7 +655,7 @@ mod tests {
         let mut env = TestEnv::new();
         env.set("MVM_HOME", home.path());
         let err = EmbedderStartHost::new(None, "standard")
-            .workload_kernel()
+            .workload_kernel("firecracker")
             .expect_err("no cached kernel");
         let message = err.to_string();
         assert!(message.contains("does not build one"), "{message}");

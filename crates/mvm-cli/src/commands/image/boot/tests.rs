@@ -123,20 +123,24 @@ fn a_failed_update_leaves_the_previous_image_in_place() {
 }
 
 #[test]
-fn update_refuses_in_a_source_checkout_without_force() {
-    // The test binary is built from this checkout, so the in-repo builder-VM
-    // flake resolves and the refusal is live.
+fn update_refuses_while_an_image_checkout_is_selected_without_force() {
+    // A selected image checkout is what builds the boot image, so replacing
+    // it with a prebuilt is refused; selecting one makes the refusal live.
     let home = tempfile::tempdir().expect("tempdir");
+    let images = tempfile::tempdir().expect("tempdir");
+    crate::commands::env::builder_vm::test_pair::images_checkout(images.path(), "{}\n");
     let mut env = TestEnv::new();
     env.isolate_mvm_home(home.path());
+    env.set(mvm_build::image_source::MVM_IMAGES_DIR_ENV, images.path());
 
     let err = update::run(&UpdateRequest {
         tag: Some("image-set/v0.2.0".to_string()),
         force: false,
     })
-    .expect_err("a source checkout's local build is authoritative");
+    .expect_err("a selected checkout's local build is authoritative");
     assert!(
-        err.to_string().contains("source checkout"),
+        err.to_string()
+            .contains("while a local image checkout is selected"),
         "the refusal must name the reason: {err}"
     );
 }

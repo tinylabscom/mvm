@@ -288,7 +288,7 @@ You now have a Nix derivation. To get a bootable rootfs on disk, `mvmctl` runs `
 The orchestrator picks a builder mode (`host` | `vsock` | `auto`) and dispatches to one of the backends under `crates/mvm-build/src/backend/`. For each build it:
 
 1. **Prepares mounts.** Workspace mounted RO at `/work` inside the builder VM. Host `/nix` mounted RO when present; otherwise an empty store. Artifact dir mounted RW at `/out`.
-2. **Boots the builder VM.** 4 vCPU, 4096 MiB default. The builder image itself is built from this repo's flakes (`nix/images/builder-vm/`) — never downloaded — when running from a source checkout. (See CLAUDE.md: "Source-checkout builds never depend on mvm-published artifacts".)
+2. **Boots the builder VM.** 4 vCPU, 4096 MiB default. The builder image itself is built in mvm-images: from a selected mvm-images checkout when running from a source checkout that has one, and otherwise fetched from the signed image set `images.lock` pins.
 3. **Runs `nix build`.** With `--override-input mvm git+file://...?dir=nix` so the builder VM consumes the in-tree `nix/lib` you're editing, not a pinned release.
 4. **Extracts artifacts.** Copies `rootfs.ext4`, `vmlinux`, and `mvm-meta.json` back to the host artifact dir.
 

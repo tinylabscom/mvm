@@ -6,6 +6,12 @@
 */
 
 /**
+ * Kind of agent-side error reported via `EntrypointEvent::Error`.
+ * 
+ * The variants are deliberately coarse — the host correlates by `kind` and surfaces the human-readable `message` to the operator. Adding a variant is a wire change; renaming or removing is a breaking change.
+ */
+export type RunEntrypointError = ("PayloadCap" | "Timeout" | "Canceled" | "Busy" | "WrapperCrashed" | "NotReady" | "EntrypointInvalid" | "SessionKilled" | "InternalError")
+/**
  * Which way `guest.cp` moves the file.
  */
 export type CopyDirection = ("host_to_guest" | "guest_to_host")
@@ -22,6 +28,10 @@ exited: number
 killed: number
 } | "timed_out")
 export type GuestProcListReply = ProcInfo[]
+/**
+ * Which channel a chunk came from.
+ */
+export type StreamName = (("stdout" | "stderr") | "trace" | "frame")
 /**
  * How a waited-on process ended.
  */
@@ -78,10 +88,18 @@ pending: string[]
 }
 } | "output_consumer_slow" | "input_buffer_full" | "artifact_transfer_blocked" | "builder_busy")
 export type MachineStatus = (("starting" | "running" | "stopped" | "failed") | "paused")
-export type MachineListReply = MachineState1[]
+export type MachineInventoryReply = {
+
+}[]
+export type MachineListReply = MachineState2[]
+/**
+ * Whether the machine outlives the caller's session.
+ */
+export type RunMode = ("transient" | "persistent")
 
 export interface HostAbi {
 backend_capabilities: BackendCapabilities
+entrypoint_call: EntrypointCall
 guest_cp: GuestCp
 guest_fs_list: GuestFsList
 guest_fs_mkdir: GuestFsMkdir
@@ -95,13 +113,27 @@ guest_proc_list: GuestProcList
 guest_proc_signal: GuestProcSignal
 guest_proc_start: GuestProcStart
 guest_proc_stdin: GuestProcStdin
+guest_proc_stream_close: GuestProcStreamClose
+guest_proc_stream_next: GuestProcStreamNext
+guest_proc_stream_open: GuestProcStreamOpen
 guest_proc_wait: GuestProcWait
+machine_create: MachineCreate
 machine_exec: MachineExec
 machine_inspect: MachineInspect
+machine_inventory: MachineInventory
 machine_list: MachineList
 machine_logs: MachineLogs
+machine_logs_stream_close: MachineLogsStreamClose
+machine_logs_stream_next: MachineLogsStreamNext
+machine_logs_stream_open: MachineLogsStreamOpen
 machine_rm: MachineRm
+machine_run: MachineRun
+machine_start: MachineStart
 machine_stop: MachineStop
+session_call: SessionCall
+session_info: SessionInfo
+session_start: SessionStart
+session_stop: SessionStop
 }
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
@@ -118,6 +150,68 @@ export interface BackendCapabilitiesReply {
  */
 export interface Empty {
 
+}
+export interface EntrypointCall {
+reply: EntrypointCallReply
+request: EntrypointCallRequest
+}
+/**
+ * The reply to `entrypoint.call` and `session.call`.
+ */
+export interface EntrypointCallReply {
+/**
+ * Set when the agent, not the workload, ended the call.
+ */
+agent_error?: (AgentErrorReply | null)
+/**
+ * The wrapper's error envelope, when the call failed with one.
+ */
+error?: (RemoteErrorReply | null)
+/**
+ * The workload's exit status, or the conventional status for how the agent ended the call (124 timeout, 137 crashed wrapper, 142 killed session, 75 not ready, 1 otherwise).
+ */
+exit_code: number
+/**
+ * Output past the per-channel cap was dropped.
+ */
+output_truncated: boolean
+stderr_b64: string
+stdout_b64: string
+}
+/**
+ * Why the guest agent (or, for a killed session, the host) ended the call rather than the workload exiting.
+ */
+export interface AgentErrorReply {
+kind: RunEntrypointError
+message: string
+}
+/**
+ * The structured error a function workload's wrapper reported for an exception the user's function raised.
+ */
+export interface RemoteErrorReply {
+error_id: string
+kind: string
+message: string
+}
+/**
+ * An `entrypoint.call` request. Exactly one of `workload` and `manifest`.
+ */
+export interface EntrypointCallRequest {
+cpus?: (number | null)
+/**
+ * A manifest path, the directory holding one, or a 64-hex slot address.
+ */
+manifest?: (string | null)
+memory_mib?: (number | null)
+/**
+ * The encoded `[args, kwargs]` call, base64. Empty is the no-argument call.
+ */
+payload_b64: string
+timeout_secs?: (number | null)
+/**
+ * The id the workload was declared with.
+ */
+workload?: (string | null)
 }
 export interface GuestCp {
 reply: Empty1
@@ -330,6 +424,60 @@ data_b64: string
 id: string
 token: string
 }
+export interface GuestProcStreamClose {
+reply: Empty6
+request: CloseRequest
+}
+export interface Empty6 {
+
+}
+export interface CloseRequest {
+stream: number
+}
+export interface GuestProcStreamNext {
+reply: NextReply
+request: NextRequest
+}
+export interface NextReply {
+/**
+ * The source has ended and the stream is closed.
+ */
+done: boolean
+events: StreamEvent[]
+/**
+ * How a process ended; present when a process stream is done, absent otherwise.
+ */
+outcome?: (WaitOutcome | null)
+}
+/**
+ * One chunk of output.
+ */
+export interface StreamEvent {
+data_b64: string
+stream: StreamName
+}
+export interface NextRequest {
+stream: number
+/**
+ * How long to wait for a first chunk. At most [`MAX_WAIT_MS`].
+ */
+wait_ms?: (number | null)
+}
+export interface GuestProcStreamOpen {
+reply: OpenReply
+request: OpenRequest
+}
+export interface OpenReply {
+stream: number
+}
+export interface OpenRequest {
+id: string
+/**
+ * Bounds the wait on the guest; the stream ends `timed_out` past it.
+ */
+timeout_secs?: (number | null)
+token: string
+}
 export interface GuestProcWait {
 reply: WaitReply
 request: WaitRequest
@@ -348,28 +496,9 @@ id: string
 timeout_secs?: (number | null)
 token: string
 }
-export interface MachineExec {
-reply: ExecReply
-request: ExecRequest
-}
-/**
- * A `machine.exec` reply. Stream bytes cross as base64, because JSON strings are not byte strings — the same convention as `machine.logs` and every `guest.*` payload.
- */
-export interface ExecReply {
-exit_code: number
-stderr_b64: string
-stdout_b64: string
-}
-/**
- * A `machine.exec` request.
- */
-export interface ExecRequest {
-command: string[]
-id: string
-}
-export interface MachineInspect {
+export interface MachineCreate {
 reply: MachineState
-request: MachineRef
+request: CreateRequest
 }
 /**
  * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
@@ -445,10 +574,141 @@ guest: number
 host: number
 }
 /**
+ * A `machine.create` request: a persistent definition, never booted here.
+ */
+export interface CreateRequest {
+backend?: (string | null)
+cpus?: (number | null)
+egress?: EgressTarget[]
+force?: boolean
+/**
+ * An OCI reference (optionally `oci:`-prefixed), an absolute or `./`-relative rootfs path, or `flake:<ref>#<attr>`. Exactly one of `image`, `template` and `manifest` is set.
+ */
+image?: (string | null)
+/**
+ * A manifest file, the directory holding one, or a built slot's 64-character address. Boots as a persistent machine.
+ */
+manifest?: (string | null)
+memory_mib?: (number | null)
+name: string
+ports?: string[]
+profile?: (string | null)
+/**
+ * A template built on this host, named by the name its image was built under. Boots as a persistent machine.
+ */
+template?: (string | null)
+}
+/**
+ * One outbound destination the workload may reach. Each one lands in the signed plan's egress grant, which is what the host egress gate reads.
+ */
+export interface EgressTarget {
+host: string
+port: number
+}
+export interface MachineExec {
+reply: ExecReply
+request: ExecRequest
+}
+/**
+ * A `machine.exec` reply. Stream bytes cross as base64, because JSON strings are not byte strings — the same convention as `machine.logs` and every `guest.*` payload.
+ */
+export interface ExecReply {
+exit_code: number
+stderr_b64: string
+stdout_b64: string
+}
+/**
+ * A `machine.exec` request.
+ */
+export interface ExecRequest {
+command: string[]
+id: string
+}
+export interface MachineInspect {
+reply: MachineState1
+request: MachineRef
+}
+/**
+ * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
+ */
+export interface MachineState1 {
+/**
+ * Whether connecting auto-resumes a sleeping machine.
+ */
+auto_resume?: boolean
+/**
+ * Backend that owns this machine (e.g. `"firecracker"`, `"hvf"`, `"libkrun"`). Empty when unknown.
+ */
+backend?: string
+/**
+ * vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).
+ */
+cpus?: number
+/**
+ * RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.
+ */
+expires_at?: (string | null)
+/**
+ * Original flake reference, when known.
+ */
+flake_ref?: (string | null)
+/**
+ * Guest IP, when networking is configured.
+ */
+guest_ip?: (string | null)
+id: MachineId
+/**
+ * RFC 3339 timestamp of the last `readiness` change.
+ */
+last_readiness_change_at?: (string | null)
+/**
+ * Guest memory in MiB. `0` when unknown.
+ */
+memory_mib?: number
+name: string
+/**
+ * Active host:guest port forwardings.
+ */
+ports?: PortMapping[]
+/**
+ * Flake profile name, when built from a profile.
+ */
+profile?: (string | null)
+/**
+ * Finer-grained host-observed readiness, when tracked.
+ */
+readiness?: (InstanceReadiness | null)
+/**
+ * Nix store revision hash, when known.
+ */
+revision?: (string | null)
+status: MachineStatus
+/**
+ * Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.
+ */
+status_detail?: (string | null)
+/**
+ * Caller-supplied metadata tags.
+ */
+tags?: {
+[k: string]: string
+}
+}
+/**
  * A request naming one machine.
  */
 export interface MachineRef {
 id: string
+}
+export interface MachineInventory {
+reply: MachineInventoryReply
+request: Empty7
+}
+/**
+ * A request that carries nothing.
+ */
+export interface Empty7 {
+
 }
 export interface MachineList {
 reply: MachineListReply
@@ -457,7 +717,7 @@ request: MachineFilter
 /**
  * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
  */
-export interface MachineState1 {
+export interface MachineState2 {
 /**
  * Whether connecting auto-resumes a sleeping machine.
  */
@@ -541,11 +801,68 @@ export interface LogsRequest {
 id: string
 tail_lines?: (number | null)
 }
+export interface MachineLogsStreamClose {
+reply: Empty8
+request: CloseRequest1
+}
+export interface Empty8 {
+
+}
+export interface CloseRequest1 {
+stream: number
+}
+export interface MachineLogsStreamNext {
+reply: NextReply1
+request: NextRequest1
+}
+export interface NextReply1 {
+/**
+ * The source has ended and the stream is closed.
+ */
+done: boolean
+events: StreamEvent[]
+/**
+ * How a process ended; present when a process stream is done, absent otherwise.
+ */
+outcome?: (WaitOutcome | null)
+}
+export interface NextRequest1 {
+stream: number
+/**
+ * How long to wait for a first chunk. At most [`MAX_WAIT_MS`].
+ */
+wait_ms?: (number | null)
+}
+export interface MachineLogsStreamOpen {
+reply: OpenReply1
+request: LogsOpenRequest
+}
+export interface OpenReply1 {
+stream: number
+}
+/**
+ * A `machine.logs.stream.open` request.
+ */
+export interface LogsOpenRequest {
+/**
+ * Keep reading past the end of what has been captured so far. `true` when absent; `false` replays the transcript and ends.
+ */
+follow?: boolean
+id: string
+/**
+ * Which channels to deliver. Every channel when absent or empty.
+ */
+streams?: StreamName[]
+/**
+ * Replay only the last N captured records first. The whole transcript when absent.
+ */
+tail_lines?: (number | null)
+}
 export interface MachineRm {
-reply: Empty6
+reply: Empty9
 request: RemoveRequest1
 }
-export interface Empty6 {
+export interface Empty9 {
 
 }
 /**
@@ -554,11 +871,231 @@ export interface Empty6 {
 export interface RemoveRequest1 {
 id: string
 }
+export interface MachineRun {
+reply: RunReply
+request: RunRequest
+}
+/**
+ * A `machine.run` reply.
+ */
+export interface RunReply {
+/**
+ * `dev` or `prod`, decided by the admitted profile's `dev_guest` grant, the same declaration the guest agent's DevOnly refusal keys on. Only `dev` admits the DevOnly `guest.*` methods.
+ */
+build_mode: string
+machine: MachineState3
+/**
+ * Content-addressed id of the admitted plan, for correlating with the chain-signed audit log.
+ */
+plan_id: string
+/**
+ * The token of the process `command` started, for `guest.proc.*`; absent when the request carried no command.
+ */
+process?: (string | null)
+}
+/**
+ * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
+ */
+export interface MachineState3 {
+/**
+ * Whether connecting auto-resumes a sleeping machine.
+ */
+auto_resume?: boolean
+/**
+ * Backend that owns this machine (e.g. `"firecracker"`, `"hvf"`, `"libkrun"`). Empty when unknown.
+ */
+backend?: string
+/**
+ * vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).
+ */
+cpus?: number
+/**
+ * RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.
+ */
+expires_at?: (string | null)
+/**
+ * Original flake reference, when known.
+ */
+flake_ref?: (string | null)
+/**
+ * Guest IP, when networking is configured.
+ */
+guest_ip?: (string | null)
+id: MachineId
+/**
+ * RFC 3339 timestamp of the last `readiness` change.
+ */
+last_readiness_change_at?: (string | null)
+/**
+ * Guest memory in MiB. `0` when unknown.
+ */
+memory_mib?: number
+name: string
+/**
+ * Active host:guest port forwardings.
+ */
+ports?: PortMapping[]
+/**
+ * Flake profile name, when built from a profile.
+ */
+profile?: (string | null)
+/**
+ * Finer-grained host-observed readiness, when tracked.
+ */
+readiness?: (InstanceReadiness | null)
+/**
+ * Nix store revision hash, when known.
+ */
+revision?: (string | null)
+status: MachineStatus
+/**
+ * Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.
+ */
+status_detail?: (string | null)
+/**
+ * Caller-supplied metadata tags.
+ */
+tags?: {
+[k: string]: string
+}
+}
+/**
+ * A `machine.run` request.
+ */
+export interface RunRequest {
+/**
+ * Hypervisor override; the host's default when absent.
+ */
+backend?: (string | null)
+/**
+ * A command to start once the machine is up. The reply's `process` names it. Starting it is a DevOnly guest operation, so a sealed image refuses it.
+ */
+command?: string[]
+cpus?: (number | null)
+/**
+ * The command's working directory. Requires a `command`.
+ */
+cwd?: (string | null)
+egress?: EgressTarget[]
+/**
+ * The command's environment. Requires a `command`; a loader, shell or credential variable is refused.
+ */
+env?: {
+[k: string]: string
+}
+/**
+ * Persistent only: recreate a same-name definition whose config differs.
+ */
+force?: boolean
+/**
+ * An OCI reference (optionally `oci:`-prefixed), an absolute or `./`-relative rootfs path, or `flake:<ref>#<attr>`. Exactly one of `image`, `template` and `manifest` is set.
+ */
+image?: (string | null)
+/**
+ * A manifest file, the directory holding one, or a built slot's 64-character address. Boots as a persistent machine.
+ */
+manifest?: (string | null)
+memory_mib?: (number | null)
+mode?: RunMode
+/**
+ * Required for a persistent machine; generated for a transient one.
+ */
+name?: (string | null)
+/**
+ * Opaque TCP ingress, each written `host:guest`.
+ */
+ports?: string[]
+/**
+ * Security profile; `standard` when absent.
+ */
+profile?: (string | null)
+/**
+ * A template built on this host, named by the name its image was built under. Boots as a persistent machine.
+ */
+template?: (string | null)
+ttl_seconds?: (number | null)
+}
+export interface MachineStart {
+reply: MachineState4
+request: MachineRef1
+}
+/**
+ * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
+ */
+export interface MachineState4 {
+/**
+ * Whether connecting auto-resumes a sleeping machine.
+ */
+auto_resume?: boolean
+/**
+ * Backend that owns this machine (e.g. `"firecracker"`, `"hvf"`, `"libkrun"`). Empty when unknown.
+ */
+backend?: string
+/**
+ * vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).
+ */
+cpus?: number
+/**
+ * RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.
+ */
+expires_at?: (string | null)
+/**
+ * Original flake reference, when known.
+ */
+flake_ref?: (string | null)
+/**
+ * Guest IP, when networking is configured.
+ */
+guest_ip?: (string | null)
+id: MachineId
+/**
+ * RFC 3339 timestamp of the last `readiness` change.
+ */
+last_readiness_change_at?: (string | null)
+/**
+ * Guest memory in MiB. `0` when unknown.
+ */
+memory_mib?: number
+name: string
+/**
+ * Active host:guest port forwardings.
+ */
+ports?: PortMapping[]
+/**
+ * Flake profile name, when built from a profile.
+ */
+profile?: (string | null)
+/**
+ * Finer-grained host-observed readiness, when tracked.
+ */
+readiness?: (InstanceReadiness | null)
+/**
+ * Nix store revision hash, when known.
+ */
+revision?: (string | null)
+status: MachineStatus
+/**
+ * Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.
+ */
+status_detail?: (string | null)
+/**
+ * Caller-supplied metadata tags.
+ */
+tags?: {
+[k: string]: string
+}
+}
+/**
+ * A request naming one machine.
+ */
+export interface MachineRef1 {
+id: string
+}
 export interface MachineStop {
-reply: Empty7
+reply: Empty10
 request: StopRequest
 }
-export interface Empty7 {
+export interface Empty10 {
 
 }
 /**
@@ -566,4 +1103,113 @@ export interface Empty7 {
  */
 export interface StopRequest {
 id: string
+}
+export interface SessionCall {
+reply: EntrypointCallReply1
+request: SessionCallRequest
+}
+/**
+ * The reply to `entrypoint.call` and `session.call`.
+ */
+export interface EntrypointCallReply1 {
+/**
+ * Set when the agent, not the workload, ended the call.
+ */
+agent_error?: (AgentErrorReply | null)
+/**
+ * The wrapper's error envelope, when the call failed with one.
+ */
+error?: (RemoteErrorReply | null)
+/**
+ * The workload's exit status, or the conventional status for how the agent ended the call (124 timeout, 137 crashed wrapper, 142 killed session, 75 not ready, 1 otherwise).
+ */
+exit_code: number
+/**
+ * Output past the per-channel cap was dropped.
+ */
+output_truncated: boolean
+stderr_b64: string
+stdout_b64: string
+}
+/**
+ * A `session.call` request.
+ */
+export interface SessionCallRequest {
+/**
+ * The encoded `[args, kwargs]` call, base64.
+ */
+payload_b64: string
+session_id: string
+timeout_secs?: (number | null)
+}
+export interface SessionInfo {
+reply: SessionInfoReply
+request: SessionRef
+}
+/**
+ * A session's record, as `session.info` reports it.
+ */
+export interface SessionInfoReply {
+ephemeral: boolean
+idle_timeout_secs: number
+invoke_count: number
+last_invoke_at?: (string | null)
+/**
+ * `prod` or `dev`.
+ */
+mode: string
+session_id: string
+started_at: string
+/**
+ * `running`, `killed`, or `reaped`.
+ */
+state: string
+vm_name: string
+/**
+ * The built slot the session boots from.
+ */
+workload_id: string
+}
+/**
+ * Names a session.
+ */
+export interface SessionRef {
+session_id: string
+}
+export interface SessionStart {
+reply: SessionStartReply
+request: SessionStartRequest
+}
+/**
+ * The reply to `session.start`.
+ */
+export interface SessionStartReply {
+session_id: string
+vm_name: string
+}
+/**
+ * A `session.start` request. Exactly one of `workload` and `manifest`.
+ */
+export interface SessionStartRequest {
+cpus?: (number | null)
+/**
+ * How long the session may sit idle before the host reaps it; five minutes when absent, one day at most.
+ */
+idle_timeout_secs?: (number | null)
+manifest?: (string | null)
+memory_mib?: (number | null)
+workload?: (string | null)
+}
+export interface SessionStop {
+reply: Empty11
+request: SessionRef1
+}
+export interface Empty11 {
+
+}
+/**
+ * Names a session.
+ */
+export interface SessionRef1 {
+session_id: string
 }

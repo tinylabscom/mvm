@@ -108,7 +108,7 @@ pub enum NetworkPreset {
     Dev,
     /// LLM-agent preset: the LLM inference APIs an agent typically
     /// calls (Anthropic, OpenAI), plus GitHub for source operations.
-    /// Minimum surface for `nix/images/examples/llm-agent/`'s
+    /// Minimum surface for `nix/examples/llm-agent/`'s
     /// `claude-code-vm`. Strictly smaller than `dev` — does NOT include
     /// package registries,
     /// because an agent VM is meant to run trusted closures, not
@@ -312,6 +312,12 @@ pub enum NetworkPolicy {
         /// forgot it would leave a plan promising a route the runtime denies.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peers: Vec<crate::peer::PeerBinding>,
+        /// Endpoint routes: what the workload may do at a destination, by
+        /// HTTP method and path. Carried here for the same reason as `peers`.
+        /// See [`crate::policy::routes`]; validated into a
+        /// [`crate::policy::routes::RouteSet`] wherever it is decided on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routes: Vec<crate::policy::routes::EgressRoute>,
     },
     /// Explicit allowlist of host:port pairs.
     AllowList {
@@ -331,6 +337,12 @@ pub enum NetworkPolicy {
         /// forgot it would leave a plan promising a route the runtime denies.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         peers: Vec<crate::peer::PeerBinding>,
+        /// Endpoint routes: what the workload may do at a destination, by
+        /// HTTP method and path. Carried here for the same reason as `peers`.
+        /// See [`crate::policy::routes`]; validated into a
+        /// [`crate::policy::routes::RouteSet`] wherever it is decided on.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        routes: Vec<crate::policy::routes::EgressRoute>,
     },
 }
 
@@ -341,6 +353,23 @@ impl NetworkPolicy {
         match self {
             Self::Preset { peers, .. } | Self::AllowList { peers, .. } => peers,
         }
+    }
+
+    /// Endpoint routes this policy carries, unvalidated. Build a
+    /// [`crate::policy::routes::RouteSet`] to decide on them.
+    pub fn routes(&self) -> &[crate::policy::routes::EgressRoute] {
+        match self {
+            Self::Preset { routes, .. } | Self::AllowList { routes, .. } => routes,
+        }
+    }
+
+    /// Attach endpoint routes, replacing any already present.
+    #[must_use]
+    pub fn with_routes(mut self, new_routes: Vec<crate::policy::routes::EgressRoute>) -> Self {
+        match &mut self {
+            Self::Preset { routes, .. } | Self::AllowList { routes, .. } => *routes = new_routes,
+        }
+        self
     }
 
     /// Attach peer routes, replacing any already present.
@@ -358,6 +387,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -379,6 +409,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -388,6 +419,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -397,6 +429,7 @@ impl NetworkPolicy {
             egress_mode: None,
             ai: None,
             peers: Vec::new(),
+            routes: Vec::new(),
         }
     }
 
@@ -408,23 +441,27 @@ impl NetworkPolicy {
                 preset,
                 egress_mode,
                 peers,
+                routes,
                 ..
             } => Self::Preset {
                 preset,
                 egress_mode,
                 ai,
                 peers,
+                routes,
             },
             Self::AllowList {
                 rules,
                 egress_mode,
                 peers,
+                routes,
                 ..
             } => Self::AllowList {
                 rules,
                 egress_mode,
                 ai,
                 peers,
+                routes,
             },
         }
     }
@@ -434,20 +471,30 @@ impl NetworkPolicy {
     pub fn with_egress_mode(self, mode: EgressMode) -> Self {
         match self {
             Self::Preset {
-                preset, ai, peers, ..
+                preset,
+                ai,
+                peers,
+                routes,
+                ..
             } => Self::Preset {
                 preset,
                 egress_mode: Some(mode),
                 ai,
                 peers,
+                routes,
             },
             Self::AllowList {
-                rules, ai, peers, ..
+                rules,
+                ai,
+                peers,
+                routes,
+                ..
             } => Self::AllowList {
                 rules,
                 egress_mode: Some(mode),
                 ai,
                 peers,
+                routes,
             },
         }
     }
@@ -626,17 +673,20 @@ fn agent_rules() -> Vec<HostPort> {
 ///   unreachable; the rule is a belt-and-braces guard against a
 ///   misconfigured bridge.
 ///
-/// Deliberately **NOT** in the list:
+/// Not in this list, but denied at decision time all the same (see
+/// [`crate::policy::restricted_address`], which [`is_mandatory_deny`] and
+/// `CanonicalEgress::permits` consult):
 ///
-/// - RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) —
-///   commonly legitimate (corporate VPN, home lab, k8s pod
-///   network). Operators who want them blocked can add their
-///   own deny rules; defaulting to deny would break too many
-///   real-world workloads.
-/// - Unspecified (`0.0.0.0/32`, `::/128`) — doesn't route.
-/// - Multicast (`224.0.0.0/4`, `ff00::/8`) — doesn't reach the
-///   public internet; out of scope for egress policy.
-/// - IPv6 ULA (`fc00::/7`) — analogous to RFC1918 above.
+/// - The unspecified block (`0.0.0.0/8`, `::`), other metadata addresses
+///   (`169.254.170.2`, `100.100.100.200`) and the IPv4 addresses embedded in
+///   NAT64, 6to4, Teredo and IPv4-compatible forms — absolute, like this list.
+///   They are kept out of the const because it also drives guest route and
+///   iptables setup, where a `0.0.0.0/8` entry is noise.
+/// - RFC1918, IPv6 ULA (`fc00::/7`), multicast and `240.0.0.0/4` — denied by
+///   default, and re-admitted by a grant that names the address: a literal
+///   IP, a CIDR inside the range, or an allow-listed host that resolved to
+///   it. Corporate VPNs and home labs stay reachable by naming them; an open
+///   policy or a `0.0.0.0/0` rule does not reach them.
 ///
 /// Every enforcer (iptables/nft on Linux, `CanonicalEgress::permits`,
 /// the L7 egress proxy) should consult this list *before* the user's
@@ -651,6 +701,9 @@ pub const MANDATORY_DENY_RANGES: &[&str] = &[
     "127.0.0.0/8",
     "::1/128",
     "fe80::/10",
+    // AWS's IPv6 instance-metadata endpoint. Inside fc00::/7, which is only
+    // default-denied, so it needs its own absolute entry.
+    "fd00:ec2::254/128",
 ];
 
 /// Parse [`MANDATORY_DENY_RANGES`] into typed [`ipnet::IpNet`]s.
@@ -687,8 +740,13 @@ pub fn mandatory_deny_ranges() -> Vec<ipnet::IpNet> {
 /// justify cached parsing. A perf-sensitive consumer can hoist
 /// [`mandatory_deny_ranges`] outside its loop.
 pub fn is_mandatory_deny(ip: IpAddr) -> bool {
-    let ip = unmap_v4_mapped(ip);
-    mandatory_deny_ranges().iter().any(|net| net.contains(&ip))
+    // The shared classifier's absolute tier is a superset of the const: it
+    // adds `0.0.0.0/8`, `::`, every cloud-metadata address and the IPv4
+    // addresses embedded in NAT64, 6to4, Teredo and IPv4-compatible forms.
+    crate::policy::restricted_address::is_absolute(ip)
+        || mandatory_deny_ranges()
+            .iter()
+            .any(|net| net.contains(&unmap_v4_mapped(ip)))
 }
 
 /// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its embedded
@@ -1448,6 +1506,7 @@ mod tests {
             egress_mode: None,
             ai: Some(AiPolicy::metered().with_total_budget(1_000_000)),
             peers: Vec::new(),
+            routes: Vec::new(),
         };
         let json = serde_json::to_string(&policy).unwrap();
         let back: NetworkPolicy = serde_json::from_str(&json).unwrap();

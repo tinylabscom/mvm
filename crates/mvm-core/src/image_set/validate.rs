@@ -8,6 +8,7 @@ use std::fmt;
 
 use mvm_contract::guest_libc::GuestLibc;
 
+use super::BuilderBootAbiRange;
 use super::identity::ProtocolRange;
 use super::{
     ArtifactFormat, BootProtocol, GuestDeviceRequirement, IMAGE_LOCK_SCHEMA_VERSION,
@@ -265,7 +266,7 @@ pub struct ImageSetRequirement {
 }
 
 /// Every role published once per guest architecture.
-const ARCH_BOUND_ROLES: [ImageSetRole; 9] = [
+const ARCH_BOUND_ROLES: [ImageSetRole; 10] = [
     ImageSetRole::BuilderVm,
     ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
     ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
@@ -275,6 +276,7 @@ const ARCH_BOUND_ROLES: [ImageSetRole; 9] = [
     ImageSetRole::SdkSidecar(GuestLibc::Glibc),
     ImageSetRole::SdkSidecar(GuestLibc::Musl),
     ImageSetRole::Stage0BootstrapKernel,
+    ImageSetRole::Initramfs,
 ];
 
 impl ImageSetRequirement {
@@ -336,6 +338,10 @@ pub fn require_complete(
 pub struct HostProtocolSupport {
     pub guest_agent_protocol: ProtocolRange,
     pub builder_cache_contract: u32,
+    /// The builder boot ABIs this host can boot: through the legacy ABI only
+    /// when it has no boot payload to hand a builder, through the payload ABI
+    /// when it has.
+    pub builder_boot_abi: BuilderBootAbiRange,
 }
 
 /// Refuse a set whose declared protocols this host cannot speak.
@@ -368,6 +374,13 @@ pub fn check_declared_protocol_compatibility(
         return Err(ImageSetError::BuilderCacheContractMismatch {
             set: declared.builder_cache_contract,
             host: host.builder_cache_contract,
+        });
+    }
+    let abi = declared.builder_boot_abi_or_legacy();
+    if !host.builder_boot_abi.contains(abi) {
+        return Err(ImageSetError::BuilderBootAbiUnsupported {
+            set: abi,
+            host: host.builder_boot_abi,
         });
     }
     Ok(())

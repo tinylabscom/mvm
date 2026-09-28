@@ -520,11 +520,11 @@ fn resolve_bridge_executable_for(host: &mvm_vmm::host::aux_bin::HostProcess) -> 
 }
 
 fn bridge_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
-    mvm_vmm::host::aux_bin::AuxBin {
-        bin: mvm_vmm::host::aux_bin::CLI_BIN,
-        env_var: "MVM_QEMU_BRIDGE_PATH",
-        rebuild_package: "mvmctl",
-    }
+    mvm_vmm::host::aux_bin::AuxBin::new(
+        mvm_vmm::host::aux_bin::CLI_BIN,
+        "MVM_QEMU_BRIDGE_PATH",
+        "mvmctl",
+    )
 }
 
 /// Read a [`QemuBridgeSpec`] JSON file and run the bridge — the body of the

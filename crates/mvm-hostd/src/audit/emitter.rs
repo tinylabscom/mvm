@@ -1164,6 +1164,12 @@ impl AuditEmitter {
         &self.audit_dir
     }
 
+    /// The public half of this emitter's signing key: what its chains
+    /// verify under.
+    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+        self.signing_key.verifying_key()
+    }
+
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {
         let signed =
             crate::audit::merkle::sign_root_in(&self.audit_dir, tenant, &self.signing_key)?;

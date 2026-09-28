@@ -6,6 +6,7 @@
 // flushes them first.
 #![deny(clippy::exit)]
 
+pub mod approval;
 pub mod bench;
 pub mod bootstrap;
 pub mod commands;
@@ -27,7 +28,7 @@ pub mod ts_runner;
 pub mod ui;
 pub mod update;
 pub mod watch;
-pub(crate) mod workspace_graph;
+pub(crate) use mvm_build::workspace_graph;
 
 pub use commands::run;
 

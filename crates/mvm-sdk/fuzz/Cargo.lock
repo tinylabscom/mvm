@@ -639,7 +639,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-agentd"
-version = "0.18.0-rc.2"
+version = "0.18.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -649,6 +649,7 @@ dependencies = [
  "libc",
  "mvm-contract",
  "mvm-core",
+ "mvm-setpriv",
  "nix",
  "rand",
  "seccompiler",
@@ -662,7 +663,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-contract"
-version = "0.18.0-rc.2"
+version = "0.18.3"
 dependencies = [
  "anyhow",
  "base64",
@@ -678,7 +679,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.18.0-rc.2"
+version = "0.18.3"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -712,7 +713,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services"
-version = "0.18.0-rc.2"
+version = "0.18.3"
 dependencies = [
  "mvm-agentd",
  "mvm-core",
@@ -722,7 +723,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.18.0-rc.2"
+version = "0.18.3"
 dependencies = [
  "base64",
  "blake3",
@@ -754,6 +755,13 @@ dependencies = [
  "libfuzzer-sys",
  "mvm-sdk",
  "serde_json",
+]
+
+[[package]]
+name = "mvm-setpriv"
+version = "0.18.3"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

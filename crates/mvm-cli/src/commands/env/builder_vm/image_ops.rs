@@ -1,24 +1,5 @@
 use super::*;
 
-#[cfg(feature = "builder-vm")]
-pub(super) fn verify_stage0_rootfs_has_init(rootfs: &std::path::Path) -> Result<()> {
-    let fs = ext4_view::Ext4::load_from_path(rootfs)
-        .with_context(|| format!("opening {} as ext4", rootfs.display()))?;
-    let present = fs.exists(HOST_VM_INIT_ROOTFS_PATH).with_context(|| {
-        format!(
-            "looking up {HOST_VM_INIT_ROOTFS_PATH} in {}",
-            rootfs.display()
-        )
-    })?;
-    if !present {
-        anyhow::bail!(
-            "Stage 0 builder VM rootfs {} is missing {HOST_VM_INIT_ROOTFS_PATH}",
-            rootfs.display()
-        );
-    }
-    Ok(())
-}
-
 pub(super) fn validate_dev_image_artifacts(
     kernel: impl AsRef<std::path::Path>,
     rootfs: impl AsRef<std::path::Path>,

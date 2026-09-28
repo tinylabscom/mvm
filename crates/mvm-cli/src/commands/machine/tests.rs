@@ -91,7 +91,7 @@ fn sdk_machine_fixture(name: &str) -> Vec<String> {
             .join("../../tests/machine-fixtures")
             .join(format!("{name}.argv")),
     )
-    .expect("read shared SDK machine argv fixture")
+    .expect("read machine argv fixture")
     .lines()
     .map(std::string::ToString::to_string)
     .collect()
@@ -128,11 +128,10 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
     }
 }
 
-/// Source-of-truth anchor for the cross-language conformance harness: every
-/// `tests/machine-fixtures/*.argv` the SDKs assert against must be argv the
-/// CLI parser actually accepts, and must map to the verb its first line
-/// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
-/// `stop --name X` when `stop` takes a positional name).
+/// Every `tests/machine-fixtures/*.argv` must be argv the CLI parser accepts
+/// and must map to the verb its first line names, so the corpus documents
+/// real `mvmctl machine` invocations (e.g. `stop` takes a positional name,
+/// never `--name`).
 #[test]
 fn fork_parses_with_as() {
     let args = parse_fork(&["fork", "parent", "--as", "child"]).unwrap();
@@ -1245,7 +1244,7 @@ fn agent_verb_flag_persisted_in_spec_and_survives_roundtrip() {
 #[test]
 fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
     let dir = tempfile::tempdir().expect("tmpdir");
-    let host = dir.path().to_string_lossy().into_owned();
+    let host = dir.path().join("state.img").to_string_lossy().into_owned();
     let args = parse_run(&[
         "run",
         "--image",
@@ -1253,7 +1252,7 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
         "--name",
         "web",
         "--volume",
-        &format!("{host}:/work:ro"),
+        &format!("{host}:/data:1G:ro"),
     ])
     .expect("parse");
     let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
@@ -1266,88 +1265,244 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
         std::path::Path::new(host_part).is_absolute(),
         "host not absolute: {stored}"
     );
-    assert!(stored.ends_with(":/work:ro"), "stored: {stored}");
+    assert!(stored.ends_with(":/data:1G:ro"), "stored: {stored}");
 }
 
+/// A persistent machine has no live host-directory share, so `machine run -d`
+/// refuses a directory volume at spec time under every profile, read-only and
+/// writable alike, rather than saving a spec that is guaranteed to fail at
+/// boot. `dev` and `permissive` used to accept a writable one here.
 #[test]
-fn run_rw_volume_requires_dev_profile() {
+fn run_directory_volume_is_refused_under_every_profile() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let host = dir.path().to_string_lossy().into_owned();
-    // The default is `standard`, so a writable share is refused unless the user
-    // asks for `dev` explicitly. It refuses at spec time with the flag to pass,
-    // rather than quietly handing the guest a read-only mount it will fail to
-    // write to later.
-    let default_args = parse_run(&[
-        "run",
-        "--image",
-        "x",
-        "--name",
-        "web",
-        "--volume",
-        &format!("{host}:/work:rw"),
-    ])
-    .expect("parse");
-    let default_err = machine_run_spec(&default_args, "web".to_string(), None)
-        .expect_err(":rw is not in the default profile");
-    assert!(
-        default_err.to_string().contains("profile dev"),
-        "the refusal must name the flag that grants it: {default_err}"
-    );
+    for profile in [None, Some("standard"), Some("dev"), Some("permissive")] {
+        for mode in ["", ":ro", ":rw"] {
+            let volume = format!("{host}:/work{mode}");
+            let message = machine_run_spec_with_volume(profile, &volume)
+                .expect_err("a persistent machine takes no host directory")
+                .to_string();
+            assert!(
+                message.contains("cannot attach a live host directory"),
+                "{profile:?} {volume}: {message}"
+            );
+        }
+    }
+}
 
-    // An explicitly stricter profile still refuses the writable share.
-    let std_args = parse_run(&[
-        "run",
-        "--image",
-        "x",
-        "--name",
-        "web",
-        "--profile",
-        "standard",
-        "--volume",
-        &format!("{host}:/work:rw"),
-    ])
-    .expect("parse");
-    let err = machine_run_spec(&std_args, "web".to_string(), None)
-        .expect_err(":rw needs a dev-capable profile");
-    assert!(err.to_string().contains("profile dev"), "msg: {err}");
+/// A persistent `machine run` spec for `--volume <volume>` under `profile`.
+/// `None` leaves the flag off, which is the default (`standard`) profile.
+fn machine_run_spec_with_volume(profile: Option<&str>, volume: &str) -> Result<MachineSpec> {
+    let mut argv = vec!["run", "--image", "x", "--name", "web"];
+    if let Some(profile) = profile {
+        argv.extend(["--profile", profile]);
+    }
+    argv.extend(["--volume", volume]);
+    let args = parse_run(&argv).expect("parse");
+    machine_run_spec(&args, "web".to_string(), None)
+}
 
-    // With --profile dev the writable share is accepted.
-    let dev_args = parse_run(&[
-        "run",
-        "--image",
-        "x",
-        "--name",
-        "web",
-        "--profile",
-        "dev",
-        "--volume",
-        &format!("{host}:/work:rw"),
-    ])
-    .expect("parse");
-    let spec =
-        machine_run_spec(&dev_args, "web".to_string(), None).expect("dev profile allows :rw");
+/// Persisting data must not require unsealing the guest. A writable disk
+/// image is the guest's own ext4 file, so the default profile accepts it, as
+/// does an explicit `standard`.
+#[test]
+fn run_rw_disk_image_is_accepted_without_the_dev_profile() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let image = dir.path().join("state.img");
+    let volume = format!("{}:/data:20G:rw", image.display());
+    for profile in [None, Some("standard"), Some("dev"), Some("permissive")] {
+        let spec = machine_run_spec_with_volume(profile, &volume)
+            .unwrap_or_else(|e| panic!("{profile:?} must accept a writable disk image: {e:#}"));
+        assert_eq!(spec.volumes.len(), 1);
+        assert!(
+            spec.volumes[0].ends_with(":/data:20G:rw"),
+            "{profile:?} stored: {}",
+            spec.volumes[0]
+        );
+    }
+}
+
+/// The refusal names the directory as the problem and both ways to get the
+/// data in: a disk image, or a snapshot registered with `machine volume mount`.
+#[test]
+fn run_directory_refusal_points_at_a_disk_image_and_a_snapshot() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let volume = format!("{}:/work:rw", dir.path().display());
+    let message = machine_run_spec_with_volume(Some("dev"), &volume)
+        .expect_err("dev must refuse a directory on a persistent machine")
+        .to_string();
+    assert!(message.contains("live host directory"), "{message}");
+    assert!(message.contains("HOST.img:/GUEST:SIZE[:rw]"), "{message}");
     assert!(
-        spec.volumes[0].ends_with(":/work:rw"),
-        "stored: {}",
-        spec.volumes[0]
+        message.contains(&format!(
+            "mvmctl machine volume mount <machine> --volume <name> --host {} --guest /work",
+            dir.path().display()
+        )),
+        "{message}"
     );
 }
 
+/// Restrictive accepts no volume at all: not a read-only one, and not a
+/// writable disk image either.
+#[test]
+fn run_restrictive_refuses_every_volume() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let image = dir.path().join("state.img");
+    for volume in [
+        format!("{}:/work:ro", dir.path().display()),
+        format!("{}:/data:1G:ro", image.display()),
+        format!("{}:/data:1G:rw", image.display()),
+    ] {
+        let message = machine_run_spec_with_volume(Some("restrictive"), &volume)
+            .expect_err("restrictive must refuse every volume")
+            .to_string();
+        assert!(message.contains("does not allow volumes"), "{message}");
+    }
+}
+
+/// The profile decides whether a disk may be writable; the guest mount
+/// allow-list decides where it may mount. Accepting writable disks under
+/// `standard` must not let one land on a system path.
+#[test]
+fn run_rw_disk_image_on_a_system_path_is_refused_by_the_mount_allow_list() {
+    let dir = tempfile::tempdir().expect("tmpdir");
+    let image = dir.path().join("bin.img");
+    for profile in [Some("standard"), Some("dev")] {
+        let volume = format!("{}:/usr/bin:1G:rw", image.display());
+        let message = format!(
+            "{:#}",
+            machine_run_spec_with_volume(profile, &volume)
+                .expect_err("a disk over /usr/bin must be refused")
+        );
+        assert!(
+            !message.contains("--profile"),
+            "{profile:?}: the refusal must come from the allow-list, not the profile: {message}"
+        );
+        assert!(
+            message.contains("mount path \"/usr/bin\""),
+            "{profile:?}: the guest mount policy must name the path: {message}"
+        );
+    }
+}
+
+/// `machine create` args sourcing everything from the manifest at `manifest`.
+fn create_args_from_manifest(manifest: &Path, profile: Option<RunProfile>) -> MachineCreateArgs {
+    MachineCreateArgs {
+        name: Some("web".to_string()),
+        manifest: Some(manifest.display().to_string()),
+        image: None,
+        net: false,
+        allow_host: Vec::new(),
+        peer: Vec::new(),
+        gpu: false,
+        gpu_device: None,
+        cpus: None,
+        cpu_limit: None,
+        timeout: None,
+        grants_file: None,
+        memory: None,
+        mem_initial: None,
+        profile,
+        force: false,
+        json: false,
+    }
+}
+
+/// Write an image-backed manifest declaring one volume and return its path.
+fn manifest_with_volume(dir: &Path, volume: &str) -> PathBuf {
+    let path = dir.join("mvm.toml");
+    std::fs::write(
+        &path,
+        format!("image = \"alpine:latest\"\n[dev]\nvolumes = [\"{volume}\"]\n"),
+    )
+    .expect("manifest");
+    path
+}
+
+/// `machine create` applies the same volume grants as `machine run`: a
+/// writable disk image under `standard` is accepted.
+#[test]
+fn create_accepts_a_rw_disk_image_under_standard() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
+    let spec = create_args_from_manifest(&manifest, Some(RunProfile::Standard))
+        .into_spec()
+        .expect("standard must accept a writable disk image");
+    assert_eq!(spec.profile, "standard");
+    assert_eq!(
+        spec.volumes,
+        vec![format!(
+            "{}:/data:20G:rw",
+            dir.path().join("state.img").display()
+        )]
+    );
+}
+
+/// ...and refuses a host directory at create time under every profile,
+/// including the `dev` default a CLI-created machine gets, instead of saving a
+/// spec that `machine start` would refuse.
+#[test]
+fn create_refuses_a_directory_volume_under_every_profile() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
+    for volume in ["./src:/work:ro", "./src:/work:rw"] {
+        let manifest = manifest_with_volume(dir.path(), volume);
+        for profile in [
+            None,
+            Some(RunProfile::Standard),
+            Some(RunProfile::Dev),
+            Some(RunProfile::Permissive),
+        ] {
+            let message = create_args_from_manifest(&manifest, profile)
+                .into_spec()
+                .expect_err("a persistent machine takes no host directory")
+                .to_string();
+            assert!(
+                message.contains("cannot attach a live host directory"),
+                "{profile:?} {volume}: {message}"
+            );
+            assert!(
+                message.contains(&format!("--host {}", dir.path().join("src").display())),
+                "{profile:?} {volume}: {message}"
+            );
+        }
+    }
+}
+
+/// ...and refuses any volume under `restrictive`.
+#[test]
+fn create_restrictive_refuses_a_disk_image() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let manifest = manifest_with_volume(dir.path(), "./state.img:/data:20G:rw");
+    let message = create_args_from_manifest(&manifest, Some(RunProfile::Restrictive))
+        .into_spec()
+        .expect_err("restrictive must refuse every volume")
+        .to_string();
+    assert!(message.contains("does not allow volumes"), "{message}");
+}
+
+/// The boot-time check stays as defense in depth for a spec that reached
+/// `machine start` without passing the spec-time gate, and it says exactly
+/// what the gate says.
 #[test]
 fn persistent_directory_volume_refuses_with_the_snapshot_registration_path() {
     let dir = tempfile::tempdir().expect("tmpdir");
     let volume = format!("{}:/work:ro", dir.path().display());
-    let err = build_machine_volume_cfg(&[volume])
-        .expect_err("a persistent machine cannot carry a live directory share");
-    let message = err.to_string();
+    let at_boot = build_machine_volume_cfg(std::slice::from_ref(&volume))
+        .expect_err("a persistent machine cannot carry a live directory share")
+        .to_string();
     assert!(
-        message.contains("live host-directory share can't be expressed"),
-        "message: {message}"
+        at_boot.contains("cannot attach a live host directory"),
+        "message: {at_boot}"
     );
     assert!(
-        message.contains("machine volume mount"),
-        "message: {message}"
+        at_boot.contains("machine volume mount"),
+        "message: {at_boot}"
     );
+    let at_spec_time = enforce_volume_profile(RunProfile::Dev, &[volume])
+        .expect_err("the spec-time gate refuses it too")
+        .to_string();
+    assert_eq!(at_boot, at_spec_time);
 }
 
 #[test]
@@ -1502,108 +1657,13 @@ fn agent_verb_empty_on_transient_path_when_not_specified() {
 }
 
 #[test]
-fn rust_sdk_machine_run_uses_cli_default_deny_preflight() {
-    let sdk_args = mvm_sdk::MachineRun::builder()
-        .image("alpine:latest")
-        .command(["true"])
-        .dry_run(true)
-        .json(true)
-        .machine_args()
-        .expect("sdk machine run args");
-
-    let run = parse_owned_run(&sdk_args)
-        .expect("sdk args parse as CLI machine run")
-        .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI preflight accepts SDK args");
-
-    assert!(summary.dry_run);
-    assert!(!summary.will_execute);
-    assert_eq!(summary.image_kind, "oci");
-    assert_eq!(summary.preflight_network_posture, "deny-all");
-    assert_eq!(summary.preflight_egress_enforcement, "flow-drop");
-    assert_eq!(summary.receipt_network_posture, "deny-all");
-    assert_eq!(summary.receipt_egress_enforcement, "flow-drop");
-}
-
-#[test]
-fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
-    let sdk_args = mvm_sdk::MachineRun::builder()
-        .image("alpine:latest")
-        .allow_host("api.example.com")
-        .receipt("/tmp/mvm-sdk-machine.receipt.json")
-        .dry_run(true)
-        .json(true)
-        .command(["true"])
-        .machine_args()
-        .expect("sdk machine run args");
-
-    let run = parse_owned_run(&sdk_args)
-        .expect("sdk args parse as CLI machine run")
-        .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        SDK_RUN_EGRESS_BACKEND,
-        SDK_RUN_EGRESS_BACKEND,
-    )
-    .expect("CLI receipt input accepts SDK args");
-
-    assert_eq!(
-        summary.preflight_network_posture,
-        "allow-list:api.example.com:443"
-    );
-    assert!(summary.receipt_requested);
-    assert_eq!(
-        summary.receipt_network_posture,
-        summary.preflight_network_posture
-    );
-    assert_eq!(
-        summary.receipt_egress_enforcement,
-        SDK_RUN_EGRESS_ENFORCEMENT
-    );
-}
-
-#[test]
-fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
-    let sdk_args = mvm_sdk::MachineRun::builder()
-        .image("alpine:latest")
-        .allow_host("api.example.com")
-        .cpus(4)
-        .memory("1G")
-        .profile("dev")
-        .volume("/tmp/mvm-sdk-src:/work:ro")
-        .env("TOKEN=secret")
-        .env("MODE=test")
-        .timeout(30)
-        .receipt("/tmp/mvm-sdk-machine.receipt.json")
-        .json(true)
-        .dry_run(true)
-        .command(["sh", "-lc", "echo ok"])
-        .machine_args()
-        .expect("sdk machine run args");
-    assert_eq!(sdk_args, sdk_machine_fixture("run-admission"));
-
-    let run = parse_owned_run(&sdk_args)
-        .expect("sdk args parse as CLI machine run")
-        .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        SDK_RUN_EGRESS_BACKEND,
-        SDK_RUN_EGRESS_BACKEND,
-    )
-    .expect("CLI receipt input accepts SDK args");
-
-    assert_sdk_run_admission_inputs(summary);
-}
-
-#[test]
-fn python_typescript_machine_run_default_fixture_uses_cli_default_deny_preflight() {
+fn fixture_machine_run_default_fixture_uses_cli_default_deny_preflight() {
     let sdk_args = sdk_machine_fixture("run-default");
     let run = parse_owned_run(&sdk_args)
-        .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+        .expect("the fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI preflight accepts Python/TypeScript SDK fixture");
+        .expect("CLI preflight accepts the fixture");
 
     assert!(summary.dry_run);
     assert!(!summary.will_execute);
@@ -1615,17 +1675,17 @@ fn python_typescript_machine_run_default_fixture_uses_cli_default_deny_preflight
 }
 
 #[test]
-fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
+fn fixture_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
     let sdk_args = sdk_machine_fixture("run-allow-host-receipt");
     let run = parse_owned_run(&sdk_args)
-        .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+        .expect("the fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
         &run,
         SDK_RUN_EGRESS_BACKEND,
         SDK_RUN_EGRESS_BACKEND,
     )
-    .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+    .expect("CLI receipt input accepts the fixture");
 
     assert_eq!(
         summary.preflight_network_posture,
@@ -1643,37 +1703,23 @@ fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture(
 }
 
 #[test]
-fn python_typescript_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
+fn fixture_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
     let sdk_args = sdk_machine_fixture("run-admission");
     let run = parse_owned_run(&sdk_args)
-        .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+        .expect("the fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
         &run,
         SDK_RUN_EGRESS_BACKEND,
         SDK_RUN_EGRESS_BACKEND,
     )
-    .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+    .expect("CLI receipt input accepts the fixture");
 
     assert_sdk_run_admission_inputs(summary);
 }
 
 #[test]
-fn rust_sdk_machine_create_manifest_reaches_cli_unknown_key_gate() {
-    let sdk_args = mvm_sdk::MachineCreate::builder("web")
-        .manifest("mvm.toml")
-        .profile("dev")
-        .force(true)
-        .json(true)
-        .machine_args()
-        .expect("sdk machine create args");
-    assert_eq!(sdk_args, sdk_machine_fixture("create-manifest"));
-
-    assert_manifest_fixture_reaches_unknown_key_gate(sdk_args);
-}
-
-#[test]
-fn python_typescript_machine_create_manifest_fixture_reaches_cli_unknown_key_gate() {
+fn fixture_machine_create_manifest_fixture_reaches_cli_unknown_key_gate() {
     assert_manifest_fixture_reaches_unknown_key_gate(sdk_machine_fixture("create-manifest"));
 }
 
@@ -2124,7 +2170,6 @@ fn create_auto_generates_a_name_when_omitted() {
 #[test]
 fn create_sources_machine_defaults_from_manifest() {
     let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
     std::fs::write(
         dir.path().join("mvm.toml"),
         r#"
@@ -2140,7 +2185,7 @@ allow_hosts = ["api.example.com"]
 
 [dev]
 init = ["pip install -r requirements.txt"]
-volumes = ["./src:/work:rw"]
+volumes = ["./state.img:/data:1G:rw"]
 "#,
     )
     .expect("manifest");
@@ -2179,7 +2224,10 @@ volumes = ["./src:/work:rw"]
     assert_eq!(spec.init, vec!["pip install -r requirements.txt"]);
     assert_eq!(
         spec.volumes,
-        vec![format!("{}:/work:rw", dir.path().join("src").display())]
+        vec![format!(
+            "{}:/data:1G:rw",
+            dir.path().join("state.img").display()
+        )]
     );
 }
 
@@ -3832,4 +3880,102 @@ fn start_resolver_recreates_with_force() {
         other => panic!("expected Recreate, got {other:?}"),
     }
     assert_eq!(spec.image.as_deref(), Some("ubuntu:24.04"));
+}
+
+/// An unlocked managed block volume named `state`, registered read-write
+/// against `machine`. Registered before the machine has a spec, so no profile
+/// is applied until the machine starts.
+fn register_writable_state_volume(machine: &str) {
+    use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
+    let volumes = LocalVolumeService::new();
+    volumes
+        .create_block_volume(
+            &CreateBlockVolumeRequest::builder("state")
+                .expect("volume name")
+                .capacity_mib(16)
+                .build()
+                .expect("create request"),
+        )
+        .expect("create volume");
+    volumes.unlock_volume("state").expect("unlock");
+    crate::commands::vm::volume::mount(machine, "state", None, "/data/state", true)
+        .expect("a machine with no spec yet takes the registration");
+}
+
+/// `machine start` leases a writable registered volume under the profile the
+/// machine's spec names, exactly where a writable `--mount` disk image is
+/// accepted: `standard`, `dev` and `permissive` take it, `restrictive` and a
+/// name that is not a profile do not.
+#[test]
+fn machine_start_leases_a_writable_registered_volume_under_the_spec_profile() {
+    use mvm_client::launch::machine_start::StartHost as _;
+
+    let _state = IsolatedMachineState::new();
+    register_writable_state_volume("web");
+    for profile in ["standard", "dev", "permissive"] {
+        let mut spec = spec_fixture("web");
+        spec.profile = profile.to_string();
+        let prepared = super::lifecycle::CliStartHost::for_spec(&spec, false)
+            .prepare_volumes("web", &[])
+            .unwrap_or_else(|e| panic!("{profile}: {e:#}"));
+        assert_eq!(prepared.volumes.len(), 1, "{profile}");
+        assert_eq!(prepared.volumes[0].guest, "/data/state");
+        assert!(!prepared.volumes[0].read_only, "{profile}");
+        // Dropped uncommitted, so the next profile can take the lease.
+    }
+    for (profile, named) in [
+        ("restrictive", "profile \"restrictive\""),
+        ("dev-mode", "no recognised profile"),
+    ] {
+        let mut spec = spec_fixture("web");
+        spec.profile = profile.to_string();
+        let message = match super::lifecycle::CliStartHost::for_spec(&spec, false)
+            .prepare_volumes("web", &[])
+        {
+            Ok(_) => panic!("{profile} must refuse a writable registered volume"),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(message.contains("does not permit writable"), "{message}");
+        assert!(message.contains(named), "{message}");
+    }
+}
+
+/// A registration against a machine that already has a spec is checked
+/// against that spec's profile, so `restrictive` refuses `--rw` at
+/// registration rather than at the next start. Read-only stays accepted, and
+/// a `standard` machine takes the writable registration.
+#[test]
+fn a_writable_registration_against_a_restrictive_machine_is_refused_up_front() {
+    use mvm_client::volume::{CreateBlockVolumeRequest, LocalVolumeService, VolumeService as _};
+
+    let _state = IsolatedMachineState::new();
+    let volumes = LocalVolumeService::new();
+    volumes
+        .create_block_volume(
+            &CreateBlockVolumeRequest::builder("state")
+                .expect("volume name")
+                .capacity_mib(16)
+                .build()
+                .expect("create request"),
+        )
+        .expect("create volume");
+    volumes.unlock_volume("state").expect("unlock");
+    let mut restrictive = spec_fixture("locked");
+    restrictive.profile = "restrictive".to_string();
+    save_machine_spec(&restrictive, false).expect("save restrictive spec");
+    save_machine_spec(&spec_fixture("open"), false).expect("save standard spec");
+
+    let message = format!(
+        "{:#}",
+        crate::commands::vm::volume::mount("locked", "state", None, "/data/state", true)
+            .expect_err("restrictive refuses a writable registration")
+    );
+    assert!(message.contains("does not permit writable"), "{message}");
+    assert!(message.contains("profile \"restrictive\""), "{message}");
+    assert!(volumes.list_attachments("locked").expect("list").is_empty());
+
+    crate::commands::vm::volume::mount("locked", "state", None, "/data/ro", false)
+        .expect("restrictive still takes a read-only registration");
+    crate::commands::vm::volume::mount("open", "state", None, "/data/state", true)
+        .expect("standard takes a writable registration");
 }

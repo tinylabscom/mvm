@@ -6,8 +6,8 @@ on:
       - "v*"
   # Manual dry-run: validate the release build + packaging (binaries, host-bin
   # bundling, Linux cross-build) on the real CI runners WITHOUT publishing.
-  # `dry_run=true` (the default) runs only the `build` job and skips the Nix
-  # image jobs, the publishing `release` job, and `verify-release`. A real
+  # `dry_run=true` (the default) runs only the `build` job and skips the
+  # publishing `release` job and `verify-release`. A real
   # release still happens via a `v*` tag push; an explicit `dry_run=false`
   # dispatch publishes too (escape hatch).
   workflow_dispatch:
@@ -281,85 +281,8 @@ jobs:
             staging/*.tar.gz
             staging/*.sha256
 
-  # The universal initramfs, without which a published prod image cannot be
-  # sealed-booted from its own release assets.
-  #
-  # the universal initramfs agent runs from this as PID 1: it sets up the dm-verity target
-  # over the rootfs, mounts the runtime overlay at /sysroot/mvm/runtime, and
-  # switch_roots. A source checkout builds one locally
-  # (`resolve_or_build_local_initramfs`); an installed binary calls
-  # `download_initramfs`, which fetches `initramfs-<arch>.tar.gz` from this
-  # release. That download has never once succeeded, because nothing published
-  # the file — so every installed mvmctl has been unable to boot the sealed path
-  # its own rootfs is built for.
-  #
-  # This train, not `boot-image/v*`: `release_base_url` builds `{base}/v{version}`,
-  # and the initramfs bundles this workspace's guest agent, so it versions with
-  # the CLI rather than with the image.
-  initramfs-image:
-    if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
-    strategy:
-      # One arch must not cancel the other; the completeness check in `release`
-      # refuses a partial set, so letting both finish tells the truth about
-      # which one failed.
-      fail-fast: false
-      matrix:
-        include:
-          - arch: aarch64
-            runner: ubuntu-24.04-arm
-          - arch: x86_64
-            runner: ubuntu-latest
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
-
-      - name: Build the universal initramfs
-        env:
-          ARCH: ${{ matrix.arch }}
-        run: |
-          set -euo pipefail
-          SYSTEM="${ARCH}-linux"
-          STORE_PATH=$(nix build "./nix/images/initramfs#packages.${SYSTEM}.default" \
-            --no-link --print-out-paths | head -1)
-          mkdir -p "staging/initramfs-${ARCH}"
-          # cp -L so each file resolves through its nix-store symlink.
-          for f in initramfs.cpio.gz initramfs.hash initramfs.size VERSION; do
-            cp -L "$STORE_PATH/$f" "staging/initramfs-${ARCH}/$f"
-          done
-          # The derivation emits four of the five members `download_initramfs`
-          # requires; the manifest over them is packaging's job, exactly as it
-          # is for the runtime overlay.
-          (
-            cd "staging/initramfs-${ARCH}"
-            sha256sum initramfs.cpio.gz initramfs.hash initramfs.size VERSION \
-              > checksums-sha256.txt
-          )
-          tar -C "staging/initramfs-${ARCH}" \
-            -czf "staging/initramfs-${ARCH}.tar.gz" \
-            initramfs.cpio.gz initramfs.hash initramfs.size VERSION checksums-sha256.txt
-          (
-            cd staging
-            sha256sum "initramfs-${ARCH}.tar.gz" > "initramfs-${ARCH}.tar.gz.sha256"
-          )
-
-      - name: Upload initramfs artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: initramfs-image-${{ matrix.arch }}
-          path: |
-            staging/initramfs-${{ matrix.arch }}.tar.gz
-            staging/initramfs-${{ matrix.arch }}.tar.gz.sha256
-
   release:
-    needs: [bdd, e2e-docs, build, initramfs-image]
-    # The CLI binary and universal initramfs form one usable release. Waiting
-    # for the job is not enough under `!cancelled()`: its result must be a hard
-    # success requirement or a failed initramfs build can still publish a tag
-    # whose sealed-boot downloader always returns 404.
-    #
+    needs: [bdd, e2e-docs, build]
     # `e2e-docs` was added to `needs` above when the documented-surface gate
     # landed, and its result was never added here. `!cancelled()` overrides the
     # implicit all-needs-succeeded rule, so for as long as that was true the
@@ -372,15 +295,13 @@ jobs:
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.initramfs-image.result == 'success' }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
     # nothing else, so a branch push or a workflow_dispatch from an arbitrary
-    # ref cannot produce a signature the shipped verifier accepts. The boot
-    # image train is gated the same way against `boot-image/v*`, and
-    # revocations against its own tag; this was the last of the three trusted
-    # identities that anything could mint.
+    # ref cannot produce a signature the shipped verifier accepts. Revocations
+    # are gated the same way against their own tag.
     environment: release-signing
     runs-on: ubuntu-latest
     steps:
@@ -403,152 +324,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
-      # Mirror the locked image set into this CLI release under the names a CLI
-      # release has always carried. The bytes are built and signed once, in
-      # mvm-images; this step re-uploads them, never rebuilds them.
-      #
-      # An installed mvmctl still resolves the runtime overlay, SDK sidecar and
-      # the older image paths off its own `v{version}` release and verifies them
-      # under this workflow's identity, so the bundles for those files have to
-      # be minted here. That makes this job a re-signer of bytes it did not
-      # build, and the two gates below are what make re-signing safe:
-      #
-      # 1. The CLI being released verifies the whole set exactly as it would
-      #    on a user's machine: the root's digest against the compiled lock,
-      #    the root's cosign bundle against the lock's identity, then every
-      #    member's size and digest.
-      # 2. The mirror gate checks each file about to be republished against
-      #    that root — a member by its declared digest and size, anything else
-      #    through a checksum manifest whose member lines agree with the root —
-      #    and refuses a file nothing accounts for.
-      #
-      # Every URL comes from images.lock, never from a newest-release query. A
-      # CLI release with no image assets is a broken release, not a degraded
-      # one — every fresh install 404s on first boot — so a missing or
-      # mismatched set stops the publish rather than warning past it.
-      - name: Mirror the locked image set into this release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # Read the same Rust constant embedded in the released mvmctl. An
-          # independently selected newest tag can be complete while the image
-          # users actually fetch is missing or incomplete.
-          BOOT_TAG="$(cargo run --quiet --package xtask -- release-boot-image tag)"
-          if [ -z "${BOOT_TAG}" ]; then
-            echo "::error::the compiled default boot image tag is empty; refusing to publish" >&2
-            exit 1
-          fi
-          IMAGE_REPO="$(./scripts/locked-image-tag.sh image_set repository)"
-          MANIFEST="$(./scripts/locked-image-tag.sh image_set manifest_asset)"
-          if ! gh release view "${BOOT_TAG}" --repo "${IMAGE_REPO}" --json tagName > /dev/null; then
-            echo "::error::the CLI embeds ${BOOT_TAG}, but ${IMAGE_REPO} has no release with that tag. Publish that image set or intentionally advance images.lock before retrying." >&2
-            exit 1
-          fi
-          echo "Mirroring ${IMAGE_REPO}@${BOOT_TAG}"
-          image_set="${RUNNER_TEMP}/image-set"
-          mirror="${RUNNER_TEMP}/image-mirror"
-          mkdir -p "${image_set}" "${mirror}"
-          gh release download "${BOOT_TAG}" --repo "${IMAGE_REPO}" --dir "${image_set}" --clobber
-
-          tar -xzf artifacts/mvmctl-x86_64-unknown-linux-gnu.tar.gz -C "${RUNNER_TEMP}"
-          "${RUNNER_TEMP}/mvmctl-x86_64-unknown-linux-gnu/mvmctl" image boot verify \
-            --require-complete \
-            --manifest "${image_set}/${MANIFEST}" \
-            --bundle "${image_set}/${MANIFEST}.bundle" \
-            --artifacts "${image_set}"
-
-          mapfile -t mirrored < <(cargo run --quiet --package xtask -- release-boot-image mirror-assets)
-          for asset in "${MANIFEST}" "${MANIFEST}.bundle" "${mirrored[@]}"; do
-            mv "${image_set}/${asset}" "${mirror}/${asset}"
-          done
-          rm -rf "${image_set}"
-          cargo run --quiet --package xtask -- \
-            release-boot-image validate "${BOOT_TAG}" "${mirror}"
-
-          mkdir -p artifacts
-          for asset in "${mirrored[@]}"; do
-            mv "${mirror}/${asset}" "artifacts/${asset}"
-          done
-          ls -la artifacts/
-
-      # The attested builder pack has to be minted here, and only here.
-      #
-      # An installed mvmctl verifies it against
-      # `RELEASE_IDENTITY_TEMPLATES` — `release.yml@refs/tags/v{version}`,
-      # reconstructed from its own version. `release-boot-image.yml` used to
-      # carry this step, where that identity is unmintable: that workflow only
-      # runs on `boot-image/v*`, so its guard (`refs/tags/v*`) could never be
-      # satisfied and the step exited 0 having produced nothing, on every run
-      # since it was written. `release.yml` globbed for the result, `nullglob`
-      # dropped the unmatched pattern, and the CLI's fetch fell back to the
-      # unattested checksum download with a warning. Nothing failed, so nothing
-      # was noticed until `verify-release` ran for the first time since v0.17.0.
-      #
-      # Moving it does not merely fix the guard. A pack signed under a
-      # `boot-image/*` identity could not have been verified even if produced:
-      # `release_trust` keeps the two identity lists separate precisely so a
-      # signature over a boot image cannot validate a CLI artifact.
-      #
-      # Tag pushes only: the whole point is the `refs/tags/v*` SAN, which a
-      # dispatch cannot mint. A dry run therefore does not exercise this, and
-      # publishes without the pack — the same fail-open the CLI already handles.
-      - name: Produce and keyless-sign the attested builder pack
-        if: ${{ github.event_name == 'push' }}
-        env:
-          REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.ref }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
-          REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/builder-vm-revocations.json"
-
-          for arch in aarch64 x86_64; do
-            kernel="artifacts/builder-vm-vmlinux-${arch}"
-            rootfs="artifacts/builder-vm-rootfs-${arch}.ext4"
-            sbom="artifacts/builder-vm-${arch}.sbom.txt"
-
-            # Same complete-or-absent contract the image assets already follow:
-            # an image job that did not run leaves these absent on purpose, and
-            # a release without the pack is degraded rather than wrong. A
-            # partial set is neither, so it fails.
-            present=0
-            for f in "$kernel" "$rootfs" "$sbom"; do
-              [ -f "$f" ] && present=$((present + 1))
-            done
-            if [ "$present" -eq 0 ]; then
-              echo "::notice::no builder image for ${arch}; skipping its attested pack"
-              continue
-            fi
-            if [ "$present" -ne 3 ]; then
-              echo "::error::builder image for ${arch} is partial (${present}/3 inputs) — refusing to mint a pack over an incomplete image" >&2
-              exit 1
-            fi
-
-            SBOM_URI="https://github.com/${REPOSITORY}/releases/download/${TAG_NAME}/builder-vm-${arch}.sbom.txt"
-            cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
-              --vmlinux "$kernel" --rootfs "$rootfs" \
-              --arch "$arch" --channel stable --keyless \
-              --identity "$IDENTITY" \
-              --out-dir artifacts \
-              --sbom "$sbom" \
-              --sbom-uri "$SBOM_URI" \
-              --revocation-channel "$REVOCATION_CHANNEL"
-            mv artifacts/manifest.json "artifacts/builder-vm-${arch}.pack-manifest.json"
-
-            # --new-bundle-format: the Sigstore bundle carrying
-            # verificationMaterial that the installed binary's Rust verifier
-            # parses. The legacy --bundle format is not accepted by that stack.
-            cosign sign-blob \
-              --yes \
-              --new-bundle-format \
-              --bundle "artifacts/builder-vm-${arch}.pack-manifest.json.bundle" \
-              "artifacts/builder-vm-${arch}.pack-manifest.json"
-            echo "minted attested builder pack for ${arch}"
-          done
 
       - name: Generate combined checksum file
         shell: bash
@@ -578,24 +353,18 @@ jobs:
           # Requires cosign >= v2.4 on any host that verifies by hand; that is
           # the floor this project targets and there is no legacy fallback.
           #
-          # The checksum manifests are in this list because they are what
-          # actually gates boot bytes: every downloader hashes the artifact and
-          # compares it against the manifest, so an unsigned manifest lets
-          # whoever can swap an artifact swap its recorded hash too and the
-          # comparison still passes. Signing the tarball alone does not close
-          # that — the image blobs (kernel, rootfs, verity sidecar) are not
-          # tarballs and carry no per-file signature of their own; the manifest
-          # is their only integrity anchor.
+          # The combined checksum manifest is in this list because it is what
+          # the installer and `mvmctl update` anchor on: they hash the archive
+          # and compare it against the manifest, so an unsigned manifest lets
+          # whoever can swap an archive swap its recorded hash too and the
+          # comparison still passes. It is a literal because the preceding step
+          # always writes it and this job hard-gates on the binary build.
           #
-          # The two image manifests are globs, so nullglob drops them when the
-          # image job that would have produced them failed — image signing stays
-          # best-effort exactly as image publication is. The combined binary
-          # manifest is a literal because the preceding step always writes it
-          # and this job hard-gates on the binary build.
+          # Boot images are not in this release: they are members of the
+          # signed image set `images.lock` pins, verified against that root's
+          # own signature, so nothing here re-signs them.
           for blob in \
             artifacts/*.tar.gz \
-            artifacts/builder-vm-*-checksums-sha256.txt \
-            artifacts/default-microvm-*-checksums-sha256.txt \
             artifacts/checksums-sha256.txt \
             sbom.cdx.json; do
             cosign sign-blob \
@@ -618,94 +387,12 @@ jobs:
       # an independent rebuild landing on the same bytes needs no trust in this
       # builder at all.
       #
-      # Subjects are the tarballs only, matching the direct-signature set. The
-      # kernels, root filesystems and metadata carry no per-file signature and
-      # are anchored by digest inside the signed checksum manifests; attesting
-      # them individually here would assert a per-file guarantee the pipeline
-      # does not otherwise make.
+      # Subjects are the tarballs, matching the direct-signature set.
       - name: Attest build provenance for the release tarballs (release-provenance)
         if: ${{ github.event_name == 'push' }}
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: artifacts/*.tar.gz
-
-      # Consume what we are about to publish, before publishing it.
-      #
-      # The runtime overlay and SDK sidecar are acquired by an installed mvmctl
-      # through a fail-closed ladder: checksum, cosign signature, safe-extract,
-      # inner-manifest re-check, atomic install, resolve. Every rung refuses
-      # rather than degrades, so an artifact this pipeline builds slightly wrong
-      # does not degrade the user experience — it strands every download.
-      #
-      # This runs that exact production path over the staged artifacts via a
-      # file:// URL. It is the only place the identity genuinely is this tagged
-      # release workflow's, so it needs no trust override and proves the whole
-      # chain rather than one rung. A missing artifact is skipped (image jobs
-      # are best-effort and the release gates only on the binary build); a
-      # PRESENT artifact that cannot be consumed fails the release here.
-      - name: Verify the published artifacts survive the consumer path
-        if: ${{ github.event_name == 'push' }}
-        shell: bash
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          VERSION="${TAG_NAME#v}"
-          STAGE="consumer-check/v${VERSION}"
-          mkdir -p "${STAGE}"
-
-          checked=0
-          verify_archive() {
-            local kind="$1"
-            local arch="$2"
-            local libc="${3:-}"
-            local archive example_kind
-            if [ "${kind}" = sdk-sidecar ]; then
-              archive="artifacts/sdk-sidecar-${arch}-${libc}.tar.gz"
-              example_kind=sidecar
-            else
-              archive="artifacts/runtime-overlay-${arch}.tar.gz"
-              example_kind=overlay
-            fi
-            [ -f "${archive}" ] || return 0
-            for suffix in "" ".sha256" ".bundle"; do
-              src="${archive}${suffix}"
-              if [ ! -f "${src}" ]; then
-                echo "::error::${src} is missing — a published archive without its checksum and signature cannot be acquired" >&2
-                exit 1
-              fi
-              cp "${src}" "${STAGE}/"
-            done
-
-            consumer_args=(
-              --kind "${example_kind}"
-              --base-url "file://$(pwd)/consumer-check"
-              --version "${VERSION}"
-              --arch "${arch}"
-              --cache "$(mktemp -d)"
-            )
-            if [ -n "${libc}" ]; then
-              consumer_args+=(--libc "${libc}")
-            fi
-            echo "Consuming ${kind}-${arch}${libc:+-${libc}} through the production download path..."
-            cargo run --release -p mvm-build --example download-release-artifact \
-              --features manifest-verify -- "${consumer_args[@]}"
-            checked=$((checked + 1))
-          }
-
-          for arch in aarch64 x86_64; do
-            verify_archive runtime-overlay "${arch}"
-            for libc in glibc musl; do
-              verify_archive sdk-sidecar "${arch}" "${libc}"
-            done
-          done
-
-          if [ "${checked}" -eq 0 ]; then
-            echo "::warning::no runtime-overlay or sdk-sidecar archives present — image jobs likely failed; publishing without them" >&2
-          else
-            echo "ok: ${checked} artifact(s) verified through the end-user acquisition path."
-          fi
 
       - name: Create GitHub Release
         env:
@@ -717,60 +404,25 @@ jobs:
           DRY_RUN: ${{ github.event_name != 'push' }}
         run: |
           set -euo pipefail
-          # nullglob: image globs that matched nothing (their job failed)
-          # drop out of the list instead of being passed literally and
-          # erroring `gh release create`. The binary tarballs, the combined
-          # checksums, and the SBOM are always present (the job gates on the
-          # binary build), so the download path is always published; images
-          # attach only when their jobs succeeded.
+          # nullglob: the signature bundles exist only on a tag push, so a dry
+          # run's `*.bundle` globs match nothing and must drop out of the list
+          # rather than reach `gh release create` literally. The binary
+          # tarballs, the combined checksums, and the SBOM are always present
+          # (the job gates on the binary build).
           shopt -s nullglob
           assets=(
             artifacts/*.tar.gz
             artifacts/*.tar.gz.bundle
             artifacts/checksums-sha256.txt
             artifacts/checksums-sha256.txt.bundle
-            artifacts/builder-vm-vmlinux-*
-            artifacts/builder-vm-rootfs-*
-            artifacts/builder-vm-*.cmdline.txt
-            artifacts/builder-vm-*.manifest.json
-            artifacts/builder-vm-*.pack-manifest.json
-            artifacts/builder-vm-*.pack-manifest.json.bundle
-            artifacts/builder-vm-*.sbom.txt
-            artifacts/builder-vm-*-checksums-sha256.txt
-            artifacts/builder-vm-*-checksums-sha256.txt.bundle
-            artifacts/runtime-overlay-*.tar.gz
-            artifacts/runtime-overlay-*.tar.gz.sha256
-            artifacts/initramfs-*.tar.gz
-            artifacts/initramfs-*.tar.gz.sha256
-            artifacts/sdk-sidecar-*-glibc.tar.gz
-            artifacts/sdk-sidecar-*-glibc.tar.gz.sha256
-            artifacts/sdk-sidecar-*-musl.tar.gz
-            artifacts/sdk-sidecar-*-musl.tar.gz.sha256
-            artifacts/runtime-overlay-*.tar.gz.bundle
-            artifacts/sdk-sidecar-*-glibc.tar.gz.bundle
-            artifacts/sdk-sidecar-*-musl.tar.gz.bundle
-            artifacts/default-microvm-vmlinux-*
-            artifacts/default-microvm-rootfs-*
-            artifacts/default-microvm-meta-*
-            artifacts/default-microvm-*.pack-manifest.json
-            artifacts/default-microvm-*.pack-manifest.json.bundle
-            artifacts/default-microvm-*.sbom.txt
-            artifacts/default-microvm-*-checksums-sha256.txt
-            artifacts/default-microvm-*-checksums-sha256.txt.bundle
             sbom.cdx.json
             sbom.cdx.json.bundle
           )
-          # `artifacts/*.tar.gz` and `artifacts/*.tar.gz.bundle` already match
-          # the runtime-overlay, initramfs and sdk-sidecar tarballs that the
-          # entries above name explicitly, so each of those files is listed
-          # twice. GitHub accepts the first upload and rejects the second with
-          # `ReleaseAsset.name already exists` — a 422 that arrives *after*
-          # `gh release create` has already created the release, so the run goes
-          # red having published a partially populated release.
-          #
-          # Deduplicated rather than un-overlapped: the explicit entries record
-          # what a release is required to carry and the catch-alls cover what it
-          # may also carry, and both are worth keeping. Sorting is incidental —
+          # A file named twice is rejected by GitHub with `ReleaseAsset.name
+          # already exists` — a 422 that arrives *after* `gh release create` has
+          # already created the release, so the run goes red having published a
+          # partially populated release. Deduplicate so an entry added later
+          # that overlaps a catch-all cannot do that. Sorting is incidental —
           # upload order does not matter.
           mapfile -t assets < <(printf '%s\n' "${assets[@]}" | sort -u)
 
@@ -849,25 +501,6 @@ jobs:
             -f tag="${TAG_NAME}" \
             -f dry_run=false
 
-      # Same rule, same fix, for the kernels. `kernel-build.yml` declares
-      # `on.push.tags: v*` and has never once run from it: whatever creates the
-      # tag does so under GITHUB_TOKEN, which emits no `push` event, so the
-      # publish arm has never fired on a release. The result is releases whose
-      # `mvmctl kernel build --source download` 404s — the only supported
-      # acquisition path for a host that cannot compile kernels. Chain it
-      # explicitly rather than relying on an event that demonstrably does not
-      # arrive.
-      - name: Trigger kernel build + publish workflow
-        if: ${{ github.event_name == 'push' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          # No `-f` inputs: kernel-build.yml declares `workflow_dispatch: {}`,
-          # and `--ref <tag>` already gives it the `refs/tags/v*` github.ref its
-          # publish steps gate on.
-          gh workflow run kernel-build.yml --ref "${TAG_NAME}"
-
   # Plan 199 B2: post-publish gate. Download the just-created release and assert
   # every binary target has a tarball + matching SHA256 + cosign signature bundle
   # + an entry in the combined checksums manifest, and that the SBOM is signed.
@@ -886,51 +519,6 @@ jobs:
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
-
-      # The `release` job ends by dispatching `kernel-build.yml` and does not
-      # wait for it, so the workload kernels and their signed per-arch checksum
-      # manifests land on the release minutes after this job becomes eligible.
-      # Downloading immediately captured the release mid-publish, and the
-      # verifier then reported those assets missing — a red gate on a release
-      # that was fine, every single time, which is the failure mode that trains
-      # people to ignore a gate.
-      #
-      # Waiting for the assets rather than for the run: this job cares that the
-      # bytes are on the release, and polling the release says that directly.
-      # Reading it from a fire-and-forget dispatch would mean guessing which run
-      # id the dispatch produced.
-      #
-      # Bounded, and a timeout is a failure: assets that never arrive are the
-      # incomplete release this gate exists to catch, and must not be waited on
-      # forever or quietly skipped.
-      - name: Wait for the asynchronously published kernel assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          required=(
-            vmlinux-aarch64-workload
-            vmlinux-x86_64-workload
-            kernel-aarch64-checksums-sha256.txt
-            kernel-x86_64-checksums-sha256.txt
-          )
-          for _ in $(seq 1 40); do
-            present=$(gh release view "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
-              --json assets --jq '.assets[].name' 2>/dev/null || true)
-            missing=()
-            for name in "${required[@]}"; do
-              printf '%s\n' "${present}" | grep -qx "${name}" || missing+=("${name}")
-            done
-            if [ ${#missing[@]} -eq 0 ]; then
-              echo "kernel assets present on ${TAG_NAME}"
-              exit 0
-            fi
-            echo "waiting for ${#missing[@]} kernel asset(s): ${missing[*]}"
-            sleep 30
-          done
-          echo "::error::${TAG_NAME} never received: ${missing[*]} — kernel-build.yml did not publish them within 20 minutes, so the release is incomplete." >&2
-          exit 1
 
       - name: Download published release assets
         env:
@@ -960,59 +548,23 @@ jobs:
   # run it. v0.17.0 is a published, signed release that cannot start a
   # microVM on a fresh host.
   #
-  # After publication rather than before, because the first run downloads
-  # the workload kernels `kernel-build.yml` attaches once the release exists,
-  # and `verify-release` is what waits for them. The release is still a
+  # After publication rather than before, because the first run installs
+  # the published release, and `verify-release` is what proves its asset set
+  # complete and signed. The release is still a
   # prerelease at this point, so no user reaches it by default until
   # `promote-release`.
   #
   # Both backends a new user boots: HVF on the self-hosted Apple Silicon
   # runner `e2e-docs` uses (no hosted macOS runner can boot a guest), and
-  # Firecracker on a hosted Linux runner with KVM.
+  # Firecracker on a hosted Linux runner with KVM. The lanes live in
+  # first-run-smoke.yml so they can be dispatched against a release candidate
+  # before a tag depends on them.
   first-run-smoke:
-    name: First run after a fresh install (${{ matrix.lane }})
     needs: [verify-release]
     if: ${{ github.event_name == 'push' && needs.verify-release.result == 'success' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - lane: macOS, HVF
-            runner: [self-hosted, macOS, ARM64, m1]
-            artifact: first-run-macos-hvf
-          - lane: Linux, Firecracker
-            runner: ubuntu-latest
-            artifact: first-run-linux-firecracker
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v6
-
-      # What `install/linux.md` asks of a user: write access to /dev/kvm.
-      - name: Grant /dev/kvm access for the job
-        if: runner.os == 'Linux'
-        run: |
-          set -euo pipefail
-          if [ ! -e /dev/kvm ]; then
-            echo "::error::/dev/kvm missing on this runner — a first run cannot boot here." >&2
-            exit 1
-          fi
-          sudo chmod 666 /dev/kvm
-
-      - name: Install the tag as a new user and run the first command
-        env:
-          TAG_NAME: ${{ github.ref_name }}
-          MVM_SMOKE_OUT: ${{ runner.temp }}/first-run
-        run: sh scripts/smoke-fresh-install.sh "${TAG_NAME}"
-
-      - name: Upload the transcript
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact }}
-          path: ${{ runner.temp }}/first-run
-          if-no-files-found: warn
-          retention-days: 30
+    uses: ./.github/workflows/first-run-smoke.yml
+    with:
+      tag: ${{ github.ref_name }}
 
   # The only step that makes a release reach users who did not ask for it:
   # GitHub's latest marker (`mvmctl update`), install.sh's default (the newest

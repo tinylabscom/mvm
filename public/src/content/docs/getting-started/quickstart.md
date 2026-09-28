@@ -77,9 +77,10 @@ host dependencies. For an interactive shell, boot a workload instead — see
 [Interactive Console](#7-interactive-console) below.
 
 :::note
-Release binaries download the builder image (~200MB) on first use. From a
-source checkout, the builder VM image is always built locally from the
-in-repo flakes.
+The builder image (~200MB) is downloaded and verified against the image lock
+on first use. It is built locally only when an `mvm-images` checkout is
+selected, through `MVM_IMAGES_DIR` or a clone beside this one: image
+construction lives in that repository.
 :::
 
 ## 3. Day-to-Day Commands

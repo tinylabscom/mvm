@@ -14,9 +14,9 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use mvm_agentd::vsock::{
-    FsEntry, FsResult, FsStat, GuestRequest, ProcInfo, ProcResult, ProcWaitEvent,
-};
+/// The payloads these operations return, so a caller names them from here.
+pub use mvm_agentd::vsock::{FsEntry, FsEntryKind, FsStat, ProcInfo, ProcState, ProcWaitEvent};
+use mvm_agentd::vsock::{FsResult, GuestRequest, ProcResult};
 
 /// Record the host→guest RPC in the audit chain, before it is sent.
 ///

@@ -40,9 +40,10 @@ pub use crate::volume_image::{VolumeImageLock, ensure_persistent_volume_image};
 mod image_lock;
 
 pub use image_lock::{
-    DEFAULT_LOCK_WAIT, LOCK_WAIT_ENV, LockWait, NixStoreImageLock, UnlockedStoreImage,
-    acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
-    ensure_nix_store_image_unlocked, hold_image_lock, nix_store_image_is_contended,
+    DEFAULT_LOCK_WAIT, LOCK_WAIT_ENV, LockSubject, LockWait, LockWaitError, NixStoreImageLock,
+    UnlockedStoreImage, acquire_lock_waiting, acquire_nix_store_image_lock,
+    acquire_nix_store_image_lock_named, ensure_nix_store_image_unlocked, hold_image_lock,
+    nix_store_image_is_contended,
 };
 pub(crate) use image_lock::{
     acquire_sidecar_lock_within, pid_alive, sidecar_lock_path, sparse_create_image,
@@ -598,7 +599,7 @@ printf '%s\n' "$NIX_OUT" > /job/store-path
 # bounded fixed names keep the store bounded — the cap GC still frees a
 # superseded closure within a kind, and an unchanged derivation is a store hit
 # next build. The builder-vm image derivation name (mvm-builder-vm-image-* /
-# mvm-builder-vm-dev-*) is set in nix/images/builder-vm/flake.nix; everything
+# mvm-builder-vm-dev-*) is set by mvm-images' builder flake; everything
 # else (workload rootfs/images) is the workload kind. Best-effort; never fails
 # the build.
 case "$(basename "$NIX_OUT")" in

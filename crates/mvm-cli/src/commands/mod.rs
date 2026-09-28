@@ -159,7 +159,7 @@ pub(in crate::commands) enum Commands {
     /// Report whether a verified runtime pack is ready for instant launch
     #[command(display_order = 6)]
     Prepare(vm::prepare::Args),
-    /// Explain a run after the fact from the chain-signed audit log
+    /// Explain a run and its egress refusals from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
     /// Measure this host's launch latency against the published budgets
@@ -353,6 +353,7 @@ fn run_command() -> Result<()> {
         mvm_build::image_source::configured_images_dir().as_deref(),
     )?;
     crate::host_binaries::source::allow_payload_from_source();
+    allow_helper_builds_from_source(mvm_build::artifact_acquisition::compiled_channel());
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
@@ -581,6 +582,17 @@ fn refuse_local_image_source_in_release_build(
     Ok(())
 }
 
+/// Let a contributor build compile the per-VM helpers it spawns — the
+/// supervisors and the network endpoint — from its checkout when they are
+/// missing or out of date. A root `cargo build` produces only `mvmctl`, and
+/// this is what keeps that build plus one `mvmctl` command sufficient. An
+/// official release ships its helpers beside it and never runs `cargo`.
+fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::DistributionChannel) {
+    if channel.permits_automatic_builds() {
+        mvm_vmm::host::aux_bin::allow_helper_builds_from_source();
+    }
+}
+
 fn apply_startup_env(cli: &Cli) {
     if let Some(ref version) = cli.fc_version {
         set_cli_env("MVM_FC_VERSION", version);
@@ -617,9 +629,6 @@ fn register_builder_session_starter() {}
 /// bootstrap helper.
 #[cfg(feature = "builder-vm")]
 fn declare_embedded_host_binaries() {
-    mvm_build::builder_vm_image::register_source_fingerprint_resolver(
-        crate::commands::env::builder_vm::current_builder_vm_source_fingerprint,
-    );
     mvm_build::builder_vm_bootstrap::declare_current_exe_provides_host_binaries(
         crate::host_binaries::source::payload_available(),
     );

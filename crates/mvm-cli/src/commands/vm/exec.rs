@@ -9,7 +9,7 @@ use super::run_validation::validate_run_profile;
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::Signer;
 
 use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
@@ -21,18 +21,20 @@ use super::super::env::builder_vm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
 };
 use super::Cli;
-use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
+use super::host_signer::{host_signer_id, load_or_init};
 use crate::ui;
 
 pub(in crate::commands) mod detect;
 pub(in crate::commands) use detect::{Inference, resolve_run_source};
+mod run_mode;
+pub(in crate::commands) use run_mode::resolve_run_mode;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
-    /// legacy slot name). If omitted, the bundled
-    /// `nix/images/default-tenant/` image is used (built via Nix on first use,
-    /// cached at `~/.mvm/cache/default-microvm/`). Each invocation boots a
+    /// legacy slot name). If omitted, the default microVM image is used (from
+    /// the selected mvm-images checkout, or else the pinned image set; cached
+    /// at `~/.mvm/cache/default-microvm/`). Each invocation boots a
     /// fresh transient microVM — never the long-running builder VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,
@@ -111,125 +113,7 @@ pub(in crate::commands) struct Args {
     pub host_service: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum RunProfile {
-    /// No environment variables or host shares.
-    Restrictive,
-    /// Environment variables and read-only host shares.
-    Standard,
-    /// As standard, plus a writable share on a persistent machine and the dev
-    /// guest profile for a sealed-image entrypoint run.
-    Dev,
-    /// Local escape hatch; requires MVM_ACK_PERMISSIVE_RUN=1.
-    Permissive,
-}
-
-/// What one profile permits.
-///
-/// The presets used to be spelled out in four places — the transient
-/// validator, a stringly-typed `matches!(profile, "dev" | "permissive")` for
-/// writable volumes, another for dev init, and prose in the docs. Four
-/// declarations of one policy is four chances to disagree, and the one a
-/// reader would check is not necessarily the one that runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProfileGrants {
-    /// `--env` is accepted.
-    pub env: bool,
-    /// `--mount` is accepted at all.
-    pub host_shares: bool,
-    /// A `:rw` share is accepted **on a persistent machine**. A transient
-    /// run's live share is read-only under every profile, which is why this
-    /// is not simply "writable shares".
-    pub writable_shares_when_persistent: bool,
-    /// The guest gets the dev profile — a dev-shell agent, and DevOnly verbs
-    /// on an image that would otherwise be sealed.
-    pub dev_guest: bool,
-    /// Refuses unless `MVM_ACK_PERMISSIVE_RUN=1` is set.
-    pub needs_acknowledgement: bool,
-}
-
-impl RunProfile {
-    /// Every profile, in increasing order of what it permits.
-    pub(crate) const ALL: [Self; 4] = [
-        Self::Restrictive,
-        Self::Standard,
-        Self::Dev,
-        Self::Permissive,
-    ];
-
-    /// The name the CLI, the receipt, and the docs all use.
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Restrictive => "restrictive",
-            Self::Standard => "standard",
-            Self::Dev => "dev",
-            Self::Permissive => "permissive",
-        }
-    }
-
-    /// Parse the name a persisted machine spec stored.
-    ///
-    /// Returns `None` for anything else rather than falling back to a
-    /// default: a spec carrying a profile nobody recognises should stop the
-    /// boot and say so, not be silently treated as whichever preset the
-    /// comparison happened to miss.
-    pub(crate) fn from_name(name: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|p| p.as_str() == name)
-    }
-
-    /// The single declaration of what this profile permits.
-    pub(crate) const fn grants(self) -> ProfileGrants {
-        match self {
-            Self::Restrictive => ProfileGrants {
-                env: false,
-                host_shares: false,
-                writable_shares_when_persistent: false,
-                dev_guest: false,
-                needs_acknowledgement: false,
-            },
-            Self::Standard => ProfileGrants {
-                env: true,
-                host_shares: true,
-                writable_shares_when_persistent: false,
-                dev_guest: false,
-                needs_acknowledgement: false,
-            },
-            Self::Dev => ProfileGrants {
-                env: true,
-                host_shares: true,
-                writable_shares_when_persistent: true,
-                dev_guest: true,
-                needs_acknowledgement: false,
-            },
-            Self::Permissive => ProfileGrants {
-                env: true,
-                host_shares: true,
-                writable_shares_when_persistent: true,
-                dev_guest: true,
-                needs_acknowledgement: true,
-            },
-        }
-    }
-
-    /// One line describing what this profile permits, for `doctor` and help.
-    pub(crate) fn summary(self) -> String {
-        let g = self.grants();
-        let mut parts = Vec::new();
-        parts.push(if g.env { "env allowed" } else { "no env" });
-        parts.push(match (g.host_shares, g.writable_shares_when_persistent) {
-            (false, _) => "no host shares",
-            (true, false) => "read-only host shares",
-            (true, true) => "host shares, writable on a persistent machine",
-        });
-        if g.dev_guest {
-            parts.push("dev guest profile");
-        }
-        if g.needs_acknowledgement {
-            parts.push("requires MVM_ACK_PERMISSIVE_RUN=1");
-        }
-        parts.join("; ")
-    }
-}
+pub(crate) use mvm_client::profile::RunProfile;
 
 /// A run boots from exactly one source. Spelling the other four at each flag is
 /// what let `run` and `machine run` disagree about which sources exist at all.
@@ -292,6 +176,15 @@ pub(in crate::commands) struct RunArgs {
     /// Allow outbound access to HOST[:PORT] (repeatable).
     #[arg(long = "allow-host", value_name = "HOST[:PORT]")]
     pub allow_host: Vec<String>,
+    /// Allow one HTTP endpoint only, e.g. GET https://h/p/**.
+    #[arg(long = "allow-endpoint", value_name = "[METHOD ]URL")]
+    pub allow_endpoint: Vec<String>,
+    /// Answer `ask` rules with tty, deny, or webhook=URL (repeatable).
+    #[arg(long = "approval", value_name = "BACKEND")]
+    pub approval: Vec<crate::approval::ApprovalSpec>,
+    /// Combine several --approval backends: all (default) or any.
+    #[arg(long = "approval-mode", value_name = "MODE", value_parser = crate::approval::parse_mode)]
+    pub approval_mode: Option<mvm_core::manifest::ApprovalChainMode>,
     /// Cap total AI tokens for this run.
     #[arg(long, value_name = "TOKENS", value_parser = clap::value_parser!(u64).range(1..))]
     pub ai_token_budget: Option<u64>,
@@ -324,8 +217,8 @@ pub(in crate::commands) struct RunArgs {
     // attaches it as a block device — every backend serves it, and the image is
     // a snapshot taken at boot, so host edits mid-run are not visible.
     // `HOST:/GUEST:SIZE[:ro][:enc]` attaches a disk instead, which is what the
-    // `--volume` spelling reads naturally as. A transient run is read-only
-    // either way.
+    // `--volume` spelling reads naturally as. Only a disk may be writable,
+    // and a persistent machine takes disks only.
     //
     // Deliberately a plain comment, not a doc comment: clap derives `long_help`
     // from doc comments and `machine_run_option_summaries_stay_short` caps that
@@ -504,6 +397,9 @@ impl Default for RunArgs {
             net: false,
             network_preset: None,
             allow_host: Vec::new(),
+            allow_endpoint: Vec::new(),
+            approval: Vec::new(),
+            approval_mode: None,
             ai_token_budget: None,
             peer: Vec::new(),
             // Must track the clap default, which is resolved from the backend
@@ -693,10 +589,13 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_outputs = outputs.grants();
     let host_config = mvm_core::user_config::load(None);
     let ai_policy = super::shared::resolve_ai_policy(args.ai_token_budget);
+    let routes = super::run_routes::launch_routes(&args)?;
+    crate::approval::configure(super::run_routes::launch_approval(&args)?);
+    let allow_host = routes.with_allow_host(&args.allow_host);
     let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
         cpu_limit_millicores: args.cpu_limit,
         timeout_secs: args.timeout,
-        allow_host: &args.allow_host,
+        allow_host: &allow_host,
         peer: &args.peer,
         net: args.net,
         network_preset: args.network_preset,
@@ -705,7 +604,10 @@ pub(in crate::commands) fn run_secure_with_source(
         config: &host_config,
         ai: ai_policy.as_ref(),
     })?;
-    let network_policy = resolved_grants.network_policy.clone();
+    let network_policy = resolved_grants
+        .network_policy
+        .clone()
+        .with_routes(routes.routes.clone());
     let admit_secrets = super::run_secrets::admitted_run_secrets(&mut args)?;
 
     // Every transient run is admitted as a locally-signed workload (uniform
@@ -715,8 +617,10 @@ pub(in crate::commands) fn run_secure_with_source(
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
+    let uses_oci_image =
+        super::shared::launch_uses_oci_image(args.image.as_deref(), args.manifest.as_deref())?;
     let selected_backend = crate::exec::select_exec_backend(
-        args.image.is_some(),
+        uses_oci_image,
         &network_policy,
         args.hypervisor.as_deref(),
     )?;
@@ -751,6 +655,8 @@ pub(in crate::commands) fn run_secure_with_source(
     // plan exists, so the provenance entry binds to the plan that booted.
     let oci_provenance: OciProvenanceSink = std::rc::Rc::new(std::cell::RefCell::new(None));
     let provenance_for_admit = std::rc::Rc::clone(&oci_provenance);
+    let denials = super::egress_denials::PendingWatch::for_run(args.json, args.pty);
+    let denials_for_admit = std::rc::Rc::clone(&denials);
     let admit = move |inputs: crate::exec::AdmitInputs<'_>|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let crate::exec::AdmitInputs {
@@ -761,6 +667,7 @@ pub(in crate::commands) fn run_secure_with_source(
             assets,
             volumes,
         } = inputs;
+        denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             outputs: admit_outputs.clone(),
@@ -872,6 +779,7 @@ pub(in crate::commands) fn run_secure_with_source(
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
         let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
+        let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
@@ -882,7 +790,8 @@ pub(in crate::commands) fn run_secure_with_source(
         if !json_requested && let Some(timing) = output.phase_timing.as_ref() {
             eprintln!("{}", timing.render_table());
         }
-        let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path);
+        let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path)
+            .with_egress_denials(refused.destinations());
         if let Some(path) = summary.receipt_path.as_deref() {
             write_run_receipt(path, receipt_input, &output)?;
         }
@@ -915,74 +824,9 @@ pub(in crate::commands) fn run_secure_with_source(
             backend: &receipt_backend,
             oci_provenance: &oci_provenance,
             outputs: &outputs,
+            denials: &denials,
         },
     )
-}
-
-/// Resolve the `mvmctl run` transport mode from the explicit
-/// `--mode` flag, the friendly `--dev` / `--prod` aliases, and the
-/// `MVM_SDK_MODE` env-var override. Returns `Ok(None)` when no SDK
-/// mode was requested — in that case the verb falls back to the
-/// transient-sandbox runner over the trailing argv.
-///
-/// Env-var precedence matches `mvmctl build compile`: `MVM_SDK_MODE`
-/// supersedes any flag-only override so a wrapper script can pin a
-/// mode without the user retyping `--mode`.
-pub(in crate::commands) fn resolve_run_mode(
-    sdk: &SdkTransportArgs,
-    run: &RunArgs,
-) -> Result<Option<RunMode>> {
-    if let Ok(env_mode) = std::env::var(mvm_sdk::env::MVM_SDK_MODE_ENV) {
-        // The SDK modes do not go through the image run, so `--prod` would be
-        // dropped without a word; refuse the pair instead.
-        if run.prod {
-            anyhow::bail!(
-                "--prod is not honoured by an SDK run mode, and {}={env_mode} selects one; \
-                 unset it to run a production image",
-                mvm_sdk::env::MVM_SDK_MODE_ENV
-            );
-        }
-        return Ok(Some(parse_env_run_mode(&env_mode)?));
-    }
-    if sdk.dev {
-        if run.prod {
-            anyhow::bail!("--dev selects the SDK live mode, which does not honour --prod");
-        }
-        return Ok(Some(RunMode::Live));
-    }
-    if run.prod {
-        if run.image.is_some() {
-            return Ok(None);
-        }
-        anyhow::bail!(
-            "`mvmctl run --prod` (alias for --mode record) redirects to `mvmctl build compile`, where \
-             record is the default mode. Re-run as `mvmctl build compile <script>` (the trailing argv \
-             on `mvmctl run` is for the live sandbox runner, not for SDK record-mode)."
-        );
-    }
-    match sdk.mode {
-        None => Ok(None),
-        Some(RunMode::Live) => Ok(Some(RunMode::Live)),
-        Some(RunMode::Record) => anyhow::bail!(
-            "`mvmctl run --mode record` is unsupported — `mvmctl build compile` is the record-mode verb \
-             (record is the default; pass the script as the positional entry)."
-        ),
-        Some(RunMode::Plan) => Ok(Some(RunMode::Plan)),
-    }
-}
-
-fn parse_env_run_mode(raw: &str) -> Result<RunMode> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "live" => Ok(RunMode::Live),
-        "plan" => Ok(RunMode::Plan),
-        "record" => anyhow::bail!(
-            "MVM_SDK_MODE=record on `mvmctl run` is unsupported — `mvmctl build compile` is the \
-             record-mode verb (record is its default)."
-        ),
-        other => anyhow::bail!(
-            "MVM_SDK_MODE={other:?} is not recognized; expected one of: live, plan, record"
-        ),
-    }
 }
 
 struct TransientMounts {
@@ -1023,6 +867,8 @@ struct RunAudit<'a> {
     /// Output grants whose disks the run attaches and whose collection is
     /// recorded once it exits.
     outputs: &'a super::outputs::PreparedOutputs,
+    /// The run's egress refusals, summarized once it exits.
+    denials: &'a super::egress_denials::PendingWatch,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -1067,6 +913,7 @@ fn run_run_args(
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
+    audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs
         .close_run(audit.ctx, audit.backend, posture.get(), result)?;
@@ -1207,6 +1054,8 @@ fn build_exec_request(
         prod,
         runtime_pack,
     } = selection;
+    let manifest_arg = args.manifest.as_deref();
+    let image_ref = image_ref.as_deref();
     // Shapes where the thing being booted already carries a command, so an
     // empty argv is the image supplying one rather than the caller omitting it:
     // the wasm backend runs the module itself, a manifest slot names an image
@@ -1242,14 +1091,6 @@ fn build_exec_request(
         env_pairs.push(parse_env_pair(kv)?);
     }
     check_run_env(&args.allow_env, &env_pairs, env_args::launch_env(&target))?;
-    let selected_backend = crate::exec::select_exec_backend(
-        image_ref.is_some(),
-        &network_policy,
-        args.hypervisor.as_deref(),
-    )?;
-    let mut effective_env =
-        oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
-    effective_env.extend(env_pairs);
     // --manifest <PATH> accepts a manifest path / dir in addition to
     // legacy names. Resolve up front so the downstream
     // ImageSource::Template carries either a name (legacy) or a slot
@@ -1265,9 +1106,9 @@ fn build_exec_request(
     } else if let Some(source) = source_override {
         source
     } else {
-        match (args.manifest, image_ref) {
+        match (manifest_arg, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
-            (Some(arg), None) => match super::shared::resolve_manifest_arg(&arg)? {
+            (Some(arg), None) => match super::shared::resolve_manifest_arg(arg)? {
                 super::shared::ManifestArgRef::Slot { slot_hash } => {
                     crate::exec::ImageSource::Template(slot_hash)
                 }
@@ -1286,10 +1127,31 @@ fn build_exec_request(
                 },
             },
             (None, image_ref) => {
-                resolve_launch_image_source(image_ref.as_deref(), prod, Some(oci_provenance))?
+                resolve_launch_image_source(image_ref, prod, Some(oci_provenance))?
             }
         }
     };
+    let uses_oci_image = match &image {
+        crate::exec::ImageSource::Prebuilt {
+            unpacked_oci_root, ..
+        } => unpacked_oci_root.is_some(),
+        crate::exec::ImageSource::Template(slot_hash) => super::shared::launch_uses_oci_image(
+            image_ref,
+            manifest_arg.or(Some(slot_hash.as_str())),
+        )?,
+        crate::exec::ImageSource::PinnedTemplate { slot_hash, .. } => {
+            super::shared::launch_uses_oci_image(None, Some(slot_hash.as_str()))?
+        }
+        crate::exec::ImageSource::WasmModule { .. } => false,
+    };
+    let selected_backend = crate::exec::select_exec_backend(
+        uses_oci_image,
+        &network_policy,
+        args.hypervisor.as_deref(),
+    )?;
+    let mut effective_env =
+        oci_vsock_proxy_env_for_backend(&selected_backend, uses_oci_image, &network_policy);
+    effective_env.extend(env_pairs);
     let sdk_host_services = super::host_services::parse_host_service_bindings(&args.host_service)?;
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
@@ -1397,10 +1259,12 @@ struct RunReceiptSignature {
 
 pub(in crate::commands) mod env_args;
 mod preflight;
+mod receipt_verify;
 use env_args::{check_run_env, parse_env_pair};
 #[cfg(test)]
 use preflight::RunPreflightImage;
 use preflight::{RunJsonSummary, RunPreflightSummary, print_run_preflight_human};
+use receipt_verify::verify_run_receipt;
 
 impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
@@ -1426,13 +1290,11 @@ impl ReceiptInput {
 
         mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(backend)?;
         let selected_backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend);
-        crate::exec::validate_image_egress_backend(
-            &selected_backend,
-            args.image.is_some(),
-            &policy,
-        )?;
+        let uses_oci_image =
+            super::shared::launch_uses_oci_image(args.image.as_deref(), args.manifest.as_deref())?;
+        crate::exec::validate_image_egress_backend(&selected_backend, uses_oci_image, &policy)?;
         let mut env_keys =
-            oci_vsock_proxy_env_for_backend(&selected_backend, args.image.is_some(), &policy)
+            oci_vsock_proxy_env_for_backend(&selected_backend, uses_oci_image, &policy)
                 .into_iter()
                 .map(|(key, _)| key)
                 .collect::<Vec<_>>();
@@ -1575,61 +1437,6 @@ fn write_run_receipt(
     let bytes = serde_json::to_vec_pretty(&receipt).context("serializing run receipt")?;
     std::fs::write(path, bytes).with_context(|| format!("writing receipt {}", path.display()))?;
     Ok(())
-}
-
-fn verify_run_receipt(path: &Path, pubkey_path: Option<&Path>) -> Result<SignedRunReceipt> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("reading receipt {}", path.display()))?;
-    let receipt: SignedRunReceipt = serde_json::from_slice(&bytes)
-        .with_context(|| format!("parsing receipt {}", path.display()))?;
-    if receipt.payload.schema_version != 1 {
-        anyhow::bail!(
-            "unsupported receipt schema_version {}; this build supports 1",
-            receipt.payload.schema_version
-        );
-    }
-    if !receipt.signature.algorithm.eq_ignore_ascii_case("ed25519") {
-        anyhow::bail!(
-            "unsupported receipt signature algorithm '{}'",
-            receipt.signature.algorithm
-        );
-    }
-    let verifying = load_receipt_pubkey(pubkey_path)?;
-    let public_key = verifying.to_bytes();
-    let actual_key_hash = sha256_hex(&public_key);
-    if actual_key_hash != receipt.signature.public_key_sha256 {
-        anyhow::bail!(
-            "receipt was signed by public key {}; trusted key is {}",
-            receipt.signature.public_key_sha256,
-            actual_key_hash
-        );
-    }
-
-    let sig_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&receipt.signature.signature_base64)
-        .context("decoding receipt signature")?;
-    let signature = Signature::from_slice(&sig_bytes)
-        .map_err(|e| anyhow::anyhow!("invalid receipt signature bytes: {e}"))?;
-    let payload_bytes =
-        serde_json::to_vec(&receipt.payload).context("serializing receipt payload")?;
-    verifying
-        .verify(&payload_bytes, &signature)
-        .map_err(|e| anyhow::anyhow!("receipt signature verification failed: {e}"))?;
-    Ok(receipt)
-}
-
-fn load_receipt_pubkey(path: Option<&Path>) -> Result<VerifyingKey> {
-    let path = match path {
-        Some(path) => path.to_path_buf(),
-        None => super::host_signer::default_keys_dir()?.join(PUBLIC_FILENAME),
-    };
-    let bytes = std::fs::read(&path)
-        .with_context(|| format!("reading trusted receipt public key {}", path.display()))?;
-    let key: [u8; super::host_signer::KEY_BYTES] = bytes
-        .as_slice()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("{} must contain exactly 32 bytes", path.display()))?;
-    VerifyingKey::from_bytes(&key).with_context(|| format!("parsing {}", path.display()))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1961,6 +1768,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manifest_image_and_explicit_image_get_identical_oci_proxy_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(&manifest, "image = \"docker.io/library/alpine:latest\"\n")
+            .expect("write manifest");
+
+        let mut manifest_args = run_args(RunProfile::Standard);
+        manifest_args.hypervisor = Some("libkrun".to_string());
+        manifest_args.manifest = Some(manifest.display().to_string());
+        manifest_args.allow_host = vec!["example.com".to_string()];
+
+        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("example.com", 443),
+        ]);
+        let caps = mvm_core::vm_backend::VmCapabilities {
+            vsock: true,
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
+            ..mvm_core::vm_backend::VmCapabilities::default()
+        };
+        let image_uses_oci = crate::commands::shared::launch_uses_oci_image(
+            Some("docker.io/library/alpine:latest"),
+            None,
+        )
+        .expect("explicit image source");
+        let manifest_uses_oci =
+            crate::commands::shared::launch_uses_oci_image(None, manifest_args.manifest.as_deref())
+                .expect("manifest image source");
+
+        assert!(image_uses_oci);
+        assert!(manifest_uses_oci);
+        assert_eq!(
+            oci_vsock_proxy_env_for_capabilities(&caps, image_uses_oci, &policy),
+            oci_vsock_proxy_env_for_capabilities(&caps, manifest_uses_oci, &policy)
+        );
+
+        let mut image_args = run_args(RunProfile::Standard);
+        image_args.image = Some("docker.io/library/alpine:latest".to_string());
+        image_args.allow_host = vec!["example.com".to_string()];
+        let image_receipt =
+            ReceiptInput::from_run_args(&image_args, "libkrun").expect("image receipt");
+        let manifest_receipt =
+            ReceiptInput::from_run_args(&manifest_args, "libkrun").expect("manifest receipt");
+        assert_eq!(image_receipt.env_keys, manifest_receipt.env_keys);
+    }
+
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
             profile,
@@ -2038,75 +1892,6 @@ mod tests {
         }
     }
 
-    /// The preset table, asserted as a table. Phase 3's "preset-to-policy
-    /// mapping" is exactly this: what each profile permits, written once and
-    /// checked once, so a change to `grants()` has to be a deliberate edit to
-    /// a row here rather than something that slips through four call sites.
-    #[test]
-    fn each_preset_grants_exactly_what_the_contract_says() {
-        // (profile, env, host_shares, writable_when_persistent, dev_guest, ack)
-        let expected = [
-            (RunProfile::Restrictive, false, false, false, false, false),
-            (RunProfile::Standard, true, true, false, false, false),
-            (RunProfile::Dev, true, true, true, true, false),
-            (RunProfile::Permissive, true, true, true, true, true),
-        ];
-        assert_eq!(
-            expected.len(),
-            RunProfile::ALL.len(),
-            "a profile was added without a row here"
-        );
-        for (profile, env, shares, writable, dev_guest, ack) in expected {
-            let g = profile.grants();
-            let name = profile.as_str();
-            assert_eq!(g.env, env, "{name}: --env");
-            assert_eq!(g.host_shares, shares, "{name}: --mount");
-            assert_eq!(
-                g.writable_shares_when_persistent, writable,
-                "{name}: :rw on a persistent machine"
-            );
-            assert_eq!(g.dev_guest, dev_guest, "{name}: dev guest profile");
-            assert_eq!(g.needs_acknowledgement, ack, "{name}: acknowledgement");
-        }
-    }
-
-    /// Permissions must only widen as the presets loosen. A preset that
-    /// permitted something a looser one refuses would make "stricter" a
-    /// meaningless word in the docs and the help.
-    #[test]
-    fn the_presets_are_ordered_from_strictest_to_loosest() {
-        let mut prev = RunProfile::Restrictive.grants();
-        for profile in RunProfile::ALL.into_iter().skip(1) {
-            let g = profile.grants();
-            for (label, was, now) in [
-                ("env", prev.env, g.env),
-                ("host_shares", prev.host_shares, g.host_shares),
-                (
-                    "writable_shares",
-                    prev.writable_shares_when_persistent,
-                    g.writable_shares_when_persistent,
-                ),
-                ("dev_guest", prev.dev_guest, g.dev_guest),
-            ] {
-                assert!(
-                    now || !was,
-                    "{} revokes `{label}`, which a looser preset granted",
-                    profile.as_str()
-                );
-            }
-            prev = g;
-        }
-    }
-
-    #[test]
-    fn a_profile_name_round_trips_and_an_unknown_one_refuses() {
-        for profile in RunProfile::ALL {
-            assert_eq!(RunProfile::from_name(profile.as_str()), Some(profile));
-        }
-        assert_eq!(RunProfile::from_name("dev-mode"), None);
-        assert_eq!(RunProfile::from_name(""), None);
-    }
-
     /// The validator must read the table rather than restate it, or the
     /// refusals and the contract can disagree.
     #[test]
@@ -2132,6 +1917,17 @@ mod tests {
                 validate_run_profile(&with_mount).is_ok(),
                 g.host_shares,
                 "{}: --mount acceptance must match the table",
+                profile.as_str()
+            );
+
+            let mut with_rw_disk = run_args(profile);
+            with_rw_disk
+                .mounts
+                .push("/h/data.img:/data:2G:rw".to_string());
+            assert_eq!(
+                validate_run_profile(&with_rw_disk).is_ok(),
+                g.host_shares && g.writable_disk_images,
+                "{}: :rw disk image acceptance must match the table",
                 profile.as_str()
             );
         }
@@ -2620,6 +2416,10 @@ mod tests {
         assert!(json.contains("\"total_ms\":28.0"));
         assert!(!json.contains("sensitive stdout"));
         assert!(!json.contains("sensitive stderr"));
+        // Present and empty when nothing was refused, so a consumer reads one
+        // shape whether or not the run hit the gate.
+        let value: serde_json::Value = serde_json::from_str(&json).expect("json");
+        assert_eq!(value["egress_denials"], serde_json::json!([]));
     }
 
     #[test]

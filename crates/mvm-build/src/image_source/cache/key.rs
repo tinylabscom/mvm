@@ -1,14 +1,19 @@
 //! What a locally built image is keyed on.
 //!
-//! One key per build output: the two checkouts it was built from, the output
-//! itself (role and flake attribute), the guest architecture, the toolchain
-//! pinned for the host binaries, and the flake locks the role evaluates.
+//! One key per build output: the image checkout it was built from, what of the
+//! mvm checkout it was built from, the output itself (role and flake
+//! attribute), the guest architecture, the toolchain pinned for the host
+//! binaries, and the flake locks the role evaluates.
 //!
-//! Every input the key names is also covered by one of the two checkout
-//! identities, since the toolchain pins and the locks are tracked files. They
-//! are named separately anyway, so that an entry's recorded key says which
-//! inputs it was built from rather than leaving a reader to reconstruct them
-//! from two commits.
+//! The mvm side is the whole checkout for most roles, and only the sources the
+//! image reads for a role that has a derived input set (see [`MvmSourceIdentity`]):
+//! a builder image does not change when an mvm crate it never compiles does.
+//!
+//! The toolchain pins and the locks are tracked files, so a whole-checkout
+//! identity covers them too. They are named separately anyway, so that an
+//! entry's recorded key says which inputs it was built from rather than
+//! leaving a reader to reconstruct them from two commits, and so that a key
+//! naming only the consumed mvm sources still covers them.
 //!
 //! Paths are deliberately not part of the key. Two worktree pairs at the same
 //! commits and the same working-tree state build the same bytes, so they share
@@ -19,11 +24,12 @@ use std::path::Path;
 use std::str::FromStr;
 
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{LocalCheckouts, WorkloadImageProfile};
+use mvm_core::image_set::{MvmCheckoutRule, RepoIdentity, WorkloadImageProfile};
 use mvm_core::packs::Sha256Hex;
 use serde::{Deserialize, Serialize};
 
 use super::LocalImageCacheError;
+use super::mvm_inputs::{MvmSourceIdentity, mvm_source_identity};
 use crate::embed_toolchain::try_read_pinned_toolchain;
 use crate::image_source::LocalImageCheckout;
 use crate::image_source::local_set::open_mvm_checkout;
@@ -204,7 +210,10 @@ pub struct FlakeLockDigest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LocalImageCacheKey {
-    pub checkouts: LocalCheckouts,
+    /// The image checkout whose flakes build the output.
+    pub images: RepoIdentity,
+    /// What of the paired mvm checkout the output is built from.
+    pub mvm: MvmSourceIdentity,
     pub target: ImageBuildTarget,
     pub arch: GuestArch,
     pub toolchain: ToolchainPins,
@@ -227,7 +236,8 @@ impl LocalImageCacheKey {
     /// from a checkout that moved since it was selected.
     pub fn derive(inputs: &KeyInputs<'_>) -> Result<Self, LocalImageCacheError> {
         inputs.images.reverify()?;
-        let (mvm_root, mvm) = open_mvm_checkout(inputs.mvm_checkout)?;
+        let (mvm_root, checkout) = open_mvm_checkout(inputs.mvm_checkout)?;
+        let mvm = mvm_source_identity(inputs.images, &mvm_root, inputs.target, checkout);
         let toolchain = toolchain_pins(&mvm_root, inputs.arch)?;
         let flake_locks = inputs
             .target
@@ -242,15 +252,23 @@ impl LocalImageCacheKey {
             })
             .collect::<Result<Vec<_>, LocalImageCacheError>>()?;
         Ok(Self {
-            checkouts: LocalCheckouts {
-                images: inputs.images.identity().clone(),
-                mvm,
-            },
+            images: inputs.images.identity().clone(),
+            mvm,
             target: inputs.target.clone(),
             arch: inputs.arch,
             toolchain,
             flake_locks,
         })
+    }
+
+    /// How a set published under this key holds the mvm checkout it records:
+    /// exactly, unless the key names only the sources the image reads.
+    #[must_use]
+    pub fn mvm_checkout_rule(&self) -> MvmCheckoutRule {
+        match self.mvm {
+            MvmSourceIdentity::Checkout(_) => MvmCheckoutRule::Current,
+            MvmSourceIdentity::ConsumedInputs(_) => MvmCheckoutRule::Provenance,
+        }
     }
 
     /// The key's digest, which names its cache entry.

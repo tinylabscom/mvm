@@ -1,8 +1,8 @@
 # Compile-check mvm-core with the real TPM2 provider enabled.
 #
 # This is a lighter validation target than the full mvmctl package: it avoids
-# the heavy mvmctl build-script path (which builds qemu-wasm-engine) and only
-# exercises the tss-esapi link surface inside mvm-core.
+# the heavy mvmctl build-script path and only exercises the tss-esapi link
+# surface inside mvm-core.
 
 {
   pkgs,

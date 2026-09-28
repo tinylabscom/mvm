@@ -3,9 +3,9 @@
 //! `nix` + `bash` + `curl` + `xz` + `nss-cacert`), layered with the
 //! embedded `stage0-init` PID-1 binary. The builder materializes that seed as
 //! an ext4 root, boots libkrunfw's bundled kernel explicitly, and runs `/init`.
-//! `stage0-init` then runs `nix build` against the in-repo
-//! `nix/images/builder-vm` flake, emitting kernel + rootfs.ext4 on the
-//! raw output transport disk.
+//! `stage0-init` then runs `nix build` against the flake the host staged and
+//! named in the build config — an `mvm-images` checkout's kernel flake —
+//! emitting its artifacts on the raw output transport disk.
 //!
 //! **One userland — busybox, everywhere.** The seed carries nix + a static
 //! busybox (its closure's shell) + CA certs; there is no Alpine, no `apk`,

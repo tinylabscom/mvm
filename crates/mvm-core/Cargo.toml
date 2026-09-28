@@ -105,7 +105,7 @@ egress-ca = ["dep:rcgen"]
 # The `client` module (`MvmClient` trait + DTOs + `MockBackend`). Pulls
 # `async-trait` only — a proc-macro, no async runtime — so the runtime-free
 # invariant holds. `mvm-client` enables this to add the in-process
-# `LocalBackend`; `mvm-sdk`'s `client-facade` enables it for the subprocess impl.
+# `LocalBackend`.
 client = ["dep:async-trait"]
 # The remote REST `GatewayBackend`. Adds `mvm-http` (which pulls tokio), so it is
 # a distinct feature from `client`: only a fleet/studio consumer opts in.

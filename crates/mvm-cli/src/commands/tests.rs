@@ -1021,8 +1021,8 @@ fn build_runtime_overlay_subcommand_parses() {
 
 #[test]
 fn build_sdk_sidecar_subcommand_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "build", "sdk-sidecar", "build", "--force"])
-        .expect("SDK sidecar source-build command must parse");
+    let cli = Cli::try_parse_from(["mvmctl", "build", "sdk-sidecar", "build"])
+        .expect("SDK sidecar build command must parse");
     let Commands::Build(bg) = cli.command else {
         panic!("expected build group");
     };
@@ -2600,13 +2600,13 @@ fn test_audit_show_json_parses() {
         cli.command,
         Commands::Trust(trust::Args {
             action: trust::TrustAction::Audit(audit::Args {
-                action: AuditAction::Show {
-                    ref plan_id,
+                action: AuditAction::Show(audit::ShowArgs {
+                    ref session,
                     json: true,
                     ..
-                }
+                })
             })
-        }) if plan_id == "plan-abc"
+        }) if session == "plan-abc"
     ));
 }
 
@@ -2686,8 +2686,17 @@ fn test_audit_verify_parses() {
     };
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
-            action: AuditAction::Verify { tenant },
-        }) => assert_eq!(tenant, "local"),
+            action:
+                AuditAction::Verify(audit::VerifyArgs {
+                    tenant,
+                    session,
+                    json,
+                }),
+        }) => {
+            assert_eq!(tenant, "local");
+            assert_eq!(session, None, "no session verifies the whole chain");
+            assert!(!json);
+        }
         _ => panic!("Expected Audit::Verify"),
     }
 }
@@ -2701,7 +2710,7 @@ fn test_audit_verify_with_tenant() {
     };
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
-            action: AuditAction::Verify { tenant },
+            action: AuditAction::Verify(audit::VerifyArgs { tenant, .. }),
         }) => assert_eq!(tenant, "acme"),
         _ => panic!("Expected Audit::Verify"),
     }
@@ -2739,17 +2748,117 @@ fn test_audit_show_parses() {
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
             action:
-                AuditAction::Show {
-                    plan_id,
+                AuditAction::Show(audit::ShowArgs {
+                    session,
                     tenant,
+                    kind,
+                    since,
+                    until,
                     json,
-                },
+                }),
         }) => {
-            assert_eq!(plan_id, "plan-abc");
+            assert_eq!(session, "plan-abc");
             assert_eq!(tenant, "local");
+            assert_eq!(kind, None);
+            assert_eq!((since, until), (None, None));
             assert!(!json);
         }
         _ => panic!("Expected Audit::Show"),
+    }
+}
+
+#[test]
+fn test_audit_show_filters_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "trust",
+        "audit",
+        "show",
+        "aaaa1111",
+        "--kind",
+        "plan.*",
+        "--since",
+        "2026-09-01",
+        "--until",
+        "2026-09-02T00:00:00Z",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Show(audit::ShowArgs {
+                    kind, since, until, ..
+                }),
+        }) => {
+            assert_eq!(kind.as_deref(), Some("plan.*"));
+            assert_eq!(since.unwrap().to_rfc3339(), "2026-09-01T00:00:00+00:00");
+            assert!(until.is_some());
+        }
+        _ => panic!("Expected Audit::Show"),
+    }
+}
+
+#[test]
+fn test_audit_show_rejects_an_unparseable_time() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl", "trust", "audit", "show", "aaaa1111", "--since", "later"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn test_audit_verify_session_parses_with_json() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "trust", "audit", "verify", "aaaa1111", "--json"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action: AuditAction::Verify(audit::VerifyArgs { session, json, .. }),
+        }) => {
+            assert_eq!(session.as_deref(), Some("aaaa1111"));
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Verify"),
+    }
+}
+
+#[test]
+fn test_audit_verify_json_requires_a_session() {
+    assert!(Cli::try_parse_from(["mvmctl", "trust", "audit", "verify", "--json"]).is_err());
+}
+
+#[test]
+fn test_audit_sessions_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "sessions", "--since", "7d", "--json",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Sessions(audit::SessionsArgs {
+                    tenant,
+                    since,
+                    until,
+                    json,
+                }),
+        }) => {
+            assert_eq!(tenant, "local");
+            assert!(since.is_some());
+            assert!(until.is_none());
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Sessions"),
     }
 }
 
@@ -3551,14 +3660,45 @@ fn secret_put_without_value_source_parses_for_interactive_prompt() {
                     tenant,
                     value,
                     value_file,
+                    from,
                 },
         }) => {
             assert_eq!(name, "api-key");
             assert_eq!(tenant, "local");
             assert!(value.is_none());
             assert!(value_file.is_none());
+            assert!(from.is_none());
         }
         _ => panic!("Expected Secret put command"),
+    }
+}
+
+#[test]
+fn secret_set_takes_a_source_reference_and_refuses_it_beside_an_inline_value() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "secret",
+        "set",
+        "anthropic",
+        "--provider",
+        "anthropic",
+        "--from",
+        "op://Private/Anthropic/credential",
+    ])
+    .expect("parse");
+    match cli.command {
+        Commands::Secret(secret::Args {
+            action: secret::SecretAction::Set { from, .. },
+        }) => assert_eq!(from.as_deref(), Some("op://Private/Anthropic/credential")),
+        _ => panic!("Expected Secret set command"),
+    }
+    for clash in [["--value", "x"], ["--value-file", "/tmp/x"]] {
+        let mut argv = vec!["mvmctl", "secret", "put", "k", "--from", "env://K"];
+        argv.extend(clash);
+        assert!(
+            Cli::try_parse_from(argv).is_err(),
+            "--from beside {clash:?} must be refused"
+        );
     }
 }
 

@@ -189,9 +189,9 @@ shell devbox`.
 - `skipped — dev VM not running; run mvmctl bootstrap to verify` →
   only relevant when your source is `--flake` (an OCI `--image` run
   pulls the image directly and never touches the builder VM);
-  `mvmctl bootstrap` pre-fetches the builder VM image, or builds it
-  locally from a source checkout where the in-repo flakes are always
-  preferred over published artifacts.
+  `mvmctl bootstrap` pre-fetches the builder VM image the image lock
+  pins, or builds it from an `mvm-images` checkout when one is selected
+  (`MVM_IMAGES_DIR`, or a clone beside this one).
 - Shell exits immediately with no output → `mvmctl machine logs
   <name>` shows the kernel/init transcript; pass `--name` on the run
   so you have a name to look it up by.

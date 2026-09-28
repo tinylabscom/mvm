@@ -19,9 +19,9 @@
 //! entry. When two builds publish the same key, the first rename wins and the
 //! second discards its copy — `rename` does not replace a non-empty directory.
 //!
-//! Entries are immutable once published. A read re-verifies the entry against
-//! its manifest and against the checkouts as they are now; an entry that fails
-//! is evicted and reported, never served.
+//! Entries are immutable once published. A read re-derives the key from the
+//! checkouts as they are now and re-verifies the entry against its manifest;
+//! an entry that fails is evicted and reported, never served.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -35,15 +35,16 @@ use mvm_core::packs::Sha256Hex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::local_set::open_mvm_checkout;
 use super::{ImageSourceError, LocalImageCheckout, LocalSetError, LocalSetRequest};
 
 mod key;
+mod mvm_inputs;
 
 pub use key::{
     FlakeAttr, FlakeLockDigest, ImageBuildRole, ImageBuildTarget, KeyInputs, LocalImageCacheKey,
     ToolchainPins,
 };
+pub use mvm_inputs::MvmSourceIdentity;
 
 /// The directory under the mvm cache root that holds local image entries.
 pub const LOCAL_IMAGE_CACHE_DIR: &str = "local-images";
@@ -75,13 +76,13 @@ pub enum LocalImageCacheError {
     #[error("{}: {detail}", .path.display())]
     Input { path: PathBuf, detail: String },
     #[error(
-        "the cache key names checkouts that have changed since it was derived \
+        "the cache key names inputs that have changed since it was derived \
          (key: images {}, mvm {}; now: images {}, mvm {}); derive it again",
         .key.images, .key.mvm, .now.images, .now.mvm
     )]
     KeyStale {
-        key: Box<LocalCheckouts>,
-        now: Box<LocalCheckouts>,
+        key: Box<LocalImageCacheKey>,
+        now: Box<LocalImageCacheKey>,
     },
     #[error("staged entry {}: {detail}", .path.display())]
     StagedEntryRefused { path: PathBuf, detail: String },
@@ -396,20 +397,21 @@ enum EntryFault {
     Corrupt(String),
 }
 
-/// The key must name the checkouts as they are now.
+/// The key must be the one its inputs derive now: every checkout identity,
+/// consumed-source digest, toolchain pin and lock it names, re-read.
 fn require_current(
     key: &LocalImageCacheKey,
     ctx: &EntryContext<'_>,
 ) -> Result<(), LocalImageCacheError> {
-    ctx.images.reverify()?;
-    let (_, mvm) = open_mvm_checkout(ctx.mvm_checkout)?;
-    let now = LocalCheckouts {
-        images: ctx.images.identity().clone(),
-        mvm,
-    };
-    if now != key.checkouts {
+    let now = LocalImageCacheKey::derive(&KeyInputs {
+        images: ctx.images,
+        mvm_checkout: ctx.mvm_checkout,
+        target: &key.target,
+        arch: key.arch,
+    })?;
+    if &now != key {
         return Err(LocalImageCacheError::KeyStale {
-            key: Box::new(key.checkouts.clone()),
+            key: Box::new(key.clone()),
             now: Box::new(now),
         });
     }
@@ -476,6 +478,7 @@ fn read_set(
         set_dir: dir,
         arch: key.arch,
         roles: ctx.roles,
+        mvm_rule: key.mvm_checkout_rule(),
     })
 }
 
@@ -502,13 +505,24 @@ fn verify_staged(
             source: Box::new(other),
         },
     })?;
-    if set.checkouts != staged.key.checkouts {
+    if !records_the_keyed_checkouts(&set.checkouts, &staged.key) {
         return Err(refused(
             "the set records different checkouts from the key it is published under".to_string(),
         ));
     }
     check_exact_contents(&names, &set_file_names(&set)).map_err(refused)?;
     Ok(set)
+}
+
+/// Whether a set recording `checkouts` was built from what `key` names. A key
+/// naming only the mvm sources the image reads holds the recorded mvm
+/// checkout as provenance, so only the image checkout is compared.
+fn records_the_keyed_checkouts(checkouts: &LocalCheckouts, key: &LocalImageCacheKey) -> bool {
+    checkouts.images == key.images
+        && match &key.mvm {
+            MvmSourceIdentity::Checkout(mvm) => &checkouts.mvm == mvm,
+            MvmSourceIdentity::ConsumedInputs(_) => true,
+        }
 }
 
 /// The files a set consists of: its manifest and every artifact it names.

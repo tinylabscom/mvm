@@ -35,8 +35,7 @@ use std::process::Command;
 #[cfg(target_os = "linux")]
 pub const WORKLOAD_STATE_BASE: &str = "/var/lib/mvm/workloads";
 
-/// Path the Firecracker binary is baked at by the builder-vm flake
-/// (`nix/images/builder-vm/flake.nix`).
+/// Path the Firecracker binary is baked at by mvm-images' builder-vm flake.
 pub const FIRECRACKER_BIN: &str = "/usr/bin/firecracker";
 
 /// Base kernel cmdline every Firecracker workload boots with;

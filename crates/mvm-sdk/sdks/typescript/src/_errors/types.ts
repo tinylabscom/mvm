@@ -67,8 +67,8 @@ export class MvmTransportError extends Error {}
 export class MsgpackUnavailable extends Error {}
 
 /**
- * The encoded request exceeded the payload cap, refused before any
- * subprocess spawned.
+ * The encoded request exceeded the payload cap, refused before
+ * anything was sent.
  */
 export class PayloadTooLarge extends MvmTransportError {}
 
@@ -86,8 +86,8 @@ export class NoVmIntrospectionError extends MvmTransportError {}
 export class SecretInArgError extends Error {}
 
 /**
- * A transport call fired inside an emit subprocess, where no live
- * microVM exists.
+ * A transport call fired while `mvm emit` was running the script
+ * to lower its declarations, where no live microVM exists.
  */
 export class EmittingContextError extends Error {}
 

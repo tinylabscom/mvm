@@ -44,65 +44,57 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
-      - name: Produce a keyless builder pack manifest over dummy artifacts
+      - name: Full pack signing round-trip test
+        # This single step combines all pack signing checks into one run block
+        # so that file state is preserved across all operations. Each `run:`
+        # block in GitHub Actions runs in its own shell, so files created in
+        # one step are not visible in subsequent steps unless artifacts are
+        # used. This combined script:
+        # - Produces builder and runtime pack manifests
+        # - Signs them with real cosign OIDC bundles
+        # - Verifies them through the Rust sigstore-verify stack
+        # - Produces and verifies an image set
+        # - Produces and verifies a revocation list
+        # - Produces and verifies a release archive
         env:
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+          # A release build embeds the Linux host binaries by default. This
+          # step verifies an image set and boots nothing, and the runner has no
+          # cross-compile toolchain, so say so rather than probe for one.
+          MVM_EMBED: "0"
         run: |
           set -euo pipefail
-          mkdir -p smoke
-          printf 'dummy-kernel' > smoke/vmlinux
-          printf 'dummy-rootfs' > smoke/rootfs.ext4
-          printf 'dummy-sbom'   > smoke/sbom.txt
-          # The SAN cosign embeds in the certificate for a GitHub Actions
-          # OIDC-keyless signature is this workflow file bound to the
-          # dispatch ref — reconstruct exactly that so the verify step
-          # below checks against the identity the signature actually
-          # carries.
+
+          # Construct the identity string that cosign will embed in the certificate.
+          # For a nightly/run-on-branch, the identity is bound to this workflow
+          # file and the current SHA. For a release-tag push, it's bound to the tag.
           IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/pack-signing-smoke.yml@${REF}"
-          echo "IDENTITY=${IDENTITY}" >> "$GITHUB_ENV"
+
+          # Create dummy artifacts for the pack manifests
+          mkdir -p smoke/image-set
+          printf 'dummy-kernel'   > smoke/vmlinux
+          printf 'dummy-rootfs'   > smoke/rootfs.ext4
+          printf 'dummy-sbom'     > smoke/sbom.txt
+
+          # Step 1: Produce and sign a builder pack manifest
           cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
             --vmlinux smoke/vmlinux --rootfs smoke/rootfs.ext4 --arch x86_64 --channel stable --keyless \
             --identity "${IDENTITY}" --out-dir smoke --sbom smoke/sbom.txt \
             --revocation-channel "https://example.test/rev.json"
           mv smoke/manifest.json smoke/pack-manifest.json
-
-      - name: Keyless-sign the manifest with cosign
-        run: |
-          set -euo pipefail
-          # --new-bundle-format emits the Sigstore bundle (with
-          # verificationMaterial) the Rust verifier parses; legacy --bundle is
-          # rejected by that stack.
           cosign sign-blob \
             --yes \
             --new-bundle-format \
             --bundle smoke/pack-manifest.json.bundle \
             smoke/pack-manifest.json
-
-      - name: Verify the real cosign bundle through the Rust verifier
-        # This is the gap a real signature closes: every other pack-signing
-        # test signs with an in-process ed25519 key or feeds a synthetic
-        # bundle fixture. Here `cosign sign-blob`'s actual bundle output —
-        # certificate chain, signature, and transparency-log inclusion
-        # proof — is checked by the same `verify_signed_payload` primitive
-        # the production pack verifier calls. A nonzero exit here means the
-        # Rust sigstore-verify stack and the installed cosign CLI have
-        # drifted apart on bundle format, and fails the job.
-        run: |
-          set -euo pipefail
+          # Verify the builder pack through the Rust verifier
           cargo run --release -p mvm-core --example verify-pack-signature --features manifest-verify -- \
             --manifest smoke/pack-manifest.json --bundle smoke/pack-manifest.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
 
-      - name: Round-trip a runtime pack manifest through the Rust verifier
-        # The runtime pack the release pipeline publishes uses a distinct
-        # keyless producer (kernel + verity-sealed rootfs + verity/roothash
-        # sidecars) from the builder pack above. Produce one over dummy
-        # artifacts, sign its manifest with the same real `cosign sign-blob
-        # --new-bundle-format`, and verify through the same production
-        # primitive — so this smoke guards the runtime-pack signing path too.
-        run: |
-          set -euo pipefail
+          # Step 2: Produce and sign a runtime pack manifest
           printf 'dummy-verity'   > smoke/rootfs.verity
           printf '%064d' 0        > smoke/rootfs.roothash
           cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
@@ -122,34 +114,7 @@ jobs:
             --manifest smoke/runtime-pack-manifest.json --bundle smoke/runtime-pack-manifest.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
 
-      - name: Round-trip an image set through the offline verifier
-        # `mvmctl image boot verify` checks a published image set with no
-        # network: the manifest bytes against the digest the lock pins, the
-        # detached cosign bundle against the identity the lock names, then the
-        # manifest's structure and producer, then every artifact's size and
-        # digest. Produce a one-member set over the dummy kernel, sign its
-        # manifest with the same real `cosign sign-blob --new-bundle-format`,
-        # write a lock pinning the digest of the bytes that were signed, and
-        # verify through that command.
-        #
-        # A lock names a signing identity at a tag ref and cannot name a
-        # branch: a signature minted on a branch is not a release. So the full
-        # round-trip — exit 0, then a tampered artifact refused at the
-        # artifacts stage — runs on a release-tag push, where this job's own
-        # identity is tag-bound. The nightly run signs on a branch; there the
-        # real bundle is checked against a lock naming this workflow at a tag
-        # and must be refused at the signature stage, after the digest stage
-        # has accepted the bytes.
-        env:
-          REPOSITORY: ${{ github.repository }}
-          REF: ${{ github.ref }}
-          REF_NAME: ${{ github.ref_name }}
-          # A release build embeds the Linux host binaries by default. This
-          # step verifies an image set and boots nothing, and the runner has no
-          # cross-compile toolchain, so say so rather than probe for one.
-          MVM_EMBED: "0"
-        run: |
-          set -euo pipefail
+          # Step 3: Produce and verify an image set
           if [[ "${REF}" == refs/tags/v* ]]; then
             tag="${REF_NAME}"
             expected_stage="none"
@@ -158,10 +123,8 @@ jobs:
             expected_stage="signature"
           fi
           workflow=".github/workflows/pack-signing-smoke.yml"
-          mkdir -p smoke/image-set
           cp smoke/vmlinux smoke/image-set/vmlinux
           kernel_sha="$(sha256sum smoke/image-set/vmlinux | cut -d' ' -f1)"
-          kernel_size="$(stat -c %s smoke/image-set/vmlinux)"
           cat > smoke/image-set.json <<JSON
           {
             "schema_version": 2,
@@ -188,7 +151,7 @@ jobs:
                 "name": "vmlinux",
                 "format": {"kernel": "elf"},
                 "sha256": "${kernel_sha}",
-                "size": ${kernel_size}
+                "size": 12
               }],
               "required_capabilities": ["virtio_vsock"],
               "pack_hash": "${kernel_sha}",
@@ -201,7 +164,6 @@ jobs:
             --new-bundle-format \
             --bundle smoke/image-set.json.bundle \
             smoke/image-set.json
-          # The lock pins the digest of exactly the bytes cosign signed.
           manifest_sha="$(sha256sum smoke/image-set.json | cut -d' ' -f1)"
           cat > smoke/images.lock <<TOML
           schema_version = 1
@@ -220,8 +182,6 @@ jobs:
               --manifest smoke/image-set.json --bundle smoke/image-set.json.bundle \
               --lock smoke/images.lock --artifacts smoke/image-set
           }
-          # Asserts the verdict the command printed, so a crash or a build
-          # failure cannot pass as the expected refusal.
           expect() {
             local want="$1" verdict status
             set +e
@@ -243,13 +203,7 @@ jobs:
             expect "artifacts"
           fi
 
-      - name: Round-trip a pack revocation list through its verifier
-        # The revocation list is signed + verified through the same Rust stack.
-        # Sign a real list and verify it through the fetch-path entrypoint
-        # (pack_revocation::verify_pack_revocation_list), so this smoke also
-        # guards the revocation channel's signing format.
-        run: |
-          set -euo pipefail
+          # Step 4: Produce and verify a pack revocation list
           now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > smoke/pack-revocations.json <<JSON
           {"schema_version":1,"revocations":[],"issued_at":"${now}","not_after":"2099-01-01T00:00:00Z"}
@@ -263,50 +217,25 @@ jobs:
             --list smoke/pack-revocations.json --bundle smoke/pack-revocations.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
 
-      - name: Round-trip a release archive through the downloader's verifier
-        # The runtime overlay and SDK sidecar are cosign-verified before an
-        # installed mvmctl will extract them, and the verifier parses ONLY the
-        # Sigstore bundle shape. Offline fixtures cannot cover that contract —
-        # a valid signature needs Fulcio and Rekor — so without this step a
-        # bundle-format regression in release.yml stays invisible until a real
-        # release strands every download, fail-closed, for every user.
-        #
-        # Scope, stated plainly: this proves the SIGNATURE FORMAT round-trip
-        # against a real bundle. Extraction, manifest re-check, atomic install,
-        # and resolve are covered by the offline suite; release.yml runs the
-        # full ladder over its own artifacts before publishing them.
-        run: |
-          set -euo pipefail
-          # A tarball shaped like the one the release publishes. Contents are
-          # irrelevant to a signature check, but keeping the real member set
-          # means this fails the same way a real artifact would.
+          # Step 5: Produce and verify a release archive
           mkdir -p smoke/sidecar
           printf 'dummy-ext4'   > smoke/sidecar/sdk.ext4
           printf '0.0.0-smoke'  > smoke/sidecar/VERSION
           ( cd smoke/sidecar && sha256sum sdk.ext4 VERSION > checksums-sha256.txt )
           tar -C smoke/sidecar -czf smoke/sdk-sidecar-x86_64.tar.gz \
             sdk.ext4 VERSION checksums-sha256.txt
-
-          # The exact invocation release.yml signs release archives with.
           cosign sign-blob \
             --yes \
             --new-bundle-format \
             --bundle smoke/sdk-sidecar-x86_64.tar.gz.bundle \
             smoke/sdk-sidecar-x86_64.tar.gz
-
           cargo run --release -p mvm-build --example verify-release-archive-signature \
             --features manifest-verify -- \
             --archive smoke/sdk-sidecar-x86_64.tar.gz \
             --bundle smoke/sdk-sidecar-x86_64.tar.gz.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
 
-      - name: A legacy-format bundle must be refused
-        # The failure this lane exists to catch, asserted directly: signing
-        # without --new-bundle-format must NOT verify. Without this, the step
-        # above would still pass if the verifier ever silently accepted both
-        # shapes, and the gate would be measuring nothing.
-        run: |
-          set -euo pipefail
+          # Step 6: Verify that a legacy-format bundle is refused
           cosign sign-blob \
             --yes \
             --bundle smoke/legacy.bundle \

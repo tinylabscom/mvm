@@ -809,7 +809,7 @@ impl FlowMuxSession {
                 EgressVerdict::Allow { .. } => {}
                 EgressVerdict::Deny(reason) => {
                     warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
-                    self.deny_udp_datagram(stream_id, ip, port, "policy_denied");
+                    self.deny_udp_datagram(stream_id, ip, port, reason.audit_label());
                     return Ok(());
                 }
                 EgressVerdict::Malformed => {
@@ -2654,15 +2654,25 @@ mod tests {
             max_udp_peers: 2,
             ..Default::default()
         };
+        // The destinations are on this host's LAN address, which is usually a
+        // private range: an open gate would refuse them, so name the address.
+        let ip = local_test_ip();
+        let named = mvm_contract::policy::projection::CanonicalRule {
+            proto: mvm_contract::policy::projection::Proto::Udp,
+            net: ipnet::IpNet::from(ip),
+            port_lo: 1,
+            port_hi: u16::MAX,
+        };
         let (mut guest, mut guest_session, host) = run_session_with(
-            EgressGate::new(mvm_contract::policy::projection::CanonicalEgress::Unrestricted),
+            EgressGate::new(mvm_contract::policy::projection::CanonicalEgress::Rules(
+                vec![named],
+            )),
             limits,
         );
         write_frame(&mut guest, &mut guest_session, Opcode::OpenUdp, 1, b"");
         let (opcode, _stream_id, _payload) = read_flowmux_frame(&mut guest, &mut guest_session);
         assert_eq!(opcode, Opcode::UdpOpened);
 
-        let ip = local_test_ip();
         let d1 = std::net::UdpSocket::bind(std::net::SocketAddr::new(ip, 0)).unwrap();
         let d2 = std::net::UdpSocket::bind(std::net::SocketAddr::new(ip, 0)).unwrap();
         let d3 = std::net::UdpSocket::bind(std::net::SocketAddr::new(ip, 0)).unwrap();

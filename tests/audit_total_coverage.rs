@@ -205,15 +205,16 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 ];
 
 // `mvmctl pack` — the versioned attested-pack cache lifecycle
-// (list/rollback/prune/download/update). `rollback`/`download`/`update`
-// mutate the cache (pointer swap or new version fetched) and share
-// `PackCacheChange`; `prune` removes bytes so it reuses `CachePrune`.
+// (list/rollback/prune/download/update). `rollback` swaps the active pointer
+// and emits `PackCacheChange`; `prune` removes bytes so it reuses
+// `CachePrune`. `download`/`update` refuse for every class — no pack is
+// published — so they change nothing and have nothing to record.
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
-    ("download", AuditPosture::Emits("PackCacheChange")),
-    ("update", AuditPosture::Emits("PackCacheChange")),
+    ("download", AuditPosture::ReadOnly),
+    ("update", AuditPosture::ReadOnly),
 ];
 
 /// `deployments` is a read-only inventory of the local deploy store.
@@ -487,6 +488,8 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("tail", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
     ("show", AuditPosture::ReadOnly),
+    // Lists sessions from a verified chain; writes nothing.
+    ("sessions", AuditPosture::ReadOnly),
     ("posture", AuditPosture::ReadOnly),
     ("verify-cert", AuditPosture::ReadOnly),
     ("publish-root", AuditPosture::ReadOnly),

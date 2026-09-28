@@ -248,7 +248,7 @@ When you run `mvmctl machine build --flake .`:
 3. The resulting closure is packed into the rootfs.
 4. Kernel and rootfs artifacts are copied back to the host cache.
 5. Runtime commands boot those already-built artifacts on the selected backend,
-   attaching a version-matched runtime overlay when the workload policy
+   attaching the runtime overlay when the workload policy
    requires or prefers it.
 
 The same rootfs works on all backends (Firecracker, HVF, microvm.nix).

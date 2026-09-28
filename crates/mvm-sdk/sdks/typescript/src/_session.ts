@@ -1,52 +1,41 @@
 /**
- * Sessions — the last piece of Tier C.
+ * Sessions — a scope in which function calls share one warm workload.
  *
- * Python holds the active session in a `contextvars.ContextVar` and
- * resets its `Token` in `__exit__`. `AsyncLocalStorage` does not work
- * that way: it scopes a value to a *callback*, with no token to hand
- * back later. The two available shapes are not equivalent, so the choice
- * is recorded rather than papered over:
+ * * Under `MVM_NO_VM=1`, `session(...)` is a local scope. It mints a
+ *   `local-<hex>` id, makes it visible through {@link currentSessionId} for
+ *   the body's dynamic extent, and has nothing to tear down: the functions
+ *   it scopes run in this process.
+ * * Otherwise `session(...)` boots the workload's microVM through the host
+ *   library (`session.start`) before the body runs, dispatches every call to
+ *   that workload inside the body into it (`session.call`), and stops it
+ *   (`session.stop`) once the body — or the promise it returns — settles.
+ *   The VM is admitted and audited exactly as `mvmctl machine session start`
+ *   admits one. A warm VM is not a warm interpreter: each call still runs
+ *   the function's wrapper afresh.
  *
- *   * `session(id, body)` — what this module implements. The session is
- *     visible for exactly the dynamic extent of `body`, including across
- *     `await`, and two concurrent sessions in different async tasks
- *     cannot see each other's.
- *   * `using s = session(id)` over a module-level variable — closer to
- *     Python's call shape, but concurrent sessions clobber one another.
- *
- * The first was chosen because the failure mode of the second is one
- * session's context leaking into another, which is a correctness bug
- * rather than an ergonomic one.
- *
- * The abandonment net is also weaker than Python's, and deliberately so
- * rather than by oversight. Python registers a `weakref.finalize` that
- * best-effort stops a session the caller never closed. JavaScript's
- * `FinalizationRegistry` may never run and is not run at exit, so a
- * `try/finally` around the callback is the stronger guard available —
- * which is another reason to scope by callback rather than by disposal.
+ * Python holds the active session in a `contextvars.ContextVar` and resets
+ * its `Token` in `__exit__`. `AsyncLocalStorage` scopes a value to a
+ * *callback* instead, with no token to hand back later, so the shape here is
+ * `session(id, body)`. The session is visible for exactly the dynamic extent
+ * of `body`, including across `await`, and two concurrent sessions in
+ * different async tasks cannot see each other's. The alternative — `using
+ * s = session(id)` over a module-level variable — would let concurrent
+ * sessions clobber one another, which is a correctness bug rather than an
+ * ergonomic one.
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import * as child from "node:child_process";
+import * as crypto from "node:crypto";
 
-import { resolveCliBin } from "./_cli.js";
 import { MvmTransportError } from "./_errors/types.js";
+import { call as hostCall } from "./_hostlib.js";
+import { SESSION_START, SESSION_STOP } from "./hostabi/methods.js";
 
-const DEFAULT_SESSION_START_TIMEOUT_SEC = 60;
-const DEFAULT_SESSION_STOP_TIMEOUT_SEC = 30;
-const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+/** What the host mints as a session id: base32, lower case. */
+const HOST_SESSION_ID = /^[a-z2-7]{16,64}$/;
 
-/** Holds the active session id for the dynamic extent of a `session()` body. */
-const active = new AsyncLocalStorage<string>();
-
-function envNumber(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw === "") return fallback;
-  const parsed = Number(raw);
-  // Matches Python's `env_float` / `env_int`, which fall back silently
-  // on anything unparseable rather than raising.
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
+/** Holds the active session for the dynamic extent of a `session()` body. */
+const active = new AsyncLocalStorage<Session>();
 
 function checkId(label: string, value: string): void {
   if (!value || value.startsWith("-")) {
@@ -56,63 +45,31 @@ function checkId(label: string, value: string): void {
   }
 }
 
-function runSessionVerb(argv: string[], timeoutSec: number, label: string): string {
-  const bin = resolveCliBin("session management");
-  const result = child.spawnSync(bin, argv, {
-    timeout: timeoutSec * 1000,
-    maxBuffer: envNumber("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES),
-  });
-
-  if (result.error !== undefined) {
-    const code = (result.error as NodeJS.ErrnoException).code;
-    if (code === "ETIMEDOUT") {
-      throw new MvmTransportError(`${label} timed out after ${timeoutSec}s`);
-    }
-    if (code === "ENOBUFS") {
-      throw new MvmTransportError(`${label} exceeded its output cap`);
-    }
-    throw new MvmTransportError(`failed to spawn mvmctl: ${result.error.message}`);
-  }
-
-  const stderr = (result.stderr ?? Buffer.alloc(0)).toString("utf-8").trim();
-  if (result.status !== 0) {
-    throw new MvmTransportError(
-      `${label} exited ${result.status}: ${stderr || "(no stderr)"}`,
-    );
-  }
-  return (result.stdout ?? Buffer.alloc(0)).toString("utf-8").trim();
+/** Options for {@link session}. */
+export interface SessionOptions {
+  /**
+   * How long the host keeps an idle session VM, in seconds; the host's
+   * default when omitted. Ignored for a local session.
+   */
+  idle_timeout_secs?: number;
 }
 
-function startSession(workloadId: string): string {
-  const timeout = envNumber("MVM_SESSION_START_TIMEOUT_SEC", DEFAULT_SESSION_START_TIMEOUT_SEC);
-  const id = runSessionVerb(
-    ["session", "start", "--", workloadId],
-    timeout,
-    `mvmctl session start ${workloadId}`,
-  );
-  if (!id) {
-    throw new MvmTransportError(
-      `mvmctl session start ${workloadId} returned an empty session id`,
-    );
-  }
-  return id;
-}
-
-function stopSession(sessionId: string): void {
-  const timeout = envNumber("MVM_SESSION_STOP_TIMEOUT_SEC", DEFAULT_SESSION_STOP_TIMEOUT_SEC);
-  runSessionVerb(["session", "stop", sessionId], timeout, `mvmctl session stop ${sessionId}`);
-}
-
-/** A warm session against one workload. */
+/** A session against one workload. */
 export class Session {
-  /** Substrate-assigned session id. */
+  /** Session id; `local-<hex>` for a local session. */
   readonly id: string;
   /** Workload the session is bound to. */
   readonly workload_id: string;
+  /** Whether a microVM on the host backs this session. */
+  readonly host: boolean;
+  /** The session VM's name, for a host session. */
+  readonly vm_name: string | null;
 
-  constructor(workloadId: string, id: string) {
+  constructor(workloadId: string, id: string, opts: { host?: boolean; vmName?: string | null } = {}) {
     this.workload_id = workloadId;
     this.id = id;
+    this.host = opts.host ?? false;
+    this.vm_name = opts.vmName ?? null;
   }
 
   toString(): string {
@@ -122,52 +79,90 @@ export class Session {
 
 /** The session active in the current async context, or `null`. */
 export function currentSessionId(): string | null {
-  return active.getStore() ?? null;
+  return active.getStore()?.id ?? null;
 }
 
 /**
- * Run `body` with a warm session against `workloadId`.
- *
- * The session is stopped when `body` returns or throws. If `body`
- * returns a promise, the session is stopped once it settles — so an
- * async body is awaited rather than torn down underneath.
+ * The host session a call to `workloadId` goes into, if one is open in this
+ * context. A call to another workload inside a session runs in a VM of its
+ * own.
  */
-export function session<T>(workloadId: string, body: (session: Session) => T): T {
-  checkId("workload_id", workloadId);
-  const handle = new Session(workloadId, startSession(workloadId));
+export function hostSessionFor(workloadId: string): string | null {
+  const current = active.getStore();
+  if (current === undefined || !current.host || current.workload_id !== workloadId) {
+    return null;
+  }
+  return current.id;
+}
 
-  // Teardown must not mask a body failure: the substrate's session
-  // reaper collects the VM regardless, so a failed stop is swallowed the
-  // way Python's `_teardown` swallows it.
-  const teardown = () => {
-    try {
-      stopSession(handle.id);
-    } catch {
-      /* best effort, matching Python */
+function startHostSession(workloadId: string, opts: SessionOptions): Session {
+  const request: Record<string, unknown> = { workload: workloadId };
+  if (opts.idle_timeout_secs !== undefined) {
+    if (!Number.isInteger(opts.idle_timeout_secs) || opts.idle_timeout_secs <= 0) {
+      throw new RangeError("idle_timeout_secs must be a positive integer");
     }
-  };
+    request.idle_timeout_secs = opts.idle_timeout_secs;
+  }
+  const reply = hostCall(SESSION_START, request) as Record<string, unknown> | null;
+  const id = reply?.session_id;
+  if (typeof id !== "string" || !HOST_SESSION_ID.test(id)) {
+    throw new MvmTransportError(`session.start returned no usable session id: ${JSON.stringify(reply)}`);
+  }
+  const vmName = typeof reply?.vm_name === "string" ? reply.vm_name : null;
+  return new Session(workloadId, id, { host: true, vmName });
+}
 
+function stopHostSession(handle: Session): void {
+  hostCall(SESSION_STOP, { session_id: handle.id });
+}
+
+/** Stop a session whose body failed; the body's error is the one that counts. */
+function stopQuietly(handle: Session): void {
+  try {
+    stopHostSession(handle);
+  } catch {
+    // The body's own failure is what the caller needs to see.
+  }
+}
+
+/**
+ * Run `body` inside a session against `workloadId`, returning what it
+ * returns (a promise, if it is async).
+ *
+ * Under `MVM_NO_VM=1` the session is local. Otherwise the workload's
+ * microVM boots before `body` runs and stops once `body` — or the promise it
+ * returns — settles, whether it succeeded or not.
+ */
+export function session<T>(
+  workloadId: string,
+  body: (session: Session) => T,
+  opts: SessionOptions = {},
+): T {
+  checkId("workload_id", workloadId);
+  if (process.env.MVM_NO_VM === "1") {
+    const handle = new Session(workloadId, `local-${crypto.randomBytes(8).toString("hex")}`);
+    return active.run(handle, () => body(handle));
+  }
+  const handle = startHostSession(workloadId, opts);
   let result: T;
   try {
-    result = active.run(handle.id, () => body(handle));
+    result = active.run(handle, () => body(handle));
   } catch (err) {
-    teardown();
+    stopQuietly(handle);
     throw err;
   }
-
   if (result instanceof Promise) {
     return result.then(
       (value) => {
-        teardown();
+        stopHostSession(handle);
         return value;
       },
-      (err) => {
-        teardown();
+      (err: unknown) => {
+        stopQuietly(handle);
         throw err;
       },
     ) as T;
   }
-
-  teardown();
+  stopHostSession(handle);
   return result;
 }

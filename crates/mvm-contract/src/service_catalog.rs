@@ -70,9 +70,38 @@ pub struct ServiceProvider {
     /// is two halves).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env_var: Option<String>,
+    /// The request header the provider reads its credential from, and the
+    /// scheme word in front of it (`Authorization: Bearer`, `x-api-key`,
+    /// `x-goog-api-key`). This is where the guest's client has to put the
+    /// placeholder for substitution to find it. Set exactly when the value
+    /// goes on the wire (`Bearer`/`Basic`); a signing credential leaves as a
+    /// signature and has no header of its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<CredentialHeader>,
     /// Searchable tags.
     #[serde(default)]
     pub tags: Vec<String>,
+}
+
+/// Where a provider reads its credential in a request.
+// allow(secret-debug): a header name and scheme word from the compiled-in catalog; never a credential
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialHeader {
+    /// The header name, as the provider documents it.
+    pub name: String,
+    /// The word before the credential in the header value (`Bearer`), when
+    /// the provider wants one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<String>,
+}
+
+impl core::fmt::Display for CredentialHeader {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.scheme {
+            Some(scheme) => write!(f, "{}: {scheme} <credential>", self.name),
+            None => write!(f, "{}: <credential>", self.name),
+        }
+    }
 }
 
 /// Why a [`ServiceProvider`] entry is not usable.
@@ -92,6 +121,9 @@ pub enum ProviderInvalid {
     /// `env_var` is present but not a shell identifier, so no tool could
     /// read a placeholder handed to the guest under it.
     BadEnvVar,
+    /// A credential that goes on the wire names no header, a signing
+    /// credential names one, or the header name is not an HTTP token.
+    HeaderMismatch,
 }
 
 impl ProviderInvalid {
@@ -105,6 +137,9 @@ impl ProviderInvalid {
                 "sigv4_service must be set for sigv4 auth and absent otherwise"
             }
             ProviderInvalid::BadEnvVar => "env_var must be a shell identifier",
+            ProviderInvalid::HeaderMismatch => {
+                "header must be set, as an HTTP token, exactly when the credential goes on the wire"
+            }
         }
     }
 }
@@ -138,8 +173,41 @@ impl ServiceProvider {
         {
             return Err(ProviderInvalid::BadEnvVar);
         }
+        let on_the_wire = matches!(self.auth, AuthType::Bearer | AuthType::Basic);
+        let header_ok = match &self.header {
+            Some(header) => on_the_wire && is_http_token(&header.name),
+            None => !on_the_wire,
+        };
+        if !header_ok {
+            return Err(ProviderInvalid::HeaderMismatch);
+        }
         Ok(())
     }
+}
+
+/// Whether `name` is an HTTP header field name (an RFC 9110 token).
+fn is_http_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
 }
 
 /// A set of provider entries.
@@ -219,6 +287,7 @@ fn provider(
         auth,
         sigv4_service: sigv4_service.map(ToString::to_string),
         env_var: None,
+        header: None,
         tags: tags.iter().map(|t| (*t).to_string()).collect(),
     }
 }
@@ -228,6 +297,17 @@ impl ServiceProvider {
     #[must_use]
     fn reading(mut self, env_var: &str) -> Self {
         self.env_var = Some(env_var.to_string());
+        self
+    }
+
+    /// Name the header the provider reads the credential from, and its
+    /// scheme word if it has one.
+    #[must_use]
+    fn sent_in(mut self, name: &str, scheme: Option<&str>) -> Self {
+        self.header = Some(CredentialHeader {
+            name: name.to_string(),
+            scheme: scheme.map(ToString::to_string),
+        });
         self
     }
 }
@@ -251,7 +331,8 @@ pub fn builtin() -> ServiceCatalog {
                 None,
                 &["llm", "ai"],
             )
-            .reading("OPENAI_API_KEY"),
+            .reading("OPENAI_API_KEY")
+            .sent_in("Authorization", Some("Bearer")),
             provider(
                 "anthropic",
                 "Anthropic HTTP API",
@@ -260,7 +341,18 @@ pub fn builtin() -> ServiceCatalog {
                 None,
                 &["llm", "ai"],
             )
-            .reading("ANTHROPIC_API_KEY"),
+            .reading("ANTHROPIC_API_KEY")
+            .sent_in("x-api-key", None),
+            provider(
+                "gemini",
+                "Google Gemini API (API-key auth)",
+                &["generativelanguage.googleapis.com"],
+                AuthType::Bearer,
+                None,
+                &["llm", "ai", "google"],
+            )
+            .reading("GEMINI_API_KEY")
+            .sent_in("x-goog-api-key", None),
             provider(
                 "github",
                 "GitHub REST + GraphQL API",
@@ -269,7 +361,18 @@ pub fn builtin() -> ServiceCatalog {
                 None,
                 &["git", "forge", "vcs"],
             )
-            .reading("GITHUB_TOKEN"),
+            .reading("GITHUB_TOKEN")
+            .sent_in("Authorization", Some("Bearer")),
+            provider(
+                "gitlab",
+                "GitLab.com REST + GraphQL API",
+                &["gitlab.com"],
+                AuthType::Bearer,
+                None,
+                &["git", "forge", "vcs"],
+            )
+            .reading("GITLAB_TOKEN")
+            .sent_in("PRIVATE-TOKEN", None),
             provider(
                 "stripe",
                 "Stripe HTTP API",
@@ -278,7 +381,8 @@ pub fn builtin() -> ServiceCatalog {
                 None,
                 &["payments"],
             )
-            .reading("STRIPE_API_KEY"),
+            .reading("STRIPE_API_KEY")
+            .sent_in("Authorization", Some("Bearer")),
             provider(
                 "aws-s3",
                 "Amazon S3 (SigV4; region and access-key id are yours to supply)",
@@ -375,6 +479,8 @@ mod tests {
         assert_eq!(var("openai").as_deref(), Some("OPENAI_API_KEY"));
         assert_eq!(var("github").as_deref(), Some("GITHUB_TOKEN"));
         assert_eq!(var("stripe").as_deref(), Some("STRIPE_API_KEY"));
+        assert_eq!(var("gemini").as_deref(), Some("GEMINI_API_KEY"));
+        assert_eq!(var("gitlab").as_deref(), Some("GITLAB_TOKEN"));
         // A SigV4 credential is two halves; no single variable carries it.
         assert_eq!(var("aws-s3"), None);
     }
@@ -393,6 +499,49 @@ mod tests {
         let p: ServiceProvider = serde_json::from_str(json).unwrap();
         assert_eq!(p.env_var, None);
         assert!(!serde_json::to_string(&p).unwrap().contains("env_var"));
+    }
+
+    #[test]
+    fn each_provider_names_the_header_its_api_reads() {
+        let c = builtin();
+        let header = |name: &str| {
+            c.find(name)
+                .and_then(|p| p.header.clone())
+                .map(|h| h.to_string())
+        };
+        let bearer = "Authorization: Bearer <credential>";
+        assert_eq!(header("openai").as_deref(), Some(bearer));
+        assert_eq!(header("github").as_deref(), Some(bearer));
+        assert_eq!(header("stripe").as_deref(), Some(bearer));
+        assert_eq!(
+            header("anthropic").as_deref(),
+            Some("x-api-key: <credential>")
+        );
+        assert_eq!(
+            header("gemini").as_deref(),
+            Some("x-goog-api-key: <credential>")
+        );
+        assert_eq!(
+            header("gitlab").as_deref(),
+            Some("PRIVATE-TOKEN: <credential>")
+        );
+        assert_eq!(
+            header("aws-s3"),
+            None,
+            "a signature has no credential header"
+        );
+    }
+
+    #[test]
+    fn a_header_is_required_exactly_when_the_credential_goes_on_the_wire() {
+        let bare = provider("x", "d", &["h.example"], AuthType::Bearer, None, &[]);
+        assert_eq!(bare.validate(), Err(ProviderInvalid::HeaderMismatch));
+        let signed = provider("x", "d", &["h.example"], AuthType::Sigv4, Some("s3"), &[])
+            .sent_in("Authorization", None);
+        assert_eq!(signed.validate(), Err(ProviderInvalid::HeaderMismatch));
+        let bad_name = provider("x", "d", &["h.example"], AuthType::Bearer, None, &[])
+            .sent_in("x api key", None);
+        assert_eq!(bad_name.validate(), Err(ProviderInvalid::HeaderMismatch));
     }
 
     #[test]

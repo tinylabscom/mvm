@@ -212,17 +212,13 @@ required_witness = "Authenticated host collector receives producer startup, stan
 
 [[binary]]
 package = "mvm-agentd"
-name = "mvm-setpriv"
-source = "crates/mvm-agentd/src/bin/mvm-setpriv.rs"
+name = "mvm-setpriv-fixture"
+source = "crates/mvm-agentd/tests/bin/setpriv_fixture.rs"
 required_features = []
 [binary.capture]
-kind = "runtime-gap"
-role = "workload-guest"
-owner = "Guest init and service launcher"
-signals = ["diagnostics", "events", "logs", "spans", "stdio"]
-entrypoint = "fn main("
-gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
-required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
+kind = "non-runtime"
+category = "test-fixture"
+reason = "Explicit test-only driver or child-process fixture; no production coverage credit."
 
 [[binary]]
 package = "mvm-agentd"
@@ -563,6 +559,20 @@ required_features = ["schema"]
 kind = "non-runtime"
 category = "code-generator"
 reason = "Development schema or SDK generator; not a VM runtime producer."
+
+[[binary]]
+package = "mvm-setpriv"
+name = "mvm-setpriv"
+source = "crates/mvm-setpriv/src/main.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "workload-guest"
+owner = "Guest init and service launcher"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Entrypoint diagnostics have no certified bounded VM-lifetime telemetry capture path."
+required_witness = "Authenticated host collector receives producer startup, standalone events and diagnostics across cold start, restore and exit; saturation reports loss without stalling producers."
 
 [[binary]]
 package = "mvm-hostlib"

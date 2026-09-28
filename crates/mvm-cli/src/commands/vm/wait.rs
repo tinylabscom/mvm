@@ -13,16 +13,13 @@
 
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, ValueEnum};
 
-use mvm_agentd::vsock::{
-    ComponentState, GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse,
-    ReadinessReport, call_unary, negotiate_protocol,
-};
+use mvm_agentd::vsock::ComponentState;
+use mvm_client::readiness::ReadinessReport;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vsock_transport::{self, VsockTransport};
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -216,16 +213,9 @@ fn print_timing(label: &str, ms: Option<u64>) {
 /// Single readiness round-trip over vsock. Used by `wait`,
 /// `boot-report`, and `up --timings`.
 pub(crate) fn fetch_readiness(vm_name: &str) -> Result<ReadinessReport> {
-    let transport: Box<dyn VsockTransport> = vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(GUEST_AGENT_PORT)?;
-    let _ = negotiate_protocol(&mut stream, vec![GuestCapability::Readiness])?;
-    // `call_unary` enforces ReadinessStatus's contract — agent `Error`,
-    // profile refusal, and off-contract frames all surface as a typed
-    // `RpcError`, so the only `Ok` variant is the contracted report.
-    match call_unary(&mut stream, &GuestRequest::ReadinessStatus)? {
-        GuestResponse::ReadinessStatusReport(report) => Ok(report),
-        other => bail!("unexpected response to ReadinessStatus: {other:?}"),
-    }
+    // The vsock round-trip lives in `mvm_client::readiness` so the CLI and
+    // the host library poll the guest through one implementation.
+    mvm_client::readiness::fetch_live_readiness(vm_name)
 }
 
 // ============================================================================

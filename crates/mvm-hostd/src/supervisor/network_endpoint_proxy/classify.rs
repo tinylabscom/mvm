@@ -31,6 +31,9 @@ pub(crate) enum TerminationMode {
     Cleartext,
 }
 
+/// Why an opaque flow to a destination with endpoint rules is refused.
+pub(crate) const REASON_ENDPOINT_RULES_UNENFORCEABLE: &str = "endpoint_rules_unenforceable";
+
 impl SubstitutionService {
     /// Explain why an opaque flow to `destination` cannot honestly satisfy the
     /// admitted transformation policy.
@@ -42,6 +45,17 @@ impl SubstitutionService {
     /// creation. The curated default redaction action does not make every
     /// opaque destination transformed; only an explicit profile/default opt-in
     /// or a bound secret does.
+    /// Why an opaque flow to `host:port` is refused because a route there
+    /// has rules that cannot be decided without reading the request. The flow
+    /// only reaches this when it was not terminated, so a route asking for
+    /// inspection without an interception grant — or on an endpoint with no
+    /// egress certificate — is refused rather than relayed unchecked.
+    pub(crate) fn route_refusal_reason(&self, host: &str, port: u16) -> Option<&'static str> {
+        self.egress_gate
+            .requires_inspection(host, port)
+            .then_some(REASON_ENDPOINT_RULES_UNENFORCEABLE)
+    }
+
     pub(crate) fn opaque_refusal_reason(&self, destination: &str) -> Option<&'static str> {
         if self.registry.host_is_bound(destination) {
             return Some("destination requires secret substitution over typed HTTP");
@@ -75,7 +89,10 @@ impl SubstitutionService {
     /// bound destination without a terminator fails closed rather than
     /// being spliced through untouched.
     pub(crate) fn terminable(&self, host: &str, port: u16) -> Option<TerminationMode> {
-        if !self.registry.host_is_bound(host) {
+        // A bound secret needs the request read to substitute into it; a
+        // route whose rules the plan grants interception for needs it read to
+        // decide it. Nothing else is terminated.
+        if !self.registry.host_is_bound(host) && !self.egress_gate.grants_interception(host, port) {
             return None;
         }
         self.tls_intermediate.as_ref()?;

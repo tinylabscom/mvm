@@ -104,6 +104,7 @@ const SEED_ANCHORS: &[&str] = &[
     "seed_on_miss",
     "ensure_builder_vm_image",
     "resolve_or_seed_from_default_cache",
+    "resolve_cached_runtime_overlay",
     "attach_runtime_overlay",
     "attach_universal_initramfs",
 ];

@@ -124,28 +124,49 @@ curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/checks
 shasum -a 256 --check <(grep "mvmctl-${TARGET}.tar.gz" checksums-sha256.txt)
 ```
 
-## Verifying the runtime overlay release assets
+## Verifying boot images (the image set)
 
-Overlay-backed workloads consume a separate readonly guest-runtime artifact from
-the same release. To verify it manually:
+Boot images — the builder VM, the default workload image, the runtime overlay,
+the SDK sidecar, the initramfs and the kernels — are not attached to a CLI
+release. They are members of one signed image set published by
+[mvm-images](https://github.com/tinylabscom/mvm-images), and `mvmctl` pins that
+set in `crates/mvm-core/images.lock`: the release tag, the SHA-256 of the root
+manifest `image-set.json`, and the workflow identity that signed it. Every
+download checks the root's digest against the pin, the root's cosign bundle
+against that identity, then each member's size and digest against the root.
+
+`mvmctl image boot verify` runs that chain over files you already have. To walk
+it by hand for the runtime overlay:
 
 ```bash
-VERSION=v0.18.0
-ARCH=aarch64   # or x86_64
+TAG=image-set/v0.1.0   # the release_tag in images.lock
+ARCH=aarch64           # or x86_64
+BASE="https://github.com/tinylabscom/mvm-images/releases/download/${TAG}"
 
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.tar.gz"
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.tar.gz.sha256"
+curl -LO "${BASE}/image-set.json"
+curl -LO "${BASE}/image-set.json.bundle"
+# Compare against manifest_sha256 in images.lock.
+shasum -a 256 image-set.json
 
-shasum -a 256 --check "runtime-overlay-${ARCH}.tar.gz.sha256"
+cosign verify-blob \
+  --bundle image-set.json.bundle \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  --certificate-identity "https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/${TAG}" \
+  image-set.json
+
+curl -LO "${BASE}/runtime-overlay-${ARCH}.tar.gz"
+jq -r --arg name "runtime-overlay-${ARCH}.tar.gz" '
+  .members[] | .artifacts[] | select(.name == $name) | "\(.sha256)  \(.name)"
+' image-set.json | shasum -a 256 --check
 tar xzf "runtime-overlay-${ARCH}.tar.gz"
-sha256sum --check checksums-sha256.txt
+shasum -a 256 --check checksums-sha256.txt
 ```
 
 When `mvmctl build runtime-overlay build --source download` installs this
-payload into `~/.mvm/cache/runtime-overlay/<version>/<arch>/`, it first
-verifies the tarball, then verifies the extracted inner files against the
-embedded `checksums-sha256.txt`, and later required-overlay boots recheck those
-cached file hashes before attach. A drifted cache entry is refused.
+payload into `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, it runs the same
+chain, then verifies the extracted inner files against the embedded
+`checksums-sha256.txt`, and later required-overlay boots recheck those cached
+file hashes before attach. A drifted cache entry is refused.
 
 ## Runtime overlay update model
 
@@ -164,7 +185,7 @@ Use this checklist when promoting a release that changes guest runtime
 binaries:
 
 1. Verify the `mvmctl` archive for the target tag.
-2. Verify the matching runtime-overlay assets for the same tag and
+2. Verify the runtime overlay in the image set that release pins, for each
    architecture.
 3. Preload the overlay cache with
    `mvmctl build runtime-overlay build --source download` on hosts that should
@@ -180,12 +201,13 @@ This is a next-boot rollout, not a live remount rollout.
 If you must roll back a release:
 
 1. Downgrade `mvmctl` to the older release.
-2. Ensure the matching older runtime-overlay assets are available again, either
-   by re-running `mvmctl build runtime-overlay build --source download` for the
-   older tag or by restoring the older cached artifact under
-   `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
-3. Restart affected VMs so they boot with the downgraded, version-matched
-   overlay.
+2. Ensure the older release's runtime overlay is available again, either by
+   re-running `mvmctl build runtime-overlay build --source download` with the
+   older `mvmctl` (it fetches from the image set that release pins) or by
+   restoring the older cached artifact under
+   `~/.mvm/cache/image-set/<root-sha256>/runtime-overlay/<member-version>/<arch>/`, where
+   `<root-sha256>` is the digest of the image set that release pins.
+3. Restart affected VMs so they boot with the downgraded release's overlay.
 
 Do not expect a running VM to switch runtime versions in place. Rollback takes
 effect on restart, the same way rollout does.
@@ -205,32 +227,19 @@ A compromised CDN or GitHub Releases page cannot forge a valid signature without
 
 ---
 
-## Verifying the Builder Image Manifest
+## Verifying the builder image
 
-Every release also publishes a cosign-keyless-signed manifest for the builder image (consumed by `mvmctl bootstrap` / `mvmctl pack download builder` and mvmd's pool-build pipeline). The manifest is the trust anchor — it carries SHA-256 of every image artifact, the Nix store hash, the source git SHA, and the SHA-256 of every flake lockfile, all bound by one cosign signature.
+The builder image is a member of the same image set as every other boot image,
+so it is verified the same way: `mvmctl bootstrap` — or the first
+`machine build` / `machine run --flake ...` that needs the builder VM — fetches
+it and checks it against the signed root before it is cached. To check it by
+hand, follow [Verifying boot images](#verifying-boot-images-the-image-set) with
+the builder members (`builder-vm-vmlinux-${ARCH}`,
+`builder-vm-rootfs-${ARCH}.ext4`) in place of the runtime overlay.
 
-mvmctl verifies this automatically on every builder-pack fetch (`mvmctl bootstrap`, or the first `machine build` / `machine run --flake ...` that needs the builder VM). To verify manually:
-
-```bash
-VERSION=v0.14.0  # replace with the release you're verifying
-ARCH=aarch64     # or x86_64
-
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/builder-vm-${ARCH}.pack-manifest.json"
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/builder-vm-${ARCH}.pack-manifest.json.bundle"
-
-cosign verify-blob \
-  --bundle "builder-vm-${ARCH}.pack-manifest.json.bundle" \
-  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-  --certificate-identity-regexp "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/${VERSION}" \
-  "builder-vm-${ARCH}.pack-manifest.json"
-```
-
-A successful verification prints `Verified OK`. After verification, every artifact whose SHA-256 is recorded in the manifest can be checked with `sha256sum` and the manifest's value:
-
-```bash
-jq -r '.artifacts[] | "\(.sha256)  \(.name)"' "builder-vm-${ARCH}.pack-manifest.json" \
-  | sha256sum --check
-```
+CLI releases up to v0.18 also attached a separately signed builder "pack"
+manifest (`builder-vm-<arch>.pack-manifest.json`). Those assets stay on those
+releases, but no current `mvmctl` fetches them.
 
 :::note[What changed]
 This section used to also cover a dev-image variant, verified locally via
@@ -242,7 +251,7 @@ the dev-image pack class has no publish/fetch path today. See
 
 ### Recall (revocation list)
 
-A separate `revocations` release tag publishes a cosign-signed `revoked-versions.json`. mvmctl checks this list on every builder-pack fetch and refuses to use any image whose version is recalled. The recall reason is surfaced verbatim in the failure message, pointing at the upgrade path.
+A separate `revocations` release tag publishes a cosign-signed `revoked-versions.json`. mvmctl checks this list on every builder image fetch and refuses to use any image whose version is recalled. The recall reason is surfaced verbatim in the failure message, pointing at the upgrade path.
 
 ```bash
 curl -LO "https://github.com/tinylabscom/mvm/releases/download/revocations/revoked-versions.json"
@@ -256,14 +265,6 @@ cosign verify-blob \
 ```
 
 The revocations tag is signed by a *separate* OIDC identity (`revocations.yml`) so a leaked image-signing cert can't fabricate a permissive recall, and vice versa. Domain separation by design.
-
-Published builder packs use the same `revocations` channel for additive
-recalls. When the installed attested builder-pack path is active, `mvmctl`
-refreshes `pack-revocations.json` and `pack-revocations.json.bundle` into
-`~/.mvm/cache/pack-revocations/` every 24 hours, tolerates up to 7 days of
-offline staleness, treats `404` as bootstrap state, and unions any fetched
-entries with the operator's local `pack-trust.json` revocations. A fetched list
-that fails cosign verification is ignored rather than applied.
 
 ### Emergency escape hatches
 

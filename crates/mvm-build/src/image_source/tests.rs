@@ -129,30 +129,25 @@ fn a_discovered_sibling_that_is_not_usable_warns_and_falls_back() {
         .expect("release ignores the sibling");
     assert!(matches!(released, ImageSource::Released), "{released:?}");
 
-    // A contributor build falls back to the in-tree answer rather than
+    // A contributor build falls back to the released set rather than
     // breaking: the warning carries the reason.
     let source = select_with_discovery(DistributionChannel::Source, None, Some(&workspace))
         .expect("an unusable discovered sibling falls back, never hard-fails");
-    assert!(
-        !matches!(source, ImageSource::LocalCheckout(_)),
-        "fell back instead of selecting the unusable sibling: {source:?}"
-    );
+    assert_eq!(source, ImageSource::Released);
 }
 
 #[test]
-fn no_sibling_and_nothing_configured_keeps_the_in_tree_window() {
+fn no_sibling_and_nothing_configured_selects_the_released_set() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("mvm");
     std::fs::create_dir_all(&workspace).unwrap();
     let source = select_with_discovery(DistributionChannel::Source, None, Some(&workspace))
         .expect("no sibling resolves without error");
-    // The tests' own checkout carries the in-tree flakes, so this is InTree
-    // here; the assertion that matters is that nothing discovered a
-    // nonexistent sibling.
-    assert!(
-        !matches!(source, ImageSource::LocalCheckout(_)),
-        "{source:?}"
-    );
+    // Image construction lives in mvm-images: a contributor build with no
+    // image checkout in reach boots the released set, never something built
+    // from its own tree.
+    assert_eq!(source, ImageSource::Released);
+    assert_eq!(source.tier(), ImageTrustTier::VerifiedRelease);
 }
 
 #[test]
@@ -227,9 +222,8 @@ fn recorded_tier_reads_the_builder_cache_provenance_and_scopes_to_the_caches() {
 
 #[test]
 fn an_mvm_checkout_is_the_workspace_manifest_not_the_image_flakes() {
-    // The probe that keys automatic builds must not hinge on the in-tree
-    // image flakes: removing them (the end state of the extraction) must
-    // not turn a contributor build into an installed one.
+    // The probe that keys automatic builds is the workspace manifest, so a
+    // contributor build stays one without any image sources in its tree.
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("mvm");
     std::fs::create_dir_all(&root).unwrap();
@@ -465,57 +459,29 @@ fn an_edit_after_selection_is_caught_on_reverify() {
 }
 
 #[test]
-fn no_configured_path_and_no_in_tree_images_selects_the_released_set() {
+fn no_configured_path_selects_the_released_set_on_every_channel() {
     for channel in [DistributionChannel::Source, DistributionChannel::Release] {
-        let source = select_image_source(channel, None, None).unwrap();
+        let source = resolve_image_source(channel, None).unwrap();
         assert_eq!(source, ImageSource::Released);
         assert_eq!(source.tier(), ImageTrustTier::VerifiedRelease);
     }
 }
 
 #[test]
-fn a_contributor_build_defaults_to_its_in_tree_images_as_local_dev() {
-    let root = PathBuf::from("/src/mvm");
-    let source =
-        select_image_source(DistributionChannel::Source, None, Some(root.clone())).unwrap();
-    assert_eq!(source, ImageSource::InTree { root });
-    assert_eq!(source.tier(), ImageTrustTier::LocalDev);
-}
+fn a_build_without_an_image_checkout_names_where_the_sources_live() {
+    let refusal = ImageConstructionRefused::new("the dev default image").to_string();
 
-#[test]
-fn a_release_build_never_selects_in_tree_images() {
-    let source = select_image_source(
-        DistributionChannel::Release,
-        None,
-        Some(PathBuf::from("/src/mvm")),
-    )
-    .unwrap();
-    assert_eq!(source, ImageSource::Released);
-}
-
-#[test]
-fn a_configured_checkout_outranks_the_in_tree_images() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("mvm-images");
-    images_checkout(&dir);
-
-    let source = select_image_source(
-        DistributionChannel::Source,
-        Some(&dir),
-        Some(PathBuf::from("/src/mvm")),
-    )
-    .unwrap();
     assert!(
-        matches!(source, ImageSource::LocalCheckout(_)),
-        "{source:?}"
+        refusal.starts_with("the dev default image is built from an mvm-images checkout"),
+        "{refusal}"
     );
-}
-
-#[test]
-fn this_contributor_build_finds_its_in_tree_images() {
-    let root = in_tree_images(DistributionChannel::Source).expect("tests run from source");
-    assert!(root.join(IN_TREE_IMAGE_MARKER).is_file());
-    assert_eq!(in_tree_images(DistributionChannel::Release), None);
+    assert!(
+        refusal.contains("image construction lives in mvm-images"),
+        "{refusal}"
+    );
+    assert!(refusal.contains("$MVM_IMAGES_DIR"), "{refusal}");
+    assert!(refusal.contains("tinylabscom/mvm-images"), "{refusal}");
+    assert!(!refusal.contains("nix/images"), "{refusal}");
 }
 
 #[test]
@@ -533,10 +499,9 @@ fn a_contributor_build_selects_a_valid_checkout_as_local_dev() {
 #[test]
 fn a_bad_configured_path_is_an_error_not_the_released_set() {
     let tmp = tempfile::tempdir().unwrap();
-    let got = select_image_source(
+    let got = resolve_image_source(
         DistributionChannel::Source,
         Some(&tmp.path().join("missing")),
-        Some(PathBuf::from("/src/mvm")),
     );
     assert!(got.is_err(), "fell back to {got:?}");
 }
@@ -625,5 +590,6 @@ fn the_dirty_fingerprint_matches_the_emitters_for_a_fixed_tree() {
     );
 }
 
+mod builder_key;
 mod cache;
 mod local_set;

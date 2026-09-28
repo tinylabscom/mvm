@@ -524,22 +524,18 @@ impl VolumeService for LocalVolumeService {
 }
 
 /// Refuse any writable volume in the launch when the admitted profile does
-/// not permit read-write attachments.
+/// not grant writable disk images.
 fn enforce_profile_access(
     volumes: &[RuntimeVolume],
     profile: super::dto::AdmittedProfile,
 ) -> Result<()> {
-    if profile.permits_read_write() {
-        return Ok(());
-    }
-    if let Some(volume) = volumes.iter().find(|volume| !volume.read_only) {
-        bail!(
-            "read-write attachment at guest path {:?} refused: the admitted profile does not \
-             permit writable volumes (use a dev-tier profile)",
+    match volumes.iter().find(|volume| !volume.read_only) {
+        Some(volume) => profile.require_read_write(&format!(
+            "read-write attachment at guest path {:?}",
             volume.guest
-        );
+        )),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Lease intents for the caller-supplied explicit block-volume list.

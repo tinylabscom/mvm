@@ -31,9 +31,14 @@
 //! void mvm_hostlib_free(MvmHostlibBuf buf);
 //! ```
 //!
-//! Methods are dotted names, listed in [`dispatch::METHODS`]. Each call builds
-//! a single-threaded runtime and drops it before returning, so nothing the
-//! library started is left running between calls.
+//! Methods are dotted names: the client methods in [`dispatch::METHODS`], the
+//! launch methods in [`launch::METHODS`], the entrypoint and session methods
+//! in [`entrypoint::METHODS`], the guest methods in
+//! [`guest::METHODS`], and the stream methods in [`stream::METHODS`] and
+//! [`stream::LOG_METHODS`].
+//! Each call builds a single-threaded runtime and drops it before returning.
+//! The one thing that outlives a call is a process stream's reader, which
+//! lives until the process ends or its wait times out; see [`stream`].
 //!
 //! The version check is enforced, not advisory: a call made before a
 //! successful `mvm_hostlib_abi_is_compatible` is refused. A binding and library
@@ -52,10 +57,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod dispatch;
 mod embedder;
+pub mod entrypoint;
 pub mod guest;
+pub mod launch;
 #[cfg(feature = "schema")]
 pub mod registry;
 pub mod status;
+pub mod stream;
 
 use status::{MVM_HOSTLIB_ABI_NOT_NEGOTIATED, MVM_HOSTLIB_EMBEDDER, MVM_HOSTLIB_INTERNAL, Outcome};
 
@@ -63,11 +71,12 @@ use status::{MVM_HOSTLIB_ABI_NOT_NEGOTIATED, MVM_HOSTLIB_EMBEDDER, MVM_HOSTLIB_I
 /// library.
 pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// The ABI minor version. A minor bump only adds methods, so a binding built
-/// for an older minor keeps working.
-/// The ABI minor version. A minor bump only adds methods, so a binding built
 /// for an older minor keeps working. 1 added `machine.stop`, `machine.rm`,
-/// `machine.exec`, and `guest.cp`.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 1;
+/// `machine.exec`, and `guest.cp`. 2 added `machine.run`, `machine.create`,
+/// `machine.start`, `machine.inventory`, and `guest.proc.stream.*`. 3 added
+/// `machine.logs.stream.*`, the `template` and `manifest` launch sources, and
+/// a launch `command` with its `env` and `cwd`, whose process the reply names.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 3;
 
 /// Set once a binding has confirmed it was built for this ABI.
 static NEGOTIATED: AtomicBool = AtomicBool::new(false);
@@ -195,10 +204,17 @@ pub unsafe extern "C" fn mvm_hostlib_free(buf: MvmHostlibBuf) {
 /// Where a call's answers come from. Each is built only once the call is
 /// known to be valid, so a refused call touches no backend.
 trait Services {
-    /// The client that answers `machine.*` and `backend.*`.
+    /// The client that answers the `MvmClient` methods.
     fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome>;
+    /// The local client that answers `machine.run` and `machine.create`,
+    /// which only an in-process backend can: they admit and boot on this host.
+    fn launcher(&self) -> Result<mvm_client::LocalBackend, Outcome>;
     /// The operations that answer `guest.*`.
-    fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome>;
+    fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome>;
+    /// Where `machine.logs.stream.*` reads captured output from.
+    fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome>;
+    /// The operations that answer `entrypoint.call` and `session.*`.
+    fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome>;
 }
 
 /// This host's machines, in a process that has been told it is a library
@@ -222,9 +238,24 @@ impl Services for Local {
         Ok(Box::new(mvm_client::LocalBackend::new()))
     }
 
-    fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+    fn launcher(&self) -> Result<mvm_client::LocalBackend, Outcome> {
         declared()?;
-        Ok(Box::new(guest::LocalGuest))
+        Ok(mvm_client::LocalBackend::new())
+    }
+
+    fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome> {
+        declared()?;
+        Ok(std::sync::Arc::new(guest::LocalGuest))
+    }
+
+    fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+        declared()?;
+        Ok(std::sync::Arc::new(stream::LocalLogs))
+    }
+
+    fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
+        declared()?;
+        Ok(std::sync::Arc::new(entrypoint::LocalEntrypoint))
     }
 }
 
@@ -247,6 +278,34 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
             Err(outcome) => outcome,
         };
     }
+    if stream::is_known(method) {
+        return match services.guest() {
+            Ok(ops) => stream::dispatch(stream::streams(), ops, method, request),
+            Err(outcome) => outcome,
+        };
+    }
+    if stream::is_log_method(method) {
+        return match services.logs() {
+            Ok(source) => stream::dispatch_logs(stream::streams(), source, method, request),
+            Err(outcome) => outcome,
+        };
+    }
+    if entrypoint::is_known(method) {
+        return match services.entrypoint() {
+            Ok(ops) => entrypoint::dispatch(ops.as_ref(), method, request),
+            Err(outcome) => outcome,
+        };
+    }
+    if launch::is_known(method) {
+        let backend = match services.launcher() {
+            Ok(backend) => backend,
+            Err(outcome) => return outcome,
+        };
+        return match current_thread_runtime() {
+            Ok(runtime) => runtime.block_on(launch::dispatch(&backend, method, request)),
+            Err(outcome) => outcome,
+        };
+    }
     if !dispatch::is_known(method) {
         return Outcome::invalid_input(&format!("unknown method `{method}`"));
     }
@@ -254,21 +313,25 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
         Ok(client) => client,
         Err(outcome) => return outcome,
     };
-    let runtime = match tokio::runtime::Builder::new_current_thread()
+    match current_thread_runtime() {
+        Ok(runtime) => runtime.block_on(dispatch::dispatch(client.as_ref(), method, request)),
+        Err(outcome) => outcome,
+    }
+}
+
+/// A runtime for one call, dropped before the call returns.
+fn current_thread_runtime() -> Result<tokio::runtime::Runtime, Outcome> {
+    tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-    {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            return Outcome::failure(
+        .map_err(|e| {
+            Outcome::failure(
                 MVM_HOSTLIB_INTERNAL,
                 mvm_core::error_codes::INTERNAL,
                 &format!("the runtime would not start: {e}"),
                 false,
-            );
-        }
-    };
-    runtime.block_on(dispatch::dispatch(client.as_ref(), method, request))
+            )
+        })
 }
 
 /// Move `bytes` into a buffer the caller owns until [`mvm_hostlib_free`].
@@ -311,11 +374,30 @@ mod tests {
         fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
             Ok(Box::new(MockBackend::default()))
         }
-        fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+        fn launcher(&self) -> Result<mvm_client::LocalBackend, Outcome> {
+            Ok(mvm_client::LocalBackend::with_hypervisor("mock"))
+        }
+        fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome> {
             Err(Outcome::failure(
                 MVM_HOSTLIB_EMBEDDER,
                 mvm_core::error_codes::EMBEDDER,
                 "no guest here",
+                false,
+            ))
+        }
+        fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no logs here",
+                false,
+            ))
+        }
+        fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no entrypoint operations here",
                 false,
             ))
         }
@@ -328,8 +410,17 @@ mod tests {
         fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
             panic!("a refused call must not build a client")
         }
-        fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+        fn launcher(&self) -> Result<mvm_client::LocalBackend, Outcome> {
+            panic!("a refused call must not build a launcher")
+        }
+        fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome> {
             panic!("a refused call must not build guest operations")
+        }
+        fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+            panic!("a refused call must not open a log source")
+        }
+        fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
+            panic!("a refused call must not build entrypoint operations")
         }
     }
 
@@ -345,7 +436,31 @@ mod tests {
                 false,
             ))
         }
-        fn guest(&self) -> Result<Box<dyn guest::GuestOps>, Outcome> {
+        fn launcher(&self) -> Result<mvm_client::LocalBackend, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no",
+                false,
+            ))
+        }
+        fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no",
+                false,
+            ))
+        }
+        fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no",
+                false,
+            ))
+        }
+        fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
             Err(Outcome::failure(
                 MVM_HOSTLIB_EMBEDDER,
                 mvm_core::error_codes::EMBEDDER,
@@ -402,6 +517,64 @@ mod tests {
         assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER);
         let outcome = handle(false, b"guest.proc.list", br#"{"id":"web"}"#, &Untouched);
         assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
+    }
+
+    /// Launch and stream methods need the process declared like every other,
+    /// and are refused before negotiation without building anything.
+    #[test]
+    fn launch_and_stream_methods_are_routed_and_gated() {
+        for method in [
+            &b"machine.run"[..],
+            b"machine.create",
+            b"guest.proc.stream.open",
+            b"guest.proc.stream.next",
+            b"guest.proc.stream.close",
+            b"machine.logs.stream.open",
+            b"machine.logs.stream.next",
+            b"machine.logs.stream.close",
+        ] {
+            let outcome = handle(false, method, b"{}", &Untouched);
+            assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
+            let outcome = handle(true, method, b"{}", &Undeclared);
+            assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER);
+        }
+    }
+
+    /// Entrypoint and session methods need the process declared like every
+    /// other, and are refused before negotiation without building anything.
+    #[test]
+    fn entrypoint_and_session_methods_are_routed_and_gated() {
+        for method in entrypoint::METHODS {
+            let outcome = handle(false, method.as_bytes(), b"{}", &Untouched);
+            assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED, "{method}");
+            let outcome = handle(true, method.as_bytes(), b"{}", &Undeclared);
+            assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER, "{method}");
+        }
+    }
+
+    /// A launch reaches the local launcher, whose validation answers first.
+    #[test]
+    fn a_launch_reaches_the_launcher() {
+        let outcome = handle(true, b"machine.run", br#"{"image":"   "}"#, &Mock);
+        assert_eq!(outcome.status, status::MVM_HOSTLIB_INVALID_SPEC);
+    }
+
+    /// The ABI version a binding negotiates covers every method family.
+    #[test]
+    fn the_minor_version_covers_the_launch_and_stream_methods() {
+        const { assert!(MVM_HOSTLIB_ABI_MINOR >= 2) };
+        assert!(compatible(
+            1,
+            1,
+            MVM_HOSTLIB_ABI_MAJOR,
+            MVM_HOSTLIB_ABI_MINOR
+        ));
+        assert!(!compatible(
+            1,
+            MVM_HOSTLIB_ABI_MINOR + 1,
+            MVM_HOSTLIB_ABI_MAJOR,
+            MVM_HOSTLIB_ABI_MINOR
+        ));
     }
 
     #[test]

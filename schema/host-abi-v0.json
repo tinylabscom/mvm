@@ -2,6 +2,22 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "additionalProperties": false,
   "definitions": {
+    "AgentErrorReply": {
+      "description": "Why the guest agent (or, for a killed session, the host) ended the call rather than the workload exiting.",
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/RunEntrypointError"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
     "BackendCapabilitiesReply": {
       "description": "Opaque report; the shape is owned by the capability negotiation module.",
       "type": "object"
@@ -95,6 +111,133 @@
           "type": "string"
         }
       ]
+    },
+    "EgressTarget": {
+      "additionalProperties": false,
+      "description": "One outbound destination the workload may reach. Each one lands in the signed plan's egress grant, which is what the host egress gate reads.",
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "format": "uint16",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "host",
+        "port"
+      ],
+      "type": "object"
+    },
+    "EntrypointCallReply": {
+      "description": "The reply to `entrypoint.call` and `session.call`.",
+      "properties": {
+        "agent_error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentErrorReply"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set when the agent, not the workload, ended the call."
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemoteErrorReply"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The wrapper's error envelope, when the call failed with one."
+        },
+        "exit_code": {
+          "description": "The workload's exit status, or the conventional status for how the agent ended the call (124 timeout, 137 crashed wrapper, 142 killed session, 75 not ready, 1 otherwise).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "output_truncated": {
+          "description": "Output past the per-channel cap was dropped.",
+          "type": "boolean"
+        },
+        "stderr_b64": {
+          "type": "string"
+        },
+        "stdout_b64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "exit_code",
+        "output_truncated",
+        "stderr_b64",
+        "stdout_b64"
+      ],
+      "title": "EntrypointCallReply",
+      "type": "object"
+    },
+    "EntrypointCallRequest": {
+      "additionalProperties": false,
+      "description": "An `entrypoint.call` request. Exactly one of `workload` and `manifest`.",
+      "properties": {
+        "cpus": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "manifest": {
+          "default": null,
+          "description": "A manifest path, the directory holding one, or a 64-hex slot address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "payload_b64": {
+          "description": "The encoded `[args, kwargs]` call, base64. Empty is the no-argument call.",
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "workload": {
+          "default": null,
+          "description": "The id the workload was declared with.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "payload_b64"
+      ],
+      "title": "EntrypointCallRequest",
+      "type": "object"
     },
     "FsEntry": {
       "additionalProperties": false,
@@ -625,6 +768,122 @@
       "title": "StdinRequest",
       "type": "object"
     },
+    "GuestProcStreamCloseReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "GuestProcStreamCloseRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "CloseRequest",
+      "type": "object"
+    },
+    "GuestProcStreamNextReply": {
+      "properties": {
+        "done": {
+          "description": "The source has ended and the stream is closed.",
+          "type": "boolean"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/definitions/StreamEvent"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a process ended; present when a process stream is done, absent otherwise."
+        }
+      },
+      "required": [
+        "done",
+        "events"
+      ],
+      "title": "NextReply",
+      "type": "object"
+    },
+    "GuestProcStreamNextRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "wait_ms": {
+          "default": null,
+          "description": "How long to wait for a first chunk. At most [`MAX_WAIT_MS`].",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "NextRequest",
+      "type": "object"
+    },
+    "GuestProcStreamOpenReply": {
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "OpenReply",
+      "type": "object"
+    },
+    "GuestProcStreamOpenRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": null,
+          "description": "Bounds the wait on the guest; the stream ends `timed_out` past it.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "token": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "token"
+      ],
+      "title": "OpenRequest",
+      "type": "object"
+    },
     "GuestProcWaitReply": {
       "properties": {
         "outcome": {
@@ -791,6 +1050,223 @@
           "type": "string"
         }
       ]
+    },
+    "MachineCreateReply": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "title": "MachineState",
+      "type": "object"
+    },
+    "MachineCreateRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.create` request: a persistent definition, never booted here.",
+      "properties": {
+        "backend": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cpus": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "egress": {
+          "items": {
+            "$ref": "#/definitions/EgressTarget"
+          },
+          "type": "array"
+        },
+        "force": {
+          "default": false,
+          "type": "boolean"
+        },
+        "image": {
+          "default": null,
+          "description": "An OCI reference (optionally `oci:`-prefixed), an absolute or `./`-relative rootfs path, or `flake:<ref>#<attr>`. Exactly one of `image`, `template` and `manifest` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest": {
+          "default": null,
+          "description": "A manifest file, the directory holding one, or a built slot's 64-character address. Boots as a persistent machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "template": {
+          "default": null,
+          "description": "A template built on this host, named by the name its image was built under. Boots as a persistent machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "CreateRequest",
+      "type": "object"
     },
     "MachineExecReply": {
       "description": "A `machine.exec` reply. Stream bytes cross as base64, because JSON strings are not byte strings — the same convention as `machine.logs` and every `guest.*` payload.",
@@ -980,6 +1456,19 @@
         "id"
       ],
       "title": "MachineRef",
+      "type": "object"
+    },
+    "MachineInventoryReply": {
+      "items": {
+        "description": "A machine inventory record; the shape is owned by the client inventory module. `name` and `build_mode` (`dev` or `prod`) are always present.",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "MachineInventoryRequest": {
+      "additionalProperties": false,
+      "description": "A request that carries nothing.",
+      "title": "Empty",
       "type": "object"
     },
     "MachineListReply": {
@@ -1174,6 +1663,132 @@
       "title": "LogsRequest",
       "type": "object"
     },
+    "MachineLogsStreamCloseReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "MachineLogsStreamCloseRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "CloseRequest",
+      "type": "object"
+    },
+    "MachineLogsStreamNextReply": {
+      "properties": {
+        "done": {
+          "description": "The source has ended and the stream is closed.",
+          "type": "boolean"
+        },
+        "events": {
+          "items": {
+            "$ref": "#/definitions/StreamEvent"
+          },
+          "type": "array"
+        },
+        "outcome": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/WaitOutcome"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How a process ended; present when a process stream is done, absent otherwise."
+        }
+      },
+      "required": [
+        "done",
+        "events"
+      ],
+      "title": "NextReply",
+      "type": "object"
+    },
+    "MachineLogsStreamNextRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "wait_ms": {
+          "default": null,
+          "description": "How long to wait for a first chunk. At most [`MAX_WAIT_MS`].",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "NextRequest",
+      "type": "object"
+    },
+    "MachineLogsStreamOpenReply": {
+      "properties": {
+        "stream": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "stream"
+      ],
+      "title": "OpenReply",
+      "type": "object"
+    },
+    "MachineLogsStreamOpenRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.logs.stream.open` request.",
+      "properties": {
+        "follow": {
+          "default": true,
+          "description": "Keep reading past the end of what has been captured so far. `true` when absent; `false` replays the transcript and ends.",
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "streams": {
+          "default": [],
+          "description": "Which channels to deliver. Every channel when absent or empty.",
+          "items": {
+            "$ref": "#/definitions/StreamName"
+          },
+          "type": "array"
+        },
+        "tail_lines": {
+          "default": null,
+          "description": "Replay only the last N captured records first. The whole transcript when absent.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "LogsOpenRequest",
+      "type": "object"
+    },
     "MachineRmReply": {
       "title": "Empty",
       "type": "object"
@@ -1190,6 +1805,438 @@
         "id"
       ],
       "title": "RemoveRequest",
+      "type": "object"
+    },
+    "MachineRunReply": {
+      "description": "A `machine.run` reply.",
+      "properties": {
+        "build_mode": {
+          "description": "`dev` or `prod`, decided by the admitted profile's `dev_guest` grant, the same declaration the guest agent's DevOnly refusal keys on. Only `dev` admits the DevOnly `guest.*` methods.",
+          "type": "string"
+        },
+        "machine": {
+          "$ref": "#/definitions/MachineState"
+        },
+        "plan_id": {
+          "description": "Content-addressed id of the admitted plan, for correlating with the chain-signed audit log.",
+          "type": "string"
+        },
+        "process": {
+          "description": "The token of the process `command` started, for `guest.proc.*`; absent when the request carried no command.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "build_mode",
+        "machine",
+        "plan_id"
+      ],
+      "title": "RunReply",
+      "type": "object"
+    },
+    "MachineRunRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.run` request.",
+      "properties": {
+        "backend": {
+          "default": null,
+          "description": "Hypervisor override; the host's default when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "command": {
+          "default": [],
+          "description": "A command to start once the machine is up. The reply's `process` names it. Starting it is a DevOnly guest operation, so a sealed image refuses it.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "cpus": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "cwd": {
+          "default": null,
+          "description": "The command's working directory. Requires a `command`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "egress": {
+          "items": {
+            "$ref": "#/definitions/EgressTarget"
+          },
+          "type": "array"
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "The command's environment. Requires a `command`; a loader, shell or credential variable is refused.",
+          "type": "object"
+        },
+        "force": {
+          "default": false,
+          "description": "Persistent only: recreate a same-name definition whose config differs.",
+          "type": "boolean"
+        },
+        "image": {
+          "default": null,
+          "description": "An OCI reference (optionally `oci:`-prefixed), an absolute or `./`-relative rootfs path, or `flake:<ref>#<attr>`. Exactly one of `image`, `template` and `manifest` is set.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manifest": {
+          "default": null,
+          "description": "A manifest file, the directory holding one, or a built slot's 64-character address. Boots as a persistent machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "mode": {
+          "$ref": "#/definitions/RunMode"
+        },
+        "name": {
+          "default": null,
+          "description": "Required for a persistent machine; generated for a transient one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ports": {
+          "default": [],
+          "description": "Opaque TCP ingress, each written `host:guest`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Security profile; `standard` when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "template": {
+          "default": null,
+          "description": "A template built on this host, named by the name its image was built under. Boots as a persistent machine.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ttl_seconds": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "title": "RunRequest",
+      "type": "object"
+    },
+    "MachineStartReply": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "title": "MachineState",
+      "type": "object"
+    },
+    "MachineStartRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "MachineRef",
+      "type": "object"
+    },
+    "MachineState": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
       "type": "object"
     },
     "MachineStatus": {
@@ -1296,6 +2343,390 @@
         }
       ]
     },
+    "RemoteErrorReply": {
+      "description": "The structured error a function workload's wrapper reported for an exception the user's function raised.",
+      "properties": {
+        "error_id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "error_id",
+        "kind",
+        "message"
+      ],
+      "type": "object"
+    },
+    "RunEntrypointError": {
+      "description": "Kind of agent-side error reported via `EntrypointEvent::Error`.\n\nThe variants are deliberately coarse — the host correlates by `kind` and surfaces the human-readable `message` to the operator. Adding a variant is a wire change; renaming or removing is a breaking change.",
+      "oneOf": [
+        {
+          "description": "Inbound stdin or buffered stdout/stderr exceeded the cap configured for the call.",
+          "enum": [
+            "PayloadCap"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The wrapper exceeded `timeout_secs`. Agent killed the process group.",
+          "enum": [
+            "Timeout"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The admitted controller canceled the call and the agent killed its process group.",
+          "enum": [
+            "Canceled"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Another `RunEntrypoint` is in flight on this VM. M12: agents serialize per-VM; concurrency comes from pool growth.",
+          "enum": [
+            "Busy"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The wrapper process died unexpectedly (signal, OOM, etc.).",
+          "enum": [
+            "WrapperCrashed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Entrypoint validation has not yet completed: the agent binds vsock early and validates entrypoint in the background, so a host that races `RunEntrypoint` ahead of `ReadinessStatus { entrypoint: Ready }` gets this back rather than `EntrypointInvalid` (which would imply a permanent failure). Hosts should poll readiness, not retry blindly.",
+          "enum": [
+            "NotReady"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "`/etc/mvm/entrypoint` is missing, fails validation (symlink crossing FS, wrong perms, off the verity partition), or otherwise can't be loaded. Reported per-call even though the validation runs at agent boot.",
+          "enum": [
+            "EntrypointInvalid"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The session backing this call was killed externally (host invoked `mvmctl session kill <id>`) while the call was in flight. Synthesized host-side by `mvmctl invoke` / `session attach` after detecting a transport-level connection drop coincident with a session record marked `Killed`. The agent itself does not emit this — it would be torn down with the VM before it could.",
+          "enum": [
+            "SessionKilled"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Other agent-internal failure — file I/O, vsock framing, inter-process plumbing. Look at `message` for detail.",
+          "enum": [
+            "InternalError"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "RunMode": {
+      "description": "Whether the machine outlives the caller's session.",
+      "oneOf": [
+        {
+          "description": "Boots without a persisted definition; cleaned up when it exits or its TTL lapses.",
+          "enum": [
+            "transient"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Persists a definition under the machine's name, then boots it.",
+          "enum": [
+            "persistent"
+          ],
+          "type": "string"
+        }
+      ]
+    },
+    "SessionCallReply": {
+      "description": "The reply to `entrypoint.call` and `session.call`.",
+      "properties": {
+        "agent_error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentErrorReply"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set when the agent, not the workload, ended the call."
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemoteErrorReply"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The wrapper's error envelope, when the call failed with one."
+        },
+        "exit_code": {
+          "description": "The workload's exit status, or the conventional status for how the agent ended the call (124 timeout, 137 crashed wrapper, 142 killed session, 75 not ready, 1 otherwise).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "output_truncated": {
+          "description": "Output past the per-channel cap was dropped.",
+          "type": "boolean"
+        },
+        "stderr_b64": {
+          "type": "string"
+        },
+        "stdout_b64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "exit_code",
+        "output_truncated",
+        "stderr_b64",
+        "stdout_b64"
+      ],
+      "title": "EntrypointCallReply",
+      "type": "object"
+    },
+    "SessionCallRequest": {
+      "additionalProperties": false,
+      "description": "A `session.call` request.",
+      "properties": {
+        "payload_b64": {
+          "description": "The encoded `[args, kwargs]` call, base64.",
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "payload_b64",
+        "session_id"
+      ],
+      "title": "SessionCallRequest",
+      "type": "object"
+    },
+    "SessionInfoReply": {
+      "description": "A session's record, as `session.info` reports it.",
+      "properties": {
+        "ephemeral": {
+          "type": "boolean"
+        },
+        "idle_timeout_secs": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "invoke_count": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "last_invoke_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "`prod` or `dev`.",
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "state": {
+          "description": "`running`, `killed`, or `reaped`.",
+          "type": "string"
+        },
+        "vm_name": {
+          "type": "string"
+        },
+        "workload_id": {
+          "description": "The built slot the session boots from.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ephemeral",
+        "idle_timeout_secs",
+        "invoke_count",
+        "mode",
+        "session_id",
+        "started_at",
+        "state",
+        "vm_name",
+        "workload_id"
+      ],
+      "title": "SessionInfoReply",
+      "type": "object"
+    },
+    "SessionInfoRequest": {
+      "additionalProperties": false,
+      "description": "Names a session.",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "SessionRef",
+      "type": "object"
+    },
+    "SessionStartReply": {
+      "description": "The reply to `session.start`.",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        },
+        "vm_name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "vm_name"
+      ],
+      "title": "SessionStartReply",
+      "type": "object"
+    },
+    "SessionStartRequest": {
+      "additionalProperties": false,
+      "description": "A `session.start` request. Exactly one of `workload` and `manifest`.",
+      "properties": {
+        "cpus": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "idle_timeout_secs": {
+          "default": null,
+          "description": "How long the session may sit idle before the host reaps it; five minutes when absent, one day at most.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "manifest": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "workload": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "SessionStartRequest",
+      "type": "object"
+    },
+    "SessionStopReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "SessionStopRequest": {
+      "additionalProperties": false,
+      "description": "Names a session.",
+      "properties": {
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id"
+      ],
+      "title": "SessionRef",
+      "type": "object"
+    },
+    "StreamEvent": {
+      "description": "One chunk of output.",
+      "properties": {
+        "data_b64": {
+          "type": "string"
+        },
+        "stream": {
+          "$ref": "#/definitions/StreamName"
+        }
+      },
+      "required": [
+        "data_b64",
+        "stream"
+      ],
+      "type": "object"
+    },
+    "StreamName": {
+      "description": "Which channel a chunk came from.",
+      "oneOf": [
+        {
+          "enum": [
+            "stdout",
+            "stderr"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "A structured control record from the workload's runtime (log streams only).",
+          "enum": [
+            "trace"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "An encoded display frame (log streams only).",
+          "enum": [
+            "frame"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "WaitOutcome": {
       "description": "How a waited-on process ended.",
       "oneOf": [
@@ -1370,6 +2801,23 @@
         "reply"
       ],
       "title": "BackendCapabilities",
+      "type": "object"
+    },
+    "entrypoint_call": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/EntrypointCallReply"
+        },
+        "request": {
+          "$ref": "#/definitions/EntrypointCallRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "EntrypointCall",
       "type": "object"
     },
     "guest_cp": {
@@ -1593,6 +3041,57 @@
       "title": "GuestProcStdin",
       "type": "object"
     },
+    "guest_proc_stream_close": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStreamCloseReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStreamCloseRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStreamClose",
+      "type": "object"
+    },
+    "guest_proc_stream_next": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStreamNextReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStreamNextRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStreamNext",
+      "type": "object"
+    },
+    "guest_proc_stream_open": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/GuestProcStreamOpenReply"
+        },
+        "request": {
+          "$ref": "#/definitions/GuestProcStreamOpenRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "GuestProcStreamOpen",
+      "type": "object"
+    },
     "guest_proc_wait": {
       "additionalProperties": false,
       "properties": {
@@ -1608,6 +3107,23 @@
         "reply"
       ],
       "title": "GuestProcWait",
+      "type": "object"
+    },
+    "machine_create": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineCreateReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineCreateRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineCreate",
       "type": "object"
     },
     "machine_exec": {
@@ -1644,6 +3160,23 @@
       "title": "MachineInspect",
       "type": "object"
     },
+    "machine_inventory": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineInventoryReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineInventoryRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineInventory",
+      "type": "object"
+    },
     "machine_list": {
       "additionalProperties": false,
       "properties": {
@@ -1678,6 +3211,57 @@
       "title": "MachineLogs",
       "type": "object"
     },
+    "machine_logs_stream_close": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineLogsStreamCloseReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineLogsStreamCloseRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineLogsStreamClose",
+      "type": "object"
+    },
+    "machine_logs_stream_next": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineLogsStreamNextReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineLogsStreamNextRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineLogsStreamNext",
+      "type": "object"
+    },
+    "machine_logs_stream_open": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineLogsStreamOpenReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineLogsStreamOpenRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineLogsStreamOpen",
+      "type": "object"
+    },
     "machine_rm": {
       "additionalProperties": false,
       "properties": {
@@ -1693,6 +3277,40 @@
         "reply"
       ],
       "title": "MachineRm",
+      "type": "object"
+    },
+    "machine_run": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineRunReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineRunRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineRun",
+      "type": "object"
+    },
+    "machine_start": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineStartReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineStartRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineStart",
       "type": "object"
     },
     "machine_stop": {
@@ -1711,16 +3329,96 @@
       ],
       "title": "MachineStop",
       "type": "object"
+    },
+    "session_call": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/SessionCallReply"
+        },
+        "request": {
+          "$ref": "#/definitions/SessionCallRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "SessionCall",
+      "type": "object"
+    },
+    "session_info": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/SessionInfoReply"
+        },
+        "request": {
+          "$ref": "#/definitions/SessionInfoRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "SessionInfo",
+      "type": "object"
+    },
+    "session_start": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/SessionStartReply"
+        },
+        "request": {
+          "$ref": "#/definitions/SessionStartRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "SessionStart",
+      "type": "object"
+    },
+    "session_stop": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/SessionStopReply"
+        },
+        "request": {
+          "$ref": "#/definitions/SessionStopRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "SessionStop",
+      "type": "object"
     }
   },
   "required": [
     "backend_capabilities",
+    "entrypoint_call",
+    "machine_create",
     "machine_exec",
     "machine_inspect",
+    "machine_inventory",
     "machine_list",
     "machine_logs",
     "machine_rm",
+    "machine_logs_stream_close",
+    "machine_logs_stream_next",
+    "machine_logs_stream_open",
+    "machine_run",
+    "machine_start",
     "machine_stop",
+    "session_call",
+    "session_info",
+    "session_start",
+    "session_stop",
     "guest_cp",
     "guest_fs_list",
     "guest_fs_mkdir",
@@ -1734,6 +3432,9 @@
     "guest_proc_signal",
     "guest_proc_start",
     "guest_proc_stdin",
+    "guest_proc_stream_close",
+    "guest_proc_stream_next",
+    "guest_proc_stream_open",
     "guest_proc_wait"
   ],
   "title": "HostAbi",

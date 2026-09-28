@@ -15,6 +15,11 @@ members = [
     "crates/mvm-backends",
     "crates/mvm-build",
     "crates/mvm-agentd",
+    # The guest's static privilege-drop helper. A leaf over `libc` alone: the
+    # builder image compiles it from source, so its closure is part of that
+    # image's cache key, and a crate it reaches is a crate whose edits rebuild
+    # the image.
+    "crates/mvm-setpriv",
     # GPU compute by API remoting: the per-VM host endpoint that serves
     # guest CUDA/NVML shim RPCs over vsock against the real driver or a
     # deterministic stub. Host-only (std); the guest side of the wire is
@@ -180,7 +185,7 @@ resolver = "3"
 # functionally different software. Bumping the minor signals "0.x
 # breaking changes" without prematurely committing to a 1.0 stability
 # promise.
-version = "0.18.0-rc.2"
+version = "0.18.3"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -375,32 +380,33 @@ tree-sitter-typescript = "0.23.2"
 # here because member crates can't override that on a workspace-inherited
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
-mvm-contract = { path = "crates/mvm-contract", version = "0.18.0-rc.2", default-features = false, features = ["protocol"] }
-mvm-core = { path = "crates/mvm-core", version = "0.18.0-rc.2" }
-mvm-client = { path = "crates/mvm-client", version = "0.18.0-rc.2" }
-mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0-rc.2" }
-mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0-rc.2" }
-mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.0-rc.2" }
-mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.18.0-rc.2" }
-mvm-build = { path = "crates/mvm-build", version = "0.18.0-rc.2", default-features = false }
-mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0-rc.2", default-features = false }
-mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.0-rc.2" }
-mvm-backends = { path = "crates/mvm-backends", version = "0.18.0-rc.2" }
-mvm-fs = { path = "crates/mvm-fs", version = "0.18.0-rc.2" }
-mvm-http = { path = "crates/mvm-http", version = "0.18.0-rc.2" }
-mvm-observability = { path = "crates/mvm-observability", version = "0.18.0-rc.2" }
-mvm-net = { path = "crates/mvm-net", version = "0.18.0-rc.2" }
-mvm-cli = { path = "crates/mvm-cli", version = "0.18.0-rc.2", default-features = false }
-mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0-rc.2", default-features = false }
+mvm-contract = { path = "crates/mvm-contract", version = "0.18.3", default-features = false, features = ["protocol"] }
+mvm-core = { path = "crates/mvm-core", version = "0.18.3" }
+mvm-client = { path = "crates/mvm-client", version = "0.18.3" }
+mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.3" }
+mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.3" }
+mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.18.3" }
+mvm-host-services = { path = "crates/mvm-host-services", version = "0.18.3" }
+mvm-hostlib = { path = "crates/mvm-hostlib", version = "0.18.3" }
+mvm-build = { path = "crates/mvm-build", version = "0.18.3", default-features = false }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.3", default-features = false }
+mvm-vmm = { path = "crates/mvm-vmm", version = "0.18.3" }
+mvm-backends = { path = "crates/mvm-backends", version = "0.18.3" }
+mvm-fs = { path = "crates/mvm-fs", version = "0.18.3" }
+mvm-http = { path = "crates/mvm-http", version = "0.18.3" }
+mvm-observability = { path = "crates/mvm-observability", version = "0.18.3" }
+mvm-net = { path = "crates/mvm-net", version = "0.18.3" }
+mvm-cli = { path = "crates/mvm-cli", version = "0.18.3", default-features = false }
+mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.3", default-features = false }
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0-rc.2" }
-mvm-capture = { path = "crates/mvm-capture", version = "0.18.0-rc.2" }
+mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.3" }
+mvm-capture = { path = "crates/mvm-capture", version = "0.18.3" }
 # Plan 57 W1 — libkrun FFI bindings split out of mvm-providers so the
 # bindgen + libclang build cost is isolated from the rest of the
 # workspace. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
-libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.18.0-rc.2" }
+libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.18.3" }
 
 # Dev dependencies
 assert_cmd = "2"
@@ -562,9 +568,9 @@ attestation-tpm2 = ["mvm-core/attestation-tpm2"]
 # (default-features = false), without dragging in the rest of `host`.
 hostd-transport = ["mvm-core/hostd-transport"]
 
-# Release-only: let an installed binary download mvm-published prebuilt builder
-# VM images on a cache miss. Off for source checkouts (they build locally); the
-# release workflow turns it on.
+# Release-only: let an installed binary place a signed builder pack from its own
+# release ahead of the builder image the image lock pins. The release workflow
+# turns it on; the signed image set itself is reachable from every build.
 release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 # Mark an official distribution separately so runtime artifact resolution uses
 # the published channel even when the binary runs from a source checkout.

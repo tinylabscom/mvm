@@ -169,7 +169,7 @@ mvm runs Nix builds inside the project builder VM and copies the finished artifa
 
 ## Why this is structured this way
 
-ADR-013 names a single architectural commitment: **mvm is a library, your project owns its flake.** The previous iteration of mvm shipped a `nix/images/builder/` directory with a default dev-image flake that users would fork or edit. That coupled every user's dev workflow to mvm's internal layout, so any refactor of the library broke everyone's build.
+ADR-013 names a single architectural commitment: **mvm is a library, your project owns its flake.** An early iteration of mvm shipped a `nix/images/builder/` directory with a default dev-image flake that users would fork or edit. That coupled every user's dev workflow to mvm's internal layout, so any refactor of the library broke everyone's build.
 
 The current shape:
 
