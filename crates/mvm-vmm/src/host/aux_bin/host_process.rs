@@ -27,6 +27,7 @@ pub const CLI_BIN: &str = "mvmctl";
 
 static DECLARED_HOST_BINARY_DIR: OnceLock<PathBuf> = OnceLock::new();
 static DECLARED_LIBRARY_EMBEDDER: OnceLock<()> = OnceLock::new();
+static DECLARED_SOURCE_HELPER_BUILDS: OnceLock<()> = OnceLock::new();
 
 /// Declare the directory holding this process's host helper binaries.
 ///
@@ -49,6 +50,19 @@ pub fn declare_host_binary_dir(dir: impl Into<PathBuf>) -> Result<(), HostBinary
 /// declaring it again changes nothing.
 pub fn declare_library_embedder() {
     DECLARED_LIBRARY_EMBEDDER.get_or_init(|| ());
+}
+
+/// Let this process build a per-VM helper from the source checkout it was
+/// compiled from, when the helper is missing or older than its sources.
+///
+/// `mvmctl` declares this at startup, and only when it is a contributor build.
+/// Nothing else does, so a test binary never starts a multi-minute compile it
+/// did not ask for, and an official release — whose helpers ship beside it —
+/// never becomes a compiler frontend because it happens to run inside a clone.
+/// A library embedder is refused even when this was declared: building a
+/// helper is `cargo` work, and an embedder runs neither `mvmctl` nor `cargo`.
+pub fn allow_helper_builds_from_source() {
+    DECLARED_SOURCE_HELPER_BUILDS.get_or_init(|| ());
 }
 
 fn declare_dir_in(slot: &OnceLock<PathBuf>, dir: PathBuf) -> Result<(), HostBinaryDirError> {
@@ -111,18 +125,28 @@ impl std::error::Error for HostBinaryDirError {}
 pub struct HostProcess {
     declared_binary_dir: Option<PathBuf>,
     library_embedder: bool,
+    helper_builds_from_source: bool,
 }
 
 impl HostProcess {
     /// This process, as declared. With nothing declared this is `mvmctl`.
     pub fn current() -> Self {
-        Self::from_slots(&DECLARED_HOST_BINARY_DIR, &DECLARED_LIBRARY_EMBEDDER)
+        Self::from_slots(
+            &DECLARED_HOST_BINARY_DIR,
+            &DECLARED_LIBRARY_EMBEDDER,
+            &DECLARED_SOURCE_HELPER_BUILDS,
+        )
     }
 
-    fn from_slots(dir: &OnceLock<PathBuf>, embedder: &OnceLock<()>) -> Self {
+    fn from_slots(
+        dir: &OnceLock<PathBuf>,
+        embedder: &OnceLock<()>,
+        source_builds: &OnceLock<()>,
+    ) -> Self {
         Self {
             declared_binary_dir: dir.get().cloned(),
             library_embedder: embedder.get().is_some(),
+            helper_builds_from_source: source_builds.get().is_some(),
         }
     }
 
@@ -143,9 +167,21 @@ impl HostProcess {
         self
     }
 
+    /// This description allowed to build helpers from its source checkout.
+    pub fn allowing_helper_builds_from_source(mut self) -> Self {
+        self.helper_builds_from_source = true;
+        self
+    }
+
     /// Whether this process is a library embedding the runtime.
     pub fn is_library_embedder(&self) -> bool {
         self.library_embedder
+    }
+
+    /// Whether this process may build a missing or out-of-date helper from
+    /// its source checkout: declared, and not a library embedder.
+    pub fn builds_helpers_from_source(&self) -> bool {
+        self.helper_builds_from_source && !self.library_embedder
     }
 
     /// The directory host helper binaries are expected in: the declared one,
@@ -283,11 +319,13 @@ mod tests {
     fn nothing_declared_describes_mvmctl() {
         let dir = OnceLock::new();
         let embedder = OnceLock::new();
+        let source_builds = OnceLock::new();
 
-        let host = HostProcess::from_slots(&dir, &embedder);
+        let host = HostProcess::from_slots(&dir, &embedder, &source_builds);
 
         assert_eq!(host, HostProcess::undeclared());
         assert!(!host.is_library_embedder());
+        assert!(!host.builds_helpers_from_source());
         assert!(
             host.refuse_cli_spawn(CliSpawn::BuilderBootstrapHelper)
                 .is_ok()
@@ -336,15 +374,25 @@ mod tests {
     fn declarations_are_read_back_from_their_slots() {
         let dir = OnceLock::new();
         let embedder = OnceLock::new();
+        let source_builds = OnceLock::new();
         declare_dir_in(&dir, PathBuf::from("/opt/mvm/bin")).expect("first declaration");
         embedder.get_or_init(|| ());
+        source_builds.get_or_init(|| ());
 
         assert_eq!(
-            HostProcess::from_slots(&dir, &embedder),
+            HostProcess::from_slots(&dir, &embedder, &source_builds),
             HostProcess::undeclared()
                 .with_binary_dir("/opt/mvm/bin")
                 .as_library_embedder()
+                .allowing_helper_builds_from_source()
         );
+    }
+
+    #[test]
+    fn a_library_embedder_never_builds_helpers_even_when_allowed() {
+        let allowed = HostProcess::undeclared().allowing_helper_builds_from_source();
+        assert!(allowed.builds_helpers_from_source());
+        assert!(!allowed.as_library_embedder().builds_helpers_from_source());
     }
 
     #[test]

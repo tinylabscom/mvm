@@ -50,14 +50,50 @@ classes and method tables for both SDKs.
 | Launch | `machine.run`, `machine.create` | `LocalBackend::launch` / `create_from_request`, through `LaunchRequest` |
 | Guest (DevOnly) | `guest.proc.{start,list,signal,kill,stdin,wait}`, `guest.fs.{read,write,list,stat,mkdir,remove,rename}`, `guest.cp` | `mvm_client::guest` |
 | Streams (DevOnly) | `guest.proc.stream.{open,next,close}` | `mvm_client::guest::wait_process`, on a reader thread |
+| Log streams | `machine.logs.stream.{open,next,close}` | `mvm_core::stream_client::open_vm_output` (what `mvmctl machine logs --follow` reads), on a reader thread |
+| Functions | `entrypoint.call`, `session.{start,call,stop,info}` | `mvm_client::entrypoint`, the dispatch `mvmctl machine run --entrypoint` and `machine session` use |
 
 `machine.run` builds a `LaunchRequest`, so every field is validated by the
 same builder a Rust caller uses, and the machine is admitted under a signed,
-chain-audited plan before it boots. A field the in-process launcher cannot
-honour yet (a command override, guest environment) is refused there with its
-own reason rather than dropped. Egress targets become the plan's egress
-grant, which is what the host egress gate reads. The reply carries the
-admitted plan id and the machine's fail-closed `build_mode`.
+chain-audited plan before it boots. A persistent machine boots through the
+same start the CLI's `machine run -d` and `machine start` use. Egress targets
+become the plan's egress grant, which is what the host egress gate reads. The
+reply carries the admitted plan id and the machine's fail-closed
+`build_mode`.
+
+A launch boots exactly one source:
+
+- `image`: an OCI reference, a rootfs path, or `flake:<ref>#<attr>`.
+- `template`: a template built on this host, named by the name its image was
+  built under (the `name` its flake gave `mkGuest`). A name no built slot
+  carries, or one several do, is refused with how to build it or which
+  manifests compete. Boots as a persistent machine.
+- `manifest`: a manifest file, the directory holding one, or a built slot's
+  64-character address. Boots as a persistent machine.
+
+Nothing is built on a launch: a template or manifest that was never built is
+refused rather than built behind the caller's back.
+
+`command` starts once the machine is up, with `env` and `cwd`, and the reply's
+`process` is its token for `guest.proc.*`. `env` passes the host's
+environment denylist, so a loader, shell or credential variable is refused
+before anything boots, and `env` or `cwd` without a `command` is refused
+rather than dropped. Starting the command is the guest agent's process start,
+a DevOnly verb, so a sealed image refuses it; a machine that booted but whose
+command did not start is stopped, and the launch fails. `machine.create`
+takes no command: a definition records what boots, not what runs on it.
+
+`entrypoint.call` boots a transient microVM from the built slot that serves a
+`workload` (found by the name its image was built under) or a `manifest`,
+dispatches one entrypoint call with `payload_b64` as its input, and tears the
+machine down: `{exit_code, stdout_b64, stderr_b64, output_truncated, error?}`,
+where `error` is the `{kind, error_id, message}` envelope the guest wrote when
+the function raised. `session.start` keeps one such machine warm for
+`session.call` until `session.stop` or its idle timeout; calls on one session
+are serialised in this process. Admission is the one the CLI uses for the same
+call, so the plan, the verb grant and the audit entries match. A payload over
+one agent frame travels on the streaming input plane for `entrypoint.call`
+and is refused as `REJECTED` for `session.call`; nothing is truncated.
 
 `machine.exec` is on the client trait so a remote backend can answer it; the
 local backend does not, and the SDKs run guest commands through
@@ -87,6 +123,15 @@ and, through it, the guest process's pipe, rather than growing the host
 process. A wait already in flight on the guest agent cannot be withdrawn, so
 a closed stream's reader lives until the process ends or its wait times out.
 At most 256 streams are open at once.
+
+`machine.logs.stream.{open,next,close}` follow a machine's captured output the
+same way. `open {id, follow?, tail_lines?, streams?}` replays the last
+`tail_lines` records, then keeps reading as the machine writes when `follow`
+is true (the default); `streams` picks among `stdout`, `stderr`, `trace` and
+`frame`. `next` is the process stream's `next`, and a log stream's final batch
+carries no `outcome`. A machine with no captured output is `NOT_FOUND`. A
+handle belongs to its family: a process stream's id means nothing to the log
+methods, and the other way round.
 
 Apart from stream readers, each call builds a single-threaded runtime and
 drops it before returning, so nothing else the library starts outlives the

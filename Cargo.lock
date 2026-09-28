@@ -3337,6 +3337,7 @@ dependencies = [
  "libc",
  "mvm-agentd",
  "mvm-client",
+ "mvm-contract",
  "mvm-core",
  "mvm-vmm",
  "schemars",

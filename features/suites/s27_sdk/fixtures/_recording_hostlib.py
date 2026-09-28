@@ -29,9 +29,19 @@ REPLIES = {
         "machine": {"id": VM_ID, "name": VM_ID, "status": "running"},
         "plan_id": "plan-bdd",
         "build_mode": BUILD_MODE,
+        # The token of the launch command's process; a launch without one
+        # ignores it.
+        "process": "boot-tok",
     },
     "machine.inventory": [{"name": VM_ID, "build_mode": BUILD_MODE}],
     "machine.stop": {},
+    "machine.rm": {},
+    "machine.logs.stream.open": {"stream": 2},
+    "machine.logs.stream.next": {
+        "events": [{"stream": "stdout", "data_b64": _b64("booted\n")}],
+        "done": True,
+    },
+    "machine.logs.stream.close": {},
     "guest.proc.start": {"token": "ptok-bdd"},
     "guest.proc.stream.open": {"stream": 1},
     "guest.proc.stream.next": {

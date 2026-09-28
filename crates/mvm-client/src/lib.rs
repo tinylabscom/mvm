@@ -48,6 +48,7 @@ pub mod audit;
 pub mod boot;
 pub mod connect;
 pub mod drive;
+pub mod entrypoint;
 pub mod grants;
 pub mod grants_resolve;
 pub mod guest;
@@ -101,7 +102,8 @@ pub use grants::{enforced_grants_of, record_enforced_grants};
 pub use inventory::{MachineInventoryRecord, WorkloadPosture};
 pub use launch::{
     AccessMode, ExitReport, LaunchNetworkPolicy, LaunchOutcome, LaunchRequest,
-    LaunchRequestBuilder, LaunchVolumeSpec, LifecycleMode, MachineSecretRef, RemoveOptions,
+    LaunchRequestBuilder, LaunchSource, LaunchVolumeSpec, LifecycleMode, MachineSecretRef,
+    RemoveOptions,
 };
 pub use local::{LocalBackend, auto_selected_backend_name, default_vcpus};
 pub use readiness::{readiness_of, record_readiness, touch_activity};
