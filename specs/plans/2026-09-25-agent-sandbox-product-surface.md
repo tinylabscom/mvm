@@ -473,7 +473,7 @@ Rules this program follows beyond CLAUDE.md and AGENTS.md:
   per coherent slice, pushed early so a stopped session loses nothing.
 - Commits and PRs carry no AI attribution and no co-author trailer.
 - Arm a green PR with `gh pr merge N --squash --auto` run twice (the second
-  run confirms it is queued), then check the merge queue.
+  run shows it entered the queue), then check the merge queue.
 - Tick the plan's boxes, `specs/REFACTOR-STATUS.md`, and a delivery note
   in `specs/sprint/delivery/` in the same PR; update this execution log and
   post a status comment on #3731 when PRs land.
