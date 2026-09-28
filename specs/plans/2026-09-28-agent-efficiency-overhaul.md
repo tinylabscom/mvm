@@ -119,7 +119,7 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 4 — Route exploration through graft, not raw Shell/Grep
 
-- [ ] **4.1 Graft adoption audit (done — findings below).** Graft MCP is
+- [x] **4.1 Graft adoption audit (done — findings below).** Graft MCP is
   configured for **Cursor** (`.cursor/mcp.json`) and **Codex**
   (`~/.codex/config.toml [mcp_servers.graft]`), and Claude has the project
   skill (`.claude/skills/graft/SKILL.md`). **Kimi has no graft configured at
