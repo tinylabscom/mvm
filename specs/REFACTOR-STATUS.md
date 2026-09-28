@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-28
 
 ## In progress
 
@@ -1995,6 +1995,14 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [ ] **AI coding workflow docs**
+      (`specs/plans/2026-09-28-ai-coding-workflow-docs.md`, PR #3815).
+      The issue-to-PR playbook moved from a 588-line `AGENTS.md` to
+      `public/src/content/docs/contributing/ai-coding-workflow.md`; the root
+      file is now a 281-line rule index that keeps every normative rule and
+      points at the guide. Site build passes with the new page. Validation
+      and merge are in progress.
 
 - [ ] **Static crates registry recovery**
       (`specs/plans/2026-08-26-static-crates-registry-fetch.md`, issue #2904).

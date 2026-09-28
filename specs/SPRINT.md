@@ -10,6 +10,17 @@
 
 ## In progress
 
+- [ ] **Document the AI coding workflow and slim AGENTS.md to a rule index.**
+      `specs/plans/2026-09-28-ai-coding-workflow-docs.md`. The issue-to-PR
+      playbook for agent-driven work now lives at
+      `public/src/content/docs/contributing/ai-coding-workflow.md` (claim/status
+      ownership, worktree workflow, Graft/Serena split, per-developer Zed/Cursor
+      Serena configuration, fast feedback ladder, CI/merge-queue scope, PR
+      linkage, safe parallelism), linked from the development guide and the
+      docs sidebar. `AGENTS.md` drops from 588 to 281 lines with every
+      always-applicable rule kept and rationale moved to the guide. Shared MCP
+      files intentionally keep only graft. PR #3815 is open; merge is pending.
+
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
       an unpacked rootfs (dpkg, apk, os-release, in-image kernel; rpm is a
