@@ -326,9 +326,12 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         a Coverage-Started announcement, and refusal of a wrong guest key or
         wrong host anchor. The guest binary binds the reserved vsock telemetry
         port (5254) through the transport module's bind and host-only peer-CID
-        gate, on a thread spawned only after PID-1 activation, one session at
-        a time, with per-connection lazy key load so a pre-provisioning
-        connection is dropped cleanly and the listener keeps serving.
+        gate — opt-in, only when the launch cmdline asserts
+        `mvm.telemetry=1`, so a boot with no provisioned endpoint launches
+        no thread — on a thread spawned only after PID-1 activation, one
+        session at a time, with per-connection lazy key load so a
+        pre-provisioning connection is dropped cleanly and the listener
+        keeps serving.
         Vsock-only: the unix/container tier gets no listener in this slice.
         Twelve focused tests cover the receiver↔serve wire round-trip, epoch
         freshness, both wrong-peer refusals, dead-peer handling, the glue's

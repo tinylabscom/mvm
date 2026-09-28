@@ -12,6 +12,12 @@
 //! exists. Keys are loaded lazily per connection because the identity drive's
 //! material lands in `/run/mvm` during boot — a host that dials before the
 //! keys exist gets a dropped connection and dials again.
+//!
+//! The listener is opt-in, launch-asserted: it binds and spawns only when the
+//! kernel cmdline carries `mvm.telemetry=1` — the same host→guest assertion
+//! channel the grant requirement rides. A host that provisions no telemetry
+//! endpoint asserts nothing, and the guest launches no thread and holds no
+//! port for it.
 
 use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
@@ -28,10 +34,29 @@ use crate::transport::{accept_vsock, bind_vsock_listener, unix_transport_selecte
 /// Where the guest inits leave this boot's identity material.
 const KEY_DIR: &str = "/run/mvm";
 
+/// The launch assertion that turns the telemetry listener on. Set by the
+/// host when it provisions a telemetry endpoint for this boot; absent means
+/// no listener thread and no bound port.
+const TELEMETRY_CMDLINE_TOKEN: &str = "mvm.telemetry=1";
+
+/// Whether `cmdline` asserts a telemetry endpoint for this boot.
+fn telemetry_asserted(cmdline: &str) -> bool {
+    cmdline
+        .split_ascii_whitespace()
+        .any(|tok| tok == TELEMETRY_CMDLINE_TOKEN)
+}
+
 /// Spawn the telemetry accept thread. Must be called only after PID-1
 /// activation: the thread is created here, and activation's credential
 /// transition is per-thread at the kernel boundary.
 pub(crate) fn spawn_telemetry_listener() {
+    // Opt-in: an unreadable cmdline asserts nothing, so nothing spawns.
+    let asserted = std::fs::read_to_string("/proc/cmdline")
+        .map(|cmdline| telemetry_asserted(&cmdline))
+        .unwrap_or(false);
+    if !asserted {
+        return;
+    }
     if unix_transport_selected() {
         // Container tier: no vsock, no telemetry listener (module docs).
         return;
@@ -104,6 +129,19 @@ mod tests {
     use mvm_core::net::telemetry::{TelemetryReceiver, handshake_signing_bytes};
     use mvm_core::protocol::telemetry::{CoverageState, RecordBody, TelemetryRecord};
     use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn the_listener_is_asserted_only_by_the_exact_cmdline_token() {
+        assert!(telemetry_asserted(
+            "console=ttyS0 mvm.telemetry=1 root=/dev/vda"
+        ));
+        assert!(!telemetry_asserted("console=ttyS0 root=/dev/vda"));
+        assert!(!telemetry_asserted(""));
+        // Lookalikes assert nothing: prefixes, other values, substrings.
+        assert!(!telemetry_asserted("mvm.telemetry=0"));
+        assert!(!telemetry_asserted("mvm.telemetry=11"));
+        assert!(!telemetry_asserted("xmvm.telemetry=1"));
+    }
 
     fn provision_keys(dir: &Path) -> (SigningKey, SigningKey) {
         let guest_key = SigningKey::from_bytes(&[21; 32]);

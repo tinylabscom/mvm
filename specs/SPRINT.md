@@ -367,7 +367,7 @@ docs commit went out as #3581). Under the
       announcement, wrong-guest-key and wrong-host-anchor refusals, dead-peer
       handling; five focused tests), and the guest binary binds the reserved
       vsock telemetry port on a post-activation thread with the host-only
-      peer-CID gate, one session at a time and lazy per-connection key load.
+      peer-CID gate, opt-in via the mvm.telemetry=1 launch assertion, one session at a time and lazy per-connection key load.
       Vsock-only; with #3597's registration merged, a full-chain witness
       composes register → resolve → assert-current → authenticated receive
       against the serving guest over a live stream. No capture or

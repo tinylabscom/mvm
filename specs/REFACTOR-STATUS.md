@@ -250,7 +250,8 @@ Last updated: 2026-09-27
       the agent (fresh producer epoch, Coverage-Started announcement,
       wrong-guest-key/wrong-host-anchor refusals, dead-peer handling; five
       focused tests) plus a post-activation vsock listener on the reserved
-      telemetry port with host-only peer gating, one session at a time and
+      telemetry port with host-only peer gating, opt-in via the
+      mvm.telemetry=1 launch assertion, one session at a time and
       lazy per-connection key load. Vsock-only; with #3597's registration merged, a full-chain witness
       composes register → resolve → assert-current → authenticated receive
       against the serving guest over a live stream. No capture or

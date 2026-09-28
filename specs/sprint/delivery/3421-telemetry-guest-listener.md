@@ -17,7 +17,11 @@ wrong-host-anchor refusal and dead-peer handling.
 
 The `mvm-guest-agent` binary binds a vsock listener on the reserved telemetry
 port (`mvm_core::protocol::telemetry::TELEMETRY_PORT`, 5254), reusing the
-transport module's vsock bind and host-only peer-CID gate. The accept loop
+transport module's vsock bind and host-only peer-CID gate. The listener is
+opt-in, launch-asserted: it binds and spawns only when the kernel cmdline
+carries `mvm.telemetry=1` — the same host→guest assertion channel
+`mvm.require_grant=1` uses — so a boot whose host provisions no telemetry
+endpoint launches no thread and holds no port. The accept loop
 runs on a thread spawned only in the post-activation zone — PID-1 activation
 forbids earlier threads — and serves one session at a time. Keys are loaded
 lazily per connection (`flowmux_sync::load_guest_signing_key("/run/mvm")` plus
