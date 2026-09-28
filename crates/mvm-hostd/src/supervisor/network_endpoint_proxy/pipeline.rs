@@ -38,6 +38,34 @@ const HTTP_REQUEST_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from
 const MAX_AI_STREAM_BUFFER_BYTES: usize = 256 * 1024;
 
 impl SubstitutionService {
+    /// Capture OAuth access tokens returned in a JSON response body and teach
+    /// the reflection scrubber to replace them with the binding's placeholder
+    /// before any bytes reach the guest.
+    fn capture_oauth_response_tokens(&self, flow: &PreparedFlow, body: &[u8]) {
+        if flow.substituted.is_empty() || self.oauth_capture_by_secret.is_empty() {
+            return;
+        }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return;
+        };
+        for substituted in &flow.substituted {
+            let Some(rule) = self.oauth_capture_by_secret.get(&substituted.name) else {
+                continue;
+            };
+            let Some(access_token) = json
+                .pointer(rule.response_access_token_pointer())
+                .and_then(serde_json::Value::as_str)
+            else {
+                continue;
+            };
+            self.reflection.learn(
+                &substituted.name,
+                &substituted.placeholder,
+                access_token.as_bytes(),
+            );
+        }
+    }
+
     /// Substitute, gate, forward, and audit one request.
     ///
     /// `pub(crate)` so the FlowMux `Http` arm can call it. That arm frames the
@@ -401,6 +429,7 @@ impl SubstitutionService {
         flow: &PreparedFlow,
         response: &mut ForwardResponse,
     ) -> Result<(), WireResponse> {
+        self.capture_oauth_response_tokens(flow, &response.body);
         let Some(set) = self.reflection.snapshot() else {
             return Ok(());
         };
@@ -662,11 +691,14 @@ impl SubstitutionService {
 mod server_tests {
     use super::*;
     use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
-    use crate::supervisor::network_endpoint_proxy::SubstitutionService;
     use crate::supervisor::network_endpoint_proxy::test_support::{
         MockForwarder, RedirectForwarder, bearer_ref, gate_admitting, service_with,
     };
+    use crate::supervisor::network_endpoint_proxy::{
+        ForwardError, ForwardResponse, Forwarder, SubstitutionService,
+    };
     use crate::supervisor::redactor::STREAM_TRANSFORM_OVERLAP;
+    use async_trait::async_trait;
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use mvm_core::substitution_wire::WireResponse;
@@ -880,6 +912,76 @@ mod server_tests {
             forwarder.calls.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "the endpoint must surface a redirect, never follow it with the bound credential"
+        );
+    }
+
+    struct OAuthTokenForwarder;
+
+    #[async_trait]
+    impl Forwarder for OAuthTokenForwarder {
+        async fn forward(
+            &self,
+            _req: mvm_contract::substitution::PreparedRequest,
+        ) -> Result<ForwardResponse, ForwardError> {
+            Ok(ForwardResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: br#"{"access_token":"fresh-oauth-token","token_type":"Bearer"}"#.to_vec(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_token_substituted_at_endpoint_never_reaches_guest() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("placeholder-seeded-value".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(registry),
+                resolver,
+                Arc::new(OAuthTokenForwarder),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_oauth_capture_rule("openai", "/access_token"),
+        );
+        let response = service
+            .process(mvm_core::substitution_wire::WireRequest {
+                method: "GET".into(),
+                url: "https://api.openai.com/token".into(),
+                headers: vec![("authorization".into(), placeholder.clone())],
+                body_b64: String::new(),
+            })
+            .await;
+        let mvm_core::substitution_wire::WireResponse::Ok { body_b64, .. } = response else {
+            panic!("request must succeed");
+        };
+        let body = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(body_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body.contains(&placeholder),
+            "captured token must be replaced with the minted placeholder: {body}"
+        );
+        assert!(
+            !body.contains("fresh-oauth-token"),
+            "captured token must never be exposed to the guest: {body}"
         );
     }
 }

@@ -237,12 +237,27 @@ fn claim10_decision(
 pub(crate) fn collect_substituted_meta(
     endpoint: &NetworkEndpoint<'_>,
     headers: &[(String, String)],
-) -> Vec<(String, AuthType)> {
+) -> Vec<SubstitutedSecret> {
     headers
         .iter()
-        .filter_map(|(_, v)| find_placeholder(v))
-        .filter_map(|ph| endpoint.resolve_meta(ph))
+        .filter_map(|(_, v)| find_placeholder(v).map(str::to_string))
+        .filter_map(|placeholder| {
+            endpoint
+                .resolve_meta(&placeholder)
+                .map(|(name, auth_type)| SubstitutedSecret {
+                    name,
+                    auth_type,
+                    placeholder,
+                })
+        })
         .collect()
+}
+
+/// One substituted secret in a prepared flow.
+pub(super) struct SubstitutedSecret {
+    pub(super) name: String,
+    pub(super) auth_type: AuthType,
+    pub(super) placeholder: String,
 }
 
 /// Security state retained from request preparation through response
@@ -251,7 +266,7 @@ pub(crate) fn collect_substituted_meta(
 pub(super) struct PreparedFlow {
     pub(super) request: Option<PreparedRequest>,
     pub(super) destination: Option<String>,
-    pub(super) substituted: Vec<(String, AuthType)>,
+    pub(super) substituted: Vec<SubstitutedSecret>,
     pub(super) replacement_flow: ReplacementFlow,
     pub(super) replacement_proofs: Vec<mvm_core::policy::RewriteProofRecord>,
     pub(super) redaction_hits: RedactionHits,

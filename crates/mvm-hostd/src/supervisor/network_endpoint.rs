@@ -373,10 +373,11 @@ pub fn assemble_with_projection(
     cfg: &EndpointConfig,
     projection: &EndpointNetworkProjection,
 ) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
-    let bindings = match &cfg.binding_store_dir {
-        Some(dir) => FileBindingStore::with_dir(dir),
-        None => FileBindingStore::default_location()?,
-    };
+    let bindings: Arc<dyn crate::keyholder::BindingStore> =
+        Arc::new(match &cfg.binding_store_dir {
+            Some(dir) => FileBindingStore::with_dir(dir),
+            None => FileBindingStore::default_location()?,
+        });
     // Build the value resolver up front so `from_plan` builds the service
     // over it instead of its hardcoded `LocalResolver`. The registry (which
     // placeholders exist, their allowed_hosts/auth_type) is still assembled
@@ -392,7 +393,11 @@ pub fn assemble_with_projection(
                 Some(dir) => FileSecretStore::with_dir(dir),
                 None => FileSecretStore::with_dir(default_secrets_dir()?),
             });
-            Arc::new(LocalResolver::new(&cfg.tenant_id, secret_store))
+            Arc::new(LocalResolver::with_bindings(
+                &cfg.tenant_id,
+                secret_store,
+                Arc::clone(&bindings),
+            ))
         }
         ResolverBackend::Remote {
             uds_path,
@@ -437,7 +442,7 @@ pub fn assemble_with_projection(
             plan_secrets: &cfg.secrets,
             tenant: &cfg.tenant_id,
             instance_id: &cfg.instance_id,
-            bindings: &bindings,
+            bindings: bindings.as_ref(),
             resolver,
             forward_timeout_secs: cfg.forward_timeout_secs,
             proxy,
@@ -850,6 +855,7 @@ mod tests {
                     sigv4: None,
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -998,6 +1004,7 @@ mod tests {
                     sigv4: None,
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -1056,6 +1063,7 @@ mod tests {
                     sigv4: None,
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -1086,6 +1094,7 @@ mod tests {
                     sigv4: None,
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();

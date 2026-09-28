@@ -128,6 +128,7 @@ mod tests {
                     sigv4: None,
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -174,6 +175,7 @@ mod tests {
                     }),
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -203,6 +205,7 @@ mod tests {
                     sigv4: None,
                     provider: Some("anthropic".into()),
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -250,6 +253,7 @@ mod tests {
                     sigv4: None,
                     provider: Some("github".into()),
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
