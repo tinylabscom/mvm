@@ -46,10 +46,9 @@ jobs:
 
       - name: Full pack signing round-trip test
         # This single step combines all pack signing checks into one run block
-        # so that file state is preserved across all operations. Each `run:`
-        # block in GitHub Actions runs in its own shell, so files created in
-        # one step are not visible in subsequent steps unless artifacts are
-        # used. This combined script:
+        # so shell variables and helper functions remain available throughout.
+        # Workspace files persist across steps, but shell state does not.
+        # This combined script:
         # - Produces builder and runtime pack manifests
         # - Signs them with real cosign OIDC bundles
         # - Verifies them through the Rust sigstore-verify stack

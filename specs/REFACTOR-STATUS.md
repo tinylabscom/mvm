@@ -4,7 +4,7 @@ Last updated: 2026-09-28
 
 ## In progress
 
-- [ ] **Pack signing input isolation — #3794.** Fix, regression, actionlint and host workspace Clippy pass; workspace tests, Linux and live-signing validation remain. See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
+- [ ] **Pack signing input isolation — #3794.** Fix, regression, actionlint, host workspace Clippy and real signing smoke pass; workspace tests, Linux and remaining PR checks are pending. See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the

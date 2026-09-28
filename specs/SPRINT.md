@@ -4800,6 +4800,7 @@ writes the plan:
 
 - [x] Reproduce and remove the pack input/output collision; focused Cargo test,
       actionlint and host workspace Clippy pass.
-- [ ] Complete workspace and Linux builder validation, live signing, merge and closure.
+- [x] Pass the real signing smoke on the branch (run 36472914601).
+- [ ] Complete workspace and Linux builder validation, PR checks, merge and closure.
 
 See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
