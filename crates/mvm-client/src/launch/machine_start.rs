@@ -347,7 +347,14 @@ pub fn record_machine_started(spec: &mut mp::MachineSpec, resolved_digest: Strin
 
 fn persistent_workload_dir(spec: &mp::MachineSpec) -> Option<PathBuf> {
     spec.workload_dir.as_deref().map(PathBuf::from).or_else(|| {
-        crate::instruction_trust::gate::local_workload_dir(None, spec.manifest.as_deref())
+        let manifest = spec.manifest.as_deref()?;
+        crate::instruction_trust::gate::local_workload_dir(None, Some(manifest)).or_else(|| {
+            let path = std::path::Path::new(manifest);
+            (path.extension() == Some(std::ffi::OsStr::new("toml"))).then(|| {
+                path.parent()
+                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
+            })
+        })
     })
 }
 
