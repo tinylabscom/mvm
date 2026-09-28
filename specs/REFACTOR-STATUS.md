@@ -1,8 +1,10 @@
 # Refactor status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-28
 
 ## In progress
+
+- [ ] **Extended CI process cleanup — #3773.** Deterministic regressions and host workspace Clippy pass; full tests, Linux and live SDK/release validation remain. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the

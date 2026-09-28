@@ -4795,3 +4795,11 @@ writes the plan:
       path; the CLI hands the admitted plan's matcher in (MVM-SEC-23,
       collection gate).
 
+
+## 2026-09-28 Extended CI cleanup — #3773
+
+- [x] Reproduce and fix EPERM cleanup after a child exits, with live-child refusal intact.
+- [x] Pass host workspace Clippy and both direct lock-holder cleanup attempts.
+- [ ] Complete workspace and Linux builder checks, live SDK/release checks, merge and closure.
+
+See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
