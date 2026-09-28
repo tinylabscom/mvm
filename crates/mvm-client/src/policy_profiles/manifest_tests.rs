@@ -1,5 +1,5 @@
 use super::*;
-use crate::profiles::model::{
+use crate::policy_profiles::model::{
     EnvSection, NetworkSection, ResourcesSection, SecretGrant, SecretsSection, ShareGrant,
     SharesSection,
 };

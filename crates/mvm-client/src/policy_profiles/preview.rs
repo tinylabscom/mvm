@@ -73,7 +73,7 @@ pub fn preview(policy: &PolicyBody, config: &MvmConfig) -> Result<PlanPreview> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiles::model::{NetworkSection, ResourcesSection};
+    use crate::policy_profiles::model::{NetworkSection, ResourcesSection};
 
     #[test]
     fn the_preview_carries_the_grants_a_launch_would() {

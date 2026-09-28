@@ -1,5 +1,5 @@
 use super::*;
-use crate::profiles::model::{GroupFile, ProfileFile};
+use crate::policy_profiles::model::{GroupFile, ProfileFile};
 
 fn layer(label: &str, origin: LayerOrigin, toml_body: &str) -> Layer {
     let group: GroupFile = toml::from_str(toml_body).expect("test body parses");
@@ -455,15 +455,15 @@ fn the_committed_schema_matches_the_policy_types() {
     let committed = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join(crate::profiles::model::SCHEMA_PATH),
+            .join(crate::policy_profiles::model::SCHEMA_PATH),
     )
     .expect("the committed schema exists");
     assert_eq!(
         committed.trim_end(),
-        crate::profiles::model::json_schema_pretty(),
+        crate::policy_profiles::model::json_schema_pretty(),
         "{} is stale; regenerate it with \
          `cargo run -p mvm-client --features schema --bin emit_policy_schema`",
-        crate::profiles::model::SCHEMA_PATH
+        crate::policy_profiles::model::SCHEMA_PATH
     );
 }
 
@@ -482,5 +482,5 @@ fn the_published_schema_page_carries_the_generated_schema() {
         .nth(1)
         .and_then(|rest| rest.split("\n```").next())
         .expect("the page has a json block");
-    assert_eq!(block, crate::profiles::model::json_schema_pretty());
+    assert_eq!(block, crate::policy_profiles::model::json_schema_pretty());
 }

@@ -52,7 +52,7 @@ mod tests {
     use mvm_core::network_policy::NetworkPreset;
 
     use super::*;
-    use crate::profiles::model::{GroupFile, ProfileFile};
+    use crate::policy_profiles::model::{GroupFile, ProfileFile};
 
     fn hosts(group_names: &[&str]) -> BTreeSet<String> {
         group_names

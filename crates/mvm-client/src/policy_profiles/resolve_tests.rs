@@ -1,5 +1,5 @@
 use super::*;
-use crate::profiles::model::NetworkSection;
+use crate::policy_profiles::model::NetworkSection;
 
 /// A temporary user policy directory.
 struct Dir {
