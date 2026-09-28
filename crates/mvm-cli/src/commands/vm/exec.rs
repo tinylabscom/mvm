@@ -617,11 +617,10 @@ pub(in crate::commands) fn run_secure_with_source(
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
-    let selected_backend = crate::exec::select_exec_backend(
-        args.image.is_some(),
-        &network_policy,
-        args.hypervisor.as_deref(),
-    )?;
+    let uses_oci_image =
+        super::shared::launch_uses_oci_image(args.image.as_deref(), args.manifest.as_deref())?;
+    let selected_backend =
+        crate::exec::select_exec_backend(uses_oci_image, &network_policy, args.hypervisor.as_deref())?;
     // The typed kind, taken off the backend object itself: admission measures a
     // declared grant against the mechanisms this tier really has, and a name
     // parsed back into a tier would be measuring against whatever was typed.
@@ -1052,6 +1051,8 @@ fn build_exec_request(
         prod,
         runtime_pack,
     } = selection;
+    let manifest_arg = args.manifest.as_deref();
+    let image_ref = image_ref.as_deref();
     // Shapes where the thing being booted already carries a command, so an
     // empty argv is the image supplying one rather than the caller omitting it:
     // the wasm backend runs the module itself, a manifest slot names an image
@@ -1087,14 +1088,6 @@ fn build_exec_request(
         env_pairs.push(parse_env_pair(kv)?);
     }
     check_run_env(&args.allow_env, &env_pairs, env_args::launch_env(&target))?;
-    let selected_backend = crate::exec::select_exec_backend(
-        image_ref.is_some(),
-        &network_policy,
-        args.hypervisor.as_deref(),
-    )?;
-    let mut effective_env =
-        oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
-    effective_env.extend(env_pairs);
     // --manifest <PATH> accepts a manifest path / dir in addition to
     // legacy names. Resolve up front so the downstream
     // ImageSource::Template carries either a name (legacy) or a slot
@@ -1110,7 +1103,7 @@ fn build_exec_request(
     } else if let Some(source) = source_override {
         source
     } else {
-        match (args.manifest, image_ref) {
+        match (manifest_arg, image_ref) {
             (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
             (Some(arg), None) => match super::shared::resolve_manifest_arg(&arg)? {
                 super::shared::ManifestArgRef::Slot { slot_hash } => {
@@ -1130,11 +1123,27 @@ fn build_exec_request(
                     ),
                 },
             },
-            (None, image_ref) => {
-                resolve_launch_image_source(image_ref.as_deref(), prod, Some(oci_provenance))?
-            }
+            (None, image_ref) => resolve_launch_image_source(image_ref, prod, Some(oci_provenance))?,
         }
     };
+    let uses_oci_image = match &image {
+        crate::exec::ImageSource::Prebuilt {
+            unpacked_oci_root, ..
+        } => unpacked_oci_root.is_some(),
+        crate::exec::ImageSource::Template(slot_hash) => super::shared::launch_uses_oci_image(
+            image_ref,
+            manifest_arg.or(Some(slot_hash.as_str())),
+        )?,
+        crate::exec::ImageSource::PinnedTemplate { slot_hash, .. } => {
+            super::shared::launch_uses_oci_image(None, Some(slot_hash.as_str()))?
+        }
+        crate::exec::ImageSource::WasmModule { .. } => false,
+    };
+    let selected_backend =
+        crate::exec::select_exec_backend(uses_oci_image, &network_policy, args.hypervisor.as_deref())?;
+    let mut effective_env =
+        oci_vsock_proxy_env_for_backend(&selected_backend, uses_oci_image, &network_policy);
+    effective_env.extend(env_pairs);
     let sdk_host_services = super::host_services::parse_host_service_bindings(&args.host_service)?;
     Ok(crate::exec::ExecRequest {
         name: args.vm_name,
@@ -1273,13 +1282,11 @@ impl ReceiptInput {
 
         mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(backend)?;
         let selected_backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend);
-        crate::exec::validate_image_egress_backend(
-            &selected_backend,
-            args.image.is_some(),
-            &policy,
-        )?;
+        let uses_oci_image =
+            super::shared::launch_uses_oci_image(args.image.as_deref(), args.manifest.as_deref())?;
+        crate::exec::validate_image_egress_backend(&selected_backend, uses_oci_image, &policy)?;
         let mut env_keys =
-            oci_vsock_proxy_env_for_backend(&selected_backend, args.image.is_some(), &policy)
+            oci_vsock_proxy_env_for_backend(&selected_backend, uses_oci_image, &policy)
                 .into_iter()
                 .map(|(key, _)| key)
                 .collect::<Vec<_>>();
@@ -1751,6 +1758,52 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn manifest_image_and_explicit_image_get_identical_oci_proxy_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(&manifest, "image = \"docker.io/library/alpine:latest\"\n")
+            .expect("write manifest");
+
+        let mut manifest_args = run_args(RunProfile::Standard);
+        manifest_args.hypervisor = Some("libkrun".to_string());
+        manifest_args.manifest = Some(manifest.display().to_string());
+        manifest_args.allow_host = vec!["example.com".to_string()];
+
+        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("example.com", 443),
+        ]);
+        let caps = mvm_core::vm_backend::VmCapabilities {
+            vsock: true,
+            no_routable_guest_nic: true,
+            host_vsock_proxy: true,
+            ..mvm_core::vm_backend::VmCapabilities::default()
+        };
+        let image_uses_oci = crate::commands::shared::launch_uses_oci_image(
+            Some("docker.io/library/alpine:latest"),
+            None,
+        )
+        .expect("explicit image source");
+        let manifest_uses_oci =
+            crate::commands::shared::launch_uses_oci_image(None, manifest_args.manifest.as_deref())
+                .expect("manifest image source");
+
+        assert!(image_uses_oci);
+        assert!(manifest_uses_oci);
+        assert_eq!(
+            oci_vsock_proxy_env_for_capabilities(&caps, image_uses_oci, &policy),
+            oci_vsock_proxy_env_for_capabilities(&caps, manifest_uses_oci, &policy)
+        );
+
+        let mut image_args = run_args(RunProfile::Standard);
+        image_args.image = Some("docker.io/library/alpine:latest".to_string());
+        image_args.allow_host = vec!["example.com".to_string()];
+        let image_receipt = ReceiptInput::from_run_args(&image_args, "libkrun").expect("image receipt");
+        let manifest_receipt =
+            ReceiptInput::from_run_args(&manifest_args, "libkrun").expect("manifest receipt");
+        assert_eq!(image_receipt.env_keys, manifest_receipt.env_keys);
     }
 
     fn run_args(profile: RunProfile) -> RunArgs {
