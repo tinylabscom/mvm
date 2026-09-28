@@ -88,7 +88,7 @@ meaning is fixed once released:
   at `/sbin`. It boots with the payload, whose binaries then win and whose
   baked copies are never executed, or without one on a host that has none.
   A published set published before the field existed omits it and means 0.
-  A locally built set must declare it; one that does not is refused.
+  An omitted field currently means ABI 0 for both published and locally built sets.
 - *ABI 1* is an image that carries no binary from `mvmctl`'s payload. It
   boots only with the payload.
 - *What every ABI promises the payload:* `/run` is a mount point; busybox,
