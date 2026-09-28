@@ -50,9 +50,12 @@ permissions:
   contents: read
   id-token: write
 
+# Serialize rather than cancel: pull requests never trigger this workflow, so
+# cancelling could only kill a signing run already in flight, leaving a
+# `cancelled` run with no bundles.
 concurrency:
   group: sign-instructions-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
