@@ -1,5 +1,8 @@
 # Security mutation witnesses
 
+Backing: shipped-source
+Validation: check-mutation-witnesses
+
 **Status: IN PROGRESS**
 
 Issue: #3679. Related freshness alert: #3750.
@@ -17,7 +20,7 @@ the scheduler itself has fired.
 - [ ] Validate the path-kind, cache-capacity, credential-injection and
       egress-diagnostic regression tests in the remaining packages.
 - [ ] Validate the four documented equivalent mutations against the mutation gate.
-- [ ] Validate independent base-image scan and absolute-source-root tests in this
+- [x] Validate independent base-image scan and absolute-source-root tests in this
       worktree; preserve the unrelated uncommitted tests in the main checkout.
 - [x] Pass host workspace Clippy with warnings denied.
 - [ ] Pass full workspace tests and Linux builder all-targets Clippy.
@@ -29,3 +32,14 @@ No mutation baseline was broadly re-recorded: only four algebraically or
 control-flow equivalent mutations have explicit per-mutation explanations.
 The focused contract/filesystem run passed 1,524 tests; remaining package,
 workspace and mutation validation is pending. No security failure is marked fixed.
+
+Standalone compilation of the two new scoring tests passes. Four representative
+mutations (severity boundary, both changed-scope arithmetic terms, and exact
+rounding) fail those tests. The default mutation-surface gate also passes;
+these checks do not substitute for the pending full mutation workflow.
+
+All four base-image scan witnesses and the environment-isolated absolute source-root
+test passed in the workspace run. Security workflow 36484461950 is running against
+the witness commit. Final host workspace Clippy also passes after the
+environment-isolation follow-up.
+The Linux builder boots but is blocked in Nix-store initialization before Clippy.

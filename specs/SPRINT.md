@@ -4804,3 +4804,7 @@ writes the plan:
 See `specs/plans/2026-09-28-security-mutation-witnesses.md`; freshness alert #3750 depends on this recovery.
 
 - [x] Security witness focused validation: mvm-contract 1,103 tests and mvm-fs 421 tests pass. Host workspace Clippy also passes; remaining package, workspace and mutation checks are pending.
+
+Security validation update (#3679): all four base-image scan witnesses and the
+absolute source-root test pass. Workflow 36484461950 is underway; complete workspace
+and Linux validation remain pending. The builder is blocked in Nix-store initialization.
