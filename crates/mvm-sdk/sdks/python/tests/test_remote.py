@@ -2,13 +2,15 @@
 
 Under ``MVM_NO_VM=1`` a call runs in this process through the workload's
 wire format, so these tests assert what that round trip preserves, refuses
-and reports. Without it the call must refuse with a transport error — and
-must do so without touching the host library or starting anything.
+and reports. Without it the call goes to the host library, driven here by
+the recorded stand-in, so the tests assert the exact request each call
+sends and how each reply is turned into a result or an error.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import sys
 import warnings
@@ -251,44 +253,131 @@ def test_msgpack_path_raises_clearly_when_dependency_missing(monkeypatch) -> Non
         _build(_add, format="msgpack").sync(1, 2)
 
 
-# ── without MVM_NO_VM: refused, and nothing is reached for ───────────
+# ── without MVM_NO_VM: dispatched through the host library ───────────
 
 
 @pytest.fixture
-def no_library(monkeypatch):
-    """Fail the test if dispatch reaches for the host library at all."""
-    from mvm import _hostlib
-
-    def refuse(method, _request):
-        raise AssertionError(f"dispatch reached the host library: {method}")
-
-    monkeypatch.setattr(_hostlib, "_invoke", refuse)
+def on_host(hostlib, monkeypatch):
+    """A host process with no MVM_NO_VM: calls go to the (recorded) library."""
     monkeypatch.delenv("MVM_NO_VM", raising=False)
+    return hostlib
 
 
-def test_without_no_vm_a_call_is_refused_with_the_way_out(no_library) -> None:
-    calls = []
-    remote = _build(lambda a, b: calls.append((a, b)))
-    with pytest.raises(mvm.MvmTransportError, match="MVM_NO_VM=1") as raised:
-        remote.sync(2, 3)
-    assert "not available through the in-process host library" in str(raised.value)
-    with pytest.raises(mvm.MvmTransportError, match="MVM_NO_VM=1"):
-        asyncio.run(remote(2, 3))
-    assert calls == []
+def _b64(data: bytes) -> str:
+    return base64.b64encode(data).decode()
 
 
-def test_without_no_vm_the_pre_dispatch_checks_still_run_first(no_library, monkeypatch) -> None:
+def _reply(exit_code: int = 0, stdout: bytes = b"", stderr: bytes = b"", **extra) -> dict:
+    return {
+        "exit_code": exit_code,
+        "stdout_b64": _b64(stdout),
+        "stderr_b64": _b64(stderr),
+        "output_truncated": False,
+        **extra,
+    }
+
+
+def test_a_call_is_dispatched_into_the_workload_and_decoded(on_host) -> None:
+    ran = []
+    remote = _build(lambda a, b: ran.append((a, b)))
+    on_host.reply("entrypoint.call", _reply(stdout=b"5"))
+    assert remote.sync(2, 3) == 5
+    assert on_host.request("entrypoint.call") == {
+        "workload": "adder",
+        "payload_b64": _b64(b"[[2,3],{}]"),
+    }
+    assert ran == [], "the local body never runs for a host call"
+
+
+def test_an_awaited_call_is_dispatched_the_same_way(on_host) -> None:
+    on_host.reply("entrypoint.call", _reply(stdout=b'{"sum":7}'))
+    assert asyncio.run(_build(_add)(3, b=4)) == {"sum": 7}
+    assert on_host.request("entrypoint.call")["payload_b64"] == _b64(b'[[3],{"b":4}]')
+
+
+def test_a_raised_exception_comes_back_as_remote_error(on_host) -> None:
+    on_host.reply(
+        "entrypoint.call",
+        _reply(
+            exit_code=1,
+            stderr=b"MVM_ENVELOPE: {...}\n",
+            error={"kind": "ValueError", "error_id": "0123456789abcdef", "message": "bad"},
+        ),
+    )
+    with pytest.raises(mvm.RemoteError) as raised:
+        _build(_add).sync(1, 2)
+    assert (raised.value.kind, raised.value.error_id, raised.value.message) == (
+        "ValueError",
+        "0123456789abcdef",
+        "bad",
+    )
+
+
+def test_a_failure_without_an_envelope_is_a_transport_error_with_the_stderr_tail(on_host) -> None:
+    on_host.reply("entrypoint.call", _reply(exit_code=3, stderr=b"x" * 5000 + b"segfault"))
+    with pytest.raises(mvm.MvmTransportError, match="status 3") as raised:
+        _build(_add).sync(1, 2)
+    assert "segfault" in str(raised.value)
+    assert "x" * 2100 not in str(raised.value), "only the tail is quoted"
+
+
+def test_an_agent_ended_call_says_why(on_host) -> None:
+    on_host.reply(
+        "entrypoint.call",
+        _reply(exit_code=124, agent_error={"kind": "Timeout", "message": "exceeded 30s"}),
+    )
+    with pytest.raises(mvm.MvmTransportError, match="Timeout: exceeded 30s"):
+        _build(_add).sync(1, 2)
+
+
+def test_a_result_is_decoded_with_the_same_hardening(on_host) -> None:
+    remote = _build(_add)
+    on_host.reply("entrypoint.call", _reply(stdout=b"NaN"))
+    with pytest.raises(mvm.MvmTransportError, match="non-finite"):
+        remote.sync(1, 2)
+    on_host.reply("entrypoint.call", _reply(stdout=b'{"a":1,"a":2}'))
+    with pytest.raises(mvm.MvmTransportError, match="duplicate key"):
+        remote.sync(1, 2)
+
+
+def test_the_output_cap_applies_to_a_host_result(on_host, monkeypatch) -> None:
+    remote = _build(_add)
+    monkeypatch.setenv("MVM_MAX_OUTPUT_BYTES", "4")
+    on_host.reply("entrypoint.call", _reply(stdout=b"123456"))
+    with pytest.raises(mvm.MvmTransportError, match="output cap"):
+        remote.sync(1, 2)
+    monkeypatch.delenv("MVM_MAX_OUTPUT_BYTES")
+    on_host.reply("entrypoint.call", _reply(stdout=b"1", output_truncated=True))
+    with pytest.raises(mvm.MvmTransportError, match="output cap"):
+        remote.sync(1, 2)
+
+
+def test_a_reply_without_an_exit_status_is_refused(on_host) -> None:
+    on_host.reply("entrypoint.call", {"stdout_b64": ""})
+    with pytest.raises(mvm.MvmTransportError, match="no exit status"):
+        _build(_add).sync(1, 2)
+
+
+def test_a_library_refusal_reaches_the_caller_typed(on_host) -> None:
+    on_host.fail("entrypoint.call", "INVALID_SPEC", "no built image named \"adder\"")
+    with pytest.raises(mvm.HostLibraryError, match="no built image"):
+        _build(_add).sync(1, 2)
+
+
+def test_without_no_vm_the_pre_dispatch_checks_still_run_first(on_host, monkeypatch) -> None:
     monkeypatch.setenv("MVM_MAX_PAYLOAD_BYTES", "32")
     with pytest.raises(mvm.PayloadTooLarge):
         _build(_add).sync("x" * 1024)
+    assert on_host.calls == [], "an oversized call never reaches the library"
 
 
-def test_a_workload_ref_call_is_always_refused(no_library, monkeypatch) -> None:
+def test_a_workload_ref_call_is_dispatched_to_its_workload(on_host, monkeypatch) -> None:
     math = mvm.workload_ref("math-svc")
-    with pytest.raises(mvm.MvmTransportError, match=r"WorkloadRef\('math-svc'\)\.add"):
-        math.add.sync(1, 2)
-    with pytest.raises(mvm.MvmTransportError):
-        asyncio.run(math.add(1, 2))
+    on_host.reply("entrypoint.call", _reply(stdout=b"3"))
+    assert math.add.sync(1, 2) == 3
+    on_host.reply("entrypoint.call", _reply(stdout=b"4"))
+    assert asyncio.run(math.add(2, 2)) == 4
+    assert [r["workload"] for r in on_host.requests("entrypoint.call")] == ["math-svc"] * 2
 
     # Under MVM_NO_VM=1 there is still no local body to run: the callee's
     # function lives in the callee's microVM.

@@ -32,8 +32,10 @@
 //! ```
 //!
 //! Methods are dotted names: the client methods in [`dispatch::METHODS`], the
-//! launch methods in [`launch::METHODS`], the guest methods in
-//! [`guest::METHODS`], and the process-stream methods in [`stream::METHODS`].
+//! launch methods in [`launch::METHODS`], the entrypoint and session methods
+//! in [`entrypoint::METHODS`], the guest methods in
+//! [`guest::METHODS`], and the stream methods in [`stream::METHODS`] and
+//! [`stream::LOG_METHODS`].
 //! Each call builds a single-threaded runtime and drops it before returning.
 //! The one thing that outlives a call is a process stream's reader, which
 //! lives until the process ends or its wait times out; see [`stream`].
@@ -55,6 +57,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub mod dispatch;
 mod embedder;
+pub mod entrypoint;
 pub mod guest;
 pub mod launch;
 #[cfg(feature = "schema")]
@@ -70,8 +73,10 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// The ABI minor version. A minor bump only adds methods, so a binding built
 /// for an older minor keeps working. 1 added `machine.stop`, `machine.rm`,
 /// `machine.exec`, and `guest.cp`. 2 added `machine.run`, `machine.create`,
-/// `machine.start`, `machine.inventory`, and `guest.proc.stream.*`.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 2;
+/// `machine.start`, `machine.inventory`, and `guest.proc.stream.*`. 3 added
+/// `machine.logs.stream.*`, the `template` and `manifest` launch sources, and
+/// a launch `command` with its `env` and `cwd`, whose process the reply names.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 3;
 
 /// Set once a binding has confirmed it was built for this ABI.
 static NEGOTIATED: AtomicBool = AtomicBool::new(false);
@@ -206,6 +211,10 @@ trait Services {
     fn launcher(&self) -> Result<mvm_client::LocalBackend, Outcome>;
     /// The operations that answer `guest.*`.
     fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome>;
+    /// Where `machine.logs.stream.*` reads captured output from.
+    fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome>;
+    /// The operations that answer `entrypoint.call` and `session.*`.
+    fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome>;
 }
 
 /// This host's machines, in a process that has been told it is a library
@@ -238,6 +247,16 @@ impl Services for Local {
         declared()?;
         Ok(std::sync::Arc::new(guest::LocalGuest))
     }
+
+    fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+        declared()?;
+        Ok(std::sync::Arc::new(stream::LocalLogs))
+    }
+
+    fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
+        declared()?;
+        Ok(std::sync::Arc::new(entrypoint::LocalEntrypoint))
+    }
 }
 
 /// Everything [`mvm_hostlib_call`] does once its pointers are slices.
@@ -262,6 +281,18 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
     if stream::is_known(method) {
         return match services.guest() {
             Ok(ops) => stream::dispatch(stream::streams(), ops, method, request),
+            Err(outcome) => outcome,
+        };
+    }
+    if stream::is_log_method(method) {
+        return match services.logs() {
+            Ok(source) => stream::dispatch_logs(stream::streams(), source, method, request),
+            Err(outcome) => outcome,
+        };
+    }
+    if entrypoint::is_known(method) {
+        return match services.entrypoint() {
+            Ok(ops) => entrypoint::dispatch(ops.as_ref(), method, request),
             Err(outcome) => outcome,
         };
     }
@@ -354,6 +385,22 @@ mod tests {
                 false,
             ))
         }
+        fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no logs here",
+                false,
+            ))
+        }
+        fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no entrypoint operations here",
+                false,
+            ))
+        }
     }
 
     /// Panics if asked for anything: a refused call must build nothing.
@@ -368,6 +415,12 @@ mod tests {
         }
         fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome> {
             panic!("a refused call must not build guest operations")
+        }
+        fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+            panic!("a refused call must not open a log source")
+        }
+        fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
+            panic!("a refused call must not build entrypoint operations")
         }
     }
 
@@ -392,6 +445,22 @@ mod tests {
             ))
         }
         fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no",
+                false,
+            ))
+        }
+        fn logs(&self) -> Result<std::sync::Arc<dyn stream::LogSource>, Outcome> {
+            Err(Outcome::failure(
+                MVM_HOSTLIB_EMBEDDER,
+                mvm_core::error_codes::EMBEDDER,
+                "no",
+                false,
+            ))
+        }
+        fn entrypoint(&self) -> Result<std::sync::Arc<dyn entrypoint::EntrypointOps>, Outcome> {
             Err(Outcome::failure(
                 MVM_HOSTLIB_EMBEDDER,
                 mvm_core::error_codes::EMBEDDER,
@@ -460,11 +529,26 @@ mod tests {
             b"guest.proc.stream.open",
             b"guest.proc.stream.next",
             b"guest.proc.stream.close",
+            b"machine.logs.stream.open",
+            b"machine.logs.stream.next",
+            b"machine.logs.stream.close",
         ] {
             let outcome = handle(false, method, b"{}", &Untouched);
             assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
             let outcome = handle(true, method, b"{}", &Undeclared);
             assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER);
+        }
+    }
+
+    /// Entrypoint and session methods need the process declared like every
+    /// other, and are refused before negotiation without building anything.
+    #[test]
+    fn entrypoint_and_session_methods_are_routed_and_gated() {
+        for method in entrypoint::METHODS {
+            let outcome = handle(false, method.as_bytes(), b"{}", &Untouched);
+            assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED, "{method}");
+            let outcome = handle(true, method.as_bytes(), b"{}", &Undeclared);
+            assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER, "{method}");
         }
     }
 

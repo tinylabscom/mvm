@@ -2,8 +2,8 @@
  * Remote invocation — the TypeScript half of function dispatch.
  *
  * A function marked with {@link func} runs inside a workload's microVM. The
- * SDK reaches the host only through the in-process host library, and that
- * library has no function-dispatch method yet, so the two modes are:
+ * SDK reaches the host only through the in-process host library, never by
+ * starting a process, and the two modes are:
  *
  * * **`MVM_NO_VM=1` — local dispatch.** The call runs the wrapped function in
  *   this process, but through the same wire discipline a microVM call would
@@ -12,11 +12,21 @@
  *   result is encoded and decoded again. A function that only works because
  *   it received a live object, or returned something the wire cannot carry,
  *   fails here rather than on its first real deployment.
- * * **Otherwise — refused** with {@link MvmTransportError}, naming the
- *   escape hatch. Nothing falls back to anything else.
+ * * **Otherwise — in the workload's microVM**, through the host library's
+ *   `entrypoint.call` (or `session.call` inside an open {@link session} for
+ *   the same workload). The library boots the built image under a signed,
+ *   audited plan, exactly as `mvmctl machine run --entrypoint` does. The
+ *   encoded `[args, kwargs]` is the call's stdin and the function's encoded
+ *   return value its stdout; an exception the function raised comes back as
+ *   {@link RemoteError}, and a failure without that envelope as
+ *   {@link MvmTransportError} carrying the exit status and stderr tail.
  *
- * {@link workload_ref} handles name a function in another workload, so they
- * have no local function to run and are refused in both modes.
+ * {@link workload_ref} handles name a function in another workload: they
+ * dispatch through the host library too, and under `MVM_NO_VM=1` they are
+ * refused, having no local function to run.
+ *
+ * The host runs a workload's *primary* entrypoint: the guest wire has no
+ * function selector yet.
  *
  * The error types come from the Rust registry via `_errors/types.js`.
  */
@@ -27,19 +37,21 @@ import {
   MvmTransportError,
   NoVmIntrospectionError,
   PayloadTooLarge,
+  RemoteError,
 } from "./_errors/types.js";
+import { call as hostCall } from "./_hostlib.js";
+import { hostSessionFor } from "./_session.js";
+import { ENTRYPOINT_CALL, SESSION_CALL } from "./hostabi/methods.js";
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 16 * 1024 * 1024;
+const DEFAULT_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+
+/** How much of a failed call's stderr a transport error quotes. */
+export const STDERR_TAIL_BYTES = 2048;
 
 /** Deepest nesting a decoded value may have; matches the Python SDK and the
  *  guest-side function wrappers, so a local run refuses what a real one would. */
 export const MAX_RESULT_NESTING_DEPTH = 64;
-
-/** Why a host-side call cannot reach a function inside a microVM today. */
-export const REMOTE_DISPATCH_UNAVAILABLE =
-  "dispatching a function-entrypoint call into a microVM from a host process is not " +
-  "available through the in-process host library yet; set MVM_NO_VM=1 to run the " +
-  "function locally";
 
 /** Read a positive number from the environment, falling back on anything unparseable. */
 function envNumber(name: string, fallback: number): number {
@@ -178,6 +190,75 @@ function dispatchLocal(
   return roundTrip(result);
 }
 
+/**
+ * The host-library method and request for one call: into the open session
+ * for this workload when there is one, otherwise a transient VM. Python and
+ * TypeScript send the same shapes.
+ */
+export function hostRequest(workloadId: string, payload: Buffer): [string, Record<string, unknown>] {
+  const payloadB64 = payload.toString("base64");
+  const sessionId = hostSessionFor(workloadId);
+  if (sessionId !== null) {
+    return [SESSION_CALL, { session_id: sessionId, payload_b64: payloadB64 }];
+  }
+  return [ENTRYPOINT_CALL, { workload: workloadId, payload_b64: payloadB64 }];
+}
+
+function b64Field(reply: Record<string, unknown>, field: string): Buffer {
+  const raw = reply[field] ?? "";
+  if (typeof raw !== "string" || !/^[A-Za-z0-9+/]*={0,2}$/.test(raw)) {
+    throw new MvmTransportError(`the host library's ${field} is not base64`);
+  }
+  return Buffer.from(raw, "base64");
+}
+
+/** Turn a call reply into the function's return value, or its failure. */
+export function resultFromReply(workloadId: string, reply: unknown): unknown {
+  if (reply === null || typeof reply !== "object" || !Number.isInteger((reply as { exit_code?: unknown }).exit_code)) {
+    throw new MvmTransportError(`the call into ${workloadId} returned no exit status`);
+  }
+  const fields = reply as Record<string, unknown>;
+  const stdout = b64Field(fields, "stdout_b64");
+  const stderr = b64Field(fields, "stderr_b64");
+  const exitCode = fields.exit_code as number;
+  if (exitCode === 0) {
+    const cap = envNumber("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES);
+    if (fields.output_truncated === true || stdout.byteLength > cap) {
+      throw new MvmTransportError(`the result of ${workloadId} exceeded the ${cap}-byte output cap`);
+    }
+    return decodeJson(stdout);
+  }
+  const error = fields.error;
+  if (error !== null && typeof error === "object") {
+    const e = error as Record<string, unknown>;
+    throw new RemoteError({
+      kind: String(e.kind ?? ""),
+      error_id: String(e.error_id ?? ""),
+      message: String(e.message ?? ""),
+    });
+  }
+  const tail = stderr.subarray(Math.max(0, stderr.byteLength - STDERR_TAIL_BYTES)).toString("utf-8");
+  const agent = fields.agent_error;
+  if (agent !== null && typeof agent === "object") {
+    const a = agent as Record<string, unknown>;
+    throw new MvmTransportError(
+      `the call into ${workloadId} was ended by the guest agent (${String(a.kind)}: ` +
+        `${String(a.message)}), exit status ${exitCode}; stderr tail: ${JSON.stringify(tail)}`,
+    );
+  }
+  throw new MvmTransportError(
+    `the call into ${workloadId} exited with status ${exitCode} and no error envelope; ` +
+      `stderr tail: ${JSON.stringify(tail)}`,
+  );
+}
+
+/** Run one call in the workload's microVM through the host library. */
+function dispatchHost(workloadId: string, format: string, args: unknown[]): unknown {
+  checkFormat(format);
+  const [method, request] = hostRequest(workloadId, encodePayload(workloadId, args, {}));
+  return resultFromReply(workloadId, hostCall(method, request));
+}
+
 /** A function that runs inside a workload. */
 export class RemoteFunction {
   readonly workload_id: string;
@@ -200,13 +281,13 @@ export class RemoteFunction {
    *
    * Under `MVM_NO_VM=1` this runs {@link local} in-process through the wire
    * encoding; a promise-returning function yields a promise. Otherwise it
-   * throws {@link MvmTransportError}: the host library cannot dispatch into
-   * a microVM yet.
+   * dispatches into the workload's microVM through the host library and
+   * returns the decoded result.
    */
   sync(...args: unknown[]): unknown {
     checkEmittingContext("RemoteFunction.sync(...)");
     checkId("workload_id", this.workload_id);
-    if (!noVm()) throw new MvmTransportError(REMOTE_DISPATCH_UNAVAILABLE);
+    if (!noVm()) return dispatchHost(this.workload_id, this.format, args);
     return dispatchLocal(this.workload_id, this.format, this.local, args);
   }
 }
@@ -241,10 +322,10 @@ export interface WorkloadRef {
 /**
  * Build a {@link WorkloadRef} for `workloadId`.
  *
- * Every call through it is refused: it names a function in another
- * workload, which only a microVM dispatch could reach. Under `MVM_NO_VM=1`
- * the refusal is {@link NoVmIntrospectionError}, because there is no local
- * function to run in its place.
+ * A call through it dispatches into that workload's microVM through the
+ * host library. Under `MVM_NO_VM=1` it is refused with
+ * {@link NoVmIntrospectionError}: there is no local function to run in its
+ * place.
  */
 export function workload_ref(workloadId: string, format: string = "json"): WorkloadRef {
   checkId("workload_id", workloadId);
@@ -254,7 +335,7 @@ export function workload_ref(workloadId: string, format: string = "json"): Workl
       if (typeof property !== "string" || property in target) {
         return target[property as string];
       }
-      return () => {
+      return (...args: unknown[]) => {
         checkEmittingContext(`workload_ref(${workloadId}).${property}(...)`);
         if (noVm()) {
           throw new NoVmIntrospectionError(
@@ -263,7 +344,7 @@ export function workload_ref(workloadId: string, format: string = "json"): Workl
               "local function to run in its place",
           );
         }
-        throw new MvmTransportError(REMOTE_DISPATCH_UNAVAILABLE);
+        return dispatchHost(workloadId, format, args);
       };
     },
   }) as WorkloadRef;

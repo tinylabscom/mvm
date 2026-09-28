@@ -6,15 +6,16 @@ Last updated: 2026-09-26
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
-      microVM / vsock / signed-plan security core and close every
-      product-surface gap on top of it. One issue per workstream:
-  - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
+      product-surface gap on top of it. Resume from the plan's "Execution
+      log and handoff" section (landed PRs, open PRs, decisions, known
+      defects). One issue per workstream:
+  - [x] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
     - [x] hostlib ABI 1.2: `machine.run`/`create`/`start`/`inventory`, streamed process output
     - [x] Python and TypeScript facades on hostlib; every subprocess transport deleted (Rust `mvm-sdk` clients too)
     - [x] `xtask check-no-cli-shellout`, in `check-all`
     - [x] `mvm-client` re-exports the embedder surface; Rust quickstart on `mvm-client` alone
     - [x] library lookup documented (`MVM_HOSTLIB_PATH` → packaged → beside `mvmctl`)
-    - [ ] command override / guest env / template sources in the in-process launcher; in-VM function dispatch; log follow; live-boot SDK scenario
+    - [x] command override / guest env / template sources in the in-process launcher (persistent launch on the CLI's start); in-VM function dispatch (`entrypoint.call`, `session.*` over `mvm_client::entrypoint`); log follow (`machine.logs.stream.*`, ABI 1.3); live-boot SDK scenario on HVF
   - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
     - [x] private-range default deny at the `EgressGate`, metadata never re-admitted, DNS pinned for the forward leg
     - [x] route + endpoint-rule model (fuzzed), L7 enforcement with explicit interception grant, `ask` seam, `--allow-endpoint`, `[[network.routes]]`

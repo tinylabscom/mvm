@@ -1,17 +1,17 @@
 /**
- * Function dispatch: local under MVM_NO_VM=1, refused otherwise.
+ * Function dispatch: local under MVM_NO_VM=1, through the host library
+ * otherwise.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import * as mvm from "../src/index.js";
-import { MAX_RESULT_NESTING_DEPTH, REMOTE_DISPATCH_UNAVAILABLE } from "../src/_remote.js";
-import { HostRecorder, uninstallRecorder } from "./_recorder.js";
+import { MAX_RESULT_NESTING_DEPTH } from "../src/_remote.js";
+import { HostRecorder, failure, uninstallRecorder } from "./_recorder.js";
 
 let host: HostRecorder;
 
 beforeEach(() => {
-  // Dispatch never reaches the host library in either mode.
   host = new HostRecorder().install();
 });
 
@@ -20,45 +20,133 @@ afterEach(() => {
   delete process.env.MVM_NO_VM;
   delete process.env.MVM_EMITTING;
   delete process.env.MVM_MAX_PAYLOAD_BYTES;
-  expect(host.calls).toEqual([]);
+  delete process.env.MVM_MAX_OUTPUT_BYTES;
 });
 
 const add = mvm.func("adder", (a: unknown, b: unknown) => (a as number) + (b as number));
 
+const b64 = (text: string): string => Buffer.from(text, "utf8").toString("base64");
+
+function reply(exitCode: number, stdout = "", stderr = "", extra: Record<string, unknown> = {}) {
+  return {
+    exit_code: exitCode,
+    stdout_b64: b64(stdout),
+    stderr_b64: b64(stderr),
+    output_truncated: false,
+    ...extra,
+  };
+}
+
 describe("without MVM_NO_VM", () => {
-  it("refuses a function call, naming the escape hatch", () => {
+  it("dispatches into the workload and decodes the result", () => {
     let ran = false;
-    const fn = mvm.func("wl", () => {
+    const fn = mvm.func("adder", () => {
       ran = true;
     });
-    expect(() => fn.sync()).toThrow(mvm.MvmTransportError);
-    expect(() => fn.sync()).toThrow(REMOTE_DISPATCH_UNAVAILABLE);
-    expect(REMOTE_DISPATCH_UNAVAILABLE).toContain("MVM_NO_VM=1");
+    host.on("entrypoint.call", reply(0, "5"));
+    expect(fn.sync(2, 3)).toBe(5);
+    expect(host.requests("entrypoint.call")).toEqual([
+      { workload: "adder", payload_b64: b64("[[2,3],{}]") },
+    ]);
     expect(ran).toBe(false);
   });
 
-  it("refuses a workload_ref call", () => {
+  it("turns a raised exception into RemoteError", () => {
+    host.on(
+      "entrypoint.call",
+      reply(1, "", "MVM_ENVELOPE: {...}\n", {
+        error: { kind: "ValueError", error_id: "0123456789abcdef", message: "bad" },
+      }),
+    );
+    let caught: unknown;
+    try {
+      add.sync(1, 2);
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(mvm.RemoteError);
+    const remote = caught as mvm.RemoteError;
+    expect([remote.kind, remote.error_id]).toEqual(["ValueError", "0123456789abcdef"]);
+    expect(remote.message).toContain("bad");
+  });
+
+  it("reports a failure without an envelope with its status and stderr tail", () => {
+    host.on("entrypoint.call", reply(3, "", "x".repeat(5000) + "segfault"));
+    let message = "";
+    try {
+      add.sync(1, 2);
+    } catch (err) {
+      expect(err).toBeInstanceOf(mvm.MvmTransportError);
+      message = (err as Error).message;
+    }
+    expect(message).toContain("status 3");
+    expect(message).toContain("segfault");
+    expect(message).not.toContain("x".repeat(2100));
+  });
+
+  it("says why when the agent ended the call", () => {
+    host.on("entrypoint.call", reply(124, "", "", { agent_error: { kind: "Timeout", message: "exceeded 30s" } }));
+    expect(() => add.sync(1, 2)).toThrow(/Timeout: exceeded 30s/);
+  });
+
+  it("holds a host result to the output cap", () => {
+    process.env.MVM_MAX_OUTPUT_BYTES = "4";
+    host.on("entrypoint.call", reply(0, "123456"));
+    expect(() => add.sync(1, 2)).toThrow(/output cap/);
+    delete process.env.MVM_MAX_OUTPUT_BYTES;
+    host.on("entrypoint.call", reply(0, "1", "", { output_truncated: true }));
+    expect(() => add.sync(1, 2)).toThrow(/output cap/);
+  });
+
+  it("refuses a reply without an exit status", () => {
+    host.on("entrypoint.call", { stdout_b64: "" });
+    expect(() => add.sync(1, 2)).toThrow(/no exit status/);
+  });
+
+  it("passes a library refusal through typed", () => {
+    host.on("entrypoint.call", failure("INVALID_SPEC", 'no built image named "adder"', { status: 2 }));
+    expect(() => add.sync(1, 2)).toThrow(/no built image/);
+  });
+
+  it("dispatches a workload_ref call to its workload", () => {
     const ref = mvm.workload_ref("other");
     expect(ref.id).toBe("other");
     expect(ref.format).toBe("json");
-    expect(() => (ref.fn as () => unknown)()).toThrow(REMOTE_DISPATCH_UNAVAILABLE);
+    host.on("entrypoint.call", reply(0, "3"));
+    expect((ref.add as (...a: unknown[]) => unknown)(1, 2)).toBe(3);
+    expect(host.requests("entrypoint.call")).toEqual([
+      { workload: "other", payload_b64: b64("[[1,2],{}]") },
+    ]);
   });
 
   it("keeps the emit-context guard ahead of everything", () => {
     process.env.MVM_EMITTING = "1";
     expect(() => add.sync(1, 2)).toThrow(mvm.EmittingContextError);
     expect(() => (mvm.workload_ref("other").fn as () => unknown)()).toThrow(mvm.EmittingContextError);
+    expect(host.calls).toEqual([]);
+  });
+
+  it("runs the payload cap before reaching the library", () => {
+    process.env.MVM_MAX_PAYLOAD_BYTES = "16";
+    expect(() => add.sync("x".repeat(64), 1)).toThrow(mvm.PayloadTooLarge);
+    expect(host.calls).toEqual([]);
   });
 
   it("rejects a malformed workload id", () => {
     expect(() => mvm.workload_ref("-x")).toThrow(mvm.MvmTransportError);
     expect(() => mvm.func("", () => 1).sync()).toThrow(/must be a non-empty string/);
+    expect(host.calls).toEqual([]);
   });
 });
 
 describe("under MVM_NO_VM=1", () => {
   beforeEach(() => {
     process.env.MVM_NO_VM = "1";
+  });
+
+  afterEach(() => {
+    // A local call never reaches the host library.
+    expect(host.calls).toEqual([]);
   });
 
   it("runs the function in-process with round-tripped arguments", () => {

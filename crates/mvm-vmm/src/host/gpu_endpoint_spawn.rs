@@ -33,11 +33,11 @@ const BIND_WAIT: Duration = Duration::from_secs(30);
 const BIND_POLL: Duration = Duration::from_millis(20);
 
 fn resolve_gpu_endpoint_path() -> Result<PathBuf> {
-    crate::host::aux_bin::resolve_verified(&crate::host::aux_bin::AuxBin {
-        bin: "mvm-gpu-endpoint",
-        env_var: "MVM_GPU_ENDPOINT_PATH",
-        rebuild_package: "mvm-gpu",
-    })
+    crate::host::aux_bin::resolve_verified(&crate::host::aux_bin::AuxBin::new(
+        "mvm-gpu-endpoint",
+        "MVM_GPU_ENDPOINT_PATH",
+        "mvm-gpu",
+    ))
 }
 
 /// Where the endpoint proves readiness: the UDS path it must bind. A vsock

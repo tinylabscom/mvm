@@ -446,8 +446,10 @@ bdd-live-warm-claim:
     fi
 
 # Build the per-VM host helper bins into `target/<profile>/`, where
-# `aux_bin::resolve` looks for them. Reach for this after `cargo run -p mvm-cli`,
-# which builds no sibling `[[bin]]`s; `just build` runs it for you.
+# `aux_bin::resolve` looks for them. Optional: a contributor mvmctl run from
+# `target/<profile>/` builds a missing or out-of-date helper itself before
+# spawning it. This prebuilds them all at once, and is the way to get them for
+# an mvmctl that runs from anywhere else.
 #
 # Bare, this writes the debug helpers. Pass `--release` if the mvmctl you invoke
 # is the release one: `aux_bin::resolve` searches `target/release` before
