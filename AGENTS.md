@@ -272,6 +272,31 @@ Pair this with Retry Discipline: a scoped test that fails gets one change
 and one scoped re-run — never an unscoped sweep used as a substitute for
 reading the error.
 
+## One Shell Setup Per Worktree
+
+Set up the environment **once** per shell — `source scripts/dev-env.sh` at
+the top — and then run plain commands. Do not re-export
+`MVM_HOME`/`CARGO_TARGET_DIR`/`CARGO_HOME` inline on individual commands,
+and do not prefix every command with `cd /abs/path/to/worktree &&`.
+
+Transcript baselines show 100+ character prefixes like
+`cd …/.worktrees/mvm-x && MVM_HOME=… CARGO_TARGET_DIR=… cargo test` repeated
+8–16 times per session. Besides the noise, the copies drift: one invocation
+drops a variable, another points at a different worktree, and the failure
+that follows looks intermittent but is self-inflicted.
+
+- The session cwd IS the worktree root — commands already run there.
+- `source scripts/dev-env.sh` exports the three isolation vars for every
+  child process; anything more targeted is a special case, not the default.
+- For a one-off `mvmctl` call from an unconfigured shell, use `bin/dev …`
+  instead of hand-assembling the exports.
+- Inline `VAR=value command` overrides remain legitimate for the rare case
+  that genuinely needs a different value for one call — but reaching for
+  them as the default pattern is the anti-pattern.
+
+If you find yourself typing the same env prefix twice, stop and source
+`scripts/dev-env.sh` instead.
+
 ## Privacy & Security
 
 Privacy and security are **critical priorities** for this project and must be considered in every decision. All code changes, architecture decisions, and feature additions must be evaluated through a security lens:

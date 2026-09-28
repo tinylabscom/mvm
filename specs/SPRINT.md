@@ -4835,3 +4835,7 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
       real gap was usage. Added MCP-native routing rules to the AGENTS.md
       Graft section (find_code/find_all/trace_calls/file_api/repo_map before
       raw Grep/Glob/ReadFile).
+- [x] `AGENTS.md` "One Shell Setup Per Worktree" agreement: source
+      `scripts/dev-env.sh` once; no inline env re-exports or absolute-`cd`
+      prefixes as the default pattern; `bin/dev` for one-off unconfigured
+      shells.

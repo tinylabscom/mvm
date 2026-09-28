@@ -136,16 +136,18 @@ zero `sleep`-polling patterns in new transcripts, Kimi Shell share <60%.
 
 ## Phase 5 — Persistent shell state
 
-- [ ] **5.1 One shell setup per worktree.** Working agreement: at the start
+- [x] **5.1 One shell setup per worktree.** Working agreement: at the start
   of a session `source scripts/dev-env.sh` once; never re-export
   `MVM_HOME`/`CARGO_TARGET_DIR`/`CARGO_HOME` inline per command. (`bin/dev`
   already exists for one-off `mvmctl` calls.)
-- [ ] **5.2 Trim `cd worktree && …` prefixes.** Agreement that commands run
+- [x] **5.2 Trim `cd worktree && …` prefixes.** Agreement that commands run
   from the worktree root (the session cwd), not via repeated absolute-`cd`
   prefixes; the repeated-prefix pattern in transcripts is a copy-paste drift
   risk.
 - [ ] **5.3 Measure.** No `MVM_HOME=` inline prefixes in new transcripts
-  beyond the first setup.
+  beyond the first setup. Baseline: inline `MVM_HOME=`/`CARGO_TARGET_DIR=`
+  prefixes repeated 8–16× per session in sampled Kimi transcripts;
+  target: ≤1 per session (the deliberate special case).
 
 ## Phase 6 — Cap reasoning bloat (Codex)
 
