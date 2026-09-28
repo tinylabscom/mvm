@@ -24,3 +24,11 @@ The standalone regression failed against the original workflow and passed
 after the path change. The focused Cargo regression and host workspace Clippy passed. Full workspace
 tests and Linux builder validation remain pending. The real signing workflow
 passed; the initial PR invariant failure was a missing plan evidence header.
+
+The local workspace run exposed an existing restore-timeout witness race: a
+500 ms deadline can kill the fake supervisor before it publishes its own PID.
+An isolated rerun reproduced the failure. The test helper now captures the
+owned child PID at spawn, so the test checks that exact child was reaped
+without depending on child scheduling. All 262 backend tests now pass, including
+the timeout witness, and the final host workspace Clippy rerun passes. The
+remaining full workspace tests and Linux builder Clippy are still pending.
