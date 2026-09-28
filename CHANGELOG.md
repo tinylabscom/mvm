@@ -2,6 +2,11 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.18.3] — 2026-09-28
+
+### Fixed
+- **hostlib**: The SDK run reply's build_mode answers the declared profile
+
 ## [0.18.2] — 2026-09-28
 
 ### Added
