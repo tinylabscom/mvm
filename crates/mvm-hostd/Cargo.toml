@@ -58,6 +58,10 @@ path = "src/bin/mvm-signer-helper.rs"
 name = "mvm-network-endpoint"
 path = "src/bin/mvm-network-endpoint.rs"
 
+[[bin]]
+name = "mvm-telemetry-collector"
+path = "src/bin/mvm-telemetry-collector.rs"
+
 [[example]]
 name = "network_perf_probe"
 path = "examples/network_perf_probe.rs"
