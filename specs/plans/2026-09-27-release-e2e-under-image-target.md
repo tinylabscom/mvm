@@ -4,7 +4,11 @@ Backing: preview
 Validation: each box ticks only with the measured evidence its text names;
 unchecked boxes remain in progress.
 
-**Status:** NOT STARTED
+**Status:** IN PROGRESS — 2026-09-29: the contract box is mvm#3829 (in the
+queue); the producer is mvm-images#35 (draft, awaiting the pin advance
+#3829 enables); production-selector hardening is committed on
+`fix/set-selection-build-mode` (rebased and opened once #3829 lands);
+the consumer fetch arm and the merge-queue boxes are next.
 **Date opened:** 2026-09-27
 **Parent:** `specs/plans/2026-09-16-image-repository-extraction.md` (W8 re-measure)
 
