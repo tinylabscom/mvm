@@ -1,6 +1,6 @@
 //! Ambient "an update is available" notice for interactive use.
 //!
-//! `mvmctl update` is the explicit check-and-install flow; this module adds
+//! `mvmctl env update` is the explicit check-and-install flow; this module adds
 //! the passive half: once per day, on an interactive terminal, after the
 //! user's command has fully settled, check the GitHub releases API and print
 //! one stderr line if a newer release exists. The check never changes the
@@ -51,7 +51,7 @@ fn notice_line(latest_tag: &str, current: &str) -> Option<String> {
     use crate::update::UpdateAction;
     match crate::update::decide_update(latest_tag.trim_start_matches('v'), current, false) {
         UpdateAction::Install => Some(format!(
-            "mvmctl {latest} is available (running {current}) — run `mvmctl update` to upgrade",
+            "mvmctl {latest} is available (running {current}) — run `mvmctl env update` to upgrade",
             latest = latest_tag,
         )),
         UpdateAction::UpToDate | UpdateAction::RefuseDowngrade => None,
@@ -130,7 +130,12 @@ mod tests {
 
     #[test]
     fn only_a_newer_release_produces_a_line() {
-        assert!(notice_line("v9.9.9", "0.18.3").is_some());
+        assert_eq!(
+            notice_line("v9.9.9", "0.18.3").as_deref(),
+            Some(
+                "mvmctl v9.9.9 is available (running 0.18.3) — run `mvmctl env update` to upgrade"
+            )
+        );
         assert!(notice_line("v0.18.3", "0.18.3").is_none());
         assert!(notice_line("v0.18.2", "0.18.3").is_none());
     }
