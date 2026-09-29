@@ -8,12 +8,13 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+use std::path::Path;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
-use crate::packs::{KeylessTrust, Sha256Hex, pack_path_is_safe};
+use crate::packs::{KeylessTrust, Sha256Hex, hash_file, pack_path_is_safe};
 use crate::release_version::{ReleaseVersion, VersionSyntax};
 
 /// Current on-disk registry-pack lockfile schema.
@@ -545,8 +546,28 @@ impl<'a> RegistryPackVerification<'a> {
 /// A manifest authenticated against both the lock and namespace authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedRegistryPack {
-    pub manifest: RegistryPackManifest,
-    pub manifest_sha256: Sha256Hex,
+    manifest: RegistryPackManifest,
+    manifest_sha256: Sha256Hex,
+    manifest_bytes: Vec<u8>,
+    signature_bundle: Vec<u8>,
+}
+
+impl VerifiedRegistryPack {
+    pub fn manifest(&self) -> &RegistryPackManifest {
+        &self.manifest
+    }
+
+    pub fn manifest_sha256(&self) -> &Sha256Hex {
+        &self.manifest_sha256
+    }
+
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
+    }
+
+    pub fn signature_bundle(&self) -> &[u8] {
+        &self.signature_bundle
+    }
 }
 
 #[derive(Debug, Error)]
@@ -577,6 +598,28 @@ pub enum RegistryPackVerificationError {
     DuplicateFile { path: String },
     #[error("registry-pack manifest contains unsafe file path {path:?}")]
     UnsafeFilePath { path: String },
+    #[error("registry-pack payload path {path:?} could not be read: {reason}")]
+    PayloadFileRead { path: String, reason: String },
+    #[error("registry-pack payload path {path:?} is not a regular file")]
+    NonRegularPayloadPath { path: String },
+    #[error(
+        "registry-pack payload file {path:?} size mismatch: declared {declared}, actual {actual}"
+    )]
+    PayloadSizeMismatch {
+        path: String,
+        declared: u64,
+        actual: u64,
+    },
+    #[error(
+        "registry-pack payload file {path:?} digest mismatch: declared {declared:?}, actual {actual:?}"
+    )]
+    PayloadHashMismatch {
+        path: String,
+        declared: Sha256Hex,
+        actual: Sha256Hex,
+    },
+    #[error("registry-pack payload contains undeclared path {path:?}")]
+    UndeclaredPayloadPath { path: String },
 }
 
 /// Verify the lock pin and publisher signature before parsing the manifest.
@@ -619,6 +662,8 @@ fn verify_registry_pack_with(
     Ok(VerifiedRegistryPack {
         manifest,
         manifest_sha256: pin.manifest_sha256().clone(),
+        manifest_bytes: request.manifest_bytes.to_vec(),
+        signature_bundle: request.signature_bundle.to_vec(),
     })
 }
 
@@ -645,6 +690,118 @@ fn validate_registry_pack_manifest(
         }
     }
     Ok(())
+}
+
+/// Verify the unpacked payload against an already authenticated manifest.
+///
+/// Every declared file must be a regular file with the exact signed length and
+/// digest. The payload must contain no undeclared files or symbolic links, so a
+/// transport cannot smuggle unsigned content into a later profile or runtime
+/// reader.
+pub fn verify_registry_pack_contents(
+    verified: &VerifiedRegistryPack,
+    root: &Path,
+) -> Result<(), RegistryPackVerificationError> {
+    let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
+        RegistryPackVerificationError::PayloadFileRead {
+            path: ".".to_string(),
+            reason: error.to_string(),
+        }
+    })?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(RegistryPackVerificationError::NonRegularPayloadPath {
+            path: ".".to_string(),
+        });
+    }
+
+    let declared = verified
+        .manifest()
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<BTreeSet<_>>();
+    for file in &verified.manifest().files {
+        let path = root.join(&file.path);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            RegistryPackVerificationError::PayloadFileRead {
+                path: file.path.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(RegistryPackVerificationError::NonRegularPayloadPath {
+                path: file.path.clone(),
+            });
+        }
+        let (actual_hash, actual_size) =
+            hash_file(&path).map_err(|reason| RegistryPackVerificationError::PayloadFileRead {
+                path: file.path.clone(),
+                reason,
+            })?;
+        if actual_size != file.size {
+            return Err(RegistryPackVerificationError::PayloadSizeMismatch {
+                path: file.path.clone(),
+                declared: file.size,
+                actual: actual_size,
+            });
+        }
+        if actual_hash != file.sha256 {
+            return Err(RegistryPackVerificationError::PayloadHashMismatch {
+                path: file.path.clone(),
+                declared: file.sha256.clone(),
+                actual: actual_hash,
+            });
+        }
+    }
+    refuse_undeclared_payload_paths(root, root, &declared)
+}
+
+fn refuse_undeclared_payload_paths(
+    root: &Path,
+    directory: &Path,
+    declared: &BTreeSet<&str>,
+) -> Result<(), RegistryPackVerificationError> {
+    let entries = std::fs::read_dir(directory).map_err(|error| {
+        RegistryPackVerificationError::PayloadFileRead {
+            path: relative_payload_path(root, directory),
+            reason: error.to_string(),
+        }
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| RegistryPackVerificationError::PayloadFileRead {
+            path: relative_payload_path(root, directory),
+            reason: error.to_string(),
+        })?;
+        let path = entry.path();
+        let relative = relative_payload_path(root, &path);
+        let file_type =
+            entry
+                .file_type()
+                .map_err(|error| RegistryPackVerificationError::PayloadFileRead {
+                    path: relative.clone(),
+                    reason: error.to_string(),
+                })?;
+        if file_type.is_symlink() {
+            return Err(RegistryPackVerificationError::NonRegularPayloadPath { path: relative });
+        }
+        if file_type.is_dir() {
+            refuse_undeclared_payload_paths(root, &path, declared)?;
+        } else if !file_type.is_file() {
+            return Err(RegistryPackVerificationError::NonRegularPayloadPath { path: relative });
+        } else if !declared.contains(relative.as_str()) {
+            return Err(RegistryPackVerificationError::UndeclaredPayloadPath { path: relative });
+        }
+    }
+    Ok(())
+}
+
+fn relative_payload_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .ok()
+        .and_then(Path::to_str)
+        .filter(|path| !path.is_empty())
+        .unwrap_or(".")
+        .to_string()
 }
 
 #[cfg(feature = "manifest-verify")]
@@ -764,6 +921,16 @@ mod tests {
             }],
         })
         .unwrap()
+    }
+
+    fn verified_payload() -> VerifiedRegistryPack {
+        let manifest_bytes = signed_manifest_bytes("runtime/python@1.2.3");
+        VerifiedRegistryPack {
+            manifest: serde_json::from_slice(&manifest_bytes).unwrap(),
+            manifest_sha256: Sha256Hex::from_bytes(&manifest_bytes),
+            manifest_bytes,
+            signature_bundle: b"test bundle".to_vec(),
+        }
     }
 
     fn accept_signature(
@@ -969,8 +1136,10 @@ mod tests {
         let policy = publisher_policy();
         let request = RegistryPackVerification::new(&requested, &bytes, b"bundle", &lock, &policy);
         let verified = verify_registry_pack_with(&request, accept_signature).unwrap();
-        assert_eq!(verified.manifest.reference, requested);
-        assert_eq!(verified.manifest_sha256, Sha256Hex::from_bytes(&bytes));
+        assert_eq!(verified.manifest().reference, requested);
+        assert_eq!(verified.manifest_sha256(), &Sha256Hex::from_bytes(&bytes));
+        assert_eq!(verified.manifest_bytes(), bytes);
+        assert_eq!(verified.signature_bundle(), b"bundle");
 
         for files in [
             vec![RegistryPackFile {
@@ -1052,6 +1221,73 @@ mod tests {
         assert!(matches!(
             verify_registry_pack(&request),
             Err(RegistryPackVerificationError::SignatureInvalid(_))
+        ));
+    }
+
+    #[test]
+    fn verified_payload_accepts_exactly_the_declared_files() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = root.path().join("pack");
+        std::fs::create_dir(&pack).unwrap();
+        std::fs::write(pack.join("profile.toml"), b"profile").unwrap();
+        let verified = verified_payload();
+
+        verify_registry_pack_contents(&verified, root.path()).unwrap();
+    }
+
+    #[test]
+    fn verified_payload_refuses_missing_tampered_and_undeclared_files() {
+        let root = tempfile::tempdir().unwrap();
+        let pack = root.path().join("pack");
+        std::fs::create_dir(&pack).unwrap();
+        let verified = verified_payload();
+
+        let missing = verify_registry_pack_contents(&verified, root.path()).unwrap_err();
+        assert!(matches!(
+            missing,
+            RegistryPackVerificationError::PayloadFileRead { .. }
+        ));
+
+        std::fs::write(pack.join("profile.toml"), b"too long").unwrap();
+        let wrong_size = verify_registry_pack_contents(&verified, root.path()).unwrap_err();
+        assert!(matches!(
+            wrong_size,
+            RegistryPackVerificationError::PayloadSizeMismatch { .. }
+        ));
+
+        std::fs::write(pack.join("profile.toml"), b"PROFILE").unwrap();
+        let tampered = verify_registry_pack_contents(&verified, root.path()).unwrap_err();
+        assert!(matches!(
+            tampered,
+            RegistryPackVerificationError::PayloadHashMismatch { .. }
+        ));
+
+        std::fs::write(pack.join("profile.toml"), b"profile").unwrap();
+        std::fs::write(pack.join("escape.toml"), b"undeclared").unwrap();
+        let undeclared = verify_registry_pack_contents(&verified, root.path()).unwrap_err();
+        assert!(matches!(
+            undeclared,
+            RegistryPackVerificationError::UndeclaredPayloadPath { .. }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_payload_refuses_a_symlink_even_when_its_target_matches() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().unwrap();
+        let pack = root.path().join("pack");
+        std::fs::create_dir(&pack).unwrap();
+        let outside = root.path().join("outside");
+        std::fs::write(&outside, b"profile").unwrap();
+        symlink(&outside, pack.join("profile.toml")).unwrap();
+        let verified = verified_payload();
+
+        let error = verify_registry_pack_contents(&verified, root.path()).unwrap_err();
+        assert!(matches!(
+            error,
+            RegistryPackVerificationError::NonRegularPayloadPath { .. }
         ));
     }
 }

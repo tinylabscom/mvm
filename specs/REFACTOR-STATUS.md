@@ -39,6 +39,7 @@ Last updated: 2026-09-28
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
     - [x] strict registry references and fail-closed manifest-digest lockfile foundation
     - [x] strict signed manifest and namespace-scoped publisher trust verification
+    - [x] exact payload digest verification with undeclared-content and symlink refusal
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
     - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
     - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
