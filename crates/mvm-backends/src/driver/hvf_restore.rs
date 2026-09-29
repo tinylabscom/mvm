@@ -1141,6 +1141,7 @@ mod tests {
     struct ScriptedSupervisor {
         script: &'static str,
         spawned: std::cell::Cell<usize>,
+        child_pid: std::cell::Cell<Option<u32>>,
     }
 
     impl ScriptedSupervisor {
@@ -1148,6 +1149,7 @@ mod tests {
             Self {
                 script,
                 spawned: std::cell::Cell::new(0),
+                child_pid: std::cell::Cell::new(None),
             }
         }
     }
@@ -1174,7 +1176,9 @@ mod tests {
                 .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
                     req.state_dir,
                 ));
-            Ok(command.spawn()?)
+            let child = command.spawn()?;
+            self.child_pid.set(Some(child.id()));
+            Ok(child)
         }
     }
 
@@ -1334,7 +1338,9 @@ mod tests {
             format!("{error:#}").contains("did not report the restored machine running"),
             "{error:#}"
         );
-        let pid = read_pid(&tmp.path().join(PID_FILE_NAME)).expect("the fake published a pid");
+        // Capture identity at spawn: the deadline may precede the child script.
+        let pid = libc::pid_t::try_from(spawner.child_pid.get().expect("the fake was spawned"))
+            .expect("the child PID fits pid_t");
         // SAFETY: signal 0 only probes whether the pid exists.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         assert!(!alive, "the unresponsive supervisor was killed and reaped");

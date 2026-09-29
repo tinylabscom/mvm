@@ -4,6 +4,7 @@ Last updated: 2026-09-29
 
 ## In progress
 
+- [ ] **Pack signing input isolation — #3794.** Fix, regression, actionlint, host workspace Clippy and real signing smoke pass. The restore-timeout fixture is deterministic and all 262 backend tests pass; full workspace tests, Linux and final PR checks are pending. See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
 - [ ] **Security mutation witnesses — #3679.** Contract/filesystem validation (1,524 tests), all four base-image tests, the source-root test and final host workspace Clippy pass. Full workspace and mutation validation remain pending; Linux builder initialization is blocked. See `specs/plans/2026-09-28-security-mutation-witnesses.md`.
 
 - [ ] **Extended CI process cleanup — #3773.** All 47 integration regressions and final host workspace Clippy pass; full tests are pending. Linux builder initialization is blocked; the final live Firecracker lane remains active. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
