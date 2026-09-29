@@ -65,7 +65,15 @@ def group_exists(process_group: int) -> bool:
 
 def terminate_group(process: subprocess.Popen[bytes], grace: float) -> None:
     process_group = process.pid
-    signal_group(process_group, signal.SIGTERM)
+    try:
+        signal_group(process_group, signal.SIGTERM)
+    except PermissionError:
+        # A reaped child can leave a macOS group that is no longer ours to
+        # signal. Preserve its outcome, but never hide failed live-child cleanup.
+        if process.poll() is None:
+            raise
+        process.wait()
+        return
     deadline = time.monotonic() + grace
     while time.monotonic() < deadline:
         process.poll()

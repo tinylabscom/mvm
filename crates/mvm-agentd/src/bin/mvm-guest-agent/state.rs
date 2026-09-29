@@ -597,6 +597,13 @@ mod tests {
                 rows: 24,
                 env: vec![],
                 argv: vec![],
+                detach_timeout_secs: None,
+            },
+            GuestRequest::ConsoleAttach {
+                session_id: 1,
+                cols: 80,
+                rows: 24,
+                take_over: true,
             },
             GuestRequest::RunDetached {
                 argv: vec!["/bin/true".into()],

@@ -112,6 +112,7 @@ impl EntrypointAdmission {
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: crate::launch::persistent::preflight_network(),
             tenant: LOCAL_TENANT,

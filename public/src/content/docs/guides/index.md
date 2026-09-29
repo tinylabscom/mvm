@@ -50,6 +50,7 @@ example, check [capability status](/security/capability-status/) and
 | [Runtime Approvals](/guides/runtime-approvals/) | Some requests or secret uses need a person, or a webhook, to say yes first. |
 | [Persistent Workspaces](/guides/persistent-workspaces/) | You need state that survives across sandbox sessions. |
 | [Audit and Receipts](/guides/audit-and-receipts/) | You need evidence for what built, ran, changed, and exited. |
+| [Provenance for instruction files](/guides/instruction-provenance/) | You need the `CLAUDE.md`/`AGENTS.md`/`SKILL.md` files a workload's agent reads to be signed by someone you trust. |
 
 ## Agent integration guides
 

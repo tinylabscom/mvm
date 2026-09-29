@@ -76,4 +76,6 @@ pub mod supervisor;
 /// The per-VM host telemetry collector worker: resolve → assert-current →
 /// authenticated receive, with bounded ingest and capped-backoff recovery.
 pub mod telemetry_collector;
+#[cfg(test)]
+mod test_fixtures;
 pub mod workload_env;

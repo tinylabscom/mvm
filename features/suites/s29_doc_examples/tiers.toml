@@ -188,6 +188,11 @@ path = "machine create"
 tier = "live"
 
 [[command]]
+path = "machine detach"
+tier = "parse"
+reason = "disconnects the client attached to a running console session, so it needs a live VM with an attached PTY client; the guest agent's session registry tests cover the detach transition"
+
+[[command]]
 path = "machine diff"
 tier = "live"
 
@@ -465,6 +470,20 @@ tier = "exec"
 [[command]]
 path = "trust audit verify"
 tier = "exec"
+
+[[command]]
+path = "trust instructions init"
+tier = "exec"
+
+[[command]]
+path = "trust instructions sign"
+tier = "exec"
+fixture = "instruction-files"
+
+[[command]]
+path = "trust instructions verify"
+tier = "exec"
+fixture = "signed-instruction-files"
 
 [[command]]
 path = "trust list"

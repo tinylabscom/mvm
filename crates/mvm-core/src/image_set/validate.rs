@@ -53,9 +53,11 @@ fn check_members(members: &[ImageSetMember]) -> Result<(), ImageSetError> {
     }
     for (index, member) in members.iter().enumerate() {
         check_member(member)?;
-        let repeated = members[..index]
-            .iter()
-            .any(|earlier| earlier.role == member.role && earlier.target == member.target);
+        let repeated = members[..index].iter().any(|earlier| {
+            earlier.role == member.role
+                && earlier.target == member.target
+                && earlier.build_mode == member.build_mode
+        });
         if repeated {
             return Err(ImageSetError::DuplicateMember {
                 role: member.role,
@@ -69,8 +71,27 @@ fn check_members(members: &[ImageSetMember]) -> Result<(), ImageSetError> {
 fn check_member(member: &ImageSetMember) -> Result<(), ImageSetError> {
     check_target_for_role(member)?;
     check_sidecar_libc(member)?;
+    check_build_mode(member)?;
     check_artifacts(member)?;
     check_boot_protocol_presence(member)
+}
+
+/// Only workload bases publish a dev build; every other role has one build.
+fn check_build_mode(member: &ImageSetMember) -> Result<(), ImageSetError> {
+    let workload_base = matches!(
+        member.role,
+        ImageSetRole::WorkloadKernel(_) | ImageSetRole::WorkloadRootfs(_)
+    );
+    if let Some(build_mode) = member.build_mode
+        && !workload_base
+    {
+        return Err(ImageSetError::BuildModeNotAllowedForRole {
+            role: member.role,
+            target: member.target,
+            build_mode,
+        });
+    }
+    Ok(())
 }
 
 fn check_target_for_role(member: &ImageSetMember) -> Result<(), ImageSetError> {

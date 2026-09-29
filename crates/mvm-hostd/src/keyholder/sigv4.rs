@@ -211,6 +211,7 @@ mod tests {
             auth_type: AuthType::Sigv4,
             allowed_hosts: vec!["example.amazonaws.com".into()],
             sigv4: None,
+            inject: Default::default(),
         };
         let sig = Signer::new(&resolver as &dyn SecretResolver)
             .sign_sigv4(&secret, &get_vanilla())
