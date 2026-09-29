@@ -921,6 +921,18 @@ mod tests {
             Err(RegistryPackVerificationError::DuplicatePublisherNamespace { .. })
         ));
 
+        for (issuer, identities) in [
+            ("", vec!["one".to_string()]),
+            ("issuer", Vec::new()),
+            ("issuer", vec!["".to_string()]),
+            ("issuer", vec!["one".to_string(), "one".to_string()]),
+        ] {
+            assert!(matches!(
+                RegistryPackPublisher::new("other", issuer, identities),
+                Err(RegistryPackVerificationError::InvalidPublisherPolicy { .. })
+            ));
+        }
+
         let unknown = serde_json::from_str::<RegistryPackPublisherPolicy>(
             r#"{"schema_version":1,"publishers":[],"surprise":true}"#,
         );
