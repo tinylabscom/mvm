@@ -192,6 +192,25 @@ class InProcessMode2(Enum):
 InProcessMode = Union[InProcessMode1, InProcessMode2]
 
 
+class InjectionMode1(Enum):
+    header = 'header'
+
+
+class InjectionMode2(Enum):
+    query_param = 'query_param'
+
+
+class InjectionMode3(Enum):
+    url_path = 'url_path'
+
+
+class InjectionMode4(Enum):
+    basic_auth = 'basic_auth'
+
+
+InjectionMode = Union[InjectionMode1, InjectionMode2, InjectionMode3, InjectionMode4]
+
+
 @dataclass
 class JsonSchemaShape:
     pass
@@ -529,6 +548,7 @@ class SecretRef:
     auth_type: AuthType
     mount: SecretMount
     name: str
+    inject: Optional[InjectionMode] = None
     sigv4: Optional[Sigv4Params] = None
 
 

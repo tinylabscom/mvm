@@ -149,7 +149,11 @@ Security-bearing gaps first, then the foundations the UX needs:
 ### PS-02 — Egress route model on vsock flows (#3712)
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
       — `policy::routes`, `fuzz_egress_routes`; carried on `NetworkPolicy` in the signed plan
-- [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+- [x] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+      — `SecretRef.inject` declares the mode; the position parser refuses a
+      placeholder outside its binding before anything forwards; basic_auth is
+      decoded/substituted/re-encoded; `mvm-contract` substitution + hostd
+      keyholder tests
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
       host is terminated only on an explicit `intercept` grant; `ask` is held and
