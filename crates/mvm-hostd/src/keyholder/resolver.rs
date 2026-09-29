@@ -93,11 +93,24 @@ impl std::fmt::Debug for OAuthTokenSet {
 }
 
 /// A host-captured OAuth token response update.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CapturedOAuthToken {
     pub access_token: OAuthSecretString,
     pub refresh_token: Option<OAuthSecretString>,
     pub expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for CapturedOAuthToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapturedOAuthToken")
+            .field("access_token", &"REDACTED")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "REDACTED"),
+            )
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Errors from resolving a [`SecretRef`] to its stored value.
