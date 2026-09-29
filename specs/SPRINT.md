@@ -10,6 +10,11 @@
 
 ## In progress
 
+- [x] **Repair shared host-side test gates.** The slow-sink regression now
+      accounts for each produced byte as delivered output or an explicit gap
+      instead of requiring lossless delivery under backpressure. The CI-scope
+      aggregate harness executes its script as a Bash command, so an expected
+      early refusal cannot break a producer writing to standard input.
 - [x] **Composable policy files and authored profiles — issue #3715.**
       Rust-derived policy/profile schema, user and project discovery,
       `policy resolve|show|validate|diff`, and `--policy`/`--plan` now lower
