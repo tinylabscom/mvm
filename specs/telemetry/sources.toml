@@ -322,8 +322,8 @@ activation = "legacy"
 
 [[launch_edge]]
 producer = "mvm-build/mvm-host-vm-init"
-launcher = "crates/mvm-cli/src/commands/env/builder_vm.rs"
-anchor = "mvm.chain_init=/sbin/mvm-host-vm-init"
+launcher = "crates/mvm-build/src/builder_boot/cmdline.rs"
+anchor = "init={BAKED_INIT}"
 activation = "always"
 
 [[launch_edge]]
