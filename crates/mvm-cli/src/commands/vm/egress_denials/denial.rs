@@ -164,14 +164,11 @@ impl EgressDenial {
 }
 
 #[cfg(test)]
-pub(super) mod tests {
+pub(in crate::commands::vm) mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    pub(in crate::commands::vm::egress_denials) fn entry(
-        event: &str,
-        labels: &[(&str, &str)],
-    ) -> PlanAuditEntry {
+    pub(in crate::commands::vm) fn entry(event: &str, labels: &[(&str, &str)]) -> PlanAuditEntry {
         PlanAuditEntry {
             timestamp: "2026-09-26T10:00:00Z".parse().unwrap(),
             tenant: mvm_core::plan::TenantId("local".into()),

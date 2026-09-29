@@ -47,10 +47,10 @@ Last updated: 2026-09-29
     - [x] provider routes with credential headers (gitlab, gemini added)
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
-  - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+  - [x] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
     - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
-    - [ ] denial → policy draft selector (Grant / Skip)
-    - [ ] `mvmctl why` against a resolved policy
+    - [x] denial → policy draft selector (Grant / Skip)
+    - [x] `mvmctl why` against a resolved policy
   - [x] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
     - [x] groups, profiles (`extends`, include/exclude, `when`, overrides), merge rules, cycle/depth limits
     - [x] `mvmctl policy resolve|show|validate|diff|groups`, `run --policy`, `run --plan`, `mvm.toml [policy]`

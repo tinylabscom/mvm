@@ -249,6 +249,91 @@ fn explain_with_json_flag_parses() {
     );
 }
 
+#[test]
+fn why_help_lists_every_query_and_policy_source() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["why", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--host",
+        "--path",
+        "--tool",
+        "--secret",
+        "--profile",
+        "--plan",
+        "--project",
+        "--json",
+    ] {
+        assert!(help.contains(flag), "why help is missing {flag}:\n{help}");
+    }
+}
+
+#[test]
+fn why_empty_project_answers_default_deny_as_json_without_booting() {
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args([
+            "why",
+            "--host",
+            "api.example.com",
+            "--project",
+            project.path().to_str().unwrap(),
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "why must not boot or need runtime state: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(answer["allowed"], false);
+    assert_eq!(answer["subject"], "host");
+    assert_eq!(answer["value"], "api.example.com:443");
+}
+
+#[test]
+fn why_discovers_the_project_policy_from_a_nested_directory() {
+    let project = tempfile::tempdir().unwrap();
+    let nested = project.path().join("src/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        project.path().join("mvm.toml"),
+        "[network]\nallow_hosts = [\"api.example.com:443\"]\n",
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .current_dir(&nested)
+        .env("MVM_HOME", home.path())
+        .env("HOME", home.path())
+        .args(["why", "--host", "api.example.com", "--json"])
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "why must resolve the containing project: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(answer["allowed"], true);
+    assert_eq!(answer["matched"], "network.allow = \"api.example.com:443\"");
+}
+
 /// `pack --help` advertises all five lifecycle subcommands.
 #[test]
 fn pack_help_lists_all_subcommands() {

@@ -190,7 +190,7 @@ pub struct ControllingTty {
 }
 
 impl ControllingTty {
-    fn open() -> std::io::Result<Self> {
+    pub(crate) fn open() -> std::io::Result<Self> {
         use std::os::unix::fs::OpenOptionsExt;
         let file = std::fs::OpenOptions::new()
             .read(true)

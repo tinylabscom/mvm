@@ -23,6 +23,19 @@ mvmctl policy resolve agent-apis -o agent.json
 mvmctl run --plan agent.json -- claude -p "summarize the repo"
 ```
 
+Ask one question of the resolved policy without booting anything:
+
+```sh
+mvmctl why --host api.github.com:443
+mvmctl why --path ./src
+mvmctl why --tool shell --profile agent-apis
+```
+
+Without `--profile` or `--plan`, `why` discovers the current project's
+`mvm.toml`. Host, path and secret answers reflect enforced policy. Tool policy
+is authored ahead of its runtime mediation, so tool answers explicitly say
+that the rule is not enforced yet.
+
 Not to be confused with `--profile restrictive|standard|dev|permissive`, the
 run's [security tier](/guides/policy-profiles/). That flag already existed, so
 authored policy uses `--policy`. The two combine: the tier still refuses shares
@@ -238,6 +251,7 @@ yours. It can tighten, but it cannot use an escape hatch.
 | `mvmctl policy validate [PROFILE\|PATH] [--strict]` | Check a profile, or a single profile or group file. `--strict` turns every note into an error, refuses the unenforced `[tools]` section, and checks each bound secret against the store. |
 | `mvmctl policy diff A B [--json]` | What each side allows or denies that the other does not. |
 | `mvmctl policy groups [--json]` | Built-in and user groups and profiles. |
+| `mvmctl why --host H[:P] \| --path P \| --tool T \| --secret S [--profile PROFILE \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. |
 
 `--backend KIND` on `show`, `resolve`, `validate` and `diff` matches `[[when]]`
 blocks against a backend other than the host's default.

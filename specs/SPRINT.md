@@ -47,6 +47,16 @@
       linker requirement. Justfile parsing, focused wrapper-environment tests,
       formatting, workspace check, and zero-warning Clippy are green.
 
+- [x] **Complete denial feedback and resolved-policy explanations — issue #3714.**
+      Grantable egress refusals now enter one explicit Grant / Skip review in
+      foreground runs or through `mvmctl explain RUN --review`; an exact draft
+      and separate confirmation precede the atomic `mvm.toml` update, while
+      absolute and operational refusals are never offered. `mvmctl why` answers
+      one host, path, tool, or secret question from the discovered project,
+      explicit profile, or resolved manifest without booting a workload. See
+      `specs/plans/2026-09-28-denial-feedback.md` and
+      `specs/sprint/delivery/3714-denial-feedback.md`.
+
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
       an unpacked rootfs (dpkg, apk, os-release, in-image kernel; rpm is a
