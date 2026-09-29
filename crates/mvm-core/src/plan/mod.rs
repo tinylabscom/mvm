@@ -41,9 +41,10 @@ pub use mvm_contract::plan::{execution_plan, sdk_sidecar, types, verb, verb_gran
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,
-    BundleRegistry, BundleResolveError, BundleResolver, BundleResources, BundleVerifyError,
-    FsBundleResolver, FsTrustStore, InstalledBundle, KeyId, PlanArtifact, PlanBundleError,
-    TrustStore, VerifiedBundle, VerityInfo, bundle_sha256, read_and_verify_bundle, sha256_hex,
+    BundleMember, BundleRegistry, BundleResolveError, BundleResolver, BundleResources,
+    BundleVerifyError, FsBundleResolver, FsTrustStore, InstalledBundle, KeyId, PlanArtifact,
+    PlanBundleError, TrustStore, VerifiedBundle, VerifiedEmbeddedImageSet, VerityInfo,
+    bundle_sha256, check_embedded_image_set_for_backend, read_and_verify_bundle, sha256_hex,
     signature_from_base64, signature_to_base64, verify_plan_bundle, write_bundle,
 };
 pub use content_id::{PlanIdMismatch, compute_plan_id, verify_plan_id};

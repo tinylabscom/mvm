@@ -17,7 +17,9 @@ use super::{
     WorkloadImageProfile,
 };
 use crate::arch::GuestArch;
+use crate::kernel_format::KernelFormat;
 use crate::packs::Sha256Hex;
+use crate::vm_backend::BackendKind;
 
 /// Check the manifest is internally consistent: supported schema, members that
 /// are unique and well-formed, the fields its producer calls for and no
@@ -415,6 +417,45 @@ pub struct BackendImageSupport {
     pub boot_protocols: Vec<BootProtocol>,
     pub artifact_formats: Vec<ArtifactFormat>,
     pub device_capabilities: Vec<GuestDeviceRequirement>,
+}
+
+impl BackendImageSupport {
+    /// Image contract declared by each Linux-direct workload backend. Backends
+    /// that do not boot the shared Linux image return `None` and are refused
+    /// before artifact extraction or boot.
+    #[must_use]
+    pub fn for_backend(kind: BackendKind) -> Option<Self> {
+        let (guest_arches, kernels) = match kind {
+            BackendKind::Firecracker | BackendKind::Qemu | BackendKind::Mock => (
+                vec![GuestArch::X86_64, GuestArch::Aarch64],
+                vec![KernelFormat::Elf, KernelFormat::Image],
+            ),
+            BackendKind::Hvf => (vec![GuestArch::Aarch64], vec![KernelFormat::Image]),
+            BackendKind::Libkrun => (vec![GuestArch::X86_64], vec![KernelFormat::Elf]),
+            BackendKind::Wasm | BackendKind::WebLinux | BackendKind::AppleContainer => return None,
+        };
+        Some(Self {
+            guest_arches,
+            boot_protocols: vec![BootProtocol::LinuxDirect],
+            artifact_formats: kernels
+                .into_iter()
+                .map(ArtifactFormat::Kernel)
+                .chain([
+                    ArtifactFormat::Ext4,
+                    ArtifactFormat::VerityHashTree,
+                    ArtifactFormat::VerityRootHash,
+                    ArtifactFormat::TarGz,
+                    ArtifactFormat::Text,
+                    ArtifactFormat::Json,
+                ])
+                .collect(),
+            device_capabilities: vec![
+                GuestDeviceRequirement::VirtioVsock,
+                GuestDeviceRequirement::VirtioBlk,
+                GuestDeviceRequirement::DmVerity,
+            ],
+        })
+    }
 }
 
 /// One verified workload kernel/rootfs pair selected from the same generic

@@ -2730,6 +2730,7 @@ fn signed_bundle_fixture(root: &Path, seed: u8) -> (PathBuf, PathBuf) {
             sha256: sha256_hex(&kernel),
             size_bytes: kernel.len() as u64,
         }],
+        members: Vec::new(),
         verity: None,
         resources: None,
     };

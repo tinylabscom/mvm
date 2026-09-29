@@ -56,6 +56,17 @@
       the `cve.json` + CycloneDX SBOM sidecar pair at pull and applies the
       gate at every `--prod` image resolve. New claim MVM-SEC-21 with
       fn-witnesses and a registered conformance suite.
+- [ ] **Portable embedded image-set artifact — issue #3551.**
+      `specs/plans/2026-09-23-portable-embedded-image-set.md`. The independent
+      consumer slice adds a backend-neutral schema-v3 image-set member, binds
+      its complete `mvm_core::image_set` manifest to signed bundle artifacts,
+      populates a manifest-hash-keyed reverified cache, and makes
+      `machine check-artifact` verify image hashes and optional backend
+      compatibility without booting. All 57 focused bundle tests and both
+      command-level artifact checks pass; the full host workspace remains
+      blocked by the unrelated slow-sink regression in PR #3835. The sealed
+      checkpoint member remains in #3384; physical backend and cross-host
+      witnesses remain open, so #3551 is not complete.
 
 - [x] **Make OCI image publication and removal durable — issue #3538.**
       Rootfs publication now syncs the containing directory after its

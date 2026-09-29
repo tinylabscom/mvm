@@ -192,6 +192,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         created_at: Utc::now().to_rfc3339(),
         labels: Default::default(),
         artifacts,
+        members: Vec::new(),
         verity,
         resources,
     };

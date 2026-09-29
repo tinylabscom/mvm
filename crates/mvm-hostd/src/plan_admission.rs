@@ -71,7 +71,8 @@ use mvm_core::packs::{PackKind, Sha256Hex};
 use mvm_core::plan::bundle::{BundleResolver, TrustStore};
 use mvm_core::plan::{
     ExecutionPlan, NonceStore, PlanId, PlanValidityError, SignedExecutionPlan, Variant,
-    check_window, sign_plan, verify_plan, verify_plan_bundle, verify_plan_id,
+    check_embedded_image_set_for_backend, check_window, sign_plan, verify_plan, verify_plan_bundle,
+    verify_plan_id,
 };
 use mvm_core::policy::PolicyBundle;
 use mvm_core::spawn_scope;
@@ -216,6 +217,16 @@ impl AdmittedPlan {
 pub struct BundleAdmissionContext<'a> {
     pub resolver: &'a dyn BundleResolver,
     pub trust: &'a dyn TrustStore,
+    /// Required when the bundle embeds an image set. This is the backend that
+    /// is actually about to boot, not a manifest label.
+    pub image: Option<BundleImageAdmissionContext<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct BundleImageAdmissionContext<'a> {
+    pub arch: mvm_core::arch::GuestArch,
+    pub backend: &'a mvm_core::image_set::BackendImageSupport,
+    pub host_protocols: &'a mvm_core::image_set::HostProtocolSupport,
 }
 
 /// Trust and revocation inputs for exact extension-pack re-verification.
@@ -545,6 +556,28 @@ fn finish_admission(parts: VerifiedAdmission<'_>) -> Result<AdmittedPlan> {
         })?;
         let verified_bundle = verify_plan_bundle(pin, ctx.resolver, ctx.trust)
             .with_context(|| format!("bundle re-verify for pin {}", pin.bundle_sha256))?;
+        if !verified_bundle.embedded_image_sets.is_empty() {
+            let image = ctx.image.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "plan pins bundle {} with an embedded image set but admission has no selected backend image contract — refuse",
+                    pin.bundle_sha256
+                )
+            })?;
+            for embedded in &verified_bundle.embedded_image_sets {
+                check_embedded_image_set_for_backend(
+                    embedded,
+                    image.arch,
+                    image.backend,
+                    image.host_protocols,
+                )
+                .with_context(|| {
+                    format!(
+                        "selected backend refuses embedded image set in bundle {}",
+                        pin.bundle_sha256
+                    )
+                })?;
+            }
+        }
         // The signature-verified manifest is the only trustworthy statement of
         // the bundle's architecture — the boot-time resolver reads an unsigned
         // registry copy. Refuse here so a foreign-arch pin never reaches a
@@ -4027,6 +4060,7 @@ mod tests {
                 make_art("vmlinux", ArtifactRole::Kernel, kernel),
                 make_art("rootfs.ext4", ArtifactRole::Rootfs, rootfs),
             ],
+            members: Vec::new(),
             verity: None,
             resources: None,
         };
@@ -4082,6 +4116,7 @@ mod tests {
         let ctx = BundleAdmissionContext {
             resolver: &resolver,
             trust: &trust,
+            image: None,
         };
         let admitted = admit_for_run(
             &input_with_pin("vm-pinned", &pin),
@@ -4147,6 +4182,7 @@ mod tests {
         let ctx = BundleAdmissionContext {
             resolver: &resolver,
             trust: &trust,
+            image: None,
         };
         let err = admit_for_run(
             &input_with_pin("vm-cross-arch", &pin),
@@ -4178,6 +4214,7 @@ mod tests {
         let ctx = BundleAdmissionContext {
             resolver: &resolver,
             trust: &trust,
+            image: None,
         };
         let err = admit_for_run(
             &input_with_pin("vm-untrusted", &pin),
@@ -4218,6 +4255,7 @@ mod tests {
         let ctx = BundleAdmissionContext {
             resolver: &resolver,
             trust: &trust,
+            image: None,
         };
         let err = admit_for_run(
             &input_with_pin("vm-pin-drift", &pin_a),

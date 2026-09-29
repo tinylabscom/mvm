@@ -18,8 +18,11 @@ use mvm_build::packed_artifact::{
     ArtifactError, Manifest, SecurityPosture, verify as verify_artifact,
 };
 use mvm_core::arch::GuestArch;
+use mvm_core::image_set::BackendImageSupport;
 use mvm_core::network_policy::NetworkPolicy;
-use mvm_core::plan::PlanSeccompTier;
+use mvm_core::plan::{
+    FsTrustStore, PlanSeccompTier, check_embedded_image_set_for_backend, read_and_verify_bundle,
+};
 use std::path::PathBuf;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -148,18 +151,29 @@ pub(in crate::commands) fn verify_for_machine_admission(
 /// [`admission_for`] over an `ImageSource::Prebuilt` boot path.
 #[derive(clap::Args, Debug, Clone)]
 pub(in crate::commands) struct CheckArtifactArgs {
-    /// Path to the `.mvm` artifact to verify and preview.
+    /// Path to the `.mvm` or `.mvmpkg` artifact to verify and preview.
     pub path: PathBuf,
     /// Verifying-key file (32-byte raw Ed25519 public key). Defaults to the
     /// host signer's public half.
     #[arg(long)]
     pub key: Option<PathBuf>,
+    /// Publisher trust-store directory for a `.mvmpkg`. Defaults to
+    /// `~/.mvm/trusted-publishers/`.
+    #[arg(long, value_name = "DIR")]
+    pub trust_store: Option<PathBuf>,
+    /// Also prove an embedded image set is usable by this backend before boot.
+    /// Supported values: firecracker, hvf, libkrun, qemu.
+    #[arg(long, value_name = "BACKEND")]
+    pub backend: Option<String>,
     /// Emit the verdict as JSON.
     #[arg(long)]
     pub json: bool,
 }
 
 pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result<()> {
+    if args.path.extension().is_some_and(|ext| ext == "mvmpkg") {
+        return run_check_bundle_artifact(&args);
+    }
     let verifying = super::super::vm::artifact::resolve_verifying_key(args.key.as_deref())?;
     let host = GuestArch::host();
     let verified = match verify_for_machine_admission(
@@ -206,6 +220,79 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
         admission.allows_volumes,
     ));
     Ok(())
+}
+
+fn run_check_bundle_artifact(args: &CheckArtifactArgs) -> Result<()> {
+    if args.key.is_some() {
+        anyhow::bail!("--key applies to .mvm artifacts; use --trust-store for .mvmpkg files");
+    }
+    let bytes = std::fs::read(&args.path)
+        .map_err(|error| anyhow::anyhow!("reading {}: {error}", args.path.display()))?;
+    let trust = match &args.trust_store {
+        Some(path) => FsTrustStore::new(path),
+        None => FsTrustStore::default_path()?,
+    };
+    let verified = read_and_verify_bundle(&bytes, &trust)
+        .map_err(|error| anyhow::anyhow!("{}: {error}", args.path.display()))?;
+
+    if let Some(name) = args.backend.as_deref() {
+        let support = backend_image_support(name)?;
+        let host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
+        for embedded in &verified.embedded_image_sets {
+            check_embedded_image_set_for_backend(
+                embedded,
+                GuestArch::host(),
+                &support,
+                &host_protocols,
+            )
+            .map_err(|error| {
+                anyhow::anyhow!("backend {name} refuses embedded image set: {error}")
+            })?;
+        }
+    }
+
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "path": args.path.display().to_string(),
+                "bundle_sha256": mvm_core::plan::bundle_sha256(&bytes),
+                "artifact_count": verified.manifest.artifacts.len(),
+                "embedded_image_sets": verified.embedded_image_sets.iter().map(|set| {
+                    set.manifest_sha256.as_str()
+                }).collect::<Vec<_>>(),
+                "backend": args.backend,
+                "verified": true,
+            }))?
+        );
+    } else {
+        crate::ui::success(&format!(
+            "{}: complete bundle verified ({} artifacts, {} embedded image set{}){}",
+            args.path.display(),
+            verified.manifest.artifacts.len(),
+            verified.embedded_image_sets.len(),
+            if verified.embedded_image_sets.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            args.backend
+                .as_deref()
+                .map(|backend| format!(", backend {backend} compatible"))
+                .unwrap_or_default(),
+        ));
+    }
+    Ok(())
+}
+
+fn backend_image_support(name: &str) -> Result<BackendImageSupport> {
+    let kind = mvm_core::vm_backend::BackendKind::from_label(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown backend {name:?}"))?;
+    BackendImageSupport::for_backend(kind).ok_or_else(|| {
+        anyhow::anyhow!(
+            "backend {name:?} has no Linux-direct embedded image-set contract; expected firecracker, hvf, libkrun, or qemu"
+        )
+    })
 }
 
 #[cfg(test)]

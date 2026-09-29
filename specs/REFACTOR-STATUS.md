@@ -126,6 +126,13 @@ Last updated: 2026-09-29
       through the unchanged per-child fork arm; batch naming, fail-fast with
       running-children report, array-shaped JSON. Ready for merge-queue
       delivery.
+- [ ] **Portable embedded image-set artifact — issue #3551.**
+      `specs/plans/2026-09-23-portable-embedded-image-set.md`. The consumer-side
+      image-set member, nested verification, CAS, and static backend refusal are
+      implemented; 57 focused bundle tests and two command-level artifact tests
+      pass. Full host validation is blocked by the unrelated slow-sink failure
+      tracked in PR #3835. Checkpoint export/re-admission remains owned by
+      #3384, and live backend/cross-host witnesses remain before issue closure.
 
 - [x] **OCI image publication and removal durability — issue #3538.**
       The rootfs artifact-set rename now ends with a directory sync, OCI index

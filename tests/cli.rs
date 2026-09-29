@@ -4,6 +4,22 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn machine_check_artifact_help_names_bundle_verification_controls() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "check-artifact", "--help"])
+        .output()
+        .expect("run machine check-artifact help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in [".mvmpkg", "--trust-store", "--backend"] {
+        assert!(
+            stdout.contains(expected),
+            "help missing {expected}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn ops_mcp_help_advertises_the_stdio_transport() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["ops", "mcp", "--help"])
