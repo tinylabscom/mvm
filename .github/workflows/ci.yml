@@ -771,6 +771,7 @@ jobs:
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           BOOT_RESULT: ${{ needs.boot-latency.result }}
+          GUEST_IMAGE_SCOPE: ${{ needs.scope.outputs.guest_image }}
           GUEST_IMAGE_RESULT: ${{ needs.guest-image-boot.result }}
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
         run: |
@@ -803,8 +804,14 @@ jobs:
             echo "Nix validation did not match event $EVENT_NAME: $NIX_RESULT"
             exit 1
           fi
-          if [ "$GUEST_IMAGE_RESULT" != "$nix_required" ]; then
-            echo "Tree-built guest validation did not match event $EVENT_NAME: $GUEST_IMAGE_RESULT"
+          # Guest-image builds are path-scoped on merge groups, unlike Nix eval.
+          case "$EVENT_NAME:$GUEST_IMAGE_SCOPE" in
+            merge_group:true|workflow_dispatch:true) guest_image_required=success ;;
+            pull_request:true|pull_request:false|merge_group:false) guest_image_required=skipped ;;
+            *) echo "Invalid guest-image scope: event=$EVENT_NAME guest_image=$GUEST_IMAGE_SCOPE"; exit 1 ;;
+          esac
+          if [ "$GUEST_IMAGE_RESULT" != "$guest_image_required" ]; then
+            echo "Tree-built guest validation did not match event/scope $EVENT_NAME/$GUEST_IMAGE_SCOPE: $GUEST_IMAGE_RESULT"
             exit 1
           fi
           case "$EVENT_NAME:$SCOPE_CODE" in
