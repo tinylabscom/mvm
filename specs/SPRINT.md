@@ -4800,3 +4800,8 @@ writes the plan:
       back under a ceiling), per-dimension exceeded latches, and
       record-then-refuse semantics matching the AI budget tracker.
 
+## 2026-09-28 Security evidence freshness — #3750
+
+- [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.
+
+Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.
