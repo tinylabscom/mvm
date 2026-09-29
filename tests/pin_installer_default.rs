@@ -262,8 +262,9 @@ fn release_proposes_prebuilt_pins_only_after_promotion() {
     assert!(job.contains("needs: [promote-release]"));
     assert!(job.contains("ref: main"));
     assert!(job.contains("sigstore/cosign-installer"));
+    assert!(job.contains("git worktree add -B"));
     assert!(job.contains(
-        "sh scripts/pin-installer-default.sh \"${TAG_NAME}\" install.sh nix/prebuilt-release.nix"
+        "sh scripts/pin-installer-default.sh \"${TAG_NAME}\" \"$PIN_WORKTREE/install.sh\" \"$PIN_WORKTREE/nix/prebuilt-release.nix\""
     ));
     assert!(job.contains("gh pr create"));
 }

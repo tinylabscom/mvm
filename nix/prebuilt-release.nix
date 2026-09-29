@@ -1,17 +1,17 @@
 {
-  version = "v0.17.0";
+  version = "v0.18.3";
   archives = {
     aarch64-darwin = {
       target = "aarch64-apple-darwin";
-      sha256 = "5fdf95929a90820af6ab4c22cc1a31e5ae6bc5eae2f3b6a795a06986797d0bce";
+      sha256 = "bb362b97a5dc50c69db26ef0f6f6d0fd19a17224edaaf08250a7500b2d390e17";
     };
     x86_64-linux = {
       target = "x86_64-unknown-linux-gnu";
-      sha256 = "8fe4115197a3c467465f4b40401e8f01fed1a837dfdf32985336975dab99213f";
+      sha256 = "54b9211aa0316907c5cce98a5a0fa8f195d1ebba009e14267a32bd437868085c";
     };
     aarch64-linux = {
       target = "aarch64-unknown-linux-gnu";
-      sha256 = "74d1077e6e3b6f5aa2a477f582f7de9bf69dfc48668289c501fd747450515b59";
+      sha256 = "d20575f29ebe1a27e41c254cf0c7dcac88530467bfaee8d27c4ce017efcdb0d5";
     };
   };
 }
