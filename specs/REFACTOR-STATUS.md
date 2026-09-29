@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-28
+Last updated: 2026-09-29
 
 ## In progress
 
@@ -56,6 +56,9 @@ Last updated: 2026-09-28
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
+    - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated
+    - [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+    - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
     - [x] trust policy (keyless/keyed publishers, blocklist, deny/warn/audit, project only tightens)
@@ -2021,6 +2024,14 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [ ] **AI coding workflow docs**
+      (`specs/plans/2026-09-28-ai-coding-workflow-docs.md`, PR #3815).
+      The issue-to-PR playbook moved from a 588-line `AGENTS.md` to
+      `public/src/content/docs/contributing/ai-coding-workflow.md`; the root
+      file is now a concise rule index that keeps every normative rule,
+      including later session and retry rules, and points at the guide. Site
+      build and repository policy checks pass; merge is in progress.
 
 - [ ] **Static crates registry recovery**
       (`specs/plans/2026-08-26-static-crates-registry-fetch.md`, issue #2904).

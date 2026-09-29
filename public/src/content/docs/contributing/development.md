@@ -3,6 +3,11 @@ title: Development Guide
 description: Getting started as a contributor to mvm.
 ---
 
+Working with an AI coding agent on this repo? Read the
+[AI Coding Workflow](/contributing/ai-coding-workflow/) guide alongside this one —
+it covers claiming issues, the mandatory worktree flow, the Graft/Serena tooling
+split, the fast feedback ladder, and what CI does and does not gate.
+
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
@@ -32,6 +37,11 @@ kernel artifacts. Contributors exercising that integration must install its
 development prerequisites explicitly.
 
 ### Getting started
+
+If you use Nix for contributor tools, `nix develop` opens the lean shell with
+the Rust toolchain pinned by `rust-toolchain.toml`, Zig, and build tools.
+`nix develop .#full` adds release, lint, and documentation tools. These shells
+do not build or publish images; that work belongs to `mvm-images`.
 
 ```bash
 git clone https://github.com/tinylabscom/mvm.git

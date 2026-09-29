@@ -1,3 +1,4 @@
+use super::remove::{remove_machine_spec, resolve_remove_targets, rm_running_refusal};
 use super::*;
 
 pub(super) fn persistent_workload_dir_for_run(args: &MachineRunArgs) -> Result<Option<String>> {

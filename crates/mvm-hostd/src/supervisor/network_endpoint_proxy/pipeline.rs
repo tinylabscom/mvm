@@ -741,6 +741,7 @@ mod server_tests {
                 auth_type: AuthType::Hmac,
                 allowed_hosts: vec!["hooks.example.com".into()],
                 sigv4: None,
+                inject: Default::default(),
             })
             .as_str()
             .to_string();

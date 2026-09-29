@@ -272,12 +272,45 @@ pub struct Supersedes {
     pub manifest_sha256: Sha256Hex,
 }
 
+/// Which build of its role a member carries.
+///
+/// Absent means the production build. Only workload bases publish a dev
+/// variant — the accessible, unsealed build a developer shell or the
+/// documented-surface e2e boots — so the enum carries just that one value
+/// until another role grows a second build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum MemberBuildMode {
+    /// The accessible, unsealed dev variant of a workload base image.
+    Dev,
+}
+
+impl fmt::Display for MemberBuildMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dev => f.write_str("dev"),
+        }
+    }
+}
+
 /// One pack in the set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageSetMember {
     pub role: ImageSetRole,
     pub target: MemberTarget,
+    /// Which build of the role this member carries; absent is the production
+    /// build. Distinguishes the dev and prod variants of one workload base so
+    /// both can publish in one atomic set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_mode: Option<MemberBuildMode>,
+    /// Fingerprint of the sources this member was built from, computed at the
+    /// producing commit by the same function a consumer uses on its own tree.
+    /// Today only the SDK sidecar publishes one; a consumer whose fingerprint
+    /// matches can adopt the published bytes instead of rebuilding them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_fingerprint: Option<Sha256Hex>,
     /// Present exactly for roles that boot; see [`ImageSetRole::is_bootable`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub boot_protocol: Option<BootProtocol>,
