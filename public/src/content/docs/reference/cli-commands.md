@@ -10,9 +10,10 @@ microVMs, talks to guest agents over vsock, manages local artifacts, and exposes
 developer/SDK workflows. Fleet and tenant control-plane verbs live in `mvmd`.
 `mvmctl deploy` builds and records a local workload artifact and can request
 authenticated delivery to `mvmd` with `--mvmd-url`; `mvmctl deployments ls`
-lists the local records. `mvmctl` does not expose `tenant` or `policy`
-subcommands; tenant lifecycle and tenant policy authoring/review remain `mvmd`
-responsibilities.
+lists the local records. `mvmctl` does not expose `tenant` subcommands;
+tenant lifecycle and tenant policy authoring/review remain `mvmd`
+responsibilities. `mvmctl policy` covers only a workload's own authored
+policy, resolved on this host.
 
 **Command grouping (Plan 178).** The surface is organized into a small set
 of top-level daily-driver verbs plus noun groups; operations on a single
@@ -29,8 +30,8 @@ verification under `trust`. Domains that already own their own subcommands
 | `build <sub>`              | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay`                                                                                        |
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
-| `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                                        |
-| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`                                  |
+| `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                        |
+| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`                         |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -305,12 +306,29 @@ Secret audit entries in `~/.mvm/audit/secrets.jsonl` record the operation
 metadata plus `secret_visibility: "write_only"` and
 `storage_security: "encrypted_at_rest"`; secret values are never logged.
 
+## Authored Policy
+
+Composable groups and profiles for what a workload may do. See
+[Policy and profiles](/guides/policy-and-profiles/) for the file format, merge
+rules and discovery order, and the [policy schema](/reference/policy-schema/).
+
+| Command | Description |
+| --- | --- |
+| `mvmctl policy show [PROFILE] [--format toml\|json\|plan] [--project DIR] [--backend KIND]` | Print the merged policy: TOML with its layers, JSON with per-item provenance, or the grants, egress rules, routes and bindings the signed plan would carry. Without `PROFILE`, reads the project's `mvm.toml` `[policy]` table |
+| `mvmctl policy resolve [PROFILE] [-o FILE] [--project DIR] [--backend KIND]` | Write the resolved manifest `run --plan` accepts |
+| `mvmctl policy validate [PROFILE\|PATH] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning, the unenforced `[tools]` section, and secrets the store would not bind |
+| `mvmctl policy diff A B [--json] [--backend KIND]` | What each profile allows or denies that the other does not |
+| `mvmctl policy groups [--json]` | List built-in and user groups and profiles |
+| `mvmctl run --policy NAME\|PATH -- <cmd>` | Run under an authored profile. Also on `machine run`, `machine create` and `machine start`. Replaces the project's `[policy]` table; the project's `[network] allow_hosts` still applies, and applies on every verb even with no policy. Flags add to its allows and cannot reach its denies, blocks or ceilings. `ns/name` pack references are refused for now |
+| `mvmctl run --plan FILE -- <cmd>` | Run under a resolved manifest. Mutually exclusive with `--policy`, `--net`, `--network-preset`, `--allow-host`, `--allow-endpoint`, `--peer`, `--cpu-limit`, `--grants-file`, `--mount`, `--allow-env` and `--secret`. The file is re-validated, and a plan or signature in it is refused: admission signs the plan itself |
+
 ## Policy Contracts
 
 `mvmctl machine run` still synthesizes and admits signed execution plans with policy
 references. The default local ref is `local-default`; tenant-scoped policy
-authoring, diffing, rollout, and review are exposed by `mvmd`, not by a public
-`mvmctl policy` command.
+bundle authoring, diffing, rollout, and review are exposed by `mvmd`. An
+authored workload policy (above) is lowered into the same flags a launch
+carries before synthesis, so it reaches the plan the same way.
 
 When admission resolves a workload policy bundle, `[audit].chain_signing = true`
 is required. The default local chain remains active, and `file://...` entries in
@@ -646,6 +664,7 @@ guest, on any tier.
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>`                                  | Same, with a stable transient VM name while it runs                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine create <name> --image <ref>`                                                   | Persist a named OCI-backed machine spec without booting it                                                                                                                                                                                                                                                                           |
 | `mvmctl machine create <name> --manifest <path>`                                               | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml`                                                                                                                                                                                                                                                        |
+| `mvmctl machine create <name> --manifest <path> --policy NAME\|PATH`                          | Persist a spec under an authored policy profile, resolved with the manifest's `[policy]` and `[network] allow_hosts` exactly as `run` resolves them; the spec records the resulting network and resource grants. Also on `machine start --image/--manifest` |
 | `mvmctl machine create <name> --image <ref> --net --allow-host <host[:port]>`                  | Persist a named spec with opt-in egress settings for future lifecycle starts                                                                                                                                                                                                                                                         |
 | `mvmctl machine create <name> --manifest <path>`                                               | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec                                                                                                                                                                                                                                                          |
 | `mvmctl machine create <name> --image <ref> --force`                                           | Overwrite an existing named machine spec                                                                                                                                                                                                                                                                                             |

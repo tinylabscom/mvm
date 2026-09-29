@@ -1,0 +1,5 @@
+description = "No egress at all. Required: once included, nothing below can drop it, and no layer can turn the network back on."
+required = true
+
+[network]
+block = true

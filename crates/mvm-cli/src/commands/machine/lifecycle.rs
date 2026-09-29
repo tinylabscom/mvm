@@ -109,6 +109,8 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         workflow,
         volumes: &volumes,
         init: &init,
+        policy: args.create_flags.policy.as_deref(),
+        project: manifest_source.as_ref().map(|source| &source.project),
     })?;
     let action = reconcile_machine_spec(existing.as_ref(), &desired, args.create_flags.force)?;
     let spec = match action {

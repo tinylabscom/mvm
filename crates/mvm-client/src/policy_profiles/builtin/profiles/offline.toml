@@ -1,0 +1,5 @@
+description = "No network, and no descendant can turn it back on."
+extends = "default"
+
+[groups]
+include = ["offline"]

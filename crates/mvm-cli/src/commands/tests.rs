@@ -3162,10 +3162,98 @@ fn test_run_cli_flag_overrides_config_memory() {
 
 #[test]
 fn tenant_orchestration_commands_are_not_mvmctl_surface() {
-    for command in ["policy", "tenant"] {
-        let err = Cli::try_parse_from(["mvmctl", command])
-            .expect_err("mvmd-owned command should not parse under mvmctl");
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    let err = Cli::try_parse_from(["mvmctl", "tenant"])
+        .expect_err("mvmd-owned command should not parse under mvmctl");
+    assert_eq!(err.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    // `policy` is the workload's own authored policy, resolved locally. The
+    // tenant bundle verbs — authoring, rollout, rollback — stay in mvmd.
+    for verb in ["apply", "rollback", "rollout", "publish"] {
+        let err = Cli::try_parse_from(["mvmctl", "policy", verb])
+            .expect_err("tenant policy verbs are not mvmctl surface");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::InvalidSubcommand,
+            "{verb}"
+        );
+    }
+}
+
+#[test]
+fn policy_verbs_and_run_policy_flags_parse() {
+    for argv in [
+        vec![
+            "mvmctl",
+            "policy",
+            "resolve",
+            "agent-apis",
+            "-o",
+            "/tmp/x.json",
+        ],
+        vec![
+            "mvmctl",
+            "policy",
+            "show",
+            "--format",
+            "plan",
+            "--backend",
+            "firecracker",
+        ],
+        vec!["mvmctl", "policy", "validate", "./p.toml", "--strict"],
+        vec!["mvmctl", "policy", "diff", "default", "offline", "--json"],
+        vec!["mvmctl", "policy", "groups", "--json"],
+        vec![
+            "mvmctl",
+            "run",
+            "--policy",
+            "agent-apis",
+            "--allow-host",
+            "x",
+            "--",
+            "true",
+        ],
+        vec![
+            "mvmctl",
+            "run",
+            "--plan",
+            "/tmp/r.json",
+            "--env",
+            "A=1",
+            "--",
+            "true",
+        ],
+        vec![
+            "mvmctl", "machine", "run", "--policy", "offline", "--image", "alpine", "--", "true",
+        ],
+    ] {
+        Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+    }
+}
+
+#[test]
+fn a_resolved_manifest_excludes_every_policy_flag() {
+    for flag in [
+        vec!["--policy", "x"],
+        vec!["--net"],
+        vec!["--network-preset", "registries"],
+        vec!["--allow-host", "a.test"],
+        vec!["--allow-endpoint", "GET https://a.test/**"],
+        vec!["--peer", "db:5432=10.0.0.2:5432"],
+        vec!["--cpu-limit", "500"],
+        vec!["--grants-file", "/tmp/g.json"],
+        vec!["--mount", "/a:/b"],
+        vec!["--allow-env", "LD_PRELOAD"],
+        vec!["--secret", "gh"],
+    ] {
+        let mut argv = vec!["mvmctl", "run", "--plan", "/tmp/r.json"];
+        argv.extend(flag.iter().copied());
+        argv.extend(["--", "true"]);
+        let err =
+            Cli::try_parse_from(&argv).expect_err("--plan must refuse every other policy flag");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::ArgumentConflict,
+            "{flag:?}"
+        );
     }
 }
 

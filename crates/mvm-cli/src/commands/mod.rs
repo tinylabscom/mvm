@@ -22,6 +22,7 @@ mod manifest;
 mod ops;
 mod pack;
 mod plugin;
+mod policy;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
 /// (`try_warm_claim`) the transient `machine run` path
 /// (`crate::exec::run_inner`) calls to claim a warm standby (auto-named,
@@ -244,6 +245,9 @@ pub(in crate::commands) enum Commands {
     /// Manage trusted bundle publishers
     #[command(display_order = 13)]
     Trust(trust::Args),
+    /// Resolve, show, validate and compare authored policy profiles
+    #[command(display_order = 13)]
+    Policy(policy::Args),
     /// Inspect, park, and resume durable agent sessions
     #[command(name = "agent-session", display_order = 12)]
     AgentSession(agent_session::Args),

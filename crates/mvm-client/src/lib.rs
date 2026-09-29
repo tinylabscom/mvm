@@ -56,6 +56,7 @@ pub mod instruction_trust;
 pub mod inventory;
 pub mod launch;
 pub mod local;
+pub mod policy_profiles;
 pub mod profile;
 pub mod readiness;
 pub mod registration;
