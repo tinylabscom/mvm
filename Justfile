@@ -242,20 +242,6 @@ test FILTER="":
     ./scripts/cargo-fast.sh nextest run --workspace 2>&1 | tee target/nextest/last-run.log
     fi
 
-# Run tests with sccache caching the workspace crates.
-# Usage: just test-cached [FILTER]
-#   FILTER: optional test filter expression
-test-cached FILTER="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
-    if [ -n "{{ FILTER }}" ]; then
-    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace -E 'test({{ FILTER }})' 2>&1 | tee target/nextest/last-run.log
-    else
-    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
-    fi
-    @sccache --show-stats
-
 # Run tests matching a filter expression (alias for test with filter)
 # Usage: just test-filter FILTER
 # Run a single crate's tests

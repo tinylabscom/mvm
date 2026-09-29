@@ -2317,8 +2317,10 @@ resume` takes a `current_head` and refuses when it differs from the
       STILL OPEN: Phase 3 (phantom build.rs tests — the `MVM_LIBKRUN_HEADER`
       half is closed, its probe is deleted), Phase 4 (dead crate edges;
       `deps_audit` and the tree-sitter grammars off the serial path; the
-      `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
-      hygiene). The pinned zig now follows the feature: eight of `ci.yml`'s nine
+      `mvm-hostd` audit cluster), Phase 5 worktree hygiene. The measured
+      sccache experiment is closed: its machine-wide wrapper and the optional
+      `test-cached` recipe were removed after repeated failures and negligible
+      cross-worktree reuse. The pinned zig now follows the feature: eight of `ci.yml`'s nine
       `install-zigbuild` steps are gone, each job traced to what it runs first,
       and that trace caught `just bdd-live-ci` booting real microVMs without the
       payload. Still open: the missing `rerun-if-env-changed` on
