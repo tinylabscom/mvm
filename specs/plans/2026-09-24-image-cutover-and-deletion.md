@@ -440,10 +440,29 @@ need an owner in `mvm-images` first.
       rollback must remain a lock-file change to a verified existing
       release. Normal host-only changes must not rebuild an image, and an
       image-only change must not require a CLI release.
+      *Measured 2026-09-28 on the v0.18.3 release (the first with no image
+      construction, mirroring or re-signing):* the Linux documented-surface
+      lane runs ~148 min (build 11.7, a verified 8.7-min builder-image
+      fetch, 22.1-min SDK-sidecar pair build, 39.4-min dev-image pair
+      build, 65.4-min suite, 339/340 scenarios green) against the
+      2026-09-15 baseline's 114 min and rc.2's ~136 min; the release publishes CLI bytes only (storage and
+      download volume in `specs/sprint/delivery/3366-w8-remeasure.md`).
+      The gate itself is missed and stays open — the Linux lane still
+      pair-builds the SDK sidecar (~24 min) and the dev default-tenant
+      image (~42 min) because neither is fetchable from the set yet — and
+      is carried by `specs/plans/2026-09-27-release-e2e-under-image-target.md`.
+      Everything else in the box holds: rollback stayed a lock edit (W7.3),
+      the image-only `image-set/v0.1.1` advance needed no CLI release
+      (#3677), and no host-only change rebuilds an image (Waves 1+2).
+      Evidence: `specs/sprint/delivery/3366-w8-remeasure.md`.
 - [ ] **Suite sharding (separate PR).** If the 313-scenario
       documented-surface suite's live phase remains the release critical
       path after the image legs are gone, shard it per the parent plan —
       this is intentionally not bundled with any wave above.
+      *2026-09-28:* the suite phase is 65.4 min of the Linux lane's ~148 —
+      the smaller half; sharding remains the lever once the image legs
+      above are gone, tracked in
+      `specs/plans/2026-09-27-release-e2e-under-image-target.md`.
 
 After Wave 4, `mvm-images`' source-drift gate (`sources/files.tsv`) still
 maps its images to `mvm`'s `nix/images/`; the first `mvm` pin advance past
