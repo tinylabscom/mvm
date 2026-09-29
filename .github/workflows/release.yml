@@ -602,6 +602,7 @@ jobs:
     if: ${{ github.event_name == 'push' && needs.promote-release.result == 'success' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
+      actions: write
       contents: write
       pull-requests: write
     env:
@@ -644,7 +645,7 @@ jobs:
           git -C "$PIN_WORKTREE" add install.sh nix/prebuilt-release.nix
           git -C "$PIN_WORKTREE" commit -m "chore: propose ${TAG_NAME} prebuilt archive pins"
           git -C "$PIN_WORKTREE" push --force-with-lease origin "$branch"
-          body="Pins the installer and Nix prebuilt package to ${TAG_NAME}. The archive hashes came from the checksum manifest signed by this repository's release workflow for that exact tag, after the release passed its first-run smoke and was promoted. Dispatch CI for this branch before merge; a PR opened with the workflow token does not start pull-request workflows."
+          body="Pins the installer and Nix prebuilt package to ${TAG_NAME}. The archive hashes came from the checksum manifest signed by this repository's release workflow for that exact tag, after the release passed its first-run smoke and was promoted. CI is explicitly dispatched for this branch because a PR opened with the workflow token does not start pull-request workflows."
           existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"
           if [ -n "$existing" ]; then
             gh pr edit "$existing" --body "$body"
@@ -652,3 +653,4 @@ jobs:
             gh pr create --base main --head "$branch" \
               --title "chore: propose ${TAG_NAME} prebuilt archive pins" --body "$body"
           fi
+          gh workflow run ci.yml --ref "$branch"
