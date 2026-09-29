@@ -240,17 +240,32 @@ fn claim10_decision(
     }
 }
 
-/// Capture per-secret audit metadata (name + auth-type) for every header that
-/// carries a known placeholder — BEFORE substitution consumes the request.
-/// `resolve_meta` touches no secret value, so this is claim-13 safe.
+/// Capture per-secret audit metadata and the placeholder for every request
+/// position carrying a known token, before substitution consumes the request.
+/// `resolve_meta` touches no secret value.
 pub(crate) fn collect_substituted_meta(
     endpoint: &NetworkEndpoint<'_>,
     placeholders: &[LocatedPlaceholder],
-) -> Vec<(String, AuthType)> {
+) -> Vec<SubstitutedSecret> {
     placeholders
         .iter()
-        .filter_map(|located| endpoint.resolve_meta(&located.placeholder))
+        .filter_map(|located| {
+            endpoint
+                .resolve_meta(&located.placeholder)
+                .map(|(name, auth_type)| SubstitutedSecret {
+                    name,
+                    auth_type,
+                    placeholder: located.placeholder.clone(),
+                })
+        })
         .collect()
+}
+
+/// One substituted secret in a prepared flow.
+pub(super) struct SubstitutedSecret {
+    pub(super) name: String,
+    pub(super) auth_type: AuthType,
+    pub(super) placeholder: String,
 }
 
 /// Security state retained from request preparation through response
@@ -259,7 +274,7 @@ pub(crate) fn collect_substituted_meta(
 pub(super) struct PreparedFlow {
     pub(super) request: Option<PreparedRequest>,
     pub(super) destination: Option<String>,
-    pub(super) substituted: Vec<(String, AuthType)>,
+    pub(super) substituted: Vec<SubstitutedSecret>,
     pub(super) replacement_flow: ReplacementFlow,
     pub(super) replacement_proofs: Vec<mvm_core::policy::RewriteProofRecord>,
     pub(super) redaction_hits: RedactionHits,
@@ -522,6 +537,30 @@ mod tests {
         reg.mint(bearer_ref("openai", &["api.openai.com"]))
             .as_str()
             .to_string()
+    }
+
+    #[test]
+    fn metadata_keeps_placeholders_from_every_approved_request_position() {
+        let (_dir, resolver) = resolver_with("openai", "sk-live-zzz");
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry.mint(bearer_ref("openai", &["api.openai.com"]));
+        let endpoint = NetworkEndpoint::new(&registry, &resolver);
+        let token = placeholder.as_str();
+        let url = format!("https://api.openai.com/{token}?key={token}");
+        let basic = B64.encode(format!("user:{token}"));
+        let headers = vec![
+            ("authorization".into(), format!("Basic {basic}")),
+            ("x-api-key".into(), token.to_string()),
+        ];
+        let located = locate_placeholders(&url, &headers);
+
+        let substituted = collect_substituted_meta(&endpoint, &located);
+        assert_eq!(substituted.len(), 4);
+        for secret in substituted {
+            assert_eq!(secret.name, "openai");
+            assert_eq!(secret.auth_type, AuthType::Bearer);
+            assert_eq!(secret.placeholder, token);
+        }
     }
 
     /// A placeholder is found wherever the body is cut, including cuts that

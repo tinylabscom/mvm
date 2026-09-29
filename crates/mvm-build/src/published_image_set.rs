@@ -208,6 +208,13 @@ impl PublishedImageSet {
 
     /// The cache members of this set are installed into, keyed by the digest
     /// of the root they were verified against.
+    /// The verified root manifest. Read-only: every consumer that selects
+    /// members goes through this type's methods so production selection
+    /// rules (build mode, target) live in one place.
+    pub fn manifest(&self) -> &ImageSetManifest {
+        &self.manifest
+    }
+
     pub fn member_cache(&self) -> SetMemberCache {
         SetMemberCache::for_root(self.root.clone())
     }

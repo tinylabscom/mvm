@@ -1,0 +1,11 @@
+description = "Package registries: npm, crates.io and PyPI, with their download hosts."
+
+[network]
+allow = [
+  "registry.npmjs.org:443",
+  "crates.io:443",
+  "static.crates.io:443",
+  "index.crates.io:443",
+  "pypi.org:443",
+  "files.pythonhosted.org:443",
+]

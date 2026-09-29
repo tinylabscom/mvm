@@ -189,7 +189,7 @@ curl: (7) CONNECT tunnel failed, response 403
 [mvm]   10.0.0.5:8080          1×  an RFC1918 private range — denied by default; admitted only by naming it exactly: --allow-host 10.0.0.5:8080
 [mvm] to allow what the allow-list refused, re-run with:
 [mvm]   --allow-host example.com:443
-[mvm] or, for a machine created with `machine create --manifest`, in its mvm.toml:
+[mvm] or, in the project's mvm.toml (read by `run`, `machine run` and `machine create` alike):
 [mvm]   [network]
 [mvm]   allow_hosts = ["example.com:443"]
 [mvm] denied by default, and admitted only by naming each exactly — do so only if the workload should reach it:

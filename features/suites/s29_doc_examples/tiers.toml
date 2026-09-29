@@ -586,6 +586,10 @@ tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
+path = "policy"
+tier = "exec"
+
+[[command]]
 path = "prepare"
 tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
@@ -633,10 +637,6 @@ reason = "renamed to `build validate`; the reference records the rename"
 [[absent]]
 path = "dev"
 reason = "removed with `dev import-image`; the airgap and release guides describe its removal"
-
-[[absent]]
-path = "policy"
-reason = "deliberately not a public verb — the reference says policy authoring lives in mvmd"
 
 [[absent]]
 path = "addon"
@@ -739,3 +739,7 @@ reason = "\"any mvmctl command that signs to initialize\" — a noun phrase"
 [[prose]]
 text = "mvmctl template init"
 reason = "correctly describes a removed mode in the past tense: \"was a `mvmctl template init --vm` mode that no longer exists\""
+
+[[prose]]
+text = "mvmctl surface"
+reason = "\"tenant policy verbs are not mvmctl surface\" — a noun, not an invocation"

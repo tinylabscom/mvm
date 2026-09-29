@@ -500,6 +500,9 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
         crate::commands::vm::exec::Inference::ExplicitOnly,
     )?
     .announce();
+    // Before the flake is built into a slot below: the project's `[policy]`
+    // table is read from the flake directory the run names.
+    crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
     let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
         let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
         args.run.manifest = Some(slot_hash.clone());
@@ -521,6 +524,14 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     tracing::debug!(?network_mode, "derived machine networking");
 
     if args.entrypoint {
+        if let Some(policy) = &args.run.applied_policy
+            && (!policy.shares.is_empty() || policy.resources.cpu_millicores.is_some())
+        {
+            anyhow::bail!(
+                "machine run --entrypoint cannot yet carry policy shares or a CPU-share \
+                 ceiling through entrypoint admission; use machine run with an argv"
+            );
+        }
         return run_entrypoint_action(args, resolved_flake_slot);
     }
 
