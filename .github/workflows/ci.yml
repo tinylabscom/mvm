@@ -38,6 +38,7 @@ jobs:
       code: ${{ steps.validate.outputs.code }}
       nix: ${{ steps.validate.outputs.nix }}
       architecture: ${{ steps.validate.outputs.architecture }}
+      guest_image: ${{ steps.validate.outputs.guest_image }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -55,7 +56,7 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            for output in code nix architecture; do
+            for output in code nix architecture guest_image; do
               echo "${output}=true" >> "$GITHUB_OUTPUT"
             done
           }
@@ -127,6 +128,18 @@ jobs:
             echo "nix=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # What the guest-image-boot lane builds: the guest binaries (the
+          # same crates the SDK sidecar fingerprint hashes), the guest
+          # recipes under nix/, and the workspace toolchain/lock that pin
+          # their build. Host-only Rust (CLI, hostd, client) changes nothing
+          # the lane compiles, so it skips — the lane still runs for every
+          # change that can alter the guest bytes.
+          if grep -zE '^(crates/(mvm-contract|mvm-core|mvm-agentd|mvm-host-services)/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|nix/|build\.rs$)' "$CHANGED_FILE" >/dev/null; then
+            echo "guest_image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "guest_image=false" >> "$GITHUB_OUTPUT"
+          fi
+
           if grep -zE '^(crates/|src/|tests/|Cargo\.|\.cargo/|rust-toolchain|scripts/check-no-orchestration-server\.sh$|\.github/workflows/(ci|architecture)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "architecture=true" >> "$GITHUB_OUTPUT"
           else
@@ -139,6 +152,7 @@ jobs:
           CODE: ${{ steps.decide.outputs.code }}
           NIX: ${{ steps.decide.outputs.nix }}
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
+          GUEST_IMAGE: ${{ steps.decide.outputs.guest_image }}
         run: |
           set -euo pipefail
           validate() {
@@ -151,6 +165,7 @@ jobs:
           validate code "$CODE"
           validate nix "$NIX"
           validate architecture "$ARCHITECTURE"
+          validate guest_image "$GUEST_IMAGE"
 
   lint-core:
     name: Lint core (fmt + clippy)
@@ -1290,7 +1305,13 @@ jobs:
     # overlapping store paths. `Test` owns both results, so parallelism does
     # not weaken the merge gate.
     needs: [scope]
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    # Only changes that can alter the guest bytes (the fingerprint crates,
+    # the nix/ guest recipes, the workspace toolchain and lock) build here;
+    # host-only Rust, docs and workflow PRs skip the 31-minute pair build,
+    # the same path-scope contract the boot-latency lane already uses.
+    # workflow_dispatch always runs. The job stays a required check: a skip
+    # is a reported result, not an absent one.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'merge_group' && needs.scope.outputs.guest_image == 'true')
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
