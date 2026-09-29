@@ -4816,6 +4816,19 @@ writes the plan:
       collection gate).
 
 
+## 2026-09-28 Extended CI cleanup — #3773
+
+- [x] Reproduce and fix EPERM cleanup after a child exits, with live-child refusal intact.
+- [x] Pass host workspace Clippy and both direct lock-holder cleanup attempts.
+- [ ] Complete workspace and Linux builder checks, live SDK/release checks, merge and closure.
+
+See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
+
+Extended CI update (#3773): all 47 updated integration regressions and final host
+workspace Clippy pass. Full
+workspace validation is retrying with bounded concurrency after an unchanged
+agent deadline test failed; Linux builder initialization remains blocked.
+
 ## 2026-09-28 Security evidence freshness — #3750
 
 - [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.

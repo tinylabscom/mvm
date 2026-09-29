@@ -4,6 +4,7 @@ Last updated: 2026-09-28
 
 ## In progress
 
+- [ ] **Extended CI process cleanup — #3773.** All 47 integration regressions and final host workspace Clippy pass; full tests are pending. Linux builder initialization is blocked; the final live Firecracker lane remains active. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
 - [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
 - [ ] **Agent efficiency overhaul.**
