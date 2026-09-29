@@ -376,7 +376,8 @@
         "attached",
         "command",
         "scrollback_bytes",
-        "session_id"
+        "session_id",
+        "shareable"
       ],
       "properties": {
         "attached": {
@@ -423,6 +424,10 @@
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0
+        },
+        "shareable": {
+          "description": "Whether plain `machine console` should treat this as the shared shell.",
+          "type": "boolean"
         }
       },
       "additionalProperties": false
@@ -3628,6 +3633,7 @@
               "type": "object",
               "required": [
                 "data_port",
+                "displaced_existing",
                 "replay_bytes",
                 "session_id"
               ],
@@ -3636,6 +3642,9 @@
                   "type": "integer",
                   "format": "uint32",
                   "minimum": 0.0
+                },
+                "displaced_existing": {
+                  "type": "boolean"
                 },
                 "replay_bytes": {
                   "type": "integer",

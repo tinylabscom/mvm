@@ -452,6 +452,7 @@ pub(crate) fn handle_console_attach(
                 session_id,
                 data_port: ticket.data_port,
                 replay_bytes: ticket.replay_bytes,
+                displaced_existing: ticket.displaced_existing,
             }
         }
         Err(mvm_agentd::console::ConsoleError::Busy(session_id)) => {
@@ -497,6 +498,7 @@ fn console_session_info(
         session_id: summary.session_id,
         command: summary.command,
         attached: summary.attached,
+        shareable: summary.shareable,
         exit_code: summary.exit_code,
         scrollback_bytes: summary.scrollback_bytes,
         detached_secs: summary.detached_for.map(|d| d.as_secs()),
