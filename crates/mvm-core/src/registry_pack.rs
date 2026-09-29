@@ -8,7 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -23,6 +23,10 @@ pub const PACK_LOCK_SCHEMA_VERSION: u32 = 1;
 pub const REGISTRY_PACK_MANIFEST_SCHEMA_VERSION: u32 = 1;
 /// Current publisher trust-policy schema.
 pub const REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION: u32 = 1;
+
+const REGISTRY_PAYLOAD_DIR_NAME: &str = "payload";
+const REGISTRY_MANIFEST_FILE_NAME: &str = "manifest.json";
+const REGISTRY_SIGNATURE_FILE_NAME: &str = "manifest.sigstore.json";
 
 /// Errors produced while parsing registry identities or enforcing a lockfile.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -570,6 +574,42 @@ impl VerifiedRegistryPack {
     }
 }
 
+/// A registry pack published beneath its exact manifest digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledRegistryPack {
+    root: PathBuf,
+}
+
+impl InstalledRegistryPack {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn payload_root(&self) -> PathBuf {
+        self.root.join(REGISTRY_PAYLOAD_DIR_NAME)
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RegistryPackInstallError {
+    #[error(transparent)]
+    Verification(#[from] RegistryPackVerificationError),
+    #[error(transparent)]
+    Cache(#[from] crate::pack_cache::PackCacheError),
+    #[error("registry-pack cache i/o error at {path}: {source}")]
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
+}
+
+fn install_io_at(path: &Path) -> impl Fn(std::io::Error) -> RegistryPackInstallError + '_ {
+    move |source| RegistryPackInstallError::Io {
+        path: path.display().to_string(),
+        source,
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum RegistryPackVerificationError {
     #[error(transparent)]
@@ -756,6 +796,132 @@ pub fn verify_registry_pack_contents(
     refuse_undeclared_payload_paths(root, root, &declared)
 }
 
+/// Verify and atomically publish a registry pack beneath its manifest digest.
+///
+/// A valid existing entry is reused after exact sidecar and payload
+/// re-verification. A poisoned entry is removed and replaced by a fully
+/// verified same-filesystem quarantine directory in one rename.
+pub fn install_registry_pack_at(
+    cache_root: &Path,
+    staged_root: &Path,
+    verified: &VerifiedRegistryPack,
+) -> Result<InstalledRegistryPack, RegistryPackInstallError> {
+    verify_registry_pack_contents(verified, staged_root)?;
+    let final_dir = cache_root.join(verified.manifest_sha256().as_str());
+    if std::fs::symlink_metadata(&final_dir).is_ok() {
+        if cached_registry_pack_is_valid(&final_dir, verified) {
+            return Ok(InstalledRegistryPack { root: final_dir });
+        }
+        remove_registry_cache_entry(&final_dir)?;
+    }
+
+    let publish =
+        crate::pack_cache::atomically_populate_dir_at(cache_root, &final_dir, |quarantine| {
+            populate_registry_quarantine(quarantine, staged_root, verified)
+        });
+    match publish {
+        Ok(()) => Ok(InstalledRegistryPack { root: final_dir }),
+        Err(_) if cached_registry_pack_is_valid(&final_dir, verified) => {
+            Ok(InstalledRegistryPack { root: final_dir })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Verify and atomically publish a registry pack in the configured MVM cache.
+pub fn install_registry_pack(
+    staged_root: &Path,
+    verified: &VerifiedRegistryPack,
+) -> Result<InstalledRegistryPack, RegistryPackInstallError> {
+    install_registry_pack_at(
+        &crate::config::registry_pack_cache_dir(),
+        staged_root,
+        verified,
+    )
+}
+
+fn populate_registry_quarantine(
+    quarantine: &Path,
+    staged_root: &Path,
+    verified: &VerifiedRegistryPack,
+) -> Result<(), RegistryPackInstallError> {
+    let payload_root = quarantine.join(REGISTRY_PAYLOAD_DIR_NAME);
+    std::fs::create_dir_all(&payload_root).map_err(install_io_at(&payload_root))?;
+    for file in &verified.manifest().files {
+        let source = staged_root.join(&file.path);
+        let destination = payload_root.join(&file.path);
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(install_io_at(parent))?;
+        }
+        std::fs::copy(&source, &destination).map_err(install_io_at(&source))?;
+    }
+    let manifest_path = quarantine.join(REGISTRY_MANIFEST_FILE_NAME);
+    std::fs::write(&manifest_path, verified.manifest_bytes())
+        .map_err(install_io_at(&manifest_path))?;
+    let signature_path = quarantine.join(REGISTRY_SIGNATURE_FILE_NAME);
+    std::fs::write(&signature_path, verified.signature_bundle())
+        .map_err(install_io_at(&signature_path))?;
+    verify_registry_pack_contents(verified, &payload_root)?;
+    Ok(())
+}
+
+fn cached_registry_pack_is_valid(root: &Path, verified: &VerifiedRegistryPack) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(root) else {
+        return false;
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    let mut names = BTreeSet::new();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            return false;
+        };
+        let Ok(file_type) = entry.file_type() else {
+            return false;
+        };
+        let expected_type = if name == REGISTRY_PAYLOAD_DIR_NAME {
+            file_type.is_dir() && !file_type.is_symlink()
+        } else {
+            file_type.is_file() && !file_type.is_symlink()
+        };
+        if !expected_type {
+            return false;
+        }
+        names.insert(name);
+    }
+    let expected = BTreeSet::from([
+        REGISTRY_PAYLOAD_DIR_NAME.to_string(),
+        REGISTRY_MANIFEST_FILE_NAME.to_string(),
+        REGISTRY_SIGNATURE_FILE_NAME.to_string(),
+    ]);
+    if names != expected {
+        return false;
+    }
+    let manifest_matches = std::fs::read(root.join(REGISTRY_MANIFEST_FILE_NAME))
+        .is_ok_and(|bytes| bytes == verified.manifest_bytes());
+    let signature_matches = std::fs::read(root.join(REGISTRY_SIGNATURE_FILE_NAME))
+        .is_ok_and(|bytes| bytes == verified.signature_bundle());
+    manifest_matches
+        && signature_matches
+        && verify_registry_pack_contents(verified, &root.join(REGISTRY_PAYLOAD_DIR_NAME)).is_ok()
+}
+
+fn remove_registry_cache_entry(path: &Path) -> Result<(), RegistryPackInstallError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(install_io_at(path))?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        std::fs::remove_dir_all(path).map_err(install_io_at(path))
+    } else {
+        std::fs::remove_file(path).map_err(install_io_at(path))
+    }
+}
+
 fn refuse_undeclared_payload_paths(
     root: &Path,
     directory: &Path,
@@ -886,6 +1052,7 @@ fn invalid_reference(value: &str, reason: &str) -> RegistryPackError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_env::TestEnv;
 
     const MANIFEST: &[u8] = br#"{"schema_version":1,"name":"python"}"#;
 
@@ -1289,5 +1456,94 @@ mod tests {
             error,
             RegistryPackVerificationError::NonRegularPayloadPath { .. }
         ));
+    }
+
+    #[test]
+    fn registry_pack_install_is_content_addressed_and_preserves_trust_sidecars() {
+        let cache = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let pack = staged.path().join("pack");
+        std::fs::create_dir(&pack).unwrap();
+        std::fs::write(pack.join("profile.toml"), b"profile").unwrap();
+        let verified = verified_payload();
+
+        let installed = install_registry_pack_at(cache.path(), staged.path(), &verified).unwrap();
+
+        assert_eq!(
+            installed.root(),
+            cache.path().join(verified.manifest_sha256().as_str())
+        );
+        assert_eq!(
+            std::fs::read(installed.payload_root().join("pack/profile.toml")).unwrap(),
+            b"profile"
+        );
+        assert_eq!(
+            std::fs::read(installed.root().join(REGISTRY_MANIFEST_FILE_NAME)).unwrap(),
+            verified.manifest_bytes()
+        );
+        assert_eq!(
+            std::fs::read(installed.root().join(REGISTRY_SIGNATURE_FILE_NAME)).unwrap(),
+            verified.signature_bundle()
+        );
+    }
+
+    #[test]
+    fn registry_pack_install_refuses_before_touching_the_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let pack = staged.path().join("pack");
+        std::fs::create_dir(&pack).unwrap();
+        std::fs::write(pack.join("profile.toml"), b"tampered").unwrap();
+        let verified = verified_payload();
+
+        let error = install_registry_pack_at(cache.path(), staged.path(), &verified).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RegistryPackInstallError::Verification(
+                RegistryPackVerificationError::PayloadSizeMismatch { .. }
+            )
+        ));
+        assert_eq!(std::fs::read_dir(cache.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn registry_pack_install_replaces_a_poisoned_cached_copy() {
+        let cache = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let pack = staged.path().join("pack");
+        std::fs::create_dir(&pack).unwrap();
+        std::fs::write(pack.join("profile.toml"), b"profile").unwrap();
+        let verified = verified_payload();
+        let installed = install_registry_pack_at(cache.path(), staged.path(), &verified).unwrap();
+        let cached_profile = installed.payload_root().join("pack/profile.toml");
+        std::fs::write(&cached_profile, b"poison!").unwrap();
+
+        let repaired = install_registry_pack_at(cache.path(), staged.path(), &verified).unwrap();
+
+        assert_eq!(repaired.root(), installed.root());
+        assert_eq!(std::fs::read(cached_profile).unwrap(), b"profile");
+        verify_registry_pack_contents(&verified, &repaired.payload_root()).unwrap();
+    }
+
+    #[test]
+    fn configured_registry_pack_install_honors_mvm_home() {
+        let home = tempfile::tempdir().unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        let pack = staged.path().join("pack");
+        std::fs::create_dir(&pack).unwrap();
+        std::fs::write(pack.join("profile.toml"), b"profile").unwrap();
+        let verified = verified_payload();
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", home.path());
+
+        let installed = install_registry_pack(staged.path(), &verified).unwrap();
+
+        assert_eq!(
+            installed.root(),
+            home.path()
+                .join("cache/registry-packs")
+                .join(verified.manifest_sha256().as_str())
+        );
     }
 }

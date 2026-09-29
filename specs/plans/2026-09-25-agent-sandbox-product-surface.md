@@ -209,6 +209,8 @@ Security-bearing gaps first, then the foundations the UX needs:
         keyless verification in `mvm-core`; publication workflow remains
   - [x] exact signed-file payload verification that refuses missing, tampered,
         undeclared, non-regular, and symlinked content before installation
+  - [x] content-addressed local installation with exact trust sidecars, atomic
+        same-filesystem promotion, verify-on-reuse, and poisoned-entry repair
 - [ ] `mvmctl search`, `pull ns/name[@ver]`, `run --profile ns/name -- CMD`, `pack ls|rm|update`
 - [ ] lockfile with digest pins; admission refuses drift (signed-bundle path, claim 9)
   - [x] strict `namespace/name[@version]` references and a versioned lockfile
