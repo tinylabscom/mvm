@@ -24,6 +24,15 @@
       fetch/publication, CLI verbs, profile safety/composition, admission
       binding, and initial packs remain open.
 
+- [ ] **Complete capability and client documentation — issue #3727.**
+      Corrections for the stale `deploy` CLI denial and durable-session status
+      are drafted with two passing documentation regression tests; workspace
+      test validation remains pending. Lineage recovery, workload provenance,
+      and durable agent sessions now have navigable guides and three further
+      passing documentation regression tests. All eight named capabilities
+      now link to feature pages with current limits. Client, authoring, and
+      generated schema documentation remains open.
+
 - [ ] **Document the AI coding workflow and slim AGENTS.md to a rule index.**
       `specs/plans/2026-09-28-ai-coding-workflow-docs.md`. The issue-to-PR
       playbook for agent-driven work now lives at

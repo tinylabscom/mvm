@@ -139,6 +139,10 @@ struct SessionRecord {
     /// with older session records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_activity_unix_secs: Option<u64>,
+    /// Digest of the builder boot payload the session booted with. Absent for a
+    /// session an `mvmctl` predating the payload started.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boot_payload_digest: Option<String>,
 }
 
 fn session_record_path() -> PathBuf {
@@ -236,7 +240,7 @@ fn run_start(args: StartArgs) -> Result<()> {
     // folded into `MVM_BUILDER_BACKEND` at startup, so the env reflects it).
     let backend = persistent_backend(resolve_env_override())?;
 
-    if read_session_record().is_ok() {
+    if current_session_record().is_some() {
         bail!(
             "a persistent-builder session is already running. \
              Stop it with `mvmctl persistent-builder stop` before starting a new one."
@@ -274,7 +278,7 @@ pub(crate) fn start_session_for_contended_build()
 -> Result<mvm_build::persistent_builder::SessionRecord> {
     // Another process may have published a record between `mvm-build`'s check
     // and this call.
-    if let Ok(existing) = read_session_record() {
+    if let Some(existing) = current_session_record() {
         return Ok(as_build_record(&existing));
     }
 
@@ -301,13 +305,59 @@ fn as_build_record(record: &SessionRecord) -> mvm_build::persistent_builder::Ses
         disk_transport: record.disk_transport.clone(),
         supervisor_pid: record.supervisor_pid,
         last_activity_unix_secs: record.last_activity_unix_secs,
+        boot_payload_digest: record.boot_payload_digest.clone(),
     }
+}
+
+/// The session this command may use, if there is one. A session left by an
+/// `mvmctl` with other builder binaries is stopped rather than reused: it would
+/// keep running the binaries it booted with.
+fn current_session_record() -> Option<SessionRecord> {
+    let current = mvm_build::builder_boot::current_payload_digest();
+    current_session_record_with_current(current.as_ref().map(|digest| digest.as_str()))
+}
+
+fn current_session_record_with_current(current: Option<&str>) -> Option<SessionRecord> {
+    let record = read_session_record().ok()?;
+    if mvm_build::persistent_builder::session_payload_is_current(
+        record.boot_payload_digest.as_deref(),
+        current,
+    ) {
+        return Some(record);
+    }
+    stop_stale_session_record(&record);
+    None
+}
+
+fn checked_current_session_record() -> Result<SessionRecord> {
+    let current = mvm_build::builder_boot::current_payload_digest();
+    checked_current_session_record_with_current(current.as_ref().map(|digest| digest.as_str()))
+}
+
+fn checked_current_session_record_with_current(current: Option<&str>) -> Result<SessionRecord> {
+    let record = read_session_record()?;
+    if mvm_build::persistent_builder::session_payload_is_current(
+        record.boot_payload_digest.as_deref(),
+        current,
+    ) {
+        return Ok(record);
+    }
+    stop_stale_session_record(&record);
+    read_session_record()
+}
+
+fn stop_stale_session_record(record: &SessionRecord) {
+    eprintln!(
+        "stopping persistent builder {}: it runs other builder binaries than this mvmctl",
+        record.session_id
+    );
+    mvm_build::persistent_builder::stop_session(&as_build_record(record));
 }
 
 /// Extract the host-vm binaries a persistent builder receives at `/mvm-bins`,
 /// and make the tree traversable while the raw input tar is packed.
 fn ensure_persistent_host_bins() -> Result<PathBuf> {
-    let host_bin_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
+    let host_bin_cache = crate::host_binaries::extract::host_bin_cache_root();
     let host_bin_dir = crate::host_binaries::extract::ensure_extracted(&host_bin_cache)
         .context("extracting host-vm binaries for persistent builder")?;
     #[cfg(unix)]
@@ -332,10 +382,10 @@ fn ensure_persistent_host_bins() -> Result<PathBuf> {
 /// can outlive this command.
 fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
     let host_bin_dir = ensure_persistent_host_bins()?;
-    let (kernel, rootfs, closure_nar) =
-        crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
-            .map_err(|e| anyhow::anyhow!(e))
-            .context("resolving the hvf builder image for the persistent builder")?;
+    let image = crate::commands::build::driver_builder_image::resolve_driver_builder_image()
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("resolving the hvf builder image for the persistent builder")?;
+    let (kernel, rootfs, closure_nar) = (image.kernel, image.rootfs, image.closure_nar);
 
     let session_id = format!("{:x}", current_unix_secs());
     let mut vm = mvm_runtime::builder_runner::HvfPersistentHostVm::new(
@@ -368,6 +418,7 @@ fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRe
             .supervisor_pid()
             .unwrap_or_else(|| read_supervisor_pid(session.state_dir())),
         last_activity_unix_secs: Some(current_unix_secs()),
+        boot_payload_digest: session.boot_payload_digest().map(str::to_string),
     };
     // Same reason as the libkrun path: the supervisor must outlive this
     // command, so the handle is leaked rather than dropped.
@@ -399,6 +450,7 @@ fn start_libkrun_persistent(workspace: PathBuf, memory_mib: u32) -> Result<Sessi
         workspace_root: workspace,
         supervisor_pid: read_supervisor_pid(handle.vm_state_dir()),
         last_activity_unix_secs: Some(current_unix_secs()),
+        boot_payload_digest: handle.boot_payload_digest().map(str::to_string),
     };
     leak_handle(handle);
     Ok(record)
@@ -418,7 +470,7 @@ fn leak_handle(handle: PersistentVmHandle) {
 }
 
 fn run_submit(args: SubmitArgs) -> Result<()> {
-    let record = read_session_record()?;
+    let record = checked_current_session_record()?;
     if !supervisor_alive(record.supervisor_pid) {
         let _ = remove_session_record();
         bail!(
@@ -869,6 +921,56 @@ fn _force_read_use(r: HostVmResponseRead) -> HostVmResponseRead {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::sync::{LazyLock, Mutex, MutexGuard};
+
+    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    struct MvmHomeGuard {
+        _lock: MutexGuard<'static, ()>,
+        previous: Option<OsString>,
+    }
+
+    impl MvmHomeGuard {
+        fn set(path: &Path) -> Self {
+            let lock = ENV_LOCK.lock().expect("lock MVM_HOME test guard");
+            let previous = std::env::var_os("MVM_HOME");
+            unsafe {
+                std::env::set_var("MVM_HOME", path);
+            }
+            Self {
+                _lock: lock,
+                previous,
+            }
+        }
+    }
+
+    impl Drop for MvmHomeGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                unsafe {
+                    std::env::set_var("MVM_HOME", previous);
+                }
+            } else {
+                unsafe {
+                    std::env::remove_var("MVM_HOME");
+                }
+            }
+        }
+    }
+
+    fn session_record_fixture(boot_payload_digest: Option<&str>) -> SessionRecord {
+        SessionRecord {
+            session_id: "session-123".to_string(),
+            dispatch_socket_path: PathBuf::from("/tmp/does-not-exist.sock"),
+            disk_transport: None,
+            job_dir: PathBuf::from("/tmp/jobs"),
+            workspace_root: PathBuf::from("/tmp/work"),
+            supervisor_pid: 2_000_000_000,
+            last_activity_unix_secs: Some(1234567890),
+            boot_payload_digest: boot_payload_digest.map(str::to_string),
+        }
+    }
 
     #[test]
     fn persistent_backend_keeps_libkrun_explicit_only() {
@@ -1155,11 +1257,63 @@ mod tests {
             workspace_root: PathBuf::from("/work"),
             supervisor_pid: 4242,
             last_activity_unix_secs: Some(1234567890),
+            boot_payload_digest: Some("a".repeat(64)),
         };
         let json = serde_json::to_vec(&record).expect("serialize");
         let back: SessionRecord = serde_json::from_slice(&json).expect("deserialize");
         assert_eq!(back.session_id, "abc123");
         assert_eq!(back.dispatch_socket_path, PathBuf::from("/tmp/sock"));
         assert_eq!(back.supervisor_pid, 4242);
+        // The digest survives into the copy `mvm-build` reads, which is the
+        // one that decides whether a build may dispatch into the session.
+        assert_eq!(
+            as_build_record(&back).boot_payload_digest,
+            Some("a".repeat(64))
+        );
+    }
+
+    #[test]
+    fn checked_current_session_record_keeps_matching_payload() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let _guard = MvmHomeGuard::set(&scratch.path().join("mvm-home"));
+        write_session_record(&session_record_fixture(Some("current-digest"))).expect("record");
+
+        let record = checked_current_session_record_with_current(Some("current-digest"))
+            .expect("current session");
+        assert_eq!(record.session_id, "session-123");
+    }
+
+    #[test]
+    fn checked_current_session_record_preserves_missing_record_error() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let _guard = MvmHomeGuard::set(&scratch.path().join("mvm-home"));
+
+        let err = checked_current_session_record_with_current(Some("current-digest"))
+            .expect_err("missing record must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no persistent-builder session record"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn checked_current_session_record_rejects_stale_payload_and_clears_record() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let mvm_home = scratch.path().join("mvm-home");
+        let _guard = MvmHomeGuard::set(&mvm_home);
+        write_session_record(&session_record_fixture(Some("stale-digest"))).expect("record");
+
+        let err = checked_current_session_record_with_current(Some("current-digest"))
+            .expect_err("stale record must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("no persistent-builder session record"),
+            "{msg}"
+        );
+        assert!(
+            !session_record_path().exists(),
+            "stale session record should be cleared after stop"
+        );
     }
 }
