@@ -591,11 +591,14 @@ jobs:
       # initramfs the cache already holds, and the test dies on a version
       # mismatch rather than on the missing command — so the real cause appears
       # only in the step's stderr.
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
         with:
           key: test-support
+
+      # The trusted-main cache includes ~/.cargo/bin. Restore it before the
+      # installer so cargo sees the pinned cargo-zigbuild binary and exits
+      # immediately instead of compiling the installer for 7-9 minutes.
+      - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -643,9 +646,11 @@ jobs:
         with:
           packages: lld
 
-      - uses: ./.github/actions/install-zigbuild
-
       - uses: ./.github/actions/rust-cache
+
+      # The workspace cache is also the trusted source of the pinned
+      # cargo-zigbuild binary; restore it before asking cargo to install.
+      - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
@@ -1041,8 +1046,6 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/free-disk
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
