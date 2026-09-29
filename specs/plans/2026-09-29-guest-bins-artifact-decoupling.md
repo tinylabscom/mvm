@@ -49,7 +49,7 @@ boot ABI) keeps the trains safe to version independently.
 - [ ] **The `mkGuest` decision.** `mkGuest` is user-facing API (workload
       authors use it from `mvm`), so it stays there; `mvm-images` vendors its
       image-assembly copy and a fixture test pins the two to the same output
-      for a fixed input. (Alternative, rejected unless the fixture proves
+      for a fixed input. (Alternative, rejected unless the fixture becomes
       painful: keep a narrow nix-lib import — a coupling this plan exists to
       remove.)
 - [ ] **Paired development stays one step.** `mvmctl build guest-bins` writes
