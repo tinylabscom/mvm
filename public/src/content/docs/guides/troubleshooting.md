@@ -400,11 +400,10 @@ loopback, link-local) or names the SSH port, no flag admits it and none is
 offered: the refusal is the boundary working, not a missing grant. A private
 address is denied by default and admitted only by naming the exact address.
 
-No line at all? A run with no egress whatsoever — the default: no `--net`, no
-`--allow-host`, no `--secret`, no published port — starts no network endpoint,
-so the guest has no channel to ask for a destination on and the host never
-decides anything to report. The guest's own error (`Could not resolve host`)
-is the signal there; add `--allow-host HOST:PORT`. Otherwise, notices print
+No `egress blocked` line, but `this run had no network access (the default)`
+after the output? The run had no outbound route or secret — no `--net`,
+`--allow-host`, `--allow-endpoint`, `--peer`, or `--secret` — so it started no network endpoint, and the
+guest had no channel to ask for a destination on. Add `--allow-host HOST:PORT`. Otherwise, notices print
 only for a foreground run and for `mvmctl machine logs -f`; a `--json` run
 carries them in its `egress_denials` array instead. For a run that already ended, `mvmctl explain <run>` lists its
 refusals. The full reason table is in

@@ -40,6 +40,15 @@ test-support = ["mvm-runtime/test-support"]
 # flag parses straight into the one profile table instead of a CLI-side copy.
 # Off by default: an embedder names a profile by value and links no parser.
 clap = ["dep:clap"]
+# Forwards to `mvm-core/manifest-verify`: the in-process Sigstore verifier that
+# checks keyless instruction-file signatures. Without it a keyless signature is
+# reported as uncheckable rather than verified. The feature exists here so the
+# tests that verify a real Sigstore bundle compile only where it is on.
+manifest-verify = ["mvm-core/manifest-verify"]
+# Derive `schemars::JsonSchema` on the instruction trust policy types and build
+# the `emit_instruction_trust_schema` bin. Off by default so no shipped closure
+# carries schemars, mirroring the other crates' `schema` features.
+schema = ["dep:schemars"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["client"] }
@@ -118,6 +127,17 @@ mvm-http = { workspace = true }
 # `clap` feature only. Already in the mvmctl closure through mvm-cli, which is
 # the one crate that turns the feature on.
 clap = { workspace = true, optional = true }
+# Instruction-file provenance: include globs (already in this crate's closure
+# through mvm-sdk) and the TOML trust policy (through mvm-core).
+globset = { workspace = true }
+toml = { workspace = true }
+# Only under `schema`; 0.8 matches the version every other crate pins.
+schemars = { version = "0.8", optional = true }
+
+[[bin]]
+name = "emit_instruction_trust_schema"
+path = "src/bin/emit_instruction_trust_schema.rs"
+required-features = ["schema"]
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }

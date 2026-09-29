@@ -134,13 +134,28 @@ cp target/release/mvmctl ~/.local/bin/
 cargo install mvmctl
 ```
 
-## Optional Nix Package
+## Optional Nix Packages
 
 This is only for users who already choose to use Nix as an install
 frontend. It is not the beginner path, and mvm does not require Nix on
 the host for normal use.
 
-The repo flake exposes a source-built host package:
+The repository root exposes a release binary pinned by archive hash. Its pin is
+updated by a pull request after a release passes the fresh-install smoke test;
+the update job verifies the release workflow's signature on the checksum
+manifest before taking any hash from it:
+
+```bash
+nix run github:tinylabscom/mvm#prebuilt -- --version
+nix profile add github:tinylabscom/mvm#prebuilt
+```
+
+In a local checkout, use `nix run .#prebuilt`. The package preserves the
+release archive's host helpers and assets next to `mvmctl`, as the downloaded
+installer does. It is available for Apple Silicon macOS and x86-64/aarch64
+Linux; there is no published Intel macOS archive to pin.
+
+The `nix/` flake remains the source-built host package:
 
 ```bash
 nix run github:tinylabscom/mvm?dir=nix
@@ -170,9 +185,8 @@ That package uses pinned, source-built upstream `libkrunfw` and `libkrun`
 recipes. It is not the default package, and it does not change the binary-first
 install model.
 
-If a future package-manager expression installs release binaries, it must stay
-separate from this source-built package and preserve release signature/checksum
-verification.
+The two outputs are separate: `#prebuilt` follows the reviewed, signed-release
+hash pin, while `nix/#mvmctl` builds the checkout's source.
 
 ## Updating
 

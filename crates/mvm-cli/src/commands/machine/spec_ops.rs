@@ -1,5 +1,26 @@
 use super::*;
 
+pub(super) fn persistent_workload_dir_for_run(args: &MachineRunArgs) -> Result<Option<String>> {
+    mvm_client::instruction_trust::gate::local_workload_dir(
+        args.run.flake.as_deref(),
+        args.run.manifest.as_deref(),
+    )
+    .map(|path| {
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir()
+                .context("resolving the current directory for the persistent workload source")?
+                .join(path)
+        };
+        Ok(std::fs::canonicalize(&absolute)
+            .unwrap_or(absolute)
+            .display()
+            .to_string())
+    })
+    .transpose()
+}
+
 pub(super) fn create_machine(args: MachineCreateArgs) -> Result<()> {
     let json = args.json;
     let force = args.force;

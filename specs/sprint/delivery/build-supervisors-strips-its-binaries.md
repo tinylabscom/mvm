@@ -19,5 +19,5 @@ and 0 with it, and a full `just build-supervisors --release` is clean.
 Not changed, and worth a follow-up decision: `release-build` and
 `release-build-target` are plain `cargo build --release` and hit the same
 defect on a macOS host. They were left alone because setting `RUSTC_WRAPPER`
-there displaces a globally configured `sccache`, which is a trade the release
-lanes should make deliberately rather than inherit from this fix.
+there displaces any globally configured compiler wrapper, which is a trade the
+release lanes should make deliberately rather than inherit from this fix.

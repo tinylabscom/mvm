@@ -190,11 +190,11 @@ populated it. Steady state after that is unchanged.
       The target directory's full path is part of the key, and every worktree
       has its own, so cross-worktree dedup cannot happen — `basedirs` is
       necessary but not sufficient, and the config's "same target-directory
-      *name*" condition understates it. What sccache actually buys here is
+      *name*" condition understates it. What sccache actually bought here was
       re-populating one checkout after `cargo clean`; within a live target dir
-      cargo already caches deps. The Justfile comment claiming cross-worktree
-      hits has been corrected. Whether to keep the wrapper at all is now a
-      decision with numbers behind it rather than an assumption.
+      cargo already caches deps. The machine-wide wrapper and the optional
+      `test-cached` recipe were removed on 2026-09-28 after repeated wrapper
+      failures outweighed that narrow benefit.
 - [~] **Phase 5 — worktree hygiene, partly done.** 49 worktrees / 261 GB at the
       time of measurement. `just worktrees-prune APPLY=1` reclaimed 5 clean
       checkouts. Five more sit on branches already merged into main — including
