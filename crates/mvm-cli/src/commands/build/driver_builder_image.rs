@@ -6,7 +6,6 @@
 //! `ensure_builder_vm_image`, the same cache-contract, shared-cache seeding and
 //! auto-bootstrap decision the libkrun and QEMU builders take, so no builder
 //! backend boots an image the others would refuse.
-//! refuse.
 //!
 //! The kernel is passed through unconverted. `FcDriver` normalises it at boot
 //! (`ensure_fc_loadable_kernel`), which is the one place that knows what
