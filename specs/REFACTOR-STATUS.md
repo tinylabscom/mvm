@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-28
 
 ## In progress
 
@@ -37,6 +37,7 @@ Last updated: 2026-09-27
     - [ ] `mvmctl why` against a resolved policy
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
+    - [x] strict registry references and fail-closed manifest-digest lockfile foundation
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
     - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
     - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
