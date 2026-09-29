@@ -35,14 +35,6 @@ pub fn clap_port_spec(s: &str) -> Result<String, String> {
     Ok(s.to_owned())
 }
 
-/// Validate a volume spec at Clap parse time. Delegates to
-/// [`parse_volume_spec`] so the flag and the post-parse converter share
-/// one grammar (no drift between clap-time and run-time validation).
-pub fn clap_volume_spec(s: &str) -> Result<String, String> {
-    parse_volume_spec(s).map_err(|e| e.to_string())?;
-    Ok(s.to_owned())
-}
-
 /// Parsed mount specification from the `--mount` CLI flag, its compatibility
 /// `--volume` alias, or the `MVM_VOLUMES` env var.
 ///
@@ -585,6 +577,47 @@ mod volume_spec_tests {
     }
 
     #[test]
+    fn validated_conversion_checks_real_host_path_kinds() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("share");
+        std::fs::create_dir(&dir).expect("create directory share");
+        let file = tmp.path().join("disk.img");
+        std::fs::write(&file, b"disk").expect("create disk image");
+
+        let dir_spec =
+            parse_volume_spec(&format!("{}:/work", dir.display())).expect("parse directory share");
+        let dir_volume = vm_volume_from_spec_validated(&dir_spec).expect("validate directory");
+        assert_eq!(
+            dir_volume.host,
+            dir.canonicalize().expect("canonical dir").to_string_lossy()
+        );
+
+        let file_share =
+            parse_volume_spec(&format!("{}:/work", file.display())).expect("parse file share");
+        assert!(
+            vm_volume_from_spec_validated(&file_share).is_err(),
+            "directory shares must reject regular files"
+        );
+
+        let disk_spec =
+            parse_volume_spec(&format!("{}:/data:10M", file.display())).expect("parse disk volume");
+        let disk_volume = vm_volume_from_spec_validated(&disk_spec).expect("validate disk");
+        assert_eq!(
+            disk_volume.host,
+            file.canonicalize()
+                .expect("canonical file")
+                .to_string_lossy()
+        );
+
+        let disk_dir = parse_volume_spec(&format!("{}:/data:10M", dir.display()))
+            .expect("parse disk directory");
+        assert!(
+            vm_volume_from_spec_validated(&disk_dir).is_err(),
+            "disk-image volumes must reject directories"
+        );
+    }
+
+    #[test]
     fn dir_share_two_part_defaults_ro() {
         match parse_volume_spec("/h/src:/work").unwrap() {
             VolumeSpec::DirShare {
@@ -717,12 +750,6 @@ mod volume_spec_tests {
         ] {
             assert!(parse_volume_spec(spec).is_err(), "should reject {spec:?}");
         }
-    }
-
-    #[test]
-    fn clap_validator_matches_parser() {
-        assert!(clap_volume_spec("/h:/g:10G:rw").is_ok());
-        assert!(clap_volume_spec("/h:/g:enc").is_err());
     }
 
     #[test]
