@@ -54,8 +54,8 @@ impl Drop for PendingChild {
     }
 }
 
-const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
-const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
+pub(crate) const BUILDER_INPUT_DEVICE: &str = "/dev/vdc";
+pub(crate) const BUILDER_OUTPUT_DEVICE: &str = "/dev/vdd";
 pub(crate) const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
 pub(crate) const BUILDER_VSOCK_EGRESS_TOKEN: &str = "mvm.vsock_egress=1";
 const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";

@@ -245,6 +245,15 @@ pub fn boot_session_vm(
         ..Default::default()
     };
 
+    // The runtime overlay is the single source of the guest agent and its
+    // helpers here, as on the transient path; a missing required overlay is
+    // built or acquired, never replaced by a copy baked into the rootfs.
+    attach_runtime_overlay_if_cached_version(&mut start_config, backend.name(), None, pair)?;
+    attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
+
+    // Admission starts the plan and verb-grant validity windows. All boot
+    // preparation therefore completes before this point, immediately before
+    // the backend consumes the admitted start config.
     let substrate = admit(AdmitInputs {
         rootfs: std::path::Path::new(&rootfs),
         kernel: start_config
@@ -268,12 +277,6 @@ pub fn boot_session_vm(
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
             .context("persisting admitted session plan before backend start")?;
     }
-
-    // The runtime overlay is the single source of the guest agent and its
-    // helpers here, as on the transient path; a missing required overlay is
-    // built or acquired, never replaced by a copy baked into the rootfs.
-    attach_runtime_overlay_if_cached_version(&mut start_config, backend.name(), None, pair)?;
-    attach_universal_initramfs_if_cached(&mut start_config, backend.name())?;
 
     tracing::info!(vm = %vm_name, slot, "booting session VM");
     backend

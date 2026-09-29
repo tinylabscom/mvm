@@ -119,10 +119,6 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
         "crates/mvm-build/src/builder_vm_bootstrap.rs",
         "fn builder_vm_helper_command(",
     ),
-    (
-        "crates/mvm-runtime/src/builder_runner/inject.rs",
-        "fn inject_host_binaries(",
-    ),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

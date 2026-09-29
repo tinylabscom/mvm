@@ -25,8 +25,9 @@ fn first_run_smoke_workflow() -> String {
         .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()))
 }
 
-fn justfile() -> String {
-    fs::read_to_string("Justfile").expect("Justfile must be readable")
+fn just_module(name: &str) -> String {
+    let path = format!("just/{name}/mod.just");
+    fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
 /// The publish path must be reachable without pushing a tag.
@@ -195,7 +196,7 @@ fn the_release_asset_list_cannot_upload_one_file_twice() {
 
 /// The release prep must test the tree it pushes, not the tree before it.
 ///
-/// `just release` runs the workspace suite and *then* calls `_release-prep`,
+/// `just release::pr` runs the workspace suite and *then* calls `release::_prep`,
 /// which is where the version actually changes. So the suite green-lights the
 /// pre-bump tree while the bumped tree — the one that becomes the release — was
 /// never run.
@@ -205,9 +206,9 @@ fn the_release_asset_list_cannot_upload_one_file_twice() {
 /// had ever carried one, making the defect unreachable until the bump.
 #[test]
 fn the_release_prep_runs_the_suite_after_the_version_is_bumped() {
-    let justfile = justfile();
+    let justfile = just_module("release");
     let prep = justfile
-        .find("_release-prep VERSION:")
+        .find("_prep VERSION:")
         .expect("the shared release prep recipe must exist");
     let body = &justfile[prep..];
 
@@ -242,9 +243,9 @@ fn the_release_prep_runs_the_suite_after_the_version_is_bumped() {
 /// on its PR and was evicted from the merge queue three times.
 #[test]
 fn the_release_prep_refreshes_the_detached_fuzz_lockfiles() {
-    let justfile = justfile();
+    let justfile = just_module("release");
     let prep = justfile
-        .find("_release-prep VERSION:")
+        .find("_prep VERSION:")
         .expect("the shared release prep recipe must exist");
     let body = &justfile[prep..];
 
@@ -751,7 +752,7 @@ fn promoted_prebuilt_pin_pr_dispatches_ci_for_its_branch() {
 
 /// The installer's offline fallback has one writer.
 ///
-/// `_release-prep` used to set `DEFAULT_VERSION` to the version it was
+/// `release::_prep` used to set `DEFAULT_VERSION` to the version it was
 /// preparing — a tag that did not exist yet — while leaving the previous
 /// release's archive hashes beside it, so a fresh install falling back to it
 /// either found no release or refused the archive as a hash mismatch. The pin
@@ -759,12 +760,12 @@ fn promoted_prebuilt_pin_pr_dispatches_ci_for_its_branch() {
 /// release's signed manifest, and nothing else touches those lines.
 #[test]
 fn the_installer_default_is_written_only_by_the_pin_script() {
-    let justfile = justfile();
+    let justfile = just_module("release");
     let prep = justfile
-        .find("_release-prep VERSION:")
+        .find("_prep VERSION:")
         .expect("the shared release prep recipe must exist");
     let body = &justfile[prep..];
-    let body = &body[..body.find("\nrelease-tag").unwrap_or(body.len())];
+    let body = &body[..body.find("\ntag VERSION:").unwrap_or(body.len())];
     assert!(
         body.contains("./scripts/pin-installer-default.sh --newest install.sh"),
         "the release PR must pin the newest promoted release, not the one it prepares"
@@ -779,7 +780,10 @@ fn the_installer_default_is_written_only_by_the_pin_script() {
                 && (line.contains("DEFAULT_VERSION") || line.contains("DEFAULT_ARCHIVE_SHA256"))
         })
     };
-    let mut files = vec![Path::new("Justfile").to_path_buf()];
+    let mut files = vec![
+        Path::new("Justfile").to_path_buf(),
+        Path::new("just/release/mod.just").to_path_buf(),
+    ];
     for dir in [".github/workflows", "scripts", "scripts/installer-compat"] {
         files.extend(
             fs::read_dir(dir)
@@ -1013,7 +1017,7 @@ fn qemu_wasm_site_pack_is_fetched_from_the_image_set_not_rebuilt() {
 
 #[test]
 fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
-    let recipes = justfile();
+    let recipes = just_module("site");
     let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
         .expect("read QEMU-WASM pack downloader");
     let harness = fs::read_to_string("scripts/run-qemu-wasm-smoke-chromium.py")
@@ -1031,10 +1035,10 @@ fn qemu_wasm_local_tools_use_the_published_pack_and_maintained_harness() {
     }
     assert!(
         !recipes.contains("qemu-wasm-pack *ARGS:"),
-        "Justfile must not offer the retired Lima-backed build recipe"
+        "the site module must not offer the retired Lima-backed build recipe"
     );
     assert!(
-        recipes.contains("qemu-wasm-pack-download *ARGS:")
+        recipes.contains("qemu-pack *ARGS:")
             && downloader.contains("locked-image-tag.sh")
             && downloader.contains("qemu-wasm-smoke-pack.tar.gz"),
         "local QEMU-WASM setup must use the tree-pinned published pack"
@@ -1458,12 +1462,12 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
     );
 }
 
-/// `just smoke-fresh-install` runs the same script the release gate runs, so a
+/// `just e2e::smoke-fresh-install` runs the same script the release gate runs, so a
 /// maintainer can reproduce a red first-run lane locally.
 #[test]
 fn the_fresh_install_smoke_recipe_runs_the_release_gate_script() {
     assert!(
-        justfile().contains(
+        just_module("e2e").contains(
             "smoke-fresh-install VERSION=\"\":\n    ./scripts/smoke-fresh-install.sh {{ VERSION }}\n"
         ),
         "the recipe must run the release gate's script with an optional version"

@@ -18,6 +18,11 @@ Feature: Documented examples work
   Scenario: every documented example parses against the real CLI
     Then every documented mvmctl example parses against the real CLI
 
+  Scenario: durable agent session inventory works in an empty home
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "agent-session ls"
+    Then the command exits with code 0
+
   Scenario: every documented command path carries a verification tier
     Then every documented command path carries a verification tier
 

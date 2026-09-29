@@ -133,45 +133,6 @@ fn write_entry(out: &mut Vec<u8>, ino: u32, mode: u32, name: &[u8], data: &[u8],
     pad4(out); // align next header to 4
 }
 
-/// One binary to inject into the target rootfs.
-pub struct InjectBinary<'a> {
-    /// Payload file name inside the initramfs (e.g. `mvm-host-vm-init`).
-    pub name: &'a str,
-    /// Absolute install path inside the rootfs (e.g. `/sbin/mvm-host-vm-init`).
-    pub install_path: &'a str,
-    /// Executable bytes.
-    pub bytes: Vec<u8>,
-}
-
-/// Assemble the injection initramfs: the patcher as `/init`, plus a `/payload`
-/// tree carrying a `manifest` (one `"<name> <install_path> <octal-mode>"` line
-/// per binary) and the binaries themselves. `mvm-rootfs-patcher` reads the
-/// manifest and copies each binary into the rootfs mounted at `/mnt`.
-pub fn build_inject_initramfs(patcher: &[u8], binaries: &[InjectBinary<'_>]) -> Vec<u8> {
-    let mut manifest = String::new();
-    for b in binaries {
-        manifest.push_str(&format!("{} {} 0755\n", b.name, b.install_path));
-    }
-
-    let mut entries = vec![
-        CpioEntry::file("init", 0o755, patcher.to_vec()),
-        // Mount points the patcher needs (empty dirs in the ramfs).
-        CpioEntry::dir("dev"),
-        CpioEntry::dir("proc"),
-        CpioEntry::dir("mnt"),
-        CpioEntry::dir("payload"),
-        CpioEntry::file("payload/manifest", 0o644, manifest.into_bytes()),
-    ];
-    for b in binaries {
-        entries.push(CpioEntry::file(
-            &format!("payload/{}", b.name),
-            0o755,
-            b.bytes.clone(),
-        ));
-    }
-    build_newc_cpio(&entries)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,66 +187,5 @@ mod tests {
         assert_eq!(parsed[1].0, "payload");
         assert_eq!(parsed[1].1 & 0o040000, 0o040000); // dir type bit
         assert_eq!(parsed[2], ("payload/manifest".to_string(), 0o100644, 9));
-    }
-
-    #[test]
-    fn inject_initramfs_carries_the_patcher_manifest_and_binaries() {
-        let patcher = b"PATCHER-ELF".to_vec();
-        let bins = [
-            InjectBinary {
-                name: "mvm-host-vm-init",
-                install_path: "/sbin/mvm-host-vm-init",
-                bytes: b"INIT-ELF".to_vec(),
-            },
-            InjectBinary {
-                name: "mvm-builderd",
-                install_path: "/sbin/mvm-builderd",
-                bytes: b"BUILDERD-ELF".to_vec(),
-            },
-        ];
-        let cpio = build_inject_initramfs(&patcher, &bins);
-        let names: Vec<String> = parse_newc(&cpio).into_iter().map(|(n, _, _)| n).collect();
-        assert!(names.contains(&"init".to_string()));
-        assert!(names.contains(&"payload/manifest".to_string()));
-        assert!(names.contains(&"payload/mvm-host-vm-init".to_string()));
-        assert!(names.contains(&"payload/mvm-builderd".to_string()));
-
-        // The manifest maps each payload name to its rootfs install path.
-        let entries = parse_newc(&cpio);
-        // Find the manifest's byte range to read it back.
-        let manifest = extract(&cpio, "payload/manifest");
-        assert!(manifest.contains("mvm-host-vm-init /sbin/mvm-host-vm-init 0755"));
-        assert!(manifest.contains("mvm-builderd /sbin/mvm-builderd 0755"));
-        // /init precedes /payload/* so the patcher is entry 0.
-        assert_eq!(entries[0].0, "init");
-    }
-
-    /// Read a file entry's data back out of a newc archive (test helper).
-    fn extract(buf: &[u8], want: &str) -> String {
-        let hex = |s: &[u8]| u32::from_str_radix(std::str::from_utf8(s).unwrap(), 16).unwrap();
-        let mut off = 0;
-        loop {
-            let field = |i: usize| hex(&buf[off + 6 + i * 8..off + 6 + i * 8 + 8]);
-            let filesize = field(6) as usize;
-            let namesize = field(11) as usize;
-            let name_start = off + 110;
-            let name =
-                String::from_utf8(buf[name_start..name_start + namesize - 1].to_vec()).unwrap();
-            let mut data_start = name_start + namesize;
-            while !data_start.is_multiple_of(4) {
-                data_start += 1;
-            }
-            if name == "TRAILER!!!" {
-                panic!("{want} not found");
-            }
-            if name == want {
-                return String::from_utf8(buf[data_start..data_start + filesize].to_vec()).unwrap();
-            }
-            let mut next = data_start + filesize;
-            while !next.is_multiple_of(4) {
-                next += 1;
-            }
-            off = next;
-        }
     }
 }

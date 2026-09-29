@@ -45,6 +45,14 @@ the endpoint routes of PS-02, whose `ask` outcome refused until now.
   dispatch) and removed at teardown.
 - **Docs.** New guide `guides/runtime-approvals`; the egress-policy and
   secrets guides, the CLI reference and ADR-003 updated.
+- **SDK callback and retained broker.** Hostlib ABI 1.4 accepts one bounded,
+  process-wide callback (`deny`, `once`, `session`). Python exposes
+  `set_approval_callback`; TypeScript exposes `setApprovalCallback`. Callback
+  exceptions, malformed prompts and unknown answers deny. Hostlib binds the
+  private approval socket after admitted boot and before an SDK-started guest
+  command, retains it across ABI calls for detached/persistent machines, and
+  drops it on stop/remove. The endpoint remains the authority for TTL, rate
+  limiting, ledger settlement and chain-signed audit.
 
 ## Tests
 
@@ -56,7 +64,9 @@ Webhook: redirect, oversize reply, non-HTTPS, malformed and non-2xx replies,
 silence past the timeout. Chain `all` / `any`, the broker socket lifecycle,
 flag / manifest / default resolution, `[approval]` parsing, `secret set
 --approve ask`, and endpoint route and secret-use approvals end to end through
-the terminated-flow harness.
+the terminated-flow harness. Hostlib adds bounded callback-result tests and a
+real retained Unix-socket broker lifecycle witness; the Python and TypeScript
+bindings cover prompt decoding, every decision and fail-closed errors.
 
 ## Live verification (macOS 26, HVF)
 
@@ -75,11 +85,11 @@ the terminated-flow harness.
 
 ## Open
 
-- PS-13 tool calls: the `tool_call` subject exists; nothing asks it yet.
-- SDK callback through hostlib: `CallbackBackend` is the type. Still needed: a
-  hostlib ABI entry to register it, a broker per machine hostlib launches (a
-  hostlib launch binds none today, so its asks deny), and the SDK facades.
-- Detached and persistent machines have no broker, so their asks deny.
+- PS-13 tool calls: the `tool_call` subject and supervisor method exist; the
+  live tool-policy caller is owned by PS-13 and nothing asks it yet.
+- Standalone CLI detached machines have no long-lived process to own a broker,
+  so their asks deny. SDK detached/persistent machines retain the embedding
+  process's callback broker; CLI ownership belongs to PS-09's session model.
 - When PS-02's injection modes land, secret-use approval must cover the new
   placeholder positions (query, path, basic auth), not only headers.
 - Found while verifying, not caused here: a `--manifest` run whose manifest

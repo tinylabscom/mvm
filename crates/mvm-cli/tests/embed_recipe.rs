@@ -2,6 +2,7 @@
 //! repair reachable from every recipe that links host binaries.
 
 const JUSTFILE: &str = include_str!("../../../Justfile");
+const EMBED_MOD: &str = include_str!("../../../just/payload/mod.just");
 
 /// The body of `name`, up to the recipe that follows it. Recipe bodies are the
 /// unit these guards assert over, and slicing them by hand three times over is
@@ -21,19 +22,22 @@ fn recipe_body(name: &str, next: &str) -> &'static str {
 /// asserted once, against the script, below.
 #[test]
 fn embed_recipe_exposes_the_pinned_rust_sysroot_to_macos_llvm_tools() {
-    let recipe = recipe_body("embed *ARGS:", "embed-refresh:");
+    let recipe = recipe_body("embed *ARGS:", "\nrelease-build:");
     assert!(recipe.contains("scripts/macos-objcopy-env.sh"), "{recipe}");
 }
 
-/// `build-supervisors` links the same `mvm-hostd` binaries `embed` does. It
+/// `payload::supervisors` links the same `mvm-hostd` binaries `embed` does. It
 /// went without this repair and shipped every supervisor unstripped, which is
 /// what this guard exists to catch a second time.
 #[test]
 fn build_supervisors_recipe_exposes_the_pinned_rust_sysroot_too() {
-    let recipe = recipe_body(
-        "build-supervisors *ARGS:",
-        "\nbuild-libkrun-supervisor *ARGS:",
-    );
+    let recipe = EMBED_MOD
+        .split("supervisors *ARGS:")
+        .nth(1)
+        .unwrap_or_else(|| panic!("supervisors recipe"))
+        .split("\nlibkrun-supervisor *ARGS:")
+        .next()
+        .unwrap_or_else(|| panic!("supervisors recipe body"));
     assert!(recipe.contains("scripts/macos-objcopy-env.sh"), "{recipe}");
     assert!(
         recipe.contains("build -p mvm-hostd --bins {{ARGS}}"),

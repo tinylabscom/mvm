@@ -428,6 +428,8 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
         GuestRequest::FsDiff => GuestResponse::FsDiffResult {
             changes: Vec::new(),
         },
+        // Nothing is buffered in a mock, so the flush is immediate.
+        GuestRequest::SyncFilesystems => GuestResponse::FilesystemsSynced,
 
         // ── Catch-all: every other verb fails loud ──────────────────
         other => GuestResponse::Error {

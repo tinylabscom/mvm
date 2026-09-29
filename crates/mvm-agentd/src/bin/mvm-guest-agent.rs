@@ -125,8 +125,8 @@ use handlers::{
     handle_proc_list, handle_proc_send_input, handle_proc_signal, handle_proc_start,
     handle_proc_wait, handle_readiness_status, handle_resource_usage,
     handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
-    handle_start_unix_socket_forward, handle_stream_input, handle_unmount_volume,
-    handle_update_idle_timeout, handle_wake, handle_worker_status,
+    handle_start_unix_socket_forward, handle_stream_input, handle_sync_filesystems,
+    handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
 use interactive::{
     handle_console_attach, handle_console_close, handle_console_detach, handle_console_list,
@@ -453,6 +453,7 @@ fn handle_client(
             GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 
             GuestRequest::FsDiff => handle_fs_diff(),
+            GuestRequest::SyncFilesystems => handle_sync_filesystems(),
 
             GuestRequest::StartUnixSocketForward {
                 guest_path,

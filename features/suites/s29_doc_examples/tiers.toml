@@ -12,6 +12,10 @@
 # documented path with no entry here fails the coverage scenario by name.
 
 [[command]]
+path = "agent-session ls"
+tier = "exec"
+
+[[command]]
 path = "bootstrap"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"

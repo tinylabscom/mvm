@@ -41,6 +41,17 @@ enum PayloadBytes {
 }
 
 impl PayloadBinary {
+    /// A compiled-in binary with the digest it claims, which a test may make
+    /// disagree with its bytes.
+    #[cfg(test)]
+    pub(crate) fn compiled_in(name: &str, sha256_hex: &str, bytes: &'static [u8]) -> Self {
+        Self {
+            name: name.to_string(),
+            sha256_hex: sha256_hex.to_string(),
+            bytes: PayloadBytes::CompiledIn(bytes),
+        }
+    }
+
     /// The binary's bytes. A stored binary is read on each call; callers
     /// extract once and verify what they wrote.
     pub(crate) fn contents(&self) -> io::Result<Cow<'static, [u8]>> {
@@ -126,7 +137,7 @@ fn pinned_toolchain(checkout: &Path) -> Result<embed_toolchain::Pin, String> {
 ///
 /// Its own directory, never the checkout's `target/<profile>`: a `cargo build`
 /// running beside this one holds that directory's lock for its whole run. The
-/// `host-vm-target` leaf is the name `just embed-refresh` clears.
+/// `host-vm-target` leaf is the name `just payload::refresh` clears.
 fn payload_target_dir(checkout: &Path) -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .filter(|dir| !dir.is_empty())
@@ -324,7 +335,7 @@ fn toolchain_refusal(reason: &str) -> String {
     format!(
         "this binary was compiled without the embedded Linux host binaries, and the \
          pinned cross-compile toolchain it needs to build them is unavailable: {reason} \
-         Install it with `just toolchain-embed`, then retry."
+         Install it with `just payload::toolchain`, then retry."
     )
 }
 
@@ -615,7 +626,7 @@ mod tests {
         let err = source.load().err().expect("refused").to_string();
 
         assert!(err.contains("zig 0.13.0 was not found."), "{err}");
-        assert!(err.contains("just toolchain-embed"), "{err}");
+        assert!(err.contains("just payload::toolchain"), "{err}");
         assert_eq!(journal.events(), Vec::<String>::new());
     }
 

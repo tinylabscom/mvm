@@ -377,6 +377,21 @@ pub fn query_fs_diff_on(stream: &mut UnixStream) -> Result<Vec<FsChange>> {
     }
 }
 
+/// Ask the guest to flush every dirty page, on an already-connected stream.
+///
+/// Called before the host reads a running guest's writable volume image, so
+/// the read sees what the workload wrote rather than what happened to reach
+/// the disk. Part of the filesystem RPC surface, so it is refused by a sealed
+/// agent exactly where the diff it serves would be.
+pub fn sync_filesystems_on(stream: &mut UnixStream) -> Result<()> {
+    require_capabilities(stream, &[GuestCapability::FilesystemRpc])?;
+    match call_unary(stream, &GuestRequest::SyncFilesystems)? {
+        GuestResponse::FilesystemsSynced => Ok(()),
+        GuestResponse::Error { message } => bail!("guest filesystem sync failed: {message}"),
+        other => bail!("unexpected response to SyncFilesystems: {other:?}"),
+    }
+}
+
 /// Dispatch a non-streaming process-control request to a running
 /// VM and return the `ProcResult`. Single-frame surface — the
 /// streaming `ProcWait` verb has its own helper below. Dir-based

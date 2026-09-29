@@ -72,7 +72,7 @@ export MVM_BUILDER_VM_TIMEOUT_SECS="${MVM_BUILDER_VM_TIMEOUT_SECS:-7200}"
 # binary normally compiles a missing workload kernel from the checkout; that
 # source-build path needs a Stage 0 builder and can select the optional libkrun
 # integration on macOS. The live suite must have the same dependency-free
-# contract as the documented `just e2e-launch` command, so acquire the
+# contract as the documented `just e2e::launch` command, so acquire the
 # published, checksum-verified workload kernel explicitly. Kernel developers
 # can exercise the source producer separately with
 # `MVM_KERNEL_SOURCE=compile mvmctl kernel build --which workload`.
@@ -156,7 +156,7 @@ echo "    home:  $E2E_HOME"
 # ---------------------------------------------------------------------------
 # 1. Build the binaries the suite drives.
 # ---------------------------------------------------------------------------
-# Deliberately no `just embed-refresh` here. That recipe clears the nested musl
+# Deliberately no `just payload::refresh` here. That recipe clears the nested musl
 # cross-compile of the *embedded* host-vm binaries, which is a different set
 # from the per-VM helpers rebuilt below, and clearing it mid-tree makes the
 # nested build fail outright:
@@ -196,11 +196,11 @@ cargo build --bin mvmctl --features user,embed-host-bins
 # costs a fingerprint check. The signing step below must follow it: a re-linked
 # supervisor loses its Hypervisor.framework entitlement.
 #
-# Not `just embed-refresh`: that clears the nested musl cross-compile of the
+# Not `just payload::refresh`: that clears the nested musl cross-compile of the
 # *embedded* host-vm binaries, a different set, and this gate boots no builder
 # VM that would rebuild them.
 echo "==> building the per-VM host helpers"
-just build-supervisors
+just payload::supervisors
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.
@@ -253,7 +253,7 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 # Scoped to the launch suite with `-i`, deliberately. Unscoped, this ran the
 # *entire* conformance suite under MVM_BDD_LIVE=1 — the doc-example checkers,
 # the cross-language SDK surface comparison, the real Nix flake build. Those are
-# `just bdd`'s job and they have their own prerequisites: this gate went red on
+# `just bdd::run`'s job and they have their own prerequisites: this gate went red on
 # a missing TypeScript toolchain and on a builder-VM Stage 0 store, neither of
 # which is a launch mode. A gate that fails for things it does not test is one
 # people stop believing, which is how the regression this suite exists for
@@ -267,7 +267,7 @@ MVM_HOME="$E2E_HOME" "$MVMCTL" doctor || true
 #
 # Name the three launch features rather than matching the whole directory.
 # `documented_setup.feature` owns bootstrap and builder-host preparation; it is
-# exercised by `just e2e-docs`, while this gate deliberately warms only workload
+# exercised by `just e2e::docs`, while this gate deliberately warms only workload
 # launch artifacts above.
 echo "==> CLI + SDK launch modes (cucumber, @live)"
 CARGO_BIN_EXE_mvmctl="$MVMCTL" \

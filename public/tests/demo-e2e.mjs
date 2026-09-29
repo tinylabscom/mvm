@@ -14,7 +14,7 @@
  * Run after building and staging the WebLinux demo assets:
  *   nix build .#qemu-wasm-smoke-pack
  *   ./web/weblinux-demo/build.sh result
- *   just docs-build
+ *   just site::build
  *   node public/tests/demo-e2e.mjs
  */
 import http from "node:http";
@@ -126,7 +126,7 @@ async function waitForLog(page, needle, timeoutMs = 60000) {
 
 async function main() {
   if (!fs.existsSync(ROOT)) {
-    throw new Error(`Built dist not found at ${ROOT}; run 'just docs-build' first.`);
+    throw new Error(`Built dist not found at ${ROOT}; run 'just site::build' first.`);
   }
 
   // Built from public/public/_headers. Without it the harness would serve an
@@ -136,7 +136,7 @@ async function main() {
   try {
     rules = loadHeaderRules(ROOT);
   } catch (err) {
-    throw new Error(`${err.message}; rebuild the site with 'just docs-build'`);
+    throw new Error(`${err.message}; rebuild the site with 'just site::build'`);
   }
 
   const server = await startServer(8788, rules);
