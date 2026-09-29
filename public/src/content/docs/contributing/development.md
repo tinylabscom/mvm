@@ -12,7 +12,7 @@ split, the fast feedback ladder, and what CI does and does not gate.
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
 - **macOS 26+ Apple Silicon or Linux** — macOS development uses native HVF; Linux uses native `/dev/kvm`. Intel Macs and older macOS releases are not supported local microVM hosts.
-- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just toolchain-embed` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed to build the Linux host binaries a VM boot uses, which a release `cargo build` embeds and a debug `mvmctl` builds on first use. `just payload::toolchain` installs the pinned versions. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
@@ -51,7 +51,7 @@ cd mvm
 # cross-targets for the active toolchain and the pinned cargo-zigbuild. Do NOT
 # `brew install zig` — Homebrew's zig drifts off the pinned cargo-zigbuild and
 # fails with a cryptic CacheCheckFailed.
-just toolchain-embed
+just payload::toolchain
 
 cargo build
 cargo run -- doctor     # reports the builder backend + anything missing
@@ -81,9 +81,9 @@ cargo run -- bootstrap
 > **Note — after a toolchain-version change.** `rust-toolchain.toml` pins an
 > exact Rust version, and rustup keys installed cross-targets per toolchain
 > *name*. When that pin changes (a version bump), rustup resolves a fresh
-> toolchain that carries none of the Linux cross-targets, so `just check-linux`
+> toolchain that carries none of the Linux cross-targets, so `just check::linux`
 > or an `mvmctl` build fails with `error[E0463]: can't find crate for core …
-> target may not be installed`. Re-run `just toolchain-embed` to reinstall the
+> target may not be installed`. Re-run `just payload::toolchain` to reinstall the
 > targets for the new toolchain.
 
 Or run the bootstrap script on a fresh machine:
@@ -100,14 +100,14 @@ just build
 
 # Prebuild the guest runtime overlay once so later required-overlay boots
 # can reuse the cached artifact instead of rebuilding guest binaries.
-just runtime-overlay
+just check::overlay
 
 # Run CLI
-just run -- --help
+just check::run -- --help
 
 # Boot a throwaway workload — the (headless) builder VM auto-bootstraps
 # on first use, then the workload boots on the platform's default backend.
-just run -- machine run --image alpine -- uname -a
+just check::run -- machine run --image alpine -- uname -a
 
 # Release build (stripped, LTO)
 just release-build
@@ -120,53 +120,87 @@ bootstrap or supervision stay outside that overlay.
 
 ### Kernel builds
 
-The builder-VM and workload microVM kernels are slim custom Linux builds
-defined in [mvm-images](https://github.com/tinylabscom/mvm-images): one shared
-config plus a per-variant delta (the workload adds dm-verity; the builder adds
-the nix-build sandbox and egress-lockdown bits). Because the config is custom,
-`cache.nixos.org` has no substitute, so compiling one on a fresh machine takes
-several minutes and is memory-heavy; later builds reuse the persistent Nix
-store.
+The builder-VM and workload microVM kernels are slim custom Linux
+builds: one shared config in `nix/images/kernel/base.nix` plus a
+per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
+the nix-build sandbox + egress-lockdown bits). Because the config is
+custom, `cache.nixos.org` has no substitute, so the first build on a
+fresh machine compiles the kernel from source. It can take several minutes
+depending on the host and is memory-heavy; later builds reuse the persistent
+Nix store.
 
-With an mvm-images checkout selected (`MVM_IMAGES_DIR`, or a sibling
-`../mvm-images`), `mvmctl build kernel build` compiles from it, and image-backed
-runs from this checkout bootstrap the kernel automatically. Without one, the
-kernel comes from the signed image set `images.lock` pins. Prebuilding is useful
-when you want the first interactive run to be warm:
+`mvmctl build kernel build` makes that compile explicit and one-time. Image
+backed runs from a source checkout also bootstrap this kernel automatically;
+prebuilding it is useful when you want the first interactive run to be warm:
 
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
 # The next build reuses it (substituted, not rebuilt).
-MVM_IMAGES_DIR=../mvm-images just run -- build kernel build --which builder
+just check::run -- build kernel build --which builder
 
 # Or both kernels:
-MVM_IMAGES_DIR=../mvm-images just run -- build kernel build --all
+just check::run -- build kernel build --all
 
-# Fetch the pinned, verified image-set kernel instead of compiling:
-MVM_KERNEL_SOURCE=download just kernel-workload
+# The same policy applies to the direct kernel recipe:
+MVM_KERNEL_SOURCE=download just kernel::workload
+```
+
+To skip the kernel compile entirely on a fresh machine, boot the builder
+VM on a published kernel (once a release has shipped one):
+
+```bash
+# Build only the rootfs locally; fetch + hash-verify the kernel.
+just check::run -- --kernel-source download bootstrap
+# `auto` downloads if available, else compiles in-image (the default).
 ```
 
 Notes:
 
 - **Host-arch only for `--source compile`.** Stage 0 builds your host's
-  architecture (aarch64 *or* x86_64). The other arch is in the published image
-  set — fetch it with `--source download`.
-- Kernel-config work (slimming, adding a driver) happens in the mvm-images
-  checkout: edit the config there and re-run the compile. Boot-smoke the
-  result — a kernel that builds is not proof it boots:
+  architecture (aarch64 *or* x86_64).
+  The other arch is published by the `kernel-build` GitHub workflow,
+  which builds both on native runners — fetch it with `--source
+  download` once a release ships it.
+- Editing `base.nix` or a variant delta? Just re-run the command — a
+  custom config always compiles locally; downloads only ever return the
+  kernel that shipped with that exact `mvmctl` release.
 
-  ```bash
-  just run -- build kernel build --which workload
-  just run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
-  just run -- machine boot-report smoke   # "control plane  ready" == good
-  just run -- machine stop smoke
-  ```
+#### Iterating on the kernel config (slimming, adding a driver)
 
-- The resolved `.config`, the `=y` symbol metrics and the built-in symbol
-  budget are mvm-images'. A local compile leaves the resolved `config` and
-  `kernel-metrics-<arch>.json` beside the cached kernel, and
-  `xtask perf footprint --kernel-config <path>` reports a config against the
-  budget.
+Changing `base.nix` / `workload.nix` / `builder.nix` and want to see the
+effect? The loop is build → boot-smoke → measure:
+
+```bash
+# 1. Build the variant you touched (compiles your edited config in Stage 0).
+just check::run -- build kernel build --which workload
+
+# 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
+#    throwaway VM and confirm the in-guest agent answers over vsock.
+just check::run -- machine run --flake examples/sleeper --hypervisor libkrun --name smoke -d
+just check::run -- machine boot-report smoke   # "control plane  ready" == good
+just check::run -- machine stop smoke
+```
+
+Two sharp edges worth knowing:
+
+- **A build that passes the config guard still has to boot.** After
+  `make olddefconfig`, the build asserts every requested `enable` is
+  still `=y` and fails loudly if one got dropped by a missing
+  dependency — but that guard can't tell you a *disable* removed
+  something the boot path needed. Only the boot-smoke proves that, so
+  never skip step 2.
+- **`enable` and `disable` are scoped.** A disable in the shared
+  `base.nix` hits *both* kernels; if only the workload should drop a
+  symbol (or only the builder needs one), put it in that variant's
+  delta. (The builder kernel, for example, keeps netfilter for its
+  egress lockdown while the workload drops it.)
+- **You can't read the resolved `.config` locally** — Stage 0 hands the
+  host a `vmlinux`, not the config. The `=y` symbol count + byte size
+  come from the `kernel-build` CI lane, which uploads
+  `workload-config-<arch>` and `kernel-metrics-<arch>.json`. Trigger it
+  without a release via `gh workflow run kernel-build.yml`. The
+  `check-kernel-config-budget` xtask gate fails CI if the `=y` count
+  regresses past `KERNEL_Y_BUDGET`.
 
 ## Testing
 
@@ -175,7 +209,7 @@ Notes:
 just test
 
 # Test a single crate
-just test-crate mvm-core
+just tests::crate mvm-core
 
 # Run tests matching a filter
 just test "test_snapshot"
@@ -314,8 +348,8 @@ is an analysis aid; the chain-signed audit log remains the record of what ran.
 ## Linting and Formatting
 
 ```bash
-just fmt          # Format all code
-just clippy       # Lint (zero warnings required)
+just lints::fmt          # Format all code
+just lints::clippy       # Lint (zero warnings required)
 just lint         # Both format check + clippy
 ```
 
@@ -366,29 +400,29 @@ Beyond the standard build/test/lint cycle, mvmctl provides commands for managing
 
 ```bash
 # First-time host setup (installs deps, stages the builder VM image)
-just run -- bootstrap
+just check::run -- bootstrap
 # `init` is a different verb: it scaffolds mvm.toml + flake.nix in a project dir
-just run -- init ./my-app
+just check::run -- init ./my-app
 
 # Bundled image catalog — browse the entries `init --catalog` can scaffold from
-just run -- catalog list            # browse bundled catalog
-just run -- catalog search http     # search by name/tag
-just run -- catalog info minimal    # show one entry
+just check::run -- catalog list            # browse bundled catalog
+just check::run -- catalog search http     # search by name/tag
+just check::run -- catalog info minimal    # show one entry
 # (`mvmctl image` is a different namespace: pull/ls/inspect/rm of cached OCI images.)
 
 # Named dev networks
-just run -- network create isolated # create a named network
-just run -- network list            # list all networks
-just run -- machine run --flake .  # attach VM to a network
+just check::run -- network create isolated # create a named network
+just check::run -- network list            # list all networks
+just check::run -- machine run --flake .  # attach VM to a network
 
 # Interactive console (PTY-over-vsock, no SSH) — `console` lives under `machine`
-just run -- machine console myvm            # interactive shell
-just run -- machine console myvm --command "uname -a"  # one-shot exec
+just check::run -- machine console myvm            # interactive shell
+just check::run -- machine console myvm --command "uname -a"  # one-shot exec
 
 # Cache and diagnostics
-just run -- cache info              # show cache dir and disk usage
-just run -- cache prune             # clean stale temp files
-just run -- doctor                  # dependency checks + security posture
+just check::run -- cache info              # show cache dir and disk usage
+just check::run -- cache prune             # clean stale temp files
+just check::run -- doctor                  # dependency checks + security posture
 # There is no `security` verb — plan 40 folded it into `doctor`.
 ```
 

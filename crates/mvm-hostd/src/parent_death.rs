@@ -58,7 +58,7 @@ fn orphan_exit() -> ! {
 /// helper's `main`, before it blocks on stdin or binds its socket.
 ///
 /// Idempotent in effect and best-effort: a watchdog that cannot arm leaves the
-/// age-based reaper (`just reap-helpers`) as the backstop rather than failing
+/// age-based reaper (`just maint::reap-helpers`) as the backstop rather than failing
 /// the helper.
 pub fn exit_when_orphaned() {
     // SAFETY: `getppid` is async-signal-safe and infallible.

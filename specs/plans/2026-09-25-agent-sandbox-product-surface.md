@@ -342,7 +342,18 @@ apply goes through the protected-path gate.
 - [ ] no external cache provider
 
 ### PS-17 — Task-runner surface (#3726)
-- [ ] recipe inventory and reduction; the top level fits one screen and mirrors CI
+- [x] recipe inventory and reduction; the top level fits one screen and mirrors CI
+
+89 recipes reduced to 8 root recipes (`build`, `test`, `lint`, `ci`, `embed`,
+`release-build`, `docs`, plus `default`) with the rest namespaced into 13
+modules under `just/` (`check`, `sdk`, `tests`, `bdd`, `e2e`, `payload`,
+`kernel`, `lints`, `release`, `site`, `maint`, `audit`, `mem`). `just --list`
+fits one screen with every module collapsed to one line. The pinning tests
+(`embed_recipe.rs`, `github_actions_bdd_gate.rs`,
+`github_actions_extended_e2e.rs`) follow the moved recipes, and
+`tests/justfile_top_level.rs` locks the root set to exactly the CI-mirroring
+list. All `just <recipe>` call sites (workflows, scripts, docs, emitted CLI
+hints) were updated to the module-qualified names.
 
 ### PS-18 — Docs (#3727)
 - [ ] one page per capability; client guides for each agent pack; profile and pack authoring guides

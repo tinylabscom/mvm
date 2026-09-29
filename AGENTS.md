@@ -114,7 +114,7 @@ bridge, and TAP devices; the Nix store (shared by design; Nix locking handles
 it). The builder VM itself is shared across worktrees — **never fork a
 per-worktree VM** (boot cost, duplicated tens-of-GB store, warm-cache loss).
 
-One-time per clone: `just install-hooks` points `core.hooksPath` at
+One-time per clone: `just maint::hooks` points `core.hooksPath` at
 `.githooks/`. The pre-commit hook runs `cargo fmt --all` (auto-restaging),
 scoped stable clippy `-D warnings`, `nix fmt` for staged `.nix` files, and
 `actionlint` for workflow changes — never the full test suite; heavy gates run
@@ -132,7 +132,7 @@ No task is complete without all of:
    not exhaustive: it skips `required-features` targets and cannot compile
    `cfg(target_os = "linux")` files on macOS — including Linux-gated _test_
    files — so any change to a shared type's shape (field, trait method, enum
-   variant) needs `just check-gated` before pushing.
+   variant) needs `just check::gated` before pushing.
 5. **Sprint spec** — `specs/SPRINT.md` reflects the new state (checked boxes,
    status labels, test counts).
 6. **Plan checkboxes** — tick each finished task in the active plan under
@@ -197,7 +197,7 @@ do not extend a foreground timeout and rerun the same command.
 
 ## Scoped feedback and worktree shell
 
-Debug with `just test-scoped <crate> <filter>`: read the failure, make one
+Debug with `just tests::scoped <crate> <filter>`: read the failure, make one
 change, and rerun that scoped test. Run the full workspace suite once before
 declaring the task done, not after each edit. Source `scripts/dev-env.sh` once
 per worktree shell and then use plain commands; do not repeat inline

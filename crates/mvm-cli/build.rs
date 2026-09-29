@@ -276,7 +276,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
             eprintln!(
                 "[build.rs] embedded {} is STALE — this build's changes are \
                  NOT in it. Dev profile reuses it rather than pay a ~163s \
-                 cross-compile per edit; run `just embed-refresh` or build \
+                 cross-compile per edit; run `just payload::refresh` or build \
                  with MVM_EMBED_NO_CACHE=1 before booting a VM that must \
                  carry the change.",
                 binary.name
@@ -323,7 +323,7 @@ fn embed_host_binaries(workspace_root: &Path, out_dir: &Path) {
         println!(
             "cargo:warning=embedded host binaries are STALE (this build's \
              changes to their sources are not in them). Dev builds reuse them \
-             instead of a ~163s cross-compile. Run `just embed-refresh`, or \
+             instead of a ~163s cross-compile. Run `just payload::refresh`, or \
              set MVM_EMBED_NO_CACHE=1, before booting a VM that must carry \
              the change."
         );
