@@ -33,7 +33,7 @@
 //! upstream Firecracker-CI kernel has no device-mapper and cannot run this),
 //! and a python3 rootfs, then executes it:
 //! `scripts/live-fork-witness-remote.sh root@<kvm-host>` (or
-//! `just live-fork-witness root@<kvm-host>`). Manual equivalent:
+//! `just e2e::live-fork-witness root@<kvm-host>`). Manual equivalent:
 //! `cargo test -p mvm-runtime --test fc_fork_live -- --ignored --nocapture`
 //! with `MVM_LIVE_KERNEL`/`MVM_LIVE_ROOTFS` set. Set `MVM_LIVE_HOME` to retain
 //! the VM state and console log after a failure.
@@ -559,6 +559,7 @@ fn fc_live_fork_n_children_from_running_parent() {
             created_unix: mvm_core::time::now_unix_secs(),
             retain_paused: false,
             grants: None,
+            workspace_volumes: Vec::new(),
         },
         control.as_ref(),
     )

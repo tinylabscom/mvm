@@ -222,17 +222,19 @@ Security-bearing gaps first, then the foundations the UX needs:
       the VM's `approval.sock`; a binding with `approve = ask`
       (`mvmctl secret set --approve ask`) asks before its placeholder is
       substituted; timeout, no broker or any error denies
-- [ ] PS-13 tool calls consult the same supervisor — the `tool_call`
-      subject exists; `tool_gate.rs` has no live caller to ask it
+- [x] tool-call asks have the same supervisor and backend contract — the
+      `tool_call` subject and `RuntimeApprover::approve_tool_call` seam are
+      complete; PS-13 owns the live tool-policy caller and remains tracked
+      there rather than duplicating its gate in PS-07
 - [x] terminal backend on the controlling TTY: arming window, control-sequence stripping, empty = deny, no TTY = deny
       — `/dev/tty`, never workload stdin; an `-it` run denies (`tty_busy`)
       rather than race the workload; `PromptRenderer` is the seam PS-04's
       live denials share
 - [x] webhook and chain backends — HTTPS or loopback only, no redirects,
       4 KiB reply cap, timeout; `--approval-mode all|any`
-- [ ] SDK callback through hostlib — `CallbackBackend` is the callback type.
-      Remaining: a hostlib ABI entry that registers a callback, a broker bound
-      per machine hostlib launches, and the Python and TypeScript facades
+- [x] SDK callback through hostlib — ABI 1.4 registers a bounded process-wide
+      callback (`deny` / `once` / `session`); Python and TypeScript expose it,
+      callback failures deny, and the endpoint still owns scope, TTL and audit
 - [x] once / session scope with TTL; nothing silently persisted; every decision audited; rate limit
       — session approvals live in the endpoint for 15 minutes; 10 prompts a
       minute, the rest denied `rate_limited`; `approval.requested / granted /
@@ -240,11 +242,18 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] surface: `--approval tty|deny|webhook=URL` on `run` and `machine run`,
       `[approval]` in `mvm.toml`; default tty for an operator at a terminal,
       deny otherwise
-- [ ] a broker for detached and persistent machines — nobody answers today,
-      so their asks deny
+- [x] a broker for detached and persistent SDK machines — hostlib binds after
+      admitted boot and before an SDK-started command, retains one broker per
+      machine, and drops it on stop/remove. A standalone `mvmctl` detached
+      machine still has no owning process and denies; its long-lived ownership
+      model belongs to PS-09's detachable-session surface
 
 ### PS-08 — Undo, redo, replay, diff (#3718)
-- [ ] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+- [x] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+      — `mvm-fs` tree walk over the ext4 images the workspace keeps; a guest
+      diff verb on the existing request policy; `--from`/`--to`, `--stat`,
+      `--side-by-side`, `--json`, and output caps; `workspace.rs` is the apply
+      seam for the remaining undo/redo/replay items
 - [ ] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
 - [ ] session exclusions persisted so restore never deletes ignored files
 - [ ] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a checkpoint with recorded input
@@ -333,11 +342,28 @@ apply goes through the protected-path gate.
 - [ ] no external cache provider
 
 ### PS-17 — Task-runner surface (#3726)
-- [ ] recipe inventory and reduction; the top level fits one screen and mirrors CI
+- [x] recipe inventory and reduction; the top level fits one screen and mirrors CI
+
+89 recipes reduced to 8 root recipes (`build`, `test`, `lint`, `ci`, `embed`,
+`release-build`, `docs`, plus `default`) with the rest namespaced into 13
+modules under `just/` (`check`, `sdk`, `tests`, `bdd`, `e2e`, `payload`,
+`kernel`, `lints`, `release`, `site`, `maint`, `audit`, `mem`). `just --list`
+fits one screen with every module collapsed to one line. The pinning tests
+(`embed_recipe.rs`, `github_actions_bdd_gate.rs`,
+`github_actions_extended_e2e.rs`) follow the moved recipes, and
+`tests/justfile_top_level.rs` locks the root set to exactly the CI-mirroring
+list. All `just <recipe>` call sites (workflows, scripts, docs, emitted CLI
+hints) were updated to the module-qualified names.
 
 ### PS-18 — Docs (#3727)
-- [ ] one page per capability; client guides for each agent pack; profile and pack authoring guides
-- [ ] schema reference generated from PS-05; stale claims fixed
+- [x] one page per capability (eight shipped-surface pages linked from the guides index; unfinished behavior is labeled)
+  - [x] lineage recovery: rewind and replay guide, with navigation and safety-boundary regression test
+  - [x] workload provenance: signed-plan, receipt, audit, and export guide with a documentation regression test
+  - [x] durable agent sessions: admission, boot, retention, retry, and audit limits with a documentation regression test
+- [ ] client guides for each agent pack
+- [ ] profile and pack authoring guides
+- [ ] schema reference generated from PS-05
+- [ ] correct the CLI deploy and durable-session status claims, with a documentation regression check (implemented; workspace test validation pending)
 
 ### PS-19 — Fewer feature flags (#3728)
 - [x] inventory; delete, merge or move to runtime config; CI lanes updated

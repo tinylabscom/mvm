@@ -912,6 +912,14 @@ pub(crate) fn handle_fs_diff() -> GuestResponse {
     GuestResponse::FsDiffResult { changes }
 }
 
+/// Flush every dirty page so a host read of a writable volume image sees what
+/// the workload wrote. `sync(2)` needs no privilege and has no failure to
+/// report; the acknowledgement comes after it returns.
+pub(crate) fn handle_sync_filesystems() -> GuestResponse {
+    mvm_agentd::filesystem_sync::flush_filesystems();
+    GuestResponse::FilesystemsSynced
+}
+
 pub(crate) fn handle_start_unix_socket_forward(
     guest_path: String,
     host_vsock_port: u32,

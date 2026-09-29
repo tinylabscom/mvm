@@ -105,6 +105,56 @@ impl ImageSetFixture {
         self
     }
 
+    /// Append one more artifact to the existing `role`/`target` member and
+    /// serve `bytes` under `name`. `publish` replaces the member's artifact
+    /// list; a multi-artifact member (a verity rootfs set) needs this.
+    #[must_use]
+    pub fn publish_extra(
+        mut self,
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> Self {
+        let artifact = MemberArtifact {
+            name: ArtifactName::new(name).unwrap(),
+            format: ArtifactFormat::TarGz,
+            sha256: Sha256Hex::from_bytes(&bytes),
+            size: u64::try_from(bytes.len()).unwrap(),
+        };
+        let index = self
+            .position(role, target)
+            .expect("publish_extra follows a publish of the same member");
+        self.manifest.members[index].artifacts.push(artifact);
+        self.served.insert(name.to_string(), bytes);
+        self
+    }
+
+    /// Publish a second, `build_mode: dev` variant of `role` for `target`
+    /// alongside the production member, serving `bytes` under `name`. The
+    /// selectors under test must never confuse it with the production build.
+    #[must_use]
+    pub fn publish_dev(
+        mut self,
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> Self {
+        let artifact = MemberArtifact {
+            name: ArtifactName::new(name).unwrap(),
+            format: ArtifactFormat::TarGz,
+            sha256: Sha256Hex::from_bytes(&bytes),
+            size: u64::try_from(bytes.len()).unwrap(),
+        };
+        let mut member = placeholder_member(role, target);
+        member.build_mode = Some(mvm_core::image_set::MemberBuildMode::Dev);
+        member.artifacts = vec![artifact];
+        self.manifest.members.push(member);
+        self.served.insert(name.to_string(), bytes);
+        self
+    }
+
     /// Serve `bytes` under `name` while the root keeps declaring whatever it
     /// declared before.
     #[must_use]

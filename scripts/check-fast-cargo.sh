@@ -13,6 +13,17 @@ require_text() {
   fi
 }
 
+# Recipe text may live in the root justfile or in any module under just/ —
+# the task-runner surface is namespaced, but these pins follow the recipe,
+# not the file it happens to sit in.
+require_recipe_text() {
+  local text="$1"
+  if ! grep -Fq -- "${text}" Justfile just/*/mod.just; then
+    echo "check-fast-cargo: recipe tree is missing: ${text}" >&2
+    exit 1
+  fi
+}
+
 if ! grep -Eq '^channel = "nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}"$' rust-toolchain.toml; then
   echo "check-fast-cargo: rust-toolchain.toml must pin a dated nightly" >&2
   exit 1
@@ -38,10 +49,10 @@ fi
 require_text scripts/cargo-fast.sh '.cargo/fast.toml'
 require_text scripts/cargo-fast.sh "RUSTUP_TOOLCHAIN=\"\${fast_toolchain}\""
 require_text scripts/cargo-fast.sh "PATH=\"\${toolchain_bin}:\${PATH}\""
-require_text Justfile './scripts/cargo-fast.sh build --workspace'
-require_text Justfile './scripts/cargo-fast.sh nextest run --workspace'
-require_text Justfile './scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings'
-require_text Justfile './scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings'
+require_recipe_text './scripts/cargo-fast.sh build --workspace'
+require_recipe_text './scripts/cargo-fast.sh nextest run --workspace'
+require_recipe_text './scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings'
+require_recipe_text './scripts/cargo-stable.sh clippy --fix --allow-dirty --workspace --all-targets -- -D warnings'
 require_text .githooks/pre-commit "./scripts/cargo-stable.sh clippy \$pass -- -D warnings"
 # The hook must keep running the workspace sweep and the staged-package pass as
 # two separate narrower invocations; collapsing them back into one
@@ -53,7 +64,7 @@ require_text .github/workflows/ci.yml 'uses: dtolnay/rust-toolchain@1.97.1'
 require_text .github/workflows/ci-full.yml 'uses: dtolnay/rust-toolchain@1.97.1'
 require_text .github/workflows/cache-warm.yml './scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings'
 require_text .github/workflows/cache-warm.yml 'uses: dtolnay/rust-toolchain@1.97.1'
-require_text Justfile './scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets'
+require_recipe_text './scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets'
 require_text scripts/cargo-stable.sh 'stable_toolchain="1.97.1"'
 require_text scripts/cargo-stable.sh "CARGO_TARGET_DIR=\"\${stable_target_root}\""
 require_text scripts/cargo-stable.sh "if [[ \"\${1:-}\" == \"--direct\" ]]"
@@ -76,7 +87,7 @@ fi
 # lane's sub-build resolves its toolchain by the literal name `nightly` — from
 # `crates/mvm-hostd/ebpf/rust-toolchain.toml` and two `cargo +nightly`
 # invocations — so a dated pin there leaves `+nightly` on a rustup-auto-installed
-# toolchain with no `rust-src`, and `just build-ebpf` fails asking for it.
+# toolchain with no `rust-src`, and `just check::ebpf` fails asking for it.
 # Tying the count to the `cargo +nightly` that forces it means removing the
 # hardcoding forces removing the exemption, rather than leaving a hole behind.
 floating_nightly="$(grep -Fc 'rust-toolchain@nightly' .github/workflows/ci.yml || true)"
@@ -87,8 +98,8 @@ fi
 require_text .github/workflows/ci.yml 'cargo +nightly install --locked --version 0.10.4 bpf-linker'
 require_text crates/mvm-hostd/ebpf/rust-toolchain.toml 'channel = "nightly"'
 require_text .github/workflows/ci.yml "toolchain: ${toolchain}"
-require_text Justfile 'cargo build --bin mvmctl --features user'
-require_text Justfile 'CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl"'
+require_recipe_text 'cargo build --bin mvmctl --features user'
+require_recipe_text 'CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl"'
 require_text crates/mvm-conformance/tests/steps/cli.rs 'var_os("CARGO_BIN_EXE_mvmctl")'
 
 if grep -Eq 'codegen-backend|threads=8' .cargo/config.toml; then

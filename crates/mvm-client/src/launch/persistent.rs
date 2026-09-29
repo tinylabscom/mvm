@@ -224,68 +224,6 @@ pub fn start_persistent_oci_machine(
         mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
     let initrd_path = persistent_oci_effective_initrd(rootfs_path)?;
 
-    let admission_ledger = InMemoryNonceLedger::new();
-    let ingress = machine_port_ingress(ports)?;
-    let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
-        .iter()
-        .filter_map(|volume| {
-            volume
-                .materialized_image
-                .as_deref()
-                .map(std::path::PathBuf::from)
-        })
-        .collect();
-    let admission = admit_plan_for_boot_with_ingress(
-        AdmitPlanForBootParams {
-            instructions: crate::admission::InstructionSources::for_workload(workload_dir)
-                .with_mount_roots(&instruction_mount_roots),
-            outputs: Vec::new(),
-            network_mode: preflight_network(),
-            tenant: "local",
-            vm_name: name,
-            backend_name,
-            configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
-            rootfs_path,
-            kernel_path: kernel_path.as_deref().map(std::path::Path::new),
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            cpus,
-            mem_mib: u64::from(memory_mib),
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: resolved_secrets.secret_release,
-            secrets: resolved_secrets.secrets,
-            caller_commitment,
-            ledger: &admission_ledger,
-            keys_dir: None,
-            audit_dir: None,
-            policy_dir: None,
-            bundle_pin: None,
-            deps_volume: None,
-            shares: shares_from_volume_cfg(volumes),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: network_policy.clone(),
-            agent_verb_override: agent_verb.to_vec(),
-            // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
-            // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
-            // boots (no argv, non-dev profile) keep the grant.
-            restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
-                false,
-                has_ad_hoc_argv,
-                profile == "dev",
-            ),
-            services: Vec::new(),
-            grants,
-            // The typed kind of the backend this start resolved, so the grant gate
-            // measures a declared bound against the mechanisms that tier has rather
-            // than refusing for want of an answer.
-            backend_kind: Some(crate::backend_kind_for(backend_name)),
-            entrypoint: crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
-                "the persistent OCI start path resolves no entrypoint",
-            ),
-        },
-        ingress,
-    )?;
     let mut start_config = VmStartParams::builder()
         .name(name.to_string())
         .rootfs_path(rootfs_path.display().to_string())
@@ -306,7 +244,7 @@ pub fn start_persistent_oci_machine(
         // Persistent named machines are long-lived; they are not transient
         // auto-named launches and are never claimed from the warm standby pool.
         .warm_pool_size(0)
-        .network_policy(network_policy)
+        .network_policy(network_policy.clone())
         .gpu(gpu)
         .gpu_device(gpu_device)
         .build()?
@@ -316,8 +254,82 @@ pub fn start_persistent_oci_machine(
     // sealed production boots; the guest profile and verb grant remain the
     // authoritative RPC gates as well.
     start_config.dev_console = preopen_console_for_profile(profile);
-    attach_runtime_overlay_if_cached(&mut start_config, backend_name)?;
-    attach_universal_initramfs_if_cached(&mut start_config, backend_name)?;
+    // Everything the boot waits on is prepared before admission, because
+    // admission starts the plan's validity window and the verb grant minted
+    // from it lives exactly as long. See `crate::launch::boot_order`.
+    let admission = crate::launch::boot_order::admit_after_preparation(
+        &mut start_config,
+        |config| {
+            attach_runtime_overlay_if_cached(config, backend_name)?;
+            attach_universal_initramfs_if_cached(config, backend_name)
+        },
+        |config| {
+            let admission_ledger = InMemoryNonceLedger::new();
+            let ingress = machine_port_ingress(ports)?;
+            let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
+                .iter()
+                .filter_map(|volume| {
+                    volume
+                        .materialized_image
+                        .as_deref()
+                        .map(std::path::PathBuf::from)
+                })
+                .collect();
+            admit_plan_for_boot_with_ingress(
+                AdmitPlanForBootParams {
+                    instructions: crate::admission::InstructionSources::for_workload(workload_dir)
+                        .with_mount_roots(&instruction_mount_roots),
+                    outputs: Vec::new(),
+                    network_mode: preflight_network(),
+                    tenant: "local",
+                    vm_name: name,
+                    backend_name,
+                    configured_images_dir: mvm_build::image_source::configured_images_dir()
+                        .as_deref(),
+                    rootfs_path,
+                    kernel_path: config.kernel_path.as_deref().map(std::path::Path::new),
+                    precomputed_image_sha256: None,
+                    boot_artifact_identity: None,
+                    cpus,
+                    mem_mib: u64::from(memory_mib),
+                    seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                    secret_release: resolved_secrets.secret_release,
+                    secrets: resolved_secrets.secrets,
+                    caller_commitment,
+                    ledger: &admission_ledger,
+                    keys_dir: None,
+                    audit_dir: None,
+                    policy_dir: None,
+                    bundle_pin: None,
+                    deps_volume: None,
+                    shares: shares_from_volume_cfg(volumes),
+                    assets: Vec::new(),
+                    redaction: mvm_core::policy::RedactionPolicy::default(),
+                    network_policy: network_policy.clone(),
+                    agent_verb_override: agent_verb.to_vec(),
+                    // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
+                    // they must not receive an attenuated ProdSafe-only grant. Baked-entrypoint
+                    // boots (no argv, non-dev profile) keep the grant.
+                    restrict_agent_verbs: crate::admission::agent_verbs::grant_eligible(
+                        false,
+                        has_ad_hoc_argv,
+                        profile == "dev",
+                    ),
+                    services: Vec::new(),
+                    grants,
+                    // The typed kind of the backend this start resolved, so the grant gate
+                    // measures a declared bound against the mechanisms that tier has rather
+                    // than refusing for want of an answer.
+                    backend_kind: Some(crate::backend_kind_for(backend_name)),
+                    entrypoint:
+                        crate::admission::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                            "the persistent OCI start path resolves no entrypoint",
+                        ),
+                },
+                ingress,
+            )
+        },
+    )?;
     emit_runtime_source_status(&start_config);
     thread_tenant_id(&mut start_config, &admission.admitted);
     populate_audit_substrate(

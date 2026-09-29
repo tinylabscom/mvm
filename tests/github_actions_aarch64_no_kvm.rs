@@ -39,8 +39,8 @@ const REQUIRED_BOOTSTRAP: &str =
 const REQUIRED_QEMU_BUILD: &str =
     "/tmp/mvmctl-source-under-test --builder qemu machine build --flake examples/exit_code";
 const REQUIRED_SOURCE_KERNEL: &str = ".mvm-ci/cache/kernels/x86_64/workload/bzImage";
-const REQUIRED_IMAGES_CHECKOUT: &str = "repository: tinylabscom/mvm-images";
-const REQUIRED_IMAGES_DIR: &str = "MVM_IMAGES_DIR: ${{ github.workspace }}/mvm-images";
+const REQUIRED_HIDE_SOURCE_FLAKE: &str = "mv nix/images/builder-vm nix/images/builder-vm.hidden";
+const REQUIRED_RESTORE_SOURCE_FLAKE: &str = "mv nix/images/builder-vm.hidden nix/images/builder-vm";
 const REQUIRED_SOURCE_KERNEL_BUILD: &str =
     "/tmp/mvmctl-source-under-test kernel build --which workload --source compile -v";
 const REQUIRED_SOURCE_KERNEL_VERIFY: &str = "bzImage.sha256";
@@ -202,8 +202,8 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
             && bootstrap_job.contains(&format!("name: {BINARY_ARTIFACT}"))
             && bootstrap_job.contains(REQUIRED_BOOTSTRAP_TIMEOUT)
             && bootstrap_job.contains(REQUIRED_BUILDER_TIMEOUT)
-            && bootstrap_job.contains(REQUIRED_IMAGES_CHECKOUT)
-            && bootstrap_job.contains(REQUIRED_IMAGES_DIR)
+            && bootstrap_job.contains(REQUIRED_HIDE_SOURCE_FLAKE)
+            && bootstrap_job.contains(REQUIRED_RESTORE_SOURCE_FLAKE)
             && bootstrap_job.contains(REQUIRED_SOURCE_KERNEL_BUILD)
             && bootstrap_job.contains("uses: actions/upload-artifact@v7")
             && bootstrap_job.contains(&format!("name: {BOOTSTRAP_ARTIFACT}")),
@@ -212,12 +212,14 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     let bootstrap = bootstrap_job
         .find("Bootstrap source-matched launch artifacts")
         .expect("the bootstrap runner must bootstrap source-matched launch artifacts");
-    // Kernel sources live in mvm-images; a compile without a checkout of it
-    // refuses, so the checkout lands after the published-download proof and
-    // before the compile.
-    let images_checkout = bootstrap_job
-        .find(REQUIRED_IMAGES_CHECKOUT)
-        .expect("the bootstrap runner must check out mvm-images for the kernel compile");
+    // Hide the source flake to prove the published download path, then restore
+    // it before source compilation.
+    let hide_source_flake = bootstrap_job
+        .find(REQUIRED_HIDE_SOURCE_FLAKE)
+        .expect("the bootstrap runner must hide the source flake");
+    let restore_source_flake = bootstrap_job
+        .find(REQUIRED_RESTORE_SOURCE_FLAKE)
+        .expect("the bootstrap runner must restore the source flake");
     let source_kernel_build = bootstrap_job
         .find(REQUIRED_SOURCE_KERNEL_BUILD)
         .expect("the bootstrap runner must source-build the QEMU kernel");
@@ -230,11 +232,12 @@ fn no_kvm_smokes_use_source_binary_and_bound_hosted_tcg_to_boot() {
     assert!(bootstrap_job.contains("/boot/vmlinuz-$(uname -r)"));
     assert!(bootstrap_job.contains("/boot/initrd.img-$(uname -r)"));
     assert!(
-        bootstrap < images_checkout
-            && images_checkout < restore_kvm
+        hide_source_flake < bootstrap
+            && bootstrap < restore_source_flake
+            && restore_source_flake < restore_kvm
             && restore_kvm < grant_boot_read
             && grant_boot_read < source_kernel_build,
-        "the mvm-images checkout, KVM acceleration, and readable boot inputs must be in place after the no-KVM bootstrap proof and before source kernel compilation"
+        "the source flake, KVM acceleration, and readable boot inputs must be restored after the published-bootstrap proof and before source kernel compilation"
     );
     assert!(
         build_job.contains("needs: no-kvm-bootstrap")

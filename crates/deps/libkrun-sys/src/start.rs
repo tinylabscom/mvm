@@ -126,7 +126,7 @@ pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error
             ctx.kernel_cmdline.as_deref(),
         )?;
         if let Some(rootfs) = &ctx.rootfs_path {
-            krun.add_disk("root", Path::new(rootfs), false)?;
+            krun.add_disk("root", Path::new(rootfs), ctx.rootfs_read_only)?;
         }
     }
 
@@ -169,7 +169,8 @@ pub(super) fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error
 }
 
 /// Validate that the boot fields on `ctx` describe exactly one of the
-/// supported shapes: (kernel + rootfs), (kernel + initramfs), or
+/// supported shapes: (kernel + rootfs), (kernel + initramfs), (kernel +
+/// rootfs + initramfs, where the initramfs `/init` mounts the disk), or
 /// (root_dir + guest_entrypoint). Anything else is a programming
 /// error — we'd otherwise pass nonsense to libkrun and watch it
 /// fail late with an opaque rc.
@@ -207,10 +208,9 @@ fn validate_boot_config(ctx: &KrunContext) -> Result<(), Error> {
                 .to_string(),
         });
     }
-    if has_rootfs == has_initramfs {
+    if !has_rootfs && !has_initramfs {
         return Err(Error::Io {
-            context: "KrunContext kernel mode requires exactly one of rootfs_path or \
-                      initramfs_path"
+            context: "KrunContext kernel mode requires rootfs_path, initramfs_path, or both"
                 .to_string(),
         });
     }
@@ -403,12 +403,37 @@ mod tests {
         validate_boot_config(&ctx).expect_err("no kernel, no root_dir → reject");
     }
 
+    /// The builder boot payload: the initramfs `/init` runs first and mounts
+    /// the rootfs disk itself.
     #[test]
-    fn validate_boot_config_rejects_kernel_with_both_rootfs_and_initramfs() {
+    fn validate_boot_config_accepts_a_rootfs_beside_an_initramfs() {
+        let ctx = KrunContext::new("vm", "/k", "/r")
+            .with_boot_initramfs("/i")
+            .with_read_only_rootfs();
+        validate_boot_config(&ctx).expect("kernel + rootfs + initramfs is the payload boot");
+        assert!(ctx.rootfs_read_only);
+    }
+
+    #[test]
+    fn validate_boot_config_rejects_a_kernel_with_neither_root() {
         let mut ctx = KrunContext::new("vm", "/k", "/r");
-        ctx.initramfs_path = Some("/i".to_string());
-        validate_boot_config(&ctx)
-            .expect_err("kernel + both rootfs and initramfs is ambiguous → reject");
+        ctx.rootfs_path = None;
+        let err = validate_boot_config(&ctx).expect_err("a kernel with no root → reject");
+        assert!(
+            matches!(err, Error::Io { ref context } if context.contains("rootfs_path, initramfs_path, or both")),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_rootfs_is_writable_at_the_vmm_unless_asked_otherwise() {
+        assert!(!KrunContext::new("vm", "/k", "/r").rootfs_read_only);
+        let json = serde_json::to_value(KrunContext::new("vm", "/k", "/r")).unwrap();
+        let mut without_field = json.as_object().unwrap().clone();
+        without_field.remove("rootfs_read_only");
+        let parsed: KrunContext =
+            serde_json::from_value(serde_json::Value::Object(without_field)).unwrap();
+        assert!(!parsed.rootfs_read_only);
     }
 
     /// When libkrun isn't installed on the host, `start` short-circuits

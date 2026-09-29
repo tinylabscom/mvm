@@ -243,7 +243,7 @@ machine/sandbox call going to the worktree-built host library.
 Useful local commands:
 
 ```sh
-just sdk-build-python
+just sdk::build-python
 uv run --directory sdks/python pytest
 PYTHONPATH="$PWD/sdks/python" python3 app.py
 ```

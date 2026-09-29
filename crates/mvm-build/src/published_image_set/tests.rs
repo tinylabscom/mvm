@@ -37,6 +37,74 @@ fn a_member_named_by_the_signed_root_is_delivered_verbatim() {
     assert_eq!(std::fs::read(&dest).unwrap(), b"overlay");
 }
 
+/// A set that also publishes the dev variant of the default tenant must not
+/// confuse the production selectors: the default-workload fetch still takes
+/// exactly the four production artifacts, and the generic artifact lookup
+/// never reaches the dev member.
+#[test]
+fn a_dev_variant_member_is_invisible_to_production_selection() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let kernel = "default-microvm-vmlinux-aarch64";
+    let fixture = ImageSetFixture::complete()
+        .publish(
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            kernel,
+            b"prod-kernel".to_vec(),
+        )
+        .publish(
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-rootfs-aarch64.ext4",
+            b"prod-rootfs".to_vec(),
+        )
+        .publish_extra(
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-rootfs-aarch64.verity",
+            b"prod-verity".to_vec(),
+        )
+        .publish_extra(
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-rootfs-aarch64.roothash",
+            b"prod-roothash".to_vec(),
+        )
+        .publish_dev(
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-dev-rootfs-aarch64.ext4",
+            b"dev-rootfs".to_vec(),
+        );
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).expect("acquire");
+
+    let out = tempfile::tempdir().unwrap();
+    set.fetch_default_workload(ARCH, out.path())
+        .expect("prod fetch");
+    assert_eq!(
+        std::fs::read(out.path().join("vmlinux")).unwrap(),
+        b"prod-kernel"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("rootfs.ext4")).unwrap(),
+        b"prod-rootfs",
+        "the dev member's rootfs must not reach the production cache"
+    );
+
+    let err = set
+        .artifact(
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-dev-rootfs-aarch64.ext4",
+        )
+        .expect_err("the generic lookup must not select the dev member");
+    assert!(
+        matches!(err, ImageSetMemberError::NoArtifact { .. }),
+        "the production member is selected and it does not carry the dev artifact: {err}"
+    );
+}
+
 #[test]
 fn a_member_whose_bytes_differ_from_the_root_is_refused_and_removed() {
     let _env = unsigned_env();
