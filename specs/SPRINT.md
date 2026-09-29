@@ -4882,10 +4882,17 @@ workspace Clippy pass. Full
 workspace validation is retrying with bounded concurrency after an unchanged
 agent deadline test failed; Linux builder initialization remains blocked.
 
+## 2026-09-28 Pack signing smoke — #3794
+
+- [x] Reproduce and remove the pack input/output collision; focused Cargo test,
+      actionlint and host workspace Clippy pass.
+- [x] Pass the real signing smoke on the branch (run 36472914601).
+- [x] Remove the restore-timeout test fixture scheduling race; all 262 backend
+      tests and the final host workspace Clippy rerun pass.
+- [ ] Complete workspace and Linux builder validation, PR checks, merge and closure.
+See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
 ## 2026-09-28 Security evidence freshness — #3750
-
 - [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.
-
 Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
 ## 2026-09-28 runtime approval SDK completion — #3717

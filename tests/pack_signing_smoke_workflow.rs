@@ -6,8 +6,12 @@ fn image_set_smoke_fixture_keeps_the_dummy_kernel_size_literal() {
         .expect("read pack-signing smoke workflow");
 
     assert!(
-        workflow.contains("printf 'dummy-kernel'   > smoke/vmlinux"),
-        "workflow must keep the fixed dummy kernel payload this regression test describes"
+        workflow.contains("printf 'dummy-kernel'   > smoke/inputs/vmlinux"),
+        "workflow must keep the fixed dummy kernel payload under the isolated smoke input path"
+    );
+    assert!(
+        workflow.contains("cp smoke/inputs/vmlinux smoke/image-set/vmlinux"),
+        "workflow must copy the dummy kernel from inputs into generated pack artifacts"
     );
     assert!(
         workflow.contains("\"size\": 12"),
