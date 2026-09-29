@@ -335,6 +335,7 @@ mod tests {
                         sigv4: None,
                         provider: None,
                         approve: Default::default(),
+                        oauth: None,
                     },
                 )
                 .expect("seed the binding store");

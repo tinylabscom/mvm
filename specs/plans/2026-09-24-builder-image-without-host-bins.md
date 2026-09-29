@@ -3,8 +3,8 @@
 Backing: preview
 Validation: none
 
-**Status:** IN PROGRESS. W0–W6 and W9–W11 are implemented in `mvm`; W7 is
-the `mvm-images` side, and W8a, what is left of W8, and W12 remain. The
+**Status:** IN PROGRESS. W0–W6, W8a, and W9–W11 are implemented in `mvm`;
+W7 is complete in `mvm-images`, while the rest of W8 and W12 remain. The
 cutover plan's W8 Waves 1+2 (#3774, 2026-09-27) removed every in-tree image
 build, the builder source fingerprint and the Stage 0 builder-image build,
 which took several W8 items with them; W8 below says which. The design was
@@ -749,12 +749,16 @@ or an in-tree bake to remove.
       flake pin advanced to `0f33c057d8`, the first payload-capable commit.
       Publishing an ABI-1 set (image-set/v0.2.2) is the release train's cut,
       not part of the PR.
-- [ ] **W8a — refuse a local set without `builder_boot_abi`.** After
+- [x] **W8a — refuse a local set without `builder_boot_abi`.** After
       mvm-images#31 (the emitter writes the field) has landed, a local image
       set that omits it is refused by name, with a message saying the
       manifest predates the builder boot ABI and must be regenerated. One
       condition in `validate_local` plus its test. Releases published before
       the field existed keep reading as ABI 0.
+      Landed: `ImageSetError::LocalBuilderBootAbiMissing` from
+      `check_local_fields` at the structure stage; releases never run that
+      check, so pre-field releases keep reading as ABI 0, with tests for
+      both sides.
 - [ ] **W8 — `mvm` cut-over.** What remains after #3774, which removed every
       in-tree image build, the builder source fingerprint (layer 2 and the
       unembedded `BootstrapPreflight` path included) and the Stage 0
