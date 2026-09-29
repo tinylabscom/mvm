@@ -423,7 +423,7 @@ issue #3731 carries the same status as a comment.
 | #3758 | PS-10 | `session.sealed` entries, derived session ledger, `trust audit sessions` / `show` / `verify <session>`; two claim-8 witnesses; CI being fixed |
 | #3767 | PS-20 | unreachable `up::Args` and stale references removed (opened by another session) |
 | #3768 | PS-17 | task-runner surface reduced (opened by another session) |
-| #3798 | PS-05 (#3715) | composable policy groups/profiles and resolved manifests; security audit fixes added, full gates pending |
+| #3798 | PS-05 (#3715) | composable policy groups/profiles and resolved manifests; security audit fixes added; focused checks, Clippy, and host workspace tests validated (one parallel image-lock race passed on serial rerun); Linux and required-feature gates pending CI |
 | mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
 
 ### Stopped mid-flight (2026-09-27)
