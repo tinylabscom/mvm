@@ -1,10 +1,12 @@
 # Refactor status
 
-Last updated: 2026-09-28
+Last updated: 2026-09-29
 
 ## In progress
 
 - [ ] **Pack signing input isolation — #3794.** Fix, regression, actionlint, host workspace Clippy and real signing smoke pass. The restore-timeout fixture is deterministic and all 262 backend tests pass; full workspace tests, Linux and final PR checks are pending. See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
+- [ ] **Security mutation witnesses — #3679.** Contract/filesystem validation (1,524 tests), all four base-image tests, the source-root test and final host workspace Clippy pass. Full workspace and mutation validation remain pending; Linux builder initialization is blocked. See `specs/plans/2026-09-28-security-mutation-witnesses.md`.
+
 - [ ] **Extended CI process cleanup — #3773.** All 47 integration regressions and final host workspace Clippy pass; full tests are pending. Linux builder initialization is blocked; the final live Firecracker lane remains active. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
 - [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
@@ -2019,6 +2021,14 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [ ] **AI coding workflow docs**
+      (`specs/plans/2026-09-28-ai-coding-workflow-docs.md`, PR #3815).
+      The issue-to-PR playbook moved from a 588-line `AGENTS.md` to
+      `public/src/content/docs/contributing/ai-coding-workflow.md`; the root
+      file is now a concise rule index that keeps every normative rule,
+      including later session and retry rules, and points at the guide. Site
+      build and repository policy checks pass; merge is in progress.
 
 - [ ] **Static crates registry recovery**
       (`specs/plans/2026-08-26-static-crates-registry-fetch.md`, issue #2904).

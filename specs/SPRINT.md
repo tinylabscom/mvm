@@ -10,6 +10,17 @@
 
 ## In progress
 
+- [ ] **Document the AI coding workflow and slim AGENTS.md to a rule index.**
+      `specs/plans/2026-09-28-ai-coding-workflow-docs.md`. The issue-to-PR
+      playbook for agent-driven work now lives at
+      `public/src/content/docs/contributing/ai-coding-workflow.md` (claim/status
+      ownership, worktree workflow, Graft/Serena split, per-developer Zed/Cursor
+      Serena configuration, fast feedback ladder, CI/merge-queue scope, PR
+      linkage, safe parallelism), linked from the development guide and the
+      docs sidebar. `AGENTS.md` is condensed while retaining the newly landed
+      session, test, and retry rules. Shared MCP files intentionally keep only
+      graft. PR #3815 is open; merge is pending.
+
 - [x] **Remove sccache from the contributor toolchain.** The machine-wide
       Cargo wrapper was producing build failures while its measured
       cross-worktree hit rate was negligible. The optional `just test-cached`
@@ -4819,6 +4830,19 @@ writes the plan:
       saturating counters (a compare-exchange loop, so totals cannot wrap
       back under a ceiling), per-dimension exceeded latches, and
       record-then-refuse semantics matching the AI budget tracker.
+
+## 2026-09-28 Security witnesses — #3679
+
+- [ ] Validate remaining regressions and pass the full Security workflow.
+- [ ] Complete required workspace/Linux checks, merge and confirm closure.
+
+See `specs/plans/2026-09-28-security-mutation-witnesses.md`; freshness alert #3750 depends on this recovery.
+
+- [x] Security witness focused validation: mvm-contract 1,103 tests and mvm-fs 421 tests pass. Host workspace Clippy also passes; remaining package, workspace and mutation checks are pending.
+
+Security validation update (#3679): all four base-image scan witnesses and the
+absolute source-root test pass. Workflow 36484461950 is underway; complete workspace
+and Linux validation remain pending. The builder is blocked in Nix-store initialization.
 
 ## 2026-09-28 Extended CI cleanup — #3773
 
