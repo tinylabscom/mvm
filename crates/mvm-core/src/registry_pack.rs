@@ -932,6 +932,27 @@ mod tests {
     }
 
     #[test]
+    fn publisher_rejects_malformed_security_policy_fields() {
+        for (issuer, identities) in [
+            (" ", vec!["publisher@example.com".to_string()]),
+            ("issuer", Vec::new()),
+            ("issuer", vec![" ".to_string()]),
+            (
+                "issuer",
+                vec![
+                    "publisher@example.com".to_string(),
+                    "publisher@example.com".to_string(),
+                ],
+            ),
+        ] {
+            assert!(matches!(
+                RegistryPackPublisher::new("runtime", issuer, identities),
+                Err(RegistryPackVerificationError::InvalidPublisherPolicy { .. })
+            ));
+        }
+    }
+
+    #[test]
     fn verification_checks_the_lock_before_the_signature() {
         let bytes = signed_manifest_bytes("runtime/python@1.2.3");
         let lock = PackLockfile::new(vec![pin("runtime/python@1.2.3", b"other")]).unwrap();
