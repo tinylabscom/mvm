@@ -40,10 +40,14 @@ test-support = ["mvm-runtime/test-support"]
 # flag parses straight into the one profile table instead of a CLI-side copy.
 # Off by default: an embedder names a profile by value and links no parser.
 clap = ["dep:clap"]
-# Derive `schemars::JsonSchema` on the authored-policy types and build the
-# `emit_policy_schema` bin. Off by default so no shipped closure carries
-# schemars; forwards to `mvm-contract/schema` because a policy embeds endpoint
-# routes and backend kinds from there.
+# Forwards to `mvm-core/manifest-verify`: the in-process Sigstore verifier that
+# checks keyless instruction-file signatures. Without it a keyless signature is
+# reported as uncheckable rather than verified. The feature exists here so the
+# tests that verify a real Sigstore bundle compile only where it is on.
+manifest-verify = ["mvm-core/manifest-verify"]
+# Derive schemas for authored policy and instruction trust policy, and build
+# their emitters. Off by default so no shipped closure carries schemars;
+# mvm-contract/schema covers policy endpoint routes and backend kinds.
 schema = ["dep:schemars", "mvm-contract/schema"]
 
 [dependencies]
@@ -123,8 +127,10 @@ mvm-http = { workspace = true }
 # `clap` feature only. Already in the mvmctl closure through mvm-cli, which is
 # the one crate that turns the feature on.
 clap = { workspace = true, optional = true }
-# Authored policy profiles: TOML documents (already in this crate's closure
-# through mvm-core).
+# Instruction-file provenance include globs (already in this crate's closure
+# through mvm-sdk).
+globset = { workspace = true }
+# Authored policy profiles and instruction trust policy TOML documents.
 toml = { workspace = true }
 # Only under `schema`; 0.8 matches the version every other crate pins.
 schemars = { version = "0.8", optional = true }
@@ -132,6 +138,11 @@ schemars = { version = "0.8", optional = true }
 [[bin]]
 name = "emit_policy_schema"
 path = "src/bin/emit_policy_schema.rs"
+required-features = ["schema"]
+
+[[bin]]
+name = "emit_instruction_trust_schema"
+path = "src/bin/emit_instruction_trust_schema.rs"
 required-features = ["schema"]
 
 [dev-dependencies]

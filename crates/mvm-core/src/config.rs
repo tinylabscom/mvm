@@ -312,6 +312,36 @@ pub fn policy_groups_dir() -> std::path::PathBuf {
     policy_dir().join("groups")
 }
 
+/// The user's instruction-file trust policy:
+/// `<mvm_home>/config/instruction-trust.toml`.
+///
+/// The authoritative half of the instruction-file provenance policy; a
+/// project's own policy may only tighten what this file allows.
+pub fn instruction_trust_policy_path() -> std::path::PathBuf {
+    instruction_trust_policy_path_at(mvm_home())
+}
+
+/// The instruction-file trust policy beneath an explicit mvm home.
+pub fn instruction_trust_policy_path_at(
+    mvm_home: impl AsRef<std::path::Path>,
+) -> std::path::PathBuf {
+    mvm_config_dir_at(mvm_home).join("instruction-trust.toml")
+}
+
+/// A project's own instruction-file trust policy:
+/// `<project_root>/.mvm/instruction-trust.toml`.
+///
+/// Not under the mvm home: it travels with the project, and may only tighten
+/// the user policy at [`instruction_trust_policy_path`].
+pub fn project_instruction_trust_policy_path(
+    project_root: impl AsRef<std::path::Path>,
+) -> std::path::PathBuf {
+    project_root
+        .as_ref()
+        .join(".mvm")
+        .join("instruction-trust.toml")
+}
+
 /// Default OCI registry trust policy: `<mvm_home>/oci-policy.toml`.
 pub fn oci_policy_path() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home()).join("oci-policy.toml")
@@ -1632,6 +1662,14 @@ mod tests {
         assert_eq!(
             policy_groups_dir(),
             std::path::PathBuf::from("/custom/root/config/policy/groups")
+        );
+        assert_eq!(
+            project_instruction_trust_policy_path("/work/app"),
+            std::path::PathBuf::from("/work/app/.mvm/instruction-trust.toml")
+        );
+        assert_eq!(
+            instruction_trust_policy_path(),
+            std::path::PathBuf::from("/custom/root/config/instruction-trust.toml")
         );
         assert_eq!(
             attestation_dir(),

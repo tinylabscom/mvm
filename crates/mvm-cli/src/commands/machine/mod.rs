@@ -69,10 +69,14 @@ use receipt::{
 };
 pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
-use spec_ops::{create_machine, inspect_machine, remove_machine, run_reconfigure};
+use spec_ops::{
+    create_machine, inspect_machine, persistent_workload_dir_for_run, remove_machine,
+    run_reconfigure,
+};
 pub(in crate::commands) use start_create_flags::MachineStartCreateFlags;
 use volume_profile::{
-    enforce_persisted_volume_profile, enforce_volume_profile, persistent_dir_share_refusal,
+    enforce_persisted_volume_profile, enforce_volume_profile, machine_run_volume_specs,
+    persistent_dir_share_refusal,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -545,23 +549,6 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
 /// different working directory still resolves the same disk. The boot path
 /// re-validates via `build_machine_volume_cfg`, so this is the early,
 /// user-facing gate, not the only one.
-fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
-    enforce_volume_profile(args.run.profile, &args.run.mounts)?;
-    let mut out = Vec::with_capacity(args.run.mounts.len());
-    for raw in &args.run.mounts {
-        let spec = super::shared::parse_volume_spec(raw)?;
-        let vmv = super::shared::vm_volume_from_spec_validated(&spec)
-            .with_context(|| format!("volume {raw:?}"))?;
-        // Pin the canonical absolute host path; keep the guest[:size][:mode]
-        // tail verbatim so disk volumes and modifiers survive the round-trip.
-        let (_, tail) = raw
-            .split_once(':')
-            .expect("parse_volume_spec guarantees a host:guest separator");
-        out.push(format!("{}:{}", vmv.host, tail));
-    }
-    Ok(out)
-}
-
 /// Interactive attach needs a real terminal: the console bridges raw-mode
 /// stdin. Refuse up front when stdin is not a TTY so the command fails with a
 /// clear message instead of hanging on an EOF'd stdin.
@@ -613,6 +600,7 @@ fn machine_run_spec(
                  `--runtime-pack` to create machine {name:?}"
         );
     };
+    let workload_dir = persistent_workload_dir_for_run(args)?;
     if !args.run.allow_endpoint.is_empty() || !args.run.policy_routes.is_empty() {
         bail!(
             "endpoint routes (--allow-endpoint, or [[network.routes]] in the policy) are not \
@@ -669,6 +657,7 @@ fn machine_run_spec(
         init: Vec::new(),
         agent_verb: args.run.agent_verb.clone(),
         caller_commitment: args.run.caller_commitment.clone(),
+        workload_dir,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: crate::exec::build_healthcheck(
@@ -1188,6 +1177,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         init: inputs.init.to_vec(),
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,

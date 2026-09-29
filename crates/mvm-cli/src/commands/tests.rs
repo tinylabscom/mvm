@@ -151,8 +151,7 @@ use config::ConfigAction;
 use image::ImageAction;
 
 use super::shared::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_volume_spec,
-    resolve_flake_ref,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, parse_volume_spec, resolve_flake_ref,
 };
 
 #[test]
@@ -3044,21 +3043,6 @@ fn test_clap_port_spec_invalid() {
 }
 
 #[test]
-fn test_clap_volume_spec_valid() {
-    assert!(clap_volume_spec("/host:/guest").is_ok());
-    assert!(clap_volume_spec("/host/path:/guest/mount").is_ok());
-    assert!(clap_volume_spec("/host:/guest:1G").is_ok());
-    assert!(clap_volume_spec("./local:/app").is_ok());
-}
-
-#[test]
-fn test_clap_volume_spec_invalid() {
-    assert!(clap_volume_spec("").is_err());
-    assert!(clap_volume_spec("nocolon").is_err());
-    assert!(clap_volume_spec(":/guest").is_err()); // empty host
-}
-
-#[test]
 fn test_clap_vm_name_valid() {
     assert!(clap_vm_name("my-vm").is_ok());
     assert!(clap_vm_name("vm1").is_ok());
@@ -3123,7 +3107,7 @@ fn test_run_rejects_invalid_port_at_parse_time() {
     );
 }
 
-// ---- Config defaults wired into the Up command ----
+// ---- Config defaults applied when run flags are omitted ----
 
 #[test]
 fn test_run_uses_config_default_cpus() {
@@ -3133,7 +3117,7 @@ fn test_run_uses_config_default_cpus() {
         ..mvm_core::user_config::MvmConfig::default()
     };
 
-    // Simulate the resolution logic from the Commands::Up dispatch.
+    // Simulate the run-path resolution: CLI flag, else config default.
     let cli_cpus: Option<u32> = None;
     let effective = cli_cpus.or(Some(cfg.default_cpus));
     assert_eq!(effective, Some(4));

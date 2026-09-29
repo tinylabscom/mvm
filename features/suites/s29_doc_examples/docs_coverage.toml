@@ -209,6 +209,9 @@ covered = [
     "mvmctl trust audit verify 1e9fca73063e",
     "mvmctl trust audit verify",
     "mvmctl trust audit verify --tenant local",
+    "mvmctl trust instructions init",
+    "mvmctl trust instructions sign ./my-agent",
+    "mvmctl trust instructions verify ./my-agent",
 ]
 uncovered = [
     "mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true",

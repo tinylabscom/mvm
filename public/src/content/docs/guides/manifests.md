@@ -125,6 +125,13 @@ mvmctl machine start alpine-dev
 `[dev].init` is intentionally fail-closed at start until its runtime
 transport is implemented.
 
+A slot built from an image boots exactly as `--image` does. `mvmctl run
+--manifest` and `mvmctl machine run --manifest` read what the slot holds, not
+which flag named it, so when the run has egress the workload gets the same
+proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` and the
+lowercase forms) and the same NIC-less backend as an `--image` run of that
+image.
+
 ### Manifest discovery
 
 Only `mvmctl machine build` takes an optional positional `[PATH]` (defaulting to `.`). `mvmctl machine run` and `mvmctl run` take `-m/--manifest <PATH>` instead, because their positional slot is the trailing argv:

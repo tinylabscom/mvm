@@ -82,6 +82,10 @@ pub struct MachineSpec {
     /// Opaque commitment bound into every execution plan for this machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caller_commitment: Option<mvm_contract::plan::CallerCommitment>,
+    /// Local workload source directory to scan for project instruction files
+    /// and policies on each start, when this machine came from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workload_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -273,6 +277,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.grants == b.grants
         && a.gpu == b.gpu
         && a.gpu_device == b.gpu_device
+        && a.workload_dir == b.workload_dir
 }
 
 /// Human summary of which boot-affecting fields differ, for the loud
@@ -286,6 +291,7 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
         || current.manifest != desired.manifest
         || current.deployment != desired.deployment
         || current.runtime_pack != desired.runtime_pack
+        || current.workload_dir != desired.workload_dir
     {
         changed.push("source");
     }
@@ -487,6 +493,7 @@ mod tests {
             init: vec![],
             agent_verb: vec![],
             caller_commitment: None,
+            workload_dir: None,
             created_at: None,
             last_started_at: None,
             health_check: None,
@@ -804,6 +811,7 @@ mod tests {
             init: vec![],
             agent_verb: vec![],
             caller_commitment: None,
+            workload_dir: None,
             created_at: None,
             last_started_at: None,
             health_check: None,

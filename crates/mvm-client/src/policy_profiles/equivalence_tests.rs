@@ -42,6 +42,7 @@ fn admitted_plan(grants: &RunGrants, dir: &std::path::Path) -> mvm_core::plan::E
     let audit = dir.join("audit");
     let ledger = InMemoryNonceLedger::new();
     let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+        instructions: Default::default(),
         outputs: Vec::new(),
         network_mode: mvm_contract::plan::NetworkMode::default(),
         tenant: "local",
