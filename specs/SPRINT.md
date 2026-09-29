@@ -15,6 +15,14 @@
       instead of requiring lossless delivery under backpressure. The CI-scope
       aggregate harness executes its script as a Bash command, so an expected
       early refusal cannot break a producer writing to standard input.
+- [x] **Composable policy files and authored profiles — issue #3715.**
+      Rust-derived policy/profile schema, user and project discovery,
+      `policy resolve|show|validate|diff`, and `--policy`/`--plan` now lower
+      into the signed execution path. Security regressions cover deny
+      precedence across lower grant surfaces, Workload IR secrets,
+      launch-plan environment, canonical share paths, conditional override
+      order, backend drift, and persistent-machine refusal for policy a spec
+      cannot record. See `specs/sprint/delivery/3715-policy-profiles.md`.
 - [ ] **Complete capability and client documentation — issue #3727.**
       Corrections for the stale `deploy` CLI denial and durable-session status
       are drafted with two passing documentation regression tests; workspace

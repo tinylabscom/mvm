@@ -44,6 +44,10 @@ gpu = false                   # opt in to the CUDA/NVML remoting plane
 [network]
 allow_hosts = ["api.example.com:443"]
 
+[policy]                      # authored policy for runs that name this project
+profile = "agent-apis"        # a profile name or a path relative to this file
+include = ["./policy/extra.toml"]   # extra groups
+
 [dev]
 init = []                     # dev-only; machine start fails closed today
 volumes = ["./state.img:/data/state:1G:rw"]
@@ -75,6 +79,7 @@ Each field's owner:
 | `gpu_device` | mvmctl — pin the VM to one host GPU ordinal | Optional; implies `gpu = true` |
 | `[dev].init` | mvmctl — future dev-only init hook | Parsed, start fails closed today |
 | `[dev].volumes` | mvmctl — persistent disk images | Optional |
+| `[policy]` | mvmctl — the authored policy profile and groups a run of this project resolves; `--policy` replaces it. See [Policy and profiles](/guides/policy-and-profiles/) | Optional |
 | `name` | mvmctl — display in `ls`, optional S3 channel key | Optional |
 
 Anything not in this list belongs in the flake (kernel/rootfs content, NixOS

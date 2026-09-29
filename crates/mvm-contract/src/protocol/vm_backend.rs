@@ -1300,6 +1300,7 @@ pub struct VmInfo {
 /// variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub enum BackendKind {
     Firecracker,
     Libkrun,
