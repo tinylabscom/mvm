@@ -13,9 +13,10 @@
 - [ ] **Complete capability and client documentation — issue #3727.**
       Corrections for the stale `deploy` CLI denial and durable-session status
       are drafted with two passing documentation regression tests; workspace
-      test validation remains pending. Lineage recovery and workload provenance
-      now have navigable guides and passing documentation regression tests; other
-      capability, client, authoring, and schema pages remain open.
+      test validation remains pending. Lineage recovery, workload provenance,
+      and durable agent sessions now have navigable guides and three further
+      passing documentation regression tests. Other capability, client,
+      authoring, and schema pages remain open.
 
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories

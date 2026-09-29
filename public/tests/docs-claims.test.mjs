@@ -71,3 +71,19 @@ test("workload provenance guide distinguishes signed evidence from an export", (
   assert.match(guide, /read-only view/);
   assert.match(guide, /not a substitute for verifying the underlying audit chain/i);
 });
+
+test("durable agent-session guide states admission and retention limits", () => {
+  const guide = readFileSync(
+    path.join(repo, "public/src/content/docs/guides/durable-agent-sessions.md"),
+    "utf8",
+  );
+  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
+
+  assert.match(sidebar, /slug: "guides\/durable-agent-sessions"/);
+  for (const verb of ["open", "park", "resume", "renew"]) {
+    assert.equal(guide.includes(`mvmctl agent-session ${verb}`), true, `${verb} is documented`);
+  }
+  assert.match(guide, /does not boot a sandbox by default/i);
+  assert.match(guide, /retention promise, not an automatic cleanup timer/i);
+  assert.match(guide, /verify the audit chain separately/i);
+});

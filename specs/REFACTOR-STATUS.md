@@ -58,6 +58,7 @@ Last updated: 2026-09-29
   - [ ] PS-18 docs per capability and per agent — #3727
     - [x] lineage recovery guide and documentation regression test; remaining pages still open
     - [x] workload provenance guide and documentation regression test; remaining pages still open
+    - [x] durable agent-session guide and documentation regression test; remaining pages still open
     - [ ] stale CLI deploy and durable-session status corrections implemented; workspace test validation pending
     - [ ] capability pages, client guides, authoring guides, and generated schema reference
   - [x] PS-19 fewer feature flags — #3728
