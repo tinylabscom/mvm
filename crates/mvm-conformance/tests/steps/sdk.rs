@@ -316,9 +316,25 @@ fn run_refusal_fixture(world: &mut CliWorld, language: String) {
     world.sdk_output = Some(run_live_fixture(world, &language, "refusals", "prod"));
 }
 
+#[when(expr = "I run the {string} SDK launch fixture")]
+fn run_launch_fixture(world: &mut CliWorld, language: String) {
+    world.sdk_output = Some(run_live_fixture(world, &language, "launch", "dev"));
+}
+
 #[then("the recorded host-library calls match the golden live session")]
 fn recorded_calls_match_golden(world: &mut CliWorld) {
-    let golden_path = sdk_fixture_dir().join("live_session.jsonl");
+    assert_recorded_calls_match(world, "live_session.jsonl");
+}
+
+#[then("the recorded host-library calls match the golden launch session")]
+fn recorded_calls_match_golden_launch(world: &mut CliWorld) {
+    assert_recorded_calls_match(world, "launch_session.jsonl");
+}
+
+/// The last live fixture's calls, with the generated machine name
+/// normalized, against the golden trace in `golden`.
+fn assert_recorded_calls_match(world: &CliWorld, golden: &str) {
+    let golden_path = sdk_fixture_dir().join(golden);
     let golden: Vec<Value> = std::fs::read_to_string(&golden_path)
         .unwrap_or_else(|error| panic!("read {}: {error}", golden_path.display()))
         .lines()

@@ -10,10 +10,13 @@ replies into Python values. A refusal from the library arrives as the typed
 
 from __future__ import annotations
 
+import secrets
+import sys
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator, Literal, overload
 
 from mvm import _hostlib
+from mvm._errors.types import HostLibraryError, MvmTransportError
 from mvm._hostabi.methods import (
     GUEST_PROC_START,
     MACHINE_CREATE,
@@ -25,12 +28,13 @@ from mvm._hostabi.methods import (
     MACHINE_START,
     MACHINE_STOP,
 )
-from mvm._live import decode_bytes, parse_host_port, stream_process
+from mvm._live import decode_bytes, follow_output, parse_host_port, stream_process
 
 
 @dataclass(frozen=True)
 class MachineResult:
-    """What a command run by :meth:`Machine.exec` produced.
+    """What a command run by :meth:`Machine.run` or :meth:`Machine.exec`
+    produced.
 
     ``exit_code`` is ``128 + signal`` when a signal ended the command and 124
     when its timeout did, the way a shell reports both."""
@@ -116,6 +120,33 @@ def _launch_request(**fields: Any) -> dict[str, Any]:
     return {key: value for key, value in fields.items() if value is not None}
 
 
+def _source(
+    image: str | None, template: str | None, manifest: str | None
+) -> dict[str, str]:
+    """The one boot source a launch names, as its request field."""
+    given = {
+        field: _require_non_empty_str(value, field)
+        for field, value in (("image", image), ("template", template), ("manifest", manifest))
+        if value is not None
+    }
+    if len(given) != 1:
+        raise ValueError("pass exactly one of image, template and manifest")
+    return given
+
+
+def _generated_name(prefix: str) -> str:
+    """A machine name the library's validator accepts, unique per boot."""
+    return f"sdk-{prefix}-{secrets.token_hex(4)}"
+
+
+def _optional_str(value: Any, label: str) -> str | None:
+    return None if value is None else _require_non_empty_str(value, label)
+
+
+def _optional_positive(value: Any, label: str) -> int | None:
+    return None if value is None else _positive_int(value, label)
+
+
 def _machine_name(state: Any, method: str) -> str:
     name = state.get("name") if isinstance(state, dict) else None
     if not isinstance(name, str) or not name:
@@ -123,21 +154,39 @@ def _machine_name(state: Any, method: str) -> str:
     return name
 
 
+def _collected(name: str, token: str, timeout: float | None) -> MachineResult:
+    """Wait for guest process ``token`` in machine ``name`` and decode what it
+    wrote."""
+    output = stream_process(name, token, timeout=timeout, on_chunk=None, error=MachineError)
+    return MachineResult(
+        exit_code=output.exit_code,
+        stdout=output.stdout.decode("utf-8", errors="replace"),
+        stderr=output.stderr.decode("utf-8", errors="replace"),
+    )
+
+
 class Machine:
     """A handle on one machine, by name.
 
-    ``Machine.run`` boots a transient machine and ``Machine.create`` persists
-    one without booting it; both return a handle. ``Machine("name")`` binds a
-    handle to a machine that already exists."""
+    ``Machine.run`` boots a machine for one command and returns what the
+    command produced. ``Machine.launch`` boots one and returns a handle to it,
+    and ``Machine.create`` persists one without booting it. ``Machine("name")``
+    binds a handle to a machine that already exists.
+
+    Every boot is a named machine started the way ``mvmctl machine run -d``
+    starts one, so the SDK and the CLI admit it under the same plan."""
 
     def __init__(self, name: str) -> None:
         self.name = _require_non_empty_str(name, "name")
-        #: ``dev`` or ``prod`` when this handle came from :meth:`run`, else
+        #: ``dev`` or ``prod`` when this handle came from :meth:`launch`, else
         #: ``None``: only a boot reply carries it.
         self.build_mode: str | None = None
-        #: The admitted plan's id when this handle came from :meth:`run`, for
-        #: finding the boot in the audit log.
+        #: The admitted plan's id when this handle came from :meth:`launch`,
+        #: for finding the boot in the audit log.
         self.plan_id: str | None = None
+        #: The token of the process a launch's ``command`` started, for
+        #: :meth:`wait`; ``None`` when the launch carried no command.
+        self.process: str | None = None
 
     def __repr__(self) -> str:
         return f"Machine({self.name!r})"
@@ -145,35 +194,91 @@ class Machine:
     @staticmethod
     def run(
         image: str,
+        command: Iterable[str],
         *,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        cpus: int | None = None,
+        memory_mib: int | None = None,
+        profile: str | None = None,
+        allow_hosts: Iterable[str] | None = None,
+        timeout: float | None = None,
+    ) -> MachineResult:
+        """Boot a machine from ``image``, run ``command`` in it, and return
+        what the command produced once it ends. The machine is stopped and
+        removed on every exit, including an exception.
+
+        ``allow_hosts`` entries are ``host:port`` (``[address]:port`` for
+        IPv6) and become the machine's egress allowlist; everything else is
+        denied. ``env`` passes the host's environment denylist: a loader,
+        shell or credential variable is refused. ``timeout`` bounds the
+        command, reported as exit code 124 when it runs out. Running a command
+        is a DevOnly guest operation, so a sealed image refuses it."""
+        argv = _command(command)
+        if argv is None:
+            raise ValueError("command must be a non-empty list of non-empty str")
+        machine = Machine.launch(
+            image,
+            name=_generated_name("run"),
+            command=argv,
+            env=env,
+            cwd=cwd,
+            cpus=cpus,
+            memory_mib=memory_mib,
+            profile=profile,
+            allow_hosts=allow_hosts,
+        )
+        try:
+            return machine.wait(timeout=timeout)
+        finally:
+            machine._discard()
+
+    @staticmethod
+    def launch(
+        image: str | None = None,
+        *,
+        template: str | None = None,
+        manifest: str | None = None,
         name: str | None = None,
         command: Iterable[str] | None = None,
         env: dict[str, str] | None = None,
+        cwd: str | None = None,
         cpus: int | None = None,
         memory_mib: int | None = None,
         profile: str | None = None,
         allow_hosts: Iterable[str] | None = None,
         ports: Iterable[str] | None = None,
         ttl_seconds: int | None = None,
+        force: bool = False,
     ) -> "Machine":
-        """Boot a transient machine from ``image`` and return a handle to it.
+        """Boot a machine and return a handle to it.
 
-        ``allow_hosts`` entries are ``host:port`` (``[address]:port`` for
-        IPv6) and become the machine's egress allowlist; everything else is
-        denied. ``command`` and ``env`` are forwarded as given; the in-process
-        launcher refuses both today with ``MachineSpecError``, saying why."""
+        Boots exactly one of ``image`` (an OCI reference, a rootfs path, or
+        ``flake:<ref>#<attr>``), ``template`` (a template built on this host,
+        by the name its image was built under) or ``manifest`` (a manifest
+        path or a built slot's address). The machine is named — ``name``, or
+        one generated here — and outlives this process until :meth:`stop` and
+        :meth:`rm`, or until ``ttl_seconds`` runs out. ``force`` replaces a
+        same-name definition whose configuration differs.
+
+        ``command`` starts once the machine is up and keeps running; its token
+        is :attr:`process`, and :meth:`wait` collects its output. ``env`` and
+        ``cwd`` apply to it and need it."""
+        source = _source(image, template, manifest)
         request = _launch_request(
-            image=_require_non_empty_str(image, "image"),
-            mode="transient",
-            name=None if name is None else _require_non_empty_str(name, "name"),
+            **source,
+            mode="persistent",
+            name=_require_non_empty_str(name, "name") if name is not None else _generated_name("machine"),
             command=_command(command),
             env=_env(env),
-            cpus=None if cpus is None else _positive_int(cpus, "cpus"),
-            memory_mib=None if memory_mib is None else _positive_int(memory_mib, "memory_mib"),
-            profile=None if profile is None else _require_non_empty_str(profile, "profile"),
-            ttl_seconds=None if ttl_seconds is None else _positive_int(ttl_seconds, "ttl_seconds"),
+            cwd=_optional_str(cwd, "cwd"),
+            cpus=_optional_positive(cpus, "cpus"),
+            memory_mib=_optional_positive(memory_mib, "memory_mib"),
+            profile=_optional_str(profile, "profile"),
+            ttl_seconds=_optional_positive(ttl_seconds, "ttl_seconds"),
             ports=_ports(ports),
             egress=_egress(allow_hosts),
+            force=True if force else None,
         )
         reply = _hostlib.call(MACHINE_RUN, request)
         if not isinstance(reply, dict):
@@ -181,15 +286,19 @@ class Machine:
         machine = Machine(_machine_name(reply.get("machine"), MACHINE_RUN))
         machine.build_mode = reply.get("build_mode")
         machine.plan_id = reply.get("plan_id")
+        process = reply.get("process")
+        if request.get("command") is not None and (not isinstance(process, str) or not process):
+            raise MachineError(f"{MACHINE_RUN} started a command but named no process: {reply!r}")
+        machine.process = process if isinstance(process, str) else None
         return machine
 
     @staticmethod
     def create(
         name: str,
-        image: str,
+        image: str | None = None,
         *,
-        command: Iterable[str] | None = None,
-        env: dict[str, str] | None = None,
+        template: str | None = None,
+        manifest: str | None = None,
         cpus: int | None = None,
         memory_mib: int | None = None,
         profile: str | None = None,
@@ -198,21 +307,38 @@ class Machine:
         force: bool = False,
     ) -> "Machine":
         """Persist a machine definition without booting it; start it with
-        :meth:`start`. ``force`` replaces an existing definition of the same
-        name."""
+        :meth:`start`. It boots exactly one of ``image``, ``template`` and
+        ``manifest``, as :meth:`launch` describes. ``force`` replaces an
+        existing definition of the same name."""
         request = _launch_request(
             name=_require_non_empty_str(name, "name"),
-            image=_require_non_empty_str(image, "image"),
-            command=_command(command),
-            env=_env(env),
-            cpus=None if cpus is None else _positive_int(cpus, "cpus"),
-            memory_mib=None if memory_mib is None else _positive_int(memory_mib, "memory_mib"),
-            profile=None if profile is None else _require_non_empty_str(profile, "profile"),
+            **_source(image, template, manifest),
+            cpus=_optional_positive(cpus, "cpus"),
+            memory_mib=_optional_positive(memory_mib, "memory_mib"),
+            profile=_optional_str(profile, "profile"),
             ports=_ports(ports),
             egress=_egress(allow_hosts),
             force=True if force else None,
         )
         return Machine(_machine_name(_hostlib.call(MACHINE_CREATE, request), MACHINE_CREATE))
+
+    def _discard(self) -> None:
+        """Stop the machine and remove its definition, reporting rather than
+        raising a failure: this is cleanup, and whatever ended the caller's
+        work is what they need to see."""
+        for verb, method in (("stopping", MACHINE_STOP), ("removing", MACHINE_RM)):
+            try:
+                _hostlib.call(method, {"id": self.name})
+            except (HostLibraryError, MvmTransportError) as exc:
+                sys.stderr.write(f"mvm: {verb} {self.name} failed: {exc}\n")
+                return
+
+    def wait(self, *, timeout: float | None = None) -> MachineResult:
+        """Wait for the command :meth:`launch` started and return what it
+        produced. ``timeout`` bounds the wait, reported as exit code 124."""
+        if self.process is None:
+            raise MachineError(f"{self!r} was not launched with a command to wait for")
+        return _collected(self.name, self.process, timeout)
 
     @staticmethod
     def ls() -> list[dict[str, Any]]:
@@ -239,11 +365,27 @@ class Machine:
         """The machine's current state."""
         return _hostlib.call(MACHINE_INSPECT, {"id": self.name})
 
-    def logs(self, lines: int | None = None) -> str:
+    @overload
+    def logs(self, lines: int | None = None, *, follow: Literal[False] = False) -> str: ...
+
+    @overload
+    def logs(self, lines: int | None = None, *, follow: Literal[True]) -> Iterator[str]: ...
+
+    def logs(self, lines: int | None = None, *, follow: bool = False) -> str | Iterator[str]:
         """Captured console output, optionally only the last ``lines`` lines.
+
+        With ``follow=True`` the output arrives as an iterator of text chunks
+        that keeps yielding as the machine writes, until it stops or the
+        iterator is closed; leaving a ``for`` loop early closes it.
 
         Decoded with replacement: console output is whatever the guest wrote,
         and a stray byte should not make the rest unreadable."""
+        if follow:
+            return follow_output(
+                self.name,
+                tail_lines=_optional_positive(lines, "lines"),
+                error=MachineError,
+            )
         request: dict[str, Any] = {"id": self.name}
         if lines is not None:
             request["tail_lines"] = _positive_int(lines, "lines")
@@ -276,12 +418,7 @@ class Machine:
         token = reply.get("token") if isinstance(reply, dict) else None
         if not isinstance(token, str) or not token:
             raise MachineError(f"{GUEST_PROC_START} returned no process token: {reply!r}")
-        output = stream_process(self.name, token, timeout=timeout, on_chunk=None, error=MachineError)
-        return MachineResult(
-            exit_code=output.exit_code,
-            stdout=output.stdout.decode("utf-8", errors="replace"),
-            stderr=output.stderr.decode("utf-8", errors="replace"),
-        )
+        return _collected(self.name, token, timeout)
 
 
 __all__ = [

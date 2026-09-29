@@ -158,6 +158,12 @@ pub fn resolve_supervisor_path() -> Result<PathBuf> {
     mvm_vmm::host::aux_bin::resolve(&hvf_supervisor_spec())
 }
 
+/// Whether the supervisor can be spawned: installed, or built on first use by
+/// a contributor `mvmctl` from its checkout. For availability probes.
+pub fn supervisor_available() -> bool {
+    mvm_vmm::host::aux_bin::available(&hvf_supervisor_spec())
+}
+
 /// Locate the supervisor and refuse a stale one: the spawn path must not hand
 /// a moved-on config contract to a helper built from an older revision.
 pub fn resolve_supervisor_path_verified() -> Result<PathBuf> {
@@ -165,11 +171,12 @@ pub fn resolve_supervisor_path_verified() -> Result<PathBuf> {
 }
 
 fn hvf_supervisor_spec() -> mvm_vmm::host::aux_bin::AuxBin<'static> {
-    mvm_vmm::host::aux_bin::AuxBin {
-        bin: "mvm-hvf-supervisor",
-        env_var: "MVM_HVF_SUPERVISOR_PATH",
-        rebuild_package: "mvm-hostd",
-    }
+    mvm_vmm::host::aux_bin::AuxBin::new(
+        "mvm-hvf-supervisor",
+        "MVM_HVF_SUPERVISOR_PATH",
+        "mvm-hostd",
+    )
+    .signed_with(mvm_vmm::host::codesign::RequiredEntitlement::Hypervisor)
 }
 
 pub fn vms_root() -> PathBuf {

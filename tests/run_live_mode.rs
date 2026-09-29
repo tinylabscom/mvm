@@ -13,7 +13,7 @@
 //! What the tests assert:
 //!
 //! 1. A dev machine's `Sandbox` calls `machine.run`, `guest.proc.start`,
-//!    `guest.fs.write` and `machine.stop`, and nothing else.
+//!    `guest.fs.write`, `machine.stop` and `machine.rm`, and nothing else.
 //! 2. Against a prod machine, the SDK raises `SandboxDevOnly` before any
 //!    `guest.*` call — security claim 4, enforced client-side as well as by
 //!    the guest agent.
@@ -44,6 +44,7 @@ REPLIES = {
     "guest.proc.start": {"token": "pid-token-itest"},
     "guest.fs.write": {"bytes_written": 5},
     "machine.stop": {},
+    "machine.rm": {},
 }
 
 def _record(method, request_json):
@@ -147,7 +148,8 @@ fn sdk_live_dev_machine_drives_the_host_library() {
             "machine.run",
             "guest.proc.start",
             "guest.fs.write",
-            "machine.stop"
+            "machine.stop",
+            "machine.rm"
         ]
     );
     assert_eq!(calls[0][1]["image"], "docker.io/library/python:3.12-slim");
@@ -156,6 +158,7 @@ fn sdk_live_dev_machine_drives_the_host_library() {
     assert_eq!(calls[1][1]["env"], serde_json::json!({"MODE": "test"}));
     assert_eq!(calls[2][1]["path"], "/app/data.bin");
     assert_eq!(calls[3][1]["id"], "sb-itest-vm");
+    assert_eq!(calls[4][1]["id"], "sb-itest-vm");
 }
 
 #[test]
@@ -177,7 +180,7 @@ fn sdk_live_prod_machine_raises_sandbox_dev_only_before_any_guest_call() {
         !called.iter().any(|m| m.starts_with("guest.")),
         "a prod machine must refuse DevOnly operations before any guest call; got {called:?}"
     );
-    assert_eq!(called, ["machine.run", "machine.stop"]);
+    assert_eq!(called, ["machine.run", "machine.stop", "machine.rm"]);
 }
 
 #[test]

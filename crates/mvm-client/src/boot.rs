@@ -178,19 +178,16 @@ impl StartedVm {
     }
 }
 
-/// Select the VMM for `backend_name`, verify it supports workloads, and start
-/// the fully-prepared config. Mirrors the CLI's former inline
-/// `from_hypervisor → require_workload_backend → start` triple exactly (both
-/// failure arms carried the same `backend-start` reason). The underlying error
-/// chain is preserved in the reason so the caller can surface and audit it.
+/// Verify `backend` supports workloads and start the fully-prepared config on
+/// it. Both failure arms carry the same `backend-start` reason, with the
+/// underlying error chain preserved so the caller can surface and audit it.
 ///
 /// Returns the backend that performed the start alongside the VM id, so the
 /// post-start steps act on that same object.
 pub fn start_prepared(
-    backend_name: &str,
+    backend: mvm_runtime::backend::AnyBackend,
     config: &mvm_core::vm_backend::VmStartConfig,
 ) -> Result<StartedVm> {
-    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend_name);
     mvm_runtime::workload_backend::require_workload_backend(&backend).map_err(|e| {
         MvmError::Backend {
             reason: format!("{e:#}"),
