@@ -153,16 +153,25 @@ fn undo_restores_preimages_and_redo_reapplies() {
     let store = ApplyStore::open(&fixture.store_dir).expect("open store");
     fixture.apply(&store);
 
-    let (undo_id, undone) = store
+    let undo = store
         .undo_latest(&fixture.source_dir)
         .expect("undo")
         .expect("an apply to undo");
-    assert_eq!(undone, fixture_apply_id(&store, 1));
+    assert_eq!(undo.target_id, fixture_apply_id(&store, 1));
+    assert_eq!(
+        store
+            .history()
+            .expect("history")
+            .last()
+            .expect("undo manifest")
+            .merkle_root,
+        undo.merkle_root
+    );
     assert!(
         store
             .effective_applies()
             .expect("effective")
-            .contains(&undo_id)
+            .contains(&undo.apply_id)
     );
 
     // The host tree is back to exactly what it was.
@@ -183,16 +192,16 @@ fn undo_restores_preimages_and_redo_reapplies() {
     // Undo again: the undo itself is an apply, and undoing it restores the
     // applied state. An undo of an undo is a reversal in disguise, so there
     // is nothing further for redo to re-apply.
-    let (undo2_id, undone2) = store
+    let undo2 = store
         .undo_latest(&fixture.source_dir)
         .expect("undo")
         .expect("an undo to undo");
-    assert_eq!(undone2, undo_id);
+    assert_eq!(undo2.target_id, undo.apply_id);
     assert!(
         store
             .effective_applies()
             .expect("effective")
-            .contains(&undo2_id)
+            .contains(&undo2.apply_id)
     );
     assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
     assert!(!fixture.source_dir.join("gone.txt").exists());
@@ -209,16 +218,28 @@ fn redo_reapplies_a_forward_apply_after_its_undo() {
     let fixture = Fixture::new();
     let store = ApplyStore::open(&fixture.store_dir).expect("open store");
     fixture.apply(&store);
-    let (_undo_id, undone) = store
+    let undo = store
         .undo_latest(&fixture.source_dir)
         .expect("undo")
         .expect("an apply to undo");
 
-    let (redo_id, redone) = store
+    let redo = store
         .redo_latest(&fixture.source_dir)
         .expect("redo")
         .expect("a redo");
-    assert_eq!(redone, undone, "redo re-applies the undone forward apply");
+    assert_eq!(
+        redo.target_id, undo.target_id,
+        "redo re-applies the undone forward apply"
+    );
+    assert_eq!(
+        store
+            .history()
+            .expect("history")
+            .last()
+            .expect("redo manifest")
+            .merkle_root,
+        redo.merkle_root
+    );
     assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
     assert!(!fixture.source_dir.join("gone.txt").exists());
     assert_eq!(read(&fixture.source_dir.join("added.txt")), "guest added\n");
@@ -226,7 +247,7 @@ fn redo_reapplies_a_forward_apply_after_its_undo() {
         store
             .effective_applies()
             .expect("effective")
-            .contains(&redo_id)
+            .contains(&redo.apply_id)
     );
 }
 

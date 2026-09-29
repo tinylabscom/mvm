@@ -25,6 +25,7 @@ use mvm_core::user_config::MvmConfig;
 use mvm_fs::tree_diff::Ext4Tree;
 use mvm_fs::workspace_apply::store::ApplyStore;
 use mvm_fs::workspace_apply::{ApplyPlan, PlanParams};
+use mvm_hostd::audit::emitter::{AuditEmitter, WorkspaceMutationAudit, workspace_audit};
 
 use super::workspace::Workspace;
 use super::{diff, workspace};
@@ -157,8 +158,28 @@ pub(in crate::commands) fn run_apply(
         }
     }
 
+    let emitter = workspace_audit_emitter()?;
     let staged = store.stage(plan, &selected.source_dir, &live_image, None)?;
+    let audit_plan = workspace_audit_plan(
+        &args.name,
+        &selected.volume,
+        "workspace:apply",
+        staged.merkle_root(),
+    )?;
     store.commit(&staged, &selected.source_dir)?;
+    emitter
+        .emit_workspace_mutation(
+            &audit_plan,
+            WorkspaceMutationAudit {
+                event: workspace_audit::APPLIED_EVENT,
+                vm_name: &args.name,
+                volume: &selected.volume,
+                apply_id: staged.id(),
+                target_id: None,
+                merkle_root: staged.merkle_root(),
+            },
+        )
+        .context("recording the workspace apply in the signed audit chain")?;
     mvm_core::audit_emit!(
         WorkspaceApply,
         vm: &args.name,
@@ -183,19 +204,40 @@ pub(in crate::commands) fn run_undo(
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
     let selected = select_workspace(&args.name, args.volume.as_deref())?;
     let store = open_recovered_store(&args.name, &selected)?;
-    let Some((apply_id, target)) = store.undo_latest(&selected.source_dir)? else {
+    let emitter = workspace_audit_emitter()?;
+    let Some(applied) = store.undo_latest(&selected.source_dir)? else {
         crate::ui::notice("nothing to undo");
         return Ok(());
     };
+    let audit_plan = workspace_audit_plan(
+        &args.name,
+        &selected.volume,
+        "workspace:undo",
+        &applied.merkle_root,
+    )?;
+    emitter
+        .emit_workspace_mutation(
+            &audit_plan,
+            WorkspaceMutationAudit {
+                event: workspace_audit::UNDONE_EVENT,
+                vm_name: &args.name,
+                volume: &selected.volume,
+                apply_id: &applied.apply_id,
+                target_id: Some(&applied.target_id),
+                merkle_root: &applied.merkle_root,
+            },
+        )
+        .context("recording the workspace undo in the signed audit chain")?;
     mvm_core::audit_emit!(
         WorkspaceUndo,
         vm: &args.name,
-        "action=workspace.undo volume={} undo={} target={}",
+        "action=workspace.undo volume={} undo={} target={} merkle_root={}",
         selected.volume,
-        apply_id,
-        target
+        applied.apply_id,
+        applied.target_id,
+        applied.merkle_root
     );
-    crate::ui::success(&format!("undid apply {target}"));
+    crate::ui::success(&format!("undid apply {}", applied.target_id));
     Ok(())
 }
 
@@ -207,19 +249,40 @@ pub(in crate::commands) fn run_redo(
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
     let selected = select_workspace(&args.name, args.volume.as_deref())?;
     let store = open_recovered_store(&args.name, &selected)?;
-    let Some((apply_id, target)) = store.redo_latest(&selected.source_dir)? else {
+    let emitter = workspace_audit_emitter()?;
+    let Some(applied) = store.redo_latest(&selected.source_dir)? else {
         crate::ui::notice("nothing to redo");
         return Ok(());
     };
+    let audit_plan = workspace_audit_plan(
+        &args.name,
+        &selected.volume,
+        "workspace:redo",
+        &applied.merkle_root,
+    )?;
+    emitter
+        .emit_workspace_mutation(
+            &audit_plan,
+            WorkspaceMutationAudit {
+                event: workspace_audit::REDONE_EVENT,
+                vm_name: &args.name,
+                volume: &selected.volume,
+                apply_id: &applied.apply_id,
+                target_id: Some(&applied.target_id),
+                merkle_root: &applied.merkle_root,
+            },
+        )
+        .context("recording the workspace redo in the signed audit chain")?;
     mvm_core::audit_emit!(
         WorkspaceRedo,
         vm: &args.name,
-        "action=workspace.redo volume={} redo={} target={}",
+        "action=workspace.redo volume={} redo={} target={} merkle_root={}",
         selected.volume,
-        apply_id,
-        target
+        applied.apply_id,
+        applied.target_id,
+        applied.merkle_root
     );
-    crate::ui::success(&format!("redid apply {target}"));
+    crate::ui::success(&format!("redid apply {}", applied.target_id));
     Ok(())
 }
 
@@ -274,6 +337,29 @@ fn apply_store_root(vm: &str, volume: &str) -> PathBuf {
     mvm_core::config::machine_state_dir(vm)
         .join("workspace-applies")
         .join(volume)
+}
+
+fn workspace_audit_emitter() -> Result<AuditEmitter> {
+    let signer = super::host_signer::load_or_init()
+        .context("loading the host signer for workspace mutation audit")?;
+    AuditEmitter::new(signer.signing)
+        .map(AuditEmitter::with_receipts)
+        .context("opening the signed audit chain for workspace mutation")
+}
+
+fn workspace_audit_plan(
+    vm: &str,
+    volume: &str,
+    intent: &str,
+    merkle_root: &str,
+) -> Result<mvm_core::plan::ExecutionPlan> {
+    crate::commands::build::image_lineage::build_event_plan(
+        "workspace-mutation",
+        intent,
+        &format!("workspace-{vm}-{volume}"),
+        merkle_root,
+    )
+    .context("building the workspace mutation audit envelope")
 }
 
 /// The protected set in force: the shipped default classes plus the

@@ -29,8 +29,10 @@ write-back path.
   undo or restore consults — the failure this answers is a restore
   rebuilding ignore defaults and deleting files the session never
   excluded.
-- The audit chain records `workspace_apply` / `workspace_undo` /
-  `workspace_redo` entries carrying the manifest Merkle root; the
+- The host-signed audit chain records `workspace.applied` /
+  `workspace.undone` / `workspace.redone` entries carrying the committed
+  manifest Merkle root; the local operational log retains its stable
+  `workspace_apply` / `workspace_undo` / `workspace_redo` kinds. The
   protected-path gate (shipped CI/build/test classes + `--protected-path`)
   refuses guest-authored changes to CI config, hooks, and signing material
   before anything reaches the host tree.
@@ -41,7 +43,12 @@ write-back path.
 ## Deliberate scope
 
 Per-step checkpoints and `replay` from a checkpoint with recorded input
-remain: replay needs the input-recording seam, which is its own slice.
+remain as an operator surface. The runtime now has the secure substrate for
+that slice: bounded encrypted and content-addressed replay inputs, session- and
+cursor-bound hash-linked checkpoint capture, an atomic session-record commit
+point, chain-verified replay planning, ordered idempotent dispatch, and session
+seal snapshot roots. Production step orchestration and the `mvmctl` replay verb
+still need to connect those primitives to the agent's input transport.
 Multi-volume machines apply one `--volume` at a time.
 
 ## Tests
@@ -50,4 +57,6 @@ Multi-volume machines apply one `--volume` at a time.
 semantics, both crash windows, protected refusal, exclusion persistence,
 blob-integrity refusal); 4 BDD scenarios on the user-visible surface
 (no-workspace remedy, unchanged workspace, terminal requirement, empty
-history); audit-posture + wire-string pins for the three new kinds.
+history); signed-chain workspace-root and session snapshot-root tests; replay
+input encryption, tamper, wrong-key, cursor-binding, step-commit, lineage, and
+ordered-dispatch tests.

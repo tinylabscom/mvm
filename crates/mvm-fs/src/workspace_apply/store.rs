@@ -47,6 +47,15 @@ pub struct StagedApply {
     manifest: Manifest,
 }
 
+/// One committed history traversal (undo or redo), including the content
+/// root the caller must bind into its audit record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppliedRelation {
+    pub apply_id: String,
+    pub target_id: String,
+    pub merkle_root: String,
+}
+
 impl StagedApply {
     #[must_use]
     pub fn manifest(&self) -> &Manifest {
@@ -206,8 +215,8 @@ impl ApplyStore {
 
     /// Reverse the most recent committed, still-effective apply: stage an
     /// inverse apply — the original's pre-images become this one's
-    /// post-images — and commit it. Returns `(new apply id, undone id)`.
-    pub fn undo_latest(&self, source_dir: &Path) -> Result<Option<(String, String)>, ApplyError> {
+    /// post-images — and commit it. Returns the committed relation and root.
+    pub fn undo_latest(&self, source_dir: &Path) -> Result<Option<AppliedRelation>, ApplyError> {
         let Some(target) = self.effective_applies()?.last().cloned() else {
             return Ok(None);
         };
@@ -218,16 +227,20 @@ impl ApplyStore {
             &EmptySource,
             Some((target.clone(), RelationKind::Undoes)),
         )?;
-        let id = staged.id().to_string();
+        let result = AppliedRelation {
+            apply_id: staged.id().to_string(),
+            target_id: target,
+            merkle_root: staged.merkle_root().to_string(),
+        };
         self.commit(&staged, source_dir)?;
-        Ok(Some((id, target)))
+        Ok(Some(result))
     }
 
     /// Re-apply the target of the most recent undo, but only when that undo
     /// is still the newest effective apply (anything applied since changed
     /// the tree the undo restored, so redo would clobber it). Returns
-    /// `(new apply id, redone id)`.
-    pub fn redo_latest(&self, source_dir: &Path) -> Result<Option<(String, String)>, ApplyError> {
+    /// the committed relation and root.
+    pub fn redo_latest(&self, source_dir: &Path) -> Result<Option<AppliedRelation>, ApplyError> {
         let effective = self.effective_applies()?;
         let Some(last) = effective.last().cloned() else {
             return Ok(None);
@@ -252,9 +265,13 @@ impl ApplyStore {
             &EmptySource,
             Some((target.id.clone(), RelationKind::Redoes)),
         )?;
-        let id = staged.id().to_string();
+        let result = AppliedRelation {
+            apply_id: staged.id().to_string(),
+            target_id: target.id.clone(),
+            merkle_root: staged.merkle_root().to_string(),
+        };
         self.commit(&staged, source_dir)?;
-        Ok(Some((id, target.id)))
+        Ok(Some(result))
     }
 
     /// The journal, in order.

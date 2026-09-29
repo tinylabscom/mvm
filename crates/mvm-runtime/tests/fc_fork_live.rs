@@ -559,6 +559,8 @@ fn fc_live_fork_n_children_from_running_parent() {
             created_unix: mvm_core::time::now_unix_secs(),
             retain_paused: false,
             grants: None,
+            parent: None,
+            session: None,
             workspace_volumes: Vec::new(),
         },
         control.as_ref(),

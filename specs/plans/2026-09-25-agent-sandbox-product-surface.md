@@ -264,12 +264,18 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] session exclusions persisted so restore never deletes ignored files
       — operator `--exclude` globs persist into the apply manifest and are the
       only list undo/redo ever consults; no default list is ever rebuilt
-- [ ] `mvmctl undo` / `redo` — landed as journal verbs reversing/re-applying
-      the most recent effective apply; per-step checkpoints and `replay` from
-      a checkpoint with recorded input remain
+- [~] `mvmctl undo` / `redo` — landed as journal verbs reversing/re-applying
+      the most recent effective apply. Replay now has encrypted,
+      content-addressed input artifacts; session-bound, parent-linked
+      `vm_full` step checkpoints; a durable session-record commit point; and
+      a chain-verified ordered replay planner/dispatcher. Production step
+      orchestration and an operator replay command remain because the general
+      agent prompt transport is not exposed through `mvmctl` yet
 - [x] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
-      — `WorkspaceApply`/`WorkspaceUndo`/`WorkspaceRedo` audit entries carry
-      the manifest Merkle root; apply plans through the shared
+      — chain-signed `workspace.applied`/`workspace.undone`/
+      `workspace.redone` entries carry the committed manifest Merkle root;
+      session seals derive their snapshot root from ordered checkpoint
+      creation digests; apply plans through the shared
       `ProtectedPathSet` (default CI/build/test classes + `--protected-path`)
       and one match refuses the whole apply
 
@@ -293,8 +299,9 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] hash-chained session ledger (plan id, image/kernel identity) — derived
       from the chain: each seal links the previous one, so there is no second
       file or trust root
-- [ ] session ledger carries snapshot roots — the `seal.snapshot_root` field is
-      reserved and unset until PS-08 records snapshot lineage per session
+- [~] session ledger carries snapshot roots — when no explicit root is supplied,
+      `session.sealed` derives it from the ordered checkpoint-creation digests
+      recorded for that session
 - [x] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
       — as `trust audit sessions`, `trust audit show <session>` (`--kind`,
       `--since`, `--until`), `trust audit verify <session>`; also `UNSEALED`

@@ -13,12 +13,17 @@
 //! `AgentSession` prefix already established by `mvm-contract`
 //! (`AgentSessionId`, `AgentSessionJournal`, `AgentSessionState`).
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use mvm_contract::protocol::agent_session::AgentSessionId;
 use mvm_core::session_transition::{SessionTransitionDigest, TransitionIdentity, TransitionKind};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+pub mod replay;
+pub mod replay_input;
+
+use replay_input::ReplayInputRef;
 
 const RECORD_FILE: &str = "session.json";
 
@@ -744,7 +749,8 @@ impl AgentSessionStore {
 
     /// Write a record, replacing any prior one for the same session.
     ///
-    /// Goes through the workspace's shared `mvm_core::atomic_io::atomic_write`
+    /// Goes through the workspace's shared
+    /// `mvm_core::atomic_io::atomic_write_durable`
     /// — the same helper `warm_artifacts.rs`, `vm/template/lifecycle/registry_sync.rs`,
     /// and `vm/name_registry.rs` already use — rather than a private copy: it
     /// writes to a fresh per-call temp file (so two concurrent writers of the
@@ -756,7 +762,7 @@ impl AgentSessionStore {
     pub fn write(&self, record: &AgentSessionRecord) -> Result<()> {
         let path = self.record_path(&record.session_id);
         let json = serde_json::to_vec_pretty(record).context("serialize session record")?;
-        mvm_core::atomic_io::atomic_write(&path, &json)
+        mvm_core::atomic_io::atomic_write_durable(&path, &json)
     }
 
     /// Load one record. An absent or malformed record is an error, never a
@@ -767,6 +773,67 @@ impl AgentSessionStore {
             .with_context(|| format!("read session record {}", path.display()))?;
         serde_json::from_slice(&bytes)
             .with_context(|| format!("parse session record {}", path.display()))
+    }
+
+    /// Commit a completed replayable step into the session record.
+    ///
+    /// The encrypted input artifact and immutable checkpoint must already be
+    /// durable. This record update is the transaction's commit point: a crash
+    /// before it leaves unreferenced artifacts that recovery may discard; a
+    /// crash after it leaves one content-addressed resume point naming the
+    /// exact journal cursor. The checkpoint must hash-link to the session's
+    /// previous resume point, so two independent histories cannot be spliced.
+    pub fn commit_replayable_step(
+        &self,
+        checkpoints: &crate::checkpoint::CheckpointStore,
+        inputs: &replay_input::ReplayInputStore,
+        input: &ReplayInputRef,
+        checkpoint: &mvm_core::checkpoint::CheckpointMeta,
+        now_unix: u64,
+    ) -> Result<AgentSessionRecord> {
+        drop(
+            inputs
+                .load(input)
+                .context("replay input is not a valid durable artifact")?,
+        );
+        let durable_checkpoint = checkpoints
+            .by_digest(&checkpoint.meta_digest)?
+            .context("step checkpoint is not durable in the checkpoint store")?;
+        if durable_checkpoint != *checkpoint {
+            bail!("step checkpoint does not match its durable record");
+        }
+        if checkpoint.class != mvm_core::checkpoint::CheckpointClass::VmFull {
+            bail!("a replayable step requires a vm_full checkpoint");
+        }
+        let mut current = self.load(&input.binding.session_id)?;
+        if current.state != SandboxResidency::Active {
+            bail!("only an active agent session can commit a replayable step");
+        }
+        if current.generation != input.binding.generation {
+            bail!("replay input generation does not match the active session");
+        }
+        if input.binding.journal_cursor <= current.journal_cursor {
+            bail!("replay input cursor does not advance the session journal");
+        }
+        let binding = checkpoint
+            .session
+            .as_ref()
+            .context("step checkpoint has no durable agent-session binding")?;
+        if binding.session_id != input.binding.session_id
+            || binding.generation != input.binding.generation
+            || binding.journal_cursor != input.binding.journal_cursor
+            || binding.replay_input_digest.as_deref() != Some(input.artifact_digest.as_str())
+        {
+            bail!("step checkpoint and replay input bindings do not match");
+        }
+        if checkpoint.parent != current.parent_checkpoint {
+            bail!("step checkpoint does not extend the session's current resume point");
+        }
+        current.parent_checkpoint = Some(checkpoint.meta_digest.clone());
+        current.journal_cursor = input.binding.journal_cursor;
+        current.updated_unix = now_unix;
+        self.write(&current)?;
+        Ok(current)
     }
 
     /// Every record that parses cleanly, sorted by session id for a stable
@@ -1009,6 +1076,9 @@ pub fn pinning_session(
 mod tests {
     use super::*;
     use mvm_contract::protocol::agent_session::AgentSessionId;
+    use mvm_core::checkpoint::{
+        ApprovalHead, CheckpointClass, CheckpointId, CheckpointMeta, SessionBinding,
+    };
 
     fn record(id: &str) -> AgentSessionRecord {
         AgentSessionRecord {
@@ -1036,6 +1106,72 @@ mod tests {
             approval_head: None,
             retain_for_secs: None,
         }
+    }
+
+    #[test]
+    fn replayable_step_commit_links_input_checkpoint_and_session_cursor() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = AgentSessionStore::at(temp.path().join("sessions"));
+        let checkpoints = crate::checkpoint::CheckpointStore::at(temp.path().join("checkpoints"));
+        let current = record("step-session");
+        sessions.write(&current).unwrap();
+        let inputs = replay_input::ReplayInputStore::at(
+            temp.path().join("sessions"),
+            temp.path().join("keys"),
+        );
+        let input = inputs
+            .record(
+                replay_input::ReplayInputBinding {
+                    session_id: current.session_id.clone(),
+                    generation: current.generation,
+                    journal_cursor: 5,
+                },
+                b"make the change",
+            )
+            .unwrap();
+        let checkpoint = CheckpointMeta::builder(
+            CheckpointId::new("step-session-5"),
+            CheckpointClass::VmFull,
+            "vm-alpha",
+        )
+        .created_unix(20)
+        .supervisor_config_digest("config")
+        .session(Some(SessionBinding {
+            session_id: current.session_id.clone(),
+            generation: current.generation,
+            journal_cursor: 5,
+            approval_head: ApprovalHead::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            replay_input_digest: Some(input.artifact_digest.clone()),
+        }))
+        .build();
+        checkpoints.write_meta(&checkpoint).unwrap();
+
+        let mut mismatched = checkpoint.clone();
+        mismatched.session.as_mut().unwrap().replay_input_digest =
+            Some(format!("sha256:{}", "b".repeat(64)));
+        assert!(
+            sessions
+                .commit_replayable_step(&checkpoints, &inputs, &input, &mismatched, 21)
+                .is_err(),
+            "the checkpoint must seal the exact encrypted input artifact"
+        );
+
+        let committed = sessions
+            .commit_replayable_step(&checkpoints, &inputs, &input, &checkpoint, 21)
+            .unwrap();
+
+        assert_eq!(committed.journal_cursor, 5);
+        assert_eq!(
+            committed.parent_checkpoint.as_ref(),
+            Some(&checkpoint.meta_digest)
+        );
+        assert_eq!(sessions.load(&current.session_id).unwrap(), committed);
+        assert!(
+            sessions
+                .commit_replayable_step(&checkpoints, &inputs, &input, &checkpoint, 22)
+                .is_err(),
+            "the same cursor must not commit twice"
+        );
     }
 
     #[test]
