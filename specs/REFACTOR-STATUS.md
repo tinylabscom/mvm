@@ -1,6 +1,6 @@
 # Refactor status
 
-Last updated: 2026-09-28
+Last updated: 2026-09-29
 
 ## In progress
 
@@ -56,6 +56,8 @@ Last updated: 2026-09-28
   - [ ] PS-16 Nix developer experience — #3725
   - [ ] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
+    - [ ] stale CLI deploy and durable-session status corrections implemented; workspace test validation pending
+    - [ ] capability pages, client guides, authoring guides, and generated schema reference
   - [x] PS-19 fewer feature flags — #3728
   - [ ] PS-20 unreachable CLI surface and stale references — #3729
   - [x] PS-21 CLI thin over `mvm-client` — #3730

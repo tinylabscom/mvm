@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+import test from "node:test";
+
+const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+
+test("CLI reference documents local deploy without denying it", () => {
+  const reference = readFileSync(
+    path.join(repo, "public/src/content/docs/reference/cli-commands.md"),
+    "utf8",
+  );
+
+  assert.equal(
+    reference.includes("`mvmctl deploy <ir.json> --boot-artifact <path>`"),
+    true,
+    "reference lists local deploy with its required boot artifact",
+  );
+  assert.equal(reference.includes("`mvmctl deployments ls`"), true, "reference lists inventory");
+  assert.equal(
+    /does not expose[^\n]*`deploy`/.test(reference),
+    false,
+    "reference must not deny local deploy",
+  );
+});
+
+test("durable session plan describes its delivered and unfinished work", () => {
+  const plan = readFileSync(
+    path.join(repo, "specs/plans/2026-08-18-durable-agent-sessions.md"),
+    "utf8",
+  );
+
+  assert.equal(plan.includes("**Status:** Design. Not implemented."), false, "header must reflect shipped work");
+  assert.equal(
+    plan.includes("**Status:** Partially implemented."),
+    true,
+    "header must preserve unfinished work",
+  );
+  assert.equal(plan.includes("- [x] **WS6 — CLI."), true, "CLI workstream is delivered");
+  assert.equal(plan.includes("- [ ] **WS8 — Tests + BDD**"), true, "BDD workstream remains open");
+});

@@ -14,11 +14,12 @@
     "astro": "astro",
     "check:tokens": "node scripts/check-no-hardcoded-hex.mjs",
     "check:samples": "node scripts/check-sample-provenance.mjs",
+    "check:docs": "node --test tests/docs-claims.test.mjs",
     "check:perf": "node scripts/check-perf-provenance.mjs",
     "check:headers": "node scripts/check-isolation-headers.mjs",
     "check:shell": "node --test tests/site-shell.test.mjs tests/clear-content-cache.test.mjs tests/install-vanity-url.test.mjs",
     "check:deploy-assets": "node scripts/check-weblinux-deploy-assets.mjs dist",
-    "check": "pnpm check:tokens && pnpm check:samples && pnpm check:perf && pnpm check:headers && pnpm check:shell && pnpm build"
+    "check": "pnpm check:tokens && pnpm check:samples && pnpm check:docs && pnpm check:perf && pnpm check:headers && pnpm check:shell && pnpm build"
   },
   "dependencies": {
     "@astrojs/react": "^4.4.2",

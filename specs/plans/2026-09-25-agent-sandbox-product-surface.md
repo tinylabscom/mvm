@@ -305,8 +305,11 @@ apply goes through the protected-path gate.
 - [ ] recipe inventory and reduction; the top level fits one screen and mirrors CI
 
 ### PS-18 — Docs (#3727)
-- [ ] one page per capability; client guides for each agent pack; profile and pack authoring guides
-- [ ] schema reference generated from PS-05; stale claims fixed
+- [ ] one page per capability
+- [ ] client guides for each agent pack
+- [ ] profile and pack authoring guides
+- [ ] schema reference generated from PS-05
+- [ ] correct the CLI deploy and durable-session status claims, with a documentation regression check (implemented; workspace test validation pending)
 
 ### PS-19 — Fewer feature flags (#3728)
 - [x] inventory; delete, merge or move to runtime config; CI lanes updated
