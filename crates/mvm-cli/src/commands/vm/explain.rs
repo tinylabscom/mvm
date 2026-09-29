@@ -9,7 +9,7 @@
 //! this is a read-only render over data other commands already emit.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -35,6 +35,12 @@ pub(in crate::commands) struct Args {
     /// Emit a machine-readable JSON object instead of the human summary.
     #[arg(long)]
     pub json: bool,
+    /// Review grantable denials and, after confirmation, update mvm.toml
+    #[arg(long, conflicts_with = "json")]
+    pub review: bool,
+    /// Project directory whose mvm.toml receives reviewed grants (default: .)
+    #[arg(long, value_name = "DIR", requires = "review")]
+    pub project: Option<PathBuf>,
 }
 
 pub(in crate::commands) fn run(args: Args) -> Result<()> {
@@ -47,6 +53,14 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
         crate::json_out::emit_json(&explanation)
     } else {
         explanation.render();
+        if args.review {
+            if !explanation.chain_verified {
+                bail!("refusing to draft grants from an audit chain that does not verify");
+            }
+            let project = args.project.as_deref().unwrap_or_else(|| Path::new("."));
+            let manifest = super::denial_review::manifest_path(project)?;
+            super::denial_review::review_destinations(&explanation.egress_denials, &manifest)?;
+        }
         Ok(())
     }
 }

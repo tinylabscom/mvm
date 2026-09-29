@@ -607,7 +607,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // VM lifecycle. `up` and `invoke` are retired (folded into `machine run`'s
     // argv lifecycle + `--entrypoint` action). `run` survives hidden as the SDK
     // Sandbox transport (`run --mode live/plan`); its posture is unchanged.
-    ("explain", AuditPosture::ReadOnly),
+    // Read-only unless --review explicitly writes a confirmed project-policy
+    // edit, so classify the whole verb by its strongest posture.
+    ("explain", AuditPosture::InteractiveOrControl),
+    ("why", AuditPosture::ReadOnly),
     ("run", AuditPosture::InteractiveOrControl),
     ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
     ("__builder-vm-bootstrap", AuditPosture::InteractiveOrControl),

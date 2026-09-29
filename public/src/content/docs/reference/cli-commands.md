@@ -318,6 +318,7 @@ rules and discovery order, and the [policy schema](/reference/policy-schema/).
 | `mvmctl policy validate [PROFILE\|PATH] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning, the unenforced `[tools]` section, and secrets the store would not bind |
 | `mvmctl policy diff A B [--json] [--backend KIND]` | What each profile allows or denies that the other does not |
 | `mvmctl policy groups [--json]` | List built-in and user groups and profiles |
+| `mvmctl why --host H[:P] \| --path P \| --tool T \| --secret S [--profile NAME\|PATH \| --plan FILE] [--project DIR] [--json]` | Resolve policy without booting and explain one allow/deny answer. Defaults to the current project's `mvm.toml`; `--profile` selects an authored profile and `--plan` reads `policy resolve` output. Tool answers say when the authored rule is not yet runtime-enforced |
 | `mvmctl run --policy NAME\|PATH -- <cmd>` | Run under an authored profile. Also on `machine run`, `machine create` and `machine start`. Replaces the project's `[policy]` table; the project's `[network] allow_hosts` still applies, and applies on every verb even with no policy. Flags add to its allows and cannot reach its denies, blocks or ceilings. `ns/name` pack references are refused for now |
 | `mvmctl run --plan FILE -- <cmd>` | Run under a resolved manifest. Mutually exclusive with `--policy`, `--net`, `--network-preset`, `--allow-host`, `--allow-endpoint`, `--peer`, `--cpu-limit`, `--grants-file`, `--mount`, `--allow-env` and `--secret`. The file is re-validated, and a plan or signature in it is refused: admission signs the plan itself |
 
@@ -1375,6 +1376,7 @@ running microVM.
 | `mvmctl bench --json`                  | Emit the versioned report JSON — the same shape the CI gate produces, so the two are comparable                                                                           |
 | `mvmctl bench -- <launch>`             | Measure a specific launch instead of the reproducible default (`run --no-detect -- /bin/true`)                                                                            |
 | `mvmctl explain <run>`                 | Explain a run and its egress refusals from the chain-signed audit log: each refused destination, its count, and how to allow it where a grant can                           |
+| `mvmctl explain <run> --review [--project DIR]` | Open the same Grant / Skip review used after a foreground run. Only grantable denials from a verified audit chain are offered; selected grants are shown as a draft and require a second confirmation before `mvm.toml` changes |
 | `mvmctl watch <ir.json>`               | Rebuild a workload when its local inputs change                                                                                                                           |
 
 ## Packs, Bundles, and Dependencies

@@ -569,6 +569,17 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
+    let review_manifest = if args.json {
+        None
+    } else {
+        match super::run_routes::project_manifest(&args)? {
+            Some((path, _)) => Some(path),
+            None => {
+                let cwd = std::env::current_dir().context("resolving policy review directory")?;
+                Some(super::denial_review::manifest_path(&cwd)?)
+            }
+        }
+    };
     // Prepare outputs before admission binds them to the grant.
     let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
     let admit_outputs = outputs.grants();
@@ -814,6 +825,11 @@ pub(in crate::commands) fn run_secure_with_source(
         if !json_requested {
             network_access.announce_exit(output.exit_code, &super::host_notices::Stderr);
         }
+        if let Some(manifest) = review_manifest.as_deref()
+            && let Err(error) = super::denial_review::review(&refused, manifest)
+        {
+            ui::warn(&format!("could not review denied egress: {error:#}"));
+        }
         if output.exit_code != 0 {
             mvm_observability::exit(output.exit_code);
         }
@@ -839,6 +855,7 @@ pub(in crate::commands) fn run_secure_with_source(
             outputs: &outputs,
             denials: &denials,
             network: network_access,
+            review_manifest: review_manifest.as_deref(),
         },
     )
 }
@@ -885,6 +902,8 @@ struct RunAudit<'a> {
     denials: &'a super::egress_denials::PendingWatch,
     /// Whether the run could reach the network at all.
     network: NetworkAccess,
+    /// The single project manifest an explicitly confirmed draft updates.
+    review_manifest: Option<&'a Path>,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -929,13 +948,18 @@ fn run_run_args(
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
-    audit.denials.finish_and_summarize(true);
+    let refused = audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs
         .close_run(audit.ctx, audit.backend, posture.get(), result)?;
     audit
         .network
         .announce_exit(exit_code, &super::host_notices::Stderr);
+    if let Some(manifest) = audit.review_manifest
+        && let Err(error) = super::denial_review::review(&refused, manifest)
+    {
+        ui::warn(&format!("could not review denied egress: {error:#}"));
+    }
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }
