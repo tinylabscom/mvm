@@ -41,6 +41,69 @@ fn a_member_named_by_the_signed_root_is_delivered_verbatim() {
 /// confuse the production selectors: the default-workload fetch still takes
 /// exactly the four production artifacts, and the generic artifact lookup
 /// never reaches the dev member.
+/// The dev-slot fetch installs the complete pair-build layout — kernel,
+/// rootfs, meta — from the dev members alone.
+#[test]
+fn fetch_dev_workload_installs_the_pair_build_layout() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let fixture = ImageSetFixture::complete()
+        .publish_dev(
+            ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-dev-vmlinux-aarch64",
+            b"dev-kernel".to_vec(),
+        )
+        .publish_dev(
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-dev-rootfs-aarch64.ext4",
+            b"dev-rootfs".to_vec(),
+        )
+        .publish_dev_extra(
+            ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+            MemberTarget::Arch(ARCH),
+            "default-microvm-dev-meta-aarch64.json",
+            br#"{"sealed": false}"#.to_vec(),
+        );
+    let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path())).expect("acquire");
+
+    let out = tempfile::tempdir().unwrap();
+    set.fetch_dev_workload(ARCH, out.path()).expect("dev fetch");
+    assert_eq!(
+        std::fs::read(out.path().join("vmlinux")).unwrap(),
+        b"dev-kernel"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("rootfs.ext4")).unwrap(),
+        b"dev-rootfs"
+    );
+    assert_eq!(
+        std::fs::read(out.path().join("mvm-meta.json")).unwrap(),
+        br#"{"sealed": false}"#
+    );
+}
+
+/// A set without dev members refuses the dev fetch with NoMember, so the
+/// caller falls back to a pair build.
+#[test]
+fn fetch_dev_workload_refuses_a_set_without_dev_members() {
+    let _env = unsigned_env();
+    let served = tempfile::tempdir().unwrap();
+    let set =
+        PublishedImageSet::acquire_from(ImageSetFixture::complete().serve_from(served.path()))
+            .expect("acquire");
+    let out = tempfile::tempdir().unwrap();
+    let err = set
+        .fetch_dev_workload(ARCH, out.path())
+        .expect_err("no dev members, no fetch");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("default_tenant") && rendered.contains("aarch64"),
+        "the refusal names the missing member: {rendered}"
+    );
+}
+
 #[test]
 fn a_dev_variant_member_is_invisible_to_production_selection() {
     let _env = unsigned_env();
