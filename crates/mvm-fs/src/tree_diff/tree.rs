@@ -29,6 +29,21 @@ pub trait TreeSource {
     fn entries(&self, max_entries: u64) -> Result<Tree, TreeDiffError>;
     /// Up to `limit` bytes of the regular file at `path`.
     fn read_prefix(&self, path: &str, limit: u64) -> Result<Vec<u8>, TreeDiffError>;
+    /// Copy the whole regular file at `path` into `sink`, returning its size
+    /// in bytes. The default reads through `read_prefix`; sources backed by
+    /// streamed readers override it so a large file never sits in memory.
+    fn copy_file_to(
+        &self,
+        path: &str,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<u64, TreeDiffError> {
+        let bytes = self.read_prefix(path, u64::MAX)?;
+        sink.write_all(&bytes).map_err(|e| TreeDiffError::Refused {
+            path: path.to_string(),
+            reason: format!("copy failed: {e}"),
+        })?;
+        Ok(bytes.len() as u64)
+    }
     /// The SHA-256 of the whole regular file at `path`, hex.
     fn sha256(&self, path: &str) -> Result<String, TreeDiffError>;
     /// The target of the symlink at `path`, as text.
@@ -199,6 +214,31 @@ impl TreeSource for Ext4Tree {
             hasher.update(&buffer[..n]);
         }
         Ok(hex::encode(hasher.finalize()))
+    }
+
+    fn copy_file_to(
+        &self,
+        path: &str,
+        sink: &mut dyn std::io::Write,
+    ) -> Result<u64, TreeDiffError> {
+        let mut file = self.open_file(path)?;
+        let mut size = 0u64;
+        let mut buffer = vec![0u8; READ_CHUNK];
+        loop {
+            let n = file
+                .read_bytes(&mut buffer)
+                .map_err(|e| unreadable(path, e))?;
+            if n == 0 {
+                break;
+            }
+            sink.write_all(&buffer[..n])
+                .map_err(|e| TreeDiffError::Refused {
+                    path: path.to_string(),
+                    reason: format!("copy failed: {e}"),
+                })?;
+            size += n as u64;
+        }
+        Ok(size)
     }
 
     fn link_target(&self, path: &str) -> Result<String, TreeDiffError> {

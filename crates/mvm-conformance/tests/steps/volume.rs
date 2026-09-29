@@ -148,6 +148,28 @@ fn register_host_directory_volume(
     guest_path: String,
     machine: String,
 ) {
+    register_host_directory_volume_impl(world, volume_name, guest_path, machine, false);
+}
+
+#[when(
+    expr = "I register host directory volume {string} read-write at {string} for machine {string}"
+)]
+fn register_host_directory_volume_rw(
+    world: &mut CliWorld,
+    volume_name: String,
+    guest_path: String,
+    machine: String,
+) {
+    register_host_directory_volume_impl(world, volume_name, guest_path, machine, true);
+}
+
+fn register_host_directory_volume_impl(
+    world: &mut CliWorld,
+    volume_name: String,
+    guest_path: String,
+    machine: String,
+    rw: bool,
+) {
     let host_dir = isolated_home(world).join("dir-volumes").join(&volume_name);
     fs::create_dir_all(&host_dir)
         .unwrap_or_else(|error| panic!("create host directory {host_dir:?}: {error}"));
@@ -174,6 +196,9 @@ fn register_host_directory_volume(
     ])
     .isolated_home(&home)
     .env("PATH", &command_path);
+    if rw {
+        cmd.arg("--rw");
+    }
     world.encrypted_volume_probe_path = Some(command_path);
     world.last_run = Some(cmd.output().expect("failed to spawn mvmctl"));
 }

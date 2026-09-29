@@ -254,10 +254,24 @@ Security-bearing gaps first, then the foundations the UX needs:
       diff verb on the existing request policy; `--from`/`--to`, `--stat`,
       `--side-by-side`, `--json`, and output caps; `workspace.rs` is the apply
       seam for the remaining undo/redo/replay items
-- [ ] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
-- [ ] session exclusions persisted so restore never deletes ignored files
-- [ ] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a checkpoint with recorded input
-- [ ] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
+- [x] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
+      — `mvmctl machine apply` (reviewed prompt, `--yes` non-interactive,
+      `--dry-run`); `mvm-fs::workspace_apply` stages pre+post images into a
+      content-addressed store, persists the manifest + Merkle root, journals
+      begin/commit, and writes through tmp+rename; a crash after begin without
+      the done marker rolls back from the snapshot, after the marker completes
+      the commit on the next open
+- [x] session exclusions persisted so restore never deletes ignored files
+      — operator `--exclude` globs persist into the apply manifest and are the
+      only list undo/redo ever consults; no default list is ever rebuilt
+- [ ] `mvmctl undo` / `redo` — landed as journal verbs reversing/re-applying
+      the most recent effective apply; per-step checkpoints and `replay` from
+      a checkpoint with recorded input remain
+- [x] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
+      — `WorkspaceApply`/`WorkspaceUndo`/`WorkspaceRedo` audit entries carry
+      the manifest Merkle root; apply plans through the shared
+      `ProtectedPathSet` (default CI/build/test classes + `--protected-path`)
+      and one match refuses the whole apply
 
 ### PS-09 — Detachable sessions (#3719)
 - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)

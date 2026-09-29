@@ -215,6 +215,10 @@ covered = [
     "mvmctl trust instructions verify ./my-agent",
 ]
 uncovered = [
+    "mvmctl machine apply <name>",
+    "mvmctl machine apply <name> --dry-run",
+    "mvmctl machine redo <name>",
+    "mvmctl machine undo <name>",
     "mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true",
     "mvmctl bench --lane prepared-cold --runs 20 --warmup 2",
     "mvmctl build compile --from-ir ./workload.json --out /tmp/agent-tool",
