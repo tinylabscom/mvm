@@ -262,7 +262,6 @@ pub fn start_persistent_oci_machine(
         |config| {
             let admission_ledger = InMemoryNonceLedger::new();
             let ingress = machine_port_ingress(ports)?;
-            let resolved_secrets = crate::admission::secrets::resolve_machine_secrets(name)?;
             admit_plan_for_boot_with_ingress(
                 AdmitPlanForBootParams {
                     outputs: Vec::new(),
