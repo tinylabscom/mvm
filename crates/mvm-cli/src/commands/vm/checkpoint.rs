@@ -376,6 +376,11 @@ fn capture_vm_full_for_running_vm(
         created_unix: args.created_unix,
         retain_paused: false,
         grants: admitted_grants_for(args.name)?,
+        // Frozen in the same pause window, so `vm diff --from/--to` can
+        // compare what the workspace held at each checkpoint.
+        workspace_volumes: super::workspace::capture_set(&super::workspace::workspaces_of(
+            args.name,
+        )?),
     };
     capture_vm_full(args.store, params, control.as_ref())
 }
@@ -1037,6 +1042,29 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         &effective_hypervisor,
     )?;
 
+    // Prepared before admission: the child's verb grant expires with the plan's
+    // validity window, which admission starts (see
+    // `mvm_client::launch::boot_order`).
+    let mut start_config = mvm_core::vm_backend::VmStartConfig {
+        name: p.child_vm_name.to_string(),
+        // Passing the instance path as rootfs_path so `prepare_instance_rootfs`
+        // hits the source-equals-instance no-op arm and leaves the fork intact.
+        rootfs_path: p.instance_rootfs.to_string_lossy().into_owned(),
+        kernel_path: Some(vmlinux_path.clone()),
+        cpus,
+        memory_mib: mem_mib as u32,
+        ..Default::default()
+    };
+    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        super::up::attach_runtime_overlay_if_cached_version(
+            &mut start_config,
+            &effective_hypervisor,
+            parent_meta.runtime_overlay_version.as_deref(),
+            pair,
+        )
+    })?;
+    super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
+
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
         instructions: Default::default(),
@@ -1081,26 +1109,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
             "a checkpoint fork boots the image the parent booted; this path resolves no entrypoint",
         ),
     })?;
-
-    let mut start_config = mvm_core::vm_backend::VmStartConfig {
-        name: p.child_vm_name.to_string(),
-        // Passing the instance path as rootfs_path so `prepare_instance_rootfs`
-        // hits the source-equals-instance no-op arm and leaves the fork intact.
-        rootfs_path: p.instance_rootfs.to_string_lossy().into_owned(),
-        kernel_path: Some(vmlinux_path),
-        cpus,
-        memory_mib: mem_mib as u32,
-        ..Default::default()
-    };
-    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        super::up::attach_runtime_overlay_if_cached_version(
-            &mut start_config,
-            &effective_hypervisor,
-            parent_meta.runtime_overlay_version.as_deref(),
-            pair,
-        )
-    })?;
-    super::up::attach_universal_initramfs_if_cached(&mut start_config, &effective_hypervisor)?;
 
     populate_fork_rootfs_verity(&mut start_config, p.instance_rootfs)?;
 

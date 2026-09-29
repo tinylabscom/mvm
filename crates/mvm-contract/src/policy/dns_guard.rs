@@ -142,4 +142,22 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn legacy_dns_classes_are_individually_forbidden() {
+        for value in [
+            "10.1.2.3",
+            "127.0.0.1",
+            "169.254.1.2",
+            "0.0.0.0",
+            "100.64.1.2",
+            "::1",
+            "::",
+            "fe81::1",
+            "fd12::1",
+        ] {
+            assert!(legacy_forbidden(ip(value)), "{value}");
+        }
+        assert!(!legacy_forbidden(ip("224.0.0.1")));
+        assert!(dns_answer_forbidden(ip("224.0.0.1")));
+    }
 }

@@ -367,6 +367,7 @@ async fn answer(backend: &LocalBackend, method: &str, request: &[u8]) -> Result<
             let r: RunRequest = parse(request)?;
             let profile = r.profile.clone();
             let launched = backend.launch(launch_request(r.into())?).await?;
+            crate::approval::ensure_server(&launched.machine.name);
             Outcome::ok(&RunReply {
                 machine: launched.machine,
                 plan_id: launched.plan_id,

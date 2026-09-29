@@ -470,4 +470,25 @@ mod tests {
         // A public address needs no re-admission.
         assert!(grant_readmits(&net("0.0.0.0/0"), ip("1.1.1.1")));
     }
+    #[test]
+    fn embedded_addresses_preserve_every_octet() {
+        let expected = Some(Ipv4Addr::new(10, 23, 45, 67));
+        for value in [
+            "::a17:2d43",
+            "64:ff9b::a17:2d43",
+            "64:ff9b:1::a17:2d43",
+            "2002:a17:2d43::1",
+            "2001:0::f5e8:d2bc",
+        ] {
+            assert_eq!(embedded_v4(value.parse().unwrap()), expected, "{value}");
+        }
+        assert_eq!(
+            RestrictedClass::Private.describe(),
+            "an RFC1918 private range"
+        );
+        assert_eq!(
+            RestrictedClass::CloudMetadata.describe(),
+            "a cloud instance-metadata endpoint"
+        );
+    }
 }

@@ -48,6 +48,7 @@ pub(super) mod tenant_resolution;
 pub(crate) mod up;
 pub(super) mod volume;
 pub(crate) mod wait;
+pub(in crate::commands) mod workspace;
 
 pub(super) use super::{Cli, shared};
 pub(crate) use agent_verbs::image_is_sealed;

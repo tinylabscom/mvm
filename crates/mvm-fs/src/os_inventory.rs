@@ -689,4 +689,36 @@ mod tests {
         let back: OsInventory = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(inventory, back);
     }
+    #[test]
+    fn empty_package_fields_never_produce_components() {
+        for (name, version) in [("", "1"), ("pkg", ""), ("", "")] {
+            let (components, limitations) =
+                parse_dpkg(&format!("Package: {name}\nVersion: {version}\n"));
+            assert!(components.is_empty());
+            assert_eq!(limitations.len(), 1);
+            let mut components = Vec::new();
+            let mut limitations = Vec::new();
+            parse_apk_installed(
+                &format!("P:{name}\nV:{version}\n"),
+                "installed",
+                &mut components,
+                &mut limitations,
+            );
+            assert!(components.is_empty());
+            assert_eq!(limitations.len(), 1);
+        }
+        assert!(parse_os_release("ID=\"\"\n").is_err());
+    }
+
+    #[test]
+    fn one_kernel_version_has_no_ambiguity_limitation() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("lib/modules/6.8.1")).unwrap();
+        let mut limitations = Vec::new();
+        assert_eq!(
+            discover_kernel_version(tmp.path(), &mut limitations).as_deref(),
+            Some("6.8.1")
+        );
+        assert!(limitations.is_empty());
+    }
 }

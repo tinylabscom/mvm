@@ -43,6 +43,10 @@ def test_the_override_variable_is_the_registry_name():
     assert _hostlib.LIB_PATH_ENV == mvm.MVM_HOSTLIB_PATH_ENV == "MVM_HOSTLIB_PATH"
 
 
+def test_the_approval_callback_is_public():
+    assert mvm.set_approval_callback is _hostlib.set_approval_callback
+
+
 def test_the_packaged_copy_comes_before_mvmctl_and_both_sides_of_its_link(tmp_path):
     real_dir = tmp_path / "cellar" / "bin"
     real_dir.mkdir(parents=True)
@@ -188,6 +192,34 @@ def test_the_default_seam_is_the_module_level_invoke(monkeypatch, seam):
     assert calls == [("machine.list", None)]
 
 
+def test_approval_callback_maps_the_bounded_decisions_and_receives_the_prompt():
+    seen = []
+    prompt = {
+        "request_id": "approval-1",
+        "subject": {"kind": "tool_call", "tool": "shell"},
+        "expires_in_ms": 1000,
+    }
+
+    def decide(value):
+        seen.append(value)
+        return "session"
+
+    encoded = json.dumps(prompt).encode()
+    assert _hostlib._approval_result(decide, encoded) == 2
+    assert seen == [prompt]
+    assert _hostlib._approval_result(lambda _: "once", encoded) == 1
+    assert _hostlib._approval_result(lambda _: "deny", encoded) == 0
+
+
+def test_approval_callback_failures_and_unknown_answers_deny():
+    def raises(_):
+        raise RuntimeError("application failure")
+
+    assert _hostlib._approval_result(raises, b"{}") == 0
+    assert _hostlib._approval_result(lambda _: "forever", b"{}") == 0
+    assert _hostlib._approval_result(lambda _: "once", b"not json") == 0
+
+
 _LIVE = pytest.mark.skipif(
     not os.environ.get("MVM_HOSTLIB_PATH") or not os.environ.get("MVM_HOME"),
     reason="needs MVM_HOSTLIB_PATH naming a built library and MVM_HOME naming a scratch directory",
@@ -199,6 +231,12 @@ def test_a_real_library_negotiates_and_answers():
     assert isinstance(_hostlib.call("machine.list"), list)
     with pytest.raises(HostLibraryInputError):
         _hostlib.call("machine.shell")
+
+
+@_LIVE
+def test_a_real_library_registers_and_clears_an_approval_callback():
+    _hostlib.set_approval_callback(lambda _: "once")
+    _hostlib.set_approval_callback(None)
 
 
 @_LIVE

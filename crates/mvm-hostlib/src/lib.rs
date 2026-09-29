@@ -20,6 +20,15 @@
 //! // A binding must call this, and get 1, before its first call.
 //! int32_t mvm_hostlib_abi_is_compatible(uint16_t major, uint16_t minor);
 //!
+//! // Process-wide callback for runtime `ask` decisions. The callback receives
+//! // one ApprovalPrompt JSON document and returns 0 (deny), 1 (approve once),
+//! // or 2 (approve for this session). NULL clears it. The binding must keep
+//! // the pointer alive until a later setter call returns. A callback must not
+//! // invoke this setter recursively.
+//! typedef int32_t (*MvmHostlibApprovalCallback)(const uint8_t *prompt,
+//!                                               size_t prompt_len);
+//! int32_t mvm_hostlib_set_approval_callback(MvmHostlibApprovalCallback cb);
+//!
 //! // 0 on success, with `out` holding the method's reply JSON. Otherwise one
 //! // of the MVM_HOSTLIB_* statuses, with `out` holding
 //! // {"code": "...", "message": "...", "retryable": bool}.
@@ -55,6 +64,7 @@ use std::ptr;
 use std::slice;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod approval;
 pub mod dispatch;
 mod embedder;
 pub mod entrypoint;
@@ -76,7 +86,11 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// `machine.start`, `machine.inventory`, and `guest.proc.stream.*`. 3 added
 /// `machine.logs.stream.*`, the `template` and `manifest` launch sources, and
 /// a launch `command` with its `env` and `cwd`, whose process the reply names.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 3;
+/// 4 added the process-wide runtime-approval callback and retained brokers for
+/// machines launched or started through the host library.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 4;
+
+pub use approval::mvm_hostlib_set_approval_callback;
 
 /// Set once a binding has confirmed it was built for this ABI.
 static NEGOTIATED: AtomicBool = AtomicBool::new(false);
@@ -235,12 +249,16 @@ fn declared() -> Result<(), Outcome> {
 impl Services for Local {
     fn client(&self) -> Result<Box<dyn mvm_core::client::MvmClient>, Outcome> {
         declared()?;
-        Ok(Box::new(mvm_client::LocalBackend::new()))
+        Ok(Box::new(
+            mvm_client::LocalBackend::new()
+                .with_command_starter(std::sync::Arc::new(approval::ApprovalCommandStarter)),
+        ))
     }
 
     fn launcher(&self) -> Result<mvm_client::LocalBackend, Outcome> {
         declared()?;
-        Ok(mvm_client::LocalBackend::new())
+        Ok(mvm_client::LocalBackend::new()
+            .with_command_starter(std::sync::Arc::new(approval::ApprovalCommandStarter)))
     }
 
     fn guest(&self) -> Result<std::sync::Arc<dyn guest::GuestOps>, Outcome> {

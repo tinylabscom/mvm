@@ -74,6 +74,10 @@ jobs:
         working-directory: public
         run: pnpm check:samples
 
+      - name: Check documentation claims
+        working-directory: public
+        run: pnpm check:docs
+
       - name: Check perf provenance
         working-directory: public
         run: pnpm check:perf

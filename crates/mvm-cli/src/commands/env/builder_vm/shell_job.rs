@@ -31,23 +31,24 @@ impl ShellJobBuilder {
     pub(crate) fn run(self, job: &mvm_build::builder_vm::BuilderShellJob) -> Result<()> {
         match self {
             Self::Hvf => {
-                let (kernel, rootfs, closure_nar) =
-                    crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()
+                let image =
+                    crate::commands::build::driver_builder_image::resolve_driver_builder_image()
                         .map_err(|error| anyhow::anyhow!("resolving HVF builder image: {error}"))?;
                 mvm_runtime::builder_runner::DriverBuilderVm::new(
                     mvm_backends::driver::hvf::HvfDriver::new(),
-                    kernel,
-                    rootfs,
+                    image.kernel,
+                    image.rootfs,
                 )
-                .with_closure_nar(closure_nar)
+                .with_closure_nar(image.closure_nar)
                 .run_shell_script(job)
                 .map_err(|error| anyhow::anyhow!("HVF builder shell job: {error}"))?;
             }
             Self::Firecracker => {
-                let image = crate::commands::build::fc_builder_image::resolve_fc_builder_image()
-                    .map_err(|error| {
-                        anyhow::anyhow!("resolving Firecracker builder image: {error}")
-                    })?;
+                let image =
+                    crate::commands::build::driver_builder_image::resolve_driver_builder_image()
+                        .map_err(|error| {
+                            anyhow::anyhow!("resolving Firecracker builder image: {error}")
+                        })?;
                 mvm_runtime::builder_runner::DriverBuilderVm::new(
                     mvm_backends::driver::fc::FcDriver::new(),
                     image.kernel,

@@ -175,7 +175,7 @@ mediated ping helper is the only ICMP-shaped surface.
 For a repeatable live proof on macOS Apple Silicon, run:
 
 ```bash
-just hvf-oci-allow-host-smoke
+just kernel::hvf-oci-smoke
 ```
 
 That wrapper packages both the exact CLI path

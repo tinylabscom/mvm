@@ -18,6 +18,14 @@
       launch-plan environment, canonical share paths, conditional override
       order, backend drift, and persistent-machine refusal for policy a spec
       cannot record. See `specs/sprint/delivery/3715-policy-profiles.md`.
+- [ ] **Complete capability and client documentation — issue #3727.**
+      Corrections for the stale `deploy` CLI denial and durable-session status
+      are drafted with two passing documentation regression tests; workspace
+      test validation remains pending. Lineage recovery, workload provenance,
+      and durable agent sessions now have navigable guides and three further
+      passing documentation regression tests. All eight named capabilities
+      now link to feature pages with current limits. Client, authoring, and
+      generated schema documentation remains open.
 
 - [ ] **Document the AI coding workflow and slim AGENTS.md to a rule index.**
       `specs/plans/2026-09-28-ai-coding-workflow-docs.md`. The issue-to-PR
@@ -135,8 +143,8 @@ docs commit went out as #3581). Under the
       serves at once: per-child state-dir-keyed vsock endpoints, name-keyed
       egress paths, distinct generation tokens and post-restore kernel
       randomness. Workspace clippy, touched-crate tests (mvm-backends 250,
-      mvm_runtime 1028+integration, mvm-cli 2089+integration), and
-      `just check-gated` are green; the recovery-path doc row now matches the
+      mvm-runtime 1028+integration, mvm-cli 2089+integration), and
+      `just check::gated` are green; the recovery-path doc row now matches the
       advertised tier.
 
 - [x] **Fork batch: `machine fork --count N` — issue #3641.**
@@ -329,7 +337,7 @@ docs commit went out as #3581). Under the
       behavior, and the `s34_telemetry_capture` suite carries the three
       not-yet-enabled contracts as explicit `@wip` pending scenarios. Meta
       gates, workspace tests, doctests, clippy, all 72 repository gates and
-      `just check-gated` pass. No runtime behavior changes; passing gap tests
+      `just check::gated` pass. No runtime behavior changes; passing gap tests
       certify nothing. Evidence:
       `specs/sprint/delivery/3420-telemetry-gap-acceptance.md`.
       W1e live control baselines are measured on dedicated KVM hardware
@@ -347,7 +355,7 @@ docs commit went out as #3581). Under the
       model (no runtime constructor; collector integration is W4). Seventeen
       new gate tests and seven ledger tests pass, plus fmt, workspace clippy,
       14,436 workspace tests (zero failures, 27 skipped), doctests, all 72
-      repository gates and `just check-gated`. No startup witness is checked at
+      repository gates and `just check::gated`. No startup witness is checked at
       runtime and no capture is certified. Evidence:
       `specs/sprint/delivery/3420-telemetry-source-inventory.md`.
       W1d offline emit-path baselines are measured and committed: the
@@ -914,7 +922,7 @@ docs commit went out as #3581). Under the
       The #3011 source-build blocker is resolved: standard macOS 26+ Apple
       Silicon source builds and release artifacts use the dependency-free HVF
       path; libkrun remains only as an explicit development integration and
-      older macOS releases are unsupported. The local `just e2e-launch` gate
+      older macOS releases are unsupported. The local `just e2e::launch` gate
       now owns its published workload-kernel selection, preventing a cold
       source checkout from silently entering optional libkrun Stage 0 during
       burn-in. It builds the `user` manifest verifier through the standard
@@ -1464,7 +1472,7 @@ docs commit went out as #3581). Under the
       token budget that refuses further AI egress when exhausted. OpenAI and
       Anthropic in v1; provider additions are macro-declared.
       All phases are complete and green (`cargo check`, `cargo clippy`,
-      `just check-gated`, unit/integration tests, and SDK tests).
+      `just check::gated`, unit/integration tests, and SDK tests).
 
 - [ ] **Merge-queue throughput recovery.**
       `specs/plans/2026-08-15-merge-queue-throughput.md`.
@@ -1966,7 +1974,7 @@ and nothing depends on it.
       was the host-toolchain probe under isolated `CARGO_HOME`, and that test
       passed when rerun with the normal Cargo home.
 
-- [x] Source-checkout kernel bootstrap reliability. `just kernel-workload` and
+- [x] Source-checkout kernel bootstrap reliability. `just kernel::workload` and
       `mvmctl kernel build --which workload` now embed the Stage 0 egress client
       they need to reach Nix caches, so a first-time local compile completes
       instead of failing with an opaque source-fetch error. `MVM_KERNEL_SOURCE`
@@ -2693,7 +2701,7 @@ updates only its own entry below.
       question the contracts raised: device-mapper layout drift **fails
       closed** — `DM_TABLE_LOAD` returns `EINVAL` for a displaced
       `target_type`, measured against Linux 6.8 — so MVM-SEC-03 was never at
-      risk. **WS2 shipped (#1943):** `just test-ci` named a nextest `ci`
+      risk. **WS2 shipped (#1943):** `just tests::ci` named a nextest `ci`
       profile that did not exist and had therefore never run. Adding it, with
       no captured test output in the uploaded JUnit, surfaced that the
       `update_check_does_not_emit_audit_entry` flake deferred above was not a
@@ -2764,7 +2772,7 @@ updates only its own entry below.
       `seed_guest_runtime_cache` seeding the guest-binary cache under a
       key the resolver never reads, so three `pull_core` tests
       cross-compiled the guest agent at 55s each (mvm-cli's suite 86s →
-      2s); and `just mutation-witnesses` running `--run` against the
+      2s); and `just lints::mutation-witnesses` running `--run` against the
       developer's real `~/.mvm` — the isolation now lives at the single
       cargo-mutants spawn site, which is what the entry above already
       claimed. Detail in `specs/VERIFICATION.md` §"Mutation-tested
@@ -3044,7 +3052,7 @@ Every user-facing behavior and every security claim begins as a Gherkin `.featur
 - Top-level `features/suites/sN_<name>/*.feature`, numbered by area — e.g. `s0_cli`, `s1_build_run`, `s2_egress_vsock`, `s3_secrets_pii`, `s4_verified_boot`, `s5_lifecycle`, `s6_admission_audit`.
 - A dev-only **cucumber-rs runner** (`crates/mvm-conformance`, _not_ one of the ~11 product crates) wires step definitions to `mvm-client`, so scenarios drive the real facade rather than mocks.
 - The **claims catalog becomes executable**: each numbered security claim maps to a scenario, complementing (not replacing) the existing machine-checked witnesses.
-- `just bdd` runs the suite; folded into `just ci` / the full local gate.
+- `just bdd::run` runs the suite; folded into `just ci` / the full local gate.
 
 ### 2.8 Top-level layout (root ~30 dirs → ~8)
 
@@ -3112,10 +3120,10 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 **WS0.6 — BDD conformance harness (cucumber-rs)** (see §2.7)
 
-- [ ] Add `features/suites/sN_<name>/` + the `crates/mvm-conformance` cucumber-rs runner + a `just bdd` recipe (folded into `just ci`); seed scenarios for the current security claims and the top-level CLI verbs, wired through `mvm-client`.
-  - [x] Gate every software-publication path on a reusable GitHub Actions workflow that runs `just bdd`: runtime releases, kernel release assets, SDK registry releases, and crates.io publication. Keep emergency revocation-list publication independent of the product suite.
+- [ ] Add `features/suites/sN_<name>/` + the `crates/mvm-conformance` cucumber-rs runner + a `just bdd::run` recipe (folded into `just ci`); seed scenarios for the current security claims and the top-level CLI verbs, wired through `mvm-client`.
+  - [x] Gate every software-publication path on a reusable GitHub Actions workflow that runs `just bdd::run`: runtime releases, kernel release assets, SDK registry releases, and crates.io publication. Keep emergency revocation-list publication independent of the product suite.
 - [ ] Standing rule for every later WS: land its Gherkin scenarios in the same change (feature-first — the scenario is written and red before the implementation).
-- Gate: `just bdd` green in CI; each security claim has a scenario.
+- Gate: `just bdd::run` green in CI; each security claim has a scenario.
 
 ### Phase 1 — Foundations
 
@@ -3177,8 +3185,8 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
   - [x] **Tier 4 — COMPLETE** (the substantive rewire happened incrementally; each split repointed its own facade + fixed imports, so the workspace was green after every batch — no broken imports remained). Closeout was documentation: the 2 "deferred" items resolved to **permanent `mvm-core` residents**, NOT pending moves — `policy/security_profile` (a `Copy` runtime value, not a serde DTO, + `crypto::seccomp` dep) and `protocol/protocol.rs` `HostdRequest`/`HostdResponse` (host-side mvmd↔hostd IPC embedding `domain::{VolumeAttach,TenantNet}` — which stay in core per architecture — over `hostd-transport` tokio framing; nothing runs in guest/browser). This is the clean line: **mvm-contract = DTOs a no_std/edge/guest/browser consumer needs; host-only IPC + orchestration domain stay in mvm-core.** Design doc `10-…` updated to Status:COMPLETE. (Cosmetic: 1 masked test-only `ToString` import left as-is — adding it risks a redundant-import lint under the std/schema build.)
   - [x] **INCREMENT 3 COMPLETE** — the `mvm-core`→`mvm-contract` DTO inversion (the Phase 1a long pole) is done. Entire signed plan + all wire/policy/plan DTOs compile no_std on wasm32; the wasm-container core-goal (WS11) foundation is real.
   - [ ] **Tier 4** — logic rewire (imports→mvm_contract) + `mod.rs` re-export shims; deferred items (`security_profile`, `protocol.rs` HostdRequest/domain).
-- [x] `mvm-storage` placement — folded into `mvm_runtime` as `crate::storage::volume` (nested under the pre-existing `crate::storage` dm-thin CoW pool module — a naming collision the original decision didn't anticipate — to avoid clashing `backend.rs`/`mod.rs` filenames and a second unrelated `StorageError`). The original fold renamed its S3 prototype to `storage-s3`; plan 283 later removed that unregistered member-only provider to restore the fleet ownership boundary while retaining the independent S3 template registry. Linux `tempfile` dep was already an unconditional normal dep of `mvm_runtime`, no change needed; `SnapshotUpper` import in `libkrun.rs` repointed. Crate deleted, workspace member + `[workspace.dependencies]` entries removed. Crate count 15 → 14.
-- [x] Full `nextest --workspace` ran — **6598 passed / 0 failed** (`176adc793`) after fixing a class the ident-rewrites missed: **stale crate-name STRING literals** (dir paths, `-p` pkgs, features, allowlist paths) in the builder-VM guest-build/libkrun-supervisor paths. Excl `mvm_runtime` (macOS codesign-SIGKILL) + `mvm-conformance` (cucumber `harness=false` → `just bdd`). Also unblocked **5 xtask claim gates that were failing-open** (paths pointed at renamed `crates/mvm-guest`) + a vacuous `no_backend_dep` cycle guard. Lesson: after crate renames, grep strings, not just idents; `nextest --no-fail-fast` catches runtime-wrong-but-compiling.
+- [x] `mvm-storage` placement — folded into `mvm-runtime` as `crate::storage::volume` (nested under the pre-existing `crate::storage` dm-thin CoW pool module — a naming collision the original decision didn't anticipate — to avoid clashing `backend.rs`/`mod.rs` filenames and a second unrelated `StorageError`). The original fold renamed its S3 prototype to `storage-s3`; plan 283 later removed that unregistered member-only provider to restore the fleet ownership boundary while retaining the independent S3 template registry. Linux `tempfile` dep was already an unconditional normal dep of `mvm-runtime`, no change needed; `SnapshotUpper` import in `libkrun.rs` repointed. Crate deleted, workspace member + `[workspace.dependencies]` entries removed. Crate count 15 → 14.
+- [x] Full `nextest --workspace` ran — **6598 passed / 0 failed** (`176adc793`) after fixing a class the ident-rewrites missed: **stale crate-name STRING literals** (dir paths, `-p` pkgs, features, allowlist paths) in the builder-VM guest-build/libkrun-supervisor paths. Excl `mvm-runtime` (macOS codesign-SIGKILL) + `mvm-conformance` (cucumber `harness=false` → `just bdd::run`). Also unblocked **5 xtask claim gates that were failing-open** (paths pointed at renamed `crates/mvm-guest`) + a vacuous `no_backend_dep` cycle guard. Lesson: after crate renames, grep strings, not just idents; `nextest --no-fail-fast` catches runtime-wrong-but-compiling.
 - [x] **CI/ADR stale-ref sweep** (`b0a9d2477`): the workflows + `ADR-022` were never updated through the 7 consolidations, so several jobs invoked deleted packages. Remapped every functional `cargo -p <gone>` (`mvm-guest`→`mvm-agentd`, `mvm-ext4`/`mvm-oci`→`mvm-fs`, `mvm-vm-host`→`mvm-hostd`, +3 stray `mvm-build`→`mvm-fs` test invocations) **verified by RUNNING each** (mvm-agentd 560/560, mvm-fs oci 25/25 + hermetic 4/4 + the 3 ext4 examples, mvm-hostd bins build); repointed `ci-full` OCI path-filters + `architecture` globs + `security` fuzz-cache paths; refreshed the `ADR-022` crate table (dropped `mvm-verify`). Both dead-crate-`-p` + stale-path-filter rg sweeps now EMPTY; all 5 YAMLs still parse. Config/doc only. **STILL DEFERRED (cosmetic/frozen/pre-existing, reported):** prose crate-name mentions in ADRs 001/002/009/010/014/016/020/024; the `security.yml` FROZEN fuzz-lane `working-directory: crates/mvm-{guest,oci,vm-host,ext4}` (needs care re pinned locks); two OLDER broken refs `mvm-jailer-lite`/`mvm-host-vm-init` (pre-this-session consolidation); a non-breaking `crates/mvm/src/hostd/**` glob + an `ext4-real-mount` job label. `scripts/*.sh` not yet swept.
 - [ ] **Follow-up (WS2↔WS10):** `check-guest-agent-runtime-free` now FAILS — merging the tokio addon bins (`addon-dns`/`vsock-bridge`/`egress-client`) into the single guest binary drags tokio into the guest closure, against the tokio-free/~8 MB goal. Single guest binary requires de-tokio'ing the addons (WS10) or a per-binary check scope.
 
@@ -3412,7 +3420,7 @@ Then unify + retire the old paths:
       mutation; UDS-channel tests now use explicit isolated roots, and the
       complete `mvm-hostd` package suite passes.
       A host-only Apple Silicon acceptance harness is now
-      available as `just hvf-warm-restore`; it records the cold bootstrap
+      available as `just kernel::hvf-warm-restore`; it records the cold bootstrap
       separately and refuses any measured cold fallback or warm-SLO violation;
       the runtime now has an explicit trusted-snapshot backend contract for
       optional immutable background publication. Unsupported hosts perform no
@@ -3671,7 +3679,7 @@ Then unify + retire the old paths:
 
 - [x] **DESIGN** (`specs/refactor/12-workload-address-pilot.md`): additive `WorkloadAddress` (`sha256(JCS(ir))` = UOR-ADDR JSON realization) for Workload IR, with a distinct newtype and no use in exact-byte, signature, nonce, or ephemeral-ID paths. The `uor-addr` crate remains deferred to the verification-gated WS11-P4/browser decision.
 - [x] **EXECUTED** (`2f75f268b`, extended by this follow-up): `mvm-core/src/workload_address.rs` validates schema first, NFC-normalizes JSON strings/object keys, then computes the UOR-ADDR label. The 12 published UOR-ADDR JSON fixtures pass; the Python/TypeScript SDK parity witness remains green. `ir_hash` is intentionally reported as a separate internal fingerprint because it does not perform UOR Unicode normalization.
-- [x] **PUBLIC API BREAKING RENAME** (2026-08-27): the unused pilot API is now `mvm_core::{WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address}`, with the canonical `mvm_core::workload_address` module. CLI JSON uses `workload_address`; human output and BDD use “workload address.” No deprecated semantic-name aliases remain. Focused unit, SDK parity, CLI, and four-scenario BDD coverage pass; workspace check, Clippy, and `just check-gated` are green.
+- [x] **PUBLIC API BREAKING RENAME** (2026-08-27): the unused pilot API is now `mvm_core::{WorkloadAddress, WorkloadAddressError, WorkloadAddressParseError, workload_address}`, with the canonical `mvm_core::workload_address` module. CLI JSON uses `workload_address`; human output and BDD use “workload address.” No deprecated semantic-name aliases remain. Focused unit, SDK parity, CLI, and four-scenario BDD coverage pass; workspace check, Clippy, and `just check::gated` are green.
 - [x] **UOR FRAMEWORK EXPLORATION** (`specs/research/uor-framework-integration-exploration.md`, 2026-07-22): broader UOR Framework, Prism, and PrimeShield adoption is not recommended. The host-side UOR-ADDR conformance baseline is complete; `BuildProvenance` addressing and `uor-addr` crate adoption remain separate follow-ups.
 
 **WS14 — mvmd contract (secondary)**
@@ -3986,7 +3994,7 @@ change.
 - All security claims still witnessed; live egress + boot smoke on Mac (HVF) and Linux (libkrun + FC); **sub-second launch** proven by the timed e2e; guest RAM demand-faulted for density.
 - **Wasm-container capable (core goal):** `mvm-contract` builds + tests on `wasm32-unknown-unknown` in CI with a CI-enforced `no_std` boundary; a `WasmBackend` runs a workload end-to-end through the same `VmBackend` + egress/audit/secret-substitution seam (POC-gated — the v1 bar is the seam proven, not full production parity).
 - Workload stdout/stderr + exit code flow over vsock; the builder VM runs the same single guest binary.
-- `just bdd` green; every security claim and top-level CLI verb has a passing Gherkin scenario; `just ci` runs the BDD suite.
+- `just bdd::run` green; every security claim and top-level CLI verb has a passing Gherkin scenario; `just ci` runs the BDD suite.
 - Root is ~8 dirs (§2.8); SDKs live under `crates/`.
 - SDK usage (decorator + runtime) unchanged; ADRs consolidated but intact; website docs current; only #1637 open.
 
@@ -4840,6 +4848,19 @@ writes the plan:
       back under a ceiling), per-dimension exceeded latches, and
       record-then-refuse semantics matching the AI budget tracker.
 
+## 2026-09-28 Security witnesses — #3679
+
+- [ ] Validate remaining regressions and pass the full Security workflow.
+- [ ] Complete required workspace/Linux checks, merge and confirm closure.
+
+See `specs/plans/2026-09-28-security-mutation-witnesses.md`; freshness alert #3750 depends on this recovery.
+
+- [x] Security witness focused validation: mvm-contract 1,103 tests and mvm-fs 421 tests pass. Host workspace Clippy also passes; remaining package, workspace and mutation checks are pending.
+
+Security validation update (#3679): all four base-image scan witnesses and the
+absolute source-root test pass. Workflow 36484461950 is underway; complete workspace
+and Linux validation remain pending. The builder is blocked in Nix-store initialization.
+
 ## 2026-09-28 Extended CI cleanup — #3773
 
 - [x] Reproduce and fix EPERM cleanup after a child exits, with live-child refusal intact.
@@ -4858,6 +4879,18 @@ agent deadline test failed; Linux builder initialization remains blocked.
 - [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.
 
 Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.
+
+## 2026-09-28 runtime approval SDK completion — #3717
+
+- [x] Add the hostlib ABI 1.4 process-wide approval callback with bounded,
+      fail-closed `deny` / `once` / `session` results.
+- [x] Bind an SDK machine's private broker after admitted boot, before its
+      requested command, retain it for detached/persistent use, and remove it
+      on stop/remove.
+- [x] Expose matching Python and TypeScript callback facades and document the
+      security and lifecycle contract.
+- [x] Cover callback decoding, failures, scopes, socket lifecycle, and SDK
+      facades with focused Rust, Python, and TypeScript tests.
 
 ## 2026-09-28 Agent efficiency overhaul — Phases 1–10
 

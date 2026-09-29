@@ -27,7 +27,7 @@ import os
 import shutil
 import sys
 import threading
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Literal, Optional, Tuple
 
 from mvm._env.vars import MVM_HOSTLIB_PATH_ENV
 from mvm._errors.types import (
@@ -112,6 +112,17 @@ class _Buf(ctypes.Structure):
 
 _lock = threading.Lock()
 _lib: Optional[ctypes.CDLL] = None
+_ApprovalCallbackC = ctypes.CFUNCTYPE(
+    ctypes.c_int32, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t
+)
+# Registered C callbacks can be invoked after the registration call returns.
+# Keep the active trampoline alive until the native setter confirms that it
+# has been replaced or cleared.
+_approval_callback_lock = threading.Lock()
+_approval_callback_ref: Optional[Any] = None
+
+ApprovalDecision = Literal["deny", "once", "session"]
+ApprovalCallback = Callable[[dict[str, Any]], ApprovalDecision]
 
 
 def _load() -> ctypes.CDLL:
@@ -135,6 +146,11 @@ def _load() -> ctypes.CDLL:
         lib.mvm_hostlib_call.restype = ctypes.c_int32
         lib.mvm_hostlib_free.argtypes = [_Buf]
         lib.mvm_hostlib_free.restype = None
+        # The callback pointer is nullable so applications can clear it. Using
+        # c_void_p here lets ctypes represent both a CFUNCTYPE trampoline and
+        # C NULL without weakening the public Python callback type.
+        lib.mvm_hostlib_set_approval_callback.argtypes = [ctypes.c_void_p]
+        lib.mvm_hostlib_set_approval_callback.restype = ctypes.c_int32
         if lib.mvm_hostlib_abi_is_compatible(ABI_MAJOR, ABI_MINOR) != 1:
             version = lib.mvm_hostlib_abi_version()
             raise HostLibraryAbiError(
@@ -162,6 +178,58 @@ def _invoke(method: str, request_json: bytes) -> Tuple[int, bytes]:
     finally:
         lib.mvm_hostlib_free(out)
     return status, body
+
+
+def _approval_result(callback: ApprovalCallback, prompt_json: bytes) -> int:
+    """Map one callback answer to the host ABI's bounded decision enum.
+
+    Malformed JSON, callback exceptions, and unknown answers all deny.
+    """
+    try:
+        prompt = json.loads(prompt_json)
+        if not isinstance(prompt, dict):
+            return 0
+        decision = callback(prompt)
+    except BaseException:
+        return 0
+    return {"deny": 0, "once": 1, "session": 2}.get(decision, 0)
+
+
+def set_approval_callback(callback: Optional[ApprovalCallback]) -> None:
+    """Set the callback that answers runtime ``ask`` decisions.
+
+    The callback receives the supervisor's JSON prompt and returns ``"deny"``,
+    ``"once"`` or ``"session"``. Register it before launching or starting a
+    machine. It is process-wide and affects machines launched or started
+    through this SDK. Clearing it with ``None`` makes all existing SDK brokers
+    deny; no answer is persisted to a profile.
+    """
+    global _approval_callback_ref
+    with _approval_callback_lock:
+        lib = _load()
+        registered = None
+        if callback is None:
+            status = lib.mvm_hostlib_set_approval_callback(None)
+        else:
+            if not callable(callback):
+                raise TypeError("approval callback must be callable or None")
+
+            def invoke(prompt: Any, length: int) -> int:
+                try:
+                    encoded = bytes(ctypes.string_at(prompt, length)) if length else b""
+                    return _approval_result(callback, encoded)
+                except BaseException:
+                    return 0
+
+            registered = _ApprovalCallbackC(invoke)
+            status = lib.mvm_hostlib_set_approval_callback(
+                ctypes.cast(registered, ctypes.c_void_p)
+            )
+        if status != _OK:
+            raise HostLibraryError(
+                f"host library refused the approval callback (status {status})"
+            )
+        _approval_callback_ref = registered
 
 
 def call(
