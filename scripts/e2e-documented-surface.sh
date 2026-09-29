@@ -444,8 +444,13 @@ if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
   echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout." >&2
   exit 1
 fi
-echo "==> building the source-matched SDK sidecar through unembedded mvmctl"
-MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+# Fetch-when-unchanged: when the pinned set's sidecar members were built
+# from exactly this tree's cdylib sources, adopt those verified bytes instead
+# of pair-building (~24 min). A fingerprint mismatch or an older set
+# pair-builds exactly as before; the verb reports which arm ran.
+echo "==> adopting or building the source-matched SDK sidecar through unembedded mvmctl"
+MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" \
+  MVM_FETCH_UNCHANGED_IMAGES=1 "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 
 # The dev default image (`mvmctl run` with no image) is built from an image
 # checkout too; without one, and with nothing cached, `run` refuses. The one
