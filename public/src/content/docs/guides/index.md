@@ -45,6 +45,7 @@ example, check [capability status](/security/capability-status/) and
 | [Building MicroVM Images](/guides/building-microvm-images/) | You need to turn a flake and manifest into a bootable image. |
 | [Nix and OCI](/guides/nix-and-oci/) | You need the Nix-first model plus OCI compatibility rules. |
 | [Policy Profiles](/guides/policy-profiles/) | You need repeatable security defaults for sandbox classes. |
+| [Policy and profiles](/guides/policy-and-profiles/) | You want what a workload may do written once, as composable groups and profiles, and resolved into the signed plan. |
 | [Secrets and Credentials](/guides/secrets-and-credentials/) | You need to pass sensitive values without widening exposure. |
 | [Network Egress Policy](/guides/network-egress-policy/) | You need explicit outbound network policy and auditability. |
 | [Runtime Approvals](/guides/runtime-approvals/) | Some requests or secret uses need a person, or a webhook, to say yes first. |

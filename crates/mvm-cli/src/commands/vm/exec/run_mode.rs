@@ -19,6 +19,14 @@ pub(in crate::commands) fn resolve_run_mode(
     sdk: &SdkTransportArgs,
     run: &RunArgs,
 ) -> Result<Option<RunMode>> {
+    let sdk_requested =
+        std::env::var_os(mvm_sdk::env::MVM_SDK_MODE_ENV).is_some() || sdk.dev || sdk.mode.is_some();
+    if sdk_requested && (run.policy.is_some() || run.plan.is_some()) {
+        anyhow::bail!(
+            "--policy and --plan are not supported by SDK run modes; unset the SDK mode or use \
+             the ordinary sandbox runner so the authored policy cannot be skipped"
+        );
+    }
     if let Ok(env_mode) = std::env::var(mvm_sdk::env::MVM_SDK_MODE_ENV) {
         // The SDK modes do not go through the image run, so `--prod` would be
         // dropped without a word; refuse the pair instead.

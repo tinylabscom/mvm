@@ -15,10 +15,11 @@ use crate::approval::{ApprovalChoice, ApprovalInputs};
 
 /// Resolve the launch's routes before anything boots.
 pub(in crate::commands) fn launch_routes(args: &RunArgs) -> Result<RunRoutes> {
-    let manifest_routes = project_manifest(args)?
-        .map(|manifest| manifest.network.routes)
+    let mut routes = project_manifest(args)?
+        .map(|(_, manifest)| manifest.network.routes)
         .unwrap_or_default();
-    resolve_run_routes(&args.allow_endpoint, &manifest_routes)
+    routes.extend(args.policy_routes.iter().cloned());
+    resolve_run_routes(&args.allow_endpoint, &routes)
 }
 
 /// Resolve who answers the launch's `ask` decisions.
@@ -27,14 +28,17 @@ pub(in crate::commands) fn launch_approval(args: &RunArgs) -> Result<ApprovalCho
     ApprovalChoice::resolve(ApprovalInputs {
         flags: &args.approval,
         flag_mode: args.approval_mode,
-        manifest: manifest.as_ref().map(|m| &m.approval),
+        manifest: manifest.as_ref().map(|(_, m)| &m.approval),
         operator_at_terminal: crate::approval::operator_at_terminal(),
     })
 }
 
 /// The manifest `--manifest` points at, or the one in a local `--flake`
-/// directory. A registered manifest name or a remote flake has no local file.
-fn project_manifest(args: &RunArgs) -> Result<Option<mvm_core::manifest::Manifest>> {
+/// directory, with its path. A registered manifest name or a remote flake has
+/// no local file.
+pub(in crate::commands) fn project_manifest(
+    args: &RunArgs,
+) -> Result<Option<(std::path::PathBuf, mvm_core::manifest::Manifest)>> {
     let path = match (args.manifest.as_deref(), args.flake.as_deref()) {
         (Some(manifest), _) => {
             mvm_core::manifest::resolve_manifest_config_path(Path::new(manifest)).ok()
@@ -47,6 +51,7 @@ fn project_manifest(args: &RunArgs) -> Result<Option<mvm_core::manifest::Manifes
     path.map(|path| {
         mvm_core::manifest::Manifest::read_file(&path)
             .with_context(|| format!("reading {}", path.display()))
+            .map(|manifest| (path, manifest))
     })
     .transpose()
 }

@@ -1,0 +1,5 @@
+description = "What a coding agent typically calls: the Anthropic and OpenAI APIs, and GitHub."
+extends = "default"
+
+[groups]
+include = ["llm-apis", "github"]

@@ -1,0 +1,5 @@
+description = "Package registries and their download mirrors, for builds that resolve dependencies."
+extends = "default"
+
+[groups]
+include = ["registries"]

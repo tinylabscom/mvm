@@ -3,6 +3,10 @@ title: Policy profiles
 description: Choose the right run profile, host-share mode, and environment policy for a sandboxed workload.
 ---
 
+This page is about `--profile`, the run's security tier. For composable,
+authored policy (groups, `extends`, and `--policy NAME|PATH`), see
+[Policy and profiles](/guides/policy-and-profiles/).
+
 Policy profiles are the first security decision for a sandbox run. Pick the
 least permissive profile that lets the workload do its job, then add filesystem,
 environment, and network permissions deliberately.

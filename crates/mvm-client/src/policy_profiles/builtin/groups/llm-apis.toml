@@ -1,0 +1,4 @@
+description = "LLM inference APIs: Anthropic and OpenAI."
+
+[network]
+allow = ["api.anthropic.com:443", "api.openai.com:443"]

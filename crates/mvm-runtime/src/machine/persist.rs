@@ -238,13 +238,33 @@ pub fn list_machine_specs() -> Result<Vec<MachineSpec>> {
 /// Two specs share a launch config when every boot-affecting field matches.
 /// Runtime metadata (resolved digest, timestamps) is deliberately excluded —
 /// it changes on every start and must not trigger a collision.
+/// An allow-list as the egress gate reads it: a bare `HOST` is `HOST:443`,
+/// and order does not matter. Specs written before policy resolution
+/// canonicalized hosts carry the bare form, and comparing the strings would
+/// report a config change where there is none.
+fn canonical_allow_host(hosts: &[String]) -> std::collections::BTreeSet<String> {
+    hosts
+        .iter()
+        .map(|host| match host.rsplit_once(':') {
+            Some((_, port)) if port.chars().all(|c| c.is_ascii_digit()) && !port.is_empty() => {
+                host.clone()
+            }
+            _ => format!("{host}:443"),
+        })
+        .collect()
+}
+
+fn same_allow_host(a: &[String], b: &[String]) -> bool {
+    canonical_allow_host(a) == canonical_allow_host(b)
+}
+
 pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
     a.image == b.image
         && a.manifest == b.manifest
         && a.deployment == b.deployment
         && a.runtime_pack == b.runtime_pack
         && a.net == b.net
-        && a.allow_host == b.allow_host
+        && same_allow_host(&a.allow_host, &b.allow_host)
         && a.peer == b.peer
         && a.ports == b.ports
         && a.cpus == b.cpus
@@ -278,7 +298,7 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     if current.net != desired.net {
         changed.push("net");
     }
-    if current.allow_host != desired.allow_host {
+    if !same_allow_host(&current.allow_host, &desired.allow_host) {
         changed.push("allow-host");
     }
     if current.peer != desired.peer {
@@ -415,6 +435,18 @@ pub fn validate_machine_memory(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bare_host_and_its_port_443_form_are_the_same_allow_list() {
+        assert!(same_allow_host(
+            &["api.example.com".into(), "b.test:8443".into()],
+            &["b.test:8443".into(), "api.example.com:443".into()],
+        ));
+        assert!(!same_allow_host(
+            &["api.example.com".into()],
+            &["api.example.com:8443".into()],
+        ));
+    }
     use mvm_core::util::test_env::TestEnv;
 
     struct IsolatedMachineState {
