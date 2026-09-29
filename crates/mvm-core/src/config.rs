@@ -507,6 +507,13 @@ pub fn pack_dir(pack_hash: &str) -> std::path::PathBuf {
     pack_cache_dir().join(pack_hash)
 }
 
+/// Root directory for installed user-facing registry packs. Registry packs use
+/// their own domain because their identity is a locked manifest digest rather
+/// than the runtime-artifact `(kind, arch, backend)` index.
+pub fn registry_pack_cache_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_cache_dir()).join("registry-packs")
+}
+
 // ============================================================================
 // Per-VM host-side state paths
 // ============================================================================

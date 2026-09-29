@@ -219,29 +219,24 @@ pub fn promote_at(
         std::fs::remove_dir_all(&final_dir).map_err(io_at(&final_dir))?;
     }
 
-    let quarantine = new_quarantine_dir_at(cache_root)?;
-    match populate_and_rename(&quarantine, staged_root, manifest, &final_dir) {
+    match atomically_populate_dir_at(cache_root, &final_dir, |quarantine| {
+        populate_quarantine(quarantine, staged_root, manifest)
+    }) {
         Ok(()) => Ok(VerifiedPackDir {
             root: final_dir,
             verified,
         }),
-        Err(error) => {
-            // Leave no partial staging behind on any failure.
-            let _ = std::fs::remove_dir_all(&quarantine);
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
-/// Copy the verified file set + manifest into `quarantine`, then rename it onto
-/// `final_dir`. The rename is the atomic-publish step.
-fn populate_and_rename(
+/// Copy the verified file set and manifest into a quarantine directory. The
+/// shared publisher validates completion before performing the atomic rename.
+fn populate_quarantine(
     quarantine: &Path,
     staged_root: &Path,
     manifest: &PackManifest,
-    final_dir: &Path,
 ) -> Result<(), PackCacheError> {
-    harden_dir(quarantine)?;
     for file in &manifest.outputs.files {
         let dest = quarantine.join(&file.path);
         if let Some(parent) = dest.parent() {
@@ -263,13 +258,38 @@ fn populate_and_rename(
         std::fs::copy(&staged_bundle, &dest_bundle).map_err(io_at(&staged_bundle))?;
     }
 
-    if let Some(parent) = final_dir.parent() {
-        harden_dir(parent)?;
-    }
-    // Atomic within a filesystem: readers see either no dir or the complete one.
-    std::fs::rename(quarantine, final_dir).map_err(io_at(final_dir))?;
-    harden_dir(final_dir)?;
     Ok(())
+}
+
+/// Populate a private same-filesystem directory and publish it with one rename.
+///
+/// The caller owns content verification and must ensure `final_dir` does not
+/// already exist. The quarantine directory is removed on every failed path.
+pub(crate) fn atomically_populate_dir_at<E>(
+    cache_root: &Path,
+    final_dir: &Path,
+    populate: impl FnOnce(&Path) -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<PackCacheError>,
+{
+    let quarantine = new_quarantine_dir_at(cache_root).map_err(E::from)?;
+    let result = (|| {
+        harden_dir(&quarantine).map_err(E::from)?;
+        populate(&quarantine)?;
+        if let Some(parent) = final_dir.parent() {
+            harden_dir(parent).map_err(E::from)?;
+        }
+        std::fs::rename(&quarantine, final_dir)
+            .map_err(io_at(final_dir))
+            .map_err(E::from)?;
+        harden_dir(final_dir).map_err(E::from)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&quarantine);
+    }
+    result
 }
 
 /// Path to the persisted pack index: `<cache_root>/packs/index.json`.
