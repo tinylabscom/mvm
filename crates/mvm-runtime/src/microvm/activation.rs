@@ -164,8 +164,37 @@ where
         GuestResponse::ActivateEnvironmentError { message } => {
             bail!("guest activation failed: {message}")
         }
+        GuestResponse::VerbNotAuthorized { verb } => {
+            bail!("{}", activation_denial_detail(&verb, env))
+        }
         other => bail!("unexpected response to ActivateEnvironment: {other:?}"),
     }
+}
+
+fn activation_denial_detail(verb: &str, env: &ActivateEnvironment) -> String {
+    if verb != "activate-environment" {
+        return format!("guest denied activation verb {verb}");
+    }
+    let Some(not_after) = env
+        .verb_grant_envelope
+        .as_ref()
+        .map(|envelope| envelope.grant.not_after)
+    else {
+        return "guest denied activate-environment: no verb grant was attached to activation"
+            .to_string();
+    };
+    let now = chrono::Utc::now();
+    if now > not_after {
+        return format!(
+            "guest denied activate-environment: verb grant expired before activation \
+             (grant not_after={not_after}, now={now}); this usually means image/runtime \
+             preparation took longer than the grant window before admission"
+        );
+    }
+    format!(
+        "guest denied activate-environment even though a verb grant was present \
+         (grant not_after={not_after}, now={now}); verify grant/session binding and host trust anchor"
+    )
 }
 
 /// Build an [`ActivateEnvironment`] from the admitted launch config.
@@ -726,6 +755,73 @@ mod tests {
             err.to_string().contains("mount failed"),
             "expected the guest's error to fail the boot: {err}"
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn activate_over_stream_reports_expired_verb_grant_context() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let guest_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+            let host_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+            let mut session =
+                mvm_agentd::vsock::AuthenticatedSession::guest(&mut guest, guest_key, &host_key)
+                    .unwrap();
+            let req: GuestRequest = session.read(&mut guest).unwrap();
+            assert!(matches!(req, GuestRequest::ActivateEnvironment(_)));
+            session
+                .write(
+                    &mut guest,
+                    &GuestResponse::VerbNotAuthorized {
+                        verb: "activate-environment".into(),
+                    },
+                )
+                .unwrap();
+        });
+
+        let (_env, _dir) = test_env();
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+
+        let vm_name = "expired-grant-vm";
+        let state = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state).unwrap();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: VALID_HASH.into(),
+            plan_nonce_hex: VALID_HASH.into(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: mvm_core::plan::VerbGrant {
+                session_id: vm_name.into(),
+                plan_nonce: mvm_core::plan::Nonce::from_hex("0123456789abcdef0123456789abcdef")
+                    .unwrap(),
+                not_after: chrono::Utc::now() - chrono::Duration::seconds(1),
+                verbs: vec![mvm_core::plan::VerbId::new("activate-environment").unwrap()],
+                drive: None,
+                sig: vec![0u8; 64],
+            },
+        };
+        std::fs::write(
+            state.join("verb-grant.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        let mut config = base_config();
+        config.name = vm_name.into();
+        let env = build_activation_environment(&config).unwrap();
+        let err = activate_over_stream(&mut host, &env).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("verb grant expired before activation"),
+            "expected expiry context in activation denial: {rendered}"
+        );
+        assert!(
+            rendered.contains("grant not_after="),
+            "expected explicit expiry metadata in activation denial: {rendered}"
+        );
+
         server.join().unwrap();
     }
 

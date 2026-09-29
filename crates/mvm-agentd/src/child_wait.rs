@@ -116,6 +116,33 @@ pub fn try_wait(child: &mut Child) -> io::Result<Option<ExitStatus>> {
     try_wait_in(registry(), child)
 }
 
+/// Non-blocking wait on a raw pid, for a child forked without
+/// [`std::process::Command`] (the console's PTY shell).
+///
+/// Returns the raw `waitpid` status once the child has exited, `Ok(None)`
+/// while it runs. Like [`try_wait`], a status the orphan reaper collected
+/// first is recovered from the table rather than lost to `ECHILD`, which is
+/// why the pid must be registered with an [`OwnedChild`] for as long as it is
+/// polled.
+pub fn try_wait_pid(pid: i32) -> io::Result<Option<i32>> {
+    if !REAPER_RUNNING.load(Ordering::Acquire) {
+        return waitpid_nohang(pid);
+    }
+    try_wait_pid_in(registry(), pid, waitpid_nohang)
+}
+
+fn waitpid_nohang(pid: i32) -> io::Result<Option<i32>> {
+    let mut raw = 0;
+    // SAFETY: `waitpid` writes only through `raw`, a live local `i32`, and
+    // `WNOHANG` makes it return immediately.
+    let rc = unsafe { libc::waitpid(pid, &mut raw, libc::WNOHANG) };
+    match rc {
+        0 => Ok(None),
+        rc if rc == pid => Ok(Some(raw)),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
 /// Blocking wait, safe against a concurrently running orphan reaper.
 ///
 /// With a reaper installed this polls [`try_wait`] rather than blocking in
@@ -197,6 +224,25 @@ fn try_wait_in(reg: &Mutex<Registry>, child: &mut Child) -> io::Result<Option<Ex
             // there is genuinely nothing left to report.
             Ok(reg.reaped.remove(&pid).map(exit_status_from_raw))
         }
+        other => other,
+    }
+}
+
+fn try_wait_pid_in(
+    reg: &Mutex<Registry>,
+    pid: i32,
+    waitpid: impl FnOnce(i32) -> io::Result<Option<i32>>,
+) -> io::Result<Option<i32>> {
+    let Ok(mut reg) = reg.lock() else {
+        return waitpid(pid);
+    };
+    if let Some(raw) = reg.reaped.remove(&pid) {
+        return Ok(Some(raw));
+    }
+    match waitpid(pid) {
+        // Same reasoning as `try_wait_in`: the reaper publishes under this
+        // lock, so ECHILD here means the status is in the table or gone.
+        Err(e) if e.raw_os_error() == Some(libc::ECHILD) => Ok(reg.reaped.remove(&pid)),
         other => other,
     }
 }
@@ -384,6 +430,37 @@ mod tests {
         let reg = reg.lock().unwrap();
         assert_eq!(reg.reaped.get(&4242), Some(&(3 << 8)));
         assert!(!reg.reaped.contains_key(&9999));
+    }
+
+    #[test]
+    fn a_raw_pid_owner_recovers_the_status_the_reaper_collected() {
+        // The console forks its shell directly, so it has a pid and no
+        // `Child`. It must get the same protection as a `Child` owner.
+        let reg = fresh_registry();
+        let mut child = spawn_exiting_with(6);
+        let pid = child.id() as i32;
+        register_in(&reg, pid);
+        reap_until_collected(&reg, pid);
+
+        let raw = try_wait_pid_in(&reg, pid, waitpid_nohang)
+            .expect("wait after reap")
+            .expect("the reaper's status must be handed to the owner");
+        assert!(libc::WIFEXITED(raw));
+        assert_eq!(libc::WEXITSTATUS(raw), 6);
+        assert_eq!(
+            try_wait_pid_in(&reg, pid, waitpid_nohang).unwrap(),
+            None,
+            "a drained status must not be replayed"
+        );
+        // Already reaped above; this only settles the `Child` handle, and the
+        // ECHILD it answers is expected.
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_raw_pid_wait_reports_a_running_child_as_running() {
+        let reg = fresh_registry();
+        assert_eq!(try_wait_pid_in(&reg, 4242, |_| Ok(None)).unwrap(), None);
     }
 
     #[test]

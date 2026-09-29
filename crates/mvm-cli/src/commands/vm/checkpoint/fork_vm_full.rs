@@ -339,6 +339,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
     let admission = crate::commands::vm::up::admit_plan_for_boot(
         crate::commands::vm::up::AdmitPlanForBootParams {
+            instructions: Default::default(),
             outputs: Vec::new(),
             network_mode: super::parent_network_mode(p.checkpoint, p.store),
             tenant: &tenant,

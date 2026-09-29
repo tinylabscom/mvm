@@ -39,7 +39,7 @@ curl -fsSL https://runmvm.com/install.sh | sh
 ### Pin a version
 
 ```bash
-curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
+curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.18.3 sh
 ```
 
 ### From source
