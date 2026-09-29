@@ -1278,6 +1278,15 @@ impl LaunchResolveMarks {
     }
 }
 
+#[cfg(test)]
+fn prepare_then_admit<T>(
+    prepare: impl FnOnce() -> Result<()>,
+    admit: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    prepare()?;
+    admit()
+}
+
 /// One launch's boot shape, resolved without starting a VM.
 ///
 /// This is the whole of what a launch knows about itself before
@@ -1383,43 +1392,6 @@ pub fn resolve_launch(
     );
     let mut use_snapshot = boot.use_snapshot;
 
-    // Admit the transient run as a locally-signed workload. Setting
-    // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
-    // `network_policy` and chain-audit the run. Force cold boot when admitted —
-    // snapshot restore is unavailable for workload admission.
-    let t_admission = std::time::Instant::now();
-    sub.start(SubPhase::AdmitPlan);
-    if let Some(admit_fn) = admit
-        && let Some(sub) = admit_fn(AdmitInputs {
-            rootfs: std::path::Path::new(&image.rootfs),
-            kernel: start_config
-                .kernel_path
-                .as_deref()
-                .map(std::path::Path::new),
-            vm_name: &vm_name,
-            sdk_sidecar: sdk_sidecar.as_ref(),
-            assets: shape.assets,
-            volumes: &start_config.volumes,
-        })?
-    {
-        start_config.tenant_id = Some(sub.tenant_id);
-        start_config.plan_json = Some(sub.plan_json);
-        start_config.bundle_json = sub.bundle_json;
-        start_config.config_files.extend(sub.config_files);
-        use_snapshot = false;
-
-        refuse_unloadable_sidecar(
-            &image.rootfs,
-            &start_config.volumes,
-            start_config.plan_json.as_deref(),
-        )?;
-    }
-    sub.finish(SubPhase::AdmitPlan);
-    tracing::debug!(
-        ms = t_admission.elapsed().as_secs_f64() * 1000.0,
-        "admit window: admission"
-    );
-
     // Clamp the vCPU request to what this backend can actually create, and say
     // so. Before the backend is chosen there is nothing to clamp against, and
     // after the launch it is too late to tell anyone.
@@ -1473,6 +1445,47 @@ pub fn resolve_launch(
     tracing::debug!(
         ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
         "admit window: attach universal initramfs"
+    );
+
+    // Admit the transient run as a locally-signed workload only after every
+    // cold preparation step the boot waits on has completed. This keeps the
+    // grant-validity window anchored to boot + activation, not to cache-miss
+    // runtime artifact preparation.
+    //
+    // Setting tenant_id + plan_json makes the runner-backed microVM supervisor
+    // enforce `network_policy` and chain-audit the run. Force cold boot when
+    // admitted — snapshot restore is unavailable for workload admission.
+    let t_admission = std::time::Instant::now();
+    sub.start(SubPhase::AdmitPlan);
+    if let Some(admit_fn) = admit
+        && let Some(sub) = admit_fn(AdmitInputs {
+            rootfs: std::path::Path::new(&image.rootfs),
+            kernel: start_config
+                .kernel_path
+                .as_deref()
+                .map(std::path::Path::new),
+            vm_name: &vm_name,
+            sdk_sidecar: sdk_sidecar.as_ref(),
+            assets: shape.assets,
+            volumes: &start_config.volumes,
+        })?
+    {
+        start_config.tenant_id = Some(sub.tenant_id);
+        start_config.plan_json = Some(sub.plan_json);
+        start_config.bundle_json = sub.bundle_json;
+        start_config.config_files.extend(sub.config_files);
+        use_snapshot = false;
+
+        refuse_unloadable_sidecar(
+            &image.rootfs,
+            &start_config.volumes,
+            start_config.plan_json.as_deref(),
+        )?;
+    }
+    sub.finish(SubPhase::AdmitPlan);
+    tracing::debug!(
+        ms = t_admission.elapsed().as_secs_f64() * 1000.0,
+        "admit window: admission"
     );
 
     let t_status = std::time::Instant::now();
@@ -1886,6 +1899,23 @@ mod tests {
         let marks = LaunchResolveMarks::new(false);
         assert!(marks.now().is_none());
         assert!(LaunchResolveMarks::new(true).now().is_some());
+    }
+
+    #[test]
+    fn slow_preparation_does_not_age_the_grant_window_before_admission() {
+        let minted = prepare_then_admit(
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                Ok(())
+            },
+            || Ok(std::time::Instant::now()),
+        )
+        .expect("preparation then admission succeeds");
+
+        assert!(
+            minted.elapsed() < std::time::Duration::from_millis(20),
+            "the grant window must start when admission runs, not before preparation"
+        );
     }
 
     #[test]
