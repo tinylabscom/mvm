@@ -151,6 +151,8 @@ fn member(role: ImageSetRole, target: MemberTarget) -> ImageSetMember {
     ImageSetMember {
         role,
         target,
+        build_mode: None,
+        source_fingerprint: None,
         boot_protocol,
         artifacts,
         required_capabilities,
@@ -1077,6 +1079,106 @@ mod completeness {
             role: ImageSetRole::QemuWasmSmokePack,
             target: MemberTarget::ArchIndependent,
         }));
+    }
+
+    /// A dev build of a workload base publishes beside its prod build in one
+    /// set: same role and target, different build mode, both accepted.
+    #[test]
+    fn a_dev_workload_base_publishes_beside_its_prod_build() {
+        let mut manifest = manifest();
+        for m in &mut manifest.members {
+            if m.role == ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant)
+                && m.target == X86
+            {
+                m.build_mode = Some(MemberBuildMode::Dev);
+            }
+        }
+        validate_structure(&manifest).expect("one dev and one prod default-tenant rootfs coexist");
+
+        let duplicate = manifest.clone();
+        validate_structure(&duplicate).expect("prod members stay unique");
+        let mut two_devs = manifest.clone();
+        let dev = two_devs
+            .members
+            .iter()
+            .find(|m| m.build_mode == Some(MemberBuildMode::Dev))
+            .expect("the dev member")
+            .clone();
+        two_devs.members.push(dev);
+        assert!(
+            matches!(
+                validate_structure(&two_devs),
+                Err(ImageSetError::DuplicateMember { .. })
+            ),
+            "two dev builds of one base are still one member too many"
+        );
+    }
+
+    /// Only workload bases publish a dev build; a dev marker on any other
+    /// role is refused, naming the role.
+    #[test]
+    fn a_dev_build_mode_on_a_non_workload_role_is_refused() {
+        let mut manifest = manifest();
+        manifest.members[0].build_mode = Some(MemberBuildMode::Dev);
+        let role = manifest.members[0].role;
+        assert!(
+            !matches!(
+                role,
+                ImageSetRole::WorkloadKernel(_) | ImageSetRole::WorkloadRootfs(_)
+            ),
+            "the fixture's first member must be a non-workload role"
+        );
+        assert!(
+            matches!(
+                validate_structure(&manifest),
+                Err(ImageSetError::BuildModeNotAllowedForRole { .. })
+            ),
+            "a dev builder-vm (or overlay, sidecar, ...) member must be refused"
+        );
+    }
+
+    /// The optional member fields round-trip: absent stays absent (the
+    /// existing sets keep parsing unchanged), and a member carrying a dev
+    /// build mode and a source fingerprint serializes and parses back.
+    #[test]
+    fn member_build_mode_and_source_fingerprint_round_trip() {
+        let mut changed = manifest();
+        for m in &mut changed.members {
+            if m.role == ImageSetRole::SdkSidecar(GuestLibc::Glibc) && m.target == ARM {
+                m.source_fingerprint = Some(sha("sdk-cdylib-sources"));
+            }
+        }
+        let dev_rootfs = changed
+            .members
+            .iter_mut()
+            .find(|m| {
+                m.role == ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant)
+                    && m.target == X86
+            })
+            .expect("the default-tenant rootfs member");
+        dev_rootfs.build_mode = Some(MemberBuildMode::Dev);
+
+        let json = serde_json::to_string(&changed).expect("serialize");
+        assert!(
+            json.contains("\"build_mode\":\"dev\""),
+            "the dev build mode serializes snake_case"
+        );
+        assert!(
+            json.matches("source_fingerprint").count() == 1,
+            "only the fingerprinted member carries the field"
+        );
+        let parsed: ImageSetManifest = serde_json::from_str(&json).expect("parse back");
+        assert_eq!(parsed, changed);
+        let pristine = manifest();
+        let untouched: ImageSetManifest =
+            serde_json::from_str(&serde_json::to_string(&pristine).unwrap()).unwrap();
+        assert!(
+            untouched
+                .members
+                .iter()
+                .all(|m| m.build_mode.is_none() && m.source_fingerprint.is_none()),
+            "members without the new fields parse with them absent"
+        );
     }
 
     #[test]
