@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::scrollback::ScrollbackRing;
-use crate::vsock::CONSOLE_PORT_BASE;
+use crate::vsock::{CONSOLE_PORT_BASE, DEV_CONSOLE_DATA_PORT_COUNT};
 
 /// Where a console client's output goes. The production sink is the vsock
 /// data stream; tests substitute a recorder.
@@ -37,6 +37,8 @@ pub struct AttachTicket {
     pub data_port: u32,
     /// Scrollback bytes the client will receive before live output.
     pub replay_bytes: u64,
+    /// Whether this attach displaced an earlier attachment or pending attach.
+    pub displaced_existing: bool,
 }
 
 /// Why an attach was refused.
@@ -46,6 +48,10 @@ pub enum AttachRefusal {
     NoSuchSession(u32),
     /// Another client is attached, and the request did not ask to take over.
     Busy(u32),
+    /// The session is ending and no longer accepts a new client.
+    Terminating(u32),
+    /// Every pre-opened console data port is still leased.
+    NoAttachPorts,
 }
 
 impl std::fmt::Display for AttachRefusal {
@@ -53,6 +59,8 @@ impl std::fmt::Display for AttachRefusal {
         match self {
             Self::NoSuchSession(id) => write!(f, "no console session {id}"),
             Self::Busy(id) => write!(f, "console session {id} already has an attached client"),
+            Self::Terminating(id) => write!(f, "console session {id} is terminating"),
+            Self::NoAttachPorts => write!(f, "no console attach data port is available"),
         }
     }
 }
@@ -73,6 +81,13 @@ pub enum AttachOutcome {
     Failed,
 }
 
+/// Which signal an expired detached session needs next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutAction {
+    HangUp(i32),
+    Kill(i32),
+}
+
 /// Point-in-time description of a session, for listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSummary {
@@ -81,6 +96,8 @@ pub struct SessionSummary {
     /// values the operator typed, and a listing is no place to echo them).
     pub command: String,
     pub attached: bool,
+    /// Whether this is the shared default shell.
+    pub shareable: bool,
     pub exit_code: Option<i32>,
     pub scrollback_bytes: u64,
     /// How long the session has had no client, while it is running.
@@ -94,17 +111,29 @@ pub struct SpawnedSession {
     pub master: Option<Arc<File>>,
     pub command: String,
     pub detach_timeout: Option<Duration>,
+    pub shareable: bool,
 }
 
 enum Liveness {
-    Running { child_pid: i32 },
-    Exited { exit_code: i32 },
+    Running {
+        child_pid: i32,
+    },
+    Terminating {
+        child_pid: i32,
+        kill_deadline: Instant,
+        kill_sent: bool,
+    },
+    Exited {
+        exit_code: i32,
+    },
 }
 
 struct Attachment {
     attach_id: u32,
     /// `None` between the attach request and the host's data connection.
     sink: Option<Box<dyn ConsoleSink>>,
+    replay_prefix: Vec<u8>,
+    pending_output: Vec<u8>,
 }
 
 impl Attachment {
@@ -124,10 +153,15 @@ struct Session {
     attachment: Option<Attachment>,
     detached_since: Option<Instant>,
     detach_timeout: Option<Duration>,
+    shareable: bool,
 }
 
 impl Session {
-    fn is_running(&self) -> bool {
+    fn is_live(&self) -> bool {
+        !matches!(self.liveness, Liveness::Exited { .. })
+    }
+
+    fn is_attachable(&self) -> bool {
         matches!(self.liveness, Liveness::Running { .. })
     }
 
@@ -136,7 +170,7 @@ impl Session {
         if let Some(attachment) = self.attachment.take() {
             attachment.hang_up();
         }
-        if self.is_running() {
+        if self.is_live() && self.detached_since.is_none() {
             self.detached_since = Some(now);
         }
     }
@@ -148,6 +182,7 @@ pub struct Registry {
     next_session_id: u32,
     next_attach_id: u32,
     scrollback_cap: usize,
+    leased_ports: [Option<u32>; DEV_CONSOLE_DATA_PORT_COUNT as usize],
 }
 
 impl Registry {
@@ -157,6 +192,7 @@ impl Registry {
             next_session_id: 0,
             next_attach_id: 0,
             scrollback_cap,
+            leased_ports: [None; DEV_CONSOLE_DATA_PORT_COUNT as usize],
         }
     }
 
@@ -164,7 +200,7 @@ impl Registry {
     /// that has exited is replaced, taking its scrollback with it.
     pub fn ensure_can_open(&self) -> Result<(), super::ConsoleError> {
         match &self.session {
-            Some(session) if session.is_running() => {
+            Some(session) if session.is_live() => {
                 Err(super::ConsoleError::AlreadyActive(session.id))
             }
             _ => Ok(()),
@@ -176,10 +212,21 @@ impl Registry {
     /// Every attach gets a fresh port rather than reusing its session's: a
     /// host-side bridge that still holds the previous connection must never be
     /// handed the next one.
-    pub fn allocate_attach(&mut self) -> (u32, u32) {
+    pub fn allocate_attach(&mut self) -> Result<(u32, u32), AttachRefusal> {
+        let Some((slot, lease)) = self
+            .leased_ports
+            .iter_mut()
+            .enumerate()
+            .find(|(_, lease)| lease.is_none())
+        else {
+            return Err(AttachRefusal::NoAttachPorts);
+        };
         self.next_attach_id += 1;
         let attach_id = self.next_attach_id;
-        (attach_id, CONSOLE_PORT_BASE + attach_id)
+        *lease = Some(attach_id);
+        let data_port =
+            CONSOLE_PORT_BASE + u32::try_from(slot + 1).expect("slot index fits in u32");
+        Ok((attach_id, data_port))
     }
 
     /// Record a newly spawned shell with a pending first attach.
@@ -197,15 +244,38 @@ impl Registry {
             attachment: Some(Attachment {
                 attach_id,
                 sink: None,
+                replay_prefix: Vec::new(),
+                pending_output: Vec::new(),
             }),
             detached_since: None,
             detach_timeout: spawned.detach_timeout,
+            shareable: spawned.shareable,
         });
         AttachTicket {
             session_id: id,
             attach_id,
-            data_port: CONSOLE_PORT_BASE + attach_id,
+            data_port: self
+                .data_port_for(attach_id)
+                .expect("insert uses a leased attach id"),
             replay_bytes: 0,
+            displaced_existing: false,
+        }
+    }
+
+    fn data_port_for(&self, attach_id: u32) -> Option<u32> {
+        self.leased_ports
+            .iter()
+            .position(|lease| *lease == Some(attach_id))
+            .map(|slot| CONSOLE_PORT_BASE + u32::try_from(slot + 1).expect("slot index fits"))
+    }
+
+    fn release_attach_port(&mut self, attach_id: u32) {
+        if let Some(lease) = self
+            .leased_ports
+            .iter_mut()
+            .find(|lease| **lease == Some(attach_id))
+        {
+            *lease = None;
         }
     }
 
@@ -230,23 +300,31 @@ impl Registry {
         if session.attachment.is_some() && !take_over {
             return Err(AttachRefusal::Busy(session_id));
         }
-        let (attach_id, data_port) = self.allocate_attach();
+        if !session.is_attachable() {
+            return Err(AttachRefusal::Terminating(session_id));
+        }
+        let (attach_id, data_port) = self.allocate_attach()?;
         let session = self
             .session_mut(session_id)
             .expect("session was found above under the same borrow of self");
+        let replay_prefix = session.ring.replay();
+        let displaced_existing = session.attachment.is_some();
         if let Some(previous) = session.attachment.take() {
             previous.hang_up();
         }
         session.attachment = Some(Attachment {
             attach_id,
             sink: None,
+            replay_prefix: replay_prefix.clone(),
+            pending_output: Vec::new(),
         });
         session.detached_since = None;
         Ok(AttachTicket {
             session_id,
             attach_id,
             data_port,
-            replay_bytes: session.ring.len() as u64,
+            replay_bytes: replay_prefix.len() as u64,
+            displaced_existing,
         })
     }
 
@@ -258,38 +336,58 @@ impl Registry {
         mut sink: Box<dyn ConsoleSink>,
         now: Instant,
     ) -> AttachOutcome {
-        let Some(session) = self.session.as_mut().filter(|s| {
+        let mut release_port = false;
+        let outcome = if let Some(session) = self.session.as_mut().filter(|s| {
             s.attachment
                 .as_ref()
                 .is_some_and(|a| a.attach_id == attach_id && a.sink.is_none())
-        }) else {
-            sink.hang_up();
-            return AttachOutcome::Superseded;
-        };
-        let replay = session.ring.replay();
-        if !replay.is_empty() && sink.send(&replay).is_err() {
-            sink.hang_up();
-            session.attachment = None;
-            if session.is_running() {
-                session.detached_since = Some(now);
+        }) {
+            let attachment = session
+                .attachment
+                .as_mut()
+                .expect("pending attach was matched above");
+            let replay_failed = !attachment.replay_prefix.is_empty()
+                && sink.send(&attachment.replay_prefix).is_err();
+            let pending_failed = !replay_failed
+                && !attachment.pending_output.is_empty()
+                && sink.send(&attachment.pending_output).is_err();
+            if replay_failed || pending_failed {
+                sink.hang_up();
+                session.attachment = None;
+                if session.is_live() && session.detached_since.is_none() {
+                    session.detached_since = Some(now);
+                }
+                release_port = true;
+                AttachOutcome::Failed
+            } else if !session.is_attachable() {
+                sink.hang_up();
+                session.attachment = None;
+                release_port = true;
+                AttachOutcome::Ended
+            } else {
+                session.attachment = Some(Attachment {
+                    attach_id,
+                    sink: Some(sink),
+                    replay_prefix: Vec::new(),
+                    pending_output: Vec::new(),
+                });
+                AttachOutcome::Live
             }
-            return AttachOutcome::Failed;
-        }
-        if !session.is_running() {
+        } else {
             sink.hang_up();
-            session.attachment = None;
-            return AttachOutcome::Ended;
+            release_port = true;
+            AttachOutcome::Superseded
+        };
+        if release_port {
+            self.release_attach_port(attach_id);
         }
-        session.attachment = Some(Attachment {
-            attach_id,
-            sink: Some(sink),
-        });
-        AttachOutcome::Live
+        outcome
     }
 
     /// The client of `attach_id` is gone (its input closed, or its data
     /// connection never arrived). A later attach is left alone.
     pub fn release(&mut self, attach_id: u32, now: Instant) {
+        self.release_attach_port(attach_id);
         if let Some(session) = self.session.as_mut().filter(|s| {
             s.attachment
                 .as_ref()
@@ -318,8 +416,14 @@ impl Registry {
             return;
         };
         session.ring.push(bytes);
-        let delivered = match session.attachment.as_mut().and_then(|a| a.sink.as_mut()) {
-            Some(sink) => sink.send(bytes).is_ok(),
+        let delivered = match session.attachment.as_mut() {
+            Some(attachment) => match attachment.sink.as_mut() {
+                Some(sink) => sink.send(bytes).is_ok(),
+                None => {
+                    attachment.pending_output.extend_from_slice(bytes);
+                    true
+                }
+            },
             None => true,
         };
         if !delivered {
@@ -351,14 +455,16 @@ impl Registry {
     pub fn exit_code(&self, session_id: u32) -> Option<i32> {
         match self.session(session_id)?.liveness {
             Liveness::Exited { exit_code } => Some(exit_code),
-            Liveness::Running { .. } => None,
+            Liveness::Running { .. } | Liveness::Terminating { .. } => None,
         }
     }
 
     /// The shell pid of `session_id`, while it runs.
     pub fn running_child(&self, session_id: u32) -> Option<i32> {
         match self.session(session_id)?.liveness {
-            Liveness::Running { child_pid } => Some(child_pid),
+            Liveness::Running { child_pid } | Liveness::Terminating { child_pid, .. } => {
+                Some(child_pid)
+            }
             Liveness::Exited { .. } => None,
         }
     }
@@ -381,17 +487,35 @@ impl Registry {
             .map(|master| master.as_raw_fd())
     }
 
-    /// The shell to hang up because its session has sat detached past its
-    /// timeout, if any.
-    pub fn expired_child(&self, now: Instant) -> Option<i32> {
-        let session = self.session.as_ref()?;
-        let Liveness::Running { child_pid } = session.liveness else {
-            return None;
-        };
-        let timeout = session.detach_timeout?;
-        let since = session.detached_since?;
-        (session.attachment.is_none() && now.saturating_duration_since(since) >= timeout)
-            .then_some(child_pid)
+    /// The next timeout signal an expired detached session needs, if any.
+    pub fn timeout_action(&mut self, now: Instant) -> Option<TimeoutAction> {
+        let session = self.session.as_mut()?;
+        match session.liveness {
+            Liveness::Running { child_pid } => {
+                let timeout = session.detach_timeout?;
+                let since = session.detached_since?;
+                if session.attachment.is_none() && now.saturating_duration_since(since) >= timeout {
+                    session.liveness = Liveness::Terminating {
+                        child_pid,
+                        kill_deadline: now + super::CLOSE_SETTLE_TIMEOUT,
+                        kill_sent: false,
+                    };
+                    session.detached_since = None;
+                    Some(TimeoutAction::HangUp(child_pid))
+                } else {
+                    None
+                }
+            }
+            Liveness::Terminating {
+                child_pid,
+                kill_deadline,
+                ref mut kill_sent,
+            } if !*kill_sent && now >= kill_deadline => {
+                *kill_sent = true;
+                Some(TimeoutAction::Kill(child_pid))
+            }
+            Liveness::Terminating { .. } | Liveness::Exited { .. } => None,
+        }
     }
 
     /// Every session this agent knows about: the running one, or the last one
@@ -406,9 +530,10 @@ impl Registry {
                     .attachment
                     .as_ref()
                     .is_some_and(|a| a.sink.is_some()),
+                shareable: session.shareable,
                 exit_code: match session.liveness {
                     Liveness::Exited { exit_code } => Some(exit_code),
-                    Liveness::Running { .. } => None,
+                    Liveness::Running { .. } | Liveness::Terminating { .. } => None,
                 },
                 scrollback_bytes: session.ring.len() as u64,
                 detached_for: session
@@ -465,13 +590,14 @@ mod tests {
             master: None,
             command: "/bin/sh".to_string(),
             detach_timeout,
+            shareable: true,
         }
     }
 
     /// A registry holding one running session whose first client is live.
     fn live_session() -> (Registry, AttachTicket, Recorder) {
         let mut reg = Registry::new(64);
-        let (attach_id, _) = reg.allocate_attach();
+        let (attach_id, _) = reg.allocate_attach().unwrap();
         let ticket = reg.insert(spawned(None), attach_id);
         let client = Recorder::default();
         let outcome = reg.complete_attach(ticket.attach_id, client.sink(), Instant::now());
@@ -482,7 +608,7 @@ mod tests {
     #[test]
     fn output_produced_before_the_first_client_connects_is_replayed_to_it() {
         let mut reg = Registry::new(64);
-        let (attach_id, port) = reg.allocate_attach();
+        let (attach_id, port) = reg.allocate_attach().unwrap();
         let ticket = reg.insert(spawned(None), attach_id);
         assert_eq!(ticket.data_port, port);
         reg.record_output(ticket.session_id, b"$ ", Instant::now());
@@ -510,7 +636,7 @@ mod tests {
         // Between the attach request and its data connection the session is
         // spoken for; a racing second client must not slip in.
         let mut reg = Registry::new(64);
-        let (attach_id, _) = reg.allocate_attach();
+        let (attach_id, _) = reg.allocate_attach().unwrap();
         let ticket = reg.insert(spawned(None), attach_id);
         assert_eq!(
             reg.attach(ticket.session_id, false),
@@ -531,6 +657,7 @@ mod tests {
             .attach(ticket.session_id, false)
             .expect("a detached session accepts a new client");
         assert_ne!(again.attach_id, ticket.attach_id);
+        assert!(!again.displaced_existing);
         assert_ne!(
             again.data_port, ticket.data_port,
             "every attach gets a fresh port"
@@ -550,12 +677,42 @@ mod tests {
     }
 
     #[test]
+    fn replay_bytes_counts_only_the_snapshot_announced_to_the_client() {
+        let (mut reg, ticket, _client) = live_session();
+        reg.detach(ticket.session_id, Instant::now()).unwrap();
+        reg.record_output(ticket.session_id, b"before\n", Instant::now());
+        let again = reg.attach(ticket.session_id, false).unwrap();
+        assert_eq!(again.replay_bytes, 7);
+
+        reg.record_output(ticket.session_id, b"after\n", Instant::now());
+        let client = Recorder::default();
+        assert_eq!(
+            reg.complete_attach(again.attach_id, client.sink(), Instant::now()),
+            AttachOutcome::Live
+        );
+        assert_eq!(client.received(), b"before\nafter\n");
+    }
+
+    #[test]
     fn a_lost_connection_detaches_without_ending_the_session() {
         let (mut reg, ticket, client) = live_session();
         reg.release(ticket.attach_id, Instant::now());
         assert!(client.was_hung_up());
         assert!(reg.attach(ticket.session_id, false).is_ok());
         assert_eq!(reg.exit_code(ticket.session_id), None);
+    }
+
+    #[test]
+    fn released_ports_are_reused_within_the_exposed_console_range() {
+        let (mut reg, ticket, _client) = live_session();
+        let first_port = ticket.data_port;
+        reg.release(ticket.attach_id, Instant::now());
+        let again = reg.attach(ticket.session_id, false).unwrap();
+        assert_eq!(again.data_port, first_port);
+        assert!(
+            (CONSOLE_PORT_BASE + 1..=CONSOLE_PORT_BASE + DEV_CONSOLE_DATA_PORT_COUNT)
+                .contains(&again.data_port)
+        );
     }
 
     #[test]
@@ -575,6 +732,7 @@ mod tests {
         let stolen = reg
             .attach(ticket.session_id, true)
             .expect("take-over is admitted");
+        assert!(stolen.displaced_existing);
         assert!(first.was_hung_up());
 
         // The displaced client's own release must not detach its successor.
@@ -591,7 +749,7 @@ mod tests {
     #[test]
     fn a_superseded_connection_is_hung_up_on_arrival() {
         let mut reg = Registry::new(64);
-        let (attach_id, _) = reg.allocate_attach();
+        let (attach_id, _) = reg.allocate_attach().unwrap();
         let ticket = reg.insert(spawned(None), attach_id);
         let _later = reg.attach(ticket.session_id, true).unwrap();
         let late = Recorder::default();
@@ -615,7 +773,7 @@ mod tests {
     #[test]
     fn a_client_attaching_after_exit_gets_the_final_output_and_an_end() {
         let mut reg = Registry::new(64);
-        let (attach_id, _) = reg.allocate_attach();
+        let (attach_id, _) = reg.allocate_attach().unwrap();
         let ticket = reg.insert(spawned(None), attach_id);
         reg.record_output(ticket.session_id, b"done\n", Instant::now());
         reg.record_exit(ticket.session_id, 0);
@@ -660,26 +818,64 @@ mod tests {
     fn the_detach_timeout_runs_only_while_no_client_is_attached() {
         let start = Instant::now();
         let mut reg = Registry::new(64);
-        let (attach_id, _) = reg.allocate_attach();
+        let (attach_id, _) = reg.allocate_attach().unwrap();
         let ticket = reg.insert(spawned(Some(Duration::from_secs(10))), attach_id);
         let client = Recorder::default();
         reg.complete_attach(ticket.attach_id, client.sink(), start);
         assert_eq!(
-            reg.expired_child(start + Duration::from_secs(60)),
+            reg.timeout_action(start + Duration::from_secs(60)),
             None,
             "an attached session never idles out"
         );
 
         reg.detach(ticket.session_id, start).unwrap();
-        assert_eq!(reg.expired_child(start + Duration::from_secs(9)), None);
+        assert_eq!(reg.timeout_action(start + Duration::from_secs(9)), None);
         assert_eq!(
-            reg.expired_child(start + Duration::from_secs(10)),
-            Some(4242)
+            reg.timeout_action(start + Duration::from_secs(10)),
+            Some(TimeoutAction::HangUp(4242))
+        );
+        assert_eq!(
+            reg.attach(ticket.session_id, false),
+            Err(AttachRefusal::Terminating(ticket.session_id))
+        );
+        assert_eq!(
+            reg.timeout_action(
+                start + Duration::from_secs(10) + super::super::CLOSE_SETTLE_TIMEOUT
+            ),
+            Some(TimeoutAction::Kill(4242))
+        );
+    }
+
+    #[test]
+    fn repeated_detach_preserves_the_original_timeout_start() {
+        let start = Instant::now();
+        let (mut reg, ticket, _client) = live_session();
+        reg.detach(ticket.session_id, start).unwrap();
+        assert_eq!(
+            reg.detach(ticket.session_id, start + Duration::from_secs(9)),
+            Ok(false)
+        );
+        assert_eq!(
+            reg.timeout_action(start + Duration::from_secs(60)),
+            None,
+            "without an explicit timeout the session never expires"
         );
 
-        // Reattaching stops the clock.
-        reg.attach(ticket.session_id, false).unwrap();
-        assert_eq!(reg.expired_child(start + Duration::from_secs(60)), None);
+        let mut reg = Registry::new(64);
+        let (attach_id, _) = reg.allocate_attach().unwrap();
+        let ticket = reg.insert(spawned(Some(Duration::from_secs(10))), attach_id);
+        let client = Recorder::default();
+        reg.complete_attach(ticket.attach_id, client.sink(), start);
+        reg.detach(ticket.session_id, start).unwrap();
+        assert_eq!(
+            reg.detach(ticket.session_id, start + Duration::from_secs(9)),
+            Ok(false)
+        );
+        assert_eq!(
+            reg.timeout_action(start + Duration::from_secs(10)),
+            Some(TimeoutAction::HangUp(4242)),
+            "a repeated detach must not postpone the timeout"
+        );
     }
 
     #[test]
@@ -687,7 +883,7 @@ mod tests {
         let (mut reg, ticket, _client) = live_session();
         let now = Instant::now();
         reg.detach(ticket.session_id, now).unwrap();
-        assert_eq!(reg.expired_child(now + Duration::from_secs(86_400)), None);
+        assert_eq!(reg.timeout_action(now + Duration::from_secs(86_400)), None);
     }
 
     #[test]
@@ -698,6 +894,7 @@ mod tests {
         assert_eq!(summary.session_id, ticket.session_id);
         assert_eq!(summary.command, "/bin/sh");
         assert!(summary.attached);
+        assert!(summary.shareable);
         assert_eq!(summary.detached_for, None);
 
         reg.detach(ticket.session_id, now).unwrap();

@@ -119,6 +119,7 @@ class ConsoleSessionInfo:
     command: str
     scrollback_bytes: int
     session_id: int
+    shareable: bool
     detach_timeout_secs: Optional[int] = None
     detached_secs: Optional[int] = None
     exit_code: Optional[int] = None
@@ -1055,6 +1056,7 @@ class GuestResponse29:
 @dataclass
 class ConsoleAttached:
     data_port: int
+    displaced_existing: bool
     replay_bytes: int
     session_id: int
 

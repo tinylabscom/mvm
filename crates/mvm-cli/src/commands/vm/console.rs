@@ -544,7 +544,7 @@ fn attach_or_open(
 ) -> Result<AttachedSession> {
     let running = fetch_sessions(transport, name)?
         .into_iter()
-        .find(|session| session.exit_code.is_none());
+        .find(|session| session.exit_code.is_none() && session.shareable);
     let Some(session) = running else {
         ui::info(&format!(
             "Opening console to VM {name:?} ({}x{})...",
@@ -563,6 +563,7 @@ fn attach_or_open(
             session_id,
             data_port,
             replay_bytes,
+            displaced_existing,
         } => {
             ui::info(&format!(
                 "Reattaching to console session {session_id} on VM {name:?} \
@@ -571,7 +572,7 @@ fn attach_or_open(
             Ok(AttachedSession {
                 session_id,
                 data_port,
-                kind: if session.attached {
+                kind: if displaced_existing {
                     AttachKind::TookOver
                 } else {
                     AttachKind::Reattached
@@ -1242,6 +1243,7 @@ mod console_relay_tests {
             session_id: 1,
             command: "/bin/sh".to_string(),
             attached: true,
+            shareable: true,
             exit_code: None,
             scrollback_bytes: 2048,
             detached_secs: None,

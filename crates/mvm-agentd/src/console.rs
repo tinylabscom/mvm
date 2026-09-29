@@ -82,6 +82,8 @@ pub enum ConsoleError {
     BindFailed(u32),
     NoSuchSession(u32),
     Busy(u32),
+    Terminating(u32),
+    NoAttachPorts,
     DidNotTerminate(u32),
 }
 
@@ -98,6 +100,8 @@ impl std::fmt::Display for ConsoleError {
             Self::BindFailed(port) => write!(f, "failed to bind vsock port {port}"),
             Self::NoSuchSession(id) => write!(f, "no console session {id}"),
             Self::Busy(id) => write!(f, "console session {id} already has an attached client"),
+            Self::Terminating(id) => write!(f, "console session {id} is terminating"),
+            Self::NoAttachPorts => write!(f, "no console attach data port is available"),
             Self::DidNotTerminate(id) => write!(f, "console session {id} did not terminate"),
         }
     }
@@ -110,6 +114,8 @@ impl From<AttachRefusal> for ConsoleError {
         match refusal {
             AttachRefusal::NoSuchSession(id) => Self::NoSuchSession(id),
             AttachRefusal::Busy(id) => Self::Busy(id),
+            AttachRefusal::Terminating(id) => Self::Terminating(id),
+            AttachRefusal::NoAttachPorts => Self::NoAttachPorts,
         }
     }
 }
@@ -238,7 +244,7 @@ fn open_session_in(
 
     let mut registry = lock(sessions);
     registry.ensure_can_open()?;
-    let (attach_id, data_port) = registry.allocate_attach();
+    let (attach_id, data_port) = registry.allocate_attach()?;
     let listener = bind_data_listener(data_port)?;
     let (child_pid, master) = spawn_shell(request, &command_argv)?;
     // Registered before anything waits on it, so the PID-1 orphan reaper
@@ -251,6 +257,7 @@ fn open_session_in(
             master: Some(Arc::clone(&master)),
             command,
             detach_timeout: request.detach_timeout,
+            shareable: request.argv.is_empty() && request.env.is_empty(),
         },
         attach_id,
     );
@@ -681,7 +688,6 @@ fn forward_input(mut conn: UnixStream, master: &File) {
 /// the shell goes.
 fn pump_output(sessions: &Mutex<Registry>, session_id: u32, child_pid: i32, master: &File) {
     let mut buf = [0u8; 4096];
-    let mut idle_hangup_sent = false;
     let exit_code = loop {
         if pty_readable(master, PUMP_TICK) {
             let mut pty = master;
@@ -695,10 +701,18 @@ fn pump_output(sessions: &Mutex<Registry>, session_id: u32, child_pid: i32, mast
                 _ => break reap_after_hangup(child_pid),
             }
         }
-        if !idle_hangup_sent && lock(sessions).expired_child(Instant::now()) == Some(child_pid) {
-            eprintln!("console: session {session_id} passed its detach timeout; hanging up");
-            signal_session(child_pid, Some(master), SIGHUP);
-            idle_hangup_sent = true;
+        match lock(sessions).timeout_action(Instant::now()) {
+            Some(registry::TimeoutAction::HangUp(pid)) if pid == child_pid => {
+                eprintln!("console: session {session_id} passed its detach timeout; hanging up");
+                signal_session(pid, Some(master), SIGHUP);
+            }
+            Some(registry::TimeoutAction::Kill(pid)) if pid == child_pid => {
+                eprintln!(
+                    "console: session {session_id} ignored SIGHUP after detach timeout; killing"
+                );
+                signal_session(pid, Some(master), SIGKILL);
+            }
+            _ => {}
         }
         // The shell can exit while a background job still holds the terminal
         // open, so the pty never reports EOF; the exit is what ends a session.
@@ -1085,13 +1099,14 @@ mod tests {
         let sessions: &'static Mutex<Registry> = Box::leak(Box::new(Mutex::new(Registry::new(64))));
         let ticket = {
             let mut registry = lock(sessions);
-            let (attach_id, _) = registry.allocate_attach();
+            let (attach_id, _) = registry.allocate_attach().unwrap();
             registry.insert(
                 SpawnedSession {
                     child_pid,
                     master: None,
                     command: "/bin/sh".to_string(),
                     detach_timeout: None,
+                    shareable: true,
                 },
                 attach_id,
             )
@@ -1195,7 +1210,7 @@ mod tests {
         let mut registry = lock(sessions);
         assert!(registry.summaries(Instant::now()).is_empty());
         assert_eq!(
-            registry.allocate_attach().0,
+            registry.allocate_attach().unwrap().0,
             1,
             "a refused open must not consume a data port"
         );

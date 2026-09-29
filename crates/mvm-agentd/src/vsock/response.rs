@@ -295,6 +295,7 @@ pub enum GuestResponse {
         session_id: u32,
         data_port: u32,
         replay_bytes: u64,
+        displaced_existing: bool,
     },
     /// Attach refused: another client is attached to `session_id`.
     ConsoleBusy { session_id: u32 },
@@ -900,6 +901,8 @@ pub struct ConsoleSessionInfo {
     pub command: String,
     /// Whether a client is connected right now.
     pub attached: bool,
+    /// Whether plain `machine console` should treat this as the shared shell.
+    pub shareable: bool,
     /// Set once the shell has exited.
     pub exit_code: Option<i32>,
     /// Scrollback retained for the next attach.
@@ -1206,6 +1209,7 @@ mod tests {
                 session_id: 1,
                 data_port: 20002,
                 replay_bytes: 4096,
+                displaced_existing: true,
             },
             GuestResponse::ConsoleBusy { session_id: 1 },
             GuestResponse::ConsoleDetached {
@@ -1217,6 +1221,7 @@ mod tests {
                     session_id: 1,
                     command: "/bin/sh".to_string(),
                     attached: false,
+                    shareable: true,
                     exit_code: None,
                     scrollback_bytes: 4096,
                     detached_secs: Some(12),

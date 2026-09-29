@@ -496,6 +496,7 @@ session_id: number
 } | {
 ConsoleAttached: {
 data_port: number
+displaced_existing: boolean
 replay_bytes: number
 session_id: number
 }
@@ -1244,6 +1245,10 @@ exit_code?: (number | null)
  */
 scrollback_bytes: number
 session_id: number
+/**
+ * Whether plain `machine console` should treat this as the shared shell.
+ */
+shareable: boolean
 }
 /**
  * Snapshot of agent readiness at the moment of a `ReadinessStatus` call.
