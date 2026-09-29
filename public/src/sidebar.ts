@@ -221,6 +221,9 @@ export const sidebar: SidebarGroup[] = [
   },
   {
     label: "Contributing",
-    items: [{ label: "Development Guide", slug: "contributing/development" }],
+    items: [
+      { label: "Development Guide", slug: "contributing/development" },
+      { label: "AI Coding Workflow", slug: "contributing/ai-coding-workflow" },
+    ],
   },
 ];

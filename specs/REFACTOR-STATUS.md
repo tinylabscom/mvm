@@ -2025,6 +2025,14 @@ for detailed scope and acceptance criteria.
 
 ## In-flight plans
 
+- [ ] **AI coding workflow docs**
+      (`specs/plans/2026-09-28-ai-coding-workflow-docs.md`, PR #3815).
+      The issue-to-PR playbook moved from a 588-line `AGENTS.md` to
+      `public/src/content/docs/contributing/ai-coding-workflow.md`; the root
+      file is now a concise rule index that keeps every normative rule,
+      including later session and retry rules, and points at the guide. Site
+      build and repository policy checks pass; merge is in progress.
+
 - [ ] **Static crates registry recovery**
       (`specs/plans/2026-08-26-static-crates-registry-fetch.md`, issue #2904).
       The pinned Nix crate fetcher is blocked by crates.io's curl user-agent
