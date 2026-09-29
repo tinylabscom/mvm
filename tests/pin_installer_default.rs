@@ -74,6 +74,11 @@ esac
             "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$FIXTURE/cosign.log\"\nexit \"${FAKE_COSIGN_STATUS:-0}\"\n",
         );
         std::fs::copy(repo_root().join("install.sh"), fixture.installer()).unwrap();
+        std::fs::copy(
+            repo_root().join("nix/prebuilt-release.nix"),
+            fixture.nix_pin(),
+        )
+        .unwrap();
         fixture
     }
 
@@ -87,6 +92,10 @@ esac
 
     fn installer(&self) -> PathBuf {
         self.path().join("install.sh")
+    }
+
+    fn nix_pin(&self) -> PathBuf {
+        self.path().join("prebuilt-release.nix")
     }
 
     fn write_tool(&self, name: &str, body: &str) {
@@ -133,8 +142,34 @@ esac
         command.output().unwrap()
     }
 
+    fn run_with_nix(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        let mut command = Command::new("sh");
+        command
+            .arg(repo_root().join("scripts/pin-installer-default.sh"))
+            .args(args)
+            .arg(self.installer())
+            .arg(self.nix_pin())
+            .env("FIXTURE", self.path())
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    self.bin().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            );
+        for (key, value) in envs {
+            command.env(key, value);
+        }
+        command.output().unwrap()
+    }
+
     fn installer_text(&self) -> String {
         std::fs::read_to_string(self.installer()).unwrap()
+    }
+
+    fn nix_pin_text(&self) -> String {
+        std::fs::read_to_string(self.nix_pin()).unwrap()
     }
 }
 
@@ -156,6 +191,128 @@ fn assert_pinned_to(installer: &str, tag: &str) {
             "{variable} must carry {tag}'s {target} hash"
         );
     }
+}
+
+fn assert_nix_pinned_to(pin: &str, tag: &str) {
+    assert!(pin.contains(&format!("version = \"{tag}\";")));
+    for (system, target) in [
+        ("aarch64-darwin", "aarch64-apple-darwin"),
+        ("x86_64-linux", "x86_64-unknown-linux-gnu"),
+        ("aarch64-linux", "aarch64-unknown-linux-gnu"),
+    ] {
+        assert!(
+            pin.contains(&format!(
+                "{system} = {{\n      target = \"{target}\";\n      sha256 = \"{}\";\n    }};",
+                digest(tag, target)
+            )),
+            "the {system} Nix package must pin {tag}'s {target} archive"
+        );
+    }
+}
+
+#[test]
+fn committed_nix_pin_matches_the_installer_fallback() {
+    let installer = std::fs::read_to_string(repo_root().join("install.sh")).unwrap();
+    let nix_pin = std::fs::read_to_string(repo_root().join("nix/prebuilt-release.nix")).unwrap();
+    let tag = installer
+        .lines()
+        .find_map(|line| line.strip_prefix("DEFAULT_VERSION=\""))
+        .and_then(|value| value.strip_suffix('"'))
+        .expect("installer version pin");
+    assert!(nix_pin.contains(&format!("version = \"{tag}\";")));
+    for (system, target, variable) in [
+        (
+            "aarch64-darwin",
+            "aarch64-apple-darwin",
+            "DEFAULT_ARCHIVE_SHA256_AARCH64_APPLE_DARWIN",
+        ),
+        (
+            "x86_64-linux",
+            "x86_64-unknown-linux-gnu",
+            "DEFAULT_ARCHIVE_SHA256_X86_64_UNKNOWN_LINUX_GNU",
+        ),
+        (
+            "aarch64-linux",
+            "aarch64-unknown-linux-gnu",
+            "DEFAULT_ARCHIVE_SHA256_AARCH64_UNKNOWN_LINUX_GNU",
+        ),
+    ] {
+        let digest = installer
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{variable}=\"")))
+            .and_then(|value| value.strip_suffix('"'))
+            .expect("installer archive pin");
+        assert!(
+            nix_pin.contains(&format!(
+                "{system} = {{\n      target = \"{target}\";\n      sha256 = \"{digest}\";\n    }};"
+            )),
+            "Nix and the installer must pin the same {target} archive"
+        );
+    }
+}
+
+#[test]
+fn release_proposes_prebuilt_pins_only_after_promotion() {
+    let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
+        .expect("release workflow");
+    let job = workflow
+        .split("  propose-prebuilt-pin:")
+        .nth(1)
+        .expect("prebuilt pin job");
+    assert!(job.contains("needs: [promote-release]"));
+    assert!(job.contains("ref: main"));
+    assert!(job.contains("sigstore/cosign-installer"));
+    assert!(job.contains(
+        "sh scripts/pin-installer-default.sh \"${TAG_NAME}\" install.sh nix/prebuilt-release.nix"
+    ));
+    assert!(job.contains("gh pr create"));
+}
+
+#[test]
+fn a_signed_release_updates_nix_and_installer_from_the_same_manifest() {
+    let fixture = Fixture::new();
+    fixture.publish("v9.1.0", "promoted", true);
+
+    let output = fixture.run_with_nix(&["v9.1.0"], &[]);
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_pinned_to(&fixture.installer_text(), "v9.1.0");
+    assert_nix_pinned_to(&fixture.nix_pin_text(), "v9.1.0");
+    let check = fixture.run_with_nix(&["--check", "v9.1.0"], &[]);
+    assert!(check.status.success(), "{}", stderr(&check));
+}
+
+#[test]
+fn an_unverified_release_cannot_change_either_pin() {
+    let fixture = Fixture::new();
+    fixture.publish("v9.2.0", "promoted", true);
+    let installer_before = fixture.installer_text();
+    let nix_before = fixture.nix_pin_text();
+
+    let output = fixture.run_with_nix(&["v9.2.0"], &[("FAKE_COSIGN_STATUS", "1")]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert_eq!(fixture.installer_text(), installer_before);
+    assert_eq!(fixture.nix_pin_text(), nix_before);
+}
+
+#[test]
+fn nix_check_refuses_a_stale_pin_without_writing() {
+    let fixture = Fixture::new();
+    fixture.publish("v9.3.0", "promoted", true);
+    let installer_update = fixture.run(&["v9.3.0"], &[]);
+    assert!(
+        installer_update.status.success(),
+        "{}",
+        stderr(&installer_update)
+    );
+    let before = fixture.nix_pin_text();
+
+    let output = fixture.run_with_nix(&["--check", "v9.3.0"], &[]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    assert!(stderr(&output).contains("does not pin v9.3.0"));
+    assert_eq!(fixture.nix_pin_text(), before);
 }
 
 #[test]
