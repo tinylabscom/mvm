@@ -1,5 +1,8 @@
 # #3717 follow-up: runtime approval across secret injection modes
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Problem
 
 PS-07 runtime approval originally inspected plain request-header values for a
