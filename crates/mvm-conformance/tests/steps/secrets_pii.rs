@@ -42,6 +42,7 @@ fn given_bound_secret(world: &mut CliWorld, name: String, value: String, tenant:
         sigv4: None,
         provider: None,
         approve: Default::default(),
+        oauth: None,
     };
     service
         .bind(&tenant, &name, binding)
