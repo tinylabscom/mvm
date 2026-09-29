@@ -15,8 +15,9 @@
       are drafted with two passing documentation regression tests; workspace
       test validation remains pending. Lineage recovery, workload provenance,
       and durable agent sessions now have navigable guides and three further
-      passing documentation regression tests. Other capability, client,
-      authoring, and schema pages remain open.
+      passing documentation regression tests. All eight named capabilities
+      now link to feature pages with current limits. Client, authoring, and
+      generated schema documentation remains open.
 
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories

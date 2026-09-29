@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import test from "node:test";
@@ -86,4 +86,32 @@ test("durable agent-session guide states admission and retention limits", () => 
   assert.match(guide, /does not boot a sandbox by default/i);
   assert.match(guide, /retention promise, not an automatic cleanup timer/i);
   assert.match(guide, /verify the audit chain separately/i);
+});
+
+test("every agent-sandbox capability links to a concrete feature page", () => {
+  const index = readFileSync(
+    path.join(repo, "public/src/content/docs/guides/index.md"),
+    "utf8",
+  );
+  const pages = new Map([
+    ["Isolation", "security/matryoshka.md"],
+    ["Undo, redo, and replay", "guides/lineage-recovery.md"],
+    ["Audit trail", "guides/audit-and-receipts.md"],
+    ["Provenance", "guides/workload-provenance.md"],
+    ["Runtime approvals", "guides/runtime-approvals.md"],
+    ["Network filtering", "guides/network-egress-policy.mdx"],
+    ["Credential injection", "guides/secrets-and-credentials.mdx"],
+    ["Sessions", "guides/durable-agent-sessions.md"],
+  ]);
+
+  for (const [capability, source] of pages) {
+    const route = source.replace(/\.(md|mdx)$/, "");
+    assert.equal(existsSync(path.join(repo, "public/src/content/docs", source)), true, `${capability} page exists`);
+    assert.equal(
+      index.includes(`| ${capability} | [Feature page](/${route}/) |`),
+      true,
+      `${capability} appears in the capability map`,
+    );
+  }
+  assert.match(index, /external side effects are not undone/i);
 });

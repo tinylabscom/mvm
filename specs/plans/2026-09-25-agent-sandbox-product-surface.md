@@ -305,7 +305,7 @@ apply goes through the protected-path gate.
 - [ ] recipe inventory and reduction; the top level fits one screen and mirrors CI
 
 ### PS-18 — Docs (#3727)
-- [ ] one page per capability
+- [x] one page per capability (eight shipped-surface pages linked from the guides index; unfinished behavior is labeled)
   - [x] lineage recovery: rewind and replay guide, with navigation and safety-boundary regression test
   - [x] workload provenance: signed-plan, receipt, audit, and export guide with a documentation regression test
   - [x] durable agent sessions: admission, boot, retention, retry, and audit limits with a documentation regression test
