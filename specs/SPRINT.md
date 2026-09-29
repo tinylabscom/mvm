@@ -4863,6 +4863,18 @@ agent deadline test failed; Linux builder initialization remains blocked.
 
 Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
+## 2026-09-28 runtime approval SDK completion — #3717
+
+- [x] Add the hostlib ABI 1.4 process-wide approval callback with bounded,
+      fail-closed `deny` / `once` / `session` results.
+- [x] Bind an SDK machine's private broker after admitted boot, before its
+      requested command, retain it for detached/persistent use, and remove it
+      on stop/remove.
+- [x] Expose matching Python and TypeScript callback facades and document the
+      security and lifecycle contract.
+- [x] Cover callback decoding, failures, scopes, socket lifecycle, and SDK
+      facades with focused Rust, Python, and TypeScript tests.
+
 ## 2026-09-28 Agent efficiency overhaul — Phases 1–10
 
 - [x] Quantified baseline from ~120 sampled transcripts across the three

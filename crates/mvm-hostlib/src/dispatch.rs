@@ -161,17 +161,21 @@ async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<
         }
         MACHINE_STOP => {
             let target: StopRequest = parse(request)?;
-            client.stop_machine(&MachineId(target.id)).await?;
+            client.stop_machine(&MachineId(target.id.clone())).await?;
+            crate::approval::remove_server(&target.id);
             Outcome::ok(&Empty {})
         }
         MACHINE_RM => {
             let target: RemoveRequest = parse(request)?;
-            client.remove_machine(&MachineId(target.id)).await?;
+            client.remove_machine(&MachineId(target.id.clone())).await?;
+            crate::approval::remove_server(&target.id);
             Outcome::ok(&Empty {})
         }
         MACHINE_START => {
             let target: MachineRef = parse(request)?;
-            Outcome::ok(&client.start_machine(&MachineId(target.id)).await?)
+            let machine = client.start_machine(&MachineId(target.id)).await?;
+            crate::approval::ensure_server(&machine.name);
+            Outcome::ok(&machine)
         }
         MACHINE_INVENTORY => {
             let _: Empty = parse_or_default_empty(request)?;

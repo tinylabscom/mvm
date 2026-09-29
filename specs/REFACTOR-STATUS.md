@@ -49,7 +49,10 @@ Last updated: 2026-09-29
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
-  - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+  - [x] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+    - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
+    - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
+    - [x] tool-call supervisor seam (live caller stays in PS-13); SDK callback through hostlib ABI 1.4; retained broker for SDK detached/persistent machines
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
     - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated
