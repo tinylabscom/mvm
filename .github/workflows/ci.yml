@@ -189,6 +189,7 @@ jobs:
                      scripts/security-lane-verdict.test.sh \
                      scripts/cargo-fast.sh \
                      scripts/cargo-stable.sh \
+                     scripts/dev-run-guard.test.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
                      scripts/installer-compat/*.sh \
@@ -292,6 +293,9 @@ jobs:
 
       - name: Cargo target dir guard tests
         run: bash scripts/cargo-target-dir-guard.test.sh
+
+      - name: Dev-run guard tests
+        run: bash scripts/dev-run-guard.test.sh
 
       # The nightly security lanes do not run on a PR, so this is the only
       # place their failure reporting is exercised before it has to work.
