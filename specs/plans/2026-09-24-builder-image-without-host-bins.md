@@ -737,11 +737,18 @@ or an in-tree bake to remove.
         `builder-vm/hvf/`. Boot overhead was measured on HVF only (about 1 ms
         of initramfs unpack and 5 ms of stage 1); Firecracker is still to
         measure. See `specs/sprint/delivery/builder-boot-payload.md`.
-- [ ] **W7 — the `mvm-images` side** (a PR in that repository). Stop consuming
+- [x] **W7 — the `mvm-images` side** (a PR in that repository). Stop consuming
       `hostBinaries`/`MVM_HOST_BIN_DIR`, write `/etc/mvm/builder-boot-abi`,
       drop the builder job's host-binary build, drop `--impure` for the builder
       attribute, add `builder_boot_abi` to `assemble-release.py` and the
       manifest schema, and publish.
+      Landed as mvm-images#33 (the emitters) + mvm-images#37: the builder
+      image bakes no mvm host binary, evaluates pure, writes the
+      `/etc/mvm/builder-boot-abi` marker from `boot-abi.nix` (now `1`), the
+      zig/host-binary build left the workflows and just recipes, and the mvm
+      flake pin advanced to `0f33c057d8`, the first payload-capable commit.
+      Publishing an ABI-1 set (image-set/v0.2.2) is the release train's cut,
+      not part of the PR.
 - [ ] **W8a — refuse a local set without `builder_boot_abi`.** After
       mvm-images#31 (the emitter writes the field) has landed, a local image
       set that omits it is refused by name, with a message saying the
