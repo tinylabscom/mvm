@@ -4831,6 +4831,19 @@ writes the plan:
       back under a ceiling), per-dimension exceeded latches, and
       record-then-refuse semantics matching the AI budget tracker.
 
+## 2026-09-28 Security witnesses — #3679
+
+- [ ] Validate remaining regressions and pass the full Security workflow.
+- [ ] Complete required workspace/Linux checks, merge and confirm closure.
+
+See `specs/plans/2026-09-28-security-mutation-witnesses.md`; freshness alert #3750 depends on this recovery.
+
+- [x] Security witness focused validation: mvm-contract 1,103 tests and mvm-fs 421 tests pass. Host workspace Clippy also passes; remaining package, workspace and mutation checks are pending.
+
+Security validation update (#3679): all four base-image scan witnesses and the
+absolute source-root test pass. Workflow 36484461950 is underway; complete workspace
+and Linux validation remain pending. The builder is blocked in Nix-store initialization.
+
 ## 2026-09-28 Extended CI cleanup — #3773
 
 - [x] Reproduce and fix EPERM cleanup after a child exits, with live-child refusal intact.
