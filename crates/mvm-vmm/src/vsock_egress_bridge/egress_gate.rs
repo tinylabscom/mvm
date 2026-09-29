@@ -1069,6 +1069,7 @@ mod tests {
     /// unrestricted ⇒ admit, and any projection error ⇒ fail-closed deny.
     #[test]
     fn from_network_policy_threads_the_real_policy_and_fails_closed() {
+        use mvm_contract::policy::routes::{EgressRoute, RouteOutcome};
         use mvm_core::policy::dns_pin::DnsPinRegistry;
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
 
@@ -1094,6 +1095,20 @@ mod tests {
             port: 443,
         }]);
         let gate = EgressGate::from_network_policy(&unpinned, &pins, now);
+        assert!(gate.decide_request("93.184.216.34:443").is_deny());
+
+        // Route validation is part of the same constructor. An otherwise-open
+        // policy with a malformed route must become deny-all, not silently
+        // discard the L7 policy while leaving L4 open.
+        let malformed = NetworkPolicy::unrestricted().with_routes(vec![EgressRoute {
+            id: "not a valid route id".into(),
+            host: "example.com".into(),
+            port: 443,
+            rules: Vec::new(),
+            otherwise: RouteOutcome::Allow,
+            intercept: false,
+        }]);
+        let gate = EgressGate::from_network_policy(&malformed, &pins, now);
         assert!(gate.decide_request("93.184.216.34:443").is_deny());
     }
 

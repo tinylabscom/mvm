@@ -633,11 +633,8 @@ fn machine_run_spec(
         },
         args.run.applied_policy.as_ref(),
     )?;
-    let (net, allow_host) = super::shared::persisted_run_network(
-        args.run.net,
-        args.run.network_preset,
-        &allow_host,
-    );
+    let (net, allow_host) =
+        super::shared::persisted_run_network(args.run.net, args.run.network_preset, &allow_host);
     let _ = validate_machine_memory(&args.run.memory, None)?;
     let profile = run_profile_name(args.run.profile).to_string();
     Ok(MachineSpec {

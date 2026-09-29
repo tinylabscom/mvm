@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use mvm_contract::policy::routes::EgressRoute;
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
 

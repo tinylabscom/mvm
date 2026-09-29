@@ -86,9 +86,24 @@ because the certificate covered the intercepted host.
 
 ## Validation
 
-- focused contract, binding, runtime persistence, client launch, CLI,
-  admission, proxy, and hostd suites;
-- workspace check and zero-warning workspace Clippy;
-- Linux- and feature-gated cross-checks plus `check-single-network-path`;
-- the host workspace suite split around two pre-existing builder-environment
-  tests that wait indefinitely when local libkrun prerequisites are absent.
+The original branch validation covered focused contract, binding, runtime
+persistence, client launch, CLI, admission, proxy, and hostd suites; workspace
+check and zero-warning Clippy; Linux- and feature-gated cross-checks; and the
+single-network-path gate.
+
+After rebasing onto `main` on 2026-09-29:
+
+- persistent route round-trip, drift, restart, named-run and manifest-create
+  regressions pass;
+- all 57 CLI integration tests pass, including every injection mode and both
+  `--allow-endpoint` surfaces;
+- `fuzz_substitution_positions` compiles with its position-aware driver;
+- workspace check, zero-warning workspace Clippy, formatting, actionlint, and
+  `check-single-network-path` pass;
+- the full workspace run reached 840 passing `mvm-agentd` tests, then the
+  unrelated `stream_pump::tests::a_slow_sink_receives_every_byte_exactly_once`
+  failed with 158,208 of 524,288 bytes; a direct scoped run reproduced the
+  same existing failure;
+- the post-rebase `just check::gated` could not start because this host has no
+  `rustup` or `cargo-zigbuild`; the original branch's gated result remains the
+  latest evidence for the shared schema changes.
