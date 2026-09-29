@@ -211,9 +211,9 @@ pre-commit hook treats warnings as errors.
   `build()`) and thread that value through. The only legitimate suppression is
   bindgen-generated FFI (`crates/deps/libkrun-sys/src/sys.rs`); convert any
   existing hand-written suppression to a builder as you touch it.
-- Fix warnings immediately; common findings: `too_many_arguments` (→ builder),
-  `redundant_closure`, `needless_pass_by_value`, `single_match` → `if let`,
-  unused imports/variables.
+- Fix warnings immediately; common findings: too many arguments (→ builder),
+  redundant closures, unnecessary owned parameters, single-arm matches (→
+  `if let`), and unused imports/variables.
 
 ## No `unwrap()` in production code
 
