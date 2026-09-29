@@ -44,6 +44,8 @@ mod signals;
 mod socket;
 #[path = "mvm-guest-agent/state.rs"]
 mod state;
+#[path = "mvm-guest-agent/telemetry.rs"]
+mod telemetry;
 #[path = "mvm-guest-agent/transport.rs"]
 mod transport;
 
@@ -123,12 +125,13 @@ use handlers::{
     handle_proc_list, handle_proc_send_input, handle_proc_signal, handle_proc_start,
     handle_proc_wait, handle_readiness_status, handle_resource_usage,
     handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
-    handle_start_unix_socket_forward, handle_stream_input, handle_unmount_volume,
-    handle_update_idle_timeout, handle_wake, handle_worker_status,
+    handle_start_unix_socket_forward, handle_stream_input, handle_sync_filesystems,
+    handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
 use interactive::{
-    handle_console_close, handle_console_open, handle_console_resize, handle_exec,
-    handle_exec_batch, handle_run_code, handle_run_detached,
+    handle_console_attach, handle_console_close, handle_console_detach, handle_console_list,
+    handle_console_open, handle_console_resize, handle_exec, handle_exec_batch, handle_run_code,
+    handle_run_detached,
 };
 
 /// Shared references every per-verb handler needs: the state Arcs
@@ -450,6 +453,7 @@ fn handle_client(
             GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 
             GuestRequest::FsDiff => handle_fs_diff(),
+            GuestRequest::SyncFilesystems => handle_sync_filesystems(),
 
             GuestRequest::StartUnixSocketForward {
                 guest_path,
@@ -465,7 +469,19 @@ fn handle_client(
                 rows,
                 env,
                 argv,
-            } => handle_console_open(cols, rows, env, argv),
+                detach_timeout_secs,
+            } => handle_console_open(cols, rows, env, argv, detach_timeout_secs),
+
+            GuestRequest::ConsoleAttach {
+                session_id,
+                cols,
+                rows,
+                take_over,
+            } => handle_console_attach(session_id, cols, rows, take_over),
+
+            GuestRequest::ConsoleDetach { session_id } => handle_console_detach(session_id),
+
+            GuestRequest::ConsoleList => handle_console_list(),
 
             GuestRequest::ConsoleClose { session_id } => handle_console_close(session_id),
 
@@ -827,6 +843,12 @@ fn main() {
             let s = Arc::clone(&probe_state);
             std::thread::spawn(move || init_probes(&bs, &s));
         }
+
+        // The telemetry listener spawns a thread, so it belongs in this
+        // post-activation zone with the other background workers; boot
+        // readiness is already served by the control plane above and never
+        // waits on it.
+        telemetry::spawn_telemetry_listener();
     }
 
     // Port forwarders are started on-demand via StartPortForward requests

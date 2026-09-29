@@ -149,7 +149,11 @@ Security-bearing gaps first, then the foundations the UX needs:
 ### PS-02 — Egress route model on vsock flows (#3712)
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
       — `policy::routes`, `fuzz_egress_routes`; carried on `NetworkPolicy` in the signed plan
-- [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+- [x] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+      — `SecretRef.inject` declares the mode; the position parser refuses a
+      placeholder outside its binding before anything forwards; basic_auth is
+      decoded/substituted/re-encoded; `mvm-contract` substitution + hostd
+      keyholder tests
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
       host is terminated only on an explicit `intercept` grant; `ask` is held and
@@ -225,17 +229,19 @@ Security-bearing gaps first, then the foundations the UX needs:
       the VM's `approval.sock`; a binding with `approve = ask`
       (`mvmctl secret set --approve ask`) asks before its placeholder is
       substituted; timeout, no broker or any error denies
-- [ ] PS-13 tool calls consult the same supervisor — the `tool_call`
-      subject exists; `tool_gate.rs` has no live caller to ask it
+- [x] tool-call asks have the same supervisor and backend contract — the
+      `tool_call` subject and `RuntimeApprover::approve_tool_call` seam are
+      complete; PS-13 owns the live tool-policy caller and remains tracked
+      there rather than duplicating its gate in PS-07
 - [x] terminal backend on the controlling TTY: arming window, control-sequence stripping, empty = deny, no TTY = deny
       — `/dev/tty`, never workload stdin; an `-it` run denies (`tty_busy`)
       rather than race the workload; `PromptRenderer` is the seam PS-04's
       live denials share
 - [x] webhook and chain backends — HTTPS or loopback only, no redirects,
       4 KiB reply cap, timeout; `--approval-mode all|any`
-- [ ] SDK callback through hostlib — `CallbackBackend` is the callback type.
-      Remaining: a hostlib ABI entry that registers a callback, a broker bound
-      per machine hostlib launches, and the Python and TypeScript facades
+- [x] SDK callback through hostlib — ABI 1.4 registers a bounded process-wide
+      callback (`deny` / `once` / `session`); Python and TypeScript expose it,
+      callback failures deny, and the endpoint still owns scope, TTL and audit
 - [x] once / session scope with TTL; nothing silently persisted; every decision audited; rate limit
       — session approvals live in the endpoint for 15 minutes; 10 prompts a
       minute, the rest denied `rate_limited`; `approval.requested / granted /
@@ -243,19 +249,34 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] surface: `--approval tty|deny|webhook=URL` on `run` and `machine run`,
       `[approval]` in `mvm.toml`; default tty for an operator at a terminal,
       deny otherwise
-- [ ] a broker for detached and persistent machines — nobody answers today,
-      so their asks deny
+- [x] a broker for detached and persistent SDK machines — hostlib binds after
+      admitted boot and before an SDK-started command, retains one broker per
+      machine, and drops it on stop/remove. A standalone `mvmctl` detached
+      machine still has no owning process and denies; its long-lived ownership
+      model belongs to PS-09's detachable-session surface
 
 ### PS-08 — Undo, redo, replay, diff (#3718)
-- [ ] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+- [x] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+      — `mvm-fs` tree walk over the ext4 images the workspace keeps; a guest
+      diff verb on the existing request policy; `--from`/`--to`, `--stat`,
+      `--side-by-side`, `--json`, and output caps; `workspace.rs` is the apply
+      seam for the remaining undo/redo/replay items
 - [ ] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
 - [ ] session exclusions persisted so restore never deletes ignored files
 - [ ] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a checkpoint with recorded input
 - [ ] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
 
 ### PS-09 — Detachable sessions (#3719)
-- [ ] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
-- [ ] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+- [x] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
+      — the guest agent keeps one console session per VM alive across client
+      disconnects (1 MiB replay ring, fresh data port per attach, typed
+      `ConsoleBusy`, explicit `take_over`, optional detach timeout); new verbs
+      `ConsoleAttach`/`ConsoleDetach`/`ConsoleList` are DevOnly like
+      `ConsoleOpen`; `~d` detaches, `~.` ends
+- [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+      — `machine attach` (alias of `console`) and `machine detach` join the
+      existing `ps`, `logs -f`, `stop`; `inspect` still covers persistent
+      machine specs only
 - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
 
 ### PS-10 — Cryptographic audit trail UX (#3720)
@@ -274,10 +295,29 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
 
 ### PS-11 — Instruction-file provenance (#3721)
-- [ ] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
-- [ ] `mvmctl trust init|sign|verify` for instruction files; keyless signing workflow for our repos
-- [ ] pre-boot scan of workspace inputs wired into admission; files read-only in the guest; audited
+- [x] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
+      — `mvm_client::instruction_trust::policy`; user policy at
+      `<MVM_HOME>/config/instruction-trust.toml`, project policy at
+      `<project>/.mvm/instruction-trust.toml` (advisory alone); schema generated
+      from the Rust types at `schema/instruction-trust-policy-v0.json`
+- [x] `mvmctl trust instructions init|sign|verify|policy`; keyless signing workflow for our repos
+      — `.github/workflows/sign-instructions.yml` signs this repository's files
+      on a path-filtered push to `main` or dispatch, verifies the bundles through
+      the in-process verifier, and uploads them as an artifact (no commit). Other
+      repositories copy it rather than call it: a reusable workflow's certificate
+      names the called file, whoever called it
+- [x] pre-boot scan of `--mount` sources, `--asset` trees and the local workload
+      directory wired into admission; every verdict chain-audited
+      (`trust.instruction_verified` / `_unsigned` / `_blocked`); `deny` refuses
+      with `plan.admission_refused` stage `instruction_provenance`
+- [ ] files read-only in the guest: holds for `--mount` (read-only by default, a
+      per-launch snapshot, scanned at every admission). Open: volumes attached as
+      block devices are not scanned — including `machine volume mount --host DIR`,
+      whose directory is re-snapshotted at the next start after a host edit, and
+      whose `--rw` private copy keeps in-guest edits across restarts
 - [ ] mvm-scout static scan for injection indicators in instruction files
+      — in review: tinylabscom/mvm-assurance#202 (`SCOUT-PROMPT-002`, one shared
+      instruction-file surface definition)
 
 ### PS-12 — Environment hygiene (#3722)
 - [x] one shared denylist filter (loader, shell, interpreter, password-manager session variables)
@@ -309,7 +349,18 @@ apply goes through the protected-path gate.
 - [ ] no external cache provider
 
 ### PS-17 — Task-runner surface (#3726)
-- [ ] recipe inventory and reduction; the top level fits one screen and mirrors CI
+- [x] recipe inventory and reduction; the top level fits one screen and mirrors CI
+
+89 recipes reduced to 8 root recipes (`build`, `test`, `lint`, `ci`, `embed`,
+`release-build`, `docs`, plus `default`) with the rest namespaced into 13
+modules under `just/` (`check`, `sdk`, `tests`, `bdd`, `e2e`, `payload`,
+`kernel`, `lints`, `release`, `site`, `maint`, `audit`, `mem`). `just --list`
+fits one screen with every module collapsed to one line. The pinning tests
+(`embed_recipe.rs`, `github_actions_bdd_gate.rs`,
+`github_actions_extended_e2e.rs`) follow the moved recipes, and
+`tests/justfile_top_level.rs` locks the root set to exactly the CI-mirroring
+list. All `just <recipe>` call sites (workflows, scripts, docs, emitted CLI
+hints) were updated to the module-qualified names.
 
 ### PS-18 — Docs (#3727)
 - [ ] one page per capability; client guides for each agent pack; profile and pack authoring guides
@@ -343,7 +394,7 @@ Follow-ups for the owner-decision rows above, plus re-examining
 small PRs.
 
 ### PS-20 — Unreachable surface (#3729)
-- [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
+- [x] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
 
 ### PS-21 — CLI thin over mvm-client (#3730)
 - [x] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
@@ -470,7 +521,10 @@ packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
   can expire before boot (`VerbNotAuthorized`).
 - #3757: a `--manifest` run naming an OCI image gets no guest proxy/CA env.
 - Transient `LocalBackend::launch` (`mvm_hostd::run::admit_and_boot_local`)
-  attaches no universal initramfs and panics at `/init` for Rust callers.
+  attached no universal initramfs and panicked at `/init` for Rust callers.
+  Fixed by the `fix/transient-launch-initramfs` PR: the attach decision
+  lives in `mvm_runtime::universal_initramfs` and hostd attaches overlay +
+  initramfs together on the in-process boot.
 - #3753 open box: host-directory volumes attached as block devices
   (`machine volume mount --host DIR`) are never scanned for instruction files.
 - For review: a boot command override on a `prod` build slot is accepted, the

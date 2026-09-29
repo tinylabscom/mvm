@@ -3,7 +3,7 @@
 # target that lets a fresh host trust that release before it has any verifier —
 # to a promoted CLI release.
 #
-#   pin-installer-default.sh [--check] <tag | --newest> [installer]
+#   pin-installer-default.sh [--check] <tag | --newest> [installer] [nix-pin]
 #
 # The installer normally installs the newest promoted release it finds through
 # the releases API; the pin is what it installs when that API cannot be
@@ -21,7 +21,7 @@
 #   --check    change nothing; exit 1 unless the installer already carries
 #              exactly this pin
 #
-# The only writer of those lines: the release PR (`just release`) and the
+# The only writer of those lines: the release PR (`just release::pr`) and the
 # site deployment both call this. Needs an authenticated `gh` and `cosign`.
 set -eu
 
@@ -35,16 +35,18 @@ if [ "${1:-}" = "--check" ]; then
   CHECK=1
   shift
 fi
-if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
+if [ "$#" -lt 1 ] || [ "$#" -gt 3 ]; then
   usage
 fi
 REQUESTED="$1"
 INSTALLER="${2:-$(cd "$(dirname "$0")/.." && pwd -P)/install.sh}"
+NIX_PIN="${3:-}"
 
 die() { printf 'pin-installer-default: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
 [ -f "$INSTALLER" ] || die "no installer at $INSTALLER"
+[ -z "$NIX_PIN" ] || [ -f "$NIX_PIN" ] || die "no Nix pin at $NIX_PIN"
 need gh
 need cosign
 
@@ -111,6 +113,25 @@ cosign verify-blob \
 } > "$work/pin"
 [ "$(wc -l < "$work/pin")" -eq 4 ] || die "could not read a hash for every target of $TAG"
 
+if [ -n "$NIX_PIN" ]; then
+  digest_for() {
+    awk -F '"' -v name="$1=" '$1 == name { print $2 }' "$work/pin"
+  }
+  darwin_hash="$(digest_for DEFAULT_ARCHIVE_SHA256_AARCH64_APPLE_DARWIN)"
+  x86_linux_hash="$(digest_for DEFAULT_ARCHIVE_SHA256_X86_64_UNKNOWN_LINUX_GNU)"
+  arm_linux_hash="$(digest_for DEFAULT_ARCHIVE_SHA256_AARCH64_UNKNOWN_LINUX_GNU)"
+  {
+    printf '{\n  version = "%s";\n  archives = {\n' "$TAG"
+    printf '    aarch64-darwin = {\n      target = "aarch64-apple-darwin";\n      sha256 = "%s";\n    };\n' "$darwin_hash"
+    printf '    x86_64-linux = {\n      target = "x86_64-unknown-linux-gnu";\n      sha256 = "%s";\n    };\n' "$x86_linux_hash"
+    printf '    aarch64-linux = {\n      target = "aarch64-unknown-linux-gnu";\n      sha256 = "%s";\n    };\n' "$arm_linux_hash"
+    printf '  };\n}\n'
+  } > "$work/nix-pin"
+  if [ "$CHECK" = 1 ]; then
+    cmp -s "$work/nix-pin" "$NIX_PIN" || die "$NIX_PIN does not pin $TAG and its verified archive hashes"
+  fi
+fi
+
 while IFS= read -r line; do
   name="${line%%=*}"
   current="$(grep -E "^$name=\"[^\"]*\"$" "$INSTALLER" || true)"
@@ -127,5 +148,9 @@ done < "$work/pin"
 if [ "$CHECK" = 1 ]; then
   printf 'ok   %s pins %s, a promoted release, with its signed archive hashes\n' "$INSTALLER" "$TAG"
 else
+  if [ -n "$NIX_PIN" ]; then
+    cp "$work/nix-pin" "$NIX_PIN" || die "could not update $NIX_PIN"
+    printf 'pinned %s to %s\n' "$NIX_PIN" "$TAG"
+  fi
   printf 'pinned %s to %s\n' "$INSTALLER" "$TAG"
 fi

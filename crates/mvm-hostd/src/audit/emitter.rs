@@ -79,6 +79,8 @@ pub mod grants_audit;
 pub mod wall_clock_audit;
 pub use checkpoint_audit::CheckpointForkedAudit;
 pub mod image_audit;
+pub mod instruction_audit;
+pub use instruction_audit::InstructionTrustEvent;
 
 /// Wire-stable event name and label keys for the workload output-stream audit
 /// entries. Shared so the emitter (writer) and any reader cannot drift on a

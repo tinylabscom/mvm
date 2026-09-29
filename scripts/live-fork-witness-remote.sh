@@ -6,7 +6,7 @@
 # a real-hardware run one command from any checkout:
 #
 #   scripts/live-fork-witness-remote.sh root@<kvm-host>
-#   just live-fork-witness root@<kvm-host>
+#   just e2e::live-fork-witness root@<kvm-host>
 #
 # Everything is idempotent; re-runs after the first complete in minutes because
 # the remote caches the toolchain, guest-agent builds, and images.

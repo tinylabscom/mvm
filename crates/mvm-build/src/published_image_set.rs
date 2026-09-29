@@ -223,11 +223,19 @@ impl PublishedImageSet {
             ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
             ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
         ];
+        // Production build only: a set that also publishes the dev variant of
+        // this base carries it as a second member per role/target with
+        // `build_mode: dev`, and the dev slot selects it explicitly, never
+        // through this fetch.
         let artifacts: Vec<MemberArtifact> = self
             .manifest
             .members
             .iter()
-            .filter(|member| roles.contains(&member.role) && member.target == target)
+            .filter(|member| {
+                member.build_mode.is_none()
+                    && roles.contains(&member.role)
+                    && member.target == target
+            })
             .flat_map(|member| member.artifacts.iter().cloned())
             .collect();
         if artifacts.len() != 4 {
@@ -290,7 +298,9 @@ impl PublishedImageSet {
             .manifest
             .members
             .iter()
-            .find(|member| member.role == role && member.target == target)
+            .find(|member| {
+                member.build_mode.is_none() && member.role == role && member.target == target
+            })
             .ok_or_else(|| ImageSetMemberError::NoMember {
                 release_tag: self.release_tag.clone(),
                 role,

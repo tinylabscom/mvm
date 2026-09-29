@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 3;
+export const ABI_MINOR = 4;
 
 export type Classification = "prod_safe" | "dev_only";
 

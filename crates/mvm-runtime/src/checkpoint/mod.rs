@@ -21,7 +21,8 @@ mod staging;
 
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
-    CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness,
+    CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness, WorkspaceVolume,
+    workspace_blob_name,
 };
 use restore_content::{
     content_with_load_memory_digest, reseed_forked_identity_drive, validate_fork_verity_binding,
@@ -845,6 +846,11 @@ fn capture_vm_full_inner(
     let memory = content_dir.join("memory.bin");
     let rootfs_dst = content_dir.join("rootfs.ext4");
     let machine_id = content_dir.join("machine-id");
+    let workspace = params
+        .workspace_volumes
+        .iter()
+        .map(|volume| Ok((volume.blob_name()?, volume.image.clone())))
+        .collect::<Result<Vec<(String, PathBuf)>>>()?;
 
     control.pause().context("pausing VM for vm_full capture")?;
     // From here, RESUME on every exit path so a failure never strands the guest.
@@ -855,6 +861,12 @@ fn capture_vm_full_inner(
         let live_rootfs = control.rootfs_path()?;
         crate::base::cow::clone_rootfs_for_instance(&live_rootfs, &rootfs_dst)
             .context("cloning rootfs in the pause window")?;
+        // The workspace is frozen with the machine: a clone taken after resume
+        // could hold writes the captured memory never made.
+        for (blob, image) in &workspace {
+            crate::base::cow::clone_rootfs_for_instance(image, &content_dir.join(blob))
+                .with_context(|| format!("cloning workspace volume {}", image.display()))?;
+        }
         // Collect the machine-id sidecar when the backend wrote one.
         // Backends that do not have a machine-id concept (e.g. Firecracker) skip
         // this step — the blob is absent from the manifest and restore does not
@@ -881,6 +893,13 @@ fn capture_vm_full_inner(
         chunks::chunk_blob(&object_pool, &content_dir, "rootfs.ext4", &rootfs_dst, true)?,
         chunks::chunk_blob(&object_pool, &content_dir, "memory.bin", &memory, false)?,
     ];
+
+    for (blob, _) in &workspace {
+        content.push(ContentBlob {
+            name: blob.clone(),
+            sha256: sha256_file_hex(&content_dir.join(blob))?,
+        });
+    }
 
     // Include the machine-id blob when the backend wrote one.
     if machine_id.exists() {
@@ -2047,6 +2066,7 @@ mod tests {
                 created_unix: 9,
                 retain_paused,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -2098,6 +2118,7 @@ mod tests {
                 created_unix: 9,
                 retain_paused: false,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -2153,6 +2174,7 @@ mod tests {
                 created_unix: 10,
                 retain_paused: false,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -2221,6 +2243,7 @@ mod tests {
                 created_unix: 11,
                 retain_paused: false,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -2282,6 +2305,7 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -2634,6 +2658,7 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -2687,6 +2712,7 @@ mod tests {
                 created_unix: 2,
                 retain_paused: false,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -2978,6 +3004,7 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )
@@ -3164,6 +3191,7 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants: None,
+                workspace_volumes: Vec::new(),
             },
             &ctl,
         )

@@ -189,6 +189,10 @@ pub enum GuestRequest {
     },
     /// Request filesystem diff (changes since boot, from overlay or snapshot).
     FsDiff,
+    /// Flush every dirty page to disk. Carries nothing and returns nothing but
+    /// an acknowledgement: the host asks for it before reading a running
+    /// guest's writable volume image, so the read sees what the workload wrote.
+    SyncFilesystems,
     /// Bind a guest Unix socket and forward each accepted connection to a host
     /// vsock port. The guest path must live under `/run/mvm/` (see
     /// `validate_unix_forward_guest_path`).
@@ -199,7 +203,9 @@ pub enum GuestRequest {
     },
     /// Open an interactive PTY console session (dev-mode only).
     /// The guest allocates a PTY, spawns a shell, and listens on a
-    /// dedicated vsock data port for raw byte streaming.
+    /// dedicated vsock data port for raw byte streaming. The session
+    /// outlives its client: a disconnect detaches, and the shell keeps
+    /// running until it exits, is closed, or the VM stops.
     ConsoleOpen {
         cols: u16,
         rows: u16,
@@ -207,8 +213,28 @@ pub enum GuestRequest {
         env: Vec<(String, String)>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         argv: Vec<String>,
+        /// End the shell once it has had no attached client for this many
+        /// seconds. Absent: it lives until it exits, is closed, or the VM
+        /// stops.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detach_timeout_secs: Option<u64>,
     },
-    /// Close an active console session.
+    /// Attach to a running console session, replaying its scrollback.
+    /// Answered `ConsoleBusy` when another client is attached, unless
+    /// `take_over` asks to hang that client up first.
+    ConsoleAttach {
+        session_id: u32,
+        cols: u16,
+        rows: u16,
+        take_over: bool,
+    },
+    /// Hang up the client attached to a console session. The shell keeps
+    /// running.
+    ConsoleDetach { session_id: u32 },
+    /// List the agent's console sessions.
+    ConsoleList,
+    /// End a console session: hang up its shell and report the exit code.
+    /// A session that already exited answers from its recorded code.
     ConsoleClose { session_id: u32 },
     /// Resize the PTY window for an active console session.
     ConsoleResize {
@@ -528,8 +554,12 @@ impl GuestRequest {
             Self::RunDetached { .. } => "run-detached",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
+            Self::SyncFilesystems => "sync-filesystems",
             Self::StartUnixSocketForward { .. } => "start-unix-socket-forward",
             Self::ConsoleOpen { .. } => "console-open",
+            Self::ConsoleAttach { .. } => "console-attach",
+            Self::ConsoleDetach { .. } => "console-detach",
+            Self::ConsoleList => "console-list",
             Self::ConsoleClose { .. } => "console-close",
             Self::ConsoleResize { .. } => "console-resize",
             Self::EntrypointStatus => "entrypoint-status",
@@ -694,6 +724,7 @@ mod tests {
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
+            GuestRequest::SyncFilesystems,
             GuestRequest::StartUnixSocketForward {
                 guest_path: "/run/mvm/forward.sock".to_string(),
                 host_vsock_port: BROKER_PORT,
@@ -704,7 +735,16 @@ mod tests {
                 rows: 40,
                 env: Vec::new(),
                 argv: Vec::new(),
+                detach_timeout_secs: Some(3600),
             },
+            GuestRequest::ConsoleAttach {
+                session_id: 1,
+                cols: 120,
+                rows: 40,
+                take_over: false,
+            },
+            GuestRequest::ConsoleDetach { session_id: 1 },
+            GuestRequest::ConsoleList,
             GuestRequest::ConsoleClose { session_id: 1 },
             GuestRequest::ConsoleResize {
                 session_id: 1,
@@ -1309,6 +1349,7 @@ mod tests {
                 "post-restore",
             ),
             (GuestRequest::FsDiff, "fs-diff"),
+            (GuestRequest::SyncFilesystems, "sync-filesystems"),
             (
                 GuestRequest::StartUnixSocketForward {
                     guest_path: "/run/mvm/forward.sock".to_string(),
@@ -1323,9 +1364,24 @@ mod tests {
                     rows: 0,
                     env: Vec::new(),
                     argv: Vec::new(),
+                    detach_timeout_secs: None,
                 },
                 "console-open",
             ),
+            (
+                GuestRequest::ConsoleAttach {
+                    session_id: 0,
+                    cols: 0,
+                    rows: 0,
+                    take_over: false,
+                },
+                "console-attach",
+            ),
+            (
+                GuestRequest::ConsoleDetach { session_id: 0 },
+                "console-detach",
+            ),
+            (GuestRequest::ConsoleList, "console-list"),
             (
                 GuestRequest::ConsoleClose { session_id: 0 },
                 "console-close",
@@ -1429,6 +1485,7 @@ mod tests {
             rows: 24,
             env: Vec::new(),
             argv: vec!["/bin/sh".to_string()],
+            detach_timeout_secs: None,
         };
         let json = serde_json::to_string(&req).expect("serialize console-open");
         assert!(
@@ -1442,6 +1499,70 @@ mod tests {
             }
             other => panic!("expected ConsoleOpen, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn console_session_requests_round_trip() {
+        for req in [
+            GuestRequest::ConsoleOpen {
+                cols: 80,
+                rows: 24,
+                env: Vec::new(),
+                argv: Vec::new(),
+                detach_timeout_secs: Some(900),
+            },
+            GuestRequest::ConsoleAttach {
+                session_id: 3,
+                cols: 132,
+                rows: 50,
+                take_over: true,
+            },
+            GuestRequest::ConsoleDetach { session_id: 3 },
+            GuestRequest::ConsoleList,
+        ] {
+            let json = serde_json::to_string(&req).expect("serialize");
+            let back: GuestRequest = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                json,
+                "{} must survive a round trip",
+                req.kind_name()
+            );
+        }
+    }
+
+    #[test]
+    fn console_session_requests_refuse_unknown_fields() {
+        for smuggled in [
+            r#"{"ConsoleAttach":{"session_id":1,"cols":80,"rows":24,"take_over":false,"argv":["/bin/sh"]}}"#,
+            r#"{"ConsoleDetach":{"session_id":1,"force":true}}"#,
+            r#"{"ConsoleOpen":{"cols":80,"rows":24,"detach_timeout_secs":1,"scrollback":0}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<GuestRequest>(smuggled).is_err(),
+                "an unknown field must fail closed: {smuggled}"
+            );
+        }
+        // Attach names its take-over decision explicitly; there is no default.
+        assert!(
+            serde_json::from_str::<GuestRequest>(
+                r#"{"ConsoleAttach":{"session_id":1,"cols":80,"rows":24}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn console_open_without_a_detach_timeout_omits_the_field() {
+        let json = serde_json::to_string(&GuestRequest::ConsoleOpen {
+            cols: 80,
+            rows: 24,
+            env: Vec::new(),
+            argv: Vec::new(),
+            detach_timeout_secs: None,
+        })
+        .unwrap();
+        assert!(!json.contains("detach_timeout_secs"), "{json}");
     }
 
     #[test]

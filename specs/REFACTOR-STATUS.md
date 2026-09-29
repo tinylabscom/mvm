@@ -4,6 +4,21 @@ Last updated: 2026-09-29
 
 ## In progress
 
+- [ ] **Security mutation witnesses — #3679.** Contract/filesystem validation (1,524 tests), all four base-image tests, the source-root test and final host workspace Clippy pass. Full workspace and mutation validation remain pending; Linux builder initialization is blocked. See `specs/plans/2026-09-28-security-mutation-witnesses.md`.
+
+- [ ] **Extended CI process cleanup — #3773.** All 47 integration regressions and final host workspace Clippy pass; full tests are pending. Linux builder initialization is blocked; the final live Firecracker lane remains active. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
+- [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
+
+- [ ] **Agent efficiency overhaul.**
+      `specs/plans/2026-09-28-agent-efficiency-overhaul.md`. Phases 1–10
+      establish retry, waiting, scoped-test, tool-routing, environment,
+      reasoning-budget, recovery, background-operation, context-hygiene, and
+      subagent-preflight disciplines across the supported agent harnesses.
+  - [x] Agreements, retry guard and journal, scoped-test recipe, reproducible
+        transcript analysis, and baseline measurements implemented.
+  - [ ] Re-measure fresh transcripts after two weeks and record the Phase
+        2.4–10.3 results against the plan's baselines.
+
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
       microVM / vsock / signed-plan security core and close every
@@ -32,33 +47,35 @@ Last updated: 2026-09-29
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
-    - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
-    - [ ] denial → policy draft selector (Grant / Skip)
-    - [ ] `mvmctl why` against a resolved policy
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
     - [x] strict registry references and fail-closed manifest-digest lockfile foundation
     - [x] strict signed manifest and namespace-scoped publisher trust verification
-  - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
+  - [x] PS-07 runtime approval supervisor for network, tools and secrets — #3717
     - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
     - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
-    - [ ] tool calls (PS-13), SDK callback through hostlib (PS-01), a broker for detached machines
+    - [x] tool-call supervisor seam (live caller stays in PS-13); SDK callback through hostlib ABI 1.4; retained broker for SDK detached/persistent machines
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
+    - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated
+    - [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+    - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
-    - [x] per-session seal, derived session ledger, `trust audit sessions|show|verify <session>`
-    - [x] fsync policy stated and tested; anchoring documented; rotation default confirmed
-    - [ ] snapshot roots in the ledger (waits on PS-08)
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
+    - [x] trust policy (keyless/keyed publishers, blocklist, deny/warn/audit, project only tightens)
+    - [x] `mvmctl trust instructions init|sign|verify|policy`; `sign-instructions.yml` keyless workflow
+    - [x] pre-boot scan wired into admission; every verdict chain-audited
+    - [ ] block-device volumes (incl. `machine volume mount --host`) are not scanned
+    - [ ] mvm-scout indicator scan (tinylabscom/mvm-assurance#202, in review)
   - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723
   - [ ] PS-15 packaging: deb, rpm, AUR, nixpkgs, crates.io, native lib in wheels/npm — #3724
   - [ ] PS-16 Nix developer experience — #3725
-  - [ ] PS-17 task-runner surface — #3726
+  - [x] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
-  - [x] PS-19 fewer feature flags — #3728
-  - [ ] PS-20 unreachable CLI surface and stale references — #3729
-  - [x] PS-21 CLI thin over `mvm-client` — #3730
+  - [ ] PS-19 fewer feature flags — #3728
+  - [x] PS-20 unreachable CLI surface and stale references — #3729
+  - [ ] PS-21 CLI thin over `mvm-client` — #3730
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by
@@ -217,7 +234,7 @@ Last updated: 2026-09-29
       W1b source inventory (subscriber-init scan, script sources, launch edges,
       backend endpoint anchors) and the `WitnessLedger` model are tested: 17
       new gate tests, 7 ledger tests, 14,436 workspace tests, doctests, all 72
-      repository gates and `just check-gated` pass. Startup witnesses are a
+      repository gates and `just check::gated` pass. Startup witnesses are a
       model only; nothing checks them at runtime and no capture is certified.
       Evidence: `specs/sprint/delivery/3420-telemetry-source-inventory.md`.
       W1d offline emit-path baselines are committed (harness + five M3 Max
@@ -251,6 +268,17 @@ Last updated: 2026-09-29
       regressions and the full host workspace pass.
       Standby capture also provisions its own identity. Identity-stage policy
       gates (69), declared backing, BDD and Linux cross-check pass; post-rebase delivery is open.
+      W2b guest listener half is delivered: authenticated per-session serve in
+      the agent (fresh producer epoch, Coverage-Started announcement,
+      wrong-guest-key/wrong-host-anchor refusals, dead-peer handling; five
+      focused tests) plus a post-activation vsock listener on the reserved
+      telemetry port with host-only peer gating, opt-in via the
+      mvm.telemetry=1 launch assertion, one session at a time and
+      lazy per-connection key load. Vsock-only; with #3597's registration merged, a full-chain witness
+      composes register → resolve → assert-current → authenticated receive
+      against the serving guest over a live stream. No capture or
+      VM-lifetime collection is claimed. Evidence:
+      `specs/sprint/delivery/3421-telemetry-guest-listener.md`.
       W3b prepared-record handoff passes nine new component tests, including a
       stalled encrypted writer, atomic close and retrievable loss evidence.
       Two allocation regressions pass natively and under Miri, including cold
@@ -784,7 +812,7 @@ Last updated: 2026-09-29
       resolved: standard macOS 26+ Apple Silicon source builds and release
       artifacts use dependency-free HVF; libkrun remains only as an explicit
       development integration and older macOS releases are unsupported. A
-      cold local `just e2e-launch` now fetches the verified workload kernel
+      cold local `just e2e::launch` now fetches the verified workload kernel
       instead of silently entering optional libkrun Stage 0, and its standard
       linker build includes the manifest verifier needed to authenticate that
       fetch. The launch gate now runs only its three owned features, and the
@@ -1326,7 +1354,7 @@ Last updated: 2026-09-29
       The workload kernel was cached inside `builder-vm/<arch>`, the directory
       Stage 0 `remove_dir_all`s on a source-fingerprint change, so promoting a
       new builder image destroyed a half-hour artifact and the next boot rebuilt
-      it — blowing `just e2e-launch`'s 1800s cap. Entries now live at
+      it — blowing `just e2e::launch`'s 1800s cap. Entries now live at
       `<cache>/kernels/<arch>/<variant>/`; `resolve_kernel` adopts an entry left
       at the old path by renaming it. The layout was hand-rebuilt at nine call
       sites, all now routed through `kernel_cache_dir`/`cached_kernel_path`. The
@@ -1378,7 +1406,7 @@ Last updated: 2026-09-29
       substitution endpoint, per-VM Prometheus metrics, audit records, and an
       optional token budget that refuses further AI egress when exhausted.
       Phases 1–6 complete and green (`cargo check`, `cargo clippy`,
-      `just check-gated`, unit/integration tests, and SDK tests). Builds on
+      `just check::gated`, unit/integration tests, and SDK tests). Builds on
       Plan 313's seam; does not cover streaming relay or compaction.
 
 This is the cross-plan progress index. The owning plan remains authoritative
@@ -1864,7 +1892,7 @@ for detailed scope and acceptance criteria.
       its subprocess with both, so the registry exports them and the divergence
       file is down to the type-erased set plus the unported names. That work
       also found that neither SDK's unit suite ran in CI at all (212 pytest,
-      138 vitest, no cargo target and no workflow step); `just sdk-test` on the
+      138 vitest, no cargo target and no workflow step); `just sdk::test` on the
       BDD lane closes it. Also fixed a ~50% pre-existing flake in the s27
       TypeScript live fixture (unawaited `wait()` racing `spawnSync`): base
       9/20, now 30/30. WS-3–WS-5, WS-7, WS-8 open; WS-6 (Tier C) untouched.
@@ -1997,6 +2025,14 @@ for detailed scope and acceptance criteria.
       zero; the later workload boot stopped at a separate readiness timeout.
 
 ## In-flight plans
+
+- [ ] **AI coding workflow docs**
+      (`specs/plans/2026-09-28-ai-coding-workflow-docs.md`, PR #3815).
+      The issue-to-PR playbook moved from a 588-line `AGENTS.md` to
+      `public/src/content/docs/contributing/ai-coding-workflow.md`; the root
+      file is now a concise rule index that keeps every normative rule,
+      including later session and retry rules, and points at the guide. Site
+      build and repository policy checks pass; merge is in progress.
 
 - [ ] **Static crates registry recovery**
       (`specs/plans/2026-08-26-static-crates-registry-fetch.md`, issue #2904).
@@ -2296,10 +2332,12 @@ resume` takes a `current_head` and refuses when it differs from the
       STILL OPEN: Phase 3 (phantom build.rs tests — the `MVM_LIBKRUN_HEADER`
       half is closed, its probe is deleted), Phase 4 (dead crate edges;
       `deps_audit` and the tree-sitter grammars off the serial path; the
-      `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
-      hygiene). The pinned zig now follows the feature: eight of `ci.yml`'s nine
+      `mvm-hostd` audit cluster), Phase 5 worktree hygiene. The measured
+      sccache experiment is closed: its machine-wide wrapper and the optional
+      `test-cached` recipe were removed after repeated failures and negligible
+      cross-worktree reuse. The pinned zig now follows the feature: eight of `ci.yml`'s nine
       `install-zigbuild` steps are gone, each job traced to what it runs first,
-      and that trace caught `just bdd-live-ci` booting real microVMs without the
+      and that trace caught `just bdd::live-ci` booting real microVMs without the
       payload. Still open: the missing `rerun-if-env-changed` on
       `MVM_EMBED_CACHE_MAX_BYTES` / `MVM_EMBED_CACHE_DIR`. An earlier revision
       of this entry also listed "the embed store sitting at 17 GB against its
@@ -2789,7 +2827,7 @@ resume` takes a `current_head` and refuses when it differs from the
   - [x] Host workspace `check`, `mvm-runtime`/`mvm-hostd` all-target Clippy,
         `cargo fmt`, and focused telemetry unit tests pass
   - [x] Build the real Aya eBPF object with nightly + `bpf-linker`
-        (`just build-ebpf` builds `bpfel-unknown-none` on any host)
+        (`just check::ebpf` builds `bpfel-unknown-none` on any host)
   - [x] End-to-end attach→detach integration test via `mode.json` sidecar
   - [x] Full workspace test run on the host (cargo nextest: 10134 passed,
         18 skipped; cargo test previously flaked on one netd test that
@@ -3002,7 +3040,7 @@ resume` takes a `current_head` and refuses when it differs from the
         (2.0 Gb/s) is a floor bounded by the benchmark's own send window,
         and says so. Also fixed in passing: `l3_linux_privileged.rs` had not
         compiled for Linux since the IPv6 field addition, because
-        `just check-linux` is `--lib` and never builds Linux-gated test files
+        `just check::linux` is `--lib` and never builds Linux-gated test files
   - [ ] WS5 (#2118) — zero-copy / batched transfer, gated on the same
         measurement; must keep the memory ceiling assertable
   - [~] WS7 (#2119) — node-to-node transport for cross-host VM traffic.
@@ -3961,3 +3999,13 @@ resume` takes a `current_head` and refuses when it differs from the
                   image; `nix/images/` is deleted.
             - [x] Release decoupling: image-set members are cached by the
                   pinned root, so a CLI version bump needs no image rebuild.
+            - [x] Re-measure on v0.18.3 recorded honestly (delivery note
+                  3366-w8-remeasure): no image bytes in the release (10
+                  assets, ~55 MiB vs rc.2's 78/~1.66 GiB), the
+                  ≥25-minute gate is missed because the lane still
+                  pair-builds the SDK sidecar and dev image, and the plan
+                  stays open with
+                  specs/plans/2026-09-27-release-e2e-under-image-target.md
+                  carrying the work. Parent W6's boot box ticked: the
+                  v0.2.1 pack boots on HVF, libkrun, Firecracker and QEMU
+                  across aarch64 and x86_64.

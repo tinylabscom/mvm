@@ -5,12 +5,12 @@ set -euo pipefail
 # lane so it can run beside the workspace test lane without duplicating the
 # coverage in a second workflow definition.
 #
-# The Gherkin suite is deliberately NOT here. `just bdd` ran at the end of this
+# The Gherkin suite is deliberately NOT here. `just bdd::run` ran at the end of this
 # script and again in the `bdd-conformance` job, so on any pull request touching
 # `crates/mvm-cli/` the same 252 scenarios ran twice — about 16 minutes of this
 # lane's 20, and what made it the slowest job in the workflow. `bdd-conformance`
 # owns the suite now and is gated on the `code` scope, which is what this lane
-# runs on, so nothing lost a trigger. `check_workflow_paths` fails if `just bdd`
+# runs on, so nothing lost a trigger. `check_workflow_paths` fails if `just bdd::run`
 # comes back here.
 
 tmpdir="$(mktemp -d)"

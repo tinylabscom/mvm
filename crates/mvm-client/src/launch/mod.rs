@@ -8,6 +8,7 @@
 //! boot) and typed secret references are validated fail-closed and recorded
 //! as metadata-only sidecars before any boot.
 
+pub mod boot_order;
 pub mod detached;
 pub mod grants_report;
 pub mod machine_start;
@@ -495,6 +496,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         gpu: false,
         gpu_device: None,
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some(mvm_core::util::time::utc_now()),
         last_started_at: None,
         health_check: None,

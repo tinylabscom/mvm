@@ -4,7 +4,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use mvm_contract::ir::AuthType;
+use mvm_contract::ir::{AuthType, InjectionMode};
 use mvm_contract::substitution::{
     PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver, contains_minted_placeholder,
     prepare_request as prepare_request_core,
@@ -62,6 +62,10 @@ pub fn prepare_request(
             "more than one signing placeholder in one request".into(),
         )),
         Err(PrepareError::Driver(e)) => Err(e),
+        Err(PrepareError::PlaceholderOutOfPosition(position)) => Err(ProxyError::Refused(format!(
+            "a secret placeholder is substituted only where its binding says; refusing one found here ({})",
+            position.refusal_label(),
+        ))),
     }
 }
 
@@ -70,6 +74,10 @@ impl<'a> SubstitutionDriver for NetworkEndpoint<'a> {
 
     fn auth_type(&self, placeholder: &str) -> Option<AuthType> {
         self.resolve_ref(placeholder).map(|r| r.auth_type)
+    }
+
+    fn inject_mode(&self, placeholder: &str) -> Option<InjectionMode> {
+        self.resolve_ref(placeholder).map(|r| r.inject)
     }
 
     fn substitute(

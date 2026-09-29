@@ -247,7 +247,7 @@ release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] 
 # meant to fix.
 e2e_phase build
 echo "==> refreshing embedded aux helpers"
-just embed-refresh
+just payload::refresh
 
 # `user` carries manifest-verify, which the verified-fetch path needs to accept
 # the published builder VM image. Its sigstore/aws-lc dependency must use the
@@ -297,7 +297,7 @@ fi
 # cargo makes this a no-op when they are already current, so the cost of always
 # doing it is a fingerprint check.
 echo "==> building the per-VM host helpers"
-just build-supervisors
+just payload::supervisors
 
 # The language SDKs drive machines in-process through the host library and find
 # it beside the `mvmctl` on PATH, which the live steps put first. `cargo build
@@ -305,6 +305,19 @@ just build-supervisors
 # with "the host library ... was not found" before a machine is asked for.
 echo "==> building the SDK host library beside mvmctl"
 cargo build -p mvm-hostlib
+hostlib_ext="so"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  hostlib_ext="dylib"
+fi
+hostlib_path="$(dirname "$MVMCTL")/libmvm_hostlib.${hostlib_ext}"
+if [[ ! -f "$hostlib_path" ]]; then
+  echo "!!! expected host library at $hostlib_path, but it was not built." >&2
+  exit 1
+fi
+# The runtime-SDK scenarios launch scripts through `mvmctl run --mode live`.
+# Export the exact library path so the in-repo SDK does not depend on PATH
+# propagation through that launch boundary.
+export MVM_HOSTLIB_PATH="$hostlib_path"
 
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
@@ -359,9 +372,9 @@ start_watcher
 e2e_phase typescript-sdk
 echo "==> building the TypeScript SDK"
 if [[ ! -d crates/mvm-sdk/sdks/typescript/node_modules ]]; then
-  just sdk-install-typescript
+  just sdk::install-typescript
 fi
-just sdk-build-typescript
+just sdk::build-typescript
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.

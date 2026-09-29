@@ -164,7 +164,7 @@ jobs:
         run: |
           sudo --preserve-env=HOME,CARGO_HOME,RUSTUP_HOME,CARGO_TARGET_DIR,RUSTFLAGS,MVM_KERNEL_SOURCE,FC_VERSION \
             env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
-              "PATH=$PATH" "$HOME/.cargo/bin/just" bdd-live-warm-claim
+              "PATH=$PATH" "$HOME/.cargo/bin/just" bdd::live-warm-claim
 
   # The documented-surface lanes moved into a reusable workflow so this nightly
   # run and `release.yml` drive the identical thing. They used to live here
@@ -179,6 +179,106 @@ jobs:
       # claim-bearing lanes went stale before. Releases still block on it.
       macos_blocks_on_unusable_host: false
 
+  # The documented-surface release lane fetches the pinned, signed builder
+  # image, so it no longer proves a source checkout can build one. This lane
+  # does, and only this: a cold home, Stage 0 from the in-tree flake, the
+  # unembedded binary handing the SDK sidecar build to its helper, and a user
+  # flake built through the resulting builder. Every step is fatal.
+  #
+  # Nightly rather than on release, because a cold Stage 0 measured 37 minutes on
+  # a good run and hung for two hours on a bad one — cost no release scenario
+  # needs to pay. It is still a gate a regression cannot hide from: a red run
+  # opens the Extended CI tracking issue like every other lane here.
+  #
+  # Read-only token and the canonical repository only: the job runs this
+  # checkout's Nix inputs on a KVM host and has no reason to hold more.
+  source-bootstrap-linux:
+    name: Source builder bootstrap (Linux, cold Stage 0)
+    if: github.repository == 'tinylabscom/mvm'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # Stage 0's own builder timeout is two hours; the job has to outlast it by
+    # the whole of setup, or a hang is reported as a cancellation rather than
+    # as the builder error that names it.
+    timeout-minutes: 240
+    env:
+      # Must track `FC_VERSION_DEFAULT` in mvm-core.
+      FC_VERSION: v1.17.0
+      MVM_E2E_FEATURES: user,release-artifact-bootstrap
+      # Hosted runners protect their distro kernel under /boot; the workload
+      # kernel is not what this lane proves.
+      MVM_KERNEL_SOURCE: download
+      # Firecracker, named rather than auto-detected, because it is what a
+      # Linux/KVM host auto-detects and so the path a contributor's cold
+      # bootstrap takes. The home below is deep enough that Firecracker's API
+      # socket would overflow the Unix socket limit without the short socket
+      # namespace, so this lane also keeps that fallback exercised.
+      MVM_BUILDER_BACKEND: firecracker
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: ./.github/actions/free-disk
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: libcap-ng-dev lld
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Install just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: source-bootstrap-linux
+
+      - name: Install firecracker
+        run: |
+          set -euo pipefail
+          curl -fL -o firecracker.tgz \
+            "https://github.com/firecracker-microvm/firecracker/releases/download/${FC_VERSION}/firecracker-${FC_VERSION}-x86_64.tgz"
+          tar -xzf firecracker.tgz
+          sudo install -m 0755 \
+            "release-${FC_VERSION}-x86_64/firecracker-${FC_VERSION}-x86_64" \
+            /usr/bin/firecracker
+          /usr/bin/firecracker --version
+
+      - name: Grant /dev/kvm access for the job
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — Stage 0 cannot boot." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      - name: Bootstrap the builder image from source
+        env:
+          MVM_E2E_HOME: ${{ runner.temp }}/source-bootstrap-home
+        run: just e2e::source-bootstrap
+
+      # A Stage 0 guest that refuses to build says why only on its console, and
+      # the runner is gone by the time anyone reads the job log.
+      - name: Upload the Stage 0 and builder consoles
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: source-bootstrap-consoles
+          path: |
+            ${{ runner.temp }}/source-bootstrap-home/vms/*/console.log
+            ${{ runner.temp }}/source-bootstrap-home/vms/*/firecracker.log
+          if-no-files-found: warn
+          retention-days: 14
+
+
   sdk-release-dry-run:
     name: SDK release dry-run
     permissions:
@@ -187,6 +287,113 @@ jobs:
     uses: ./.github/workflows/publish-sdk.yml
     with:
       dry_run: true
+
+
+
+
+
+  # ── Lane: Builder VM image build (Linux, Plan 100 W2) ────────────
+  # Plan 100 W2 — "ensure `nix/images/builder-vm/` builds on Linux
+  # contributor hosts." Today the artifact is built on macOS via the
+  # libkrun-on-macOS path; Linux contributors (the ones Plan 100 will
+  # eventually make nested-libkrun-the-default for) have never had
+  # the eval *and* realise paths exercised end-to-end on a Linux
+  # runner.
+  #
+  # The eval-only `nix-flake-check` lane above catches eval bugs.
+  # This lane goes one step further: it actually runs `nix build` so
+  # a regression in the package set (kernel config, busybox version,
+  # toolchain pin) surfaces here, not when a Linux contributor next
+  # runs `mvmctl dev up` against an updated flake.
+  #
+  # Paths-gated to keep PR-time cost sane — `nix build` of the
+  # builder-VM image is bandwidth-heavy (~1-2 GB of substitutes on
+  # cold cache).
+  builder-vm-image-linux:
+    name: Builder VM image build (Linux, Plan 100 W2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Detect builder-vm-touching paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            builder_vm:
+              - 'nix/images/builder-vm/**'
+              - 'nix/lib/**'
+              # `mvm-host-vm-init` is a [[bin]] of mvm-build, not a crate of
+              # its own — the standalone directory this used to name was
+              # absorbed. A filter on a path that cannot exist never matches,
+              # so edits to the builder VM's PID 1 stopped triggering this
+              # lane silently.
+              - 'crates/mvm-build/src/bin/mvm-host-vm-init/**'
+
+      - name: Install Nix
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build builder-vm image
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        # `--no-link` avoids the gc-root file; `--print-out-paths`
+        # gives us the store path to inspect afterward. The four
+        # outputs the flake commits to (per `flake.nix` line 14):
+        # `vmlinux`, `rootfs.ext4`, `cmdline.txt`, `manifest.json`.
+        #
+        # Plan 115 / ADR-065: the flake reads `MVM_HOST_BIN_DIR`
+        # under `--impure` to inject every binary declared by
+        # nix/lib/mvm-host-binaries.nix via extraFiles. mvmctl normally
+        # extracts its embedded copy
+        # before invoking nix; CI uses placeholder files so the flake
+        # evaluates + builds (the rootfs will contain placeholder
+        # bytes at the binary install paths, which is fine for an
+        # eval-and-realise smoke).
+        run: |
+          set -euo pipefail
+          HOST_BIN_DIR=$(mktemp -d)
+          # Placeholder bytes — flake just needs the files to exist
+          # at the names the manifest declares.
+          : > "$HOST_BIN_DIR/mvm-host-vm-init"
+          : > "$HOST_BIN_DIR/mvm-builderd"
+          chmod 0755 "$HOST_BIN_DIR"/mvm-*
+          MVM_HOST_BIN_DIR="$HOST_BIN_DIR" \
+            nix build "./nix/images/builder-vm#packages.x86_64-linux.default" \
+              --impure --no-link --print-out-paths \
+              > /tmp/builder-vm-store-path.txt
+          STORE_PATH=$(head -1 /tmp/builder-vm-store-path.txt)
+          echo "STORE_PATH=$STORE_PATH"
+          ls -la "$STORE_PATH/"
+
+      - name: Assert all four outputs exist
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        # `nix build` returns 0 even when a non-fatal post-build hook
+        # squelches an output. Pin the contract by asserting every
+        # file the flake commits to is actually on disk. A future
+        # `flake.nix` change that drops one of these silently fails
+        # here, not in a contributor's `mvmctl dev up`.
+        run: |
+          set -euo pipefail
+          STORE_PATH=$(head -1 /tmp/builder-vm-store-path.txt)
+          for f in vmlinux rootfs.ext4 cmdline.txt manifest.json; do
+            if [ ! -e "$STORE_PATH/$f" ]; then
+              echo "::error::builder-vm output missing: $STORE_PATH/$f" >&2
+              exit 1
+            fi
+            ls -la "$STORE_PATH/$f"
+          done
+          echo "All four builder-vm outputs present."
+
+      - name: SHA-256 + size for visibility
+        if: steps.filter.outputs.builder_vm == 'true' || github.ref == 'refs/heads/main'
+        # Diff-grade visibility — a kernel-config change should show
+        # up as a different vmlinux hash, surfacing in the CI log
+        # without requiring downstream debugging.
+        run: |
+          set -euo pipefail
+          STORE_PATH=$(head -1 /tmp/builder-vm-store-path.txt)
+          (cd "$STORE_PATH" && sha256sum vmlinux rootfs.ext4 cmdline.txt manifest.json)
+          du -h "$STORE_PATH"/vmlinux "$STORE_PATH"/rootfs.ext4
 
   # ── Lane: Apple (release-only) ────────────────────────────────────
   # macOS regressions surface here, on release-tag pushes only. The
@@ -567,6 +774,9 @@ jobs:
             exit 1
           fi
 
+      - name: Use published builder VM bootstrap path
+        run: mv nix/images/builder-vm nix/images/builder-vm.hidden
+
       - name: Download published builder VM
         run: /tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v
 
@@ -576,23 +786,12 @@ jobs:
         run: /tmp/mvmctl-source-under-test --builder qemu bootstrap --production -v
 
       # The published workload asset is the uncompressed ELF required by
-      # Firecracker. Compile the same kernel once so Stage 0 can retain its
-      # sibling bzImage, which QEMU's x86 Linux boot protocol requires. Kernel
-      # sources live in mvm-images, and a compile refuses without a checkout of
-      # it, so the step below points the source binary at one — at the commit
-      # that produced the set images.lock pins, never at mvm-images `main`.
-      - name: Resolve the mvm-images commit images.lock pins
-        id: images-ref
-        run: |
-          ref="$(cargo run -q -p xtask -- image-source-ref)"
-          echo "ref=$ref" >> "$GITHUB_OUTPUT"
-
-      - name: Check out mvm-images
-        uses: actions/checkout@v6
-        with:
-          repository: tinylabscom/mvm-images
-          ref: ${{ steps.images-ref.outputs.ref }}
-          path: mvm-images
+      # Firecracker. Build the same pinned source once so Stage 0 can retain
+      # its sibling bzImage, which QEMU's x86 Linux boot protocol requires.
+      # Restore the source flake after proving the published-builder path;
+      # source compilation deliberately refuses to run without that checkout.
+      - name: Restore source builder VM flake
+        run: mv nix/images/builder-vm.hidden nix/images/builder-vm
 
       # Artifact compilation is not the no-KVM launch witness. Re-enable KVM
       # for the project builder VM; the independent smoke runner below denies
@@ -607,8 +806,6 @@ jobs:
             "/boot/initrd.img-$(uname -r)"
 
       - name: Build source QEMU-compatible workload kernel
-        env:
-          MVM_IMAGES_DIR: ${{ github.workspace }}/mvm-images
         run: /tmp/mvmctl-source-under-test kernel build --which workload --source compile -v
 
       # The published builder image is cheap to re-download and dominates the

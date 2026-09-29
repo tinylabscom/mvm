@@ -253,6 +253,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
             sigv4: None,
+            inject: Default::default(),
         }
     }
 
@@ -309,6 +310,7 @@ mod tests {
             auth_type: auth,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
             sigv4: None,
+            inject: Default::default(),
         }
     }
 
@@ -520,5 +522,12 @@ mod tests {
         let ph = reg_a.mint(bearer_ref("openai", &["api.openai.com"]));
         let reg_b = SubstitutionRegistry::new();
         assert!(reg_b.resolve(ph.as_str()).is_none());
+    }
+    #[test]
+    fn credential_injection_tracks_the_registry_bindings() {
+        let mut registry = SubstitutionRegistry::new();
+        assert!(!registry.injects_a_credential());
+        registry.mint(bearer_ref("token", &["api.example.test"]));
+        assert!(registry.injects_a_credential());
     }
 }

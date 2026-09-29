@@ -166,4 +166,20 @@ mod tests {
         assert_eq!(target_of("::1", 443), "[::1]:443");
         assert_eq!(target_of("api.example.com", 443), "api.example.com:443");
     }
+    #[test]
+    fn admitted_address_cache_prunes_only_at_capacity_and_keeps_the_new_answer() {
+        let admitted = AdmittedAddresses::default();
+        let ip = "93.184.216.34".parse().unwrap();
+        for index in 0..MAX_ADMITTED_ENTRIES {
+            admitted.record(&format!("host-{index}.test"), 443, vec![ip]);
+        }
+        assert_eq!(admitted.entries.lock().unwrap().len(), MAX_ADMITTED_ENTRIES);
+        admitted.record("NEW.test", 8443, vec![ip]);
+        assert_eq!(
+            admitted.entries.lock().unwrap().len(),
+            MAX_ADMITTED_ENTRIES / 2 + 1
+        );
+        assert_eq!(admitted.get("new.test", 8443), Some(vec![ip]));
+        assert_eq!(admitted.get("new.test", 443), None);
+    }
 }

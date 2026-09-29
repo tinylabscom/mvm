@@ -1434,6 +1434,50 @@ mod tests {
     }
 
     #[test]
+    fn denial_text_distinguishes_empty_grants_and_readmittable_ranges() {
+        assert_eq!(
+            DenyReason::HostNotAdmitted {
+                host: "example.test".into(),
+                admitted_hosts: vec![],
+            }
+            .to_string(),
+            "example.test is not admitted; no hosts are admitted"
+        );
+        assert_eq!(
+            DenyReason::PortNotAdmitted {
+                host: "example.test".into(),
+                port: 80,
+                admitted_ports: vec![],
+            }
+            .to_string(),
+            "example.test:80 is not admitted"
+        );
+        for (address, class, remedy) in [
+            ("10.1.2.3", RestrictedClass::Private, true),
+            ("169.254.169.254", RestrictedClass::CloudMetadata, false),
+        ] {
+            let text = DenyReason::RestrictedAddress {
+                ip: address.parse().unwrap(),
+                port: 443,
+                class,
+            }
+            .to_string();
+            assert_eq!(text.contains("--allow-host"), remedy);
+            assert_eq!(text.contains("never reachable"), !remedy);
+        }
+    }
+
+    #[test]
+    fn empty_dns_answers_are_denied_without_indexing_a_restriction() {
+        let gate = EgressGate::new(CanonicalEgress::Unrestricted);
+        let verdict = gate.decide_hostname_request(Proto::Tcp, "empty.test", 443, |_| Ok(vec![]));
+        assert!(matches!(
+            verdict,
+            EgressVerdict::Deny(DenyReason::HostNotAdmitted { .. })
+        ));
+    }
+
+    #[test]
     fn dns_verdict_filters_unrestricted_rebinding_answers() {
         use mvm_core::protocol::dns::DnsRecordType;
 

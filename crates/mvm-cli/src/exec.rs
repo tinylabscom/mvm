@@ -29,6 +29,7 @@ mod either;
 mod guest_run;
 mod launch_plan;
 mod mounts;
+mod oci_boot;
 use either::Either;
 use mounts::refuse_unloadable_sidecar;
 mod session;
@@ -42,6 +43,7 @@ pub(crate) use mvm_client::boot::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
 };
 pub use mvm_client::entrypoint::{AdmitInputs, SessionAdmit, SessionAuditSubstrate};
+pub(crate) use oci_boot::{ImageNaming, LaunchNames, boots_oci_image, oci_proxy_env};
 use session::wait_for_agent_timed;
 pub use session::{SessionVm, dispatch_in_session, wait_for_agent};
 use transient::{
@@ -293,14 +295,11 @@ impl ExecRequest {
     }
 }
 
-fn shape_uses_vsock_proxy_backend(shape: &LaunchShape<'_>) -> bool {
-    matches!(
-        shape.image,
-        ImageSource::Prebuilt {
-            unpacked_oci_root: Some(_),
-            ..
-        }
-    ) && shape.network_policy.allows_egress()
+fn shape_uses_vsock_proxy_backend(shape: &LaunchShape<'_>) -> Result<bool> {
+    Ok(
+        boots_oci_image(ImageNaming::Resolved(shape.image))?
+            && shape.network_policy.allows_egress(),
+    )
 }
 
 /// Build the IR healthcheck from the CLI flags. A shell command string becomes
@@ -1278,6 +1277,15 @@ impl LaunchResolveMarks {
     }
 }
 
+#[cfg(test)]
+fn prepare_then_admit<T>(
+    prepare: impl FnOnce() -> Result<()>,
+    admit: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    prepare()?;
+    admit()
+}
+
 /// One launch's boot shape, resolved without starting a VM.
 ///
 /// This is the whole of what a launch knows about itself before
@@ -1327,7 +1335,7 @@ pub fn resolve_launch(
     use crate::commands::vm::phase_timing::SubPhase;
 
     let backend = select_exec_backend(
-        shape_uses_vsock_proxy_backend(shape),
+        shape_uses_vsock_proxy_backend(shape)?,
         shape.network_policy,
         shape.hypervisor,
     )?;
@@ -1382,6 +1390,38 @@ pub fn resolve_launch(
         "admit window: build_start_config"
     );
     let mut use_snapshot = boot.use_snapshot;
+
+    // Attach everything the boot waits on before admitting. Admission starts
+    // the plan's validity window and the verb grant minted from it expires
+    // with it, so a cold overlay build after admission would spend the window
+    // the boot needs (see `mvm_client::launch::boot_order`).
+    let t_overlay = std::time::Instant::now();
+    sub.start(SubPhase::AttachOverlay);
+    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
+        crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
+            &mut start_config,
+            backend.name(),
+            None,
+            pair,
+        )
+    })?;
+    sub.finish(SubPhase::AttachOverlay);
+    tracing::debug!(
+        ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
+        "admit window: attach runtime overlay"
+    );
+
+    let t_initramfs = std::time::Instant::now();
+    sub.start(SubPhase::AttachInitramfs);
+    crate::commands::vm::up::attach_universal_initramfs_if_cached(
+        &mut start_config,
+        backend.name(),
+    )?;
+    sub.finish(SubPhase::AttachInitramfs);
+    tracing::debug!(
+        ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
+        "admit window: attach universal initramfs"
+    );
 
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
@@ -1446,34 +1486,6 @@ pub fn resolve_launch(
         );
         start_config.cpus = granted;
     }
-
-    let t_overlay = std::time::Instant::now();
-    sub.start(SubPhase::AttachOverlay);
-    crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
-        crate::commands::vm::up::attach_runtime_overlay_if_cached_version(
-            &mut start_config,
-            backend.name(),
-            None,
-            pair,
-        )
-    })?;
-    sub.finish(SubPhase::AttachOverlay);
-    tracing::debug!(
-        ms = t_overlay.elapsed().as_secs_f64() * 1000.0,
-        "admit window: attach runtime overlay"
-    );
-
-    let t_initramfs = std::time::Instant::now();
-    sub.start(SubPhase::AttachInitramfs);
-    crate::commands::vm::up::attach_universal_initramfs_if_cached(
-        &mut start_config,
-        backend.name(),
-    )?;
-    sub.finish(SubPhase::AttachInitramfs);
-    tracing::debug!(
-        ms = t_initramfs.elapsed().as_secs_f64() * 1000.0,
-        "admit window: attach universal initramfs"
-    );
 
     let t_status = std::time::Instant::now();
     crate::commands::vm::up::emit_runtime_source_status(&start_config);
@@ -1886,6 +1898,23 @@ mod tests {
         let marks = LaunchResolveMarks::new(false);
         assert!(marks.now().is_none());
         assert!(LaunchResolveMarks::new(true).now().is_some());
+    }
+
+    #[test]
+    fn slow_preparation_does_not_age_the_grant_window_before_admission() {
+        let minted = prepare_then_admit(
+            || {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                Ok(())
+            },
+            || Ok(std::time::Instant::now()),
+        )
+        .expect("preparation then admission succeeds");
+
+        assert!(
+            minted.elapsed() < std::time::Duration::from_millis(20),
+            "the grant window must start when admission runs, not before preparation"
+        );
     }
 
     #[test]
