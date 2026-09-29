@@ -149,7 +149,11 @@ Security-bearing gaps first, then the foundations the UX needs:
 ### PS-02 — Egress route model on vsock flows (#3712)
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
       — `policy::routes`, `fuzz_egress_routes`; carried on `NetworkPolicy` in the signed plan
-- [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+- [x] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+      — `SecretRef.inject` declares the mode; the position parser refuses a
+      placeholder outside its binding before anything forwards; basic_auth is
+      decoded/substituted/re-encoded; `mvm-contract` substitution + hostd
+      keyholder tests
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
       host is terminated only on an explicit `intercept` grant; `ask` is held and
@@ -247,8 +251,16 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
 
 ### PS-09 — Detachable sessions (#3719)
-- [ ] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
-- [ ] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+- [x] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
+      — the guest agent keeps one console session per VM alive across client
+      disconnects (1 MiB replay ring, fresh data port per attach, typed
+      `ConsoleBusy`, explicit `take_over`, optional detach timeout); new verbs
+      `ConsoleAttach`/`ConsoleDetach`/`ConsoleList` are DevOnly like
+      `ConsoleOpen`; `~d` detaches, `~.` ends
+- [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+      — `machine attach` (alias of `console`) and `machine detach` join the
+      existing `ps`, `logs -f`, `stop`; `inspect` still covers persistent
+      machine specs only
 - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
 
 ### PS-10 — Cryptographic audit trail UX (#3720)
@@ -267,10 +279,29 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
 
 ### PS-11 — Instruction-file provenance (#3721)
-- [ ] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
-- [ ] `mvmctl trust init|sign|verify` for instruction files; keyless signing workflow for our repos
-- [ ] pre-boot scan of workspace inputs wired into admission; files read-only in the guest; audited
+- [x] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
+      — `mvm_client::instruction_trust::policy`; user policy at
+      `<MVM_HOME>/config/instruction-trust.toml`, project policy at
+      `<project>/.mvm/instruction-trust.toml` (advisory alone); schema generated
+      from the Rust types at `schema/instruction-trust-policy-v0.json`
+- [x] `mvmctl trust instructions init|sign|verify|policy`; keyless signing workflow for our repos
+      — `.github/workflows/sign-instructions.yml` signs this repository's files
+      on a path-filtered push to `main` or dispatch, verifies the bundles through
+      the in-process verifier, and uploads them as an artifact (no commit). Other
+      repositories copy it rather than call it: a reusable workflow's certificate
+      names the called file, whoever called it
+- [x] pre-boot scan of `--mount` sources, `--asset` trees and the local workload
+      directory wired into admission; every verdict chain-audited
+      (`trust.instruction_verified` / `_unsigned` / `_blocked`); `deny` refuses
+      with `plan.admission_refused` stage `instruction_provenance`
+- [ ] files read-only in the guest: holds for `--mount` (read-only by default, a
+      per-launch snapshot, scanned at every admission). Open: volumes attached as
+      block devices are not scanned — including `machine volume mount --host DIR`,
+      whose directory is re-snapshotted at the next start after a host edit, and
+      whose `--rw` private copy keeps in-guest edits across restarts
 - [ ] mvm-scout static scan for injection indicators in instruction files
+      — in review: tinylabscom/mvm-assurance#202 (`SCOUT-PROMPT-002`, one shared
+      instruction-file surface definition)
 
 ### PS-12 — Environment hygiene (#3722)
 - [x] one shared denylist filter (loader, shell, interpreter, password-manager session variables)
@@ -336,7 +367,7 @@ Follow-ups for the owner-decision rows above, plus re-examining
 small PRs.
 
 ### PS-20 — Unreachable surface (#3729)
-- [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
+- [x] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
 
 ### PS-21 — CLI thin over mvm-client (#3730)
 - [x] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
@@ -463,7 +494,10 @@ packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
   can expire before boot (`VerbNotAuthorized`).
 - #3757: a `--manifest` run naming an OCI image gets no guest proxy/CA env.
 - Transient `LocalBackend::launch` (`mvm_hostd::run::admit_and_boot_local`)
-  attaches no universal initramfs and panics at `/init` for Rust callers.
+  attached no universal initramfs and panicked at `/init` for Rust callers.
+  Fixed by the `fix/transient-launch-initramfs` PR: the attach decision
+  lives in `mvm_runtime::universal_initramfs` and hostd attaches overlay +
+  initramfs together on the in-process boot.
 - #3753 open box: host-directory volumes attached as block devices
   (`machine volume mount --host DIR`) are never scanned for instruction files.
 - For review: a boot command override on a `prod` build slot is accepted, the

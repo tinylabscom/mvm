@@ -253,6 +253,7 @@ mod tests {
             agent_verb: Vec::new(),
             caller_commitment: None,
             created_at: None,
+            workload_dir: None,
             last_started_at: None,
             health_check: None,
             grants: None,

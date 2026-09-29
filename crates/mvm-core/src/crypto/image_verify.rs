@@ -27,9 +27,24 @@ pub enum VerifyError {
 /// Result alias used throughout this module.
 pub type VerifyResult<T> = Result<T, VerifyError>;
 
-/// Verify a cosign bundle over `artifact` against the exact SAN identity and
-/// OIDC issuer, returning `Ok(())` only when the signature, certificate chain,
-/// and transparency-log inclusion proof all check out.
+/// The certificate identity a verified keyless signature was minted under.
+///
+/// Returned only after the signature, certificate chain, and transparency-log
+/// inclusion proof have all checked out, so holding one is evidence the
+/// payload was signed by whoever the certificate names. What that identity is
+/// *allowed* to sign is the caller's policy, not this module's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSigner {
+    /// The certificate's subject alternative name — for a CI workflow, the
+    /// workflow file bound to the ref it ran under.
+    pub identity: String,
+    /// The OIDC issuer recorded in the certificate.
+    pub issuer: String,
+}
+
+/// Verify a cosign bundle over `artifact` under `expected_issuer`, and under
+/// `expected_identity` when one is given, returning the certificate identity
+/// the signature was minted under.
 ///
 /// Verification is offline: the Sigstore trust root (Fulcio CA + Rekor and
 /// CT-log public keys) is embedded in `sigstore-trust-root`, and the bundle
@@ -40,9 +55,9 @@ pub type VerifyResult<T> = Result<T, VerifyError>;
 fn verify_cosign_bundle(
     artifact: &[u8],
     cosign_bundle: &[u8],
-    expected_identity: &str,
+    expected_identity: Option<&str>,
     expected_issuer: &str,
-) -> VerifyResult<()> {
+) -> VerifyResult<VerifiedSigner> {
     use sigstore_trust_root::{SIGSTORE_PRODUCTION_TRUSTED_ROOT, TrustedRoot};
     use sigstore_types::Bundle;
     use sigstore_verify::{VerificationPolicy, verify};
@@ -61,16 +76,27 @@ fn verify_cosign_bundle(
         }
     })?;
 
-    let policy = VerificationPolicy::default()
-        .require_identity(expected_identity)
-        .require_issuer(expected_issuer);
+    let mut policy = VerificationPolicy::default().require_issuer(expected_issuer);
+    if let Some(identity) = expected_identity {
+        policy = policy.require_identity(identity);
+    }
 
-    verify(artifact, &bundle, &policy, &trusted_root).map_err(|e| {
+    let result = verify(artifact, &bundle, &policy, &trusted_root).map_err(|e| {
         VerifyError::SignatureInvalid {
             reason: format!("signature verification failed: {e}"),
         }
     })?;
-    Ok(())
+    // The issuer was required above, so a verified result always carries it;
+    // a certificate with no SAN names nobody and cannot satisfy any policy.
+    let identity = result
+        .identity
+        .ok_or_else(|| VerifyError::SignatureInvalid {
+            reason: "signing certificate carries no identity (SAN)".to_string(),
+        })?;
+    Ok(VerifiedSigner {
+        identity,
+        issuer: result.issuer.unwrap_or_else(|| expected_issuer.to_string()),
+    })
 }
 
 /// Verify a cosign-signed payload of any shape against the exact SAN
@@ -96,9 +122,10 @@ pub fn verify_signed_payload(
     verify_cosign_bundle(
         payload_bytes,
         cosign_bundle,
-        expected_identity,
+        Some(expected_identity),
         expected_issuer,
     )
+    .map(|_| ())
 }
 
 #[cfg(not(feature = "manifest-verify"))]
@@ -109,11 +136,54 @@ pub fn verify_signed_payload(
     _expected_issuer: &str,
 ) -> VerifyResult<()> {
     Err(VerifyError::SignatureInvalid {
-        reason: "manifest-verify feature is disabled in this build; rebuild \
-                 mvmctl with `--features user`, or set MVM_SKIP_COSIGN_VERIFY=1 \
-                 in an emergency rotation."
-            .to_string(),
+        reason: VERIFIER_DISABLED_REASON.to_string(),
     })
+}
+
+/// Why a build compiled without the verifier refuses every keyless signature.
+#[cfg(not(feature = "manifest-verify"))]
+const VERIFIER_DISABLED_REASON: &str = "manifest-verify feature is disabled in this build; rebuild \
+     mvmctl with `--features user`, or set MVM_SKIP_COSIGN_VERIFY=1 in an emergency rotation.";
+
+/// Verify a cosign-signed payload under `expected_issuer` alone and return
+/// the certificate identity it was signed under.
+///
+/// For callers whose trust policy is a *pattern* over identities rather than
+/// a closed set — a publisher trusted for any tag of one workflow, say — and
+/// which therefore cannot enumerate exact identities for
+/// [`verify_signed_payload_under_any_identity`]. The cryptographic checks are
+/// identical; only the identity comparison moves to the caller, which must
+/// match [`VerifiedSigner::identity`] before trusting the payload. The issuer
+/// is still pinned here, so an identity is never compared across issuers.
+#[cfg(feature = "manifest-verify")]
+pub fn verify_signed_payload_signer(
+    payload_bytes: &[u8],
+    cosign_bundle: &[u8],
+    expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
+    verify_cosign_bundle(payload_bytes, cosign_bundle, None, expected_issuer)
+}
+
+#[cfg(not(feature = "manifest-verify"))]
+pub fn verify_signed_payload_signer(
+    _payload_bytes: &[u8],
+    _cosign_bundle: &[u8],
+    _expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
+    Err(VerifyError::SignatureInvalid {
+        reason: VERIFIER_DISABLED_REASON.to_string(),
+    })
+}
+
+/// Whether this build carries the keyless verifier at all.
+///
+/// A build without it refuses every keyless signature, which is the right
+/// answer at a gate but the wrong *explanation*: a caller reporting on a file
+/// should be able to say "this build cannot check keyless signatures" rather
+/// than "this signature is invalid".
+#[must_use]
+pub const fn keyless_verifier_available() -> bool {
+    cfg!(feature = "manifest-verify")
 }
 
 /// Verify `payload_bytes` against `cosign_bundle` under whichever of
@@ -387,6 +457,56 @@ mod tests {
         let err = verify_signed_payload_under_any_identity(b"{}", b"bundle", &[], "issuer")
             .expect_err("no accepted identity must never mean any identity");
         assert!(matches!(err, VerifyError::SignatureInvalid { .. }));
+    }
+
+    /// A real release bundle, the same fixture the release-signature tests
+    /// verify under an exact identity. Checked here under the issuer alone, the
+    /// verifier must hand back the workflow identity the certificate carries —
+    /// the value a pattern-matching caller compares, so a regression that
+    /// returned the wrong field would let that caller trust the wrong signer.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn a_real_bundle_verified_under_its_issuer_names_its_signing_workflow() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvm-build/tests/fixtures/release-signature/v0.18.0-rc.1");
+        let payload = std::fs::read(dir.join("builder-vm-aarch64-checksums-sha256.txt")).unwrap();
+        let bundle =
+            std::fs::read(dir.join("builder-vm-aarch64-checksums-sha256.txt.bundle")).unwrap();
+
+        let signer = verify_signed_payload_signer(
+            &payload,
+            &bundle,
+            crate::release_trust::RELEASE_OIDC_ISSUER,
+        )
+        .expect("the release workflow's own signature verifies under its issuer");
+        assert_eq!(
+            signer.identity,
+            crate::release_trust::accepted_release_identities("0.18.0-rc.1")[0]
+        );
+        assert_eq!(signer.issuer, crate::release_trust::RELEASE_OIDC_ISSUER);
+
+        let mut tampered = payload.clone();
+        tampered.push(b'\n');
+        verify_signed_payload_signer(
+            &tampered,
+            &bundle,
+            crate::release_trust::RELEASE_OIDC_ISSUER,
+        )
+        .expect_err("a payload that is not the signed one must be refused");
+        verify_signed_payload_signer(&payload, &bundle, "https://accounts.example.test")
+            .expect_err("a signature is never accepted under a different issuer");
+    }
+
+    #[cfg(not(feature = "manifest-verify"))]
+    #[test]
+    fn a_build_without_the_verifier_refuses_signer_extraction_too() {
+        assert!(!keyless_verifier_available());
+        let err = verify_signed_payload_signer(b"{}", b"bundle", "issuer")
+            .expect_err("a non-verifying build must refuse");
+        assert!(
+            err.to_string()
+                .contains("manifest-verify feature is disabled")
+        );
     }
 
     #[cfg(not(feature = "manifest-verify"))]

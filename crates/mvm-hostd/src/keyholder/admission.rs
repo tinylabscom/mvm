@@ -90,6 +90,7 @@ pub fn assemble_registry(
             // forward-path signer reads it to name the credential. None for
             // every non-SigV4 secret.
             sigv4: meta.sigv4,
+            inject: Default::default(),
         };
         let placeholder = registry.mint(secret_ref);
         handed.push((b.name.clone(), placeholder));

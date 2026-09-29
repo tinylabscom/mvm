@@ -1347,7 +1347,7 @@ mod tests {
         let mut cmd = std::process::Command::new("cargo");
         cmd.env("RUSTFLAGS", "-Zthreads=8")
             .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
-            .env("RUSTC_WRAPPER", "sccache")
+            .env("RUSTC_WRAPPER", "outer-rustc-wrapper")
             .env("RUSTUP_TOOLCHAIN", "nightly");
         apply_zigbuild_env(&mut cmd, &spec, Some(Path::new("/pinned/rustc")))
             .expect("configure zigbuild env");

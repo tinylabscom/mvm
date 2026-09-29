@@ -179,6 +179,9 @@ fn verb_refusal_explanation(
     envelope: Option<&mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> String {
+    if verb != "activate-environment" {
+        return format!("guest denied activation verb {verb}");
+    }
     let Some(envelope) = envelope else {
         return format!(
             "the guest refused `{verb}`: its policy requires a signed verb grant and the host \
@@ -189,8 +192,9 @@ fn verb_refusal_explanation(
     if now >= not_after {
         let late = (now - not_after).num_seconds();
         return format!(
-            "the guest refused `{verb}` because the verb grant for session {} expired at \
-             {not_after}, {late}s before activation. A grant lasts only as long as the admitted \
+            "the guest refused `{verb}` because the verb grant expired before activation: \
+             the grant for session {} expired at {not_after}, {late}s before activation \
+             (grant not_after={not_after}). A grant lasts only as long as the admitted \
              plan's validity window, so something between admission and boot outlasted that \
              window. Start again: prepared artifacts are cached, and admission now happens after \
              preparation.",
@@ -199,7 +203,8 @@ fn verb_refusal_explanation(
     }
     format!(
         "the guest refused `{verb}`: the verb grant for session {} (valid until {not_after}) was \
-         not accepted. The guest console log records why it rejected the grant.",
+         not accepted. The guest console log records why it rejected the grant; verify the \
+         grant/session binding and host trust anchor.",
         envelope.grant.session_id
     )
 }
@@ -441,6 +446,12 @@ mod tests {
     fn a_missing_grant_says_none_was_sent() {
         let message = verb_refusal_explanation("activate-environment", None, chrono::Utc::now());
         assert!(message.contains("sent none"), "{message}");
+    }
+
+    #[test]
+    fn an_unexpected_verb_is_named_without_guessing_its_grant_state() {
+        let message = verb_refusal_explanation("exec", None, chrono::Utc::now());
+        assert_eq!(message, "guest denied activation verb exec");
     }
     use mvm_core::net::session::SessionError;
     use mvm_core::protocol::vm_backend::VmVolumeKind;
@@ -808,6 +819,73 @@ mod tests {
             err.to_string().contains("mount failed"),
             "expected the guest's error to fail the boot: {err}"
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn activate_over_stream_reports_expired_verb_grant_context() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().unwrap();
+        let server = std::thread::spawn(move || {
+            let guest_key = ed25519_dalek::SigningKey::from_bytes(&[9u8; 32]);
+            let host_key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]).verifying_key();
+            let mut session =
+                mvm_agentd::vsock::AuthenticatedSession::guest(&mut guest, guest_key, &host_key)
+                    .unwrap();
+            let req: GuestRequest = session.read(&mut guest).unwrap();
+            assert!(matches!(req, GuestRequest::ActivateEnvironment(_)));
+            session
+                .write(
+                    &mut guest,
+                    &GuestResponse::VerbNotAuthorized {
+                        verb: "activate-environment".into(),
+                    },
+                )
+                .unwrap();
+        });
+
+        let (_env, _dir) = test_env();
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("host-signer.ed25519"), [7u8; 32]).unwrap();
+
+        let vm_name = "expired-grant-vm";
+        let state = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state).unwrap();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: VALID_HASH.into(),
+            plan_nonce_hex: VALID_HASH.into(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: mvm_core::plan::VerbGrant {
+                session_id: vm_name.into(),
+                plan_nonce: mvm_core::plan::Nonce::from_hex("0123456789abcdef0123456789abcdef")
+                    .unwrap(),
+                not_after: chrono::Utc::now() - chrono::Duration::seconds(1),
+                verbs: vec![mvm_core::plan::VerbId::new("activate-environment").unwrap()],
+                drive: None,
+                sig: vec![0u8; 64],
+            },
+        };
+        std::fs::write(
+            state.join("verb-grant.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        let mut config = base_config();
+        config.name = vm_name.into();
+        let env = build_activation_environment(&config).unwrap();
+        let err = activate_over_stream(&mut host, &env).unwrap_err();
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("verb grant expired before activation"),
+            "expected expiry context in activation denial: {rendered}"
+        );
+        assert!(
+            rendered.contains("grant not_after="),
+            "expected explicit expiry metadata in activation denial: {rendered}"
+        );
+
         server.join().unwrap();
     }
 

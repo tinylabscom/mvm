@@ -93,6 +93,9 @@ pub struct PersistentImageStartParams<'a> {
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
     pub gpu_device: Option<u32>,
+    /// Local workload source directory to scan for project instruction files and
+    /// policies on each start, when the persistent machine came from one.
+    pub workload_dir: Option<&'a std::path::Path>,
     /// The machine's recorded secret references, already validated against
     /// the caller's secret service.
     pub secrets: crate::admission::secrets::ResolvedPlanSecrets,
@@ -198,6 +201,7 @@ pub fn start_persistent_oci_machine(
         grants,
         gpu,
         gpu_device,
+        workload_dir,
         secrets: resolved_secrets,
         backend,
     } = params;
@@ -262,8 +266,19 @@ pub fn start_persistent_oci_machine(
         |config| {
             let admission_ledger = InMemoryNonceLedger::new();
             let ingress = machine_port_ingress(ports)?;
+            let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
+                .iter()
+                .filter_map(|volume| {
+                    volume
+                        .materialized_image
+                        .as_deref()
+                        .map(std::path::PathBuf::from)
+                })
+                .collect();
             admit_plan_for_boot_with_ingress(
                 AdmitPlanForBootParams {
+                    instructions: crate::admission::InstructionSources::for_workload(workload_dir)
+                        .with_mount_roots(&instruction_mount_roots),
                     outputs: Vec::new(),
                     network_mode: preflight_network(),
                     tenant: "local",

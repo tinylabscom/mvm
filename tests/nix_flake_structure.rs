@@ -649,9 +649,12 @@ fn installation_docs_keep_binary_install_primary() {
         "installation docs must show the current image-backed one-shot path"
     );
     assert!(
-        normalized.contains("future package-manager expression installs release binaries")
-            && normalized.contains("separate from this source-built package"),
-        "installation docs must keep release-binary packaging separate from source-built Nix"
+        normalized.contains("repository root exposes a release binary pinned by archive hash")
+            && normalized.contains("nix run github:tinylabscom/mvm#prebuilt")
+            && normalized.contains("nix profile add github:tinylabscom/mvm#prebuilt")
+            && normalized.contains("two outputs are separate: `#prebuilt`")
+            && normalized.contains("`nix/#mvmctl` builds the checkout's source"),
+        "installation docs must distinguish pinned release binaries from source-built Nix"
     );
 }
 

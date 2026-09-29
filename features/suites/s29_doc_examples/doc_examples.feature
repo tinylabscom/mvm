@@ -39,6 +39,9 @@ Feature: Documented examples work
   Scenario: side-effect-free documented examples actually run
     Then every side-effect-free documented example executes successfully
 
+  Scenario: instruction trust examples work together in an isolated home
+    Then the instruction trust workflow runs "trust instructions init" then "trust instructions sign ./my-agent" then "trust instructions verify ./my-agent"
+
   Scenario: placeholder templates still name real commands
     # A template is exempt from parsing. Its verb prefix is not, or writing
     # `<placeholders>` would be a way to document a command that never existed.

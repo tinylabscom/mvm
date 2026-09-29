@@ -128,6 +128,12 @@ ref: SecretRef
  * How a secret authenticates an outbound request, so the keyholder picks the right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer); `Bearer`/`Basic` are *injected* credentials.
  */
 export type AuthType = ("sigv4" | "hmac" | "bearer" | "basic")
+/**
+ * Where an injected credential's placeholder may sit in a request, and so where its value is substituted.
+ * 
+ * Only injected credentials (`Bearer`, `Basic`) have a position; a signing scheme (`Sigv4`, `Hmac`) signs the whole request and is always `Header`.
+ */
+export type InjectionMode = ("header" | "query_param" | "url_path" | "basic_auth")
 export type SecretMount = ({
 kind: "env"
 var: string
@@ -346,6 +352,10 @@ allowed_hosts: string[]
  * How the keyholder uses the secret on egress (signer vs injector).
  */
 auth_type: AuthType
+/**
+ * Where in a request the placeholder is substituted. The binding's operator declares it; a placeholder anywhere else is refused. Omitted when it is [`InjectionMode::Header`], so a plan without one is byte-identical to one written before the field existed.
+ */
+inject?: InjectionMode
 mount: SecretMount
 name: string
 /**

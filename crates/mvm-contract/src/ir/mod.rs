@@ -28,8 +28,8 @@ pub use validate::{ValidationError, validate};
 pub use version::{IR_MAJOR, IR_MINOR, VersionError, validate_schema_version};
 pub use workload::{
     App, AuthType, Concurrency, Dependencies, Entrypoint, EnvValue, Format, HealthCheck, HostPort,
-    Image, InProcessMode, JsonSchemaShape, MaterializedFile, Mount, MountMode, MountSource,
-    Network, NetworkDns, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto,
+    Image, InProcessMode, InjectionMode, JsonSchemaShape, MaterializedFile, Mount, MountMode,
+    MountSource, Network, NetworkDns, NetworkEgress, NetworkMode, NodeTool, PortForward, PortProto,
     PortTransform, PythonTool, Resources, SecretMount, SecretRef, Sigv4Params, Source, Volume,
     WarmProcessConfig, Workload, host_is_bound, host_matches,
     host_pattern_is_single_label_wildcard, host_pattern_subtree,
