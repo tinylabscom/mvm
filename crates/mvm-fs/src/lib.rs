@@ -52,3 +52,4 @@ pub mod sdk_sidecar;
 pub mod snapshot_store;
 pub mod tree_diff;
 pub mod trusted_snapshot;
+pub mod workspace_apply;

@@ -80,6 +80,8 @@ fn params(id: &str) -> CaptureVmFullParams {
         created_unix: 1,
         retain_paused: false,
         grants: None,
+        parent: None,
+        session: None,
         workspace_volumes: Vec::new(),
     }
 }

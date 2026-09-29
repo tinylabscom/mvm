@@ -4974,3 +4974,21 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
 - [x] Phase 10 subagent pre-flight: AGENTS.md four-item checklist (paths,
       env, scope + tools, denial fallback). Anti-example recorded: 3/3
       analysis subagents blocked on first call, 2026-09-28.
+
+## 2026-09-29 PS-08 replay and signed workspace history — #3718
+
+- [~] Emit chain-signed apply, undo and redo audit entries with the exact
+      committed workspace Merkle root; derive session-seal snapshot roots from
+      ordered checkpoint creation digests.
+- [~] Add encrypted, content-addressed replay inputs and bind each input to a
+      parent-linked `vm_full` checkpoint, session generation and journal cursor.
+- [~] Add the durable step commit point plus chain-verified replay planning and
+      idempotent ordered dispatch witnesses.
+- [~] Finish production step orchestration and expose replay through the
+      operator surface once the general agent prompt transport is available to
+      `mvmctl`.
+- [~] Validation: affected-crate Clippy with warnings denied, workspace check,
+      formatting and focused replay/audit/lineage tests pass. The unchanged
+      `mvm-agentd` slow-sink test fails reproducibly after receiving 175 KiB of
+      its expected 512 KiB; the Linux gated check cannot start because this
+      host has no `rustup` executable.

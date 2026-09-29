@@ -61,6 +61,9 @@ Last updated: 2026-09-29
     - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
     - [x] tool-call supervisor seam (live caller stays in PS-13); SDK callback through hostlib ABI 1.4; retained broker for SDK detached/persistent machines
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
+    - [~] content diff and reviewed, crash-recoverable apply with durable undo/redo
+    - [~] committed apply/undo/redo roots and checkpoint-derived session roots in the signed audit chain
+    - [~] encrypted input artifacts, session-linked step checkpoints and verified ordered replay dispatch are implemented; production prompt orchestration and the operator replay command remain
   - [ ] PS-09 detachable sessions and console reattach — #3719
     - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated
     - [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`

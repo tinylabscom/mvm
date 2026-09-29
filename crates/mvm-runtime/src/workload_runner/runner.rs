@@ -996,6 +996,8 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             grants: None,
             // A factory parent has no workspace: it is booted before any
             // workload, with no user volume attached.
+            parent: None,
+            session: None,
             workspace_volumes: Vec::new(),
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))

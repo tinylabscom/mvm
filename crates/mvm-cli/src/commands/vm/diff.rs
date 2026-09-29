@@ -231,7 +231,7 @@ fn image_for(store: &CheckpointStore, workspace: &Workspace, side: &Side) -> Res
 }
 
 /// Ask the running guest to flush its writes before its volume image is read.
-fn flush_guest(name: &str) -> Result<()> {
+pub(in crate::commands) fn flush_guest(name: &str) -> Result<()> {
     #[cfg(feature = "test-support")]
     {
         let mock_socket = mvm_runtime::MockBackend::vm_dir(name)

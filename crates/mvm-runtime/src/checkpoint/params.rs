@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use mvm_contract::builder::BuilderError;
-use mvm_core::checkpoint::CheckpointId;
+use mvm_core::checkpoint::{CheckpointDigest, CheckpointId, SessionBinding};
 
 /// Inputs for an `fs_quick` capture. Grouped into a struct so the call site
 /// reads clearly and we never thread a long positional argument list.
@@ -396,6 +396,10 @@ pub struct CaptureVmFullParams {
     /// The permission set the captured VM was admitted under. See
     /// [`CaptureFsQuickParams::grants`].
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Previous step checkpoint in the same session timeline.
+    pub parent: Option<CheckpointDigest>,
+    /// Durable session position frozen by this step checkpoint.
+    pub session: Option<SessionBinding>,
     /// Writable volume images cloned in the same pause window as memory and
     /// rootfs, so the checkpoint freezes the workspace with the machine.
     pub workspace_volumes: Vec<WorkspaceVolume>,
@@ -423,6 +427,8 @@ pub struct CaptureVmFullParamsBuilder {
     created_unix: Option<u64>,
     retain_paused: Option<bool>,
     grants: Option<mvm_contract::grants::Grants>,
+    parent: Option<CheckpointDigest>,
+    session: Option<SessionBinding>,
     workspace_volumes: Vec<WorkspaceVolume>,
 }
 
@@ -440,6 +446,8 @@ impl CaptureVmFullParamsBuilder {
             created_unix: None,
             retain_paused: None,
             grants: None,
+            parent: None,
+            session: None,
             workspace_volumes: Vec::new(),
         }
     }
@@ -520,6 +528,20 @@ impl CaptureVmFullParamsBuilder {
         self
     }
 
+    /// Link this capture to the previous step checkpoint.
+    #[must_use]
+    pub fn parent(mut self, parent: impl Into<Option<CheckpointDigest>>) -> Self {
+        self.parent = parent.into();
+        self
+    }
+
+    /// Bind this capture to an exact durable session position.
+    #[must_use]
+    pub fn session(mut self, session: impl Into<Option<SessionBinding>>) -> Self {
+        self.session = session.into();
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<CaptureVmFullParams, BuilderError> {
         Ok(CaptureVmFullParams {
@@ -543,6 +565,8 @@ impl CaptureVmFullParamsBuilder {
                 "retain_paused",
             ))?,
             grants: self.grants,
+            parent: self.parent,
+            session: self.session,
             workspace_volumes: self.workspace_volumes,
         })
     }
