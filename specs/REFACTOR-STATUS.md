@@ -6,6 +6,16 @@ Last updated: 2026-09-28
 
 - [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
+- [ ] **Agent efficiency overhaul.**
+      `specs/plans/2026-09-28-agent-efficiency-overhaul.md`. Phases 1–10
+      establish retry, waiting, scoped-test, tool-routing, environment,
+      reasoning-budget, recovery, background-operation, context-hygiene, and
+      subagent-preflight disciplines across the supported agent harnesses.
+  - [x] Agreements, retry guard and journal, scoped-test recipe, reproducible
+        transcript analysis, and baseline measurements implemented.
+  - [ ] Re-measure fresh transcripts after two weeks and record the Phase
+        2.4–10.3 results against the plan's baselines.
+
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
       microVM / vsock / signed-plan security core and close every

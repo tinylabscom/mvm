@@ -265,6 +265,25 @@ test-crate CRATE:
     ./scripts/require-nextest.sh
     ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
 
+# Run one crate's tests filtered by test name — the default debugging loop.
+# The failure loop is: test-scoped → read the failure → fix → test-scoped
+# again; the full-workspace sweep (just test) runs once before declaring
+# done, not after every edit. A filtered workspace run still builds and
+# links every crate in the tree; scoping to the one crate under edit is
+# what keeps the loop seconds instead of minutes.
+# Usage: just test-scoped CRATE [FILTER]
+#   CRATE: crate name to test
+#   FILTER: optional test-name filter (e.g. "my_test" or "my_*")
+test-scoped CRATE FILTER="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/require-nextest.sh
+    if [ -n "{{ FILTER }}" ]; then
+    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }} -E 'test({{ FILTER }})'
+    else
+    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
+    fi
+
 # Run tests under the `ci` profile: no retries, slow-test warnings, and a
 # JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure
 # only (no captured test output — see .config/nextest.toml).
