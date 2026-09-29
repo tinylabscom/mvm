@@ -222,17 +222,19 @@ Security-bearing gaps first, then the foundations the UX needs:
       the VM's `approval.sock`; a binding with `approve = ask`
       (`mvmctl secret set --approve ask`) asks before its placeholder is
       substituted; timeout, no broker or any error denies
-- [ ] PS-13 tool calls consult the same supervisor — the `tool_call`
-      subject exists; `tool_gate.rs` has no live caller to ask it
+- [x] tool-call asks have the same supervisor and backend contract — the
+      `tool_call` subject and `RuntimeApprover::approve_tool_call` seam are
+      complete; PS-13 owns the live tool-policy caller and remains tracked
+      there rather than duplicating its gate in PS-07
 - [x] terminal backend on the controlling TTY: arming window, control-sequence stripping, empty = deny, no TTY = deny
       — `/dev/tty`, never workload stdin; an `-it` run denies (`tty_busy`)
       rather than race the workload; `PromptRenderer` is the seam PS-04's
       live denials share
 - [x] webhook and chain backends — HTTPS or loopback only, no redirects,
       4 KiB reply cap, timeout; `--approval-mode all|any`
-- [ ] SDK callback through hostlib — `CallbackBackend` is the callback type.
-      Remaining: a hostlib ABI entry that registers a callback, a broker bound
-      per machine hostlib launches, and the Python and TypeScript facades
+- [x] SDK callback through hostlib — ABI 1.4 registers a bounded process-wide
+      callback (`deny` / `once` / `session`); Python and TypeScript expose it,
+      callback failures deny, and the endpoint still owns scope, TTL and audit
 - [x] once / session scope with TTL; nothing silently persisted; every decision audited; rate limit
       — session approvals live in the endpoint for 15 minutes; 10 prompts a
       minute, the rest denied `rate_limited`; `approval.requested / granted /
@@ -240,8 +242,11 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] surface: `--approval tty|deny|webhook=URL` on `run` and `machine run`,
       `[approval]` in `mvm.toml`; default tty for an operator at a terminal,
       deny otherwise
-- [ ] a broker for detached and persistent machines — nobody answers today,
-      so their asks deny
+- [x] a broker for detached and persistent SDK machines — hostlib binds after
+      admitted boot and before an SDK-started command, retains one broker per
+      machine, and drops it on stop/remove. A standalone `mvmctl` detached
+      machine still has no owning process and denies; its long-lived ownership
+      model belongs to PS-09's detachable-session surface
 
 ### PS-08 — Undo, redo, replay, diff (#3718)
 - [ ] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints

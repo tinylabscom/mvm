@@ -171,10 +171,45 @@ export function setInvokeForTesting(fn: InvokeFn | null): void {
 interface LoadedLib {
   call: (...args: unknown[]) => number;
   free: (buf: unknown) => void;
-  koffi: { decode: (ptr: unknown, type: string, len: number) => Uint8Array };
+  setApprovalCallback: (callback: unknown) => number;
+  approvalCallbackType: unknown;
+  koffi: {
+    decode: (ptr: unknown, type: string, len: number) => Uint8Array;
+    pointer: (type: unknown) => unknown;
+    register: (
+      callback: (pointer: unknown, length: number) => number,
+      type: unknown,
+    ) => unknown;
+    unregister: (callback: unknown) => void;
+  };
 }
 
 let lib: LoadedLib | null = null;
+let activeApprovalCallback: unknown | null = null;
+let approvalCleanupRegistered = false;
+
+/** The only decisions an SDK callback can return. */
+export type ApprovalDecision = "deny" | "once" | "session";
+/** What the paused flow is asking to do. */
+export type ApprovalSubject =
+  | {
+      kind: "egress";
+      route_id: string;
+      rule: string;
+      destination: string;
+      method: string;
+      path: string;
+    }
+  | { kind: "secret_use"; secret: string; destination: string }
+  | { kind: "tool_call"; tool: string };
+/** The supervisor's bounded JSON question. */
+export interface ApprovalPrompt {
+  request_id: string;
+  subject: ApprovalSubject;
+  expires_in_ms: number;
+}
+/** An application callback for runtime `ask` decisions. */
+export type ApprovalCallback = (prompt: ApprovalPrompt) => ApprovalDecision;
 
 /** Load and memoize the library, declaring the C ABI signatures. */
 function loadLib(): LoadedLib {
@@ -194,6 +229,14 @@ function loadLib(): LoadedLib {
       "int32_t mvm_hostlib_call(const uint8_t*, size_t, const uint8_t*, size_t, _Out_ MvmHostlibBuf*)",
     );
     const free = handle.func("void mvm_hostlib_free(MvmHostlibBuf)");
+    const approvalCallbackType = koffi.proto(
+      "MvmHostlibApprovalCallback",
+      "int32_t",
+      ["const uint8_t *", "size_t"],
+    );
+    const setApprovalCallback = handle.func(
+      "int32_t mvm_hostlib_set_approval_callback(void *callback)",
+    );
     if (abiCompatible(ABI_MAJOR, ABI_MINOR) !== 1) {
       const version: number = abiVersion();
       throw new HostLibraryAbiError(
@@ -201,9 +244,70 @@ function loadLib(): LoadedLib {
           `this SDK needs ${ABI_MAJOR}.${ABI_MINOR}; install matching versions`,
       );
     }
-    lib = { call, free, koffi };
+    lib = { call, free, setApprovalCallback, approvalCallbackType, koffi };
   }
   return lib;
+}
+
+/** Map one callback answer to the host ABI's bounded decision enum. */
+export function approvalCallbackResult(
+  callback: ApprovalCallback,
+  encoded: Buffer,
+): number {
+  try {
+    const parsed: unknown = JSON.parse(encoded.toString("utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return 0;
+    const decision = callback(parsed as unknown as ApprovalPrompt);
+    return decision === "once" ? 1 : decision === "session" ? 2 : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Set the process-wide callback for runtime `ask` decisions.
+ *
+ * Register it before launching or starting a machine. Machines launched or
+ * started through this SDK retain a private broker until stop/remove. Clearing
+ * with `null` makes existing brokers deny; no decision is written to a profile.
+ * Exceptions and unknown answers deny.
+ */
+export function setApprovalCallback(callback: ApprovalCallback | null): void {
+  const handle = loadLib();
+  let registered: unknown = null;
+  if (callback !== null) {
+    registered = handle.koffi.register(
+      (pointer: unknown, length: number): number => {
+        try {
+          const bytes = Buffer.from(handle.koffi.decode(pointer, "uint8_t", length));
+          return approvalCallbackResult(callback, bytes);
+        } catch {
+          return 0;
+        }
+      },
+      handle.koffi.pointer(handle.approvalCallbackType),
+    );
+    if (!approvalCleanupRegistered) {
+      process.once("exit", () => {
+        handle.setApprovalCallback(null);
+        if (activeApprovalCallback !== null) {
+          handle.koffi.unregister(activeApprovalCallback);
+          activeApprovalCallback = null;
+        }
+      });
+      approvalCleanupRegistered = true;
+    }
+  }
+  const status = handle.setApprovalCallback(registered);
+  if (status !== OK) {
+    if (registered !== null) handle.koffi.unregister(registered);
+    throw new HostLibraryError(
+      `host library refused the approval callback (status ${status})`,
+    );
+  }
+  const previous = activeApprovalCallback;
+  activeApprovalCallback = registered;
+  if (previous !== null) handle.koffi.unregister(previous);
 }
 
 /** Call the C ABI once and return `[status, body]`. */
