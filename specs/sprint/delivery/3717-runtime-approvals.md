@@ -20,8 +20,10 @@ the endpoint routes of PS-02, whose `ask` outcome refused until now.
   id. Guest-derived fields are length-bounded; the path is never recorded.
 - **Secret use.** `SecretBindingMeta.approve` (`never` by default, omitted when
   `never`), set by `mvmctl secret set --approve ask` and shown by `secret ls`.
-  The endpoint asks before substituting a header placeholder of such a
-  secret toward a bound destination.
+  The endpoint asks before substituting such a secret toward a bound
+  destination in any supported injection position: header, decoded Basic
+  credential, query value, or URL path. The position must match the signed
+  binding before it is eligible to ask.
 - **Broker transport.** The wire types (`ApprovalSubject`, `ApprovalPrompt`,
   `ApprovalAnswer`, `display_safe`) are in `mvm_contract::policy::approval_prompt`.
   The endpoint connects to `approval.sock` in the VM's socket directory
@@ -64,9 +66,10 @@ Webhook: redirect, oversize reply, non-HTTPS, malformed and non-2xx replies,
 silence past the timeout. Chain `all` / `any`, the broker socket lifecycle,
 flag / manifest / default resolution, `[approval]` parsing, `secret set
 --approve ask`, and endpoint route and secret-use approvals end to end through
-the terminated-flow harness. Hostlib adds bounded callback-result tests and a
-real retained Unix-socket broker lifecycle witness; the Python and TypeScript
-bindings cover prompt decoding, every decision and fail-closed errors.
+the terminated-flow harness, including query, path, and Basic-auth injection.
+Hostlib adds bounded callback-result tests and a real retained Unix-socket
+broker lifecycle witness; the Python and TypeScript bindings cover prompt
+decoding, every decision and fail-closed errors.
 
 ## Live verification (macOS 26, HVF)
 
@@ -90,10 +93,20 @@ bindings cover prompt decoding, every decision and fail-closed errors.
 - Standalone CLI detached machines have no long-lived process to own a broker,
   so their asks deny. SDK detached/persistent machines retain the embedding
   process's callback broker; CLI ownership belongs to PS-09's session model.
-- When PS-02's injection modes land, secret-use approval must cover the new
-  placeholder positions (query, path, basic auth), not only headers.
 - Found while verifying, not caused here: a `--manifest` run whose manifest
   names an OCI `image` gets no guest proxy environment
   (`oci_vsock_proxy_env_for_backend` keys on `--image` only), so an unmodified
   client cannot reach an admitted route. The route test above passed the
   proxy to `curl` explicitly.
+
+## 2026-09-29 injection-mode follow-up validation
+
+`cargo test -p mvm-hostd` passed, including 1,978 unit tests and all hostd
+integration and documentation tests. Workspace Clippy, workspace check,
+formatting, and the sprint-append gate also passed. The full workspace test
+run reached `mvm-agentd` with 840 tests passed before the existing flaky
+`stream_pump::tests::a_slow_sink_receives_every_byte_exactly_once` observed
+165,888 of 524,288 bytes. The aggregate policy check passed 73 of 75 gates;
+the remaining two could not spawn host-missing `uvx` and `tsx` tools. Gated
+target compilation could not start because this host has neither `rustup` nor
+`cargo-zigbuild`.

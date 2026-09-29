@@ -55,7 +55,7 @@ pub use forward::{
     ForwardError, ForwardResponse, ForwardStreamResponse, Forwarder, HardenedForwarder,
 };
 pub use ingress::HostMaterialError;
-pub(crate) use prepare::{PLACEHOLDER_OUTSIDE_HEADERS, REASON_PLACEHOLDER_IN_BODY};
+pub(crate) use prepare::{PLACEHOLDER_IN_BODY_MESSAGE, REASON_PLACEHOLDER_IN_BODY};
 pub use prepare::{ProxyError, prepare_request};
 pub(crate) use routing::method_label;
 

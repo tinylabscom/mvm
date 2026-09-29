@@ -6,7 +6,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_contract::ir::{AuthType, InjectionMode};
 use mvm_contract::substitution::{
-    PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver, contains_minted_placeholder,
+    LocatedPlaceholder, PlaceholderPosition, PrepareError, PreparedRequest, ProxyRequest,
+    SubstitutionDriver, contains_minted_placeholder, locate_placeholders,
     prepare_request as prepare_request_core,
 };
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
@@ -15,9 +16,7 @@ use url::Url;
 use super::SubstitutionService;
 use super::redaction::fail_closed_reason;
 use super::sign::{SignRequest, sign_into_headers};
-use crate::keyholder::{
-    NetworkEndpoint, SignDispatchError, SubstituteError, SubstitutionRegistry, find_placeholder,
-};
+use crate::keyholder::{NetworkEndpoint, SignDispatchError, SubstituteError, SubstitutionRegistry};
 use crate::supervisor::redactor::RedactionHits;
 use crate::supervisor::reversible_replacement::ReplacementFlow;
 
@@ -40,6 +39,11 @@ pub enum ProxyError {
     /// Fail-closed: refuse rather than forward an unsigned request.
     #[error("refusing to forward: {0}")]
     Refused(String),
+    #[error(
+        "a secret placeholder is substituted only where its binding says; refusing one found here ({})",
+        .0.refusal_label()
+    )]
+    PlaceholderOutOfPosition(PlaceholderPosition),
 }
 
 /// Substitute every placeholder in `req`'s headers against `endpoint`,
@@ -62,10 +66,9 @@ pub fn prepare_request(
             "more than one signing placeholder in one request".into(),
         )),
         Err(PrepareError::Driver(e)) => Err(e),
-        Err(PrepareError::PlaceholderOutOfPosition(position)) => Err(ProxyError::Refused(format!(
-            "a secret placeholder is substituted only where its binding says; refusing one found here ({})",
-            position.refusal_label(),
-        ))),
+        Err(PrepareError::PlaceholderOutOfPosition(position)) => {
+            Err(ProxyError::PlaceholderOutOfPosition(position))
+        }
     }
 }
 
@@ -153,13 +156,11 @@ const REASON_POLICY_DENIED: &str = "policy_denied";
 const REASON_MALFORMED: &str = "malformed";
 /// What a refusal records as its destination when the URL names none.
 pub(super) const UNPARSEABLE_DESTINATION: &str = "unparseable";
-/// The reason a request carrying a placeholder in its URL is refused.
-const REASON_PLACEHOLDER_IN_URL: &str = "placeholder_in_url";
 /// The reason a request carrying a placeholder in its body is refused.
 pub(crate) const REASON_PLACEHOLDER_IN_BODY: &str = "placeholder_in_body";
-/// What the workload is told when it sends a placeholder outside a header.
-pub(crate) const PLACEHOLDER_OUTSIDE_HEADERS: &str = "a secret placeholder is substituted only in a request header; refusing a request \
-     that carries one elsewhere";
+/// What the workload is told when it sends a placeholder in a request body.
+pub(crate) const PLACEHOLDER_IN_BODY_MESSAGE: &str =
+    "a secret placeholder is never substituted in a request body; refusing the request";
 
 /// Finds a minted placeholder in a body that arrives in chunks, including one
 /// split across two chunks.
@@ -244,12 +245,11 @@ fn claim10_decision(
 /// `resolve_meta` touches no secret value, so this is claim-13 safe.
 pub(crate) fn collect_substituted_meta(
     endpoint: &NetworkEndpoint<'_>,
-    headers: &[(String, String)],
+    placeholders: &[LocatedPlaceholder],
 ) -> Vec<(String, AuthType)> {
-    headers
+    placeholders
         .iter()
-        .filter_map(|(_, v)| find_placeholder(v))
-        .filter_map(|ph| endpoint.resolve_meta(ph))
+        .filter_map(|located| endpoint.resolve_meta(&located.placeholder))
         .collect()
 }
 
@@ -273,7 +273,7 @@ impl SubstitutionService {
     /// not bound for is refused later without bothering anyone.
     async fn approve_secret_use(
         &self,
-        headers: &[(String, String)],
+        placeholders: &[LocatedPlaceholder],
         destination: Option<&str>,
     ) -> Result<(), &'static str> {
         if self.approval_required.is_empty() {
@@ -283,15 +283,13 @@ impl SubstitutionService {
             return Ok(());
         };
         let mut asked: Vec<&str> = Vec::new();
-        for (_, value) in headers {
-            let Some(placeholder) = find_placeholder(value) else {
-                continue;
-            };
-            let Some(secret) = self.registry.resolve(placeholder) else {
+        for located in placeholders {
+            let Some(secret) = self.registry.resolve(&located.placeholder) else {
                 continue;
             };
             if !self.approval_required.contains(&secret.name)
                 || !mvm_contract::ir::host_is_bound(&secret.allowed_hosts, destination)
+                || located.position.mode().as_ref() != Some(&secret.inject)
                 || asked.contains(&secret.name.as_str())
             {
                 continue;
@@ -392,27 +390,21 @@ impl SubstitutionService {
                 });
             }
         }
-        // A placeholder is substituted only in a header. Anywhere else it would
-        // go to the destination as the token itself, so the request is refused
-        // before anything is forwarded.
-        let placeholder_elsewhere = if contains_minted_placeholder(req.url.as_bytes()) {
-            Some(REASON_PLACEHOLDER_IN_URL)
-        } else if contains_minted_placeholder(&req.body) {
-            Some(REASON_PLACEHOLDER_IN_BODY)
-        } else {
-            None
-        };
-        if let Some(reason) = placeholder_elsewhere {
+        // No binding substitutes into a request body. URL placeholders are
+        // allowed only in the path/query positions their signed binding names;
+        // `prepare_request` validates those positions below.
+        if contains_minted_placeholder(&req.body) {
             self.audit_flow_refused(
                 destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
-                reason,
+                REASON_PLACEHOLDER_IN_BODY,
             )
             .await;
             return Err(WireResponse::Refused {
-                message: PLACEHOLDER_OUTSIDE_HEADERS.into(),
+                message: PLACEHOLDER_IN_BODY_MESSAGE.into(),
             });
         }
-        let substituted = collect_substituted_meta(&endpoint, &req.headers);
+        let placeholders = locate_placeholders(&req.url, &req.headers);
+        let substituted = collect_substituted_meta(&endpoint, &placeholders);
         // Resolve the per-destination redaction action; clone so it outlives
         // `req` (which `redact_outbound` then `prepare_request` consume).
         let action = destination
@@ -444,17 +436,14 @@ impl SubstitutionService {
         }
         // Whether the request smuggled a host placeholder at all — decides if a
         // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
-        let carried_placeholder = req
-            .headers
-            .iter()
-            .any(|(_, v)| find_placeholder(v).is_some());
+        let carried_placeholder = !placeholders.is_empty();
         // Scrub undeclared secret-shaped / PII content before any
         // substitution. Runs first so a declared placeholder (not secret-shaped,
         // host-reserved) survives to be substituted, while an undeclared secret
         // the guest put in the body or a non-placeholder header is masked and
         // never reaches the wire.
         if let Err(reason) = self
-            .approve_secret_use(&req.headers, destination.as_deref())
+            .approve_secret_use(&placeholders, destination.as_deref())
             .await
         {
             self.audit_flow_refused(
@@ -488,6 +477,16 @@ impl SubstitutionService {
         };
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
+            Err(ProxyError::PlaceholderOutOfPosition(position)) => {
+                self.audit_flow_refused(
+                    destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
+                    position.refusal_label(),
+                )
+                .await;
+                return Err(WireResponse::Refused {
+                    message: ProxyError::PlaceholderOutOfPosition(position).to_string(),
+                });
+            }
             Err(e) => {
                 // A placeholder-bearing request refused before forwarding is a
                 // claim-12 drop — audit it (metadata only). A refusal with no
