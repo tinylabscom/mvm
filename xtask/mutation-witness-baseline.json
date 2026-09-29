@@ -1109,6 +1109,26 @@
       "file": "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
       "mutant": "replace SubstitutionSpawnParams<'a>::builder -> SubstitutionSpawnParamsBuilder<'a> with Default::default()",
       "reason": "provably equivalent: `SubstitutionSpawnParams::builder` is a one-line alias for `SubstitutionSpawnParamsBuilder::new()`, and this file's `impl Default for SubstitutionSpawnParamsBuilder` returns `Self::new()`, so `Default::default()` evaluates the identical expression. No test can distinguish the two, and the builder's own required-field refusal is asserted directly by the empty-builder test beside it."
+    },
+    {
+      "file": "crates/mvm-contract/src/policy/restricted_address.rs",
+      "mutant": "replace | with ^ in embedded_v4",
+      "reason": "Provably equivalent: u32::from(s[6]) << 16 occupies only the high 16 bits, while u32::from(s[7]) occupies only the low 16 bits. OR and XOR are identical for these disjoint bit ranges before the complement."
+    },
+    {
+      "file": "crates/mvm-fs/src/os_inventory.rs",
+      "mutant": "replace || with && in parse_dpkg_status",
+      "reason": "Provably equivalent: a continuation beginning with a space or tab cannot start with the exact Package: or Version: prefixes checked immediately afterward. Removing its early skip changes no parsed component or limitation."
+    },
+    {
+      "file": "crates/mvm-fs/src/os_inventory.rs",
+      "mutant": "replace || with && in parse_os_release",
+      "reason": "Provably equivalent: an empty line fails split_once and is ignored anyway; a comment line starts with #, so its key cannot equal ID, VERSION_ID or PRETTY_NAME. Removing the early skip changes no parsed field or error."
+    },
+    {
+      "file": "crates/mvm-build/src/runtime_overlay.rs",
+      "mutant": "delete field version from struct RuntimeOverlayArtifact expression in install_image_set_runtime_overlay_archive",
+      "reason": "Provably equivalent: stage_runtime_overlay_archive reads the version through read_overlay_artifact_from_dir and read_version_file, which already trims surrounding whitespace. MemberVersion::parse validates that trimmed string without changing it. Omitting the explicit version field therefore inherits exactly the same staged.version; validation and set.record still execute."
     }
   ]
 }

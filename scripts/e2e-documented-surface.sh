@@ -247,7 +247,7 @@ release_lock() { [[ -f "$LOCK" ]] && [[ "$(cat "$LOCK" 2>/dev/null)" == "$$" ]] 
 # meant to fix.
 e2e_phase build
 echo "==> refreshing embedded aux helpers"
-just embed-refresh
+just payload::refresh
 
 # `user` carries manifest-verify, which the verified-fetch path needs to accept
 # the published builder VM image. Its sigstore/aws-lc dependency must use the
@@ -297,7 +297,7 @@ fi
 # cargo makes this a no-op when they are already current, so the cost of always
 # doing it is a fingerprint check.
 echo "==> building the per-VM host helpers"
-just build-supervisors
+just payload::supervisors
 
 # The language SDKs drive machines in-process through the host library and find
 # it beside the `mvmctl` on PATH, which the live steps put first. `cargo build
@@ -372,9 +372,9 @@ start_watcher
 e2e_phase typescript-sdk
 echo "==> building the TypeScript SDK"
 if [[ ! -d crates/mvm-sdk/sdks/typescript/node_modules ]]; then
-  just sdk-install-typescript
+  just sdk::install-typescript
 fi
-just sdk-build-typescript
+just sdk::build-typescript
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.

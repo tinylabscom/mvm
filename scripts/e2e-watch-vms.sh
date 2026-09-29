@@ -5,7 +5,7 @@
 # Cucumber captures a step's output and prints it only when the step fails, so
 # a multi-minute boot shows nothing at all while it happens. This watches the
 # filesystem instead of the test runner, which means it works against any run —
-# `just e2e-docs`, a bare `mvmctl machine start`, or someone else's session.
+# `just e2e::docs`, a bare `mvmctl machine start`, or someone else's session.
 #
 # Usage:
 #   scripts/e2e-watch-vms.sh                 # watch ~/.mvm

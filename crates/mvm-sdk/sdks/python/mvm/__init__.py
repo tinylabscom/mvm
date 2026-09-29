@@ -127,6 +127,7 @@ from mvm._machine import (
     MachineError,
     MachineResult,
 )
+from mvm._hostlib import set_approval_callback
 from mvm._sandbox import (
     DEFAULT_TTL_SECONDS,
     ExecResult,
@@ -258,6 +259,7 @@ __all__ = [
     "python_image",
     "reset",
     "reset_recording",
+    "set_approval_callback",
     "resources",
     "secret",
     "session",

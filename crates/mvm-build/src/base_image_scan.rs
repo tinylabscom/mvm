@@ -1004,4 +1004,167 @@ mod tests {
         let back: BaseImageScanReport = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(report, back);
     }
+
+    #[test]
+    fn severity_boundaries_and_ranks_preserve_all_bands() {
+        for (score, band) in [
+            (0.0, "none"),
+            (0.1, "low"),
+            (3.9, "low"),
+            (4.0, "medium"),
+            (6.9, "medium"),
+            (7.0, "high"),
+            (8.9, "high"),
+            (9.0, "critical"),
+            (10.0, "critical"),
+        ] {
+            assert_eq!(severity_band(score), band, "score {score}");
+        }
+        for (rank, band) in ["unknown", "none", "low", "medium", "high", "critical"]
+            .iter()
+            .enumerate()
+        {
+            assert_eq!(usize::from(severity_rank(band)), rank, "band {band}");
+        }
+        assert_eq!(severity_rank("moderate"), severity_rank("medium"));
+    }
+
+    #[test]
+    fn cvss_versions_changed_scope_and_exact_rounding_are_distinguished() {
+        for version in ["3.0", "3.1"] {
+            let vector = format!("CVSS:{version}/AV:P/AC:H/PR:H/UI:R/S:C/C:H/I:H/A:H");
+            assert_eq!(cvss3_base_score(&vector), Some(6.8));
+        }
+        assert_eq!(
+            cvss3_base_score("CVSS:2.0/AV:P/AC:H/PR:H/UI:R/S:C/C:H/I:H/A:H"),
+            None
+        );
+        for (input, expected) in [
+            (0.0, 0.0),
+            (0.1, 0.1),
+            (4.0, 4.0),
+            (4.00001, 4.1),
+            (4.12, 4.2),
+        ] {
+            assert_eq!(roundup(input), expected);
+        }
+    }
+
+    #[test]
+    fn advisory_deduplication_and_fixes_are_scoped_to_the_package() {
+        let mut first = vuln("CVE-A", Some("HIGH"));
+        first.fixed_versions = vec![
+            ("unrelated".into(), "99".into()),
+            ("alpha".into(), "2".into()),
+        ];
+        let client = MockOsv {
+            batch: BTreeMap::from([
+                (
+                    "alpha".into(),
+                    vec![
+                        "CVE-A".into(),
+                        "CVE-A".into(),
+                        "CVE-B".into(),
+                        "CVE-C".into(),
+                        "CVE-D".into(),
+                    ],
+                ),
+                ("beta".into(), vec!["CVE-A".into()]),
+            ]),
+            records: BTreeMap::from([
+                ("CVE-A".into(), first),
+                ("CVE-B".into(), vuln("CVE-B", Some("CRITICAL"))),
+                ("CVE-C".into(), vuln("CVE-C", None)),
+                ("CVE-D".into(), vuln("CVE-D", Some("LOW"))),
+            ]),
+            batches_seen: RefCell::new(Vec::new()),
+        };
+        let report = scan_inventory(
+            &inventory_with(vec![
+                component("Debian", "alpha", "1"),
+                component("Debian", "beta", "1"),
+            ]),
+            &image(),
+            &client,
+        )
+        .unwrap();
+        let findings: Vec<_> = report
+            .findings
+            .iter()
+            .map(|f| {
+                (
+                    f.id.as_str(),
+                    f.package.as_str(),
+                    f.fixed_version.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            findings,
+            vec![
+                ("CVE-B", "alpha", None),
+                ("CVE-A", "alpha", Some("2")),
+                ("CVE-A", "beta", None),
+                ("CVE-D", "alpha", None),
+                ("CVE-C", "alpha", None)
+            ]
+        );
+        let sidecar = render_cve_sidecar(&report);
+        assert_eq!(sidecar["summary"]["high"], 2);
+        assert_eq!(sidecar["summary"]["critical"], 1);
+        assert_eq!(sidecar["summary"]["unknown_severity"], 1);
+    }
+
+    #[test]
+    fn osv_http_accepts_large_advisories_but_enforces_its_four_mib_limit() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        for (body_size, accepted) in [(2_097_152, true), (4_194_305, false)] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(&socket);
+                loop {
+                    let mut line = String::new();
+                    assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {body_size}\r\nConnection: close\r\n\r\n"
+                )
+                .unwrap();
+                // A size refusal may close the connection before all bytes are sent.
+                let _ = socket.write_all(&vec![b'x'; body_size]);
+            });
+            let result = BlockingOsvClient::default()
+                .http()
+                .unwrap()
+                .get(format!("http://{address}/advisory"))
+                .send()
+                .and_then(|r| r.bytes());
+            server.join().unwrap();
+            if accepted {
+                assert_eq!(result.unwrap().len(), body_size);
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(mvm_http::Error::BodyTooLarge { limit: 4_194_304 })
+                    ),
+                    "{result:?}"
+                );
+            }
+        }
+    }
 }

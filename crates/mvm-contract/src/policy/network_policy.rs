@@ -1548,4 +1548,19 @@ mod tests {
         let policy = NetworkPolicy::deny_all();
         assert!(policy.ai().is_none());
     }
+    #[test]
+    fn endpoint_routes_are_returned_for_both_policy_forms() {
+        let route: crate::policy::routes::EgressRoute =
+            serde_json::from_str(r#"{"id":"api","host":"api.example.test"}"#).unwrap();
+        for policy in [
+            NetworkPolicy::unrestricted(),
+            NetworkPolicy::allow_list(Vec::new()),
+        ] {
+            assert!(policy.routes().is_empty());
+            let policy = policy.with_routes(vec![route.clone()]);
+            assert_eq!(policy.routes(), core::slice::from_ref(&route));
+        }
+        assert!(is_mandatory_deny("0.1.2.3".parse().unwrap()));
+        assert!(is_mandatory_deny("64:ff9b::a9fe:a9fe".parse().unwrap()));
+    }
 }

@@ -1391,33 +1391,10 @@ pub fn resolve_launch(
     );
     let mut use_snapshot = boot.use_snapshot;
 
-    // Clamp the vCPU request to what this backend can actually create, and say
-    // so. Before the backend is chosen there is nothing to clamp against, and
-    // after the launch it is too late to tell anyone.
-    //
-    // Not an error. `--cpus 4` is a portable command meeting a host limit, and
-    // refusing it would make the same script succeed on Linux and fail on
-    // macOS for a reason the user cannot act on — worse, HVF's default is 2, so
-    // a hard refusal at a ceiling of 1 failed *every* launch on that backend.
-    // Silence is the other failure: a guest on one CPU while its admitted plan
-    // says four, with nothing to explain the performance.
-    if let Some(granted) =
-        mvm_core::vm_backend::clamp_vcpus(start_config.cpus, backend.capabilities().max_vcpus)
-    {
-        ui::warn(&format!(
-            "{} supports at most {granted} vCPU(s); {} requested, booting with {granted}",
-            backend.name(),
-            start_config.cpus,
-        ));
-        tracing::info!(
-            backend = backend.name(),
-            requested = start_config.cpus,
-            granted,
-            "vcpu request clamped to the backend ceiling"
-        );
-        start_config.cpus = granted;
-    }
-
+    // Attach everything the boot waits on before admitting. Admission starts
+    // the plan's validity window and the verb grant minted from it expires
+    // with it, so a cold overlay build after admission would spend the window
+    // the boot needs (see `mvm_client::launch::boot_order`).
     let t_overlay = std::time::Instant::now();
     sub.start(SubPhase::AttachOverlay);
     crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
@@ -1446,14 +1423,10 @@ pub fn resolve_launch(
         "admit window: attach universal initramfs"
     );
 
-    // Admit the transient run as a locally-signed workload only after every
-    // cold preparation step the boot waits on has completed. This keeps the
-    // grant-validity window anchored to boot + activation, not to cache-miss
-    // runtime artifact preparation.
-    //
-    // Setting tenant_id + plan_json makes the runner-backed microVM supervisor
-    // enforce `network_policy` and chain-audit the run. Force cold boot when
-    // admitted — snapshot restore is unavailable for workload admission.
+    // Admit the transient run as a locally-signed workload. Setting
+    // tenant_id + plan_json makes the runner-backed microVM supervisor enforce
+    // `network_policy` and chain-audit the run. Force cold boot when admitted —
+    // snapshot restore is unavailable for workload admission.
     let t_admission = std::time::Instant::now();
     sub.start(SubPhase::AdmitPlan);
     if let Some(admit_fn) = admit
@@ -1486,6 +1459,33 @@ pub fn resolve_launch(
         ms = t_admission.elapsed().as_secs_f64() * 1000.0,
         "admit window: admission"
     );
+
+    // Clamp the vCPU request to what this backend can actually create, and say
+    // so. Before the backend is chosen there is nothing to clamp against, and
+    // after the launch it is too late to tell anyone.
+    //
+    // Not an error. `--cpus 4` is a portable command meeting a host limit, and
+    // refusing it would make the same script succeed on Linux and fail on
+    // macOS for a reason the user cannot act on — worse, HVF's default is 2, so
+    // a hard refusal at a ceiling of 1 failed *every* launch on that backend.
+    // Silence is the other failure: a guest on one CPU while its admitted plan
+    // says four, with nothing to explain the performance.
+    if let Some(granted) =
+        mvm_core::vm_backend::clamp_vcpus(start_config.cpus, backend.capabilities().max_vcpus)
+    {
+        ui::warn(&format!(
+            "{} supports at most {granted} vCPU(s); {} requested, booting with {granted}",
+            backend.name(),
+            start_config.cpus,
+        ));
+        tracing::info!(
+            backend = backend.name(),
+            requested = start_config.cpus,
+            granted,
+            "vcpu request clamped to the backend ceiling"
+        );
+        start_config.cpus = granted;
+    }
 
     let t_status = std::time::Instant::now();
     crate::commands::vm::up::emit_runtime_source_status(&start_config);

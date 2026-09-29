@@ -50,4 +50,5 @@ pub mod parallel;
 pub mod rootfs;
 pub mod sdk_sidecar;
 pub mod snapshot_store;
+pub mod tree_diff;
 pub mod trusted_snapshot;
