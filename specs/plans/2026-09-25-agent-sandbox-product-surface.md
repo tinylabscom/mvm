@@ -229,6 +229,9 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] pack manifest schema and keyless signing workflow in `mvm-templates`
 - [ ] `mvmctl search`, `pull ns/name[@ver]`, `run --profile ns/name -- CMD`, `pack ls|rm|update`
 - [ ] lockfile with digest pins; admission refuses drift (signed-bundle path, claim 9)
+  - [x] strict `namespace/name[@version]` references and a versioned lockfile
+        that refuses missing pins, duplicate package names, requested-version
+        drift, and raw manifest-byte digest drift before parsing
 - [ ] publisher trust policy; escape-hatch fields stripped from pack profiles; no host-config writes
 - [ ] agent packs: claude, codex, pi, opencode, goose; runtime packs: python, node, rust, go
 

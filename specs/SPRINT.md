@@ -47,6 +47,15 @@
       linker requirement. Justfile parsing, focused wrapper-environment tests,
       formatting, workspace check, and zero-warning Clippy are green.
 
+- [ ] **Signed product packs and registry profiles — issue #3716.**
+      `specs/plans/2026-09-25-agent-sandbox-product-surface.md` PS-06. The
+      unblocked foundation is complete: `mvm_core::registry_pack` owns strict
+      `namespace/name[@version]` identities and a schema-versioned lockfile
+      that hashes exact signed-manifest bytes and fails closed on missing,
+      duplicate, version-drifted, or digest-drifted pins. Eight focused tests
+      cover round trips and every refusal. Registry fetch/signing, CLI verbs,
+      policy composition, admission binding, and initial packs remain open.
+
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
       an unpacked rootfs (dpkg, apk, os-release, in-image kernel; rpm is a
