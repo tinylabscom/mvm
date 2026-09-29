@@ -16,6 +16,17 @@
       aggregate harness executes its script as a Bash command, so an expected
       early refusal cannot break a producer writing to standard input.
 
+- [ ] **Document the AI coding workflow and slim AGENTS.md to a rule index.**
+      `specs/plans/2026-09-28-ai-coding-workflow-docs.md`. The issue-to-PR
+      playbook for agent-driven work now lives at
+      `public/src/content/docs/contributing/ai-coding-workflow.md` (claim/status
+      ownership, worktree workflow, Graft/Serena split, per-developer Zed/Cursor
+      Serena configuration, fast feedback ladder, CI/merge-queue scope, PR
+      linkage, safe parallelism), linked from the development guide and the
+      docs sidebar. `AGENTS.md` is condensed while retaining the newly landed
+      session, test, and retry rules. Shared MCP files intentionally keep only
+      graft. PR #3815 is merged.
+
 - [x] **Remove sccache from the contributor toolchain.** The machine-wide
       Cargo wrapper was producing build failures while its measured
       cross-worktree hit rate was negligible. The optional `just test-cached`
