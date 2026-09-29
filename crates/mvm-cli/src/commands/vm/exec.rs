@@ -28,7 +28,9 @@ use crate::ui;
 
 pub(in crate::commands) mod detect;
 pub(in crate::commands) use detect::{Inference, resolve_run_source};
+mod network_access;
 mod run_mode;
+use network_access::NetworkAccess;
 pub(in crate::commands) use run_mode::resolve_run_mode;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -627,6 +629,7 @@ pub(in crate::commands) fn run_secure_with_source(
         .clone()
         .with_routes(routes.routes.clone());
     let admit_secrets = super::run_secrets::admitted_run_secrets(&mut args)?;
+    let network_access = NetworkAccess::of_run(&network_policy, !admit_secrets.secrets.is_empty());
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
@@ -819,7 +822,8 @@ pub(in crate::commands) fn run_secure_with_source(
             eprintln!("{}", timing.render_table());
         }
         let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path)
-            .with_egress_denials(refused.destinations());
+            .with_egress_denials(refused.destinations())
+            .with_network(network_access.label());
         if let Some(path) = summary.receipt_path.as_deref() {
             write_run_receipt(path, receipt_input, &output)?;
         }
@@ -828,6 +832,9 @@ pub(in crate::commands) fn run_secure_with_source(
                 "{}",
                 serde_json::to_string_pretty(&summary).context("serializing run JSON summary")?
             );
+        }
+        if !json_requested {
+            network_access.announce_exit(output.exit_code, &super::host_notices::Stderr);
         }
         if output.exit_code != 0 {
             mvm_observability::exit(output.exit_code);
@@ -853,6 +860,7 @@ pub(in crate::commands) fn run_secure_with_source(
             oci_provenance: &oci_provenance,
             outputs: &outputs,
             denials: &denials,
+            network: network_access,
         },
     )
 }
@@ -897,6 +905,8 @@ struct RunAudit<'a> {
     outputs: &'a super::outputs::PreparedOutputs,
     /// The run's egress refusals, summarized once it exits.
     denials: &'a super::egress_denials::PendingWatch,
+    /// Whether the run could reach the network at all.
+    network: NetworkAccess,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -945,6 +955,9 @@ fn run_run_args(
     let exit_code = audit
         .outputs
         .close_run(audit.ctx, audit.backend, posture.get(), result)?;
+    audit
+        .network
+        .announce_exit(exit_code, &super::host_notices::Stderr);
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }
@@ -2312,6 +2325,8 @@ mod tests {
         // shape whether or not the run hit the gate.
         let value: serde_json::Value = serde_json::from_str(&json).expect("json");
         assert_eq!(value["egress_denials"], serde_json::json!([]));
+        let offline = serde_json::to_value(summary.with_network("none")).expect("json");
+        assert_eq!(offline["network"], "none");
     }
 
     #[test]
