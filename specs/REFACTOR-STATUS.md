@@ -5,7 +5,18 @@ Last updated: 2026-09-28
 ## In progress
 
 - [ ] **Pack signing input isolation — #3794.** Fix, regression, actionlint, host workspace Clippy and real signing smoke pass. The restore-timeout fixture is deterministic and all 262 backend tests pass; full workspace tests, Linux and final PR checks are pending. See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
+- [ ] **Extended CI process cleanup — #3773.** All 47 integration regressions and final host workspace Clippy pass; full tests are pending. Linux builder initialization is blocked; the final live Firecracker lane remains active. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
 - [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
+
+- [ ] **Agent efficiency overhaul.**
+      `specs/plans/2026-09-28-agent-efficiency-overhaul.md`. Phases 1–10
+      establish retry, waiting, scoped-test, tool-routing, environment,
+      reasoning-budget, recovery, background-operation, context-hygiene, and
+      subagent-preflight disciplines across the supported agent harnesses.
+  - [x] Agreements, retry guard and journal, scoped-test recipe, reproducible
+        transcript analysis, and baseline measurements implemented.
+  - [ ] Re-measure fresh transcripts after two weeks and record the Phase
+        2.4–10.3 results against the plan's baselines.
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
@@ -35,31 +46,30 @@ Last updated: 2026-09-28
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
   - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
-    - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
-    - [ ] denial → policy draft selector (Grant / Skip)
-    - [ ] `mvmctl why` against a resolved policy
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
-    - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
-    - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`
-    - [ ] tool calls (PS-13), SDK callback through hostlib (PS-01), a broker for detached machines
   - [ ] PS-08 undo, redo, replay; content `vm diff`; journaled apply — #3718
   - [ ] PS-09 detachable sessions and console reattach — #3719
+    - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated
+    - [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+    - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
-    - [x] per-session seal, derived session ledger, `trust audit sessions|show|verify <session>`
-    - [x] fsync policy stated and tested; anchoring documented; rotation default confirmed
-    - [ ] snapshot roots in the ledger (waits on PS-08)
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
+    - [x] trust policy (keyless/keyed publishers, blocklist, deny/warn/audit, project only tightens)
+    - [x] `mvmctl trust instructions init|sign|verify|policy`; `sign-instructions.yml` keyless workflow
+    - [x] pre-boot scan wired into admission; every verdict chain-audited
+    - [ ] block-device volumes (incl. `machine volume mount --host`) are not scanned
+    - [ ] mvm-scout indicator scan (tinylabscom/mvm-assurance#202, in review)
   - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723
   - [ ] PS-15 packaging: deb, rpm, AUR, nixpkgs, crates.io, native lib in wheels/npm — #3724
   - [ ] PS-16 Nix developer experience — #3725
   - [ ] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
-  - [x] PS-19 fewer feature flags — #3728
-  - [ ] PS-20 unreachable CLI surface and stale references — #3729
-  - [x] PS-21 CLI thin over `mvm-client` — #3730
+  - [ ] PS-19 fewer feature flags — #3728
+  - [x] PS-20 unreachable CLI surface and stale references — #3729
+  - [ ] PS-21 CLI thin over `mvm-client` — #3730
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by
@@ -252,6 +262,17 @@ Last updated: 2026-09-28
       regressions and the full host workspace pass.
       Standby capture also provisions its own identity. Identity-stage policy
       gates (69), declared backing, BDD and Linux cross-check pass; post-rebase delivery is open.
+      W2b guest listener half is delivered: authenticated per-session serve in
+      the agent (fresh producer epoch, Coverage-Started announcement,
+      wrong-guest-key/wrong-host-anchor refusals, dead-peer handling; five
+      focused tests) plus a post-activation vsock listener on the reserved
+      telemetry port with host-only peer gating, opt-in via the
+      mvm.telemetry=1 launch assertion, one session at a time and
+      lazy per-connection key load. Vsock-only; with #3597's registration merged, a full-chain witness
+      composes register → resolve → assert-current → authenticated receive
+      against the serving guest over a live stream. No capture or
+      VM-lifetime collection is claimed. Evidence:
+      `specs/sprint/delivery/3421-telemetry-guest-listener.md`.
       W3b prepared-record handoff passes nine new component tests, including a
       stalled encrypted writer, atomic close and retrievable loss evidence.
       Two allocation regressions pass natively and under Miri, including cold
@@ -2297,8 +2318,10 @@ resume` takes a `current_head` and refuses when it differs from the
       STILL OPEN: Phase 3 (phantom build.rs tests — the `MVM_LIBKRUN_HEADER`
       half is closed, its probe is deleted), Phase 4 (dead crate edges;
       `deps_audit` and the tree-sitter grammars off the serial path; the
-      `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
-      hygiene). The pinned zig now follows the feature: eight of `ci.yml`'s nine
+      `mvm-hostd` audit cluster), Phase 5 worktree hygiene. The measured
+      sccache experiment is closed: its machine-wide wrapper and the optional
+      `test-cached` recipe were removed after repeated failures and negligible
+      cross-worktree reuse. The pinned zig now follows the feature: eight of `ci.yml`'s nine
       `install-zigbuild` steps are gone, each job traced to what it runs first,
       and that trace caught `just bdd-live-ci` booting real microVMs without the
       payload. Still open: the missing `rerun-if-env-changed` on

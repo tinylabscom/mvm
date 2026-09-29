@@ -246,6 +246,7 @@ pub fn start_machine_spec(
     let prepared_volumes = host
         .prepare_volumes(&spec.name, &spec.volumes)
         .context("resolving registered local volumes before admission")?;
+    let workload_dir = persistent_workload_dir(spec);
     let admitted = start_persistent_oci_machine(PersistentImageStartParams {
         name: &spec.name,
         image_label: &boot.label,
@@ -266,6 +267,7 @@ pub fn start_machine_spec(
         grants: spec.grants.clone(),
         gpu: spec.gpu,
         gpu_device: spec.gpu_device,
+        workload_dir: workload_dir.as_deref(),
         secrets,
         backend: host.backend(params.hypervisor),
     })?;
@@ -418,6 +420,19 @@ pub fn record_machine_started(spec: &mut mp::MachineSpec, resolved_digest: Strin
     spec.last_started_at = Some(mvm_core::time::utc_now());
 }
 
+fn persistent_workload_dir(spec: &mp::MachineSpec) -> Option<PathBuf> {
+    spec.workload_dir.as_deref().map(PathBuf::from).or_else(|| {
+        let manifest = spec.manifest.as_deref()?;
+        crate::instruction_trust::gate::local_workload_dir(None, Some(manifest)).or_else(|| {
+            let path = std::path::Path::new(manifest);
+            (path.extension() == Some(std::ffi::OsStr::new("toml"))).then(|| {
+                path.parent()
+                    .map_or_else(|| PathBuf::from("."), PathBuf::from)
+            })
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +460,7 @@ mod tests {
             init: Vec::new(),
             agent_verb: Vec::new(),
             caller_commitment: None,
+            workload_dir: None,
             created_at: None,
             last_started_at: None,
             health_check: None,
@@ -501,6 +517,27 @@ mod tests {
         assert_eq!(boot.rootfs, PathBuf::from("/cache/rootfs.ext4"));
         assert_eq!(boot.digest, "sha256:abc");
         assert_eq!(boot.kernel, None, "the host's kernel is used");
+    }
+
+    #[test]
+    fn persistent_workload_dir_prefers_the_persisted_source_dir() {
+        let mut machine = spec("web");
+        machine.workload_dir = Some("/persisted/project".to_string());
+        machine.manifest = Some("/other/mvm.toml".to_string());
+        assert_eq!(
+            persistent_workload_dir(&machine),
+            Some(PathBuf::from("/persisted/project"))
+        );
+    }
+
+    #[test]
+    fn persistent_workload_dir_falls_back_to_a_local_manifest_path() {
+        let mut machine = spec("web");
+        machine.manifest = Some("/workspace/project/mvm.toml".to_string());
+        assert_eq!(
+            persistent_workload_dir(&machine),
+            Some(PathBuf::from("/workspace/project"))
+        );
     }
 
     #[test]

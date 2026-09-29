@@ -1,0 +1,174 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InstructionTrustPolicy",
+  "description": "One instruction trust policy file, as written.",
+  "type": "object",
+  "properties": {
+    "blocklist": {
+      "description": "File digests refused whoever signed them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/BlockedDigest"
+      }
+    },
+    "enforcement": {
+      "description": "`deny` (the default when a policy exists), `warn`, or `audit`.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/Enforcement"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "includes": {
+      "description": "Globs selecting instruction files, relative to each scanned root. Omitted means the built-in list; an empty list selects nothing.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "publishers": {
+      "description": "Who may sign an instruction file.",
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/Publisher"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "BlockedDigest": {
+      "description": "A file digest refused regardless of who signed it.",
+      "type": "object",
+      "required": [
+        "sha256"
+      ],
+      "properties": {
+        "reason": {
+          "description": "Why it is blocked; shown when a file is refused.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sha256": {
+          "description": "SHA-256 of the file, as 64 hex characters, optionally `sha256:`-prefixed.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "Enforcement": {
+      "description": "What a failed verification does to the boot.\n\nOrdered by strictness, so \"the stricter of two\" is `max`.",
+      "oneOf": [
+        {
+          "description": "Record each verdict in the audit chain and say nothing.",
+          "type": "string",
+          "enum": [
+            "audit"
+          ]
+        },
+        {
+          "description": "Print each failure and boot anyway; still recorded.",
+          "type": "string",
+          "enum": [
+            "warn"
+          ]
+        },
+        {
+          "description": "Refuse the boot if any instruction file fails verification.",
+          "type": "string",
+          "enum": [
+            "deny"
+          ]
+        }
+      ]
+    },
+    "Publisher": {
+      "description": "A publisher whose signature makes an instruction file trusted.",
+      "oneOf": [
+        {
+          "description": "A CI workflow signing keylessly through Sigstore.\n\nThe signing certificate names the workflow file bound to the ref it ran under; `repository` and `workflow` must match exactly, `ref` is a glob.",
+          "type": "object",
+          "required": [
+            "issuer",
+            "kind",
+            "name",
+            "ref",
+            "repository",
+            "workflow"
+          ],
+          "properties": {
+            "issuer": {
+              "description": "OIDC issuer, e.g. `https://token.actions.githubusercontent.com`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "keyless"
+              ]
+            },
+            "name": {
+              "description": "Unique name, used in reports and audit entries.",
+              "type": "string"
+            },
+            "ref": {
+              "description": "Glob over the git ref the workflow ran under, e.g. `refs/heads/main` or `refs/tags/v*`. `*` does not cross `/`; use `**` for that.",
+              "type": "string"
+            },
+            "repository": {
+              "description": "`owner/repo` of the workflow that signs.",
+              "type": "string"
+            },
+            "workflow": {
+              "description": "The signing workflow file, e.g. `.github/workflows/sign-instructions.yml`.",
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "An Ed25519 key, named by exactly one of `key_id` or `public_key`.",
+          "type": "object",
+          "required": [
+            "kind",
+            "name"
+          ],
+          "properties": {
+            "key_id": {
+              "description": "A key enrolled with `mvmctl trust add` (32 lowercase hex).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "keyed"
+              ]
+            },
+            "name": {
+              "description": "Unique name, used in reports and audit entries.",
+              "type": "string"
+            },
+            "public_key": {
+              "description": "The 32-byte public key itself, as 64 hex characters.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  }
+}

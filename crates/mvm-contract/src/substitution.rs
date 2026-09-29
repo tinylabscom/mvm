@@ -29,12 +29,20 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use crate::ir::{AuthType, SecretRef, host_is_bound};
+use crate::ir::{AuthType, InjectionMode, SecretRef, host_is_bound};
+
+mod position;
+pub use position::{
+    LocatedPlaceholder, PlaceholderPosition, basic_credential, basic_header, locate_placeholders,
+    percent_encode,
+};
+use position::{UrlParts, mentions_placeholder};
 
 /// The host-owned namespace every minted [`Placeholder`] carries. This prefix
-/// is reserved: a placeholder is substituted only in a request header, so the
-/// endpoint refuses a request that carries one anywhere else rather than
-/// sending the token itself to the destination.
+/// is reserved: a placeholder is substituted only in the position its binding
+/// declares (a header by default), so the endpoint refuses a request that
+/// carries one anywhere else rather than sending the token itself to the
+/// destination.
 pub const SECRET_PLACEHOLDER_PREFIX: &str = "mvm-secret-";
 
 /// Hex digits after [`SECRET_PLACEHOLDER_PREFIX`] in a minted placeholder:
@@ -200,6 +208,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: hosts.iter().map(|h| h.to_string()).collect::<Vec<_>>(),
             sigv4: None,
+            inject: Default::default(),
         }
     }
 
@@ -380,11 +389,13 @@ pub struct PreparedRequest {
     pub body: Vec<u8>,
 }
 
-/// Errors from the pure header-walk preparation step.
+/// Errors from the pure preparation step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrepareError<E> {
     /// More than one signing placeholder appeared in one request.
     MultipleSigningPlaceholders,
+    /// A placeholder sat somewhere its binding does not substitute.
+    PlaceholderOutOfPosition(PlaceholderPosition),
     /// The driver produced an error.
     Driver(E),
 }
@@ -401,6 +412,12 @@ impl<E: core::fmt::Display> core::fmt::Display for PrepareError<E> {
             Self::MultipleSigningPlaceholders => {
                 write!(f, "more than one signing placeholder in one request")
             }
+            Self::PlaceholderOutOfPosition(position) => write!(
+                f,
+                "a secret placeholder is substituted only where its binding says; refusing one \
+                 found here ({})",
+                position.refusal_label()
+            ),
             Self::Driver(e) => write!(f, "{e}"),
         }
     }
@@ -418,6 +435,15 @@ pub trait SubstitutionDriver {
 
     /// The auth type of a placeholder, if known.
     fn auth_type(&self, placeholder: &str) -> Option<AuthType>;
+
+    /// Where a placeholder's binding substitutes it, if known.
+    fn inject_mode(&self, placeholder: &str) -> Option<InjectionMode>;
+
+    /// Record that `wire` went on the wire where the guest wrote `guest`, so
+    /// a response echoing `wire` can be given back as `guest`. The raw value
+    /// is recorded when it is substituted; this is for the encoded forms a
+    /// URL or Basic credential puts on the wire instead.
+    fn reflect(&self, _placeholder: &str, _guest: &str, _wire: &str) {}
 
     /// Substitute `placeholder` in `text` for `destination`.
     fn substitute(
@@ -441,12 +467,20 @@ pub trait SubstitutionDriver {
     ) -> Result<Vec<(String, String)>, Self::Error>;
 }
 
-/// Walk `req`'s headers, dispatching each placeholder through `driver`.
+/// Substitute every placeholder in `req`, in the position its binding
+/// declares, dispatching each through `driver`.
 ///
-/// Inject-style placeholders (Bearer/Basic) are substituted in-place.
-/// Signing-style placeholders (SigV4/Hmac) cause their header to be dropped
-/// and a single sign pass to run after the walk. More than one signing
-/// placeholder is an error.
+/// - A header placeholder (`inject = header`) is substituted as written.
+/// - A placeholder in a Basic credential (`inject = basic_auth`) is
+///   substituted inside the decoded `user:password`, which is re-encoded.
+/// - A placeholder in a path segment (`url_path`) or a query value
+///   (`query_param`) is replaced by the percent-encoded value.
+/// - Signing-style placeholders (SigV4/Hmac) cause their header to be dropped
+///   and a single sign pass to run after the walk; more than one is an error.
+///
+/// A placeholder anywhere its binding does not declare — including a part of
+/// the URL no mode covers — is [`PrepareError::PlaceholderOutOfPosition`], and
+/// nothing is forwarded.
 ///
 /// `destination` is the host (no port) extracted from the request URL by the
 /// caller; keeping URL parsing out of this function keeps the crate
@@ -460,13 +494,21 @@ pub fn prepare_request<D: SubstitutionDriver>(
     let mut signing: Option<String> = None;
 
     for (name, value) in req.headers {
+        if let Some(credential) = basic_credential(&name, &value)
+            && let Some(ph) = find_placeholder(&credential)
+        {
+            let ph = ph.to_string();
+            require_position(driver, &ph, PlaceholderPosition::BasicAuth)?;
+            let substituted = driver.substitute(&ph, destination, &credential)?;
+            let wire = basic_header(&substituted);
+            driver.reflect(&ph, token_of(&basic_header(&credential)), token_of(&wire));
+            headers.push((name, wire));
+            continue;
+        }
         let new_value = match find_placeholder(&value) {
             Some(ph) => {
                 let ph = ph.to_string();
                 match driver.auth_type(&ph) {
-                    Some(AuthType::Bearer) | Some(AuthType::Basic) => {
-                        driver.substitute(&ph, destination, &value)?
-                    }
                     Some(AuthType::Sigv4 | AuthType::Hmac) => {
                         if signing.is_some() {
                             return Err(PrepareError::MultipleSigningPlaceholders);
@@ -474,7 +516,10 @@ pub fn prepare_request<D: SubstitutionDriver>(
                         signing = Some(ph);
                         continue;
                     }
-                    None => driver.substitute(&ph, destination, &value)?,
+                    Some(AuthType::Bearer | AuthType::Basic) | None => {
+                        require_position(driver, &ph, PlaceholderPosition::Header)?;
+                        driver.substitute(&ph, destination, &value)?
+                    }
                 }
             }
             None => value,
@@ -482,33 +527,161 @@ pub fn prepare_request<D: SubstitutionDriver>(
         headers.push((name, new_value));
     }
 
+    let url = if mentions_placeholder(&req.url) {
+        substitute_url(driver, destination, &req.url)?
+    } else {
+        req.url
+    };
+
     if let Some(ph) = signing {
-        headers = driver.sign(&ph, destination, &req.method, &req.url, &headers, &req.body)?;
+        headers = driver.sign(&ph, destination, &req.method, &url, &headers, &req.body)?;
     }
 
     Ok(PreparedRequest {
         method: req.method,
-        url: req.url,
+        url,
         headers,
         body: req.body,
     })
+}
+
+/// The base64 token of a `Basic <token>` header.
+fn token_of(header: &str) -> &str {
+    header.split_once(' ').map_or(header, |(_, token)| token)
+}
+
+/// Refuse `placeholder` in `position` unless its binding substitutes there.
+/// An unknown placeholder passes: the driver refuses it with its own error.
+fn require_position<D: SubstitutionDriver>(
+    driver: &D,
+    placeholder: &str,
+    position: PlaceholderPosition,
+) -> Result<(), PrepareError<D::Error>> {
+    match (driver.inject_mode(placeholder), position.mode()) {
+        (None, Some(_)) => Ok(()),
+        (Some(declared), Some(here)) if declared == here => Ok(()),
+        _ => Err(PrepareError::PlaceholderOutOfPosition(position)),
+    }
+}
+
+/// `url` with each path-segment and query-value placeholder replaced by its
+/// percent-encoded value. A placeholder in the authority, a parameter name or
+/// the fragment is out of position whatever its binding says.
+fn substitute_url<D: SubstitutionDriver>(
+    driver: &D,
+    destination: &str,
+    url: &str,
+) -> Result<String, PrepareError<D::Error>> {
+    let parts = UrlParts::split(url);
+    let outside = [Some(parts.head), parts.fragment];
+    if outside
+        .into_iter()
+        .flatten()
+        .any(|s| find_placeholder(s).is_some())
+    {
+        return Err(PrepareError::PlaceholderOutOfPosition(
+            PlaceholderPosition::UrlOther,
+        ));
+    }
+    let path = substitute_component(
+        driver,
+        destination,
+        parts.path,
+        PlaceholderPosition::UrlPath,
+    )?;
+    let query = match parts.query {
+        Some(query) => {
+            let mut pairs = Vec::new();
+            for pair in query.split('&') {
+                let (key, value) = match pair.split_once('=') {
+                    Some((key, value)) => (key, Some(value)),
+                    None => (pair, None),
+                };
+                if find_placeholder(key).is_some() {
+                    return Err(PrepareError::PlaceholderOutOfPosition(
+                        PlaceholderPosition::UrlOther,
+                    ));
+                }
+                pairs.push(match value {
+                    Some(value) => {
+                        let value = substitute_component(
+                            driver,
+                            destination,
+                            value,
+                            PlaceholderPosition::QueryParam,
+                        )?;
+                        alloc::format!("{key}={value}")
+                    }
+                    None => key.to_string(),
+                });
+            }
+            Some(pairs.join("&"))
+        }
+        None => None,
+    };
+    Ok(parts.join(&path, query.as_deref()))
+}
+
+/// `text` with every placeholder in it replaced by its percent-encoded value,
+/// each required to be bound for `position`.
+fn substitute_component<D: SubstitutionDriver>(
+    driver: &D,
+    destination: &str,
+    text: &str,
+    position: PlaceholderPosition,
+) -> Result<String, PrepareError<D::Error>> {
+    let mut out = String::from(text);
+    while let Some(ph) = find_placeholder(&out) {
+        let ph = ph.to_string();
+        require_position(driver, &ph, position)?;
+        let value = driver.substitute(&ph, destination, &ph)?;
+        let encoded = percent_encode(&value);
+        if encoded != value {
+            driver.reflect(&ph, &ph, &encoded);
+        }
+        out = out.replacen(&ph, &encoded, 1);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod prepare_tests {
     use super::*;
 
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq, Default)]
     struct DummyDriver {
         allow_substitute: bool,
+        value: &'static str,
+        reflected: core::cell::RefCell<Vec<(String, String)>>,
     }
 
     impl SubstitutionDriver for DummyDriver {
         type Error = &'static str;
 
+        fn inject_mode(&self, placeholder: &str) -> Option<InjectionMode> {
+            match placeholder {
+                "mvm-secret-a0e70000" => Some(InjectionMode::QueryParam),
+                "mvm-secret-a0a70000" => Some(InjectionMode::UrlPath),
+                "mvm-secret-ba5c0000" => Some(InjectionMode::BasicAuth),
+                "mvm-secret-bea70000" | "mvm-secret-deadbeef" | "mvm-secret-cafebabe" => {
+                    Some(InjectionMode::Header)
+                }
+                _ => None,
+            }
+        }
+
+        fn reflect(&self, _placeholder: &str, guest: &str, wire: &str) {
+            self.reflected
+                .borrow_mut()
+                .push((guest.to_string(), wire.to_string()));
+        }
+
         fn auth_type(&self, placeholder: &str) -> Option<AuthType> {
             match placeholder {
-                "mvm-secret-bea70000" => Some(AuthType::Bearer),
+                "mvm-secret-bea70000" | "mvm-secret-a0e70000" | "mvm-secret-a0a70000" => {
+                    Some(AuthType::Bearer)
+                }
+                "mvm-secret-ba5c0000" => Some(AuthType::Basic),
                 "mvm-secret-deadbeef" => Some(AuthType::Hmac),
                 "mvm-secret-cafebabe" => Some(AuthType::Hmac),
                 _ => None,
@@ -524,7 +697,12 @@ mod prepare_tests {
             if !self.allow_substitute {
                 return Err("substitute refused");
             }
-            Ok(text.replace(placeholder, "REAL"))
+            let value = if self.value.is_empty() {
+                "REAL"
+            } else {
+                self.value
+            };
+            Ok(text.replace(placeholder, value))
         }
 
         fn sign(
@@ -555,6 +733,7 @@ mod prepare_tests {
     fn passes_through_a_request_with_no_placeholder() {
         let driver = DummyDriver {
             allow_substitute: true,
+            ..DummyDriver::default()
         };
         let req = ProxyRequest {
             headers: vec![("Accept".to_string(), "application/json".to_string())],
@@ -571,6 +750,7 @@ mod prepare_tests {
     fn substitutes_an_inject_placeholder() {
         let driver = DummyDriver {
             allow_substitute: true,
+            ..DummyDriver::default()
         };
         let req = ProxyRequest {
             headers: vec![(
@@ -590,6 +770,7 @@ mod prepare_tests {
     fn propagates_a_driver_substitute_error() {
         let driver = DummyDriver {
             allow_substitute: false,
+            ..DummyDriver::default()
         };
         let req = ProxyRequest {
             headers: vec![(
@@ -606,6 +787,7 @@ mod prepare_tests {
     fn refuses_more_than_one_signing_placeholder() {
         let driver = DummyDriver {
             allow_substitute: true,
+            ..DummyDriver::default()
         };
         let req = ProxyRequest {
             headers: vec![
@@ -625,6 +807,7 @@ mod prepare_tests {
     fn signing_placeholder_drops_its_header_then_signs() {
         let driver = DummyDriver {
             allow_substitute: true,
+            ..DummyDriver::default()
         };
         let req = ProxyRequest {
             headers: vec![
@@ -647,6 +830,206 @@ mod prepare_tests {
             prepared
                 .headers
                 .contains(&("x-signature".to_string(), "sig".to_string()))
+        );
+    }
+
+    fn driver_with(value: &'static str) -> DummyDriver {
+        DummyDriver {
+            allow_substitute: true,
+            value,
+            ..DummyDriver::default()
+        }
+    }
+
+    #[test]
+    fn a_query_param_binding_is_substituted_percent_encoded_in_the_query_value() {
+        let driver = driver_with("k/y+1");
+        let req = ProxyRequest {
+            url: "https://api.example.com/v1/models?alt=json&key=mvm-secret-a0e70000#top".into(),
+            ..req()
+        };
+        let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
+        assert_eq!(
+            prepared.url,
+            "https://api.example.com/v1/models?alt=json&key=k%2Fy%2B1#top"
+        );
+        assert_eq!(
+            driver.reflected.borrow().as_slice(),
+            [("mvm-secret-a0e70000".to_string(), "k%2Fy%2B1".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_url_path_binding_is_substituted_in_its_segment() {
+        let driver = driver_with("123:ABC");
+        let req = ProxyRequest {
+            url: "https://api.example.com/botmvm-secret-a0a70000/sendMessage?x=1".into(),
+            ..req()
+        };
+        let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
+        assert_eq!(
+            prepared.url,
+            "https://api.example.com/bot123%3AABC/sendMessage?x=1"
+        );
+    }
+
+    #[test]
+    fn a_basic_auth_binding_is_substituted_inside_the_decoded_credential() {
+        let driver = driver_with("s3cret-pass");
+        let req = ProxyRequest {
+            headers: vec![(
+                "Authorization".into(),
+                basic_header("robot:mvm-secret-ba5c0000"),
+            )],
+            ..req()
+        };
+        let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
+        assert_eq!(
+            prepared.headers,
+            vec![("Authorization".into(), basic_header("robot:s3cret-pass"))]
+        );
+        let reflected = driver.reflected.borrow();
+        assert_eq!(reflected.len(), 1);
+        assert_eq!(
+            basic_credential("authorization", &alloc::format!("Basic {}", reflected[0].1))
+                .as_deref(),
+            Some("robot:s3cret-pass")
+        );
+    }
+
+    #[test]
+    fn every_placeholder_out_of_its_declared_position_is_refused() {
+        let driver = driver_with("v");
+        let cases: Vec<(ProxyRequest, PlaceholderPosition)> = vec![
+            // A header binding in the query, and in a path segment.
+            (
+                ProxyRequest {
+                    url: "https://h/x?key=mvm-secret-bea70000".into(),
+                    ..req()
+                },
+                PlaceholderPosition::QueryParam,
+            ),
+            (
+                ProxyRequest {
+                    url: "https://h/mvm-secret-bea70000".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlPath,
+            ),
+            // A query binding in a header, and in a path segment.
+            (
+                ProxyRequest {
+                    headers: vec![("X-Key".into(), "mvm-secret-a0e70000".into())],
+                    ..req()
+                },
+                PlaceholderPosition::Header,
+            ),
+            (
+                ProxyRequest {
+                    url: "https://h/mvm-secret-a0e70000".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlPath,
+            ),
+            // A basic binding written raw in a header.
+            (
+                ProxyRequest {
+                    headers: vec![("Authorization".into(), "Bearer mvm-secret-ba5c0000".into())],
+                    ..req()
+                },
+                PlaceholderPosition::Header,
+            ),
+            // A header binding hidden inside a Basic credential.
+            (
+                ProxyRequest {
+                    headers: vec![(
+                        "Authorization".into(),
+                        basic_header("u:mvm-secret-bea70000"),
+                    )],
+                    ..req()
+                },
+                PlaceholderPosition::BasicAuth,
+            ),
+            // No binding substitutes in a parameter name, the authority or the
+            // fragment.
+            (
+                ProxyRequest {
+                    url: "https://h/x?mvm-secret-a0e70000=1".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlOther,
+            ),
+            (
+                ProxyRequest {
+                    url: "https://mvm-secret-a0a70000.h/x".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlOther,
+            ),
+            (
+                ProxyRequest {
+                    url: "https://h/x#mvm-secret-a0e70000".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlOther,
+            ),
+        ];
+        for (request, position) in cases {
+            let err = prepare_request(&driver, "h", request.clone()).unwrap_err();
+            assert_eq!(
+                err,
+                PrepareError::PlaceholderOutOfPosition(position),
+                "{request:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_signing_request_signs_the_substituted_url() {
+        struct UrlSigner;
+        impl SubstitutionDriver for UrlSigner {
+            type Error = &'static str;
+            fn auth_type(&self, ph: &str) -> Option<AuthType> {
+                Some(if ph == "mvm-secret-deadbeef" {
+                    AuthType::Hmac
+                } else {
+                    AuthType::Bearer
+                })
+            }
+            fn inject_mode(&self, ph: &str) -> Option<InjectionMode> {
+                Some(if ph == "mvm-secret-deadbeef" {
+                    InjectionMode::Header
+                } else {
+                    InjectionMode::QueryParam
+                })
+            }
+            fn substitute(&self, ph: &str, _d: &str, text: &str) -> Result<String, &'static str> {
+                Ok(text.replace(ph, "VAL"))
+            }
+            fn sign(
+                &self,
+                _ph: &str,
+                _d: &str,
+                _m: &str,
+                url: &str,
+                headers: &[(String, String)],
+                _b: &[u8],
+            ) -> Result<Vec<(String, String)>, &'static str> {
+                let mut out = headers.to_vec();
+                out.push(("x-signed-url".into(), url.to_string()));
+                Ok(out)
+            }
+        }
+        let req = ProxyRequest {
+            url: "https://h/x?key=mvm-secret-a0e70000".into(),
+            headers: vec![("Authorization".into(), "mvm-secret-deadbeef".into())],
+            ..req()
+        };
+        let prepared = prepare_request(&UrlSigner, "h", req).unwrap();
+        assert!(
+            prepared
+                .headers
+                .contains(&("x-signed-url".into(), "https://h/x?key=VAL".into()))
         );
     }
 }

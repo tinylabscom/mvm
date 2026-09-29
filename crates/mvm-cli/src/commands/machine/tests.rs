@@ -1,4 +1,7 @@
 use super::receipt::MachineStartInitPolicy;
+use super::remove::{
+    remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,
+};
 use super::runtime::{
     PostStart, post_start_action, resolve_persistent_spec, transient_volume_warning,
 };
@@ -116,6 +119,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::SetTimeout(_) => "set-timeout",
         MachineAction::Logs(_) => "logs",
         MachineAction::Console(_) => "console",
+        MachineAction::Detach(_) => "detach",
         MachineAction::CheckArtifact(_) => "check-artifact",
         MachineAction::Timeline(_) => "timeline",
         MachineAction::Revert(_) => "revert",
@@ -1039,6 +1043,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         init: vec![],
         agent_verb: vec![],
         caller_commitment: None,
+        workload_dir: None,
         created_at: None,
         last_started_at: None,
         health_check: None,
@@ -1086,6 +1091,7 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
         spec.caller_commitment.as_ref().map(ToString::to_string),
         Some("ab".repeat(32))
     );
+    assert!(spec.workload_dir.is_none());
 }
 
 #[test]
@@ -1185,12 +1191,70 @@ fn deployment_source_is_verified_and_persisted_as_canonical_directory() {
     );
     assert!(spec.image.is_none());
     assert!(spec.manifest.is_none());
+    assert!(spec.workload_dir.is_none());
 
     std::fs::write(&rootfs, b"tampered").expect("tamper");
     let err = resolve_local_deployment(dir.path()).expect_err("tampered rootfs refused");
     assert!(
         err.to_string()
             .contains("verifying deployment boot artifact")
+    );
+}
+
+#[test]
+fn manifest_backed_persistent_runs_persist_the_local_workload_directory() {
+    let dir = tempfile::tempdir().expect("project dir");
+    std::fs::write(dir.path().join("mvm.toml"), "image = \"alpine:3.20\"\n").expect("manifest");
+    let args = parse_run(&[
+        "run",
+        "--manifest",
+        dir.path().join("mvm.toml").to_str().expect("utf8"),
+        "--name",
+        "web",
+        "-d",
+        "--",
+        "true",
+    ])
+    .expect("parse");
+    let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
+    assert_eq!(
+        spec.workload_dir.as_deref(),
+        Some(
+            dir.path()
+                .canonicalize()
+                .expect("canonical")
+                .to_str()
+                .expect("utf8")
+        )
+    );
+}
+
+#[test]
+fn flake_backed_persistent_runs_persist_the_local_workload_directory_after_slot_resolution() {
+    let dir = tempfile::tempdir().expect("flake dir");
+    std::fs::write(dir.path().join("flake.nix"), "{ }").expect("flake");
+    let args = parse_run(&[
+        "run",
+        "--flake",
+        dir.path().to_str().expect("utf8"),
+        "--name",
+        "web",
+        "-d",
+        "--",
+        "true",
+    ])
+    .expect("parse");
+    let spec = machine_run_spec(&args, "web".to_string(), Some("materialized-slot")).expect("spec");
+    assert_eq!(spec.manifest.as_deref(), Some("materialized-slot"));
+    assert_eq!(
+        spec.workload_dir.as_deref(),
+        Some(
+            dir.path()
+                .canonicalize()
+                .expect("canonical")
+                .to_str()
+                .expect("utf8")
+        )
     );
 }
 
@@ -2090,6 +2154,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         init: Vec::new(),
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -2343,6 +2408,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         init: vec!["pip install -r requirements.txt".to_string()],
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -2438,6 +2504,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         init: Vec::new(),
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some("2026-06-18T00:00:00Z".to_string()),
         last_started_at: None,
         health_check: None,
@@ -2507,6 +2574,7 @@ fn create_refuses_overwrite_without_force() {
         init: Vec::new(),
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2544,6 +2612,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         init: Vec::new(),
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -2583,6 +2652,7 @@ fn seed_machine_spec(name: &str) {
         init: Vec::new(),
         agent_verb: Vec::new(),
         caller_commitment: None,
+        workload_dir: None,
         created_at: Some(mvm_core::time::utc_now()),
         last_started_at: None,
         health_check: None,
@@ -3157,6 +3227,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         init: vec![],
         agent_verb: vec![],
         caller_commitment: None,
+        workload_dir: None,
         created_at: None,
         last_started_at: None,
         health_check: None,

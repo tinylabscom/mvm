@@ -698,6 +698,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec![bound_host.to_string()],
             sigv4: None,
+            inject: Default::default(),
         });
         // Every flow in these tests is decided on the FlowMux connect path, by
         // the session's own gate, before any request reaches the service. Its

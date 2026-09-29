@@ -792,6 +792,7 @@ mod tests {
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec![binding.pattern.to_string()],
                 sigv4: None,
+                inject: Default::default(),
             });
             placeholders.push(placeholder.as_str().to_string());
         }

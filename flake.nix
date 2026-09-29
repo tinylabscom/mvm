@@ -10,7 +10,8 @@
     };
   };
 
-  outputs = { nixpkgs, rust-overlay, ... }:
+  outputs =
+    { nixpkgs, rust-overlay, ... }:
     let
       systems = [
         "aarch64-darwin"
@@ -20,9 +21,42 @@
       ];
 
       forAllSystems = nixpkgs.lib.genAttrs systems;
+
+      prebuiltRelease = import ./nix/prebuilt-release.nix;
+
+      prebuiltPackage =
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+          archive = prebuiltRelease.archives.${system};
+        in
+        pkgs.stdenvNoCC.mkDerivation {
+          pname = "mvmctl-prebuilt";
+          version = nixpkgs.lib.removePrefix "v" prebuiltRelease.version;
+          src = pkgs.fetchurl {
+            url = "https://github.com/tinylabscom/mvm/releases/download/${prebuiltRelease.version}/mvmctl-${archive.target}.tar.gz";
+            inherit (archive) sha256;
+          };
+          nativeBuildInputs = [
+            pkgs.gnutar
+            pkgs.gzip
+          ];
+          dontUnpack = true;
+          dontConfigure = true;
+          dontBuild = true;
+          installPhase = ''
+            runHook preInstall
+            mkdir -p "$out/bin"
+            tar -xzf "$src" -C "$out/bin" --strip-components=1
+            test -x "$out/bin/mvmctl"
+            runHook postInstall
+          '';
+          meta.mainProgram = "mvmctl";
+        };
     in
     {
-      devShells = forAllSystems (system:
+      devShells = forAllSystems (
+        system:
         let
           pkgs = import nixpkgs {
             inherit system;
@@ -33,54 +67,66 @@
 
           zig = if pkgs ? zig_0_13 then pkgs.zig_0_13 else pkgs.zig;
 
-          optionalCargoTools =
-            (pkgs.lib.optional (pkgs ? cargo-machete) pkgs.cargo-machete)
-            ++ (pkgs.lib.optional (pkgs ? cargo-zigbuild) pkgs.cargo-zigbuild);
-        in
-        {
-          default = pkgs.mkShell {
-            packages = (with pkgs; [
+          optionalZigbuild = pkgs.lib.optional (pkgs ? cargo-zigbuild) pkgs.cargo-zigbuild;
+          leanPackages =
+            (with pkgs; [
               rust
-              rust-analyzer
-              cargo-audit
-              cargo-deny
-              cargo-nextest
               curl
               git
               jq
               just
-              lld
-              nix
-              nixfmt-rfc-style
-              nodejs_22
               pkg-config
-              pnpm
-              prettier
               protobuf
-              python3
-              ripgrep
-              shellcheck
-              shfmt
-              treefmt
               zig
-              zsh
-            ]) ++ optionalCargoTools;
+            ])
+            ++ optionalZigbuild;
 
-            buildInputs = with pkgs; [
-              llvmPackages.libclang
-              openssl
-            ];
+          buildInputs = with pkgs; [
+            llvmPackages.libclang
+            openssl
+          ];
+        in
+        {
+          default = pkgs.mkShell {
+            packages = leanPackages;
+            inherit buildInputs;
+            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
+            PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev ];
+            shellHook = ''
+              echo "mvm development shell (${rust.version})"
+              echo "Extended tools: nix develop .#full"
+            '';
+          };
+
+          full = pkgs.mkShell {
+            packages =
+              leanPackages
+              ++ (with pkgs; [
+                rust-analyzer
+                cargo-audit
+                cargo-deny
+                cargo-nextest
+                lld
+                nix
+                nixfmt-rfc-style
+                nodejs_22
+                pnpm
+                prettier
+                python3
+                ripgrep
+                shellcheck
+                shfmt
+                treefmt
+                zsh
+              ])
+              ++ (pkgs.lib.optional (pkgs ? cargo-machete) pkgs.cargo-machete);
+
+            inherit buildInputs;
 
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev ];
 
             shellHook = ''
-              # WASM target for the portable half of the workspace.
-              if command -v rustup >/dev/null 2>&1; then
-                rustup target add wasm32-unknown-unknown \
-                  >/dev/null 2>&1 || true
-              fi
-
               # nix develop initially starts Bash. Replace only the
               # interactive shell with the user's configured zsh.
               if [[ "$-" == *i* ]]; then
@@ -93,12 +139,22 @@
               echo "Nix workload flake: ./nix"
             '';
           };
-        });
+        }
+      );
 
-      formatter = forAllSystems (system:
+      formatter = forAllSystems (
+        system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
         in
-        pkgs.nixfmt-rfc-style);
+        pkgs.nixfmt-rfc-style
+      );
+
+      packages = forAllSystems (
+        system:
+        nixpkgs.lib.optionalAttrs (builtins.hasAttr system prebuiltRelease.archives) {
+          prebuilt = prebuiltPackage system;
+        }
+      );
     };
 }
