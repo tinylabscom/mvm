@@ -38,6 +38,7 @@ Last updated: 2026-09-28
   - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
     - [x] strict registry references and fail-closed manifest-digest lockfile foundation
+    - [x] strict signed manifest and namespace-scoped publisher trust verification
   - [ ] PS-07 runtime approval supervisor for network, tools and secrets — #3717
     - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
     - [x] terminal, webhook and chain backends; `--approval`, `--approval-mode`, `[approval]`

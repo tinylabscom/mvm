@@ -12,12 +12,17 @@
 
 - [ ] **Signed product packs and registry profiles — issue #3716.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md` PS-06. The
-      unblocked foundation is complete: `mvm_core::registry_pack` owns strict
+      The first two unblocked foundations are complete:
+      `mvm_core::registry_pack` owns strict
       `namespace/name[@version]` identities and a schema-versioned lockfile
       that hashes exact signed-manifest bytes and fails closed on missing,
-      duplicate, version-drifted, or digest-drifted pins. Eight focused tests
-      cover round trips and every refusal. Registry fetch/signing, CLI verbs,
-      policy composition, admission binding, and initial packs remain open.
+      duplicate, version-drifted, or digest-drifted pins. It also owns the
+      strict signed-manifest schema, namespace-scoped publisher authorities,
+      and the lock-before-signature-before-parse verifier. Fourteen portable
+      tests plus a feature-gated production-verifier test cover round trips,
+      trust ordering, and refusal paths. Registry
+      fetch/publication, CLI verbs, profile safety/composition, admission
+      binding, and initial packs remain open.
 
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
