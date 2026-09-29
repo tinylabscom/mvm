@@ -508,6 +508,69 @@ pub struct SecretRef {
     /// `None` for every other auth type.
     #[serde(default)]
     pub sigv4: Option<Sigv4Params>,
+    /// Where in a request the placeholder is substituted. The binding's
+    /// operator declares it; a placeholder anywhere else is refused.
+    /// Omitted when it is [`InjectionMode::Header`], so a plan without one is
+    /// byte-identical to one written before the field existed.
+    #[serde(default, skip_serializing_if = "InjectionMode::is_header")]
+    pub inject: InjectionMode,
+}
+
+/// Where an injected credential's placeholder may sit in a request, and so
+/// where its value is substituted.
+///
+/// Only injected credentials (`Bearer`, `Basic`) have a position; a signing
+/// scheme (`Sigv4`, `Hmac`) signs the whole request and is always `Header`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum InjectionMode {
+    /// In a request header value (`Authorization: Bearer <placeholder>`).
+    #[default]
+    Header,
+    /// In a query parameter's value (`?key=<placeholder>`), percent-encoded.
+    QueryParam,
+    /// In a URL path segment (`/bot<placeholder>/send`), percent-encoded.
+    UrlPath,
+    /// In the credential of `Authorization: Basic`, which the client
+    /// base64-encodes (`user:<placeholder>`). Decoded, substituted and
+    /// re-encoded. Requires `auth_type = Basic`.
+    BasicAuth,
+}
+
+impl InjectionMode {
+    /// Whether this is the default, header, position.
+    #[must_use]
+    pub fn is_header(&self) -> bool {
+        matches!(self, Self::Header)
+    }
+
+    /// The wire label, as the binding and the audit log spell it.
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Header => "header",
+            Self::QueryParam => "query_param",
+            Self::UrlPath => "url_path",
+            Self::BasicAuth => "basic_auth",
+        }
+    }
+
+    /// Whether a secret authenticating as `auth_type` may be substituted in
+    /// this position. A signing scheme has none but the header; `basic_auth`
+    /// carries a Basic credential and nothing else.
+    #[must_use]
+    pub fn admits(&self, auth_type: AuthType) -> bool {
+        matches!(
+            (self, auth_type),
+            (Self::Header, _)
+                | (Self::BasicAuth, AuthType::Basic)
+                | (
+                    Self::QueryParam | Self::UrlPath,
+                    AuthType::Bearer | AuthType::Basic
+                )
+        )
+    }
 }
 
 /// The non-secret half of a SigV4 credential: the public access-key id and the

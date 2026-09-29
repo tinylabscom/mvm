@@ -24,10 +24,12 @@
 // construction + capability-gate seam the CLI, mvmd, and the SDKs share.
 
 pub mod build_env;
+mod host_shell;
 pub mod machine;
 pub mod sdk_sidecar;
 pub mod security;
 pub mod storage;
+pub mod universal_initramfs;
 pub mod vsock_transport;
 
 pub mod vm;

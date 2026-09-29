@@ -81,16 +81,11 @@ jobs:
             PUBLISH_FLAG=""
           fi
 
-          # Publish in dependency order: leaf crates first, root facade last.
-          # mvm-apple-container is versioned independently — list it before
-          # mvm, which depends on it.
+          # Publish in dependency order: leaf crates first, the mvmctl
+          # binary (the workspace root package) last.
           CRATES=(
             mvm-core
-            mvm-apple-container
-            mvm-guest
-            mvm-security
             mvm-build
-            mvm
             mvm-cli
             mvmctl
           )
