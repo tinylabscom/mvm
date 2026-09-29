@@ -355,7 +355,7 @@ Follow-ups for the owner-decision rows above, plus re-examining
 small PRs.
 
 ### PS-20 — Unreachable surface (#3729)
-- [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
+- [x] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
 
 ### PS-21 — CLI thin over mvm-client (#3730)
 - [x] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
