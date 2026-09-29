@@ -1,4 +1,7 @@
 use super::receipt::MachineStartInitPolicy;
+use super::remove::{
+    remove_machine_runtime_state, remove_machine_spec, resolve_remove_targets, rm_running_refusal,
+};
 use super::runtime::{
     PostStart, post_start_action, resolve_persistent_spec, transient_volume_warning,
 };
@@ -116,6 +119,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::SetTimeout(_) => "set-timeout",
         MachineAction::Logs(_) => "logs",
         MachineAction::Console(_) => "console",
+        MachineAction::Detach(_) => "detach",
         MachineAction::CheckArtifact(_) => "check-artifact",
         MachineAction::Timeline(_) => "timeline",
         MachineAction::Revert(_) => "revert",

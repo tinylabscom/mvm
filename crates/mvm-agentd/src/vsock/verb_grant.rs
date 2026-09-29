@@ -699,7 +699,16 @@ mod tests {
                 rows: 24,
                 env: vec![],
                 argv: vec![],
+                detach_timeout_secs: None,
             },
+            GuestRequest::ConsoleAttach {
+                session_id: 1,
+                cols: 80,
+                rows: 24,
+                take_over: false,
+            },
+            GuestRequest::ConsoleDetach { session_id: 1 },
+            GuestRequest::ConsoleList,
             GuestRequest::ConsoleClose { session_id: 1 },
             GuestRequest::ConsoleResize {
                 session_id: 1,
