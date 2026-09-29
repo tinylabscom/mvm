@@ -201,16 +201,31 @@ fn stage_raw(manifest_bytes: &[u8]) -> Staged {
 mod builder_boot_abi {
     use super::*;
 
-    /// Until the image emitter writes the field, every existing local set
-    /// omits it, and those sets still bake their binaries. Reading a missing
-    /// ABI as the legacy one keeps them usable through the transition.
+    /// A local set's emitter has always written the field, so a local
+    /// manifest without it predates the builder boot ABI and is refused by
+    /// name at the structure stage.
     #[test]
-    fn a_local_set_without_one_reads_as_the_legacy_abi() {
+    fn a_local_set_without_one_is_refused() {
         let mut manifest = local_manifest();
         manifest.compatibility.builder_boot_abi = None;
-        stage(manifest.clone())
-            .verify_fresh()
-            .expect("a local set without the field is accepted");
+        let err = stage(manifest).verify_fresh().unwrap_err();
+        assert_eq!(err.stage(), ImageSetStage::Structure, "{err}");
+        assert!(matches!(err, ImageSetError::LocalBuilderBootAbiMissing));
+        let message = err.to_string();
+        assert!(
+            message.contains("predates the builder boot ABI"),
+            "{message}"
+        );
+        assert!(message.contains("regenerated"), "{message}");
+    }
+
+    /// The refusal is the local-set rule only: a release published before
+    /// the field existed still validates and keeps reading as the legacy ABI.
+    #[test]
+    fn a_release_without_one_keeps_reading_as_the_legacy_abi() {
+        let mut manifest = manifest();
+        manifest.compatibility.builder_boot_abi = None;
+        validate_structure(&manifest).expect("a release predating the field still validates");
         assert_eq!(
             manifest.compatibility.builder_boot_abi_or_legacy(),
             BuilderBootAbi::LEGACY
