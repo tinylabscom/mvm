@@ -452,6 +452,20 @@ required_witness = "Host collector records process startup, VM/generation correl
 
 [[binary]]
 package = "mvm-hostd"
+name = "mvm-telemetry-collector"
+source = "crates/mvm-hostd/src/bin/mvm-telemetry-collector.rs"
+required_features = []
+[binary.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "Per-VM telemetry collector"
+signals = ["diagnostics", "events", "logs", "spans", "stdio"]
+entrypoint = "fn main("
+gap = "Collector capture and lifecycle behavior are not yet certified by this inventory."
+required_witness = "Host collector records process startup, VM/generation correlation, and events after CLI detach; slow sinks cannot stall lifecycle."
+
+[[binary]]
+package = "mvm-hostd"
 name = "mvm-hvf-supervisor"
 source = "crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs"
 required_features = []
