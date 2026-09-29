@@ -229,6 +229,8 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] pack manifest schema and keyless signing workflow in `mvm-templates`
   - [x] strict product-pack manifest schema and lock-first, publisher-bound
         keyless verification in `mvm-core`; publication workflow remains
+  - [x] exact signed-file payload verification that refuses missing, tampered,
+        undeclared, non-regular, and symlinked content before installation
 - [ ] `mvmctl search`, `pull ns/name[@ver]`, `run --profile ns/name -- CMD`, `pack ls|rm|update`
 - [ ] lockfile with digest pins; admission refuses drift (signed-bundle path, claim 9)
   - [x] strict `namespace/name[@version]` references and a versioned lockfile
