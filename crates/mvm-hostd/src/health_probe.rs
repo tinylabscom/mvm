@@ -589,7 +589,6 @@ mod tests {
             agent_verb: vec![],
             workload_dir: None,
             caller_commitment: None,
-            workload_dir: None,
             created_at: None,
             last_started_at: None,
             health_check,

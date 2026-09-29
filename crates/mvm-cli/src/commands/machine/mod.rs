@@ -66,10 +66,14 @@ use receipt::{
 };
 pub(in crate::commands) use runtime::boot_persistent_by_name;
 use runtime::run_dispatch;
-use spec_ops::{create_machine, inspect_machine, remove_machine, run_reconfigure};
+use spec_ops::{
+    create_machine, inspect_machine, persistent_workload_dir_for_run, remove_machine,
+    run_reconfigure,
+};
 pub(in crate::commands) use start_create_flags::MachineStartCreateFlags;
 use volume_profile::{
-    enforce_persisted_volume_profile, enforce_volume_profile, persistent_dir_share_refusal,
+    enforce_persisted_volume_profile, enforce_volume_profile, machine_run_volume_specs,
+    persistent_dir_share_refusal,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -542,23 +546,6 @@ fn resolve_machine_run_name(args: &MachineRunArgs) -> Result<String> {
 /// different working directory still resolves the same disk. The boot path
 /// re-validates via `build_machine_volume_cfg`, so this is the early,
 /// user-facing gate, not the only one.
-fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
-    enforce_volume_profile(args.run.profile, &args.run.mounts)?;
-    let mut out = Vec::with_capacity(args.run.mounts.len());
-    for raw in &args.run.mounts {
-        let spec = super::shared::parse_volume_spec(raw)?;
-        let vmv = super::shared::vm_volume_from_spec_validated(&spec)
-            .with_context(|| format!("volume {raw:?}"))?;
-        // Pin the canonical absolute host path; keep the guest[:size][:mode]
-        // tail verbatim so disk volumes and modifiers survive the round-trip.
-        let (_, tail) = raw
-            .split_once(':')
-            .expect("parse_volume_spec guarantees a host:guest separator");
-        out.push(format!("{}:{}", vmv.host, tail));
-    }
-    Ok(out)
-}
-
 /// Interactive attach needs a real terminal: the console bridges raw-mode
 /// stdin. Refuse up front when stdin is not a TTY so the command fails with a
 /// clear message instead of hanging on an EOF'd stdin.
@@ -584,27 +571,6 @@ fn machine_run_spec(
     name: String,
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
-    fn persistent_workload_dir_for_run(args: &MachineRunArgs) -> Result<Option<String>> {
-        mvm_client::instruction_trust::gate::local_workload_dir(
-            args.run.flake.as_deref(),
-            args.run.manifest.as_deref(),
-        )
-        .map(|path| {
-            let absolute = if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir()
-                    .context("resolving the current directory for the persistent workload source")?
-                    .join(path)
-            };
-            Ok(std::fs::canonicalize(&absolute)
-                .unwrap_or(absolute)
-                .display()
-                .to_string())
-        })
-        .transpose()
-    }
-
     validate_machine_name(&name)?;
     let (image, manifest, deployment) = if let Some(path) = &args.run.deployment {
         let deployment = resolve_local_deployment(path)?;

@@ -505,6 +505,50 @@ fn stage_instruction_files(dir: &Path) {
         .expect("write instruction-file fixture");
 }
 
+#[then(expr = "the instruction trust workflow runs {string} then {string} then {string}")]
+fn instruction_trust_examples_run(
+    _world: &mut CliWorld,
+    init: String,
+    sign: String,
+    verify: String,
+) {
+    let scratch = tempfile::tempdir().expect("create instruction trust example directory");
+    let home = scratch.path().join("home");
+    let dir = scratch.path().join("work");
+    std::fs::create_dir_all(&dir).expect("create instruction trust work directory");
+    stage_instruction_files(&dir);
+
+    let run = |args: &str| {
+        crate::steps::cli::mvmctl_command()
+            .isolated_home(&home)
+            .env("MVM_SKIP_RECONCILE", "1")
+            .current_dir(&dir)
+            .args(args.split_whitespace())
+            .output()
+            .expect("run instruction trust example")
+    };
+
+    assert!(
+        run(&init).status.success(),
+        "instruction trust init must pass"
+    );
+    assert!(
+        !run(&verify).status.success(),
+        "unsigned instructions must fail verification"
+    );
+    assert!(run(&sign).status.success(), "instruction signing must pass");
+    assert!(
+        run(&verify).status.success(),
+        "signed instructions must pass verification"
+    );
+    std::fs::write(dir.join("my-agent/CLAUDE.md"), "Changed instructions.\n")
+        .expect("tamper with signed instructions");
+    assert!(
+        !run(&verify).status.success(),
+        "tampered instructions must fail verification"
+    );
+}
+
 #[then(expr = "every side-effect-free documented example executes successfully")]
 fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
