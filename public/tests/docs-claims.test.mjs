@@ -56,3 +56,18 @@ test("lineage recovery has a navigable capability guide with its safety boundary
   assert.match(guide, /signed audit chain/i);
   assert.match(guide, /new VM identity/i);
 });
+
+test("workload provenance guide distinguishes signed evidence from an export", () => {
+  const guide = readFileSync(
+    path.join(repo, "public/src/content/docs/guides/workload-provenance.md"),
+    "utf8",
+  );
+  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
+
+  assert.match(sidebar, /slug: "guides\/workload-provenance"/);
+  assert.match(guide, /signed `ExecutionPlan`/);
+  assert.match(guide, /mvmctl trust receipt verify/);
+  assert.match(guide, /mvmctl trust audit verify/);
+  assert.match(guide, /read-only view/);
+  assert.match(guide, /not a substitute for verifying the underlying audit chain/i);
+});

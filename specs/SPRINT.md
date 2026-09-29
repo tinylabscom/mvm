@@ -13,8 +13,8 @@
 - [ ] **Complete capability and client documentation — issue #3727.**
       Corrections for the stale `deploy` CLI denial and durable-session status
       are drafted with two passing documentation regression tests; workspace
-      test validation remains pending. The lineage recovery capability now has
-      a navigable guide and a passing documentation regression test; other
+      test validation remains pending. Lineage recovery and workload provenance
+      now have navigable guides and passing documentation regression tests; other
       capability, client, authoring, and schema pages remain open.
 
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**

@@ -307,6 +307,7 @@ apply goes through the protected-path gate.
 ### PS-18 — Docs (#3727)
 - [ ] one page per capability
   - [x] lineage recovery: rewind and replay guide, with navigation and safety-boundary regression test
+  - [x] workload provenance: signed-plan, receipt, audit, and export guide with a documentation regression test
 - [ ] client guides for each agent pack
 - [ ] profile and pack authoring guides
 - [ ] schema reference generated from PS-05
