@@ -4804,5 +4804,7 @@ writes the plan:
 - [x] Remove the restore-timeout test fixture scheduling race; all 262 backend
       tests and the final host workspace Clippy rerun pass.
 - [ ] Complete workspace and Linux builder validation, PR checks, merge and closure.
-
 See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
+## 2026-09-28 Security evidence freshness — #3750
+- [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.
+Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.

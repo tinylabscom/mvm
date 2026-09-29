@@ -125,7 +125,6 @@ jobs:
           workflow=".github/workflows/pack-signing-smoke.yml"
           cp smoke/inputs/vmlinux smoke/image-set/vmlinux
           kernel_sha="$(sha256sum smoke/image-set/vmlinux | cut -d' ' -f1)"
-          kernel_size="$(stat -c %s smoke/image-set/vmlinux)"
           cat > smoke/image-set.json <<JSON
           {
             "schema_version": 2,
@@ -152,7 +151,7 @@ jobs:
                 "name": "vmlinux",
                 "format": {"kernel": "elf"},
                 "sha256": "${kernel_sha}",
-                "size": ${kernel_size}
+                "size": 12
               }],
               "required_capabilities": ["virtio_vsock"],
               "pack_hash": "${kernel_sha}",

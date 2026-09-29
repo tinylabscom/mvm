@@ -3,7 +3,7 @@
 //! When the guest agent refuses a verb the admitted plan's `agent_verbs` grant
 //! does not permit, it answers `VerbNotAuthorized`, which the host dispatch
 //! surfaces as a typed [`RpcError::VerbNotAuthorized`]. The host records that
-//! refusal as a chain-signed `verb_denied` entry (claim-12 parity) so denials are
+//! refusal as a chain-signed `verb_denied` entry so denials are
 //! observable and tamper-evident. Emission is best-effort — the refusal already
 //! surfaces to the caller as an error; the audit is an observability record, not
 //! load-bearing.
@@ -25,8 +25,8 @@ fn denied_verb(err: &anyhow::Error) -> Option<&str> {
 /// Record a chain-signed `verb_denied` entry for `verb` on `vm_name`. Best-effort:
 /// loads the VM's persisted plan + host signer; a missing plan/signer or a flaky
 /// audit fs warns and skips — it never fails the caller.
-pub(in crate::commands) fn emit_verb_denied(vm_name: &str, verb: &str) {
-    let plan = match super::plan_persist::read_plan(vm_name) {
+pub fn emit_verb_denied(vm_name: &str, verb: &str) {
+    let plan = match mvm_hostd::audit::plan_persist::read_plan(vm_name) {
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, vm = vm_name, verb = verb,
@@ -34,14 +34,14 @@ pub(in crate::commands) fn emit_verb_denied(vm_name: &str, verb: &str) {
             return;
         }
     };
-    let signer = match super::host_signer::load_or_init() {
+    let signer = match mvm_hostd::audit::host_keypair::load_or_init() {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "host signer unavailable; verb_denied entry skipped");
             return;
         }
     };
-    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
+    let emitter = match mvm_hostd::audit::emitter::AuditEmitter::new(signer.signing) {
         Ok(e) => e,
         Err(e) => {
             tracing::warn!(error = %e, "audit emitter unavailable; verb_denied entry skipped");
@@ -58,7 +58,7 @@ pub(in crate::commands) fn emit_verb_denied(vm_name: &str, verb: &str) {
 /// refusal; a no-op for any other error. Callers pass every dispatch failure here
 /// on the error path so grant refusals are audited uniformly across the verb
 /// surface (exec / run-code / attach / set-timeout).
-pub(in crate::commands) fn audit_verb_refusal(vm_name: &str, err: &anyhow::Error) {
+pub fn audit_verb_refusal(vm_name: &str, err: &anyhow::Error) {
     if let Some(verb) = denied_verb(err) {
         emit_verb_denied(vm_name, verb);
     }

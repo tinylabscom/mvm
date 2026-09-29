@@ -78,9 +78,9 @@ export const greet = mvm.app({
     source: "crates/mvm-sdk/sdks/python/README.md",
     code: `import mvm as mv
 
-vm = mv.Machine.run("alpine:latest", allow_hosts=["example.com:443"], ttl_seconds=600)
-print(vm.name, vm.build_mode, vm.inspect()["status"])
-vm.stop()`,
+# Boot, run one command, collect its output, stop and remove the machine. Dev builds only.
+result = mv.Machine.run("alpine:latest", ["uname", "-a"], timeout=60)
+print(result.exit_code, result.stdout)`,
   },
   {
     id: "sdk-node",
@@ -89,9 +89,9 @@ vm.stop()`,
     source: "crates/mvm-sdk/sdks/typescript/README.md",
     code: `import { Machine } from "@runmvm/mvm";
 
-const vm = Machine.run("alpine:latest", { allowHosts: ["example.com:443"], ttlSeconds: 600 });
-console.log(vm.name, vm.inspect().status);
-vm.stop();`,
+// Boot, run one command, collect its output, stop and remove the machine. Dev builds only.
+const run = Machine.run("alpine:latest", ["uname", "-a"], { timeout: 60 });
+console.log(run.exitCode, run.stdout);`,
   },
   {
     id: "sdk-rust",
@@ -104,7 +104,7 @@ vm.stop();`,
 let client = LocalBackend::new();
 
 let image: RootfsSource = "docker.io/library/nginx:1.27".parse()?;
-let request = LaunchRequest::builder(LifecycleMode::Transient, image)
+let request = LaunchRequest::builder(LifecycleMode::Persistent, image)
     .name("web")
     .cpus(2)
     .memory_mib(512)

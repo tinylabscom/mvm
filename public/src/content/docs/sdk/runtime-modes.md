@@ -90,12 +90,12 @@ operation is one library call:
 
 | `Sandbox` operation | Library method |
 | --- | --- |
-| `Sandbox.create(image=...)` | `machine.run` — admitted under a signed plan before boot |
+| `Sandbox.create(image=...)` / `Sandbox.create(template)` | `machine.run` — admitted under a signed plan before boot; `command=` starts once the machine is up |
 | `Sandbox.connect(id)` | `machine.inventory` — reads the machine's dev/prod posture |
 | `commands.start`, `exec`, `shell` | `guest.proc.start`, then `guest.proc.stream.*` for the output |
 | `files.write` / `read` / `list` / `stat` / `mkdir` / `remove` / `move` | `guest.fs.*` |
 | `copy_in` / `copy_out` | `guest.cp` |
-| `kill()` | `machine.stop` |
+| `kill()` | `machine.stop`, then `machine.rm` for a machine the sandbox booted |
 
 Output from `exec` and `ProcessHandle.wait` streams while the process runs:
 the library queues each chunk and the SDK polls for it, so an `on_event`
@@ -115,8 +115,8 @@ Live mode is intentionally narrower than the target SDK contract:
 | TTL | Defaults to 30 minutes unless the caller sets `ttl`. |
 | Commands | `commands.start(...)` starts a command and returns a handle; `exec(...)` / `shell(...)` is the one-shot that returns a captured `ExecResult`. |
 | Files | `files.write(...)` stages bytes into the running VM; `read` / `list` / `stat` / `mkdir` / `remove` / `move` are live-mode only. |
-| Source | `image=` (an OCI reference, a rootfs path, or `flake:<ref>#<attr>`). A template or manifest source is refused: the in-process launcher has no template slot yet. |
-| Boot command | `command=` is passed to the launcher, which refuses a command override today; the image's own entrypoint runs. |
+| Source | `image=` (an OCI reference, a rootfs path, or `flake:<ref>#<attr>`), or a `template` built on this host under that name, boots a named machine started the way `mvmctl machine run -d` starts one; `kill()` stops and removes it. A template nobody built is refused with how to build it. Nothing is built on a launch. |
+| Boot command | `command=` starts once the machine is up, with `env=` as its environment, and `sandbox.process` is its handle. Starting it is a DevOnly guest operation, so a sealed image refuses it, and a machine whose command did not start is stopped. |
 | Cleanup | Python `with`, TypeScript `using`, or explicit `kill()` stops the machine. |
 | Secrets | Live command env forwarding accepts literal values only. Secret refs must use host-managed injection paths. |
 
