@@ -1475,6 +1475,7 @@ mod tests {
                     inject: Default::default(),
                     provider: Some("catalog-provider".into()),
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();

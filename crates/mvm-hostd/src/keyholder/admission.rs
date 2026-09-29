@@ -138,6 +138,7 @@ mod tests {
                     inject: InjectionMode::QueryParam,
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -186,6 +187,7 @@ mod tests {
                     inject: Default::default(),
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -218,6 +220,7 @@ mod tests {
                     inject: InjectionMode::UrlPath,
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -240,6 +243,7 @@ mod tests {
                     inject: Default::default(),
                     provider: Some("anthropic".into()),
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -288,6 +292,7 @@ mod tests {
                     inject: Default::default(),
                     provider: Some("github".into()),
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();

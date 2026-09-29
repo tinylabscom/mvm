@@ -694,6 +694,7 @@ mod tests {
                         inject: Default::default(),
                         provider: None,
                         approve: Default::default(),
+                        oauth: None,
                     },
                 )
                 .unwrap();

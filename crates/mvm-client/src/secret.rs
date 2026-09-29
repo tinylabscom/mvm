@@ -551,6 +551,7 @@ mod tests {
             inject: Default::default(),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         }
     }
 
@@ -1070,6 +1071,7 @@ mod tests {
             inject: Default::default(),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         assert!(validate_binding_meta("local", "aws", &missing).is_err());
         // SigV4 with scope → accepted.
@@ -1080,6 +1082,7 @@ mod tests {
             inject: Default::default(),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         validate_binding_meta("local", "aws", &good).unwrap();
         // Non-SigV4 carrying scope → refused (would be silently ignored).
@@ -1090,6 +1093,7 @@ mod tests {
             inject: Default::default(),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         assert!(validate_binding_meta("local", "k", &stray).is_err());
 
@@ -1100,6 +1104,7 @@ mod tests {
             inject: mvm_contract::ir::InjectionMode::QueryParam,
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         assert!(validate_binding_meta("local", "k", &incompatible).is_err());
     }

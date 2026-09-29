@@ -204,6 +204,7 @@ fn build_service(
                 inject: Default::default(),
                 provider: None,
                 approve: Default::default(),
+                oauth: None,
             },
         )
         .expect("seed secret binding");

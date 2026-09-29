@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use chrono::{Duration as ChronoDuration, Utc};
 use mvm_contract::ir::AuthType;
 use mvm_contract::substitution::SubstitutionDriver;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
@@ -19,6 +20,7 @@ use super::prepare::{
     UNPARSEABLE_DESTINATION, destination_host,
 };
 use super::reflection::{ScrubCounts, StreamingScrubber, body_is_readable, merge_counts};
+use crate::keyholder::resolver::{CapturedOAuthToken, OAuthSecretString};
 use crate::keyholder::{NetworkEndpoint, find_placeholder};
 use crate::supervisor::ai_meter;
 use crate::supervisor::redactor::{RedactionHits, SensitiveDetectionError, StreamingRedactor};
@@ -38,6 +40,95 @@ const HTTP_REQUEST_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from
 const MAX_AI_STREAM_BUFFER_BYTES: usize = 256 * 1024;
 
 impl SubstitutionService {
+    fn flow_has_oauth_capture(&self, flow: &PreparedFlow) -> bool {
+        flow.substituted
+            .iter()
+            .any(|substituted| self.oauth_capture_by_secret.contains_key(&substituted.name))
+    }
+
+    fn captured_oauth_token(
+        &self,
+        rule: &super::OAuthCaptureRule,
+        json: &serde_json::Value,
+    ) -> Option<CapturedOAuthToken> {
+        let access_token = json
+            .pointer(rule.response_access_token_pointer())
+            .and_then(serde_json::Value::as_str)?;
+        let refresh_token = json
+            .pointer("/refresh_token")
+            .and_then(serde_json::Value::as_str)
+            .map(|value| OAuthSecretString::from(value.to_owned()));
+        let expires_at = json
+            .pointer("/expires_at")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&Utc))
+            .or_else(|| {
+                json.pointer("/expires_in")
+                    .and_then(serde_json::Value::as_i64)
+                    .and_then(ChronoDuration::try_seconds)
+                    .map(|ttl| Utc::now() + ttl)
+            });
+        Some(CapturedOAuthToken {
+            access_token: OAuthSecretString::from(access_token.to_owned()),
+            refresh_token,
+            expires_at,
+        })
+    }
+
+    /// Capture OAuth tokens (access and refresh) returned in a JSON response
+    /// body and teach the reflection scrubber to replace them with the
+    /// binding's placeholder before any bytes reach the guest.
+    async fn capture_oauth_response_tokens(
+        &self,
+        flow: &PreparedFlow,
+        body: &[u8],
+    ) -> Result<(), WireResponse> {
+        if flow.substituted.is_empty() || self.oauth_capture_by_secret.is_empty() {
+            return Ok(());
+        }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return Ok(());
+        };
+        for substituted in &flow.substituted {
+            let Some(rule) = self.oauth_capture_by_secret.get(&substituted.name) else {
+                continue;
+            };
+            let Some(token) = self.captured_oauth_token(rule, &json) else {
+                continue;
+            };
+            let mut learned_values = vec![token.access_token.expose_secret().as_bytes().to_vec()];
+            if let Some(refresh_token) = &token.refresh_token {
+                learned_values.push(refresh_token.expose_secret().as_bytes().to_vec());
+            }
+            if let Err(error) = self
+                .resolver
+                .store_captured_oauth_token(&substituted.name, token)
+            {
+                self.audit_fail_closed(flow.destination.as_deref(), "oauth_capture_store_failed")
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: format!(
+                        "captured oauth token for `{}` could not be stored: {error}",
+                        substituted.name
+                    ),
+                });
+            }
+            for learned_value in learned_values {
+                // A zero-length needle would match at every scrub position.
+                if learned_value.is_empty() {
+                    continue;
+                }
+                self.reflection.learn_captured_token(
+                    &substituted.name,
+                    &substituted.placeholder,
+                    &learned_value,
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Substitute, gate, forward, and audit one request.
     ///
     /// `pub(crate)` so the FlowMux `Http` arm can call it. That arm frames the
@@ -401,6 +492,8 @@ impl SubstitutionService {
         flow: &PreparedFlow,
         response: &mut ForwardResponse,
     ) -> Result<(), WireResponse> {
+        self.capture_oauth_response_tokens(flow, &response.body)
+            .await?;
         let Some(set) = self.reflection.snapshot() else {
             return Ok(());
         };
@@ -424,6 +517,106 @@ impl SubstitutionService {
         self.audit_reflection_scrubbed(&counts, flow.destination.as_deref())
             .await;
         Ok(())
+    }
+
+    async fn transform_captured_oauth_stream(
+        &self,
+        mut flow: PreparedFlow,
+        mut upstream: ForwardStreamResponse,
+        ai_meta: Option<AiRequestMeta>,
+        mut head: ForwardResponse,
+        mut scrub_counts: ScrubCounts,
+    ) -> Result<ForwardStreamResponse, WireResponse> {
+        if let Err(refusal) = self.refuse_unreadable_response(&flow, &head.headers).await {
+            self.audit_forward_outcome(&flow, ForwardOutcome::ResponseRefused)
+                .await;
+            return Err(refusal);
+        }
+        let mut body = Vec::new();
+        while let Some(next) = upstream.body.recv().await {
+            let chunk = match next {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    self.audit_forward_outcome(&flow, ForwardOutcome::ResponseFailed)
+                        .await;
+                    return Err(WireResponse::Refused {
+                        message: error.to_string(),
+                    });
+                }
+            };
+            if body.len().saturating_add(chunk.len()) > MAX_HTTP_STREAM_BODY_BYTES {
+                self.audit_fail_closed(flow.destination.as_deref(), "response_body_limit_exceeded")
+                    .await;
+                self.audit_forward_outcome(&flow, ForwardOutcome::ResponseRefused)
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: format!(
+                        "response body exceeds the {MAX_HTTP_STREAM_BODY_BYTES} byte limit"
+                    ),
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+        if let Err(refusal) = self.capture_oauth_response_tokens(&flow, &body).await {
+            self.audit_forward_outcome(&flow, ForwardOutcome::ResponseRefused)
+                .await;
+            return Err(refusal);
+        }
+        if let Some(set) = self.reflection.snapshot() {
+            for (_, value) in &mut head.headers {
+                *value = set.scrub_str(value, &mut scrub_counts);
+            }
+            body = set.scrub(&body, &mut scrub_counts);
+        }
+        head.body = body;
+        let reinject_proofs = flow.replacement_flow.reinject_response(&mut head);
+        if let Some((redacted, hits)) = self
+            .redactor
+            .redact_bytes_for(&head.body, &flow.redaction_action)
+        {
+            if hits.detector_failures > 0 {
+                self.audit_fail_closed(
+                    flow.destination.as_deref(),
+                    "response_body_detector_failed",
+                )
+                .await;
+                self.audit_forward_outcome(&flow, ForwardOutcome::ResponseRefused)
+                    .await;
+                return Err(WireResponse::Refused {
+                    message: "sensitive-data detector failed closed; refusing response".into(),
+                });
+            }
+            head.body = redacted;
+            flow.redaction_hits.merge(hits);
+        }
+
+        self.audit_completed_flow(&flow, &reinject_proofs).await;
+        if let Some(meta) = ai_meta {
+            self.record_streaming_ai_usage(&meta, head.status, &head.body)
+                .await;
+        }
+        self.audit_reflection_scrubbed(&scrub_counts, flow.destination.as_deref())
+            .await;
+        self.audit_forward_outcome(&flow, ForwardOutcome::Completed)
+            .await;
+
+        let status = head.status;
+        let headers = head.headers;
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        if !head.body.is_empty() {
+            sender
+                .try_send(Ok(head.body))
+                .map_err(|_| WireResponse::Refused {
+                    message: "response consumer closed".into(),
+                })?;
+        }
+        drop(sender);
+        Ok(ForwardStreamResponse {
+            status,
+            headers,
+            body_len: None,
+            body: receiver,
+        })
     }
 
     async fn transform_response_stream(
@@ -452,12 +645,13 @@ impl SubstitutionService {
         // Reinject and redact response headers before any body byte can cross
         // to the guest. HTTP transfer framing belongs to the upstream leg, not
         // FlowMux; remove it because transforms may change decoded length.
+        let status = upstream.status;
+        let headers = std::mem::take(&mut upstream.headers);
         let mut head = ForwardResponse {
-            status: upstream.status,
-            headers: upstream.headers,
+            status,
+            headers,
             body: Vec::new(),
         };
-        let mut reinject_proofs = flow.replacement_flow.reinject_response(&mut head);
         head.headers.retain(|(name, _)| {
             !name.eq_ignore_ascii_case("content-length")
                 && !name.eq_ignore_ascii_case("transfer-encoding")
@@ -483,6 +677,12 @@ impl SubstitutionService {
                 flow.redaction_hits.merge(hits);
             }
         }
+        if self.flow_has_oauth_capture(&flow) {
+            return self
+                .transform_captured_oauth_stream(flow, upstream, ai_meta, head, scrub_counts)
+                .await;
+        }
+        let mut reinject_proofs = flow.replacement_flow.reinject_response(&mut head);
 
         let response_status = head.status;
         let response_headers = std::mem::take(&mut head.headers);
@@ -661,19 +861,53 @@ impl SubstitutionService {
 #[cfg(test)]
 mod server_tests {
     use super::*;
-    use crate::keyholder::{LocalResolver, SecretResolver, SubstitutionRegistry};
-    use crate::supervisor::network_endpoint_proxy::SubstitutionService;
+    use crate::keyholder::resolver::OAuthTokenSet;
+    use crate::keyholder::{
+        FileBindingStore, LocalResolver, SecretBindingMeta, SecretResolver, SubstitutionRegistry,
+    };
     use crate::supervisor::network_endpoint_proxy::test_support::{
         MockForwarder, RedirectForwarder, bearer_ref, gate_admitting, service_with,
     };
+    use crate::supervisor::network_endpoint_proxy::{
+        ForwardError, ForwardResponse, Forwarder, SubstitutionService,
+    };
     use crate::supervisor::redactor::STREAM_TRANSFORM_OVERLAP;
+    use async_trait::async_trait;
+    use chrono::{Duration, Utc};
     use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
+    use mvm_core::crypto::secret_binding::{BindingStore, OAuthBindingMeta};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use mvm_core::substitution_wire::WireResponse;
-    use secrecy::SecretBox;
+    use secrecy::{ExposeSecret, SecretBox};
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
     use zeroize::Zeroizing;
+
+    fn oauth_binding_meta(pointer: &str) -> SecretBindingMeta {
+        SecretBindingMeta {
+            auth_type: AuthType::Bearer,
+            allowed_hosts: vec!["api.openai.com".into()],
+            sigv4: None,
+            inject: Default::default(),
+            provider: None,
+            approve: Default::default(),
+            oauth: Some(OAuthBindingMeta {
+                authorization_url: "https://auth.example.com/authorize".into(),
+                token_url: "https://auth.example.com/token".into(),
+                client_id: "public-client-id".into(),
+                scopes: vec!["scope-a".into()],
+                response_access_token_pointer: Some(pointer.into()),
+            }),
+        }
+    }
+
+    fn oauth_token_set(access_token: &str) -> OAuthTokenSet {
+        OAuthTokenSet {
+            access_token: OAuthSecretString::from(access_token.to_owned()),
+            refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            expires_at: Utc::now() + Duration::minutes(5),
+        }
+    }
 
     #[tokio::test]
     async fn flowmux_request_body_streams_through_split_token_redaction() {
@@ -882,5 +1116,327 @@ mod server_tests {
             1,
             "the endpoint must surface a redirect, never follow it with the bound credential"
         );
+    }
+
+    struct OAuthTokenForwarder;
+
+    #[async_trait]
+    impl Forwarder for OAuthTokenForwarder {
+        async fn forward(
+            &self,
+            _req: mvm_contract::substitution::PreparedRequest,
+        ) -> Result<ForwardResponse, ForwardError> {
+            Ok(ForwardResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: br#"{"access_token":"fresh-oauth-token","token_type":"Bearer"}"#.to_vec(),
+            })
+        }
+    }
+
+    struct FullOAuthTokenForwarder;
+
+    #[async_trait]
+    impl Forwarder for FullOAuthTokenForwarder {
+        async fn forward(
+            &self,
+            _req: mvm_contract::substitution::PreparedRequest,
+        ) -> Result<ForwardResponse, ForwardError> {
+            Ok(ForwardResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: br#"{"access_token":"fresh-oauth-token","refresh_token":"fresh-refresh-token","expires_in":3600,"token_type":"Bearer"}"#
+                    .to_vec(),
+            })
+        }
+    }
+
+    struct ShortOAuthTokenForwarder;
+
+    #[async_trait]
+    impl Forwarder for ShortOAuthTokenForwarder {
+        async fn forward(
+            &self,
+            _req: mvm_contract::substitution::PreparedRequest,
+        ) -> Result<ForwardResponse, ForwardError> {
+            Ok(ForwardResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: br#"{"access_token":"tok123","token_type":"Bearer"}"#.to_vec(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_token_substituted_at_endpoint_never_reaches_guest() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new(
+                    serde_json::to_string(&oauth_token_set("placeholder-seeded-value")).unwrap(),
+                )),
+            )
+            .unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put("local", "openai", &oauth_binding_meta("/access_token"))
+            .unwrap();
+        let resolver = Arc::new(LocalResolver::with_bindings(
+            "local",
+            Arc::new(store),
+            Arc::new(bindings),
+        ));
+        let resolver_dyn: Arc<dyn SecretResolver> = resolver.clone();
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(registry),
+                resolver_dyn,
+                Arc::new(OAuthTokenForwarder),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_oauth_capture_rule("openai", "/access_token"),
+        );
+        let response = service
+            .process(mvm_core::substitution_wire::WireRequest {
+                method: "GET".into(),
+                url: "https://api.openai.com/token".into(),
+                headers: vec![("authorization".into(), placeholder.clone())],
+                body_b64: String::new(),
+            })
+            .await;
+        let mvm_core::substitution_wire::WireResponse::Ok { body_b64, .. } = response else {
+            panic!("request must succeed");
+        };
+        let body = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(body_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body.contains(&placeholder),
+            "captured token must be replaced with the minted placeholder: {body}"
+        );
+        assert!(
+            !body.contains("fresh-oauth-token"),
+            "captured token must never be exposed to the guest: {body}"
+        );
+        let secret = resolver
+            .resolve(&bearer_ref("openai", &["api.openai.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"fresh-oauth-token");
+    }
+
+    #[tokio::test]
+    async fn echoed_oauth_refresh_token_is_scrubbed_and_persisted() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(FileSecretStore::with_dir(dir.path()));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new(
+                    serde_json::to_string(&oauth_token_set("seed-token")).unwrap(),
+                )),
+            )
+            .unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put("local", "openai", &oauth_binding_meta("/access_token"))
+            .unwrap();
+        let resolver = Arc::new(LocalResolver::with_bindings(
+            "local",
+            store.clone(),
+            Arc::new(bindings),
+        ));
+        let resolver_dyn: Arc<dyn SecretResolver> = resolver.clone();
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(registry),
+                resolver_dyn,
+                Arc::new(FullOAuthTokenForwarder),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_oauth_capture_rule("openai", "/access_token"),
+        );
+        let response = service
+            .process(mvm_core::substitution_wire::WireRequest {
+                method: "GET".into(),
+                url: "https://api.openai.com/token".into(),
+                headers: vec![("authorization".into(), placeholder.clone())],
+                body_b64: String::new(),
+            })
+            .await;
+        let mvm_core::substitution_wire::WireResponse::Ok { body_b64, .. } = response else {
+            panic!("request must succeed");
+        };
+        let body = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(body_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body.matches(&placeholder).count() >= 2,
+            "access and refresh token must both be replaced with the minted placeholder: {body}"
+        );
+        assert!(
+            !body.contains("fresh-oauth-token"),
+            "captured access token must never be exposed to the guest: {body}"
+        );
+        assert!(
+            !body.contains("fresh-refresh-token"),
+            "captured refresh token must never be exposed to the guest: {body}"
+        );
+        let secret = resolver
+            .resolve(&bearer_ref("openai", &["api.openai.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"fresh-oauth-token");
+        let stored: OAuthTokenSet =
+            serde_json::from_str(store.get("local", "openai").unwrap().expose_secret()).unwrap();
+        assert_eq!(
+            stored.refresh_token.as_ref().unwrap().expose_secret(),
+            "fresh-refresh-token"
+        );
+        assert!(stored.expires_at > Utc::now());
+    }
+
+    #[tokio::test]
+    async fn short_oauth_tokens_are_scrubbed_and_persisted() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new(
+                    serde_json::to_string(&oauth_token_set("seed-token")).unwrap(),
+                )),
+            )
+            .unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put("local", "openai", &oauth_binding_meta("/access_token"))
+            .unwrap();
+        let resolver = Arc::new(LocalResolver::with_bindings(
+            "local",
+            Arc::new(store),
+            Arc::new(bindings),
+        ));
+        let resolver_dyn: Arc<dyn SecretResolver> = resolver.clone();
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(registry),
+                resolver_dyn,
+                Arc::new(ShortOAuthTokenForwarder),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_oauth_capture_rule("openai", "/access_token"),
+        );
+        let response = service
+            .process(mvm_core::substitution_wire::WireRequest {
+                method: "GET".into(),
+                url: "https://api.openai.com/token".into(),
+                headers: vec![("authorization".into(), placeholder.clone())],
+                body_b64: String::new(),
+            })
+            .await;
+        let mvm_core::substitution_wire::WireResponse::Ok { body_b64, .. } = response else {
+            panic!("request must succeed");
+        };
+        let body = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(body_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(body.contains(&placeholder));
+        assert!(!body.contains("tok123"));
+        let secret = resolver
+            .resolve(&bearer_ref("openai", &["api.openai.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"tok123");
+    }
+
+    #[tokio::test]
+    async fn flowmux_response_token_capture_updates_streamed_oauth_responses() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new(
+                    serde_json::to_string(&oauth_token_set("seed-token")).unwrap(),
+                )),
+            )
+            .unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put("local", "openai", &oauth_binding_meta("/access_token"))
+            .unwrap();
+        let resolver = Arc::new(LocalResolver::with_bindings(
+            "local",
+            Arc::new(store),
+            Arc::new(bindings),
+        ));
+        let resolver_dyn: Arc<dyn SecretResolver> = resolver.clone();
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(registry),
+                resolver_dyn,
+                Arc::new(OAuthTokenForwarder),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_oauth_capture_rule("openai", "/access_token"),
+        );
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(sender);
+        let mut response = service
+            .process_body_stream(
+                mvm_core::substitution_wire::HttpFlowHead {
+                    method: "GET".into(),
+                    url: "https://api.openai.com/token".into(),
+                    headers: vec![("authorization".into(), placeholder.clone())],
+                    body_len: 0,
+                },
+                receiver,
+            )
+            .await
+            .expect("streamed oauth response");
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body.recv().await {
+            body.extend_from_slice(&chunk.unwrap());
+        }
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.contains(&placeholder));
+        assert!(!body.contains("fresh-oauth-token"));
+        let secret = resolver
+            .resolve(&bearer_ref("openai", &["api.openai.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"fresh-oauth-token");
     }
 }

@@ -104,6 +104,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
                 inject: Default::default(),
                 provider: None,
                 approve: Default::default(),
+                oauth: None,
             },
         )
         .unwrap();

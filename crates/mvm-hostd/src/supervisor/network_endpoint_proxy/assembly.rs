@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use mvm_core::plan::SecretBinding;
 
-use super::SubstitutionService;
 use super::forward::{ForwardError, Forwarder, HardenedForwarder};
+use super::{OAuthCaptureRule, SubstitutionService};
 use crate::keyholder::{
     AssembleError, BindingStore, HandedPlaceholders, SecretResolver, SubstitutionRegistry,
     assemble_registry,
@@ -86,6 +86,33 @@ fn secrets_requiring_approval(
         .collect()
 }
 
+/// OAuth response-capture rules keyed by secret name.
+fn oauth_capture_rules(
+    plan_secrets: &[mvm_core::plan::SecretBinding],
+    tenant: &str,
+    bindings: &dyn crate::keyholder::BindingStore,
+) -> std::collections::BTreeMap<String, OAuthCaptureRule> {
+    plan_secrets
+        .iter()
+        .filter_map(|binding| match &binding.source {
+            mvm_core::plan::SecretSource::Keystore { address } => Some(address),
+            mvm_core::plan::SecretSource::External { .. } => None,
+        })
+        .filter_map(|address| {
+            let meta = bindings.get(tenant, address).ok().flatten()?;
+            let oauth = meta.oauth?;
+            Some((
+                address.clone(),
+                OAuthCaptureRule {
+                    response_access_token_pointer: oauth
+                        .response_access_token_pointer
+                        .unwrap_or_else(|| "/access_token".to_string()),
+                },
+            ))
+        })
+        .collect()
+}
+
 impl SubstitutionService {
     /// Build a service over its registry, resolver, forward leg and claim-10
     /// gate. The gate is a constructor argument rather than a builder step so
@@ -118,6 +145,7 @@ impl SubstitutionService {
             approver: Arc::new(crate::supervisor::runtime_approval::NoApprovalBackend),
             approval_required: std::collections::BTreeSet::new(),
             reflection: super::reflection::ReflectionGuard::default(),
+            oauth_capture_by_secret: std::collections::BTreeMap::new(),
         }
     }
 
@@ -256,11 +284,13 @@ impl SubstitutionService {
                 .with_gate_resolver(Arc::clone(&admitted), Arc::clone(&egress_gate)),
         );
         let approval_required = secrets_requiring_approval(plan_secrets, tenant, bindings);
+        let oauth_capture_by_secret = oauth_capture_rules(plan_secrets, tenant, bindings);
         let mut service = Self::new(Arc::new(registry), resolver, forwarder, egress_gate)
             .with_admitted_addresses(admitted)
             .with_approval_required(approval_required)
             .with_tenant(tenant)
             .with_instance_id(instance_id);
+        service.oauth_capture_by_secret = oauth_capture_by_secret;
         service = service.with_redaction_policy(redaction);
         service = service.with_reversible_replacement_policy(reversible_replacement);
         if let Some(intermediate) = tls_intermediate {
@@ -310,6 +340,17 @@ impl SubstitutionService {
                 .as_ref()
                 .map(|recorder| Arc::as_ptr(recorder).cast::<()>() as usize),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_oauth_capture_rule(mut self, secret: &str, pointer: &str) -> Self {
+        self.oauth_capture_by_secret.insert(
+            secret.to_string(),
+            OAuthCaptureRule {
+                response_access_token_pointer: pointer.to_string(),
+            },
+        );
+        self
     }
 }
 
@@ -396,6 +437,7 @@ mod server_tests {
                     inject: Default::default(),
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();
@@ -457,6 +499,7 @@ mod server_tests {
                     inject: Default::default(),
                     provider: None,
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();

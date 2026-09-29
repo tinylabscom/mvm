@@ -336,6 +336,7 @@ mod tests {
                         inject: Default::default(),
                         provider: None,
                         approve: Default::default(),
+                        oauth: None,
                     },
                 )
                 .expect("seed the binding store");

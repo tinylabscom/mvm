@@ -383,6 +383,7 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
             inject,
             provider: resolved.provider,
             approve,
+            oauth: None,
         },
     )?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
@@ -1221,6 +1222,7 @@ mod tests {
             inject: Default::default(),
             provider: Some("openai".into()),
             approve: Default::default(),
+            oauth: None,
         };
         let line = ls_line("openai", Some(&b));
         assert!(line.contains("provider=openai"), "got: {line}");
@@ -1327,6 +1329,7 @@ mod tests {
             inject: Default::default(),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         let line = ls_line("aws", Some(&b));
         assert!(line.contains("type=sigv4"), "got: {line}");
@@ -1347,6 +1350,7 @@ mod tests {
             inject: Default::default(),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         let line = ls_line("openai", Some(&b));
         assert!(line.starts_with("openai"));
