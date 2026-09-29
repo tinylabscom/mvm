@@ -190,6 +190,11 @@ pub enum BuilderArtifacts {
 /// without a matching rootfs is impossible.
 pub const SIDECAR_FILENAME: &str = "mvm-meta.json";
 
+/// The `hypervisor` value a sidecar carries when its rootfs was materialized
+/// from an OCI image rather than built by `mkGuest`. See
+/// [`GuestSidecar::is_oci_materialized`].
+pub const OCI_MATERIALIZED_HYPERVISOR: &str = "oci";
+
 /// mkGuest runtime sidecar (`mvm-meta.json`). Wire-format mirror of
 /// `mkGuest`'s `passthru.mvm`. Build paths emit this; runtime paths
 /// consume it.
@@ -330,6 +335,16 @@ impl GuestSidecar {
         self.runtime_lean
     }
 
+    /// Whether this rootfs was materialized from an OCI image by
+    /// [`Self::for_oci_run`], rather than built by `mkGuest`.
+    ///
+    /// Load-bearing: an OCI image's own init knows nothing of the guest's
+    /// egress proxy, so a launch that boots one must hand the workload the
+    /// proxy environment itself. A `mkGuest` image exports it from `/init`.
+    pub fn is_oci_materialized(&self) -> bool {
+        self.hypervisor == OCI_MATERIALIZED_HYPERVISOR
+    }
+
     /// Sidecar for a rootfs materialized from an OCI image and made
     /// bootable by the mvm runtime injection (baked agent + netinit +
     /// `/mvm/runtime` mount point + overlay-preferring `/init`).
@@ -350,10 +365,10 @@ impl GuestSidecar {
     /// the agent-verb grant both read these fields and must see a sealed
     /// image refuse interactive access. The baked agent is the real
     /// cross-compiled binary, not the stub. `hypervisor` is left
-    /// backend-neutral ("oci"): the materialized rootfs is cached and
-    /// boots on any backend, so it can't honestly name one — and no
-    /// gate reads this field (it is informational; only `accessible`
-    /// drives a runtime decision).
+    /// backend-neutral ([`OCI_MATERIALIZED_HYPERVISOR`]): the materialized
+    /// rootfs is cached and boots on any backend, so it can't honestly name
+    /// one. That value is also how a launch learns the rootfs came from an
+    /// image, whichever surface named it — see [`Self::is_oci_materialized`].
     pub fn for_oci_run(name: &str, sealed: bool, runtime_lean: bool) -> Self {
         Self {
             name: name.to_string(),
@@ -372,7 +387,7 @@ impl GuestSidecar {
             // config says otherwise; the entrypoint runs under the
             // agent, which applies the configured uid.
             rootless_entrypoint: false,
-            hypervisor: "oci".to_string(),
+            hypervisor: OCI_MATERIALIZED_HYPERVISOR.to_string(),
             overlay_aware: true,
             runtime_lean,
             // An arbitrary OCI image belongs to no mvm image line and carries
@@ -1806,6 +1821,15 @@ mod tests {
         assert_eq!(sidecar.agent_binary, "real");
         sidecar.write_to_dir(tmp.path()).expect("write");
         admit_runtime_overlay_contract(tmp.path()).expect("OCI-run rootfs must admit");
+    }
+
+    #[test]
+    fn only_an_oci_materialized_sidecar_says_it_came_from_an_image() {
+        assert!(
+            GuestSidecar::for_oci_run("oci:sha256-deadbeef", false, true).is_oci_materialized()
+        );
+        assert!(GuestSidecar::for_oci_run("oci:sha256-deadbeef", true, true).is_oci_materialized());
+        assert!(!fixture_sidecar().is_oci_materialized());
     }
 
     #[test]
