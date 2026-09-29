@@ -30,16 +30,23 @@ for production workloads.
 mvmctl machine run --flake ./my-app --name devbox -d
 mvmctl machine console devbox
 mvmctl machine console devbox --command "uname -a"
+mvmctl machine console devbox --list
+mvmctl machine detach devbox
 ```
 
 Use `--command` for a one-shot shell command when you want console transport
 but not an interactive session. Use `mvmctl machine exec` for normal automation.
 
+An interactive session survives its client: press Enter then `~d` to detach,
+and run `machine console` again to reattach with the recent output replayed.
+`~.` ends the session. See [Attach to a microVM](/console/attach/) for the full
+lifecycle.
+
 ## When to use which surface
 
 | Need | Prefer |
 | --- | --- |
-| Human debugging | `mvmctl machine console <name>` |
+| Human debugging | `mvmctl machine console <name>` (alias `machine attach`) |
 | Scripted command execution | `mvmctl machine exec <name> -- <cmd>` |
 | Process lifecycle control | `mvmctl machine proc start/ls/wait/kill` |
 | File transfer | `mvmctl machine fs` or `mvmctl machine cp` |

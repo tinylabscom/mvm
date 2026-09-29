@@ -68,9 +68,11 @@ pub struct PersistentImageStartParams<'a> {
     pub ports: &'a [String],
     /// Concrete backend selected by the caller.
     pub backend_name: &'a str,
-    /// The workload kernel to boot. Resolved by the caller: the CLI may build
-    /// one through the builder VM, and a library embedder never builds.
-    pub kernel_path: String,
+    /// The workload kernel to boot, or `None` for a backend that carries its
+    /// own (libkrun's bundled kernel, the in-memory mock). Resolved by the
+    /// caller: the CLI may build one through the builder VM, and a library
+    /// embedder never builds.
+    pub kernel_path: Option<String>,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
     /// sealed-prod default.
     pub agent_verb: Vec<String>,
@@ -91,6 +93,14 @@ pub struct PersistentImageStartParams<'a> {
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
     pub gpu_device: Option<u32>,
+    /// Local workload source directory to scan for project instruction files and
+    /// policies on each start, when the persistent machine came from one.
+    pub workload_dir: Option<&'a std::path::Path>,
+    /// The machine's recorded secret references, already validated against
+    /// the caller's secret service.
+    pub secrets: crate::admission::secrets::ResolvedPlanSecrets,
+    /// The backend that starts the VM, an instance of `backend_name`.
+    pub backend: mvm_runtime::backend::AnyBackend,
 }
 
 /// The network mode every newly admitted networked workload uses: the
@@ -191,6 +201,9 @@ pub fn start_persistent_oci_machine(
         grants,
         gpu,
         gpu_device,
+        workload_dir,
+        secrets: resolved_secrets,
+        backend,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     if let Some(granted) = crate::clamp_vcpus_for_backend(backend_name, cpus) {
@@ -213,9 +226,19 @@ pub fn start_persistent_oci_machine(
 
     let admission_ledger = InMemoryNonceLedger::new();
     let ingress = machine_port_ingress(ports)?;
-    let resolved_secrets = crate::admission::secrets::resolve_machine_secrets(name)?;
+    let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
+        .iter()
+        .filter_map(|volume| {
+            volume
+                .materialized_image
+                .as_deref()
+                .map(std::path::PathBuf::from)
+        })
+        .collect();
     let admission = admit_plan_for_boot_with_ingress(
         AdmitPlanForBootParams {
+            instructions: crate::admission::InstructionSources::for_workload(workload_dir)
+                .with_mount_roots(&instruction_mount_roots),
             outputs: Vec::new(),
             network_mode: preflight_network(),
             tenant: "local",
@@ -223,7 +246,7 @@ pub fn start_persistent_oci_machine(
             backend_name,
             configured_images_dir: mvm_build::image_source::configured_images_dir().as_deref(),
             rootfs_path,
-            kernel_path: Some(std::path::Path::new(&kernel_path)),
+            kernel_path: kernel_path.as_deref().map(std::path::Path::new),
             precomputed_image_sha256: None,
             boot_artifact_identity: None,
             cpus,
@@ -266,7 +289,7 @@ pub fn start_persistent_oci_machine(
     let mut start_config = VmStartParams::builder()
         .name(name.to_string())
         .rootfs_path(rootfs_path.display().to_string())
-        .vmlinux_path(kernel_path)
+        .vmlinux_path(kernel_path.unwrap_or_default())
         .initrd_path(initrd_path)
         .verity_path(verity_path)
         .roothash(roothash)
@@ -320,7 +343,7 @@ pub fn start_persistent_oci_machine(
     )?;
     // VMM selection + workload-support check + start move behind the facade; the
     // admission gate (above) and the launched/failed emits stay here.
-    let started = match crate::start_prepared(backend_name, &start_config) {
+    let started = match crate::start_prepared(backend, &start_config) {
         Ok(started) => started,
         Err(err) => {
             let err = anyhow::anyhow!("{err}");

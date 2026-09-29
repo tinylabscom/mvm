@@ -153,6 +153,8 @@ fn placeholder_member(role: ImageSetRole, target: MemberTarget) -> ImageSetMembe
     ImageSetMember {
         role,
         target,
+        build_mode: None,
+        source_fingerprint: None,
         boot_protocol: role.is_bootable().then_some(BootProtocol::LinuxDirect),
         artifacts: vec![MemberArtifact {
             name: ArtifactName::new(name.as_str()).unwrap(),

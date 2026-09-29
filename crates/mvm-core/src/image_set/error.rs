@@ -32,6 +32,14 @@ pub enum ImageSetError {
         role: ImageSetRole,
         target: MemberTarget,
     },
+    #[error(
+        "member {role}/{target} declares build mode {build_mode}, which only workload bases publish"
+    )]
+    BuildModeNotAllowedForRole {
+        role: ImageSetRole,
+        target: MemberTarget,
+        build_mode: super::MemberBuildMode,
+    },
     #[error("member {role}/{target} lists artifact {name} more than once")]
     DuplicateArtifactName {
         role: ImageSetRole,
@@ -345,6 +353,7 @@ impl ImageSetError {
             | Self::UnexpectedBootProtocol { .. }
             | Self::TargetNotAllowedForRole { .. }
             | Self::UnknownSidecarLibc { .. }
+            | Self::BuildModeNotAllowedForRole { .. }
             | Self::ReleaseTagVersionMismatch { .. }
             | Self::SupersedesNotOlder { .. }
             | Self::MissingNixLock

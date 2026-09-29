@@ -28,13 +28,12 @@ pub(crate) use parse::AssetSpec;
 pub(crate) use parse::materialize_disk_volume;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_asset_spec,
-    parse_volume_spec, validate_volume_spec, vm_volume_from_spec_validated,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, parse_asset_spec, parse_volume_spec,
+    validate_volume_spec, vm_volume_from_spec_validated,
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
-pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, resolve_flake_ref, resolve_manifest_arg,
-};
+pub(crate) use resolve::{ManifestArgRef, resolve_manifest_arg};
+pub(super) use resolve::{egress_enforcement_label, launch_uses_oci_image, resolve_flake_ref};
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};
 pub(crate) use vcpu_default::default_vcpus;
 pub(super) use vsock::{emit_vsock_rpc_audit, wait_for_guest_agent};

@@ -25,12 +25,12 @@ keep a workflow documented as planned.
 | Operation | CLI | Python SDK | TypeScript SDK | Notes |
 | --- | --- | --- | --- | --- |
 | Create named sandbox | Shipped | Partial | Partial | SDK live mode calls `machine.run` in `libmvm_hostlib`, in-process; record mode records `Sandbox.create(...)`. |
-| One-shot run | Shipped | Target | Target | `mvmctl run -- <cmd>` is current; SDK convenience helpers should preserve receipts and policy. |
+| One-shot run | Shipped | Shipped | Shipped | `Machine.run(image, command)` boots a machine through the admitted start `mvmctl machine run -d` uses, runs the command, returns its captured output, and stops and removes the machine. |
 | Start command | Shipped | Partial | Partial | SDK exposes `commands.start(...)`; result capture is still a target. |
 | Command result capture | Shipped | Shipped | Shipped | `sandbox.exec(...)` / `shell(...)` returns a captured `ExecResult` (live mode only). There is no `commands.run(...)`. |
 | File write | Shipped | Shipped | Shipped | SDK supports `files.write(...)`; live mode calls `guest.fs.write` in `libmvm_hostlib`. |
 | File read/list/remove | Shipped | Shipped | Shipped | `files.read/list/stat/mkdir/remove/move(...)`, live mode only. |
-| Logs | Shipped | Target | Target | SDK log helpers should keep payload redaction rules explicit. |
+| Logs | Shipped | Shipped | Shipped | `Machine.logs(...)` returns the captured console; with `follow` it is a stream over `machine.logs.stream.*`, the reader `mvmctl machine logs --follow` uses. |
 | Port forwarding | Not claimed | Not claimed | Not claimed | Dynamic forwarding is retired. Ingress is declared before boot with `machine run --port HOST:GUEST`, or `network(ports=[...])` in a declaration; `mvmctl machine forward` and `sandbox.forward(...)` only explain the migration. |
 | Snapshot save/restore | Shipped | Target | Target | Backend behavior differs; SDK type model needs to expose that. |
 | Cold mode | Shipped | Target | Target | SDK should make running, cold, restoring, stopped, and destroyed states explicit. |
@@ -72,7 +72,8 @@ The next SDK work should close the highest-value gaps in this order:
 
 1. Receipt/audit correlation on the `ExecResult` returned by
    `sandbox.exec(...)`, which today carries only exit code, stdout, and stderr.
-2. `logs(...)` with redaction and bounded streaming.
+2. `sandbox.logs(...)` with redaction and bounded streaming on the sandbox
+   handle; `Machine.logs(...)` is already shipped.
 3. Declarative `network.ports` ingress with explicit policy.
 4. `snapshot(...)`, `cold()`, `resume()`, `destroy()`, and `detach()` with
    backend-aware state types.

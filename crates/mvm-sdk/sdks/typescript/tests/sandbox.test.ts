@@ -167,9 +167,18 @@ describe("MVM_SDK_MODE", () => {
     }
   });
 
-  it("live mode refuses a template source before looking for the library", () => {
+  it("live mode sends a template source to the library", () => {
     process.env.MVM_SDK_MODE = "live";
-    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(mvm.SandboxModeError);
+    const previous = process.env.MVM_HOSTLIB_PATH;
+    process.env.MVM_HOSTLIB_PATH = "/nonexistent/libmvm_hostlib.so";
+    try {
+      // The template reaches the library call rather than being refused by the
+      // SDK, so the failure is the missing library's.
+      expect(() => mvm.Sandbox.create("python-3.12")).toThrow(mvm.MvmTransportError);
+    } finally {
+      if (previous === undefined) delete process.env.MVM_HOSTLIB_PATH;
+      else process.env.MVM_HOSTLIB_PATH = previous;
+    }
   });
 
   it("plan mode redirects to mvmctl run --mode plan", () => {

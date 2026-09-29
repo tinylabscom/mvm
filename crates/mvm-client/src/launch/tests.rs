@@ -615,25 +615,26 @@ async fn removing_a_running_persistent_machine_needs_the_force_flow() {
 async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
     let _home = Isolated::new();
     let client = mock_client();
-    let mut spec = mvm_runtime::machine::persist::MachineSpec {
+    let spec = mvm_runtime::machine::persist::MachineSpec {
         caller_commitment: None,
         schema_version: mvm_runtime::machine::persist::MACHINE_SPEC_SCHEMA_VERSION,
-        name: "p-net".into(),
+        name: "p-vol".into(),
         image: Some("alpine:latest".into()),
         manifest: None,
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
-        net: true,
+        net: false,
         allow_host: vec![],
         peer: Vec::new(),
         cpus: 1,
         memory: "128M".into(),
         mem_initial: None,
         profile: "standard".into(),
-        volumes: vec![],
+        volumes: vec!["/h:/data".into()],
         init: vec![],
         agent_verb: vec![],
+        workload_dir: None,
         created_at: None,
         last_started_at: None,
         health_check: None,
@@ -643,16 +644,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         ports: vec![],
         ai: None,
     };
-    mvm_runtime::machine::persist::save_machine_spec(&spec, false).unwrap();
-    let err = client
-        .start_machine(&mvm_core::client::dto::MachineId("p-net".into()))
-        .await
-        .unwrap_err();
-    assert!(err.to_string().contains("deny-all"), "got: {err}");
-
-    spec.name = "p-vol".into();
-    spec.net = false;
-    spec.volumes = vec!["/h:/data".into()];
+    // Refused before the image is resolved: nothing here reaches a registry.
     mvm_runtime::machine::persist::save_machine_spec(&spec, false).unwrap();
     let err = client
         .start_machine(&mvm_core::client::dto::MachineId("p-vol".into()))
@@ -768,13 +760,13 @@ async fn persistent_relaunch_revalidates_sidecar_refs_recorded_earlier() {
 }
 
 #[tokio::test]
-async fn launch_over_a_deployment_backed_spec_refuses_a_silent_image_boot() {
+async fn launch_over_a_deployment_backed_spec_never_boots_it_as_a_plain_image() {
     let home = Isolated::new();
     let client = mock_client();
     let rootfs = home.rootfs();
 
-    // A definition carrying an attested-deployment source (created by the
-    // CLI's deployment flow, which this backend cannot honor).
+    // A definition carrying an attested-deployment source, created by the
+    // CLI's deployment flow.
     let spec = mvm_runtime::machine::persist::MachineSpec {
         deployment: Some("/deployments/web".into()),
         ..super::persisted_spec_from_request(
@@ -784,14 +776,7 @@ async fn launch_over_a_deployment_backed_spec_refuses_a_silent_image_boot() {
     };
     mvm_runtime::machine::persist::save_machine_spec(&spec, false).unwrap();
 
-    // The bootability gate refuses the source outright …
-    let err = super::ensure_spec_bootable_in_process(&spec).unwrap_err();
-    assert!(
-        err.to_string().contains("attested-deployment"),
-        "got: {err}"
-    );
-
-    // … and a same-image launch never silently boots it as a plain image:
+    // A same-image launch never silently boots it as a plain image:
     // the deployment field is part of the launch config, so the reconcile
     // refuses without the explicit force flow.
     let request = persistent_request(&rootfs, "p-deploy").build().unwrap();
@@ -802,15 +787,14 @@ async fn launch_over_a_deployment_backed_spec_refuses_a_silent_image_boot() {
     );
     assert!(err.to_string().contains("different config"), "got: {err}");
 
-    // `start` refuses the same source fail-closed.
+    // `start` boots the deployment the spec names, through the same start
+    // path as the CLI, and that deployment is missing here: it must refuse on
+    // the deployment rather than fall back to the spec's image.
     let err = client
         .start_machine(&mvm_core::client::dto::MachineId("p-deploy".into()))
         .await
         .unwrap_err();
-    assert!(
-        err.to_string().contains("attested-deployment"),
-        "got: {err}"
-    );
+    assert!(err.to_string().contains("/deployments/web"), "got: {err}");
 }
 
 // ── Per-backend workload-kernel resolution ──────────────────────────
@@ -1117,73 +1101,53 @@ async fn create_machine_persists_the_callers_grants() {
     );
 }
 
-#[test]
-fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
+#[tokio::test]
+async fn a_restart_re_admits_under_the_persisted_grants_not_deny_all() {
     // A permission set that holds for the first boot and lapses on the next is
     // the "my allowlist stopped applying" failure in its purest form: closed
     // for egress, so nothing breaks loudly, and silent for CPU and wall clock.
-    let mut spec = mp::MachineSpec {
-        caller_commitment: None,
-        schema_version: mp::MACHINE_SPEC_SCHEMA_VERSION,
-        name: "p-restart".to_string(),
-        image: Some("alpine:latest".to_string()),
-        manifest: None,
-        deployment: None,
-        resolved_digest: None,
-        runtime_pack: false,
-        net: false,
-        allow_host: vec![],
-        peer: Vec::new(),
-        cpus: 2,
-        memory: "256M".to_string(),
-        mem_initial: None,
-        profile: "standard".to_string(),
-        volumes: vec![],
-        init: vec![],
-        agent_verb: vec![],
-        created_at: None,
-        last_started_at: None,
-        health_check: None,
-        grants: Some(egress_grants("api.example.com", 443)),
-        gpu: false,
-        gpu_device: None,
-        ports: vec![],
-        ai: None,
-    };
-
-    let request =
-        super::start_request_from_spec("p-restart", declared("alpine:latest"), 256, &spec)
-            .expect("the start request builds");
-    let carried = request
-        .grants
-        .as_ref()
-        .expect("the start carries the definition's grants");
-    assert_eq!(
-        carried.cpu,
-        Some(mvm_contract::grants::CpuGrant::Share { millicores: 1500 })
+    // A start boots straight from the persisted definition, so the grants it
+    // is admitted under are the definition's own.
+    let home = Isolated::new();
+    let client = mock_client();
+    let rootfs = home.rootfs();
+    let mut spec = super::persisted_spec_from_request(
+        &persistent_request(&rootfs, "p-restart").build().unwrap(),
+        "p-restart",
     );
+    // An address, not a name: admission pins every allow-listed name to its
+    // addresses, and this test must not depend on a resolver. Egress only,
+    // because the start refuses a grant its backend cannot enforce and the
+    // mock meters no CPU.
+    spec.grants = Some(mvm_contract::grants::Grants {
+        cpu: None,
+        ..egress_grants("203.0.113.10", 443)
+    });
+    mp::save_machine_spec(&spec, false).unwrap();
 
+    let (started, _) = client
+        .boot_spec(&mut spec, None, false)
+        .await
+        .expect("the start boots");
+    let admitted = started
+        .admitted
+        .plan()
+        .grants
+        .clone()
+        .expect("the start carries the definition's grants");
     // The policy the boot installs is derived from exactly those grants, so
     // asserting the projection is asserting what the gate will enforce.
-    let policy = mvm_contract::grants::projection::network_policy_from_grants(carried);
+    let policy = mvm_contract::grants::projection::network_policy_from_grants(&admitted);
     assert_eq!(
         policy
             .resolve_rules()
             .expect("an allow-list resolves to rules"),
         vec![mvm_core::policy::network_policy::HostPort::new(
-            "api.example.com",
+            "203.0.113.10",
             443
         )],
         "a restart must not silently fall back to deny-all"
     );
-
-    // And a definition that granted nothing stays grant-free, so the pre-grant
-    // baseline is unchanged.
-    spec.grants = None;
-    let ungranted =
-        super::start_request_from_spec("p-restart", declared("alpine:latest"), 256, &spec)
-            .expect("the start request builds");
-    assert_eq!(ungranted.grants, None);
 }
 
 #[test]
@@ -1214,4 +1178,143 @@ fn launch_request_refuses_a_malformed_port_before_anything_is_persisted() {
         format!("{error:#}").contains("invalid port spec"),
         "{error:#}"
     );
+}
+
+// ── Boot commands ───────────────────────────────────────────────────
+
+/// Records every command a launch hands over, answering with a fixed token
+/// or refusing, in place of a guest agent the mock backend does not run.
+#[derive(Default)]
+struct RecordingStarter {
+    started: std::sync::Mutex<Vec<(String, super::detached::BootCommand)>>,
+    refuse: bool,
+}
+
+impl super::detached::CommandStarter for RecordingStarter {
+    fn start(&self, name: &str, command: super::detached::BootCommand) -> anyhow::Result<String> {
+        self.started
+            .lock()
+            .expect("recorder lock")
+            .push((name.to_string(), command));
+        if self.refuse {
+            anyhow::bail!("the guest refused the command");
+        }
+        Ok("proc-1".to_string())
+    }
+}
+
+fn client_starting_commands_with(starter: &Arc<RecordingStarter>) -> LocalBackend {
+    mock_client()
+        .with_command_starter(Arc::clone(starter) as Arc<dyn super::detached::CommandStarter>)
+}
+
+#[tokio::test]
+async fn a_persistent_launch_starts_its_command_once_the_machine_is_up() {
+    let home = Isolated::new();
+    let starter = Arc::new(RecordingStarter::default());
+    let client = client_starting_commands_with(&starter);
+    let request = persistent_request(&home.rootfs(), "p-cmd")
+        .command([
+            "/bin/serve".to_string(),
+            "--port".to_string(),
+            "9222".to_string(),
+        ])
+        .env("MODE", "headless")
+        .cwd("/srv")
+        .build()
+        .unwrap();
+    let outcome = client.launch(request).await.expect("launch with a command");
+    assert_eq!(outcome.process.as_deref(), Some("proc-1"));
+    assert_eq!(
+        outcome.machine.status,
+        mvm_core::client::dto::MachineStatus::Running
+    );
+    let started = starter.started.lock().unwrap();
+    let [(name, command)] = &started[..] else {
+        panic!("exactly one command starts: {:?}", started.len())
+    };
+    assert_eq!(name, "p-cmd");
+    assert_eq!(command.argv, ["/bin/serve", "--port", "9222"]);
+    assert_eq!(
+        command.env.get("MODE").map(String::as_str),
+        Some("headless")
+    );
+    assert_eq!(command.cwd.as_deref(), Some("/srv"));
+}
+
+#[tokio::test]
+async fn a_transient_launch_starts_its_command_once_the_machine_is_up() {
+    let home = Isolated::new();
+    let starter = Arc::new(RecordingStarter::default());
+    let client = client_starting_commands_with(&starter);
+    let request = transient_request(&home.rootfs())
+        .name("t-cmd")
+        .command(["/bin/true".to_string()])
+        .build()
+        .unwrap();
+    let outcome = client.launch(request).await.expect("launch with a command");
+    assert_eq!(outcome.process.as_deref(), Some("proc-1"));
+    assert_eq!(starter.started.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_launch_without_a_command_starts_no_process() {
+    let home = Isolated::new();
+    let starter = Arc::new(RecordingStarter::default());
+    let client = client_starting_commands_with(&starter);
+    let request = persistent_request(&home.rootfs(), "p-nocmd")
+        .build()
+        .unwrap();
+    let outcome = client.launch(request).await.expect("launch");
+    assert_eq!(outcome.process, None);
+    assert!(starter.started.lock().unwrap().is_empty());
+}
+
+/// A machine whose command never started is not what the caller asked for:
+/// the launch fails and the machine is not left running.
+#[tokio::test]
+async fn a_command_the_guest_refuses_fails_the_launch_and_stops_the_machine() {
+    let home = Isolated::new();
+    let starter = Arc::new(RecordingStarter {
+        refuse: true,
+        ..Default::default()
+    });
+    let client = client_starting_commands_with(&starter);
+    let request = persistent_request(&home.rootfs(), "p-refused-cmd")
+        .command(["/bin/serve".to_string()])
+        .build()
+        .unwrap();
+    let err = client.launch(request).await.unwrap_err();
+    assert!(
+        matches!(err, mvm_core::client::MvmError::Backend { .. }),
+        "{err}"
+    );
+    assert!(err.to_string().contains("refused the command"), "{err}");
+    let listed = client
+        .list_machines(mvm_core::client::dto::MachineFilter::all())
+        .await
+        .expect("list");
+    assert!(
+        listed
+            .iter()
+            .filter(|m| m.name == "p-refused-cmd")
+            .all(|m| m.status != mvm_core::client::dto::MachineStatus::Running),
+        "{listed:?}"
+    );
+}
+
+#[test]
+fn create_refuses_a_command_it_would_have_nowhere_to_keep() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = persistent_request(&home.rootfs(), "p-create-cmd")
+        .command(["/bin/true".to_string()])
+        .build()
+        .unwrap();
+    let err = client.create_from_request(&request).unwrap_err();
+    assert!(
+        matches!(err, mvm_core::client::MvmError::InvalidSpec { .. }),
+        "{err}"
+    );
+    assert!(!machine_spec_path("p-create-cmd").exists());
 }

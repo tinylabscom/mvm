@@ -595,3 +595,62 @@ jobs:
           gh workflow run workers.yml --repo "${GITHUB_REPOSITORY}" \
             --ref "${TAG_NAME}" \
             -f install_version="${TAG_NAME}"
+
+  propose-prebuilt-pin:
+    name: Propose verified Nix prebuilt pin
+    needs: [promote-release]
+    if: ${{ github.event_name == 'push' && needs.promote-release.result == 'success' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+    env:
+      PIN_WORKTREE: ${{ github.workspace }}/../.worktrees/mvm-prebuilt-pin
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Create the pin worktree
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$PIN_WORKTREE")"
+          git worktree add -B "chore/prebuilt-pin-${TAG_NAME}" "$PIN_WORKTREE" main
+
+      - name: Pin the promoted release from its signed checksum manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: sh scripts/pin-installer-default.sh "${TAG_NAME}" "$PIN_WORKTREE/install.sh" "$PIN_WORKTREE/nix/prebuilt-release.nix"
+
+      - name: Propose the pin update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if git -C "$PIN_WORKTREE" diff --quiet -- install.sh nix/prebuilt-release.nix; then
+            echo "The installer and Nix package already pin ${TAG_NAME}"
+            exit 0
+          fi
+          branch="chore/prebuilt-pin-${TAG_NAME}"
+          git -C "$PIN_WORKTREE" config user.name "github-actions[bot]"
+          git -C "$PIN_WORKTREE" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$PIN_WORKTREE" add install.sh nix/prebuilt-release.nix
+          git -C "$PIN_WORKTREE" commit -m "chore: propose ${TAG_NAME} prebuilt archive pins"
+          git -C "$PIN_WORKTREE" push --force-with-lease origin "$branch"
+          body="Pins the installer and Nix prebuilt package to ${TAG_NAME}. The archive hashes came from the checksum manifest signed by this repository's release workflow for that exact tag, after the release passed its first-run smoke and was promoted. CI is explicitly dispatched for this branch because a PR opened with the workflow token does not start pull-request workflows."
+          existing="$(gh pr list --head "$branch" --json number --jq '.[0].number // empty')"
+          if [ -n "$existing" ]; then
+            gh pr edit "$existing" --body "$body"
+          else
+            gh pr create --base main --head "$branch" \
+              --title "chore: propose ${TAG_NAME} prebuilt archive pins" --body "$body"
+          fi
+          gh workflow run ci.yml --ref "$branch"

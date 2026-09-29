@@ -184,6 +184,11 @@ path = "machine create"
 tier = "live"
 
 [[command]]
+path = "machine detach"
+tier = "parse"
+reason = "disconnects the client attached to a running console session, so it needs a live VM with an attached PTY client; the guest agent's session registry tests cover the detach transition"
+
+[[command]]
 path = "machine diff"
 tier = "live"
 
@@ -440,8 +445,19 @@ path = "trust audit provenance export"
 tier = "exec"
 
 [[command]]
+path = "trust audit publish-root"
+tier = "parse"
+reason = "publishes a host-signed root into the caller's audit history"
+
+[[command]]
+path = "trust audit sessions"
+tier = "parse"
+reason = "reports session history from the caller's audit chain, which an isolated home does not contain"
+
+[[command]]
 path = "trust audit show"
-tier = "exec"
+tier = "parse"
+reason = "names a session that only exists in the caller's audit history"
 
 [[command]]
 path = "trust audit tail"
@@ -450,6 +466,20 @@ tier = "exec"
 [[command]]
 path = "trust audit verify"
 tier = "exec"
+
+[[command]]
+path = "trust instructions init"
+tier = "exec"
+
+[[command]]
+path = "trust instructions sign"
+tier = "exec"
+fixture = "instruction-files"
+
+[[command]]
+path = "trust instructions verify"
+tier = "exec"
+fixture = "signed-instruction-files"
 
 [[command]]
 path = "trust list"

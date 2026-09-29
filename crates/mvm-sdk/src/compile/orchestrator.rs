@@ -664,6 +664,7 @@ mod tests {
                     auth_type: crate::ir::AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    inject: Default::default(),
                 },
             },
         );
@@ -717,6 +718,7 @@ mod tests {
                     auth_type: crate::ir::AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    inject: Default::default(),
                 },
             },
         );
@@ -756,6 +758,7 @@ mod tests {
                         auth_type: crate::ir::AuthType::Bearer,
                         allowed_hosts: vec!["api.openai.com".into()],
                         sigv4: None,
+                        inject: Default::default(),
                     },
                 },
             );

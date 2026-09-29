@@ -403,7 +403,7 @@ pub(crate) fn apply_nested_rust_env(
         // stable compiler used for reproducible embedded binaries.
         .env_remove("RUSTFLAGS")
         .env_remove("CARGO_ENCODED_RUSTFLAGS");
-    // Empty values normally prevent a global sccache wrapper from leaking
+    // Empty values normally prevent a global compiler wrapper from leaking
     // into the reproducible nested build. On macOS the pinned rust-objcopy
     // binary needs the sysroot loader wrapper after nested Cargo reconstructs
     // its dynamic-library environment.
@@ -494,7 +494,7 @@ mod tests {
         let mut cmd = Command::new("cargo");
         cmd.env("RUSTFLAGS", "-Zthreads=8")
             .env("CARGO_ENCODED_RUSTFLAGS", "-Zthreads=8")
-            .env("RUSTC_WRAPPER", "sccache");
+            .env("RUSTC_WRAPPER", "outer-rustc-wrapper");
 
         apply_nested_rust_env(
             &mut cmd,

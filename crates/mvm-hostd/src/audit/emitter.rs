@@ -79,6 +79,8 @@ pub mod grants_audit;
 pub mod wall_clock_audit;
 pub use checkpoint_audit::CheckpointForkedAudit;
 pub mod image_audit;
+pub mod instruction_audit;
+pub use instruction_audit::InstructionTrustEvent;
 
 /// Wire-stable event name and label keys for the workload output-stream audit
 /// entries. Shared so the emitter (writer) and any reader cannot drift on a
@@ -1162,6 +1164,12 @@ impl AuditEmitter {
     /// The directory this emitter's chains, roots, and witness marks live in.
     pub fn audit_dir(&self) -> &Path {
         &self.audit_dir
+    }
+
+    /// The public half of this emitter's signing key: what its chains
+    /// verify under.
+    pub fn verifying_key(&self) -> ed25519_dalek::VerifyingKey {
+        self.signing_key.verifying_key()
     }
 
     pub fn publish_root(&self, tenant: &str) -> Result<SignedAuditRoot> {

@@ -193,6 +193,28 @@ gap = "Driver diagnostics and forwarded workload output reach the developer term
 required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
 
 [[script_source]]
+path = "crates/mvm-sdk/sdks/python/mvm/_machine.py"
+anchor = "sys.stderr"
+language = "python"
+[script_source.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "language SDK host driver"
+gap = "A machine teardown that fails after a one-shot run is reported on the developer terminal only; a detached observer sees nothing."
+required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
+
+[[script_source]]
+path = "crates/mvm-sdk/sdks/typescript/src/_machine.ts"
+anchor = "console.error"
+language = "typescript"
+[script_source.capture]
+kind = "runtime-gap"
+role = "host"
+owner = "language SDK host driver"
+gap = "A machine teardown that fails after a one-shot run is reported on the developer terminal only; a detached observer sees nothing."
+required_witness = "Host-local collection receives driver diagnostics alongside the VM's collector stream."
+
+[[script_source]]
 path = "crates/mvm-sdk/sdks/python/mvm/_remote.py"
 anchor = "warnings.warn"
 language = "python"

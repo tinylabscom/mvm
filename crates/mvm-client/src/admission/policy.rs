@@ -1,7 +1,7 @@
 //! Bundle-pin plumbing and generated network-policy bundle synthesis for
-//! `mvmctl up` admission — the in-memory bundle resolver used when the
-//! CLI already has archive bytes in hand, and the helpers that turn a
-//! resolved --network-preset / --network-allow into a signed PolicyBundle.
+//! launch admission — the in-memory bundle resolver used when the caller
+//! already has archive bytes in hand, and the helpers that turn a
+//! resolved --allow-host egress policy into a signed PolicyBundle.
 
 use anyhow::{Context, Result};
 use mvm_core::policy::PolicyBundle;
@@ -12,7 +12,7 @@ use mvm_runtime::image;
 /// future callers (policy slots) can extend the shape without
 /// churning every call site.
 /// In-memory `BundleResolver` scoped to a single admission. Used
-/// when `mvmctl up --bundle-pin <path>` already has the archive
+/// when a caller-supplied bundle pin already has the archive
 /// bytes — no need to walk the filesystem registry again.
 pub struct InMemoryBundleResolver {
     bytes: Vec<u8>,

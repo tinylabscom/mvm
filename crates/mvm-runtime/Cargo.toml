@@ -84,7 +84,10 @@ tracing.workspace = true
 tokio = { workspace = true, features = ["fs"] }
 # DEK held in `EncryptedStorage` is zeroized on drop.
 zeroize.workspace = true
+# Writes the gzip stream of the universal-initramfs test fixture.
+flate2 = { workspace = true, optional = true }
 [dev-dependencies]
+flate2.workspace = true
 # Used by tests/phase3c_supervisor_dispatch.rs only; the lib never names it.
 libkrun-sys.workspace = true
 mvm-core = { workspace = true, features = ["test-support"] }
@@ -113,6 +116,7 @@ wasm-backend = ["dep:wasmtime", "dep:wasmtime-wasi"]
 # binary; only an explicit `--hypervisor mock` (itself refused outside this
 # feature) or the workspace test suite reaches it.
 test-support = [
+    "dep:flate2",
     "mvm-core/test-support",
     "mvm-backends/test-support",
     "mvm-fs/test-support",

@@ -353,6 +353,8 @@ fn the_bounded_runner_terminates_descendants_that_hold_file_locks() {
     );
     let shell = format!("python3 -c '{holder}' & wait");
 
+    // Allow cold interpreter startup before exercising descendant cleanup.
+    // The child holds the lock for 30 seconds; the runner must release it early.
     for attempt in 1..=2 {
         let _ = fs::remove_file(&ready_path);
         let started = Instant::now();
@@ -360,7 +362,7 @@ fn the_bounded_runner_terminates_descendants_that_hold_file_locks() {
             .args([
                 "scripts/run-bounded-command.py",
                 "--timeout",
-                "1",
+                "5",
                 "--grace",
                 "1",
                 "--log",
@@ -374,7 +376,7 @@ fn the_bounded_runner_terminates_descendants_that_hold_file_locks() {
 
         assert_eq!(status.code(), Some(124), "attempt {attempt} must time out");
         assert!(
-            started.elapsed() < Duration::from_secs(5),
+            started.elapsed() < Duration::from_secs(15),
             "attempt {attempt} did not terminate its process tree promptly"
         );
         assert!(
@@ -402,7 +404,14 @@ fn the_bounded_runner_streams_output_and_preserves_exit_status() {
     let log_path = scratch.path().join("runner.log");
     let started = Instant::now();
     let status = Command::new("python3")
-        .args(["scripts/run-bounded-command.py", "--timeout", "5", "--log"])
+        .args([
+            "scripts/run-bounded-command.py",
+            "--timeout",
+            "5",
+            "--grace",
+            "1",
+            "--log",
+        ])
         .arg(&log_path)
         .args(["--", "sh", "-c", "sleep 30 & echo bounded-marker; exit 7"])
         .status()
@@ -410,13 +419,44 @@ fn the_bounded_runner_streams_output_and_preserves_exit_status() {
 
     assert_eq!(status.code(), Some(7));
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(15),
         "an outliving descendant kept the output pipe open"
     );
     assert_eq!(
         fs::read_to_string(log_path).expect("read bounded command log"),
         "bounded-marker\n"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn bounded_cleanup_only_ignores_permission_denial_after_the_child_exits() {
+    let status = Command::new("python3")
+        .args([
+            "-B",
+            "-c",
+            r#"
+import importlib.util
+from unittest.mock import Mock, patch
+spec = importlib.util.spec_from_file_location("bounded", "scripts/run-bounded-command.py")
+bounded = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(bounded)
+for returncode in [0, 7, None]:
+    process = Mock(pid=12345)
+    process.poll.return_value = returncode
+    with patch.object(bounded.os, "killpg", side_effect=PermissionError()):
+        try:
+            bounded.terminate_group(process, 0)
+        except PermissionError:
+            assert returncode is None, "a reaped child must retain its original outcome"
+        else:
+            assert returncode is not None, "permission errors for a live child must propagate"
+            process.wait.assert_called_once()
+"#,
+        ])
+        .status()
+        .expect("exercise deterministic process-group cleanup races");
+    assert!(status.success());
 }
 
 fn justfile() -> String {

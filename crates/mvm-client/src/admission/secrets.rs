@@ -72,16 +72,19 @@ pub fn resolve_workload_secrets(workload_ir_path: Option<&Path>) -> Result<Resol
         .unwrap_or_default())
 }
 
-/// Load and validate the metadata-only references recorded beside a persistent
-/// machine spec, then lower them through the same binding seam as Workload IR.
-/// An unreadable sidecar or invalid reference refuses admission.
-pub fn resolve_machine_secrets(machine: &str) -> Result<ResolvedPlanSecrets> {
+/// Load the metadata-only references recorded beside a persistent machine
+/// spec, validate them against `service`, and lower them through the same
+/// binding seam as Workload IR. An unreadable sidecar or invalid reference
+/// refuses admission.
+pub fn resolve_machine_secrets(
+    machine: &str,
+    service: &SecretService,
+) -> Result<ResolvedPlanSecrets> {
     let references = load_machine_secret_refs(machine)?;
     if references.is_empty() {
         return Ok(ResolvedPlanSecrets::default());
     }
-    SecretService::local()
-        .context("opening the local secret service")?
+    service
         .validate_for_admission("local", &references)
         .context("validating persistent-machine secret references")?;
     Ok(ResolvedPlanSecrets::from_machine_refs(&references))
@@ -217,6 +220,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.example.com".to_string()],
                     sigv4: None,
+                    inject: Default::default(),
                 },
             },
         );

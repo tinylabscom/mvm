@@ -840,7 +840,15 @@ Delivery slices, one PR each:
       before acquisition, on every path that consumes one (carried from W3).
 - [x] Update Stage 0 kernel acquisition, default-image resolution, image update
       commands, CI downloads, and WebLinux consumers to the lock file.
-- [ ] Boot every pack through its intended backend before advancing the pin.
+- [x] Boot every pack through its intended backend before advancing the pin.
+      (2026-09-28: `image-set/v0.2.1`'s default-tenant pack booted clean-cache
+      through every Linux-direct backend the fleet has — HVF and libkrun on
+      the witness Mac (2026-09-26), Firecracker and QEMU on rpi1 aarch64 and
+      on the Hetzner x86_64 KVM box (2026-09-28); guest `uname` is the image
+      kernel 6.12.111 on every host, digests equal the signed root before and
+      after boot. Bundles under `~/.cache/mvm-witness/`; reported on
+      tinylabscom/mvm-images#8. Witnessing surfaced and filed tinylabscom/mvm#3789,
+      fixed by #3791.)
 - [x] Add a bot or workflow that opens, but never auto-merges, an `mvm` pin
       update with manifest/compatibility evidence.
 
@@ -899,6 +907,13 @@ Execution detail: `specs/plans/2026-09-24-image-cutover-and-deletion.md`.
       (The image-set contract, `images.lock`, the acquisition boundary and
       the merge-queue boot lanes all stay.)
 - [ ] Re-measure release duration, storage, download volume, and failure rate.
+      (Measured 2026-09-28 on `v0.18.3`: the Linux lane is ~148 min against
+      the 114-min baseline; the release publishes CLI bytes only. The
+      ≥25-minute gate is missed — the Linux lane still pair-builds the SDK
+      sidecar (~24 min) and the dev default-tenant image (~42 min) — and
+      stays open with the plan Status; the work to close it is
+      `specs/plans/2026-09-27-release-e2e-under-image-target.md`. Evidence:
+      `specs/sprint/delivery/3366-w8-remeasure.md`.)
 - [ ] Separately shard the 313-scenario documented-surface suite if its live
       phase remains the critical path.
 
@@ -977,18 +992,30 @@ the pin through review.
 - [ ] W1–W8 issues are closed with their acceptance evidence linked; W9 has a
       measured go/no-go decision and, if approved, its separate migration is
       complete.
-- [ ] `mvm-images` is the canonical producer and host for the complete image
-      set.
-- [ ] `mvm` has one image lock and no scattered canonical repository/tag pins.
-- [ ] Production accepts only signed, compatible, unrevoked image sets from the
-      new trust root.
-- [ ] Sibling development is documented, tested, explicit, and impossible to
-      enable in a release/production binary.
-- [ ] Old supported CLIs remain functional for the declared support window.
-- [ ] Linux/Firecracker and physical macOS/HVF clean-cache witnesses pass.
+- [x] `mvm-images` is the canonical producer and host for the complete image
+      set. (Waves 3+4 deleted the in-tree producer; `v0.18.1` publishes no
+      image bytes.)
+- [x] `mvm` has one image lock and no scattered canonical repository/tag pins.
+      (`crates/mvm-core/images.lock` is the one source; the `legacy` entry
+      retires 2026-12-31.)
+- [x] Production accepts only signed, compatible, unrevoked image sets from the
+      new trust root. (W6 + Wave 0.5a: `current_train` requires the
+      initramfs role on both architectures; acquisition verifies the signed
+      root and refuses incompatible ranges before boot.)
+- [x] Sibling development is documented, tested, explicit, and impossible to
+      enable in a release/production binary. (W5; Waves 1+2 keep the pair
+      builds and refuse in-tree builds with "image construction lives in
+      mvm-images", each with a refusal test.)
+- [x] Old supported CLIs remain functional for the declared support window.
+      (W7 window + support-window docs; no release or asset deleted.)
+- [x] Linux/Firecracker and physical macOS/HVF clean-cache witnesses pass.
+      (mvm-images#8: Firecracker/QEMU on x86_64 and aarch64 KVM hosts,
+      HVF/libkrun on the witness Mac; bundles under `~/.cache/mvm-witness/`.)
 - [ ] The measured release critical path improves by at least 25 minutes, and
       remaining scenario time is separately visible.
-- [ ] `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` match this plan.
+- [x] `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` match this plan.
+      (2026-09-28: re-measure recorded honestly, the ≥25-minute box left
+      open, REFACTOR-STATUS bumped.)
 
 ## Kickoff prompt
 

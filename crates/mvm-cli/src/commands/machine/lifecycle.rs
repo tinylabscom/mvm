@@ -234,10 +234,13 @@ impl CliStartHost {
 }
 
 impl mvm_client::launch::machine_start::StartHost for CliStartHost {
-    fn workload_kernel(&self) -> Result<String> {
+    /// The CLI boots an explicit kernel on every backend: the pinned one, or
+    /// the workload kernel, built through the builder VM when the cache has
+    /// none.
+    fn workload_kernel(&self, _backend: &str) -> Result<Option<String>> {
         match up::resolve_kernel_pin_path(self.kernel_pinned)? {
-            Some(kernel_path) => Ok(kernel_path),
-            None => crate::commands::env::builder_vm::ensure_workload_kernel(),
+            Some(kernel_path) => Ok(Some(kernel_path)),
+            None => crate::commands::env::builder_vm::ensure_workload_kernel().map(Some),
         }
     }
 
@@ -344,6 +347,8 @@ pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) ->
             name: args.name,
             command,
             force: args.force,
+            list: false,
+            detach_timeout: None,
             env: Vec::new(),
             pty_argv: Vec::new(),
         },
@@ -359,6 +364,8 @@ pub(super) fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) 
             name: args.name,
             command: None,
             force: args.force,
+            list: false,
+            detach_timeout: None,
             env: Vec::new(),
             pty_argv: Vec::new(),
         },
@@ -422,20 +429,4 @@ pub(super) fn confirm_stop(
     Ok(())
 }
 
-pub(super) fn machine_is_running(name: &str) -> bool {
-    mvm_client::backend_is_running(&shared::resolve_effective_hypervisor("firecracker"), name)
-}
-
-pub(super) fn stop_running_machine(name: &str) {
-    let hypervisor = shared::resolve_effective_hypervisor("firecracker");
-    match mvm_client::backend_stop_by_name(&hypervisor, name) {
-        Ok(()) => {
-            if let Err(err) = crate::commands::vm::volume::release_volume_leases_for_vm(name) {
-                tracing::warn!(error = %err, machine = name, "releasing volume leases after stop failed");
-            }
-        }
-        Err(err) => {
-            tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
-        }
-    }
-}
+pub(super) use mvm_client::launch::detached::{machine_is_running, stop_running_machine};

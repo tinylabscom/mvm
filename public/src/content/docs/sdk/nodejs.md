@@ -9,7 +9,8 @@ The TypeScript SDK currently exposes both runtime and declarative surfaces.
 
 Current:
 
-- `Sandbox.create({ image }, options)` (live mode boots an image; a template source is record mode only)
+- `Sandbox.create({ image }, options)` or `Sandbox.create(template, options)` (live mode boots an image, or a template built on this host)
+- `Machine.run(...)` / `launch(...)` / `create(...)`, plus `start()` / `stop()` / `rm()` / `inspect()` / `logs()` on a machine handle
 - `sandbox.commands.start(argv, options)` — the only method on `commands`
 - `sandbox.exec(argv, options)` / `sandbox.shell(command, options)` — one-shot with a captured `ExecResult` (live mode only)
 - `sandbox.files.write/read/list/stat/mkdir/remove/move(...)` — everything but `write` is live mode only
@@ -20,7 +21,7 @@ Current:
 
 Planned:
 
-- logs and event streams;
+- `sandbox.logs(...)` on the sandbox handle, and richer event streams beyond the current machine-log follow API;
 - snapshot, cold, resume, detach, destroy;
 - additional lifecycle result types once the local runtime transport supports them.
 

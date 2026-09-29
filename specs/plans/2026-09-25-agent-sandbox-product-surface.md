@@ -110,26 +110,50 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] runtime lookup of `libmvm_hostlib` documented (packaging in PS-15):
       `MVM_HOSTLIB_PATH` → packaged in the SDK → beside `mvmctl`; `mvmctl run
       --mode live` sets the variable to the library beside itself
-- [ ] the in-process launcher accepts a command override and guest
+- [x] the in-process launcher accepts a command override and guest
       environment, so `Machine.run(command=...)`, `Sandbox.create(command=...)`
       and the Obscura `BrowserSandbox` preset boot instead of refusing
-      (converge with the CLI's `machine run` front half; drive-plane plan WS2
-      "One admission path for every launcher")
-- [ ] template/manifest sources launch in-process, so a live `Sandbox.create`
+      — `LaunchRequest` carries `command`/`env`/`cwd`, validated against the
+      `env_hygiene` denylist when built; the command starts once the machine
+      is up and the launch returns its process token. A persistent launch
+      boots through the CLI's `start_machine_spec` admission, with the spec
+      reconcile, persist-then-boot, start record and TTL moved out of the CLI
+      into `mvm_client::launch::detached` for both callers. `Machine.run(image,
+      command)` again returns the command's result; `Machine.launch` returns a
+      handle
+- [x] template/manifest sources launch in-process, so a live `Sandbox.create`
       and the Chromium/Chrome `BrowserSandbox` presets can name a built
-      template rather than only an image
-- [ ] function-entrypoint dispatch (`await f(...)`, `session(...)`, workload
-      references) into a microVM through the library — today it raises a
-      typed transport error, and `MVM_NO_VM=1` dispatches in-language; the
-      invoke path has to move from the CLI into `mvm-client` first
-- [ ] `machine.logs` follow as a stream, like `guest.proc.stream.*`
-- [ ] a live-boot scenario driving an SDK through the real library against a
-      real guest (the BDD suite records calls in-process)
+      template rather than only an image — `LaunchSource::{from_template,
+      from_manifest}`: a template resolves by the name its image was built
+      under, through the same admission and signing as an image; nothing is
+      built on a launch
+- [x] function-entrypoint dispatch (`await f(...)`, `session(...)`, workload
+      references) into a microVM through the library — `entrypoint.call` and
+      `session.{start,call,stop,info}` over `mvm_client::entrypoint`, which
+      the CLI's `machine run --entrypoint` and `machine session` now call
+      too; one admission for transient calls and session starts. The host
+      runs the primary entrypoint only (the guest wire has no function
+      selector)
+- [x] `machine.logs` follow as a stream, like `guest.proc.stream.*` —
+      `machine.logs.stream.{open,next,close}` (ABI 1.3); `Machine.logs(follow=True)`
+- [x] a live-boot scenario driving an SDK through the real library against a
+      real guest (the BDD suite records calls in-process) — run on macOS
+      26.6.2 arm64 (HVF) against `docker.io/library/alpine:latest` and a built
+      slot: `Machine.run`, `Sandbox.create(image, command, env)` with exec,
+      files and logs, `Machine.launch(manifest=...)`, and an unbuilt
+      template's refusal, from Python; `Machine.run` and a sandbox from
+      TypeScript. Recorded in
+      `specs/sprint/delivery/3711-sdk-launcher-parity.md`; function dispatch
+      was not live-booted (no function workload is built on that host)
 
 ### PS-02 — Egress route model on vsock flows (#3712)
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
       — `policy::routes`, `fuzz_egress_routes`; carried on `NetworkPolicy` in the signed plan
-- [ ] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+- [x] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
+      — `SecretRef.inject` declares the mode; the position parser refuses a
+      placeholder outside its binding before anything forwards; basic_auth is
+      decoded/substituted/re-encoded; `mvm-contract` substitution + hostd
+      keyholder tests
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
       host is terminated only on an explicit `intercept` grant; `ask` is held and
@@ -227,21 +251,57 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [ ] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
 
 ### PS-09 — Detachable sessions (#3719)
-- [ ] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
-- [ ] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+- [x] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
+      — the guest agent keeps one console session per VM alive across client
+      disconnects (1 MiB replay ring, fresh data port per attach, typed
+      `ConsoleBusy`, explicit `take_over`, optional detach timeout); new verbs
+      `ConsoleAttach`/`ConsoleDetach`/`ConsoleList` are DevOnly like
+      `ConsoleOpen`; `~d` detaches, `~.` ends
+- [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
+      — `machine attach` (alias of `console`) and `machine detach` join the
+      existing `ps`, `logs -f`, `stop`; `inspect` still covers persistent
+      machine specs only
 - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
 
 ### PS-10 — Cryptographic audit trail UX (#3720)
-- [ ] per-session integrity summary (event count, chain head, Merkle root)
-- [ ] hash-chained session ledger (plan id, snapshot roots, image/kernel identity)
-- [ ] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
-- [ ] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
+- [x] per-session integrity summary (event count, chain head, Merkle root)
+      — a chain-signed `session.sealed` entry at exit, failed boot, and
+      persistent stop (`mvm_hostd::audit::session`)
+- [x] hash-chained session ledger (plan id, image/kernel identity) — derived
+      from the chain: each seal links the previous one, so there is no second
+      file or trust root
+- [ ] session ledger carries snapshot roots — the `seal.snapshot_root` field is
+      reserved and unset until PS-08 records snapshot lineage per session
+- [x] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
+      — as `trust audit sessions`, `trust audit show <session>` (`--kind`,
+      `--since`, `--until`), `trust audit verify <session>`; also `UNSEALED`
+      and `NOT_FOUND`, each with its own exit status
+- [x] durability (fsync) policy stated and tested; chain-head anchoring documented; rotation default matches docs
 
 ### PS-11 — Instruction-file provenance (#3721)
-- [ ] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
-- [ ] `mvmctl trust init|sign|verify` for instruction files; keyless signing workflow for our repos
-- [ ] pre-boot scan of workspace inputs wired into admission; files read-only in the guest; audited
+- [x] trust policy: publishers (keyless/keyed), digest blocklist, deny/warn/audit, project cannot weaken user
+      — `mvm_client::instruction_trust::policy`; user policy at
+      `<MVM_HOME>/config/instruction-trust.toml`, project policy at
+      `<project>/.mvm/instruction-trust.toml` (advisory alone); schema generated
+      from the Rust types at `schema/instruction-trust-policy-v0.json`
+- [x] `mvmctl trust instructions init|sign|verify|policy`; keyless signing workflow for our repos
+      — `.github/workflows/sign-instructions.yml` signs this repository's files
+      on a path-filtered push to `main` or dispatch, verifies the bundles through
+      the in-process verifier, and uploads them as an artifact (no commit). Other
+      repositories copy it rather than call it: a reusable workflow's certificate
+      names the called file, whoever called it
+- [x] pre-boot scan of `--mount` sources, `--asset` trees and the local workload
+      directory wired into admission; every verdict chain-audited
+      (`trust.instruction_verified` / `_unsigned` / `_blocked`); `deny` refuses
+      with `plan.admission_refused` stage `instruction_provenance`
+- [ ] files read-only in the guest: holds for `--mount` (read-only by default, a
+      per-launch snapshot, scanned at every admission). Open: volumes attached as
+      block devices are not scanned — including `machine volume mount --host DIR`,
+      whose directory is re-snapshotted at the next start after a host edit, and
+      whose `--rw` private copy keeps in-guest edits across restarts
 - [ ] mvm-scout static scan for injection indicators in instruction files
+      — in review: tinylabscom/mvm-assurance#202 (`SCOUT-PROMPT-002`, one shared
+      instruction-file surface definition)
 
 ### PS-12 — Environment hygiene (#3722)
 - [x] one shared denylist filter (loader, shell, interpreter, password-manager session variables)
@@ -307,7 +367,7 @@ Follow-ups for the owner-decision rows above, plus re-examining
 small PRs.
 
 ### PS-20 — Unreachable surface (#3729)
-- [ ] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
+- [x] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected
 
 ### PS-21 — CLI thin over mvm-client (#3730)
 - [x] every PS workstream lands library-first; inventory of CLI paths that bypass `mvm-client`
@@ -434,7 +494,10 @@ packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
   can expire before boot (`VerbNotAuthorized`).
 - #3757: a `--manifest` run naming an OCI image gets no guest proxy/CA env.
 - Transient `LocalBackend::launch` (`mvm_hostd::run::admit_and_boot_local`)
-  attaches no universal initramfs and panics at `/init` for Rust callers.
+  attached no universal initramfs and panicked at `/init` for Rust callers.
+  Fixed by the `fix/transient-launch-initramfs` PR: the attach decision
+  lives in `mvm_runtime::universal_initramfs` and hostd attaches overlay +
+  initramfs together on the in-process boot.
 - #3753 open box: host-directory volumes attached as block devices
   (`machine volume mount --host DIR`) are never scanned for instruction files.
 - For review: a boot command override on a `prod` build slot is accepted, the

@@ -151,8 +151,7 @@ use config::ConfigAction;
 use image::ImageAction;
 
 use super::shared::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_volume_spec,
-    resolve_flake_ref,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, parse_volume_spec, resolve_flake_ref,
 };
 
 #[test]
@@ -2600,13 +2599,13 @@ fn test_audit_show_json_parses() {
         cli.command,
         Commands::Trust(trust::Args {
             action: trust::TrustAction::Audit(audit::Args {
-                action: AuditAction::Show {
-                    ref plan_id,
+                action: AuditAction::Show(audit::ShowArgs {
+                    ref session,
                     json: true,
                     ..
-                }
+                })
             })
-        }) if plan_id == "plan-abc"
+        }) if session == "plan-abc"
     ));
 }
 
@@ -2686,8 +2685,17 @@ fn test_audit_verify_parses() {
     };
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
-            action: AuditAction::Verify { tenant },
-        }) => assert_eq!(tenant, "local"),
+            action:
+                AuditAction::Verify(audit::VerifyArgs {
+                    tenant,
+                    session,
+                    json,
+                }),
+        }) => {
+            assert_eq!(tenant, "local");
+            assert_eq!(session, None, "no session verifies the whole chain");
+            assert!(!json);
+        }
         _ => panic!("Expected Audit::Verify"),
     }
 }
@@ -2701,7 +2709,7 @@ fn test_audit_verify_with_tenant() {
     };
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
-            action: AuditAction::Verify { tenant },
+            action: AuditAction::Verify(audit::VerifyArgs { tenant, .. }),
         }) => assert_eq!(tenant, "acme"),
         _ => panic!("Expected Audit::Verify"),
     }
@@ -2739,17 +2747,117 @@ fn test_audit_show_parses() {
     match tg.action {
         trust::TrustAction::Audit(audit::Args {
             action:
-                AuditAction::Show {
-                    plan_id,
+                AuditAction::Show(audit::ShowArgs {
+                    session,
                     tenant,
+                    kind,
+                    since,
+                    until,
                     json,
-                },
+                }),
         }) => {
-            assert_eq!(plan_id, "plan-abc");
+            assert_eq!(session, "plan-abc");
             assert_eq!(tenant, "local");
+            assert_eq!(kind, None);
+            assert_eq!((since, until), (None, None));
             assert!(!json);
         }
         _ => panic!("Expected Audit::Show"),
+    }
+}
+
+#[test]
+fn test_audit_show_filters_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "trust",
+        "audit",
+        "show",
+        "aaaa1111",
+        "--kind",
+        "plan.*",
+        "--since",
+        "2026-09-01",
+        "--until",
+        "2026-09-02T00:00:00Z",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Show(audit::ShowArgs {
+                    kind, since, until, ..
+                }),
+        }) => {
+            assert_eq!(kind.as_deref(), Some("plan.*"));
+            assert_eq!(since.unwrap().to_rfc3339(), "2026-09-01T00:00:00+00:00");
+            assert!(until.is_some());
+        }
+        _ => panic!("Expected Audit::Show"),
+    }
+}
+
+#[test]
+fn test_audit_show_rejects_an_unparseable_time() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl", "trust", "audit", "show", "aaaa1111", "--since", "later"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn test_audit_verify_session_parses_with_json() {
+    let cli =
+        Cli::try_parse_from(["mvmctl", "trust", "audit", "verify", "aaaa1111", "--json"]).unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action: AuditAction::Verify(audit::VerifyArgs { session, json, .. }),
+        }) => {
+            assert_eq!(session.as_deref(), Some("aaaa1111"));
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Verify"),
+    }
+}
+
+#[test]
+fn test_audit_verify_json_requires_a_session() {
+    assert!(Cli::try_parse_from(["mvmctl", "trust", "audit", "verify", "--json"]).is_err());
+}
+
+#[test]
+fn test_audit_sessions_parses() {
+    let cli = Cli::try_parse_from([
+        "mvmctl", "trust", "audit", "sessions", "--since", "7d", "--json",
+    ])
+    .unwrap();
+    let Commands::Trust(tg) = cli.command else {
+        panic!("expected trust group")
+    };
+    match tg.action {
+        trust::TrustAction::Audit(audit::Args {
+            action:
+                AuditAction::Sessions(audit::SessionsArgs {
+                    tenant,
+                    since,
+                    until,
+                    json,
+                }),
+        }) => {
+            assert_eq!(tenant, "local");
+            assert!(since.is_some());
+            assert!(until.is_none());
+            assert!(json);
+        }
+        _ => panic!("Expected Audit::Sessions"),
     }
 }
 
@@ -2935,21 +3043,6 @@ fn test_clap_port_spec_invalid() {
 }
 
 #[test]
-fn test_clap_volume_spec_valid() {
-    assert!(clap_volume_spec("/host:/guest").is_ok());
-    assert!(clap_volume_spec("/host/path:/guest/mount").is_ok());
-    assert!(clap_volume_spec("/host:/guest:1G").is_ok());
-    assert!(clap_volume_spec("./local:/app").is_ok());
-}
-
-#[test]
-fn test_clap_volume_spec_invalid() {
-    assert!(clap_volume_spec("").is_err());
-    assert!(clap_volume_spec("nocolon").is_err());
-    assert!(clap_volume_spec(":/guest").is_err()); // empty host
-}
-
-#[test]
 fn test_clap_vm_name_valid() {
     assert!(clap_vm_name("my-vm").is_ok());
     assert!(clap_vm_name("vm1").is_ok());
@@ -3014,7 +3107,7 @@ fn test_run_rejects_invalid_port_at_parse_time() {
     );
 }
 
-// ---- Config defaults wired into the Up command ----
+// ---- Config defaults applied when run flags are omitted ----
 
 #[test]
 fn test_run_uses_config_default_cpus() {
@@ -3024,7 +3117,7 @@ fn test_run_uses_config_default_cpus() {
         ..mvm_core::user_config::MvmConfig::default()
     };
 
-    // Simulate the resolution logic from the Commands::Up dispatch.
+    // Simulate the run-path resolution: CLI flag, else config default.
     let cli_cpus: Option<u32> = None;
     let effective = cli_cpus.or(Some(cfg.default_cpus));
     assert_eq!(effective, Some(4));
@@ -3525,9 +3618,13 @@ fn test_console_with_command() {
             name,
             command,
             force,
+            list,
+            detach_timeout,
             env,
             pty_argv,
         }) => {
+            assert!(!list);
+            assert_eq!(detach_timeout, None);
             assert_eq!(name, "myvm");
             assert_eq!(command.as_deref(), Some("ls"));
             assert!(!force, "default --force is off");

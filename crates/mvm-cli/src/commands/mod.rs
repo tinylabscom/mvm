@@ -353,6 +353,7 @@ fn run_command() -> Result<()> {
         mvm_build::image_source::configured_images_dir().as_deref(),
     )?;
     crate::host_binaries::source::allow_payload_from_source();
+    allow_helper_builds_from_source(mvm_build::artifact_acquisition::compiled_channel());
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
@@ -579,6 +580,17 @@ fn refuse_local_image_source_in_release_build(
     }
     mvm_build::image_source::refuse_in_release_build(channel, configured)?;
     Ok(())
+}
+
+/// Let a contributor build compile the per-VM helpers it spawns — the
+/// supervisors and the network endpoint — from its checkout when they are
+/// missing or out of date. A root `cargo build` produces only `mvmctl`, and
+/// this is what keeps that build plus one `mvmctl` command sufficient. An
+/// official release ships its helpers beside it and never runs `cargo`.
+fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::DistributionChannel) {
+    if channel.permits_automatic_builds() {
+        mvm_vmm::host::aux_bin::allow_helper_builds_from_source();
+    }
 }
 
 fn apply_startup_env(cli: &Cli) {
