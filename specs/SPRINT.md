@@ -10,6 +10,12 @@
 
 ## In progress
 
+- [x] **Align the slow-sink stream test with bounded handoff semantics.**
+      The regression now accounts for each produced byte as delivered output
+      or an explicit gap instead of requiring lossless delivery under
+      backpressure. The focused stream-pump suite (36 tests), formatting, and
+      workspace Clippy pass on macOS.
+
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
       an unpacked rootfs (dpkg, apk, os-release, in-image kernel; rpm is a
