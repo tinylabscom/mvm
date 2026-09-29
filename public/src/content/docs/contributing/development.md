@@ -3,6 +3,11 @@ title: Development Guide
 description: Getting started as a contributor to mvm.
 ---
 
+Working with an AI coding agent on this repo? Read the
+[AI Coding Workflow](/contributing/ai-coding-workflow/) guide alongside this one —
+it covers claiming issues, the mandatory worktree flow, the Graft/Serena tooling
+split, the fast feedback ladder, and what CI does and does not gate.
+
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
