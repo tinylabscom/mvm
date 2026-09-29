@@ -201,8 +201,8 @@ often it was refused, then the exact flags that admit the ones a grant can
 admit. The metadata service is listed and never offered; the private address is
 kept out of the allow command and named apart.
 
-A run with no egress at all — the default: no `--net`, no `--allow-host`, no
-`--secret`, no published port — starts no network endpoint. The guest has no
+A run with no outbound route at all — the default: no `--net`, no `--allow-host`,
+no `--allow-endpoint`, no `--peer`, and no `--secret` — starts no network endpoint. The guest has no
 channel to ask for a destination on and the host decides nothing, so there is
 no refusal to report. When such a run fails, one line after its output says
 it was offline:
