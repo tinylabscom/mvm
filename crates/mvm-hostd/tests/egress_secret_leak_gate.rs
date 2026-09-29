@@ -103,6 +103,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
                 sigv4: None,
                 provider: None,
                 approve: Default::default(),
+                oauth: None,
             },
         )
         .unwrap();

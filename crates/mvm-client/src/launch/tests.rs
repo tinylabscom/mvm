@@ -88,6 +88,7 @@ fn seeded_secret_ref(service: &SecretService) -> MachineSecretRef {
                 sigv4: None,
                 provider: None,
                 approve: Default::default(),
+                oauth: None,
             },
         )
         .expect("bind secret");

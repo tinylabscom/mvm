@@ -123,11 +123,8 @@ impl ReflectionGuard {
         Arc::clone(&self.set.lock().unwrap_or_else(|p| p.into_inner()))
     }
 
-    /// Remember `value` as substituted for `name`, standing in `placeholder`.
-    /// A value already remembered is not added twice; a value too short to
-    /// scrub is not remembered at all — see [`MIN_SCRUBBED_VALUE_LEN`].
-    pub(crate) fn learn(&self, name: &str, placeholder: &str, value: &[u8]) {
-        if value.len() < MIN_SCRUBBED_VALUE_LEN || self.current().holds(value) {
+    fn learn_inner(&self, name: &str, placeholder: &str, value: &[u8], allow_short: bool) {
+        if (!allow_short && value.len() < MIN_SCRUBBED_VALUE_LEN) || self.current().holds(value) {
             return;
         }
         let mut guard = self.set.lock().unwrap_or_else(|p| p.into_inner());
@@ -151,6 +148,20 @@ impl ReflectionGuard {
         entries.sort_by_key(|e| std::cmp::Reverse(e.value.len()));
         let longest = entries.first().map_or(0, |e| e.value.len());
         *guard = Arc::new(ScrubSet { entries, longest });
+    }
+
+    /// Remember `value` as substituted for `name`, standing in `placeholder`.
+    /// A value already remembered is not added twice; a value too short to
+    /// scrub is not remembered at all — see [`MIN_SCRUBBED_VALUE_LEN`].
+    pub(crate) fn learn(&self, name: &str, placeholder: &str, value: &[u8]) {
+        self.learn_inner(name, placeholder, value, false);
+    }
+
+    /// Remember a captured OAuth token even when it is shorter than the
+    /// generic reflected-secret threshold: a configured token response must
+    /// never reach the guest unchanged.
+    pub(crate) fn learn_captured_token(&self, name: &str, placeholder: &str, value: &[u8]) {
+        self.learn_inner(name, placeholder, value, true);
     }
 
     /// The set a response is scrubbed against, or `None` when nothing has
