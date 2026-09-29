@@ -509,6 +509,12 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
 
+      # The authored-policy schema is generated from the Rust types and
+      # published twice (schema/ and the docs reference page); the drift tests
+      # and the emitter bin exist only under `schema`.
+      - name: policy schema drift (mvm-client schema)
+        run: |
+          cargo nextest run -p mvm-client --features schema -E 'test(/policy_profiles::/)'
       # Instruction-file provenance: the keyless half verifies a real Sigstore
       # bundle only under `manifest-verify`, and the committed policy schema is
       # checked against the Rust types only under `schema`. Neither feature is

@@ -153,7 +153,8 @@ impl DenialTally {
             lines.push("to allow what the allow-list refused, re-run with:".to_string());
             lines.push(format!("  {}", allow_flags(&allowable)));
             lines.push(
-                "or, for a machine created with `machine create --manifest`, in its mvm.toml:"
+                "or, in the project's mvm.toml (read by `run`, `machine run` and \
+                 `machine create` alike):"
                     .to_string(),
             );
             lines.push("  [network]".to_string());

@@ -34,6 +34,7 @@ pub(super) mod readiness;
 pub(super) mod redaction_flags;
 pub(super) mod rekernel;
 pub(super) mod run_plan;
+pub(in crate::commands) mod run_policy;
 pub(in crate::commands) mod run_routes;
 pub(in crate::commands) mod run_secrets;
 mod run_validation;
