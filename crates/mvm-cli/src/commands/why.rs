@@ -91,6 +91,7 @@ fn resolve_policy(args: &Args) -> Result<ResolvedPolicy> {
             layers: Vec::new(),
             provenance: Default::default(),
             notes: Vec::new(),
+            backend_conditioned: false,
         });
     }
 

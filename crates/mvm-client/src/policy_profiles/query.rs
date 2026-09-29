@@ -312,6 +312,7 @@ mod tests {
             layers: Vec::new(),
             provenance: Default::default(),
             notes: Vec::new(),
+            backend_conditioned: false,
         }
     }
 
