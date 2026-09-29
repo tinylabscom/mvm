@@ -66,6 +66,26 @@ boot ABI) keeps the trains safe to version independently.
       same change, per its AGENTS.md rule that transitional mirrors must not
       become permanent reverse dependencies.
 
+## The developer-experience contract
+
+The owner-level requirement this design serves: developing a feature for the
+binaries that run inside a microVM must not feel like a two-repo workflow.
+
+- **A guest-binary-only feature touches only `mvm`.** The recipe is unchanged;
+  the dev-tier build arms rebuild and boot the new binaries from the checkout
+  (the runtime overlay's source arm today, rootfs images through one pair-build
+  verb), with no `mvm-images` checkout required.
+- **`mvm` is the front door.** One clone of `mvm` is a complete environment:
+  `bin/dev` auto-provisions the sibling `mvm-images` checkout on the first
+  image-touching use (shallow, at the pin), so the second repo is a build
+  detail, not a workplace. Crossing into `mvm-images` happens deliberately,
+  for image-definition work only.
+- **One verb drives every image operation from `mvm`**
+  (`bin/dev build image-set <role>`), and under this plan the guest-bins
+  freshness step happens inside it — no hand-wired paths.
+- **CI owns `mvm-images` day to day**; the bump jobs, not humans, carry the
+  version + sha pairs across the boundary.
+
 ## Tests
 
 - `mvm`: the artifact's manifest digests verify against the bytes; the
