@@ -1,7 +1,7 @@
 # Agent Working Agreement
 
-Backing: issues-and-shipped-source
-Validation: repository-gates
+Backing: shipped-source
+Validation: check-all
 
 ## Builder VM Requirement
 

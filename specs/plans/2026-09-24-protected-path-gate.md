@@ -1,7 +1,7 @@
 # Plan: Protected-path gate — refuse guest-authored changes to CI/test/build files
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 ## Status
 

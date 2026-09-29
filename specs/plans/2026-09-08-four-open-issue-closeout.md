@@ -1,7 +1,7 @@
 # Four-open-issue closeout
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Opened:** 2026-09-08
 **Baseline:** `main` at `1c8d5154c3` after issues #3211 and #3213 closed

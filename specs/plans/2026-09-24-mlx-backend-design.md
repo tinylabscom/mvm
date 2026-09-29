@@ -1,7 +1,7 @@
 # MLX backend for the GPU-over-vsock plane — design note
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Epic:** [#3560](https://github.com/tinylabscom/mvm/issues/3560) —
 GPU support for microVMs. This note designs the named follow-up from
