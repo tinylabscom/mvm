@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  approvalCallbackResult,
   call,
   candidatePaths,
   HostLibraryError,
@@ -21,6 +22,7 @@ import {
   libraryFileName,
   packagedLibraryPath,
   resolveLibraryPath,
+  setApprovalCallback,
   setInvokeForTesting,
   type InvokeFn,
 } from "../src/_hostlib.js";
@@ -255,6 +257,40 @@ describe("setInvokeForTesting", () => {
   });
 });
 
+describe("approval callback", () => {
+  const prompt = Buffer.from(
+    JSON.stringify({
+      request_id: "approval-1",
+      subject: { kind: "tool_call", tool: "shell" },
+      expires_in_ms: 1000,
+    }),
+    "utf8",
+  );
+
+  it("maps the bounded decisions and hands the parsed prompt to the application", () => {
+    const seen: unknown[] = [];
+    expect(approvalCallbackResult((value) => { seen.push(value); return "session"; }, prompt)).toBe(2);
+    expect(seen).toEqual([
+      {
+        request_id: "approval-1",
+        subject: { kind: "tool_call", tool: "shell" },
+        expires_in_ms: 1000,
+      },
+    ]);
+    expect(approvalCallbackResult(() => "once", prompt)).toBe(1);
+    expect(approvalCallbackResult(() => "deny", prompt)).toBe(0);
+  });
+
+  it("denies malformed JSON and callback exceptions", () => {
+    expect(approvalCallbackResult(() => "once", Buffer.from("not json"))).toBe(0);
+    expect(
+      approvalCallbackResult(() => {
+        throw new Error("application failure");
+      }, prompt),
+    ).toBe(0);
+  });
+});
+
 describe("generated method table", () => {
   it("carries the ABI version the binding negotiates with", () => {
     expect(typeof ABI_MAJOR).toBe("number");
@@ -275,6 +311,11 @@ describe("live library", () => {
 
   live("answers machine.inventory with a list", () => {
     expect(Array.isArray(call(MACHINE_INVENTORY))).toBe(true);
+  });
+
+  live("registers and clears an approval callback", () => {
+    setApprovalCallback(() => "once");
+    setApprovalCallback(null);
   });
 
   live("refuses a machine.run command override with MachineSpecError", () => {

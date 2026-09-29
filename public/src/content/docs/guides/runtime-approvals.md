@@ -121,6 +121,43 @@ or if it does not answer before the question expires.
 The path is guest-controlled text. Treat it as untrusted wherever your webhook
 displays it.
 
+## SDK callback
+
+An application embedding the host library can answer asks in process. The
+callback receives the same prompt object as a webhook and returns `deny`,
+`once`, or `session`:
+
+```python
+import mvm
+
+mvm.set_approval_callback(
+    lambda prompt: "once"
+    if prompt["subject"]["kind"] == "egress"
+    else "deny"
+)
+```
+
+```ts
+import { setApprovalCallback } from "@runmvm/mvm";
+
+setApprovalCallback((prompt) =>
+  prompt.subject.kind === "egress" ? "once" : "deny",
+);
+```
+
+Register the callback before launching or starting a machine. The callback is
+process-wide. A machine launched or started through that process gets a private
+broker before its first SDK-started command runs, and
+the process retains the broker until `stop` or `rm`; this covers persistent
+and detached SDK machines. Passing `None` in Python or `null` in TypeScript
+clears the callback and makes existing brokers deny.
+
+An exception, malformed prompt, or return value other than the three bounded
+decisions denies. The endpoint still owns the timeout, rate limit, session
+TTL, ledger, and chain-signed audit; the callback cannot persist an answer to
+a profile. A TypeScript application must keep its event loop responsive,
+because native-thread callbacks are delivered on JavaScript's main thread.
+
 ## Secrets that ask
 
 ```sh
@@ -165,12 +202,10 @@ be changed from the guest:
 
 ## Limits
 
-- Approvals are answered by a foreground `mvmctl`. A detached or persistent
-  machine (`machine run -d`, `machine start`) has nobody listening, so its
-  questions are denied. `machine run --entrypoint -d` answers during the call
-  and denies after it, while the machine keeps running.
+- A detached or persistent machine launched by `mvmctl` (`machine run -d`,
+  `machine start`) has no long-lived CLI process to own a terminal or webhook
+  broker, so its questions are denied. `machine run --entrypoint -d` answers
+  during the call and denies after it, while the machine keeps running. SDK
+  embedders retain their per-machine callback brokers as described above.
 - Tool calls have an approval subject (`tool_call`) and the same supervisor,
-  but no tool gate asks it yet.
-- A machine launched through the host library (the Python and TypeScript
-  SDKs) has no broker yet, so its questions are denied, and an embedding
-  application cannot yet supply its own approval callback.
+  but PS-13's live tool gate does not ask it yet.
