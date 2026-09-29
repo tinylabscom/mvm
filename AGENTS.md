@@ -81,10 +81,11 @@ Every change — code, docs, dependency bumps, refactors, bug fixes — is
 developed in a git worktree. No docs-only or trivial-change exception.
 
 ```bash
-cd /Users/auser/work/tinylabs/mvmco/mvm   # main checkout
+cd /path/to/mvm                           # main checkout
 mkdir -p ../.worktrees
-git worktree add ../.worktrees/mvm-<slug> -b feat/<slug>
-cd ../.worktrees/mvm-<slug>               # code + cargo live here
+branch=feat/example                        # choose feat/, fix/, docs/, or chore/
+git worktree add ../.worktrees/mvm-example -b "$branch"
+cd ../.worktrees/mvm-example               # code + cargo live here
 ```
 
 Branch names: `feat/<slug>`, `fix/<slug>`, `chore/<slug>` (docs topics:
@@ -98,11 +99,13 @@ acceptable. Remove the worktree after merge (`git worktree remove ...`).
 wraps `cargo run` with the same env; `.envrc.example` covers direnv users):
 
 ```bash
-MVM_HOME="$PWD/.mvm-test"                 # mvmctl state tree: templates, sockets,
-                                          # registry, snapshots, keys
-CARGO_TARGET_DIR="$PWD/.mvm-test/target"  # own target dir (no rustc lock contention)
-CARGO_HOME="$PWD/.mvm-test/cargo"         # own registry + .package-cache lock
+export MVM_HOME="$PWD/.mvm-test"
+export CARGO_TARGET_DIR="$PWD/.mvm-test/target"
+export CARGO_HOME="$PWD/.mvm-test/cargo"
 ```
+
+These exports apply to commands in the current shell until it is closed or
+the variables are unset.
 
 **Still shared between worktrees** — vary microVM and TAP names if two worktrees
 run microVMs concurrently: `.git/objects` + packed refs + hooks (the git rule

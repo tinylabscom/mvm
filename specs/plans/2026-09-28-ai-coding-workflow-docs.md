@@ -3,7 +3,7 @@
 Backing: shipped-source
 Validation: check-sprint-append
 
-**Status: IMPLEMENTED — PR #3815 open, merge pending.**
+**Status: IN REVIEW — implementation complete in PR #3815, not yet merged.**
 
 ## Scope
 

@@ -38,8 +38,9 @@ in a git worktree. Full detail is in `AGENTS.md`; the short version:
 cd mvm    # the main checkout — stays on main, always clean
 git fetch origin && git pull --ff-only origin main
 mkdir -p ../.worktrees
-git worktree add ../.worktrees/mvm-<slug> -b feat/<slug>
-cd ../.worktrees/mvm-<slug>
+branch=feat/example # choose feat/, fix/, docs/, or chore/
+git worktree add ../.worktrees/mvm-example -b "$branch"
+cd ../.worktrees/mvm-example
 ```
 
 - The main checkout is the **single git operator**. All `git` commands (status,
@@ -189,7 +190,7 @@ builder VM, self-hosted runner lanes), not a surprise formatting error.
 
 ## Opening and landing the PR
 
-1. Push the worktree branch: `git -C ../.worktrees/mvm-<slug> push -u origin feat/<slug>`.
+1. Push the worktree branch from the main checkout: `git -C ../.worktrees/mvm-<slug> push -u origin HEAD`.
 2. Open the PR against `main` with: a title in the conventional style used by
    the repo (`feat(area): …`, `fix(area): …`, `docs(area): …`), a summary of
    what changed and why, the validation you ran (ladder rungs), and
