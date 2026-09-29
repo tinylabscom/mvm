@@ -46,10 +46,9 @@ jobs:
 
       - name: Full pack signing round-trip test
         # This single step combines all pack signing checks into one run block
-        # so that file state is preserved across all operations. Each `run:`
-        # block in GitHub Actions runs in its own shell, so files created in
-        # one step are not visible in subsequent steps unless artifacts are
-        # used. This combined script:
+        # so shell variables and helper functions remain available throughout.
+        # Workspace files persist across steps, but shell state does not.
+        # This combined script:
         # - Produces builder and runtime pack manifests
         # - Signs them with real cosign OIDC bundles
         # - Verifies them through the Rust sigstore-verify stack
@@ -72,16 +71,17 @@ jobs:
           # file and the current SHA. For a release-tag push, it's bound to the tag.
           IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/pack-signing-smoke.yml@${REF}"
 
-          # Create dummy artifacts for the pack manifests
-          mkdir -p smoke/image-set
-          printf 'dummy-kernel'   > smoke/vmlinux
-          printf 'dummy-rootfs'   > smoke/rootfs.ext4
-          printf 'dummy-sbom'     > smoke/sbom.txt
+          # Keep input artifacts outside the output directory: copying a file
+          # onto itself truncates it on Linux before it can be signed.
+          mkdir -p smoke/inputs smoke/image-set
+          printf 'dummy-kernel'   > smoke/inputs/vmlinux
+          printf 'dummy-rootfs'   > smoke/inputs/rootfs.ext4
+          printf 'dummy-sbom'     > smoke/inputs/sbom.txt
 
           # Step 1: Produce and sign a builder pack manifest
           cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
-            --vmlinux smoke/vmlinux --rootfs smoke/rootfs.ext4 --arch x86_64 --channel stable --keyless \
-            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/sbom.txt \
+            --vmlinux smoke/inputs/vmlinux --rootfs smoke/inputs/rootfs.ext4 --arch x86_64 --channel stable --keyless \
+            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/inputs/sbom.txt \
             --revocation-channel "https://example.test/rev.json"
           mv smoke/manifest.json smoke/pack-manifest.json
           cosign sign-blob \
@@ -95,14 +95,14 @@ jobs:
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
 
           # Step 2: Produce and sign a runtime pack manifest
-          printf 'dummy-verity'   > smoke/rootfs.verity
-          printf '%064d' 0        > smoke/rootfs.roothash
+          printf 'dummy-verity'   > smoke/inputs/rootfs.verity
+          printf '%064d' 0        > smoke/inputs/rootfs.roothash
           cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
             --kind runtime \
-            --vmlinux smoke/vmlinux --rootfs smoke/rootfs.ext4 \
-            --verity smoke/rootfs.verity --roothash smoke/rootfs.roothash \
+            --vmlinux smoke/inputs/vmlinux --rootfs smoke/inputs/rootfs.ext4 \
+            --verity smoke/inputs/rootfs.verity --roothash smoke/inputs/rootfs.roothash \
             --arch x86_64 --channel stable --keyless \
-            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/sbom.txt \
+            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/inputs/sbom.txt \
             --revocation-channel "https://example.test/rev.json"
           mv smoke/manifest.json smoke/runtime-pack-manifest.json
           cosign sign-blob \
@@ -123,7 +123,7 @@ jobs:
             expected_stage="signature"
           fi
           workflow=".github/workflows/pack-signing-smoke.yml"
-          cp smoke/vmlinux smoke/image-set/vmlinux
+          cp smoke/inputs/vmlinux smoke/image-set/vmlinux
           kernel_sha="$(sha256sum smoke/image-set/vmlinux | cut -d' ' -f1)"
           cat > smoke/image-set.json <<JSON
           {

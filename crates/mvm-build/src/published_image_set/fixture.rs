@@ -155,6 +155,27 @@ impl ImageSetFixture {
         self
     }
 
+    /// Stamp `source_fingerprint` on every SDK sidecar member for `arch`
+    /// (None clears it), for the fetch-when-unchanged tests.
+    #[must_use]
+    pub fn with_sidecar_fingerprints(
+        mut self,
+        arch: mvm_core::arch::GuestArch,
+        fingerprint: Option<String>,
+    ) -> Self {
+        for member in &mut self.manifest.members {
+            if matches!(
+                member.role,
+                mvm_core::image_set::ImageSetRole::SdkSidecar(_)
+            ) && member.target == mvm_core::image_set::MemberTarget::Arch(arch)
+            {
+                member.source_fingerprint =
+                    fingerprint.clone().map(|fp| Sha256Hex::new(fp).unwrap());
+            }
+        }
+        self
+    }
+
     /// Serve `bytes` under `name` while the root keeps declaring whatever it
     /// declared before.
     #[must_use]
