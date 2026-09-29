@@ -104,9 +104,10 @@ decoding, every decision and fail-closed errors.
 `cargo test -p mvm-hostd` passed, including 1,978 unit tests and all hostd
 integration and documentation tests. Workspace Clippy, workspace check,
 formatting, and the sprint-append gate also passed. The full workspace test
-run reached `mvm-agentd` with 840 tests passed before the existing flaky
+run reached `mvm-agentd` with 840 tests passed before the existing bounded
+slow-sink mismatch in
 `stream_pump::tests::a_slow_sink_receives_every_byte_exactly_once` observed
-165,888 of 524,288 bytes. The aggregate policy check passed 73 of 75 gates;
-the remaining two could not spawn host-missing `uvx` and `tsx` tools. Gated
-target compilation could not start because this host has neither `rustup` nor
-`cargo-zigbuild`.
+165,888 of 524,288 bytes; a focused retry observed the same mismatch, and its
+dedicated auto-merge fix is PR #3835. All 75 aggregate policy gates and both
+halves of `just check::gated` passed after restoring the already-installed
+developer tools to the non-login shell's `PATH`.

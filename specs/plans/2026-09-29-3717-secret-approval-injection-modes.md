@@ -75,11 +75,13 @@ profiles, and the PS-13 live tool-policy caller.
 - `cargo test --workspace`: reached `mvm-agentd` with 840 tests passed, then the
   pre-existing flaky `stream_pump::tests::a_slow_sink_receives_every_byte_exactly_once`
   observed 165,888 of 524,288 bytes.
-- `cargo run -p xtask -- check-all`: 73 of 75 gates passed; `check-stubs` could
-  not spawn `uvx`, and `check-ir-parity` could not spawn its pinned `tsx`
-  runner because those tools are absent from this host.
-- `just check::gated`: could not start because this host has neither `rustup`
-  nor `cargo-zigbuild`.
+- `cargo run -p xtask -- check-all`: all 75 gates passed after restoring the
+  installed `uvx` and `npx` directories to the non-login shell's `PATH`.
+- `just check::gated`: passed both Linux cross-target and BDD-required-feature
+  compilation after restoring the installed Rust and Zig tools to `PATH`.
+- A focused retry confirms the workspace failure is the unrelated bounded
+  slow-sink expectation being corrected by auto-merge PR #3835; this plan does
+  not duplicate that change.
 
 ## Open questions / assumptions
 
