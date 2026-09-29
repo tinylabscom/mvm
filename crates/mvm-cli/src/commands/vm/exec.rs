@@ -557,7 +557,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let routes = super::run_routes::launch_routes(&args)?;
     crate::approval::configure(super::run_routes::launch_approval(&args)?);
     let allow_host = routes.with_allow_host(&args.allow_host);
-    let resolved_grants = super::shared::resolve_run_grants_with_policy(
+    let resolved_grants = super::shared::resolve_policy_run_grants(
         super::shared::GrantInputs {
             cpu_limit_millicores: args.cpu_limit,
             timeout_secs: args.timeout,

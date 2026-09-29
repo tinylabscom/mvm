@@ -623,7 +623,7 @@ fn machine_run_spec(
     }
     let config = mvm_core::user_config::load(None);
     let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
-    let resolved = super::shared::resolve_run_grants_with_policy(
+    let resolved = super::shared::resolve_policy_run_grants(
         super::shared::GrantInputs {
             cpu_limit_millicores: args.run.cpu_limit,
             timeout_secs: args.run.timeout,
@@ -1137,7 +1137,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     // Resolving grants also settles the egress policy, so validating it
     // here validates the same policy the machine will actually boot under.
     let config = mvm_core::user_config::load(None);
-    let resolved = super::shared::resolve_run_grants_with_policy(
+    let resolved = super::shared::resolve_policy_run_grants(
         super::shared::GrantInputs {
             cpu_limit_millicores: policy.cpu_limit,
             timeout_secs: policy.timeout,

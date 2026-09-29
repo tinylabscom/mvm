@@ -21,7 +21,7 @@ pub(super) use hints::with_hints;
 #[cfg(test)]
 pub(in crate::commands) use mvm_client::admission::run_grants::resolve_run_grants;
 pub(in crate::commands) use mvm_client::admission::run_grants::{
-    GrantInputs, resolve_run_grants_with_policy,
+    GrantInputs, resolve_policy_run_grants,
 };
 pub(super) use mvm_client::admission::run_network::{
     parse_run_network_preset, persisted_run_network, resolve_ai_policy, resolve_run_network_policy,

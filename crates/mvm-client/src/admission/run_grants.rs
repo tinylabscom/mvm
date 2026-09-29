@@ -68,7 +68,7 @@ pub struct RunGrants {
 /// Precedence is per dimension: a `--cpu-limit` on the command line does not
 /// discard an egress allow-list the manifest declared.
 pub fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result<RunGrants> {
-    resolve_run_grants_with_policy(inputs, None)
+    resolve_policy_run_grants(inputs, None)
 }
 
 /// Fold every grant surface, then apply an authored policy as the final
@@ -78,7 +78,7 @@ pub fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result<RunGrants> {
 /// default may supply a dimension the command line did not name, but none of
 /// those lower surfaces may reopen a destination the authored policy blocks
 /// or denies.
-pub fn resolve_run_grants_with_policy(
+pub fn resolve_policy_run_grants(
     inputs: GrantInputs<'_>,
     policy: Option<&crate::policy_profiles::PolicyBody>,
 ) -> Result<RunGrants> {
@@ -372,7 +372,7 @@ mod tests {
         };
         let mut policy = crate::policy_profiles::PolicyBody::default();
         policy.network.deny = vec!["denied.test".to_string()];
-        let resolved = resolve_run_grants_with_policy(
+        let resolved = resolve_policy_run_grants(
             GrantInputs {
                 manifest: Some(&manifest),
                 ..inputs(&cfg, &[])
@@ -388,7 +388,7 @@ mod tests {
         );
 
         policy.network.block = Some(true);
-        let resolved = resolve_run_grants_with_policy(
+        let resolved = resolve_policy_run_grants(
             GrantInputs {
                 manifest: Some(&manifest),
                 ..inputs(&cfg, &[])
