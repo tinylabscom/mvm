@@ -28,8 +28,8 @@ pub(crate) use parse::AssetSpec;
 pub(crate) use parse::materialize_disk_volume;
 pub(crate) use parse::{DirShareSpec, parse_dir_share_spec};
 pub(super) use parse::{
-    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, clap_volume_spec, parse_asset_spec,
-    parse_volume_spec, validate_volume_spec, vm_volume_from_spec_validated,
+    VolumeSpec, clap_flake_ref, clap_port_spec, clap_vm_name, parse_asset_spec, parse_volume_spec,
+    validate_volume_spec, vm_volume_from_spec_validated,
 };
 pub(in crate::commands) use parse::{parse_output_spec, resolve_output_destination};
 pub(crate) use resolve::{ManifestArgRef, resolve_manifest_arg};
