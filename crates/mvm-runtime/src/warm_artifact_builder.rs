@@ -18,61 +18,7 @@ use crate::warm_artifacts::{
 };
 use crate::warm_readiness::WarmGoldenVmFactory;
 
-struct HostShellEnvironment;
-
-impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment {
-    fn shell_exec(&self, script: &str) -> Result<()> {
-        let output = std::process::Command::new("bash")
-            .args(["-c", script])
-            .output()
-            .context("run host build command")?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            anyhow::bail!(
-                "host build command failed (exit {}): {}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    fn shell_exec_stdout(&self, script: &str) -> Result<String> {
-        let output = std::process::Command::new("bash")
-            .args(["-c", script])
-            .output()
-            .context("run host build command")?;
-        if output.status.success() {
-            Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-        } else {
-            anyhow::bail!(
-                "host build command failed (exit {}): {}",
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    fn shell_exec_visible(&self, script: &str) -> Result<()> {
-        let status = std::process::Command::new("bash")
-            .args(["-c", script])
-            .status()
-            .context("run host build command")?;
-        if status.success() {
-            Ok(())
-        } else {
-            anyhow::bail!("host build command failed (exit {:?})", status.code());
-        }
-    }
-
-    fn log_info(&self, message: &str) {
-        tracing::info!(message = %message, "warm artifact builder");
-    }
-
-    fn log_success(&self, message: &str) {
-        tracing::info!(message = %message, "warm artifact builder completed");
-    }
-}
+use crate::host_shell::HostShellEnvironment;
 
 /// Resolved workload inputs plus the cache root used by support-artifact
 /// builders. The rootfs and kernel are supplied by the image/source adapter;

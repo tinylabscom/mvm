@@ -1,8 +1,21 @@
 # Refactor status
 
-Last updated: 2026-09-28
+Last updated: 2026-09-29
 
 ## In progress
+
+- [ ] **Extended CI process cleanup — #3773.** All 47 integration regressions and final host workspace Clippy pass; full tests are pending. Linux builder initialization is blocked; the final live Firecracker lane remains active. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
+- [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
+
+- [ ] **Agent efficiency overhaul.**
+      `specs/plans/2026-09-28-agent-efficiency-overhaul.md`. Phases 1–10
+      establish retry, waiting, scoped-test, tool-routing, environment,
+      reasoning-budget, recovery, background-operation, context-hygiene, and
+      subagent-preflight disciplines across the supported agent harnesses.
+  - [x] Agreements, retry guard and journal, scoped-test recipe, reproducible
+        transcript analysis, and baseline measurements implemented.
+  - [ ] Re-measure fresh transcripts after two weeks and record the Phase
+        2.4–10.3 results against the plan's baselines.
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
@@ -249,6 +262,17 @@ Last updated: 2026-09-28
       regressions and the full host workspace pass.
       Standby capture also provisions its own identity. Identity-stage policy
       gates (69), declared backing, BDD and Linux cross-check pass; post-rebase delivery is open.
+      W2b guest listener half is delivered: authenticated per-session serve in
+      the agent (fresh producer epoch, Coverage-Started announcement,
+      wrong-guest-key/wrong-host-anchor refusals, dead-peer handling; five
+      focused tests) plus a post-activation vsock listener on the reserved
+      telemetry port with host-only peer gating, opt-in via the
+      mvm.telemetry=1 launch assertion, one session at a time and
+      lazy per-connection key load. Vsock-only; with #3597's registration merged, a full-chain witness
+      composes register → resolve → assert-current → authenticated receive
+      against the serving guest over a live stream. No capture or
+      VM-lifetime collection is claimed. Evidence:
+      `specs/sprint/delivery/3421-telemetry-guest-listener.md`.
       W3b prepared-record handoff passes nine new component tests, including a
       stalled encrypted writer, atomic close and retrievable loss evidence.
       Two allocation regressions pass natively and under Miri, including cold
@@ -2000,9 +2024,9 @@ for detailed scope and acceptance criteria.
       (`specs/plans/2026-09-28-ai-coding-workflow-docs.md`, PR #3815).
       The issue-to-PR playbook moved from a 588-line `AGENTS.md` to
       `public/src/content/docs/contributing/ai-coding-workflow.md`; the root
-      file is now a 281-line rule index that keeps every normative rule and
-      points at the guide. Site build passes with the new page. Validation
-      and merge are in progress.
+      file is now a concise rule index that keeps every normative rule,
+      including later session and retry rules, and points at the guide. Site
+      build and repository policy checks pass; merge is in progress.
 
 - [ ] **Static crates registry recovery**
       (`specs/plans/2026-08-26-static-crates-registry-fetch.md`, issue #2904).
@@ -2302,8 +2326,10 @@ resume` takes a `current_head` and refuses when it differs from the
       STILL OPEN: Phase 3 (phantom build.rs tests — the `MVM_LIBKRUN_HEADER`
       half is closed, its probe is deleted), Phase 4 (dead crate edges;
       `deps_audit` and the tree-sitter grammars off the serial path; the
-      `mvm-hostd` audit cluster), Phase 5 (sccache 4.2% Rust hit rate, worktree
-      hygiene). The pinned zig now follows the feature: eight of `ci.yml`'s nine
+      `mvm-hostd` audit cluster), Phase 5 worktree hygiene. The measured
+      sccache experiment is closed: its machine-wide wrapper and the optional
+      `test-cached` recipe were removed after repeated failures and negligible
+      cross-worktree reuse. The pinned zig now follows the feature: eight of `ci.yml`'s nine
       `install-zigbuild` steps are gone, each job traced to what it runs first,
       and that trace caught `just bdd-live-ci` booting real microVMs without the
       payload. Still open: the missing `rerun-if-env-changed` on
@@ -3967,3 +3993,13 @@ resume` takes a `current_head` and refuses when it differs from the
                   image; `nix/images/` is deleted.
             - [x] Release decoupling: image-set members are cached by the
                   pinned root, so a CLI version bump needs no image rebuild.
+            - [x] Re-measure on v0.18.3 recorded honestly (delivery note
+                  3366-w8-remeasure): no image bytes in the release (10
+                  assets, ~55 MiB vs rc.2's 78/~1.66 GiB), the
+                  ≥25-minute gate is missed because the lane still
+                  pair-builds the SDK sidecar and dev image, and the plan
+                  stays open with
+                  specs/plans/2026-09-27-release-e2e-under-image-target.md
+                  carrying the work. Parent W6's boot box ticked: the
+                  v0.2.1 pack boots on HVF, libkrun, Firecracker and QEMU
+                  across aarch64 and x86_64.

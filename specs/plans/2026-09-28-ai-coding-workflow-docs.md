@@ -23,13 +23,15 @@ that keeps every normative rule and points at the guide for detail.
 - [x] Link the guide from
       `public/src/content/docs/contributing/development.md` and register it in
       `public/src/sidebar.ts`.
-- [x] Condense `AGENTS.md` (588 → 281 lines) into a rule index preserving
+- [x] Condense `AGENTS.md` into a rule index preserving
       every always-applicable rule: builder-VM boundaries and owner-approved
       exceptions, cargo-on-host default, single git operator, worktree
       workflow, definition of done, test expectations, waiting model,
       privacy/security, clippy zero-warnings (including the
       `too_many_arguments` builder rule), no `unwrap()`, no spec references in
-      comments, reuse-first, and Rust best practices.
+      comments, reuse-first, and Rust best practices. The later no-sleep,
+      scoped-test, session, and retry rules remain in the index after merging
+      current `main`.
 - [x] Leave the shared MCP files (`.cursor/mcp.json`, `.zed/settings.json`)
       unchanged — a committed absolute Serena `--project` path would point at
       one developer's worktree and mislead the team; Serena stays a

@@ -787,10 +787,6 @@ test gate — it's process-parallel and faster than `cargo test` on this
 folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 --workspace` still works as a fallback if nextest isn't installed.
 
-For fast inner-loop iteration across worktrees, `just test-cached` wraps rustc
-in sccache to share compilation across branches (needs `cargo install
-sccache`).
-
 **`--all-targets` has two blind spots**, and a change to a shared type's shape
 (a new struct field, trait method, or enum variant) walks into both. It skips
 any target behind `required-features` — `mvm-conformance`'s cucumber runner

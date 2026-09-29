@@ -183,6 +183,40 @@ Pick the wait primitive from the condition being observed:
 An event-driven change does not imply a repo-wide async runtime — use the
 smallest event primitive matching the existing ownership boundary.
 
+## No sleep-polling and long operations
+
+Never use `sleep N && <check>` as a wait strategy. For CI, use
+`gh pr checks <n> --watch` or a background watch. Owned processes use an
+armed event handle, not a sleep loop. Reconcile externally owned state only
+when no event source exists: at most five polls with escalating backoff, and
+record the event that would replace the poll.
+
+Commands expected to exceed 60 seconds (builds, workspace tests, image builds,
+CI watches) run as background tasks. Wait on the task notification or handle;
+do not extend a foreground timeout and rerun the same command.
+
+## Scoped feedback and worktree shell
+
+Debug with `just test-scoped <crate> <filter>`: read the failure, make one
+change, and rerun that scoped test. Run the full workspace suite once before
+declaring the task done, not after each edit. Source `scripts/dev-env.sh` once
+per worktree shell and then use plain commands; do not repeat inline
+`MVM_HOME`/`CARGO_TARGET_DIR`/`CARGO_HOME` or `cd` prefixes. Use
+`bin/dev` for a one-off `mvmctl` call from an unconfigured shell. A genuinely
+one-command override is an exception, not the default.
+
+## Session and delegation discipline
+
+Think once at each decision point, then act; after two reasoning turns with no
+action, make the tool call, ask, or write and test a hypothesis. At each plan
+phase boundary, record decisions, files touched, blocker, and exact next step.
+After roughly 50 tool calls without reaching the session goal, stop and
+re-plan; close finished sessions and split long multi-part efforts.
+
+Before launching a subagent, declare its exact workspace paths, environment
+setup, read-only or write scope and tools, and a denial/missing-path fallback.
+If any pre-flight item is unknown, do not launch it.
+
 ## Privacy & security
 
 Every change is evaluated through a security lens:
@@ -295,3 +329,43 @@ file governs.
 - **Async (Tokio)**: no blocking calls in async context (`tokio::fs`, offload
   CPU work with `spawn_blocking`/`rayon`); bound concurrency with `Semaphore` /
   `JoinSet`; no repo-wide runtime for event-driven changes (see Waiting model).
+
+## No placeholders in shipped plans, code, or guidance
+
+Do not ship `TODO`, `TBD`, placeholder values, pseudo-code, or stub
+implementations where a concrete answer is required. Read existing code
+before planning a change; compute unknown values before writing the plan, or
+specify the exact command, source, and verification for execution time.
+Operator-supplied install-time values need an explicit error, not a checked-in
+placeholder.
+
+## Documentation and scratch files
+
+User-facing behavior changes update the matching docs in the same PR, including
+the CLI reference for commands, flags, defaults, or environment variables.
+Keep guides aligned with shipped behavior, not aspirational features; do not
+mark work done while docs are stale. Verify the changed reference against code.
+
+Never put agent-created scratch or intermediate files anywhere in a worktree,
+including gitignored paths. Use `/tmp` for logs, merge scratch, screenshots,
+and snapshots; `.agent-memory/notes/` is the sole findings exception.
+
+## Graft context graph
+
+For repo orientation, use the indexed `graft/` graph before raw source search
+when available. Use `graft ask "<question>" --source` for ranked code spans,
+`graft grep "<literal>"` for exhaustive indexed matches,
+`graft skeleton <file>` for an API surface, and `graft callers <symbol>`
+for call edges; raw search is for unindexed files or missing results. Use the
+equivalent graft MCP tools first when this harness exposes them. Refresh the
+graph with `graft build` after large code changes.
+
+## Retry discipline
+
+Never immediately repeat an identical failed command. Read the full error,
+form a root-cause hypothesis, change one thing, then rerun a scoped command.
+For cargo/`mvmctl` one-offs, `mvm_run` from `scripts/dev-env.sh` records a
+failed-command fingerprint in `.mvm-test/last-failed-cmd` and refuses an
+identical retry; clear it only after diagnosis. At three failures on one task,
+record what failed, why, and the next single change in the failure journal
+before another attempt. If the same hypothesis fails twice, change strategy.
