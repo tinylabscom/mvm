@@ -76,9 +76,9 @@ impl SubstitutionService {
         })
     }
 
-    /// Capture OAuth access tokens returned in a JSON response body and teach
-    /// the reflection scrubber to replace them with the binding's placeholder
-    /// before any bytes reach the guest.
+    /// Capture OAuth tokens (access and refresh) returned in a JSON response
+    /// body and teach the reflection scrubber to replace them with the
+    /// binding's placeholder before any bytes reach the guest.
     async fn capture_oauth_response_tokens(
         &self,
         flow: &PreparedFlow,
@@ -97,7 +97,10 @@ impl SubstitutionService {
             let Some(token) = self.captured_oauth_token(rule, &json) else {
                 continue;
             };
-            let learned_value = token.access_token.expose_secret().as_bytes().to_vec();
+            let mut learned_values = vec![token.access_token.expose_secret().as_bytes().to_vec()];
+            if let Some(refresh_token) = &token.refresh_token {
+                learned_values.push(refresh_token.expose_secret().as_bytes().to_vec());
+            }
             if let Err(error) = self
                 .resolver
                 .store_captured_oauth_token(&substituted.name, token)
@@ -111,11 +114,17 @@ impl SubstitutionService {
                     ),
                 });
             }
-            self.reflection.learn_captured_token(
-                &substituted.name,
-                &substituted.placeholder,
-                &learned_value,
-            );
+            for learned_value in learned_values {
+                // A zero-length needle would match at every scrub position.
+                if learned_value.is_empty() {
+                    continue;
+                }
+                self.reflection.learn_captured_token(
+                    &substituted.name,
+                    &substituted.placeholder,
+                    &learned_value,
+                );
+            }
         }
         Ok(())
     }
@@ -1123,6 +1132,23 @@ mod server_tests {
         }
     }
 
+    struct FullOAuthTokenForwarder;
+
+    #[async_trait]
+    impl Forwarder for FullOAuthTokenForwarder {
+        async fn forward(
+            &self,
+            _req: mvm_contract::substitution::PreparedRequest,
+        ) -> Result<ForwardResponse, ForwardError> {
+            Ok(ForwardResponse {
+                status: 200,
+                headers: vec![("content-type".into(), "application/json".into())],
+                body: br#"{"access_token":"fresh-oauth-token","refresh_token":"fresh-refresh-token","expires_in":3600,"token_type":"Bearer"}"#
+                    .to_vec(),
+            })
+        }
+    }
+
     struct ShortOAuthTokenForwarder;
 
     #[async_trait]
@@ -1205,6 +1231,85 @@ mod server_tests {
             .resolve(&bearer_ref("openai", &["api.openai.com"]))
             .unwrap();
         assert_eq!(secret.expose_secret().as_slice(), b"fresh-oauth-token");
+    }
+
+    #[tokio::test]
+    async fn echoed_oauth_refresh_token_is_scrubbed_and_persisted() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(FileSecretStore::with_dir(dir.path()));
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new(
+                    serde_json::to_string(&oauth_token_set("seed-token")).unwrap(),
+                )),
+            )
+            .unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put("local", "openai", &oauth_binding_meta("/access_token"))
+            .unwrap();
+        let resolver = Arc::new(LocalResolver::with_bindings(
+            "local",
+            store.clone(),
+            Arc::new(bindings),
+        ));
+        let resolver_dyn: Arc<dyn SecretResolver> = resolver.clone();
+        let mut registry = SubstitutionRegistry::new();
+        let placeholder = registry
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let service = Arc::new(
+            SubstitutionService::new(
+                Arc::new(registry),
+                resolver_dyn,
+                Arc::new(FullOAuthTokenForwarder),
+                gate_admitting(&[("api.openai.com", 443)]),
+            )
+            .with_oauth_capture_rule("openai", "/access_token"),
+        );
+        let response = service
+            .process(mvm_core::substitution_wire::WireRequest {
+                method: "GET".into(),
+                url: "https://api.openai.com/token".into(),
+                headers: vec![("authorization".into(), placeholder.clone())],
+                body_b64: String::new(),
+            })
+            .await;
+        let mvm_core::substitution_wire::WireResponse::Ok { body_b64, .. } = response else {
+            panic!("request must succeed");
+        };
+        let body = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(body_b64)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            body.matches(&placeholder).count() >= 2,
+            "access and refresh token must both be replaced with the minted placeholder: {body}"
+        );
+        assert!(
+            !body.contains("fresh-oauth-token"),
+            "captured access token must never be exposed to the guest: {body}"
+        );
+        assert!(
+            !body.contains("fresh-refresh-token"),
+            "captured refresh token must never be exposed to the guest: {body}"
+        );
+        let secret = resolver
+            .resolve(&bearer_ref("openai", &["api.openai.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"fresh-oauth-token");
+        let stored: OAuthTokenSet =
+            serde_json::from_str(store.get("local", "openai").unwrap().expose_secret()).unwrap();
+        assert_eq!(
+            stored.refresh_token.as_ref().unwrap().expose_secret(),
+            "fresh-refresh-token"
+        );
+        assert!(stored.expires_at > Utc::now());
     }
 
     #[tokio::test]
