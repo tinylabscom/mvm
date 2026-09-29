@@ -39,6 +39,16 @@ build?"
 
 ## Work
 
+- [x] **Contract: the image-set schema carries dev build variants and source
+      fingerprints.** `ImageSetMember` gains two optional fields —
+      `build_mode` (only `dev` exists today; absent is the production build,
+      and only workload-kernel/rootfs members may carry it) and
+      `source_fingerprint` (today the SDK sidecar's cdylib fingerprint).
+      Member identity includes the build mode, so the dev and prod variants of
+      one base publish beside each other in one atomic set; `current_train`
+      requires nothing new, so existing sets keep validating unchanged. This
+      is the mvm half of the producer item below; the producer emits the
+      fields once its pin carries this schema.
 - [ ] **Producer: publish the dev default-tenant variant as a set member.**
       `mvm-images` adds the dev-slot default-tenant image (both guest
       architectures) to the atomic image set it publishes, with the same
@@ -68,6 +78,28 @@ build?"
       phase against the W8 re-measure table; the parent plan's ≥25-minute
       box ticks only if the measured improvement clears it.
 
+## PR merge time (measured 2026-09-29, the other half of the goal)
+
+The merge-queue run itself is ~31 min when runners are free; the 50-minute
+perception is queue wait behind other merges. One merge-group run (36367678633)
+decomposed:
+
+| Lane | Duration | Note |
+|---|---:|---|
+| Guest image boots (mvm-images) | 31 min | builds the pair from the checkout on **every** merge, even Rust-only PRs; its heavy step ignores the path scope the setup steps honor |
+| Test workspace | 23.5 min | full nextest suite, one runner |
+| BDD live witness / BDD conformance | 18.5 / 17.7 min | parallel |
+| Test workspace (aarch64) | 17 min | parallel |
+
+- [ ] **Path-scope the guest-image-boot lane's heavy step.** It already
+      `needs: [scope]`; gate the build/boot step on `scope.nix` the way the
+      boot-latency lane skips docs-only PRs, so Rust-only merges stop paying
+      a 31-minute image build. The lane still runs on every image-relevant
+      change and on dispatch.
+- [ ] **Shard `Test workspace`.** Split the nextest suite across two runners
+      (~23.5 min -> ~12 min) if the queue remains the bottleneck after the
+      image lane is scoped.
+
 ## Separately tracked (not this plan)
 
 - [ ] **Suite sharding.** If the live scenario phase (~1 h) remains the
@@ -80,7 +112,9 @@ build?"
 - Does the dev default-tenant member publish on the same `image-set/v*`
   cadence as prod, or does a dev-slot member warrant its own promotion
   rule? (Leaning: same set, same atomicity; the dev slot is a build-time
-  concern, not a trust tier.)
+  concern, not a trust tier.) — *answered 2026-09-29: same set; the
+  member's `build_mode` field marks the variant, so one release carries
+  both builds atomically.*
 - The fingerprint gate keys on the host-services C ABI only; a change in
   the sidecar's non-ABI inputs (packaging, glibc/musl toolchain) still
   over-approximates to a rebuild. Acceptable for v1; revisit if the
