@@ -12,7 +12,7 @@
 
 - [ ] **Signed product packs and registry profiles — issue #3716.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md` PS-06. The
-      The first two unblocked foundations are complete:
+      first two unblocked foundations are complete:
       `mvm_core::registry_pack` owns strict
       `namespace/name[@version]` identities and a schema-versioned lockfile
       that hashes exact signed-manifest bytes and fails closed on missing,
