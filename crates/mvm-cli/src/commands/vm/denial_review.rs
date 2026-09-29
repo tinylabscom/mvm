@@ -39,8 +39,16 @@ fn candidates_from_destinations(denials: &[DeniedDestination]) -> Vec<GrantCandi
     denials
         .iter()
         .filter_map(candidate)
-        .filter(|candidate| seen.insert(candidate.target.clone()))
+        .filter(|candidate| seen.insert(candidate_key(&candidate.target)))
         .collect()
+}
+
+fn candidate_key(target: &str) -> String {
+    if target.rsplit_once(':').is_some() {
+        target.to_ascii_lowercase()
+    } else {
+        format!("{}:443", target.to_ascii_lowercase())
+    }
 }
 
 fn candidate(denial: &DeniedDestination) -> Option<GrantCandidate> {
@@ -296,6 +304,19 @@ mod tests {
                 "{target} {reason}"
             );
         }
+    }
+
+    #[test]
+    fn candidates_deduplicate_dns_and_tcp_default_port() {
+        let denials = [
+            tally("pypi.org", "policy_denied").destinations(),
+            tally("pypi.org:443", "policy_denied").destinations(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+
+        assert_eq!(candidates_from_destinations(&denials).len(), 1);
     }
 
     #[test]

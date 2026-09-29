@@ -176,21 +176,6 @@ fn answer_host(resolved: &ResolvedPolicy, raw: &str) -> Result<PolicyAnswer, Str
 
 fn answer_path(resolved: &ResolvedPolicy, path: &Path) -> PolicyAnswer {
     let value = path.display().to_string();
-    if let Some(deny) = resolved
-        .policy
-        .shares
-        .deny
-        .iter()
-        .find(|deny| path.starts_with(deny))
-    {
-        return PolicyAnswer::deny(
-            "path",
-            value,
-            true,
-            "a share-source deny prefix covers this path",
-            Some(format!("shares.deny = {deny:?}")),
-        );
-    }
     if let Some(share) = resolved
         .policy
         .shares
@@ -212,6 +197,21 @@ fn answer_path(resolved: &ResolvedPolicy, path: &Path) -> PolicyAnswer {
                 }
             ),
             Some(format!("shares.mount = {:?}", share.host)),
+        );
+    }
+    if let Some(deny) = resolved
+        .policy
+        .shares
+        .deny
+        .iter()
+        .find(|deny| path.starts_with(deny))
+    {
+        return PolicyAnswer::deny(
+            "path",
+            value,
+            true,
+            "a share-source deny prefix covers this path",
+            Some(format!("shares.deny = {deny:?}")),
         );
     }
     PolicyAnswer::deny(
@@ -386,11 +386,9 @@ mod tests {
                 .unwrap()
                 .allowed
         );
-        assert!(
-            !answer(&policy, PolicyQuery::Path("/work/private/key".into()))
-                .unwrap()
-                .allowed
-        );
+        let private = answer(&policy, PolicyQuery::Path("/work/private/key".into())).unwrap();
+        assert!(private.allowed);
+        assert_eq!(private.matched.as_deref(), Some("shares.mount = \"/work\""));
         let tool = answer(&policy, PolicyQuery::Tool("read".into())).unwrap();
         assert!(tool.allowed && !tool.enforced);
         assert!(
