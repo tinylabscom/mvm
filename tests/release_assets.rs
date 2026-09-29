@@ -733,6 +733,22 @@ fn workers_bakes_a_trusted_archive_hash_for_every_installer_target() {
     }
 }
 
+#[test]
+fn promoted_prebuilt_pin_pr_dispatches_ci_for_its_branch() {
+    let workflow = release_workflow();
+    let job = workflow
+        .split("  propose-prebuilt-pin:\n")
+        .nth(1)
+        .expect("release workflow must propose a prebuilt pin");
+
+    assert!(job.contains("gh pr create --base main --head \"$branch\""));
+    assert!(job.contains("      actions: write"));
+    assert!(
+        job.contains("gh workflow run ci.yml --ref \"$branch\""),
+        "a PR opened by the workflow token needs an explicit CI dispatch"
+    );
+}
+
 /// The installer's offline fallback has one writer.
 ///
 /// `_release-prep` used to set `DEFAULT_VERSION` to the version it was

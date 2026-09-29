@@ -244,6 +244,7 @@ mod tests {
                 auth_type: AuthType::Bearer,
                 allowed_hosts: vec!["api.example.com".to_string()],
                 sigv4: None,
+                inject: Default::default(),
             },
         }
     }
