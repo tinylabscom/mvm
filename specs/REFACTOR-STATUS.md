@@ -1,8 +1,10 @@
 # Refactor status
 
-Last updated: 2026-09-27
+Last updated: 2026-09-28
 
 ## In progress
+
+- [ ] **Scheduled security evidence — #3750.** Blocked on #3679 and a successful scheduled run. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
 - [ ] **Agent-sandbox product surface — tracking issue #3731.**
       `specs/plans/2026-09-25-agent-sandbox-product-surface.md`. Keep the
@@ -10,13 +12,13 @@ Last updated: 2026-09-27
       product-surface gap on top of it. Resume from the plan's "Execution
       log and handoff" section (landed PRs, open PRs, decisions, known
       defects). One issue per workstream:
-  - [ ] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
+  - [x] PS-01 SDKs in-process through mvm-hostlib; `mvm-client` is the one library — #3711
     - [x] hostlib ABI 1.2: `machine.run`/`create`/`start`/`inventory`, streamed process output
     - [x] Python and TypeScript facades on hostlib; every subprocess transport deleted (Rust `mvm-sdk` clients too)
     - [x] `xtask check-no-cli-shellout`, in `check-all`
     - [x] `mvm-client` re-exports the embedder surface; Rust quickstart on `mvm-client` alone
     - [x] library lookup documented (`MVM_HOSTLIB_PATH` → packaged → beside `mvmctl`)
-    - [ ] command override / guest env / template sources in the in-process launcher; in-VM function dispatch; log follow; live-boot SDK scenario
+    - [x] command override / guest env / template sources in the in-process launcher (persistent launch on the CLI's start); in-VM function dispatch (`entrypoint.call`, `session.*` over `mvm_client::entrypoint`); log follow (`machine.logs.stream.*`, ABI 1.3); live-boot SDK scenario on HVF
   - [ ] PS-02 egress route model on vsock flows, L7 rules, private-range default deny — #3712
     - [x] private-range default deny at the `EgressGate`, metadata never re-admitted, DNS pinned for the forward leg
     - [x] route + endpoint-rule model (fuzzed), L7 enforcement with explicit interception grant, `ask` seam, `--allow-endpoint`, `[[network.routes]]`
@@ -47,6 +49,9 @@ Last updated: 2026-09-27
     - [x] one lifecycle surface: `ps`, `attach`, `detach`, `logs -f`, `stop`, `inspect`
     - [ ] detached start fails closed; healthcheck and session timeout enforced; restart policy
   - [ ] PS-10 cryptographic audit trail UX (session summary, ledger, verify) — #3720
+    - [x] per-session seal, derived session ledger, `trust audit sessions|show|verify <session>`
+    - [x] fsync policy stated and tested; anchoring documented; rotation default confirmed
+    - [ ] snapshot roots in the ledger (waits on PS-08)
   - [ ] PS-11 instruction-file provenance (signed CLAUDE.md / AGENTS.md / SKILL.md) — #3721
   - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723
@@ -3959,3 +3964,13 @@ resume` takes a `current_head` and refuses when it differs from the
                   image; `nix/images/` is deleted.
             - [x] Release decoupling: image-set members are cached by the
                   pinned root, so a CLI version bump needs no image rebuild.
+            - [x] Re-measure on v0.18.3 recorded honestly (delivery note
+                  3366-w8-remeasure): no image bytes in the release (10
+                  assets, ~55 MiB vs rc.2's 78/~1.66 GiB), the
+                  ≥25-minute gate is missed because the lane still
+                  pair-builds the SDK sidecar and dev image, and the plan
+                  stays open with
+                  specs/plans/2026-09-27-release-e2e-under-image-target.md
+                  carrying the work. Parent W6's boot box ticked: the
+                  v0.2.1 pack boots on HVF, libkrun, Firecracker and QEMU
+                  across aarch64 and x86_64.

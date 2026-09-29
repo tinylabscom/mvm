@@ -42,7 +42,8 @@ afterEach(() => {
 /** Boot a live sandbox against a canned `machine.run` reply. */
 function boot(buildMode: "dev" | "prod", name = "sb-vm", options: mvm.SandboxCreateOptions = {}): mvm.Sandbox {
   process.env.MVM_SDK_MODE = "live";
-  host.on("machine.run", runReply(name, buildMode)).on("machine.stop", {});
+  const processToken = options.command !== undefined ? "boot-tok" : undefined;
+  host.on("machine.run", runReply(name, buildMode, processToken)).on("machine.stop", {}).on("machine.rm", {});
   return mvm.Sandbox.create({ image: IMAGE }, { workloadId: "testwid", ...options });
 }
 
@@ -173,7 +174,7 @@ describe("Sandbox.create (live mode)", () => {
     const request = host.requests("machine.run")[0];
     expect(Object.keys(request).sort()).toEqual(["image", "mode", "name", "ttl_seconds"]);
     expect(request.image).toBe(IMAGE);
-    expect(request.mode).toBe("transient");
+    expect(request.mode).toBe("persistent");
     expect(request.ttl_seconds).toBe(mvm.DEFAULT_TTL_SECONDS);
     expect(request.name).toMatch(/^sdk-testwid-[0-9a-f]{8}$/);
   });
@@ -228,18 +229,82 @@ describe("Sandbox.create (live mode)", () => {
     expect(host.calls).toEqual([]);
   });
 
-  it("refuses a template source before any call", () => {
+  it.each(["python-3.12", { manifest: "python-3.12" }] as const)(
+    "boots a template as a persistent machine that kill removes: %j",
+    (source) => {
+      process.env.MVM_SDK_MODE = "live";
+      host.on("machine.run", runReply("sb-tmpl", "dev")).on("machine.stop", {}).on("machine.rm", {});
+      const sb = mvm.Sandbox.create(source, { workloadId: "tmpl" });
+      const request = host.requests("machine.run")[0];
+      expect(request.name).toMatch(/^sdk-tmpl-[0-9a-f]{8}$/);
+      delete request.name;
+      expect(request).toEqual({ template: "python-3.12", mode: "persistent", ttl_seconds: mvm.DEFAULT_TTL_SECONDS });
+      sb.kill();
+      expect(host.methods().slice(-2)).toEqual(["machine.stop", "machine.rm"]);
+      expect(host.requests("machine.rm")).toEqual([{ id: "sb-tmpl" }]);
+    },
+  );
+
+  it("raises the library's refusal of a template nobody built", () => {
     process.env.MVM_SDK_MODE = "live";
-    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(mvm.SandboxModeError);
-    expect(() => mvm.Sandbox.create({ manifest: "python-3.12" })).toThrow(/pass .*image/i);
+    host.on("machine.run", failure("INVALID_SPEC", 'template "chromium": no built image named'));
+    expect(() => mvm.Sandbox.create("chromium")).toThrow(mvm.MachineSpecError);
+  });
+
+  it("removes an image sandbox after stopping it", () => {
+    const sb = boot("dev");
+    host.on("machine.rm", {});
+    sb.kill();
+    expect(host.methods().slice(-2)).toEqual(["machine.stop", "machine.rm"]);
+  });
+
+  it("stops a connected machine without removing it", () => {
+    process.env.MVM_SDK_MODE = "live";
+    host.on("machine.inventory", [{ name: "shared", build_mode: "dev" }]).on("machine.stop", {}).on("machine.rm", {});
+    const sb = mvm.Sandbox.connect("shared");
+    sb.kill();
+    expect(host.methods()).toEqual(["machine.inventory", "machine.stop"]);
+  });
+
+  it("carries the launch command's env and exposes its process", async () => {
+    const sb = boot("dev", "vm", { command: ["/app/serve"], env: { MODE: "safe", LEVEL: mvm.literal("3") } });
+    const request = host.requests("machine.run")[0];
+    expect(request.command).toEqual(["/app/serve"]);
+    expect(request.env).toEqual({ MODE: "safe", LEVEL: "3" });
+    expect(sb.process?.token).toBe("boot-tok");
+    host
+      .on("guest.proc.stream.open", { stream: 3 })
+      .on("guest.proc.stream.next", batch([["stdout", "ok"]], { kind: "exited", code: 0 }));
+    const result = await sb.process!.wait();
+    expect(result.exitCode).toBe(0);
+    sb.kill();
+  });
+
+  it("has no process without a launch command", () => {
+    const sb = boot("dev");
+    expect(sb.process).toBeNull();
+    expect(host.requests("machine.run")[0].env).toBeUndefined();
+    sb.kill();
+  });
+
+  it("refuses a secret as launch environment before any call", () => {
+    process.env.MVM_SDK_MODE = "live";
+    const secret = mvm.secret("api-key", { type: "bearer", hosts: ["api.example.com"] });
+    expect(() => mvm.Sandbox.create({ image: IMAGE }, { command: ["/app/serve"], env: { TOKEN: secret } })).toThrow(
+      /non-literal/,
+    );
     expect(host.calls).toEqual([]);
   });
 
-  it("refuses env and unrepresentable options before any call", () => {
+  it("reports a started command with no process as SandboxLiveError", () => {
     process.env.MVM_SDK_MODE = "live";
-    expect(() => mvm.Sandbox.create({ image: IMAGE }, { env: { MODE: "safe" } })).toThrow(
-      /Sandbox\.commands\.start/,
-    );
+    host.on("machine.run", runReply("vm", "dev"));
+    expect(() => mvm.Sandbox.create({ image: IMAGE }, { command: ["/app/serve"] })).toThrow(/named no process/);
+  });
+
+  it("refuses env without a command and unrepresentable options before any call", () => {
+    process.env.MVM_SDK_MODE = "live";
+    expect(() => mvm.Sandbox.create({ image: IMAGE }, { env: { MODE: "safe" } })).toThrow(/pass `command`/);
     expect(() =>
       mvm.Sandbox.create({ image: IMAGE }, { resources: { cpu_cores: 1, memory_mb: 256, rootfs_size_mb: 512 } }),
     ).toThrow(/resources/);
@@ -253,7 +318,7 @@ describe("Sandbox.create (live mode)", () => {
 
   it("propagates the library's typed refusal", () => {
     process.env.MVM_SDK_MODE = "live";
-    host.on("machine.run", failure("INVALID_SPEC", "a command override is not supported", { status: 3 }));
+    host.on("machine.run", failure("INVALID_SPEC", "variable LD_PRELOAD is denied", { status: 3 }));
     try {
       mvm.Sandbox.create({ image: IMAGE }, { command: ["true"] });
       expect.unreachable();
@@ -262,7 +327,7 @@ describe("Sandbox.create (live mode)", () => {
       expect(err).toBeInstanceOf(mvm.HostLibraryError);
       const f = err as mvm.HostLibraryFailure;
       expect([f.code, f.retryable, f.status]).toEqual(["INVALID_SPEC", false, 3]);
-      expect(f.message).toBe("a command override is not supported");
+      expect(f.message).toBe("variable LD_PRELOAD is denied");
     }
   });
 
@@ -713,7 +778,7 @@ describe("SandboxLiveError", () => {
 describe("CodeSandbox", () => {
   function codeSandbox(image: string, stdout = "", code = 0): mvm.CodeSandbox {
     process.env.MVM_SDK_MODE = "live";
-    host.on("machine.run", runReply("sb-cs-vm", "dev")).on("machine.stop", {}).on("guest.cp", {});
+    host.on("machine.run", runReply("sb-cs-vm", "dev")).on("machine.stop", {}).on("machine.rm", {}).on("guest.cp", {});
     streamReplies(batch(stdout ? [["stdout", stdout]] : [], { kind: "exited", code }));
     return new mvm.CodeSandbox(image);
   }
@@ -780,7 +845,7 @@ describe("CodeSandbox", () => {
 describe("BrowserSandbox", () => {
   function liveBrowser(): void {
     process.env.MVM_SDK_MODE = "live";
-    host.on("machine.run", runReply("browser", "dev")).on("machine.stop", {});
+    host.on("machine.run", runReply("browser", "dev", "cdp-tok")).on("machine.stop", {}).on("machine.rm", {});
   }
 
   it("uses the pinned image, fixed proxy/loopback command, and allowlist", () => {
@@ -809,10 +874,20 @@ describe("BrowserSandbox", () => {
     expect(host.calls).toEqual([]);
   });
 
-  it("refuses the template-backed browsers in live mode before any call", () => {
-    liveBrowser();
-    expect(() => new mvm.BrowserSandbox("chromium")).toThrow(mvm.SandboxModeError);
-    expect(host.calls).toEqual([]);
+  it.each(["chromium", "chrome"])("boots the %s template with CDP ingress", (browser) => {
+    process.env.MVM_SDK_MODE = "live";
+    host.on("machine.run", runReply(browser, "dev")).on("machine.stop", {}).on("machine.rm", {});
+    const bs = new mvm.BrowserSandbox(browser);
+    try {
+      const request = host.requests("machine.run")[0];
+      expect(request.template).toBe(browser);
+      expect(request.mode).toBe("persistent");
+      expect(request.ports).toEqual(["9222:9222"]);
+      expect(request.command).toBeUndefined();
+    } finally {
+      bs.kill();
+    }
+    expect(host.methods().slice(-2)).toEqual(["machine.stop", "machine.rm"]);
   });
 
   it("validates CDP readiness and cleans up after timeout", async () => {

@@ -14,6 +14,9 @@ import {
   GUEST_PROC_STREAM_CLOSE,
   GUEST_PROC_STREAM_NEXT,
   GUEST_PROC_STREAM_OPEN,
+  MACHINE_LOGS_STREAM_CLOSE,
+  MACHINE_LOGS_STREAM_NEXT,
+  MACHINE_LOGS_STREAM_OPEN,
 } from "./hostabi/methods.js";
 
 /** Builds the error a malformed reply is reported as. */
@@ -153,4 +156,63 @@ export function waitGuestProcess(
     stdout: Buffer.concat(stdout),
     stderr: Buffer.concat(stderr),
   };
+}
+
+/**
+ * How long one `machine.logs.stream.next` call waits for output before
+ * returning an empty batch, in milliseconds. Long enough that a quiet machine
+ * costs a handful of calls a minute, short enough that ending the iteration
+ * is not held up for long.
+ */
+const FOLLOW_WAIT_MS = 5000;
+
+/**
+ * A machine's console output as text, following it as it is written.
+ *
+ * The stream opens when iteration starts, not when this is called, so an
+ * iterator nobody reads holds nothing open. Chunks decode incrementally, so a
+ * character split across two chunks still decodes. The stream is closed when
+ * the machine's output ends or iteration stops early, including a `break`
+ * out of a `for...of` loop.
+ */
+export function* followMachineOutput(
+  id: string,
+  options: { tailLines?: number },
+  fail: ReplyFailure,
+): Generator<string, void, undefined> {
+  const request: Record<string, unknown> = { id, follow: true, streams: ["stdout", "stderr"] };
+  if (options.tailLines !== undefined) request.tail_lines = options.tailLines;
+  const opened = call(MACHINE_LOGS_STREAM_OPEN, request);
+  const stream = opened?.stream;
+  if (!Number.isInteger(stream)) {
+    throw fail("machine.logs.stream.open returned no stream id");
+  }
+  const decoder = new TextDecoder("utf-8");
+  let done = false;
+  try {
+    while (!done) {
+      const batch = call(MACHINE_LOGS_STREAM_NEXT, { stream, wait_ms: FOLLOW_WAIT_MS });
+      if (batch === null || typeof batch !== "object" || !Array.isArray(batch.events)) {
+        throw fail("machine.logs.stream.next returned a malformed batch");
+      }
+      done = batch.done === true;
+      for (const event of batch.events as Array<{ data_b64?: unknown }>) {
+        const text = decoder.decode(fromBase64(event?.data_b64, "a log chunk's data_b64", fail), {
+          stream: true,
+        });
+        if (text.length > 0) yield text;
+      }
+    }
+    const tail = decoder.decode();
+    if (tail.length > 0) yield tail;
+  } finally {
+    if (!done) {
+      try {
+        call(MACHINE_LOGS_STREAM_CLOSE, { stream });
+      } catch {
+        // Closing is cleanup; whatever ended the iteration is what the
+        // caller needs to see.
+      }
+    }
+  }
 }

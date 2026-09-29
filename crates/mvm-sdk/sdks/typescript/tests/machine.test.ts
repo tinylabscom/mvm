@@ -5,7 +5,7 @@
  * a facade method sends and how the reply comes back.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import * as mvm from "../src/index.js";
 import { parseAllowHost } from "../src/_machine.js";
@@ -24,22 +24,109 @@ afterEach(() => {
 const STATE = { id: "id-devbox", name: "devbox", status: "stopped" };
 
 describe("Machine.run", () => {
-  it("sends the minimal transient request and returns a handle", () => {
-    host.on("machine.run", runReply("gen-1", "dev"));
-    const machine = mvm.Machine.run("alpine:latest");
-    expect(machine).toBeInstanceOf(mvm.Machine);
-    expect(machine.name).toBe("gen-1");
-    expect(host.calls).toEqual([
-      { method: "machine.run", request: { image: "alpine:latest", mode: "transient" } },
+  it("boots, runs the command, returns its output, and stops the machine", () => {
+    host
+      .on("machine.run", runReply("run-1", "dev", "tok-1"))
+      .on("guest.proc.stream.open", { stream: 4 })
+      .on("guest.proc.stream.next", batch([["stdout", "Linux\n"]], { kind: "exited", code: 0 }))
+      .on("machine.stop", {})
+      .on("machine.rm", {});
+    const result = mvm.Machine.run("alpine:latest", ["uname"], {
+      env: { LANG: "C" },
+      cwd: "/",
+      cpus: 2,
+      memoryMib: 512,
+      allowHosts: ["example.com:443"],
+      timeout: 30,
+    });
+    expect(result).toEqual({ exitCode: 0, stdout: "Linux\n", stderr: "" });
+    const [request] = host.requests("machine.run");
+    expect(request.name).toMatch(/^sdk-run-[0-9a-f]{8}$/);
+    delete request.name;
+    expect([request]).toEqual([
+      {
+        image: "alpine:latest",
+        mode: "persistent",
+        command: ["uname"],
+        env: { LANG: "C" },
+        cwd: "/",
+        cpus: 2,
+        memory_mib: 512,
+        egress: [{ host: "example.com", port: 443 }],
+      },
     ]);
+    expect(host.requests("guest.proc.stream.open")).toEqual([{ id: "run-1", token: "tok-1", timeout_secs: 30 }]);
+    expect(host.methods().slice(-2)).toEqual(["machine.stop", "machine.rm"]);
+    expect(host.requests("machine.stop")).toEqual([{ id: "run-1" }]);
+    expect(host.requests("machine.rm")).toEqual([{ id: "run-1" }]);
+  });
+
+  it("stops and removes the machine when the wait fails", () => {
+    host
+      .on("machine.run", runReply("run-2", "dev", "tok"))
+      .on("guest.proc.stream.open", failure("BACKEND_ERROR", "the agent went away"))
+      .on("machine.stop", {})
+      .on("machine.rm", {});
+    expect(() => mvm.Machine.run("alpine:latest", ["true"])).toThrow(mvm.MachineBackendError);
+    expect(host.requests("machine.stop")).toEqual([{ id: "run-2" }]);
+    expect(host.requests("machine.rm")).toEqual([{ id: "run-2" }]);
+  });
+
+  it("reports rather than throws a failed teardown", () => {
+    host
+      .on("machine.run", runReply("run-3", "dev", "tok"))
+      .on("guest.proc.stream.open", { stream: 1 })
+      .on("guest.proc.stream.next", batch([], { kind: "exited", code: 0 }))
+      .on("machine.stop", failure("NOT_FOUND", "already reaped"));
+    const written: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((line: unknown) => {
+      written.push(String(line));
+    });
+    try {
+      expect(mvm.Machine.run("alpine:latest", ["true"]).exitCode).toBe(0);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(written.join("")).toContain("stopping run-3 failed: already reaped");
+    expect(host.methods()).not.toContain("machine.rm");
+  });
+
+  it("needs a command", () => {
+    expect(() => mvm.Machine.run("alpine:latest", [])).toThrow(RangeError);
+    expect(host.calls).toEqual([]);
+  });
+
+  it("raises the library's refusal of a denied variable, and boots nothing to stop", () => {
+    host.on("machine.run", failure("INVALID_SPEC", "variable LD_PRELOAD is denied"));
+    expect(() => mvm.Machine.run("alpine:latest", ["true"], { env: { LD_PRELOAD: "/x.so" } })).toThrow(
+      mvm.MachineSpecError,
+    );
+    expect(host.methods()).toEqual(["machine.run"]);
+  });
+});
+
+describe("Machine.launch", () => {
+  it("sends the minimal request with a generated name and returns a handle", () => {
+    host.on("machine.run", runReply("gen-1", "dev"));
+    const machine = mvm.Machine.launch({ image: "alpine:latest" });
+    expect(machine).toBeInstanceOf(mvm.Machine);
+    expect([machine.name, machine.buildMode, machine.planId, machine.process]).toEqual([
+      "gen-1",
+      "dev",
+      "plan-0",
+      undefined,
+    ]);
+    const [request] = host.requests("machine.run");
+    expect(request.name).toMatch(/^sdk-machine-[0-9a-f]{8}$/);
+    delete request.name;
+    expect(request).toEqual({ image: "alpine:latest", mode: "persistent" });
   });
 
   it("sends every option under the library's field names", () => {
     host.on("machine.run", runReply("web", "prod"));
-    mvm.Machine.run("alpine:latest", {
+    mvm.Machine.launch({
+      image: "alpine:latest",
       name: "web",
-      command: ["uname", "-a"],
-      env: { A: "1" },
       cpus: 2,
       memoryMib: 512,
       profile: "dev",
@@ -50,10 +137,8 @@ describe("Machine.run", () => {
     expect(host.requests("machine.run")).toEqual([
       {
         image: "alpine:latest",
-        mode: "transient",
+        mode: "persistent",
         name: "web",
-        command: ["uname", "-a"],
-        env: { A: "1" },
         cpus: 2,
         memory_mib: 512,
         profile: "dev",
@@ -69,32 +154,56 @@ describe("Machine.run", () => {
 
   it("leaves empty collections out", () => {
     host.on("machine.run", runReply("x", "dev"));
-    mvm.Machine.run("alpine:latest", { command: [], env: {}, allowHosts: [], ports: [] });
-    expect(host.requests("machine.run")).toEqual([{ image: "alpine:latest", mode: "transient" }]);
+    mvm.Machine.launch({ image: "alpine:latest", name: "x", env: {}, allowHosts: [], ports: [] });
+    expect(host.requests("machine.run")).toEqual([{ image: "alpine:latest", mode: "persistent", name: "x" }]);
   });
 
-  it("passes a command through so the library's refusal is the one raised", () => {
-    host.on("machine.run", failure("INVALID_SPEC", "command overrides are not supported yet"));
-    try {
-      mvm.Machine.run("alpine:latest", { command: ["true"] });
-      expect.unreachable();
-    } catch (err) {
-      expect(err).toBeInstanceOf(mvm.MachineSpecError);
-      expect((err as mvm.HostLibraryFailure).code).toBe("INVALID_SPEC");
-    }
-    expect(host.requests("machine.run")[0].command).toEqual(["true"]);
+  it("keeps a started command's process to wait on", () => {
+    host
+      .on("machine.run", runReply("svc", "dev", "tok-9"))
+      .on("guest.proc.stream.open", { stream: 1 })
+      .on("guest.proc.stream.next", batch([["stderr", "bad"]], { kind: "exited", code: 3 }));
+    const machine = mvm.Machine.launch({ image: "alpine:latest", command: ["serve"], name: "svc" });
+    expect(machine.process).toBe("tok-9");
+    expect(machine.wait()).toEqual({ exitCode: 3, stdout: "", stderr: "bad" });
   });
+
+  it("reports a started command with no process as MachineError", () => {
+    host.on("machine.run", runReply("svc", "dev"));
+    expect(() => mvm.Machine.launch({ image: "alpine:latest", command: ["serve"] })).toThrow(/named no process/);
+  });
+
+  it("refuses to wait without a command", () => {
+    expect(() => new mvm.Machine("idle").wait()).toThrow(mvm.MachineError);
+    expect(host.calls).toEqual([]);
+  });
+
+  it.each(["template", "manifest"] as const)("boots a %s by its field", (field) => {
+    host.on("machine.run", runReply("b", "dev"));
+    mvm.Machine.launch({ [field]: "chromium", name: "b" });
+    expect(host.requests("machine.run")).toEqual([{ [field]: "chromium", mode: "persistent", name: "b" }]);
+  });
+
+  it.each([{}, { image: "alpine", template: "chromium" }, { template: "a", manifest: "b" }])(
+    "names exactly one source: %j",
+    (source) => {
+      expect(() => mvm.Machine.launch(source)).toThrow(/exactly one/);
+      expect(host.calls).toEqual([]);
+    },
+  );
 
   it("refuses bad arguments before any call", () => {
-    expect(() => mvm.Machine.run("")).toThrow(TypeError);
-    expect(() => mvm.Machine.run("img", { cpus: 0 })).toThrow(RangeError);
-    expect(() => mvm.Machine.run("img", { allowHosts: ["example.com"] })).toThrow(mvm.MachineError);
+    expect(() => mvm.Machine.launch({ image: "" })).toThrow(TypeError);
+    expect(() => mvm.Machine.launch({ image: "img", cpus: 0 })).toThrow(RangeError);
+    expect(() => mvm.Machine.launch({ image: "img", cwd: "" })).toThrow(TypeError);
+    expect(() => mvm.Machine.launch({ image: "img", command: [] })).toThrow(RangeError);
+    expect(() => mvm.Machine.launch({ image: "img", allowHosts: ["example.com"] })).toThrow(mvm.MachineError);
     expect(host.calls).toEqual([]);
   });
 
   it("reports a reply with no machine name as MachineError", () => {
     host.on("machine.run", { machine: {}, build_mode: "dev" });
-    expect(() => mvm.Machine.run("img")).toThrow(mvm.MachineError);
+    expect(() => mvm.Machine.launch({ image: "img" })).toThrow(mvm.MachineError);
   });
 });
 
@@ -142,6 +251,12 @@ describe("Machine.create", () => {
     mvm.Machine.create("devbox", "alpine:latest");
     expect(host.requests("machine.create")).toEqual([{ name: "devbox", image: "alpine:latest" }]);
   });
+
+  it("persists a definition from a manifest", () => {
+    host.on("machine.create", STATE);
+    mvm.Machine.create("tmpl", { manifest: "./mvm.toml" });
+    expect(host.requests("machine.create")).toEqual([{ name: "tmpl", manifest: "./mvm.toml" }]);
+  });
 });
 
 describe("Machine.ls", () => {
@@ -176,6 +291,39 @@ describe("Machine lifecycle", () => {
       { method: "machine.stop", request: { id: "devbox" } },
       { method: "machine.rm", request: { id: "devbox" } },
     ]);
+  });
+
+  it("follows logs as they arrive, decoding a character split across chunks", () => {
+    const snowman = Buffer.from("\u2603", "utf8");
+    const chunk = (stream: string, bytes: Buffer) => ({ stream, data_b64: bytes.toString("base64") });
+    host
+      .on("machine.logs.stream.open", { stream: 8 })
+      .on(
+        "machine.logs.stream.next",
+        { events: [chunk("stdout", Buffer.concat([Buffer.from("boot "), snowman.subarray(0, 1)]))], done: false },
+        { events: [], done: false },
+        { events: [chunk("stderr", Buffer.concat([snowman.subarray(1), Buffer.from(" up")]))], done: true },
+      );
+    const chunks = new mvm.Machine("web").logs({ lines: 5, follow: true });
+    expect(host.calls).toEqual([]);
+    expect([...chunks].join("")).toBe("boot \u2603 up");
+    expect(host.requests("machine.logs.stream.open")).toEqual([
+      { id: "web", follow: true, streams: ["stdout", "stderr"], tail_lines: 5 },
+    ]);
+    expect(host.requests("machine.logs.stream.next")[0]).toEqual({ stream: 8, wait_ms: 5000 });
+    expect(host.methods()).not.toContain("machine.logs.stream.close");
+  });
+
+  it("closes a followed log stream when iteration stops early", () => {
+    host
+      .on("machine.logs.stream.open", { stream: 2 })
+      .on("machine.logs.stream.next", { events: [{ stream: "stdout", data_b64: Buffer.from("line\n").toString("base64") }], done: false })
+      .on("machine.logs.stream.close", {});
+    for (const text of new mvm.Machine("web").logs({ follow: true })) {
+      expect(text).toBe("line\n");
+      break;
+    }
+    expect(host.requests("machine.logs.stream.close")).toEqual([{ stream: 2 }]);
   });
 
   it("logs decodes the console and forwards the line limit", () => {

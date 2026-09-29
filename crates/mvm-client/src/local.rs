@@ -53,6 +53,9 @@ pub struct LocalBackend {
     /// validation/recording. `None` builds the production-wired
     /// [`crate::secret::SecretService::local`] on first use.
     pub(crate) secret_service: Option<std::sync::Arc<crate::secret::SecretService>>,
+    /// Starts a launch's command once its machine is up: the guest agent,
+    /// unless a caller supplied another.
+    pub(crate) command_starter: std::sync::Arc<dyn crate::launch::detached::CommandStarter>,
 }
 
 /// vCPUs to give a guest when the caller does not say.
@@ -82,6 +85,7 @@ impl LocalBackend {
         Self {
             backend: AnyBackend::auto_select(),
             secret_service: None,
+            command_starter: std::sync::Arc::new(crate::launch::detached::GuestAgentStarter),
         }
     }
 
@@ -89,6 +93,7 @@ impl LocalBackend {
         Self {
             backend: AnyBackend::from_hypervisor(name),
             secret_service: None,
+            command_starter: std::sync::Arc::new(crate::launch::detached::GuestAgentStarter),
         }
     }
 
@@ -104,6 +109,7 @@ impl LocalBackend {
         Self {
             backend: AnyBackend::for_started_vm(vm).unwrap_or_else(AnyBackend::auto_select),
             secret_service: None,
+            command_starter: std::sync::Arc::new(crate::launch::detached::GuestAgentStarter),
         }
     }
 
@@ -116,6 +122,18 @@ impl LocalBackend {
         service: std::sync::Arc<crate::secret::SecretService>,
     ) -> Self {
         self.secret_service = Some(service);
+        self
+    }
+
+    /// Replace what starts a launch's command once its machine is up. The
+    /// default speaks to the machine's guest agent; a caller whose machines
+    /// have no reachable agent — a test double backend — supplies its own.
+    #[must_use]
+    pub fn with_command_starter(
+        mut self,
+        starter: std::sync::Arc<dyn crate::launch::detached::CommandStarter>,
+    ) -> Self {
+        self.command_starter = starter;
         self
     }
 
@@ -921,6 +939,34 @@ fn path_collision_hint(image_ref: &str) -> String {
     }
 }
 
+/// Record when `name` expires on its host name-registry entry, or clear it
+/// with `None`; the TTL reaper stops a machine past it. Synchronous, so a
+/// caller already inside a runtime (the host library) sets a TTL without
+/// nesting one. A machine with no registry entry is `NotFound`.
+pub fn set_machine_expiry(name: &str, expires_at: Option<String>) -> Result<()> {
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    let mut registry = VmNameRegistry::load(&path).map_err(|e| {
+        backend_err(format!(
+            "loading VM name registry at {}: {e}",
+            path.display()
+        ))
+    })?;
+    let updated = registry
+        .set_expires_at(name, expires_at)
+        .map_err(|e| backend_err(format!("updating registry record: {e}")))?;
+    if !updated {
+        return Err(MvmError::NotFound {
+            id: name.to_string(),
+        });
+    }
+    registry.save(&path).map_err(|e| {
+        backend_err(format!(
+            "saving VM name registry at {}: {e}",
+            path.display()
+        ))
+    })
+}
+
 /// Materialize an OCI reference into a host `rootfs.ext4`, for a caller that
 /// wants the artifact rather than a running machine.
 ///
@@ -1222,6 +1268,13 @@ impl MvmClient for LocalBackend {
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
         let vid = VmId(id.0.clone());
+        // A persistent machine's session ends at its stop; a transient's ends
+        // when its exit is reported, which seals it. Read before the stop: the
+        // plan lives in the state dir the stop removes.
+        let stopped_session = mvm_core::config::machine_spec_path(&id.0)
+            .exists()
+            .then(|| mvm_hostd::audit::plan_persist::read_plan(&id.0).ok())
+            .flatten();
         // Stop via the VMM that actually started this VM (resolved from its
         // per-VM state-dir pid marker) so a QEMU/libkrun VM is torn down by its
         // own hypervisor, not this client's default. A marker-less VM (mock or
@@ -1246,6 +1299,9 @@ impl MvmClient for LocalBackend {
                 tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
             }
             remove_stopped_runtime_state(&id.0)?;
+            if let Some(plan) = stopped_session {
+                crate::launch::seal_stopped_session(&plan, &id.0);
+            }
         }
         result.map_err(backend_err)
     }
@@ -1316,25 +1372,7 @@ impl MvmClient for LocalBackend {
     }
 
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
-        let path = mvm_runtime::vm::name_registry::registry_path();
-        let mut registry = VmNameRegistry::load(&path).map_err(|e| {
-            backend_err(format!(
-                "loading VM name registry at {}: {e}",
-                path.display()
-            ))
-        })?;
-        let updated = registry
-            .set_expires_at(&id.0, expires_at)
-            .map_err(|e| backend_err(format!("updating registry record: {e}")))?;
-        if !updated {
-            return Err(MvmError::NotFound { id: id.0.clone() });
-        }
-        registry.save(&path).map_err(|e| {
-            backend_err(format!(
-                "saving VM name registry at {}: {e}",
-                path.display()
-            ))
-        })
+        set_machine_expiry(&id.0, expires_at)
     }
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {

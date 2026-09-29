@@ -1,7 +1,6 @@
 use super::*;
 use crate::commands::shared;
 use crate::commands::vm::{invoke, logs};
-use mvm_client::MvmClient;
 
 pub(super) fn resolve_persistent_spec(
     args: &MachineRunArgs,
@@ -15,21 +14,21 @@ pub(super) fn resolve_persistent_spec(
         || args.run.deployment.is_some()
         || resolved_manifest_slot.is_some()
         || direct_boot;
-    if !has_source {
-        return match existing {
-            Some(spec) => Ok((spec, SpecReconcile::Reuse)),
-            None => anyhow::bail!(
-                "machine {name:?} does not exist; pass --image, --manifest, --deployment, or --flake to create it"
-            ),
-        };
+    if !has_source && existing.is_none() {
+        anyhow::bail!(
+            "machine {name:?} does not exist; pass --image, --manifest, --deployment, or --flake to create it"
+        );
     }
-    let desired = machine_run_spec(args, name.to_string(), resolved_manifest_slot)?;
-    let action = reconcile_machine_spec(existing.as_ref(), &desired, args.force)?;
-    let spec = match action {
-        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
-        SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
+    let desired = if has_source {
+        Some(machine_run_spec(
+            args,
+            name.to_string(),
+            resolved_manifest_slot,
+        )?)
+    } else {
+        None
     };
-    Ok((spec, action))
+    mvm_client::launch::detached::resolve_spec(name, desired, existing, args.force)
 }
 
 fn run_persistent(
@@ -75,12 +74,20 @@ fn run_persistent(
         })
         .flatten();
 
-    let booted = persist_and_boot_machine(
-        &name,
-        &spec,
-        action,
-        start_args_for_run(&args, &name),
-        secret_refs.as_deref(),
+    if let SpecReconcile::Recreate { changed } = &action {
+        eprintln!(
+            "machine {name:?}: config changed ({changed}) — stopping the old instance and recreating it"
+        );
+    }
+    let start = start_args_for_run(&args, &name);
+    let booted = mvm_client::launch::detached::persist_and_boot(
+        mvm_client::launch::detached::DetachedBoot {
+            name: &name,
+            spec: &spec,
+            action,
+            secret_refs: secret_refs.as_deref(),
+        },
+        || lifecycle::start_machine(start),
     )?;
     if !booted && !args.run.json && !args.up_json {
         println!("machine {name} already running");
@@ -121,50 +128,6 @@ fn persistent_secret_refs(
         .validate_for_admission("local", &references)
         .context("validating workload secret references")?;
     Ok(Some(references))
-}
-
-fn persist_and_boot_machine(
-    name: &str,
-    spec: &MachineSpec,
-    action: SpecReconcile,
-    start: MachineStartArgs,
-    secret_refs: Option<&[mvm_client::secret::MachineSecretRef]>,
-) -> Result<bool> {
-    match action {
-        SpecReconcile::Reuse => {}
-        SpecReconcile::Create => save_machine_spec(spec, false)?,
-        SpecReconcile::Recreate { changed } => {
-            eprintln!(
-                "machine {name:?}: config changed ({changed}) — stopping the old instance and recreating it"
-            );
-            lifecycle::stop_running_machine(name);
-            overwrite_machine_spec(spec)?;
-        }
-    }
-    if lifecycle::machine_is_running(name) && secret_refs.is_some() {
-        anyhow::bail!(
-            "machine {name:?} is already running; stop it before changing its secret bindings"
-        );
-    }
-    if let Some(references) = secret_refs {
-        let service = mvm_client::secret::SecretService::local()
-            .context("opening the local secret service")?;
-        if references.is_empty() {
-            service
-                .clear_machine_references(name)
-                .context("clearing persistent-machine secret references")?;
-        } else {
-            service
-                .record_machine_references(name, references)
-                .context("recording persistent-machine secret references")?;
-        }
-    }
-    if lifecycle::machine_is_running(name) {
-        Ok(false)
-    } else {
-        lifecycle::start_machine(start)?;
-        Ok(true)
-    }
 }
 
 fn run_persistent_post_start(
@@ -351,20 +314,11 @@ pub(super) fn transient_volume_warning(name: &str, count: usize) -> String {
 }
 
 fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
-    // Duration parsing stays a CLI concern; the facade's `set_ttl` applies the
-    // resolved `expires_at` to the host registry (same op the `set-ttl` verb
-    // routes through), so the machine path stays off the registry internals.
+    // Parsing the flag is a CLI concern; recording the expiry is the library
+    // step every detached run shares.
     let dur = mvm_core::crypto::policy::parse_ttl(dur_str)
         .with_context(|| format!("Invalid --ttl value {dur_str:?}"))?;
-    let expires_at = mvm_core::util::time::utc_plus_duration(dur);
-    let client = mvm_client::LocalBackend::new();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("build runtime for machine TTL")?;
-    match runtime
-        .block_on(client.set_ttl(&mvm_client::MachineId(name.to_string()), Some(expires_at)))
-    {
+    match mvm_client::launch::detached::apply_ttl(name, dur) {
         Ok(()) => Ok(()),
         Err(mvm_client::MvmError::NotFound { .. }) => {
             anyhow::bail!("machine {name:?} is not registered")

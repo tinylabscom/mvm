@@ -7,11 +7,18 @@
 //!
 //! Every field is validated at the client boundary, in
 //! [`LaunchRequestBuilder::build`]. Fields the in-process backend cannot
-//! honor are **refused**, never silently dropped: a command/entrypoint
-//! override, guest environment variables, and an untyped network policy other
-//! than deny-all all fail the build with an error naming what does support
-//! them. Egress is expressed as a grant, which the plan is signed over and the
+//! honor are **refused**, never silently dropped: an untyped network policy
+//! other than deny-all fails the build with an error naming what does support
+//! it. Egress is expressed as a grant, which the plan is signed over and the
 //! gate reads.
+//!
+//! A command override runs once the machine is up, through the guest agent's
+//! process start, with its environment filtered by the host denylist. It is
+//! the same contract `mvmctl machine run -d -- <argv>` has: the machine is
+//! admitted without the attenuated ProdSafe grant, because it is booted to
+//! run an ad-hoc command.
+
+use std::collections::BTreeMap;
 
 use mvm_core::client::{MvmError, Result};
 use mvm_core::rootfs_source::RootfsSource;
@@ -64,12 +71,83 @@ pub struct LaunchVolumeSpec {
     pub access: AccessMode,
 }
 
+/// What a launch boots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchSource {
+    /// A rootfs declaration: an OCI reference, a rootfs path, or a flake
+    /// output.
+    Image(RootfsSource),
+    /// A workload already built from a manifest into the local slot registry,
+    /// named by its slot. Resolve one with [`LaunchSource::from_manifest`].
+    Built {
+        /// The 64-character slot address.
+        slot_hash: String,
+    },
+}
+
+impl LaunchSource {
+    /// Resolve a manifest source — a manifest file, the directory holding one,
+    /// or a built slot's 64-character address — to the slot it built into.
+    /// Nothing is built here: a manifest that was never built is refused with
+    /// the command that builds it.
+    pub fn from_manifest(manifest: &str) -> Result<Self> {
+        let invalid = |reason: String| MvmError::InvalidSpec { reason };
+        match crate::launch::manifest_ref::resolve_manifest_arg(manifest)
+            .map_err(|e| invalid(format!("manifest {manifest:?}: {e:#}")))?
+        {
+            crate::launch::manifest_ref::ManifestArgRef::Slot { slot_hash } => {
+                Ok(Self::Built { slot_hash })
+            }
+            crate::launch::manifest_ref::ManifestArgRef::WasmModule { .. } => {
+                Err(invalid(format!(
+                    "manifest {manifest:?} selects a wasm module, which runs on the wasm backend \
+                 rather than in a microVM"
+                )))
+            }
+        }
+    }
+
+    /// Resolve a built template by the name its image was built under — the
+    /// `name` its flake gave `mkGuest` — to the one slot whose current
+    /// revision carries it. Nothing is built here: a name no slot carries, or
+    /// one several do, is refused with how to build it or which manifests
+    /// compete.
+    pub fn from_template(name: &str) -> Result<Self> {
+        let invalid = |reason: String| MvmError::InvalidSpec { reason };
+        if name.trim().is_empty() {
+            return Err(invalid("a template name must be non-empty".to_string()));
+        }
+        crate::entrypoint::workload::resolve_workload_slot(name)
+            .map(|slot_hash| Self::Built { slot_hash })
+            .map_err(|e| invalid(format!("template {name:?}: {e:#}")))
+    }
+
+    /// The written form a persisted definition records.
+    fn written(&self) -> String {
+        match self {
+            Self::Image(image) => image.to_string(),
+            Self::Built { slot_hash } => slot_hash.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for LaunchSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.written())
+    }
+}
+
 /// A fully-validated launch request. Construct via [`LaunchRequest::builder`].
 #[derive(Debug, Clone)]
 pub struct LaunchRequest {
     pub(crate) name: Option<String>,
     pub(crate) mode: LifecycleMode,
-    pub(crate) image: RootfsSource,
+    pub(crate) source: LaunchSource,
+    /// The command to start once the machine is up, with its environment and
+    /// working directory. Empty when the machine boots without one.
+    pub(crate) command: Vec<String>,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) cwd: Option<String>,
     pub(crate) cpus: u32,
     pub(crate) memory_mib: u32,
     pub(crate) backend: Option<String>,
@@ -111,12 +189,19 @@ impl LaunchRequest {
     /// value rather than a string is what keeps a request that names nothing
     /// unbuildable rather than merely refused.
     pub fn builder(mode: LifecycleMode, image: RootfsSource) -> LaunchRequestBuilder {
+        Self::builder_for(mode, LaunchSource::Image(image))
+    }
+
+    /// Start building a request that boots `source`: an image, or a workload
+    /// built from a manifest.
+    pub fn builder_for(mode: LifecycleMode, source: LaunchSource) -> LaunchRequestBuilder {
         LaunchRequestBuilder {
             mode,
-            image,
+            source,
             name: None,
             command: Vec::new(),
             env: Vec::new(),
+            cwd: None,
             cpus: 1,
             memory_mib: 512,
             backend: None,
@@ -142,6 +227,16 @@ impl LaunchRequest {
     pub fn mode(&self) -> LifecycleMode {
         self.mode
     }
+
+    /// What the launch boots.
+    pub fn source(&self) -> &LaunchSource {
+        &self.source
+    }
+
+    /// The command started once the machine is up; empty when there is none.
+    pub fn command(&self) -> &[String] {
+        &self.command
+    }
 }
 
 /// Builder for [`LaunchRequest`]. `build` validates every field and refuses
@@ -149,10 +244,11 @@ impl LaunchRequest {
 #[derive(Debug, Clone)]
 pub struct LaunchRequestBuilder {
     mode: LifecycleMode,
-    image: RootfsSource,
+    source: LaunchSource,
     name: Option<String>,
     command: Vec<String>,
     env: Vec<(String, String)>,
+    cwd: Option<String>,
     cpus: u32,
     memory_mib: u32,
     backend: Option<String>,
@@ -179,21 +275,28 @@ impl LaunchRequestBuilder {
         self
     }
 
-    /// Command/entrypoint override. Represented so a caller's intent is
-    /// visible, but the in-process backend refuses a non-empty override at
-    /// `build` — the image's baked entrypoint is the only thing that runs.
+    /// A command to start once the machine is up, in place of the image's
+    /// own. Started through the guest agent's process start, which is a
+    /// DevOnly verb: a sealed production image refuses it in the guest.
     #[must_use]
     pub fn command(mut self, argv: impl IntoIterator<Item = String>) -> Self {
         self.command.extend(argv);
         self
     }
 
-    /// Guest environment variables. Refused when non-empty: the in-process
-    /// boot path has no env delivery seam, and silently dropping values a
-    /// caller believes were set is worse than a refusal.
+    /// An environment variable for the command. Only a command receives
+    /// environment, so `build` refuses one without a command; a loader, shell
+    /// or credential variable the host denylist names is refused too.
     #[must_use]
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// The command's working directory; the agent's default when unset.
+    #[must_use]
+    pub fn cwd(mut self, cwd: impl Into<String>) -> Self {
+        self.cwd = Some(cwd.into());
         self
     }
 
@@ -354,19 +457,24 @@ impl LaunchRequestBuilder {
         if self.memory_mib == 0 {
             return Err(invalid("memory_mib must be >= 1".into()));
         }
-        if !self.command.is_empty() {
+        let ValidatedCommand {
+            argv: command,
+            env,
+            cwd,
+        } = validated_command(self.command, self.env, self.cwd)?;
+        if matches!(self.source, LaunchSource::Built { .. })
+            && self.mode == LifecycleMode::Transient
+        {
             return Err(invalid(
-                "a command/entrypoint override is not supported by the in-process local \
-                 backend (the image's baked entrypoint runs); use `mvmctl machine run` \
-                 for ad-hoc commands"
+                "a workload built from a manifest boots as a persistent machine; launch it \
+                 persistent (and remove it when done)"
                     .into(),
             ));
         }
-        if !self.env.is_empty() {
+        if self.assurance_campaign.is_some() && self.mode == LifecycleMode::Persistent {
             return Err(invalid(
-                "guest environment variables are not supported by the in-process local \
-                 backend (no delivery seam; values would be silently dropped); use the \
-                 CLI run path"
+                "an assurance campaign runs against a transient launch; a persisted definition \
+                 does not carry it, so a later start would silently run without it"
                     .into(),
             ));
         }
@@ -444,7 +552,10 @@ impl LaunchRequestBuilder {
         Ok(LaunchRequest {
             name: self.name,
             mode: self.mode,
-            image: self.image,
+            source: self.source,
+            command,
+            env,
+            cwd,
             cpus,
             memory_mib,
             backend: self.backend,
@@ -462,6 +573,70 @@ impl LaunchRequestBuilder {
             signed_plan: self.signed_plan,
         })
     }
+}
+
+/// Check a command, its environment and working directory together: the
+/// environment and directory belong to the command, so either without one is
+/// refused rather than dropped; an empty argument, a duplicate or malformed
+/// variable name, or a name the host environment denylist refuses fails too.
+fn validated_command(
+    command: Vec<String>,
+    env: Vec<(String, String)>,
+    cwd: Option<String>,
+) -> Result<ValidatedCommand> {
+    let invalid = |reason: String| MvmError::InvalidSpec { reason };
+    if command.is_empty() {
+        if !env.is_empty() {
+            return Err(invalid(
+                "guest environment is delivered to a command; pass the command it is for".into(),
+            ));
+        }
+        if cwd.is_some() {
+            return Err(invalid(
+                "a working directory is for a command; pass the command it is for".into(),
+            ));
+        }
+        return Ok(ValidatedCommand::default());
+    }
+    if command.iter().any(String::is_empty) {
+        return Err(invalid("command arguments must not be empty".into()));
+    }
+    if cwd.as_deref().is_some_and(str::is_empty) {
+        return Err(invalid("the working directory must not be empty".into()));
+    }
+    let mut vars = BTreeMap::new();
+    for (key, value) in env {
+        let well_formed = !key.is_empty()
+            && !key.starts_with(|c: char| c.is_ascii_digit())
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if !well_formed {
+            return Err(invalid(format!(
+                "{key:?} is not a valid environment variable name"
+            )));
+        }
+        if vars.insert(key.clone(), value).is_some() {
+            return Err(invalid(format!(
+                "environment variable {key:?} is set twice"
+            )));
+        }
+    }
+    mvm_core::env_hygiene::EnvFilter::new(mvm_core::env_hygiene::EnvReadmit::none())
+        .refuse_denied(vars.keys().map(String::as_str))
+        .map_err(|e| invalid(format!("command environment: {e}")))?;
+    Ok(ValidatedCommand {
+        argv: command,
+        env: vars,
+        cwd,
+    })
+}
+
+/// A launch's command once [`validated_command`] has accepted it: empty when
+/// the launch carries none.
+#[derive(Debug, Default)]
+struct ValidatedCommand {
+    argv: Vec<String>,
+    env: BTreeMap<String, String>,
+    cwd: Option<String>,
 }
 
 #[cfg(test)]
@@ -537,27 +712,109 @@ mod tests {
     }
 
     #[test]
-    fn command_override_is_refused_not_ignored() {
-        let err = base(LifecycleMode::Transient)
-            .command(["/bin/sh".to_string(), "-c".to_string(), "id".to_string()])
+    fn a_command_with_its_environment_and_directory_is_carried() {
+        let req = base(LifecycleMode::Persistent)
+            .command(["python".to_string(), "app.py".to_string()])
+            .env("MODE", "test")
+            .cwd("/app")
             .build()
-            .unwrap_err();
-        assert!(
-            err.to_string().contains("command/entrypoint override"),
-            "got: {err}"
-        );
+            .expect("a command with env and cwd builds");
+        assert_eq!(req.command(), ["python", "app.py"]);
+        assert_eq!(req.env.get("MODE").map(String::as_str), Some("test"));
+        assert_eq!(req.cwd.as_deref(), Some("/app"));
     }
 
+    /// Environment and a working directory belong to a command; without one
+    /// they would reach nothing, so they are refused rather than dropped.
     #[test]
-    fn env_vars_are_refused_not_ignored() {
+    fn env_or_cwd_without_a_command_is_refused_not_ignored() {
         let err = base(LifecycleMode::Transient)
             .env("API_KEY", "value")
             .build()
             .unwrap_err();
         assert!(
-            err.to_string().contains("environment variables"),
+            err.to_string().contains("delivered to a command"),
             "got: {err}"
         );
+        let err = base(LifecycleMode::Transient)
+            .cwd("/app")
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("working directory"), "got: {err}");
+    }
+
+    #[test]
+    fn a_denied_or_malformed_variable_is_refused() {
+        for (key, needle) in [
+            ("LD_PRELOAD", "LD_PRELOAD"),
+            ("1BAD", "not a valid"),
+            ("A-B", "not a valid"),
+            ("", "not a valid"),
+        ] {
+            let err = base(LifecycleMode::Persistent)
+                .command(["true".to_string()])
+                .env(key, "x")
+                .build()
+                .unwrap_err();
+            assert!(err.to_string().contains(needle), "{key:?}: {err}");
+        }
+        let err = base(LifecycleMode::Persistent)
+            .command(["true".to_string()])
+            .env("A", "1")
+            .env("A", "2")
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("set twice"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_command_argument_is_refused() {
+        let err = base(LifecycleMode::Persistent)
+            .command(["python".to_string(), String::new()])
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "{err}");
+    }
+
+    /// A built workload is persistent; a campaign is transient-only.
+    #[test]
+    fn sources_and_campaigns_are_held_to_their_lifecycle() {
+        let built = LaunchSource::Built {
+            slot_hash: "a".repeat(64),
+        };
+        let err = LaunchRequest::builder_for(LifecycleMode::Transient, built.clone())
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("persistent machine"), "{err}");
+        LaunchRequest::builder_for(LifecycleMode::Persistent, built)
+            .name("tmpl")
+            .build()
+            .expect("a built workload launches persistent");
+        let err = base(LifecycleMode::Persistent)
+            .assurance_campaign("/campaign.toml")
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("transient launch"), "{err}");
+    }
+
+    #[test]
+    fn an_unbuilt_manifest_source_is_refused_with_the_path() {
+        let err = LaunchSource::from_manifest("/nonexistent/mvm.toml").unwrap_err();
+        assert!(err.to_string().contains("does not exist"), "{err}");
+        assert!(matches!(err, MvmError::InvalidSpec { .. }));
+    }
+
+    #[test]
+    fn a_template_nothing_was_built_as_is_refused_with_how_to_build_it() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let err = LaunchSource::from_template("chromium").unwrap_err();
+        assert!(matches!(err, MvmError::InvalidSpec { .. }), "{err}");
+        assert!(err.to_string().contains("\"chromium\""), "{err}");
+        assert!(err.to_string().contains("mvmctl machine build"), "{err}");
+        let err = LaunchSource::from_template("  ").unwrap_err();
+        assert!(err.to_string().contains("non-empty"), "{err}");
     }
 
     #[test]

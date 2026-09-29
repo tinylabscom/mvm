@@ -9,7 +9,10 @@
  * refuses on its own: an argument it cannot send, or a reply it cannot read.
  */
 
+import { randomBytes } from "node:crypto";
+
 import {
+  followMachineOutput,
   fromBase64,
   startGuestProcess,
   waitGuestProcess,
@@ -33,19 +36,28 @@ export type MachineState = Record<string, unknown>;
 /** One entry of the host-wide machine inventory (`name`, `build_mode`, `status`, …). */
 export type MachineInventoryRecord = Record<string, unknown>;
 
-/** A command run with {@link Machine.exec}: its exit code and decoded output. */
+/** A command run with {@link Machine.run} or {@link Machine.exec}: its exit
+ *  code and decoded output. */
 export interface MachineResult {
   exitCode: number;
   stdout: string;
   stderr: string;
 }
 
-/** What {@link Machine.run} and {@link Machine.create} both describe. */
+/**
+ * What a machine boots: exactly one of an `image` (an OCI reference, a rootfs
+ * path, or `flake:<ref>#<attr>`), a `template` built on this host (by the name
+ * its image was built under), or a `manifest` (a manifest path or a built
+ * slot's address). A template or manifest boots as a persistent machine.
+ */
+export interface MachineSource {
+  image?: string;
+  template?: string;
+  manifest?: string;
+}
+
+/** What {@link Machine.launch} and {@link Machine.create} both describe. */
 interface MachineSpecOptions {
-  /** Command override for the image's entrypoint. */
-  command?: string[];
-  /** Guest environment. */
-  env?: Record<string, string>;
   cpus?: number;
   memoryMib?: number;
   /** Security profile; the library defaults to `standard`. */
@@ -56,14 +68,37 @@ interface MachineSpecOptions {
   ports?: string[];
 }
 
-export interface MachineRunOptions extends MachineSpecOptions {
-  /** Name for the machine; the library generates one when absent. */
-  name?: string;
-  /** Seconds before the host reaps the machine. */
-  ttlSeconds?: number;
+/** A command started once a machine is up. */
+interface CommandOptions {
+  /** The command's environment; the host's denylist refuses a loader, shell
+   *  or credential variable. */
+  env?: Record<string, string>;
+  /** The command's working directory. */
+  cwd?: string;
 }
 
-export interface MachineCreateOptions extends MachineSpecOptions {
+export interface MachineRunOptions extends CommandOptions {
+  cpus?: number;
+  memoryMib?: number;
+  profile?: string;
+  /** Egress destinations, each `host:port` or `[v6-address]:port`. */
+  allowHosts?: string[];
+  /** Wall-clock limit on the command in seconds (exit 124 on overrun). */
+  timeout?: number;
+}
+
+export interface MachineLaunchOptions extends MachineSource, MachineSpecOptions, CommandOptions {
+  /** Name for the machine; one is generated when absent. */
+  name?: string;
+  /** Started once the machine is up; {@link Machine.process} names it. */
+  command?: string[];
+  /** Seconds before the host reaps the machine. */
+  ttlSeconds?: number;
+  /** Replace a same-name definition whose configuration differs. */
+  force?: boolean;
+}
+
+export interface MachineCreateOptions extends MachineSource, MachineSpecOptions {
   /** Replace a same-name definition whose configuration differs. */
   force?: boolean;
 }
@@ -79,6 +114,11 @@ export interface MachineExecOptions {
 export interface MachineLogsOptions {
   /** Return only the last `lines` lines. */
   lines?: number;
+}
+
+export interface MachineFollowLogsOptions extends MachineLogsOptions {
+  /** Keep yielding output as the machine writes it. */
+  follow: true;
 }
 
 /** A request the SDK refused before sending, or a reply it could not read. */
@@ -144,17 +184,36 @@ export function parseAllowHost(entry: string): { host: string; port: number } {
   return { host, port };
 }
 
-/** The request fields `machine.run` and `machine.create` share. Absent and
- *  empty values are left out, so the library applies its own defaults. */
-function specFields(options: MachineSpecOptions): Record<string, unknown> {
+/** The one boot source `source` names, as its request field. */
+function sourceField(source: MachineSource): Record<string, string> {
+  const given = (["image", "template", "manifest"] as const).filter((f) => source[f] !== undefined);
+  if (given.length !== 1) {
+    throw new TypeError("pass exactly one of image, template and manifest");
+  }
+  const field = given[0] as keyof MachineSource;
+  return { [field]: requireString(source[field], field) };
+}
+
+/** A command's request fields; `env` and `cwd` without a command are for the
+ *  library to refuse, so they are sent as given. */
+function commandFields(command: string[] | undefined, options: CommandOptions): Record<string, unknown> {
   const request: Record<string, unknown> = {};
-  if (options.command !== undefined) {
-    const command = requireStringArray(options.command, "command");
-    if (command.length > 0) request.command = command;
+  if (command !== undefined) {
+    const argv = requireStringArray(command, "command");
+    if (argv.length === 0) throw new RangeError("command must be non-empty");
+    request.command = argv;
   }
   if (options.env !== undefined && Object.keys(options.env).length > 0) {
     request.env = { ...options.env };
   }
+  if (options.cwd !== undefined) request.cwd = requireString(options.cwd, "cwd");
+  return request;
+}
+
+/** The request fields `machine.run` and `machine.create` share. Absent and
+ *  empty values are left out, so the library applies its own defaults. */
+function specFields(options: MachineSpecOptions): Record<string, unknown> {
+  const request: Record<string, unknown> = {};
   if (options.cpus !== undefined) request.cpus = requireCount(options.cpus, "cpus");
   if (options.memoryMib !== undefined) request.memory_mib = requireCount(options.memoryMib, "memoryMib");
   if (options.profile !== undefined) request.profile = requireString(options.profile, "profile");
@@ -177,32 +236,97 @@ function machineName(state: unknown, method: string): string {
   return name;
 }
 
-/** A handle on one machine, by name. Constructing it makes no call. */
+/** A machine name the library's validator accepts, unique per boot. */
+function generatedName(prefix: string): string {
+  return `sdk-${prefix}-${randomBytes(4).toString("hex")}`;
+}
+
+function decoded(result: { exitCode: number; stdout: Uint8Array; stderr: Uint8Array }): MachineResult {
+  const decoder = new TextDecoder("utf-8");
+  return {
+    exitCode: result.exitCode,
+    stdout: decoder.decode(result.stdout),
+    stderr: decoder.decode(result.stderr),
+  };
+}
+
+/**
+ * A handle on one machine, by name. Constructing it makes no call.
+ *
+ * Every boot is a named machine started the way `mvmctl machine run -d`
+ * starts one, so the SDK and the CLI admit it under the same plan.
+ */
 export class Machine {
   readonly name: string;
+  /** `dev` or `prod` when this handle came from {@link Machine.launch}. */
+  buildMode?: string;
+  /** The admitted plan's id when this handle came from {@link Machine.launch}. */
+  planId?: string;
+  /** The token of the process a launch's `command` started, for {@link wait}. */
+  process?: string;
 
   constructor(name: string) {
     this.name = requireString(name, "name");
   }
 
-  /** Boot a transient machine from `image` and return a handle on it. */
-  static run(image: string, options: MachineRunOptions = {}): Machine {
+  /**
+   * Boot a machine from `image`, run `command` in it, and return what the
+   * command produced once it ends. The machine is stopped and removed on
+   * every exit, including a throw. Running a command is a DevOnly guest
+   * operation, so a sealed image refuses it.
+   */
+  static run(image: string, command: string[], options: MachineRunOptions = {}): MachineResult {
+    const machine = Machine.launch({
+      image,
+      name: generatedName("run"),
+      command,
+      env: options.env,
+      cwd: options.cwd,
+      cpus: options.cpus,
+      memoryMib: options.memoryMib,
+      profile: options.profile,
+      allowHosts: options.allowHosts,
+    });
+    try {
+      return machine.wait({ timeout: options.timeout });
+    } finally {
+      machine.discard();
+    }
+  }
+
+  /**
+   * Boot a machine and return a handle on it. The machine is named — `name`,
+   * or one generated here — and outlives this process until `stop()` and
+   * `rm()`, or until `ttlSeconds` runs out. `command` starts once the machine
+   * is up; {@link process} names it and {@link wait} collects its output.
+   */
+  static launch(options: MachineLaunchOptions): Machine {
+    const source = sourceField(options);
     const request: Record<string, unknown> = {
-      image: requireString(image, "image"),
-      mode: "transient",
+      ...source,
+      mode: "persistent",
+      name: options.name !== undefined ? requireString(options.name, "name") : generatedName("machine"),
     };
-    if (options.name !== undefined) request.name = requireString(options.name, "name");
-    Object.assign(request, specFields(options));
+    Object.assign(request, commandFields(options.command, options), specFields(options));
     if (options.ttlSeconds !== undefined) request.ttl_seconds = requireCount(options.ttlSeconds, "ttlSeconds");
+    if (options.force) request.force = true;
     const reply = call(MACHINE_RUN, request);
-    return new Machine(machineName(reply?.machine, "machine.run"));
+    const machine = new Machine(machineName(reply?.machine, "machine.run"));
+    if (typeof reply?.build_mode === "string") machine.buildMode = reply.build_mode;
+    if (typeof reply?.plan_id === "string") machine.planId = reply.plan_id;
+    const processToken = reply?.process;
+    if (request.command !== undefined && (typeof processToken !== "string" || processToken.length === 0)) {
+      throw new MachineError("machine.run started a command but named no process");
+    }
+    if (typeof processToken === "string") machine.process = processToken;
+    return machine;
   }
 
   /** Persist a machine definition without booting it; `start()` boots it. */
-  static create(name: string, image: string, options: MachineCreateOptions = {}): Machine {
+  static create(name: string, source: MachineSource | string, options: MachineCreateOptions = {}): Machine {
     const request: Record<string, unknown> = {
       name: requireString(name, "name"),
-      image: requireString(image, "image"),
+      ...sourceField(typeof source === "string" ? { image: source } : source),
       ...specFields(options),
     };
     if (options.force) request.force = true;
@@ -235,10 +359,47 @@ export class Machine {
     return call(MACHINE_INSPECT, { id: this.name }) as MachineState;
   }
 
-  /** Captured console output, decoded as UTF-8. */
-  logs(options: MachineLogsOptions = {}): string {
+  /** Stop the machine and remove its definition, reporting rather than
+   *  throwing a failure: this is cleanup, and whatever ended the caller's
+   *  work is what they need to see. */
+  private discard(): void {
+    for (const [verb, method] of [
+      ["stopping", MACHINE_STOP],
+      ["removing", MACHINE_RM],
+    ] as const) {
+      try {
+        call(method, { id: this.name });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(`mvm: ${verb} ${this.name} failed: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      }
+    }
+  }
+
+  /** Wait for the command {@link Machine.launch} started and return what it
+   *  produced. `timeout` bounds the wait (exit 124 on overrun). */
+  wait(options: { timeout?: number } = {}): MachineResult {
+    if (this.process === undefined) {
+      throw new MachineError(`machine ${this.name} was not launched with a command to wait for`);
+    }
+    return decoded(waitGuestProcess(this.name, this.process, { timeout: options.timeout }, fail));
+  }
+
+  /**
+   * Captured console output, decoded as UTF-8. With `follow: true` it arrives
+   * as an iterable of text chunks that keeps yielding as the machine writes,
+   * until the output ends or iteration stops.
+   */
+  logs(options: MachineFollowLogsOptions): Iterable<string>;
+  logs(options?: MachineLogsOptions): string;
+  logs(options: MachineLogsOptions | MachineFollowLogsOptions = {}): string | Iterable<string> {
+    const lines = options.lines === undefined ? undefined : requireCount(options.lines, "lines");
+    if ("follow" in options && options.follow === true) {
+      return followMachineOutput(this.name, { tailLines: lines }, fail);
+    }
     const request: Record<string, unknown> = { id: this.name };
-    if (options.lines !== undefined) request.tail_lines = requireCount(options.lines, "lines");
+    if (lines !== undefined) request.tail_lines = lines;
     const reply = call(MACHINE_LOGS, request);
     return new TextDecoder("utf-8").decode(fromBase64(reply?.data_b64, "machine.logs's data_b64", fail));
   }
@@ -253,12 +414,6 @@ export class Machine {
     const argv = requireStringArray(command, "command");
     if (argv.length === 0) throw new RangeError("command must be non-empty");
     const token = startGuestProcess(this.name, argv, { env: options.env, cwd: options.cwd }, fail);
-    const result = waitGuestProcess(this.name, token, { timeout: options.timeout }, fail);
-    const decoder = new TextDecoder("utf-8");
-    return {
-      exitCode: result.exitCode,
-      stdout: decoder.decode(result.stdout),
-      stderr: decoder.decode(result.stderr),
-    };
+    return decoded(waitGuestProcess(this.name, token, { timeout: options.timeout }, fail));
   }
 }
