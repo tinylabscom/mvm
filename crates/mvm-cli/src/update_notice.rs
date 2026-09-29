@@ -31,10 +31,6 @@ struct UpdateCheckState {
     latest_tag: String,
 }
 
-fn state_path() -> std::path::PathBuf {
-    std::path::Path::new(&mvm_core::config::mvm_home()).join("update-check.json")
-}
-
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -89,7 +85,7 @@ pub(crate) fn maybe_notify() {
     if !interactive() {
         return;
     }
-    let path = state_path();
+    let path = mvm_core::config::mvm_update_check_path();
     let now = now_unix();
     if read_state(&path).is_some_and(|state| is_fresh(state.checked_at_unix, now)) {
         return;
