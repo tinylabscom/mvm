@@ -1291,7 +1291,10 @@ mod tests {
         let err = checked_current_session_record_with_current(Some("current-digest"))
             .expect_err("missing record must fail");
         let msg = format!("{err:#}");
-        assert!(msg.contains("no persistent-builder session record"), "{msg}");
+        assert!(
+            msg.contains("no persistent-builder session record"),
+            "{msg}"
+        );
     }
 
     #[test]
@@ -1304,7 +1307,10 @@ mod tests {
         let err = checked_current_session_record_with_current(Some("current-digest"))
             .expect_err("stale record must fail");
         let msg = format!("{err:#}");
-        assert!(msg.contains("no persistent-builder session record"), "{msg}");
+        assert!(
+            msg.contains("no persistent-builder session record"),
+            "{msg}"
+        );
         assert!(
             !session_record_path().exists(),
             "stale session record should be cleared after stop"
