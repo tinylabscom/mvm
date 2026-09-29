@@ -40,3 +40,19 @@ test("durable session plan describes its delivered and unfinished work", () => {
   assert.equal(plan.includes("- [x] **WS6 — CLI."), true, "CLI workstream is delivered");
   assert.equal(plan.includes("- [ ] **WS8 — Tests + BDD**"), true, "BDD workstream remains open");
 });
+
+test("lineage recovery has a navigable capability guide with its safety boundary", () => {
+  const guide = readFileSync(
+    path.join(repo, "public/src/content/docs/guides/lineage-recovery.md"),
+    "utf8",
+  );
+  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
+
+  assert.match(sidebar, /slug: "guides\/lineage-recovery"/);
+  for (const verb of ["timeline", "revert", "rewind", "advance"]) {
+    assert.equal(guide.includes(`mvmctl machine ${verb}`), true, `${verb} is documented`);
+  }
+  assert.match(guide, /not an undo of external effects/i);
+  assert.match(guide, /signed audit chain/i);
+  assert.match(guide, /new VM identity/i);
+});

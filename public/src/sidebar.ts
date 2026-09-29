@@ -114,6 +114,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "Config & Secrets", slug: "guides/config-secrets" },
       { label: "Secrets and Credentials", slug: "guides/secrets-and-credentials" },
       { label: "Persistent Workspaces", slug: "guides/persistent-workspaces" },
+      { label: "Rewind and replay a sandbox", slug: "guides/lineage-recovery" },
       { label: "Audit and Receipts", slug: "guides/audit-and-receipts" },
       { label: "Workload Output Streaming", slug: "guides/workload-output-streaming" },
       { label: "Workload Input", slug: "guides/workload-input" },
