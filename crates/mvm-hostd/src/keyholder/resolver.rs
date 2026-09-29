@@ -12,22 +12,92 @@
 
 use std::sync::Arc;
 
+use anyhow::Context;
 use chrono::{Duration, Utc};
 use mvm_contract::ir::SecretRef;
 use mvm_core::crypto::secret_binding::BindingStore;
 use mvm_core::crypto::secret_store::SecretStore;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 const OAUTH_REFRESH_SKEW: Duration = Duration::seconds(60);
 
 /// OAuth token set stored in the encrypted secret store for an OAuth binding.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default)]
+pub struct OAuthSecretString(Zeroizing<String>);
+
+impl OAuthSecretString {
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for OAuthSecretString {
+    fn from(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+}
+
+impl std::fmt::Debug for OAuthSecretString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OAuthSecretString(REDACTED)")
+    }
+}
+
+impl PartialEq for OAuthSecretString {
+    fn eq(&self, other: &Self) -> bool {
+        self.expose_secret() == other.expose_secret()
+    }
+}
+
+impl Eq for OAuthSecretString {}
+
+impl Serialize for OAuthSecretString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.expose_secret())
+    }
+}
+
+impl<'de> Deserialize<'de> for OAuthSecretString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(Self::from(String::deserialize(deserializer)?))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthTokenSet {
-    pub access_token: String,
+    pub access_token: OAuthSecretString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub refresh_token: Option<String>,
+    pub refresh_token: Option<OAuthSecretString>,
     pub expires_at: chrono::DateTime<Utc>,
+}
+
+impl std::fmt::Debug for OAuthTokenSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthTokenSet")
+            .field("access_token", &"REDACTED")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "REDACTED"),
+            )
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// A host-captured OAuth token response update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedOAuthToken {
+    pub access_token: OAuthSecretString,
+    pub refresh_token: Option<OAuthSecretString>,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Errors from resolving a [`SecretRef`] to its stored value.
@@ -61,6 +131,14 @@ pub enum ResolveError {
 /// longer-lived buffer.
 pub trait SecretResolver: Send + Sync {
     fn resolve(&self, r: &SecretRef) -> Result<SecretBox<Vec<u8>>, ResolveError>;
+
+    fn store_captured_oauth_token(
+        &self,
+        name: &str,
+        _token: CapturedOAuthToken,
+    ) -> anyhow::Result<()> {
+        anyhow::bail!("resolver does not support captured oauth token updates for `{name}`");
+    }
 }
 
 /// Single-host resolver over the local [`SecretStore`] (the
@@ -130,7 +208,7 @@ impl SecretResolver for LocalResolver {
                     });
                 }
                 return Ok(SecretBox::new(Box::new(
-                    token_set.access_token.into_bytes(),
+                    token_set.access_token.expose_secret().as_bytes().to_vec(),
                 )));
             }
         }
@@ -141,6 +219,30 @@ impl SecretResolver for LocalResolver {
         Ok(SecretBox::new(Box::new(
             value.expose_secret().as_bytes().to_vec(),
         )))
+    }
+
+    fn store_captured_oauth_token(
+        &self,
+        name: &str,
+        token: CapturedOAuthToken,
+    ) -> anyhow::Result<()> {
+        let stored = self
+            .store
+            .get(&self.tenant, name)
+            .with_context(|| format!("loading oauth token set for `{name}`"))?;
+        let current: OAuthTokenSet = serde_json::from_str(stored.expose_secret())
+            .with_context(|| format!("parsing oauth token set for `{name}`"))?;
+        let updated = OAuthTokenSet {
+            access_token: token.access_token,
+            refresh_token: token.refresh_token.or(current.refresh_token),
+            expires_at: token.expires_at.unwrap_or(current.expires_at),
+        };
+        let serialized = serde_json::to_string(&updated)
+            .with_context(|| format!("serializing updated oauth token set for `{name}`"))?;
+        self.store
+            .put(&self.tenant, name, &SecretBox::new(Box::new(serialized)))
+            .with_context(|| format!("persisting updated oauth token set for `{name}`"))?;
+        Ok(())
     }
 }
 
@@ -223,22 +325,31 @@ mod tests {
         }
     }
 
+    fn store_oauth_token_set(
+        store: &FileSecretStore,
+        tenant: &str,
+        name: &str,
+        token_set: &OAuthTokenSet,
+    ) {
+        store
+            .put(
+                tenant,
+                name,
+                &SecretBox::new(Box::new(serde_json::to_string(token_set).unwrap())),
+            )
+            .unwrap();
+    }
+
     #[test]
     fn local_resolver_with_bindings_returns_oauth_access_token() {
         let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         let token_set = OAuthTokenSet {
-            access_token: "oauth-access-token".into(),
-            refresh_token: Some("oauth-refresh-token".into()),
+            access_token: OAuthSecretString::from(String::from("oauth-access-token")),
+            refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             expires_at: Utc::now() + Duration::minutes(5),
         };
-        store
-            .put(
-                "local",
-                "oauth-secret",
-                &SecretBox::new(Box::new(serde_json::to_string(&token_set).unwrap())),
-            )
-            .unwrap();
+        store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
         let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
         bindings
             .put("local", "oauth-secret", &oauth_binding_meta())
@@ -255,17 +366,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         let token_set = OAuthTokenSet {
-            access_token: "oauth-access-token".into(),
-            refresh_token: Some("oauth-refresh-token".into()),
+            access_token: OAuthSecretString::from(String::from("oauth-access-token")),
+            refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             expires_at: Utc::now() + Duration::seconds(30),
         };
-        store
-            .put(
-                "local",
-                "oauth-secret",
-                &SecretBox::new(Box::new(serde_json::to_string(&token_set).unwrap())),
-            )
-            .unwrap();
+        store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
         let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
         bindings
             .put("local", "oauth-secret", &oauth_binding_meta())
@@ -275,5 +380,56 @@ mod tests {
             .resolve(&bearer_ref("oauth-secret", &["api.example.com"]))
             .unwrap_err();
         assert!(matches!(err, ResolveError::OAuthRefreshRequired { .. }));
+    }
+
+    #[test]
+    fn oauth_token_set_debug_is_redacted() {
+        let token_set = OAuthTokenSet {
+            access_token: OAuthSecretString::from(String::from("oauth-access-token")),
+            refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            expires_at: Utc::now() + Duration::minutes(5),
+        };
+        let rendered = format!("{token_set:?}");
+        assert!(rendered.contains("REDACTED"));
+        assert!(!rendered.contains("oauth-access-token"));
+        assert!(!rendered.contains("oauth-refresh-token"));
+    }
+
+    #[test]
+    fn storing_a_captured_oauth_token_updates_the_persisted_token_set() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        let original_expiry = Utc::now() + Duration::minutes(5);
+        let token_set = OAuthTokenSet {
+            access_token: OAuthSecretString::from(String::from("oauth-access-token")),
+            refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            expires_at: original_expiry,
+        };
+        store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
+        let resolver = LocalResolver::new("local", Arc::new(store));
+        resolver
+            .store_captured_oauth_token(
+                "oauth-secret",
+                CapturedOAuthToken {
+                    access_token: OAuthSecretString::from(String::from("fresh-access-token")),
+                    refresh_token: None,
+                    expires_at: Some(Utc::now() + Duration::minutes(30)),
+                },
+            )
+            .unwrap();
+        let updated: OAuthTokenSet = serde_json::from_str(
+            resolver
+                .store
+                .get("local", "oauth-secret")
+                .unwrap()
+                .expose_secret(),
+        )
+        .unwrap();
+        assert_eq!(updated.access_token.expose_secret(), "fresh-access-token");
+        assert_eq!(
+            updated.refresh_token.as_ref().unwrap().expose_secret(),
+            "oauth-refresh-token"
+        );
+        assert!(updated.expires_at > original_expiry);
     }
 }
