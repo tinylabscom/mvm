@@ -96,6 +96,27 @@ binaries that run inside a microVM must not feel like a two-repo workflow.
 - Cross-repo: a fixture pins vendored `mkGuest` and `mvm`'s to identical
   output for one fixed input.
 
+## The decision tripwire
+
+The repo split survives on two promises; if either fails, the decision
+re-opens — revert to a single repo included, without sentiment.
+
+- **Queue wall.** After the in-flight merge-queue levers land (#3841's
+      boot-lane scope, the workspace sharding, and any successor), the
+      merge-group wall must hold below **20 minutes** when runners are free,
+      measured over at least ten merge-group runs. If it does not, the
+      split's remaining performance justification is weak and the topology
+      decision is revisited with the data.
+- **One-clone bootstrap.** A new contributor clones only `mvm`, follows the
+      quickstart, and never needs to know `mvm-images` exists unless they
+      change an image definition. The auto-provisioned sibling checkout and
+      the single front-door verb are the acceptance test; if they are not
+      real, DX becomes the reason to reconsider.
+
+Both measurements are recorded in the follow-up plan
+(`2026-09-27-release-e2e-under-image-target.md`) when the v0.18.4
+re-measurement and the bootstrap land.
+
 ## Non-goals
 
 Moving agent or protocol source out of `mvm` (the host links those crates;
