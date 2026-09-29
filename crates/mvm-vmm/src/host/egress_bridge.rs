@@ -23,6 +23,17 @@ pub fn require_grant_cmdline_token(vm_name: &str) -> Option<String> {
     path.exists().then(|| "mvm.require_grant=1".to_string())
 }
 
+/// The `mvm.telemetry=1` token when this boot's telemetry collector is
+/// provisioned. Presence-gated on the collector's pid file, the same shape
+/// as the grant token: a boot the runner gave no collector asserts nothing,
+/// and the guest agent starts no telemetry listener.
+pub fn telemetry_cmdline_token(vm_name: &str) -> Option<String> {
+    super::telemetry_collector_spawn::telemetry_provisioned(&mvm_core::config::vm_state_dir(
+        vm_name,
+    ))
+    .then(|| "mvm.telemetry=1".to_string())
+}
+
 const HOST_SIGNER_PUBKEY_FILENAME: &str = "host-signer.pub";
 
 /// The host's public signing key, pinned into every guest as the anchor its

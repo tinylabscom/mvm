@@ -152,6 +152,8 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         )
         .context("registering this boot's telemetry identity")?;
 
+        provision_telemetry_collector(req.vm_name, req.state_dir);
+
         spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
@@ -366,6 +368,43 @@ fn host_signer_key_base64() -> Result<String> {
         bytes.len()
     );
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Whether this host opts a boot into telemetry collection. Off by default:
+/// enablement is gated on the live-baseline workstreams, and the machinery
+/// stays reachable for witnesses without flipping the product default.
+fn telemetry_collection_enabled() -> bool {
+    std::env::var("MVM_TELEMETRY_COLLECT").ok().as_deref() == Some("1")
+}
+
+/// Provision the per-VM telemetry collector when enabled. Best-effort by
+/// design: a failed provision leaves no pid file, so the guest-facing
+/// `mvm.telemetry=1` assertion is never emitted and the guest starts no
+/// listener — the boot proceeds coherently without telemetry rather than
+/// failing over it, and the miss is visible in the spawn log.
+fn provision_telemetry_collector(vm_name: &str, state_dir: &Path) {
+    use mvm_vmm::host::telemetry_collector_spawn::{
+        TelemetryCollectorSpawnParams, spawn_telemetry_collector,
+    };
+
+    if !telemetry_collection_enabled() {
+        return;
+    }
+    let telemetry_sock = mvm_core::config::vm_hvf_vsock_port_socket_at(
+        state_dir,
+        mvm_net::channel::GuestService::Telemetry.port(),
+    );
+    let signer_sock = state_dir.join(mvm_vmm::host::broker_services_spawn::AUDIT_SIGNER_SOCK);
+    let spawned = TelemetryCollectorSpawnParams::builder()
+        .vm_name(vm_name)
+        .state_dir(state_dir)
+        .telemetry_sock(&telemetry_sock)
+        .signer_sock(&signer_sock)
+        .build()
+        .and_then(spawn_telemetry_collector);
+    if let Err(e) = spawned {
+        tracing::warn!(vm_name, error = %e, "telemetry collector not provisioned");
+    }
 }
 
 #[cfg(test)]

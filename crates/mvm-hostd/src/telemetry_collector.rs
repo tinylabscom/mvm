@@ -657,3 +657,169 @@ mod tests {
         handle.stop();
     }
 }
+
+/// A size-capped JSONL sink: each record appends as one JSON line until the
+/// cap, then sheds. This file exists so collection is observable — retention
+/// and durable storage are their own workstream, and nothing here claims
+/// them. Writes are local file appends; a failed write is a shed, never a
+/// stall.
+pub struct CappedJsonlSink {
+    file: std::fs::File,
+    written: u64,
+    cap: u64,
+}
+
+impl CappedJsonlSink {
+    pub fn create(path: &std::path::Path, cap: u64) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let written = file.metadata().map(|m| m.len()).unwrap_or(0);
+        Ok(Self { file, written, cap })
+    }
+}
+
+impl RecordSink for CappedJsonlSink {
+    fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome {
+        use std::io::Write as _;
+        let Ok(mut line) = serde_json::to_vec(record) else {
+            return IngestOutcome::Shed;
+        };
+        line.push(b'\n');
+        if self.written.saturating_add(line.len() as u64) > self.cap {
+            return IngestOutcome::Shed;
+        }
+        match self.file.write_all(&line) {
+            Ok(()) => {
+                self.written += line.len() as u64;
+                IngestOutcome::Ingested
+            }
+            Err(_) => IngestOutcome::Shed,
+        }
+    }
+}
+
+/// The status snapshot the collector process persists beside the VM state,
+/// for `doctor` and the future CLI seam to read.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct CollectorStatusSnapshot {
+    pub vm_name: String,
+    pub status: String,
+    /// Boot generation when a session is live; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    pub shed: u64,
+}
+
+fn status_snapshot(vm_name: &str, status: &CoverageStatus, shed: u64) -> CollectorStatusSnapshot {
+    let (label, generation) = match status {
+        CoverageStatus::Connecting => ("connecting".to_string(), None),
+        CoverageStatus::Collecting { generation } => ("collecting".to_string(), Some(*generation)),
+        CoverageStatus::Degraded { code } => (format!("degraded:{code}"), None),
+        CoverageStatus::Stopped => ("stopped".to_string(), None),
+    };
+    CollectorStatusSnapshot {
+        vm_name: vm_name.to_string(),
+        status: label,
+        generation,
+        shed,
+    }
+}
+
+/// Atomically replace the status file with the current snapshot.
+fn write_status(path: &std::path::Path, snapshot: &CollectorStatusSnapshot) {
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(bytes) = serde_json::to_vec_pretty(snapshot)
+        && std::fs::write(&tmp, bytes).is_ok()
+    {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Run a collector process from its spawn-time configuration: dial the
+/// bridged telemetry socket, authenticate through the delegated signer, and
+/// persist a status snapshot on a fixed cadence until the process is killed.
+///
+/// The first snapshot is written before anything is dialed — the spawner
+/// reads its appearance as process readiness, so a slow or absent guest can
+/// never look like a failed spawn.
+pub fn run_from_config(
+    config: mvm_vmm::host::telemetry_collector_spawn::TelemetryCollectorProcessConfig,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
+    let status_path = config
+        .state_dir
+        .join(mvm_vmm::host::telemetry_collector_spawn::TELEMETRY_COLLECTOR_STATUS_FILE);
+    write_status(
+        &status_path,
+        &status_snapshot(&config.vm_name, &CoverageStatus::Connecting, 0),
+    );
+
+    let anchor_bytes: [u8; 32] = std::fs::read(&config.host_anchor_path)
+        .with_context(|| format!("reading host anchor {}", config.host_anchor_path.display()))?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("host anchor is not 32 bytes"))?;
+    let host_anchor = VerifyingKey::from_bytes(&anchor_bytes).context("invalid host anchor")?;
+
+    let sink = CappedJsonlSink::create(
+        &config
+            .state_dir
+            .join(mvm_vmm::host::telemetry_collector_spawn::TELEMETRY_RECORDS_FILE),
+        config.records_byte_cap,
+    )
+    .context("opening the records file")?;
+
+    let telemetry_sock = config.telemetry_sock.clone();
+    let connector = move || std::os::unix::net::UnixStream::connect(&telemetry_sock);
+
+    let signer_sock = config.signer_sock.clone();
+    let signer = move |hello: &mvm_core::security::SessionHello,
+                       ack: &mvm_core::security::SessionHelloAck|
+          -> Result<Signature, mvm_core::net::session::SessionError> {
+        // Handshakes are per-session and rare; a throwaway current-thread
+        // runtime per call keeps the worker thread runtime-free.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| {
+                mvm_core::net::session::SessionError::InvalidHandshake("signer runtime".into())
+            })?;
+        let client = crate::audit_signer::helper_client::SignerHelperClient::new(&signer_sock);
+        let anchor = VerifyingKey::from_bytes(&anchor_bytes).map_err(|_| {
+            mvm_core::net::session::SessionError::InvalidHandshake("bad anchor".into())
+        })?;
+        runtime
+            .block_on(client.sign_telemetry_handshake(
+                hello,
+                ack,
+                &anchor,
+                std::time::Duration::from_secs(5),
+            ))
+            .map_err(|_| {
+                mvm_core::net::session::SessionError::InvalidHandshake("signer refused".into())
+            })
+    };
+
+    let handle = spawn_collector(
+        CollectorConfig::new(
+            config.state_dir.clone(),
+            config.vm_name.clone(),
+            host_anchor,
+            connector,
+            signer,
+        ),
+        sink,
+    )?;
+
+    // The process lives until the runner reaps it with SIGTERM; until then,
+    // keep the snapshot fresh on a coarse cadence.
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        write_status(
+            &status_path,
+            &status_snapshot(&config.vm_name, &handle.status(), handle.shed()),
+        );
+    }
+}
