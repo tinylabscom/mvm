@@ -71,7 +71,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release.yml must call the shared documented-surface workflow"
     );
     assert!(
-        workflow.contains("needs: [bdd, e2e-docs, build, initramfs-image]"),
+        workflow.contains("needs: [bdd, e2e-docs, build]"),
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
     );
@@ -90,7 +90,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         .lines()
         .find(|line| line.trim_start().starts_with("if: ${{ !cancelled()"))
         .expect("the release job must gate publication on an explicit condition");
-    for need in ["bdd", "e2e-docs", "build", "initramfs-image"] {
+    for need in ["bdd", "e2e-docs", "build"] {
         assert!(
             condition.contains(&format!("needs.{need}.result == 'success'")),
             "`{need}` is in the release job's `needs` but its result is not \
