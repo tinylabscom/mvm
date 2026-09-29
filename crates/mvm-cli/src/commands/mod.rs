@@ -327,6 +327,9 @@ pub fn run() -> Result<()> {
     // Emitted after the command settles so the profile covers teardown as well.
     // A no-op unless MVM_SPAN_TIMINGS is set.
     mvm_core::observability::span_timing::emit_report();
+    // Best-effort ambient "update available" line on interactive terminals;
+    // never changes the command's result.
+    crate::update_notice::maybe_notify();
     result
 }
 
