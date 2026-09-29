@@ -99,6 +99,7 @@ pub fn resolve_report(report: &CaptureReportV1) -> Result<ResolutionResult, Capt
                             auth_type: mvm_contract::ir::AuthType::Bearer,
                             allowed_hosts: vec!["*.example.com".to_owned()],
                             sigv4: None,
+                            inject: Default::default(),
                         },
                     },
                 );

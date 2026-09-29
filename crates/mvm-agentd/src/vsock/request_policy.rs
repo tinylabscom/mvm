@@ -66,6 +66,9 @@ impl GuestRequest {
             GuestRequest::SyncFilesystems => Verb::SyncFilesystems,
             GuestRequest::StartUnixSocketForward { .. } => Verb::StartUnixSocketForward,
             GuestRequest::ConsoleOpen { .. } => Verb::ConsoleOpen,
+            GuestRequest::ConsoleAttach { .. } => Verb::ConsoleAttach,
+            GuestRequest::ConsoleDetach { .. } => Verb::ConsoleDetach,
+            GuestRequest::ConsoleList => Verb::ConsoleList,
             GuestRequest::ConsoleClose { .. } => Verb::ConsoleClose,
             GuestRequest::ConsoleResize { .. } => Verb::ConsoleResize,
             GuestRequest::EntrypointStatus => Verb::EntrypointStatus,
@@ -154,6 +157,9 @@ impl GuestRequest {
             | GuestRequest::SyncFilesystems
             | GuestRequest::StartUnixSocketForward { .. }
             | GuestRequest::ConsoleOpen { .. }
+            | GuestRequest::ConsoleAttach { .. }
+            | GuestRequest::ConsoleDetach { .. }
+            | GuestRequest::ConsoleList
             | GuestRequest::ConsoleClose { .. }
             | GuestRequest::ConsoleResize { .. }
             | GuestRequest::FsRead { .. }
@@ -308,7 +314,16 @@ mod tests {
                 rows: 1,
                 env: Vec::new(),
                 argv: Vec::new(),
+                detach_timeout_secs: None,
             },
+            GuestRequest::ConsoleAttach {
+                session_id: 1,
+                cols: 1,
+                rows: 1,
+                take_over: false,
+            },
+            GuestRequest::ConsoleDetach { session_id: 1 },
+            GuestRequest::ConsoleList,
             GuestRequest::ConsoleClose { session_id: 1 },
             GuestRequest::ConsoleResize {
                 session_id: 1,
@@ -507,7 +522,18 @@ mod tests {
                 rows: 24,
                 env: Vec::new(),
                 argv: Vec::new(),
+                detach_timeout_secs: None,
             },
+            // Reattach, detach and listing are gated exactly like the open:
+            // a sealed VM refuses every one of them.
+            GuestRequest::ConsoleAttach {
+                session_id: 1,
+                cols: 80,
+                rows: 24,
+                take_over: true,
+            },
+            GuestRequest::ConsoleDetach { session_id: 1 },
+            GuestRequest::ConsoleList,
             GuestRequest::ProcStart {
                 argv: vec!["/x".into()],
                 env: Default::default(),

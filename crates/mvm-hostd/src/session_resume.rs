@@ -497,10 +497,10 @@ pub fn cold_boot_config(params: ColdBootParams<'_>) -> Result<VmStartConfig> {
         config.roothash = Some(read_roothash(params.state_dir)?);
     }
 
-    // A runtime-lean rootfs needs the guest agent from the overlay. The cache
-    // resolver uses the current host package version, matching the fresh-run path.
-    crate::run::attach_runtime_overlay_from_cache(&mut config, &params.material.backend_name)?;
-    crate::run::attach_universal_initramfs_from_cache(&mut config, &params.material.backend_name)?;
+    // A runtime-lean rootfs needs the guest agent from the overlay, and the
+    // initramfs that mounts it. Both resolve for the current host package
+    // version, matching the fresh-run path.
+    crate::run::attach_guest_runtime(&mut config, &params.material.backend_name)?;
 
     Ok(config)
 }
@@ -877,80 +877,13 @@ mod tests {
         (env, home)
     }
 
-    /// Isolate the host and install the runtime artifact a real HVF cold boot
-    /// now requires. The fixture goes through the shared overlay reader and
-    /// cache installer so the resolver verifies the same ext4 payload,
-    /// checksums, version, and sidecars as production.
+    /// Isolate the host and install the runtime artifacts a real HVF cold boot
+    /// requires: the overlay carrying the agent and the initramfs that mounts
+    /// it. Without the initramfs the boot would resolve one by building it.
     fn isolated_host_with_runtime_overlay() -> (TestEnv, TempDir) {
-        use mvm_build::runtime_overlay::{InstallOptions, install_overlay_into_cache};
-        use mvm_fs::ext4::{Node, Owner};
-        use mvm_fs::overlay::{REQUIRED_OVERLAY_GUEST_PATHS, read_overlay_artifact_from_dir};
-
         let (env, home) = isolated_host(GrantCeiling::default());
-        let source = home.path().join("runtime-overlay-source");
-        std::fs::create_dir_all(&source).expect("create runtime overlay source");
-        let nodes = REQUIRED_OVERLAY_GUEST_PATHS
-            .iter()
-            .map(|path| Node::File {
-                path: path.to_string(),
-                mode: 0o755,
-                data: b"session-resume-runtime-stub".to_vec(),
-                xattrs: Vec::new(),
-                owner: Owner::ROOT,
-            })
-            .collect();
-        let ext4 = mvm_fs::ext4::build_image(nodes, &Default::default())
-            .expect("build runtime overlay fixture");
-        std::fs::write(source.join("overlay.ext4"), ext4).expect("write overlay ext4");
-        std::fs::write(source.join("overlay.verity"), b"verity-sidecar")
-            .expect("write overlay verity sidecar");
-        std::fs::write(
-            source.join("overlay.roothash"),
-            format!("{}\n", "ab".repeat(32)),
-        )
-        .expect("write overlay root hash");
-        std::fs::write(
-            source.join("VERSION"),
-            format!("{}\n", env!("CARGO_PKG_VERSION")),
-        )
-        .expect("write overlay version");
-
-        let artifact = read_overlay_artifact_from_dir(&source, std::env::consts::ARCH)
-            .expect("read runtime overlay fixture");
-        install_overlay_into_cache(
-            &artifact,
-            &home.path().join("cache"),
-            &InstallOptions { overwrite: true },
-        )
-        .expect("install runtime overlay fixture");
-
-        // A boot resume attaches the universal initramfs through the same
-        // version-keyed cache resolver the fresh-run path uses; seed a
-        // complete entry so the resolve is a pure cache read (a cold cache
-        // would run the real build/download ladder, which a unit test must
-        // not reach for).
-        let initramfs_dir = home
-            .path()
-            .join("cache")
-            .join("initramfs")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join(std::env::consts::ARCH);
-        std::fs::create_dir_all(&initramfs_dir).expect("create initramfs cache dir");
-        let image = b"session-resume-initramfs-stub";
-        std::fs::write(initramfs_dir.join("initramfs.cpio.gz"), image)
-            .expect("write initramfs image");
-        std::fs::write(initramfs_dir.join("initramfs.hash"), "ab".repeat(32))
-            .expect("write initramfs hash");
-        std::fs::write(
-            initramfs_dir.join("initramfs.size"),
-            format!("{}\n", image.len()),
-        )
-        .expect("write initramfs size");
-        std::fs::write(
-            initramfs_dir.join("VERSION"),
-            format!("{}\n", env!("CARGO_PKG_VERSION")),
-        )
-        .expect("write initramfs version");
+        crate::test_fixtures::install_runtime_overlay(home.path());
+        mvm_runtime::universal_initramfs::seed_warm_universal_initramfs(home.path());
         (env, home)
     }
 

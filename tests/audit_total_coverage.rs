@@ -247,6 +247,13 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("logs", AuditPosture::ReadOnly),
     ("display", AuditPosture::ReadOnly),
     ("console", AuditPosture::InteractiveOrControl),
+    // Hangs up the client attached to a console session. The guest request is
+    // recorded as an inbound RPC (`verb=console-detach`), and a detach that
+    // disconnected someone closes their span with `ConsoleSessionEnd`.
+    (
+        "detach",
+        AuditPosture::Emits("NetworkPolicyAllow(verb=console-detach)+ConsoleSessionEnd"),
+    ),
     // Read-only lineage navigator over the checkpoint + image DAGs. Verifies
     // each hop against the signed chain but makes no trust decision and writes
     // nothing — no audit-chain emission.
@@ -507,10 +514,24 @@ const AUDIT_SUB: &[(&str, AuditPosture)] = &[
     ("asset", AuditPosture::DelegatesToSub(ASSET_SUB)),
 ];
 
+/// `trust instructions <sub>` — instruction-file provenance. Writing a policy
+/// and writing a signature both change what the host will trust, so both are
+/// recorded; `verify` and `policy` only read.
+const INSTRUCTIONS_SUB: &[(&str, AuditPosture)] = &[
+    ("init", AuditPosture::Emits("TrustInstructionsInit")),
+    ("sign", AuditPosture::Emits("TrustInstructionsSign")),
+    ("verify", AuditPosture::ReadOnly),
+    ("policy", AuditPosture::ReadOnly),
+];
+
 const TRUST_SUB: &[(&str, AuditPosture)] = &[
     ("add", AuditPosture::Emits("TrustAdd")),
     ("list", AuditPosture::ReadOnly),
     ("remove", AuditPosture::Emits("TrustRemove")),
+    (
+        "instructions",
+        AuditPosture::DelegatesToSub(INSTRUCTIONS_SUB),
+    ),
     // Plan 178 — provenance verbs folded into `trust <sub>`.
     ("attest", AuditPosture::DelegatesToSub(ATTEST_SUB)),
     ("receipt", AuditPosture::ReadOnly),
@@ -785,6 +806,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // Top-level + per-subgroup mutation kinds:
         "CachePrune",
         "ConfigChange",
+        "ConsoleSessionEnd",
         "DepsAudit",
         "Kill",
         "ManifestAliasRemove",
@@ -832,6 +854,8 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "TranscriptSealed",
         "TrustAdd",
         "TrustRemove",
+        "TrustInstructionsInit",
+        "TrustInstructionsSign",
         "VmRekernel",
         "VmStart",
         "VmStop",

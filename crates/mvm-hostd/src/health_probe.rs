@@ -587,6 +587,7 @@ mod tests {
             volumes: vec![],
             init: vec![],
             agent_verb: vec![],
+            workload_dir: None,
             caller_commitment: None,
             created_at: None,
             last_started_at: None,

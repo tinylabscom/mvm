@@ -291,6 +291,20 @@ pub enum GuestResponse {
     },
     /// Console PTY session opened. Connect to `data_port` for raw I/O.
     ConsoleOpened { session_id: u32, data_port: u32 },
+    /// Attached to a running console session. Connect to `data_port`: the
+    /// first `replay_bytes` are scrollback, then live output follows.
+    ConsoleAttached {
+        session_id: u32,
+        data_port: u32,
+        replay_bytes: u64,
+        displaced_existing: bool,
+    },
+    /// Attach refused: another client is attached to `session_id`.
+    ConsoleBusy { session_id: u32 },
+    /// The attached client, if any, was hung up. The shell keeps running.
+    ConsoleDetached { session_id: u32, was_attached: bool },
+    /// The agent's console sessions: the running one, or the last to exit.
+    ConsoleSessions { sessions: Vec<ConsoleSessionInfo> },
     /// Console PTY session ended (shell exited).
     ConsoleExited { session_id: u32, exit_code: i32 },
     /// Console resize acknowledged.
@@ -379,8 +393,8 @@ name_enum! {
         CancelExtension,
         RunDetached,
         PostRestore,
-        FsDiff, SyncFilesystems, StartUnixSocketForward, ConsoleOpen,
-        ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
+        FsDiff, SyncFilesystems, StartUnixSocketForward, ConsoleOpen, ConsoleAttach, ConsoleDetach,
+        ConsoleList, ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
         FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
         ProcList, ProcSignal, ProcSendInput, ProcWait, ProcKill, MountVolume,
         UnmountVolume, UpdateIdleTimeout, RunCode, StreamInput, CloseStreamInput,
@@ -398,7 +412,8 @@ name_enum! {
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult, FilesystemsSynced,
-        UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
+        UnixSocketForwardStarted, ConsoleOpened, ConsoleAttached, ConsoleBusy,
+        ConsoleDetached, ConsoleSessions, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
         ReadinessStatusReport, FsResult, ProcResult, ProcWaitEvent,
         VolumeMountResult, UpdateIdleTimeoutAck, StreamInputResult,
@@ -489,6 +504,9 @@ impl Verb {
             | Self::SyncFilesystems
             | Self::StartUnixSocketForward
             | Self::ConsoleOpen
+            | Self::ConsoleAttach
+            | Self::ConsoleDetach
+            | Self::ConsoleList
             | Self::ConsoleClose
             | Self::ConsoleResize
             | Self::EntrypointStatus
@@ -554,6 +572,11 @@ impl Verb {
             | Self::SyncFilesystems
             | Self::DriveFile
             | Self::StartUnixSocketForward
+            // Reattaching hands a new client the shell `ConsoleOpen` already
+            // spawned; it names no program and reaches no spawn site.
+            | Self::ConsoleAttach
+            | Self::ConsoleDetach
+            | Self::ConsoleList
             | Self::ConsoleClose
             | Self::ConsoleResize
             | Self::EntrypointStatus
@@ -624,6 +647,9 @@ impl Verb {
             Verb::SyncFilesystems => unary(&[R::FilesystemsSynced]),
             Verb::StartUnixSocketForward => unary(&[R::UnixSocketForwardStarted]),
             Verb::ConsoleOpen => unary(&[R::ConsoleOpened]),
+            Verb::ConsoleAttach => unary(&[R::ConsoleAttached, R::ConsoleBusy]),
+            Verb::ConsoleDetach => unary(&[R::ConsoleDetached]),
+            Verb::ConsoleList => unary(&[R::ConsoleSessions]),
             Verb::ConsoleClose => unary(&[R::ConsoleExited]),
             Verb::ConsoleResize => unary(&[R::ConsoleResized]),
             Verb::EntrypointStatus => unary(&[R::EntrypointStatusReport]),
@@ -693,6 +719,10 @@ impl GuestResponse {
                 ResponseVariant::UnixSocketForwardStarted
             }
             GuestResponse::ConsoleOpened { .. } => ResponseVariant::ConsoleOpened,
+            GuestResponse::ConsoleAttached { .. } => ResponseVariant::ConsoleAttached,
+            GuestResponse::ConsoleBusy { .. } => ResponseVariant::ConsoleBusy,
+            GuestResponse::ConsoleDetached { .. } => ResponseVariant::ConsoleDetached,
+            GuestResponse::ConsoleSessions { .. } => ResponseVariant::ConsoleSessions,
             GuestResponse::ConsoleExited { .. } => ResponseVariant::ConsoleExited,
             GuestResponse::ConsoleResized { .. } => ResponseVariant::ConsoleResized,
             GuestResponse::EntrypointStatusReport { .. } => ResponseVariant::EntrypointStatusReport,
@@ -866,6 +896,29 @@ pub fn protocol_hello_response(
         capabilities,
     }
 }
+/// One console session, as `ConsoleList` reports it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ConsoleSessionInfo {
+    pub session_id: u32,
+    /// The program the session runs — argv\[0\] only; arguments are never
+    /// echoed back.
+    pub command: String,
+    /// Whether a client is connected right now.
+    pub attached: bool,
+    /// Whether plain `machine console` should treat this as the shared shell.
+    pub shareable: bool,
+    /// Set once the shell has exited.
+    pub exit_code: Option<i32>,
+    /// Scrollback retained for the next attach.
+    pub scrollback_bytes: u64,
+    /// Seconds the running session has had no client.
+    pub detached_secs: Option<u64>,
+    /// The session's detach timeout, if it has one.
+    pub detach_timeout_secs: Option<u64>,
+}
+
 /// Result of a virtio-fs volume mount operation.
 /// (Renamed from `ShareResult`.)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1158,6 +1211,29 @@ mod tests {
             GuestResponse::ConsoleOpened {
                 session_id: 1,
                 data_port: 20001,
+            },
+            GuestResponse::ConsoleAttached {
+                session_id: 1,
+                data_port: 20002,
+                replay_bytes: 4096,
+                displaced_existing: true,
+            },
+            GuestResponse::ConsoleBusy { session_id: 1 },
+            GuestResponse::ConsoleDetached {
+                session_id: 1,
+                was_attached: true,
+            },
+            GuestResponse::ConsoleSessions {
+                sessions: vec![ConsoleSessionInfo {
+                    session_id: 1,
+                    command: "/bin/sh".to_string(),
+                    attached: false,
+                    shareable: true,
+                    exit_code: None,
+                    scrollback_bytes: 4096,
+                    detached_secs: Some(12),
+                    detach_timeout_secs: Some(3600),
+                }],
             },
             GuestResponse::ConsoleExited {
                 session_id: 1,
@@ -1770,6 +1846,43 @@ mod tests {
                     r.name()
                 );
             }
+        }
+    }
+
+    /// Reattach answers with a data port or a typed busy refusal — never a
+    /// free-text error the host would have to parse to tell them apart.
+    #[test]
+    fn console_session_verbs_have_typed_unary_contracts() {
+        use ResponseVariant as R;
+        let attach = Verb::ConsoleAttach.response_contract();
+        assert_eq!(attach.kind, ResponseKind::Unary);
+        assert_eq!(attach.responses, &[R::ConsoleAttached, R::ConsoleBusy]);
+        assert_eq!(
+            Verb::ConsoleDetach.response_contract().responses,
+            &[R::ConsoleDetached]
+        );
+        assert_eq!(
+            Verb::ConsoleList.response_contract().responses,
+            &[R::ConsoleSessions]
+        );
+        for verb in [Verb::ConsoleAttach, Verb::ConsoleDetach, Verb::ConsoleList] {
+            assert_eq!(verb.traffic_plane(), TrafficPlane::Control);
+            assert!(!verb.spawns_workload_process(), "{}", verb.name());
+        }
+    }
+
+    #[test]
+    fn console_session_responses_refuse_unknown_fields() {
+        for smuggled in [
+            r#"{"ConsoleAttached":{"session_id":1,"data_port":20002,"replay_bytes":0,"x":1}}"#,
+            r#"{"ConsoleBusy":{"session_id":1,"holder":"someone"}}"#,
+            r#"{"ConsoleDetached":{"session_id":1,"was_attached":true,"x":1}}"#,
+            r#"{"ConsoleSessions":{"sessions":[{"session_id":1,"command":"/bin/sh","attached":false,"exit_code":null,"scrollback_bytes":0,"detached_secs":null,"detach_timeout_secs":null,"argv":["/bin/sh","-c","secret"]}]}}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<GuestResponse>(smuggled).is_err(),
+                "an unknown field must fail closed: {smuggled}"
+            );
         }
     }
 
