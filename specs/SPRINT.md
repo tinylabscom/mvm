@@ -4808,3 +4808,9 @@ See `specs/plans/2026-09-28-security-mutation-witnesses.md`; freshness alert #37
 Security validation update (#3679): all four base-image scan witnesses and the
 absolute source-root test pass. Workflow 36484461950 is underway; complete workspace
 and Linux validation remain pending. The builder is blocked in Nix-store initialization.
+
+## 2026-09-28 Security evidence freshness — #3750
+
+- [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.
+
+Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.

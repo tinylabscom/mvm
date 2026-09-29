@@ -87,6 +87,7 @@ from mvm._hostabi.methods import (
     GUEST_PROC_START,
     GUEST_PROC_STDIN,
     MACHINE_INVENTORY,
+    MACHINE_RM,
     MACHINE_RUN,
     MACHINE_STOP,
 )
@@ -534,11 +535,14 @@ class _LiveOptions:
 
     egress: list[dict[str, Any]]
     ports: list[str]
+    #: The launch command's environment; empty without a command.
+    env: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 def _lower_live_options(
     *,
     env: dict[str, Any] | None,
+    command: list[str] | None,
     include: list[str] | None,
     tags: dict[str, str] | None,
     resources: Any,
@@ -549,12 +553,15 @@ def _lower_live_options(
     Live mode must never accept an option and then silently boot a different
     workload. Secret references also stay out of the request by construction.
     """
+    literal_env: dict[str, str] = {}
     if env:
-        _reject_live_option(
-            "env",
-            "the launch cannot deliver environment to the workload yet; declare it "
-            "in the image or pass env to Sandbox.commands.start",
-        )
+        if command is None:
+            _reject_live_option(
+                "env",
+                "it is the environment of the launch command, and none was given; pass "
+                "`command=` with it, or pass env to Sandbox.commands.start",
+            )
+        literal_env = _literal_env(env, "Sandbox.create")
     if include:
         _reject_live_option("include", "the host library has no source-bundle equivalent")
     if tags:
@@ -567,7 +574,7 @@ def _lower_live_options(
 
     encoded_network = _encode_network(network)
     if encoded_network is None:
-        return _LiveOptions(egress=[], ports=[])
+        return _LiveOptions(egress=[], ports=[], env=literal_env)
     unknown = set(encoded_network) - {"mode", "egress", "ports", "peers", "dns"}
     if unknown:
         _reject_live_option("network", f"unknown fields: {sorted(unknown)}")
@@ -581,7 +588,7 @@ def _lower_live_options(
     ports = [_ingress_mapping(port) for port in encoded_network.get("ports") or []]
     egress = encoded_network.get("egress")
     if egress is None:
-        return _LiveOptions(egress=[], ports=ports)
+        return _LiveOptions(egress=[], ports=ports, env=literal_env)
     if not isinstance(egress, dict) or set(egress) != {"allowlist"}:
         _reject_live_option("network.egress", "expected only an allowlist")
     allowlist = egress.get("allowlist")
@@ -592,7 +599,7 @@ def _lower_live_options(
         if not isinstance(entry, dict) or set(entry) != {"host", "port"}:
             _reject_live_option("network.egress", "entries must contain host and port")
         targets.append(_egress_target(entry["host"], entry["port"]))
-    return _LiveOptions(egress=targets, ports=ports)
+    return _LiveOptions(egress=targets, ports=ports, env=literal_env)
 
 
 _RUN_PROFILES = ("restrictive", "standard", "dev", "permissive")
@@ -823,27 +830,41 @@ class _LiveTransport:
     for it. The ``build_mode`` is what the SDK uses to refuse DevOnly guest
     operations client-side."""
 
-    def __init__(self, *, vm_id: str, build_mode: str) -> None:
+    def __init__(
+        self,
+        *,
+        vm_id: str,
+        build_mode: str,
+        persistent: bool = False,
+        process: str | None = None,
+    ) -> None:
         self.vm_id = vm_id
         self.build_mode = build_mode
+        #: Whether the machine has a persisted definition, which ``kill``
+        #: removes once the machine is stopped.
+        self.persistent = persistent
+        #: The token of the process the launch command started, if any.
+        self.process = process
         self._killed = False
 
     @classmethod
     def boot(
         cls,
         *,
-        image: str,
+        source_field: str,
+        source: str,
         workload_id: str,
         ttl_seconds: int,
         options: _LiveOptions,
         command: list[str] | None,
     ) -> "_LiveTransport":
-        """Boot a transient machine from ``image`` and wrap it.
+        """Boot a machine from ``source`` and wrap it.
 
-        ``command`` is forwarded even though the in-process launcher refuses a
-        command override today: the refusal then comes from the library, as a
-        ``MachineSpecError`` saying why, and the call starts working unchanged
-        when the launcher learns to honour it."""
+        ``source_field`` is the launch field that names it: ``image``, or
+        ``template`` for a template built on this host. Either boots a named
+        machine the way ``mvmctl machine run -d`` does, which :meth:`kill`
+        stops and removes. ``command`` starts once the machine is up, with
+        ``options.env``."""
         profile = _run_profile()
         # A short, validatable name. The library rejects names outside its
         # validator; lowercase alphanumerics with hyphens are always safe.
@@ -852,8 +873,8 @@ class _LiveTransport:
         vm_id = "".join(c if (c.isalnum() or c == "-") else "-" for c in vm_id)
 
         request: dict[str, Any] = {
-            "image": image,
-            "mode": "transient",
+            source_field: source,
+            "mode": "persistent",
             "name": vm_id,
             "ttl_seconds": ttl_seconds,
         }
@@ -865,8 +886,21 @@ class _LiveTransport:
             request["egress"] = options.egress
         if command is not None:
             request["command"] = command
-        name, build_mode = _parse_run_reply(_hostlib.call(MACHINE_RUN, request))
-        return cls(vm_id=name, build_mode=build_mode)
+            if options.env:
+                request["env"] = options.env
+        reply = _hostlib.call(MACHINE_RUN, request)
+        name, build_mode = _parse_run_reply(reply)
+        process = reply.get("process")
+        if command is not None and (not isinstance(process, str) or not process):
+            raise SandboxLiveError(
+                f"machine.run started the launch command but named no process: {reply!r}"
+            )
+        return cls(
+            vm_id=name,
+            build_mode=build_mode,
+            persistent=True,
+            process=process if command is not None else None,
+        )
 
     @classmethod
     def attach(cls, *, vm_id: str) -> "_LiveTransport":
@@ -1056,12 +1090,15 @@ class _LiveTransport:
         )
 
     def kill(self) -> None:
-        """Stop the machine. Idempotent — the context manager and an explicit
-        ``sb.kill()`` both land here, and the second call must not try again.
+        """Stop the machine, then remove a persistent machine's definition.
+        Idempotent — the context manager and an explicit ``sb.kill()`` both
+        land here, and the second call must not try again.
 
         A failure is reported on stderr, not raised: this is the cleanup
         path, often running while another exception unwinds, and a machine
-        that is already gone (its TTL reaped it) is the usual cause."""
+        that is already gone (its TTL reaped it) is the usual cause. A
+        definition is removed only after its machine stopped, since removing
+        a running one is refused."""
         if self._killed:
             return
         self._killed = True
@@ -1069,6 +1106,13 @@ class _LiveTransport:
             _hostlib.call(MACHINE_STOP, {"id": self.vm_id})
         except (HostLibraryError, MvmTransportError) as exc:
             sys.stderr.write(f"mvm-sdk live: stopping {self.vm_id} failed: {exc}\n")
+            return
+        if not self.persistent:
+            return
+        try:
+            _hostlib.call(MACHINE_RM, {"id": self.vm_id})
+        except (HostLibraryError, MvmTransportError) as exc:
+            sys.stderr.write(f"mvm-sdk live: removing {self.vm_id} failed: {exc}\n")
 
 
 class Sandbox:
@@ -1116,15 +1160,15 @@ class Sandbox:
         verbatim and resolved to a base image on the Rust side, so an unknown
         template fails at lower time, not here.
 
-        Live mode boots only from ``image``: the host library has no
-        template launch, so ``template`` raises :class:`SandboxModeError`
-        before anything is booted. ``command`` overrides the image command;
-        the in-process launcher refuses a command override today, and that
-        refusal arrives as ``MachineSpecError``. Live mode also refuses
-        ``env``, ``include``, ``tags`` and ``resources``, which it cannot
-        carry faithfully; pass ``env`` to ``Sandbox.commands.start`` instead.
-        Record mode continues to encode all of them in the workload
-        declaration.
+        In live mode ``image``, or a ``template`` built on this host (found
+        by the name its image was built under), boots a named machine that
+        ``kill`` stops and removes. A template nobody built is refused as
+        ``MachineSpecError`` saying how to build it. ``command`` starts once the machine is up, with ``env`` as its
+        environment; :attr:`process` is its handle. Starting it is a DevOnly
+        guest operation, so a sealed image refuses it. Live mode refuses
+        ``env`` without a ``command``, and ``include``, ``tags`` and
+        ``resources``, which it cannot carry faithfully. Record mode continues
+        to encode all of them in the workload declaration.
 
         ``workload_id`` defaults to the resolved template (the CLI
         overrides with the script's basename when invoked via
@@ -1164,22 +1208,17 @@ class Sandbox:
         wid = workload_id or source
 
         if mode == "live":
-            if template is not None:
-                raise SandboxModeError(
-                    f"Sandbox live mode cannot boot template {template!r}: the host "
-                    "library launches images only. Pass `image=` (an OCI reference, "
-                    "an absolute path, or `flake:<ref>#<attr>`), or run the script "
-                    "under record mode."
-                )
             options = _lower_live_options(
                 env=env,
+                command=command,
                 include=include,
                 tags=tags,
                 resources=resources,
                 network=network,
             )
             live = _LiveTransport.boot(
-                image=source,
+                source_field="template" if template is not None else "image",
+                source=source,
                 workload_id=wid,
                 ttl_seconds=ttl_seconds,
                 options=options,
@@ -1266,6 +1305,14 @@ class Sandbox:
     @property
     def commands(self) -> _Commands:
         return self._commands
+
+    @property
+    def process(self) -> ProcessHandle | None:
+        """The process ``Sandbox.create(command=...)`` started, or ``None``
+        when there was none or the sandbox is not live."""
+        if self._live is None or self._live.process is None:
+            return None
+        return ProcessHandle(self._live, self._live.process)
 
     @property
     def files(self) -> _Files:

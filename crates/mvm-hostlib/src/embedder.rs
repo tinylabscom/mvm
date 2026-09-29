@@ -8,6 +8,10 @@
 //! library embedder, which makes every `mvmctl` spawn refuse, and declares its
 //! own directory as the one holding the helper binaries. The release ships
 //! them side by side.
+//!
+//! It also registers the process's workload output capture, as `mvmctl` does
+//! at startup: the capture is what records a VM's output and holds the route
+//! a streamed stdin travels.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -47,6 +51,9 @@ pub(crate) fn ensure_declared() -> Result<(), EmbedderError> {
     static DECLARED: OnceLock<Result<(), EmbedderError>> = OnceLock::new();
     DECLARED
         .get_or_init(|| {
+            // Before any boot, so the VMs this process starts are captured
+            // and an entrypoint call can stream a payload into one.
+            mvm_client::entrypoint::install_output_capture();
             mvm_vmm::host::aux_bin::declare_library_embedder();
             let library = loaded_library_path().ok_or(EmbedderError::UnknownLibraryPath)?;
             let dir = helper_dir_for(&library)?;

@@ -526,11 +526,11 @@ fn stderr_tail(path: &Path, max_bytes: usize) -> Option<String> {
 /// endpoint holds the workload's substituted secrets, so a moved-on config
 /// contract failing mid-boot is the worst place to discover the mismatch.
 fn resolve_network_endpoint_path() -> Result<PathBuf> {
-    crate::host::aux_bin::resolve_verified(&crate::host::aux_bin::AuxBin {
-        bin: "mvm-network-endpoint",
-        env_var: "MVM_SUBSTITUTION_ENDPOINT_PATH",
-        rebuild_package: "mvm-hostd",
-    })
+    crate::host::aux_bin::resolve_verified(&crate::host::aux_bin::AuxBin::new(
+        "mvm-network-endpoint",
+        "MVM_SUBSTITUTION_ENDPOINT_PATH",
+        "mvm-hostd",
+    ))
 }
 
 /// `resolver_remote` config for [`SubstitutionSpawnParams`]: resolve secret

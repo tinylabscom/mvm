@@ -25,6 +25,7 @@ _DEFAULT_REPLIES: dict[str, Any] = {
     "guest.proc.kill": {},
     "guest.proc.stdin": {"accepted": 0},
     "guest.proc.stream.close": {},
+    "machine.logs.stream.close": {},
     "guest.fs.write": {"bytes_written": 0},
     "guest.fs.mkdir": {},
     "guest.fs.remove": {"entries_removed": 1},

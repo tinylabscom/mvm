@@ -27,16 +27,29 @@ Where a call runs:
   receive and return inside a microVM, so a value that would not cross the
   wire fails here too. An exception the function raises propagates as
   itself.
-- Otherwise: the SDK loads the host library in-process and never starts a
-  process of its own, and the library has no function-dispatch surface yet,
-  so the call raises :class:`MvmTransportError` saying so. Every check that
-  does not need a microVM still runs first, so an oversized payload or a
-  secret-shaped argument is reported the same way in both modes.
+- Otherwise: in the workload's microVM, through the host library loaded
+  in-process (``entrypoint.call``, or ``session.call`` inside an open
+  :func:`mvm.session` for the same workload). The library boots the built
+  image under a signed, audited plan, the same way ``mvmctl machine run
+  --entrypoint`` does; no process is started here. The encoded arguments
+  are the call's stdin, the function's encoded return value is its stdout,
+  and an exception the function raised comes back as :class:`RemoteError`
+  carrying the guest's error kind, id and message. A call that fails
+  without that envelope raises :class:`MvmTransportError` with the exit
+  status and the tail of the guest's stderr.
+
+Every check that does not need a microVM runs first in both modes, so an
+oversized payload or a secret-shaped argument is reported the same way.
+
+The host runs a workload's *primary* entrypoint: the guest wire has no
+function selector yet, so a non-primary function of a multi-function
+workload, or a ``WorkloadRef`` attribute naming one, reaches the primary.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import functools
 import inspect
 import json
@@ -45,6 +58,9 @@ import re
 import threading
 import warnings
 from typing import Any, Awaitable, Callable
+
+from mvm import _hostlib
+from mvm._hostabi.methods import ENTRYPOINT_CALL, SESSION_CALL
 
 # The error taxonomy is owned by the Rust registry
 # (crates/mvm-sdk/src/error_taxonomy.rs) and generated into
@@ -161,19 +177,6 @@ def _no_vm() -> bool:
     return os.environ.get(NO_VM_ENV_VAR) == "1"
 
 
-def _dispatch_unavailable(call_site: str) -> MvmTransportError:
-    """The refusal for a call that would need a microVM.
-
-    Spelled out in one place because sessions raise it too, and the two
-    should never disagree about what to do instead."""
-    return MvmTransportError(
-        f"{call_site}: dispatching a function-entrypoint call into a microVM from "
-        "a host process is not available through the in-process host library yet. "
-        f"Set {NO_VM_ENV_VAR}=1 to run the function locally through the same "
-        "encode/decode path, or call `.local(...)` for a plain in-process call."
-    )
-
-
 def _encode_value(format: str, value: Any) -> bytes:
     if format == "json":
         return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -287,8 +290,6 @@ def _prepare(
 
 
 def _local_target(call_site: str, fn: Callable[..., Any] | None) -> Callable[..., Any]:
-    if not _no_vm():
-        raise _dispatch_unavailable(call_site)
     if fn is None:
         raise NoVmIntrospectionError(
             f"{NO_VM_ENV_VAR}=1 is set but {call_site} has no local function to "
@@ -309,6 +310,70 @@ def _decode_call(format: str, payload: bytes) -> tuple[list[Any], dict[str, Any]
     ):
         raise MvmTransportError("encoded call payload is not an [args, kwargs] pair")
     return decoded[0], decoded[1]
+
+
+# How much of a failed call's stderr a transport error quotes.
+STDERR_TAIL_BYTES = 2048
+
+
+def _host_request(workload_id: str, payload: bytes) -> tuple[str, dict[str, Any]]:
+    """The host-library method and request for one call: into the open
+    session for this workload when there is one, otherwise a transient VM.
+
+    Python and TypeScript send the same shapes."""
+    from mvm._session import _host_session_for
+
+    payload_b64 = base64.b64encode(payload).decode("ascii")
+    session_id = _host_session_for(workload_id)
+    if session_id is not None:
+        return SESSION_CALL, {"session_id": session_id, "payload_b64": payload_b64}
+    return ENTRYPOINT_CALL, {"workload": workload_id, "payload_b64": payload_b64}
+
+
+def _b64_field(reply: dict[str, Any], field: str) -> bytes:
+    try:
+        return base64.b64decode(reply.get(field) or "", validate=True)
+    except (ValueError, TypeError) as exc:
+        raise MvmTransportError(f"the host library's {field} is not base64: {exc}") from exc
+
+
+def _result_from_reply(workload_id: str, format: str, reply: Any) -> Any:
+    """Turn a call reply into the function's return value, or its failure."""
+    if not isinstance(reply, dict) or not isinstance(reply.get("exit_code"), int):
+        raise MvmTransportError(f"the call into {workload_id} returned no exit status")
+    stdout = _b64_field(reply, "stdout_b64")
+    stderr = _b64_field(reply, "stderr_b64")
+    exit_code = reply["exit_code"]
+    if exit_code == 0:
+        cap = _env_int("MVM_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
+        if reply.get("output_truncated") or len(stdout) > cap:
+            raise MvmTransportError(f"the result of {workload_id} exceeded the {cap}-byte output cap")
+        return _decode(format, stdout)
+    error = reply.get("error")
+    if isinstance(error, dict):
+        raise RemoteError(
+            kind=str(error.get("kind", "")),
+            error_id=str(error.get("error_id", "")),
+            message=str(error.get("message", "")),
+        )
+    tail = stderr[-STDERR_TAIL_BYTES:].decode("utf-8", "replace")
+    agent = reply.get("agent_error")
+    if isinstance(agent, dict):
+        raise MvmTransportError(
+            f"the call into {workload_id} was ended by the guest agent "
+            f"({agent.get('kind')}: {agent.get('message')}), exit status {exit_code}; "
+            f"stderr tail: {tail!r}"
+        )
+    raise MvmTransportError(
+        f"the call into {workload_id} exited with status {exit_code} and no error "
+        f"envelope; stderr tail: {tail!r}"
+    )
+
+
+def _dispatch_host(workload_id: str, format: str, payload: bytes) -> Any:
+    """Run one call in the workload's microVM through the host library."""
+    method, request = _host_request(workload_id, payload)
+    return _result_from_reply(workload_id, format, _hostlib.call(method, request))
 
 
 def _round_trip_result(workload_id: str, format: str, result: Any) -> Any:
@@ -366,6 +431,8 @@ def _invoke_sync(
     fn: Callable[..., Any] | None = None,
 ) -> Any:
     payload = _prepare(call_site, workload_id, format, args, kwargs)
+    if not _no_vm():
+        return _dispatch_host(workload_id, format, payload)
     target = _local_target(call_site, fn)
     call_args, call_kwargs = _decode_call(format, payload)
     result = target(*call_args, **call_kwargs)
@@ -384,6 +451,11 @@ async def _invoke_async(
     fn: Callable[..., Any] | None = None,
 ) -> Any:
     payload = _prepare(call_site, workload_id, format, args, kwargs)
+    if not _no_vm():
+        # The library call blocks for the whole boot and call; running it on
+        # a worker thread keeps the event loop free. The session binding is
+        # a context variable, and `to_thread` carries the context across.
+        return await asyncio.to_thread(_dispatch_host, workload_id, format, payload)
     target = _local_target(call_site, fn)
     call_args, call_kwargs = _decode_call(format, payload)
     result = target(*call_args, **call_kwargs)
@@ -455,9 +527,9 @@ class _BoundRemoteCall:
     cannot introspect the callee's declared format; pass ``format="msgpack"``
     to :func:`workload_ref` if you know the callee uses msgpack.
 
-    A cross-workload call always needs the callee's microVM, so it raises
-    :class:`MvmTransportError` after those checks until the host library can
-    dispatch one.
+    A cross-workload call always needs the callee's microVM: it is
+    dispatched through the host library, and under ``MVM_NO_VM=1`` it raises
+    :class:`NoVmIntrospectionError`, since there is no local body to run.
     """
 
     __slots__ = ("_workload_id", "_function", "_format")
