@@ -839,6 +839,15 @@ jobs:
     name: Test workspace
     needs: [scope]
     if: needs.scope.outputs.code == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        # The suite is the merge queue's long pole (~23 min end to end, most
+        # of it the shared compile). Two shards halve the test pass; each
+        # shard pays the compile once on its own runner, which rust-cache
+        # warms from the same key. Extras that must run exactly once
+        # (addon tests, doctests) stay on shard 0.
+        shard: [0, 1]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -875,7 +884,7 @@ jobs:
         run: cargo nextest run -p xtask --features man
 
       - name: Run tests
-        run: cargo nextest run --workspace --all-targets
+        run: cargo nextest run --workspace --all-targets --shard-count 2 --shard-index ${{ matrix.shard }}
 
       # No separate `-p mvm-agentd --all-targets` run. It was a strict subset of
       # the workspace run above — every test it ran, that run already ran, plus 21
@@ -885,6 +894,7 @@ jobs:
       # over the same suite. The addons run below is different: `addons` is not
       # enabled by unification, and it runs 61 tests nothing else does.
       - name: Run addon/egress helper tests
+        if: matrix.shard == 0
         # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
         # mvm-egress-client) and their shared vsock session helper live behind
         # the off-by-default `addons` feature, so the default workspace run
@@ -894,6 +904,7 @@ jobs:
 
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
+        if: matrix.shard == 0
         run: cargo test --workspace --doc
 
   test-workspace-aarch64:
