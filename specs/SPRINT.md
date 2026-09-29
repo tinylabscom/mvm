@@ -10,6 +10,15 @@
 
 ## In progress
 
+- [ ] **Complete capability and client documentation — issue #3727.**
+      Corrections for the stale `deploy` CLI denial and durable-session status
+      are drafted with two passing documentation regression tests; workspace
+      test validation remains pending. Lineage recovery, workload provenance,
+      and durable agent sessions now have navigable guides and three further
+      passing documentation regression tests. All eight named capabilities
+      now link to feature pages with current limits. Client, authoring, and
+      generated schema documentation remains open.
+
 - [ ] **Document the AI coding workflow and slim AGENTS.md to a rule index.**
       `specs/plans/2026-09-28-ai-coding-workflow-docs.md`. The issue-to-PR
       playbook for agent-driven work now lives at
@@ -19,7 +28,7 @@
       linkage, safe parallelism), linked from the development guide and the
       docs sidebar. `AGENTS.md` is condensed while retaining the newly landed
       session, test, and retry rules. Shared MCP files intentionally keep only
-      graft. PR #3815 is open; merge is pending.
+      graft. PR #3815 is merged.
 
 - [x] **Remove sccache from the contributor toolchain.** The machine-wide
       Cargo wrapper was producing build failures while its measured

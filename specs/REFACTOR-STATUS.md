@@ -71,6 +71,12 @@ Last updated: 2026-09-29
   - [ ] PS-16 Nix developer experience — #3725
   - [x] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
+    - [x] eight capability pages mapped in the guides index, with current limits and link validation
+    - [x] lineage recovery guide and documentation regression test; remaining pages still open
+    - [x] workload provenance guide and documentation regression test; remaining pages still open
+    - [x] durable agent-session guide and documentation regression test; remaining pages still open
+    - [ ] stale CLI deploy and durable-session status corrections implemented; workspace test validation pending
+    - [ ] client guides, authoring guides, and generated schema reference
   - [ ] PS-19 fewer feature flags — #3728
   - [x] PS-20 unreachable CLI surface and stale references — #3729
   - [ ] PS-21 CLI thin over `mvm-client` — #3730
