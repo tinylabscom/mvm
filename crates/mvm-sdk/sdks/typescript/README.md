@@ -252,8 +252,8 @@ When changing the TypeScript SDK in this repo:
 cargo build -p mvm-hostlib
 export MVM_HOSTLIB_PATH="$PWD/target/debug/libmvm_hostlib.dylib"   # .so on Linux
 export MVM_SDK_RUN_PROFILE=dev  # explicit opt-in for files/process verbs
-just sdk-install-typescript
-just sdk-build-typescript
+just sdk::install-typescript
+just sdk::build-typescript
 ```
 
 That pins the SDK to the worktree-built host library while producing the

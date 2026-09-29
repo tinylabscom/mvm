@@ -313,7 +313,7 @@ widens to broad `--net` behavior and never falls back to a guest NIC.
 When the helper path is available and you want a live runtime proof, run:
 
 ```bash
-just hvf-oci-allow-host-smoke
+just kernel::hvf-oci-smoke
 ```
 
 The script captures both the exact `machine run --image ... --allow-host ...`

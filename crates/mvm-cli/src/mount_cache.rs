@@ -290,6 +290,31 @@ impl MountImageCache {
         Ok(actual == manifest.image_sha256)
     }
 
+    /// The image published under `cache_key`, if it is still cached and its
+    /// bytes match the digest recorded when it was published. Nothing is
+    /// built: a missing or altered entry is `None`.
+    ///
+    /// This is the baseline a writable snapshot was copied from, which is what
+    /// a workspace diff compares the guest's copy against.
+    pub(crate) fn published_image(&self, cache_key: &str) -> Result<Option<PathBuf>> {
+        let manifest_path = self.manifest_path(cache_key);
+        let image_path = self.image_path(cache_key);
+        if !manifest_path.is_file() || !is_regular_file(&image_path) {
+            return Ok(None);
+        }
+        let raw = std::fs::read(&manifest_path)
+            .with_context(|| format!("reading {}", manifest_path.display()))?;
+        let Ok(manifest) = serde_json::from_slice::<MountCacheManifest>(&raw) else {
+            return Ok(None);
+        };
+        if manifest.cache_key != cache_key {
+            return Ok(None);
+        }
+        let actual = mvm_core::crypto::image_verify::sha256_file(&image_path)
+            .with_context(|| format!("verifying cached mount image {}", image_path.display()))?;
+        Ok((actual == manifest.image_sha256).then_some(image_path))
+    }
+
     fn image_path(&self, cache_key: &str) -> PathBuf {
         self.root.join(format!("{cache_key}.ext4"))
     }
@@ -422,6 +447,35 @@ mod tests {
             .unwrap();
         assert!(!second.is_miss());
         assert_eq!(second.resolve().unwrap().path(), image.path());
+    }
+
+    /// A workspace diff's baseline: the published object, and only while its
+    /// bytes are the ones that were published.
+    #[test]
+    fn a_published_image_is_found_by_key_and_refused_once_altered() {
+        let scratch = tempfile::tempdir().unwrap();
+        let cache = MountImageCache::at(scratch.path().join("cache"));
+        let source = source(scratch.path(), b"baseline");
+        let image = cache
+            .lookup(cache.fingerprint(&source, "mvmmnt0").unwrap())
+            .unwrap()
+            .resolve()
+            .unwrap();
+        let key = image.fingerprint().cache_key().to_string();
+        assert_eq!(
+            cache.published_image(&key).unwrap().as_deref(),
+            Some(image.path())
+        );
+        assert_eq!(cache.published_image("no-such-key").unwrap(), None);
+
+        set_private_writable(image.path()).unwrap();
+        let mut file = std::fs::File::options()
+            .write(true)
+            .open(image.path())
+            .unwrap();
+        file.seek(SeekFrom::Start(2048)).unwrap();
+        file.write_all(b"tampered").unwrap();
+        assert_eq!(cache.published_image(&key).unwrap(), None);
     }
 
     #[test]

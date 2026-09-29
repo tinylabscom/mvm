@@ -96,7 +96,7 @@ fn unembedded_release_warning(reason: &str) -> String {
         "this release mvmctl does not embed its Linux host binaries, because the pinned \
          cross-compile toolchain is unavailable: {reason} It will try to build them the \
          first time it needs a builder VM, which needs the same toolchain. Install it with \
-         `just toolchain-embed`, or set MVM_EMBED=0 to build without them on purpose."
+         `just payload::toolchain`, or set MVM_EMBED=0 to build without them on purpose."
     )
 }
 
@@ -180,7 +180,7 @@ mod tests {
             panic!("expected a warning, got {decision:?}");
         };
         assert!(warning.contains("zig 0.13.0 was not found."), "{warning}");
-        assert!(warning.contains("just toolchain-embed"), "{warning}");
+        assert!(warning.contains("just payload::toolchain"), "{warning}");
         assert!(warning.contains("MVM_EMBED=0"), "{warning}");
     }
 

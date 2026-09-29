@@ -50,8 +50,7 @@ pub(in crate::commands) enum VmCmd {
     /// Run process-control RPC against a VM
     #[command(hide = true)]
     Proc(proc::Args),
-    /// Show filesystem changes in a running VM
-    #[command(hide = true)]
+    /// Show what a machine changed in its workspace volumes, with content
     Diff(diff::Args),
     /// Serve view-only display frames on a tokenized loopback URL
     Display(display::Args),

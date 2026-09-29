@@ -613,6 +613,7 @@ fn fc_warm_pool_spawn_and_claim() {
             created_unix: mvm_core::time::now_unix_secs(),
             retain_paused: false,
             grants: None,
+            workspace_volumes: Vec::new(),
         },
         control.as_ref(),
     )
@@ -633,6 +634,7 @@ fn fc_warm_pool_spawn_and_claim() {
             created_unix: mvm_core::time::now_unix_secs(),
             retain_paused: false,
             grants: None,
+            workspace_volumes: Vec::new(),
         },
         control.as_ref(),
     )

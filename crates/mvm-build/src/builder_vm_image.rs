@@ -511,6 +511,39 @@ mod tests {
         assert!(shared_cache_source(cache.path()).is_some());
     }
 
+    /// A process that validated the cached image and is reading it must keep
+    /// reading those bytes while another process seeds the same cache. Two
+    /// seeders racing on one `MVM_HOME` used to copy onto the file in place,
+    /// truncating the inode under the reader, which then failed partway
+    /// through the image with an unexpected EOF.
+    #[test]
+    fn seeding_never_rewrites_a_file_a_reader_holds_open() {
+        use std::io::{Read, Seek, SeekFrom};
+        let root = tempfile::tempdir().expect("tempdir");
+        let source = root.path().join("shared").join("aarch64");
+        let target = root.path().join("isolated").join("aarch64");
+        write_test_cache(&source);
+        std::fs::write(source.join("rootfs.ext4"), b"rootfs-seeded").unwrap();
+        write_test_cache(&target);
+        std::fs::write(target.join("rootfs.ext4"), b"rootfs-in-use").unwrap();
+        let mut reader = std::fs::File::open(target.join("rootfs.ext4")).unwrap();
+
+        copy_cache(&source, &target).expect("seed");
+
+        let mut seen = Vec::new();
+        reader.seek(SeekFrom::Start(0)).unwrap();
+        reader.read_to_end(&mut seen).unwrap();
+        assert_eq!(
+            seen, b"rootfs-in-use",
+            "an open reader saw its file rewritten"
+        );
+        assert_eq!(
+            std::fs::read(target.join("rootfs.ext4")).unwrap(),
+            b"rootfs-seeded"
+        );
+        load_from_cache(&target).expect("the seeded cache loads");
+    }
+
     #[test]
     fn a_missing_image_names_how_to_obtain_one() {
         let cache = tempfile::tempdir().expect("tempdir");

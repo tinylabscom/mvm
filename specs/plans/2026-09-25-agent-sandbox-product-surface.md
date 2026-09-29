@@ -249,7 +249,11 @@ Security-bearing gaps first, then the foundations the UX needs:
       model belongs to PS-09's detachable-session surface
 
 ### PS-08 — Undo, redo, replay, diff (#3718)
-- [ ] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+- [x] `vm diff` with content (unified / side-by-side / json), vs boot baseline and between checkpoints
+      — `mvm-fs` tree walk over the ext4 images the workspace keeps; a guest
+      diff verb on the existing request policy; `--from`/`--to`, `--stat`,
+      `--side-by-side`, `--json`, and output caps; `workspace.rs` is the apply
+      seam for the remaining undo/redo/replay items
 - [ ] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
 - [ ] session exclusions persisted so restore never deletes ignored files
 - [ ] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a checkpoint with recorded input
@@ -338,11 +342,28 @@ apply goes through the protected-path gate.
 - [ ] no external cache provider
 
 ### PS-17 — Task-runner surface (#3726)
-- [ ] recipe inventory and reduction; the top level fits one screen and mirrors CI
+- [x] recipe inventory and reduction; the top level fits one screen and mirrors CI
+
+89 recipes reduced to 8 root recipes (`build`, `test`, `lint`, `ci`, `embed`,
+`release-build`, `docs`, plus `default`) with the rest namespaced into 13
+modules under `just/` (`check`, `sdk`, `tests`, `bdd`, `e2e`, `payload`,
+`kernel`, `lints`, `release`, `site`, `maint`, `audit`, `mem`). `just --list`
+fits one screen with every module collapsed to one line. The pinning tests
+(`embed_recipe.rs`, `github_actions_bdd_gate.rs`,
+`github_actions_extended_e2e.rs`) follow the moved recipes, and
+`tests/justfile_top_level.rs` locks the root set to exactly the CI-mirroring
+list. All `just <recipe>` call sites (workflows, scripts, docs, emitted CLI
+hints) were updated to the module-qualified names.
 
 ### PS-18 — Docs (#3727)
-- [ ] one page per capability; client guides for each agent pack; profile and pack authoring guides
-- [ ] schema reference generated from PS-05; stale claims fixed
+- [x] one page per capability (eight shipped-surface pages linked from the guides index; unfinished behavior is labeled)
+  - [x] lineage recovery: rewind and replay guide, with navigation and safety-boundary regression test
+  - [x] workload provenance: signed-plan, receipt, audit, and export guide with a documentation regression test
+  - [x] durable agent sessions: admission, boot, retention, retry, and audit limits with a documentation regression test
+- [ ] client guides for each agent pack
+- [ ] profile and pack authoring guides
+- [ ] schema reference generated from PS-05
+- [ ] correct the CLI deploy and durable-session status claims, with a documentation regression check (implemented; workspace test validation pending)
 
 ### PS-19 — Fewer feature flags (#3728)
 - [x] inventory; delete, merge or move to runtime config; CI lanes updated

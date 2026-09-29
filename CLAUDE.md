@@ -51,7 +51,7 @@ feature. `MVM_EMBED=0` opts a release build out. A debug build — which is what
 `cargo check`, clippy and nextest use — never cross-compiles.
 
 When a release build finds the pinned toolchain missing it does not fail: it
-prints a `cargo:warning=` naming `just toolchain-embed` and ships the unembedded
+prints a `cargo:warning=` naming `just payload::toolchain` and ships the unembedded
 table. The explicit feature keeps failing hard, because it was asked for by
 name.
 
@@ -111,7 +111,7 @@ Provision the toolchain with one command — it installs the exact pinned zig
 cargo-zigbuild:
 
 ```sh
-just toolchain-embed
+just payload::toolchain
 ```
 
 Do **not** `brew install zig`: Homebrew's zig drifts to newer releases that are
@@ -165,6 +165,19 @@ halt defers to the on-disk build result); it is reachable only via an explicit
 `--builder libkrun`.
 
 The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same mvm-images builder image), so switching backends mid-development is supported.
+
+**mvm's builder binaries travel beside the builder image, not inside it.**
+Every builder boot on every backend carries a *builder boot payload*: an
+initramfs `mvmctl` assembles per boot from its embedded `mvm-host-vm-init` and
+`mvm-builderd`, digest-checked by the guest before it pivots into the
+read-only image and runs them from `/run/mvm/host-bins`. The image and the
+payload agree on a versioned builder boot ABI (`/etc/mvm/builder-boot-abi`;
+`builder_boot_abi` in a signed image set): 0 is a legacy image that bakes the
+binaries (the payload's copies still win), 1 is an image that carries none.
+The contract lives in `mvm_build::builder_boot` and is recorded in ADR-004;
+`builder_boot_cmdline` is the one kernel command line every backend boots
+with, and `stage_builder_boot` decides each boot. A persistent builder booted
+with other builder binaries is stopped rather than reused.
 
 Persistent builder state dirs live under `~/.mvm/cache/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-hvf-*` for hvf). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
 
@@ -781,7 +794,7 @@ cargo clippy --workspace -- -D warnings  # zero warnings
 `cargo nextest run --workspace` (what `just test` and CI run) is the named
 test gate — it's process-parallel and faster than `cargo test` on this
 ~4,350-test suite. The one gap: **nextest skips doctests**, so the
-`cargo test --workspace --doc` line above (wrapped as `just test-doc`, and
+`cargo test --workspace --doc` line above (wrapped as `just tests::doc`, and
 folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 --workspace` still works as a fallback if nextest isn't installed.
 
@@ -790,8 +803,8 @@ folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 any target behind `required-features` — `mvm-conformance`'s cucumber runner
 needs `--features bdd`, and without it the same broken tree reports zero
 errors — and on macOS it cannot compile `cfg(target_os = "linux")` files at
-all, including Linux-gated _test_ files, which `just check-linux` misses too
-because that recipe is `--lib` only. `just check-gated` covers both. Skipping
+all, including Linux-gated _test_ files, which `just check::linux` misses too
+because that recipe is `--lib` only. `just check::gated` covers both. Skipping
 it surfaces in CI as `check-nextest-groups` failing with "cargo nextest list
 failed", a message that names neither the file nor the field.
 
@@ -800,10 +813,10 @@ manifest crate (whichever one the manifest points at), silently missing
 drift in every other workspace member. CI runs `cargo fmt --all --
 --check`; if you only check the local crate, the merge will still fail.
 The pre-commit hook at `.githooks/pre-commit` auto-fixes with `cargo
-fmt --all` and re-stages — `just install-hooks` wires
+fmt --all` and re-stages — `just maint::hooks` wires
 `core.hooksPath` to `.githooks/` so it fires on every commit.
 
-The Justfile recipes wrap this correctly: `just fmt-check`, `just
+The Justfile recipes wrap this correctly: `just lints::fmt-check`, `just
 clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
 those over raw cargo invocations.
 
@@ -831,8 +844,8 @@ local-only again. Nothing here is reviewed, shared, or carried to another clone,
 and a note you write is a note only you will read.
 
 One finding per file under `.agent-memory/notes/<slug>.md`, with `title`,
-`date` and `tags` frontmatter. `just recall <terms>` searches them, `just
-notes` lists them, `just remember <slug>` scaffolds one. `xtask
+`date` and `tags` frontmatter. `just mem::recall <terms>` searches them, `just
+mem::notes` lists them, `just mem::remember <slug>` scaffolds one. `xtask
 check-agent-notes` holds the shape and refuses a `[[link]]` to a note that does
 not exist — run it yourself; it is not in `check-all`, because in CI the
 directory does not exist and the gate has nothing to check.

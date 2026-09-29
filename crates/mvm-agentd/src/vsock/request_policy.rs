@@ -63,6 +63,7 @@ impl GuestRequest {
             GuestRequest::RunDetached { .. } => Verb::RunDetached,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
+            GuestRequest::SyncFilesystems => Verb::SyncFilesystems,
             GuestRequest::StartUnixSocketForward { .. } => Verb::StartUnixSocketForward,
             GuestRequest::ConsoleOpen { .. } => Verb::ConsoleOpen,
             GuestRequest::ConsoleAttach { .. } => Verb::ConsoleAttach,
@@ -151,6 +152,9 @@ impl GuestRequest {
             | GuestRequest::ExecBatch { .. }
             | GuestRequest::RunDetached { .. }
             | GuestRequest::FsDiff
+            // Gated with the diff it exists to serve: a host that may not diff
+            // a sealed guest has no reason to flush it either.
+            | GuestRequest::SyncFilesystems
             | GuestRequest::StartUnixSocketForward { .. }
             | GuestRequest::ConsoleOpen { .. }
             | GuestRequest::ConsoleAttach { .. }
@@ -299,6 +303,7 @@ mod tests {
                 grant_envelope: None,
             },
             GuestRequest::FsDiff,
+            GuestRequest::SyncFilesystems,
             GuestRequest::StartUnixSocketForward {
                 guest_path: "/run/mvm/forward.sock".to_string(),
                 host_vsock_port: BROKER_PORT,
@@ -555,6 +560,8 @@ mod tests {
                 length: 1,
                 follow_symlinks: true,
             },
+            // The flush a live diff needs is gated with the diff.
+            GuestRequest::SyncFilesystems,
         ];
 
         for req in &dev_only_samples {
