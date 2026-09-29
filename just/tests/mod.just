@@ -1,19 +1,5 @@
 set working-directory := "../.."
 
-# Run tests with sccache caching the workspace crates.
-# Usage: just tests::cached [FILTER]
-#   FILTER: optional test filter expression
-cached FILTER="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    @command -v sccache >/dev/null || { echo "sccache not found — install with: cargo install sccache"; exit 1; }
-    if [ -n "{{ FILTER }}" ]; then
-    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace -E 'test({{ FILTER }})' 2>&1 | tee target/nextest/last-run.log
-    else
-    RUSTC_WRAPPER=sccache CARGO_INCREMENTAL=0 cargo nextest run --workspace 2>&1 | tee target/nextest/last-run.log
-    fi
-    @sccache --show-stats
-
 # Run tests matching a filter expression (alias for test with filter)
 # Usage: just test-filter FILTER
 # Run a single crate's tests
@@ -22,6 +8,18 @@ cached FILTER="":
 crate CRATE:
     ./scripts/require-nextest.sh
     ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
+
+# Run one crate's tests filtered by test name during the debugging loop.
+# Usage: just tests::scoped CRATE [FILTER]
+scoped CRATE FILTER="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ./scripts/require-nextest.sh
+    if [ -n "{{ FILTER }}" ]; then
+    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }} -E 'test({{ FILTER }})'
+    else
+    ./scripts/cargo-fast.sh nextest run -p {{ CRATE }}
+    fi
 
 # Run tests under the `ci` profile: no retries, slow-test warnings, and a
 # JUnit report at target/nextest/ci/junit.xml carrying pass/fail structure

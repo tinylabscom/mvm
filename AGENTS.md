@@ -230,6 +230,166 @@ poll loop merely because the surrounding API is synchronous.
 An event-driven change does not imply adopting a repository-wide async runtime.
 Use the smallest event primitive that matches the existing ownership boundary.
 
+## No Sleep-Polling
+
+`sleep N && <check>` is banned as a wait strategy. Transcript analysis
+(2026-09-28) found `sleep 240 && gh pr checks` loops across sessions and one
+Codex session that issued 957 sequential `wait` calls — hundreds of wasted
+round-trips where a single event-driven wait would do.
+
+- **CI and long checks:** use `gh pr checks <n> --watch` (blocks until the
+  checks settle), or launch the check as a background task and let its
+  completion notification wake you. Never sleep-then-poll a URL or CLI.
+- **Owned processes:** use the event primitive you already armed (child
+  handle, kqueue/pidfd, background-task notification) per the Waiting Model
+  above — a `sleep` loop around a pid you own is always the wrong answer.
+- **Externally owned state with no event source** (the only legitimate
+  poll): cap at 5 iterations with escalating backoff, state what event
+  would replace the poll, and prefer a single long blocking call over
+  repeated short ones.
+
+If you catch yourself typing `sleep` before a check, stop: name the condition
+you are waiting for and pick the matching primitive from the Waiting Model.
+
+## Test Failure Loop: Scoped by Default
+
+The debugging loop is **scoped**: `just tests::scoped <crate> <filter>` → read
+the failure → fix → `just tests::scoped <crate> <filter>` again. The
+full-workspace sweep (`just test`, `cargo test --workspace`) runs **once**
+before declaring a task done — it is a pre-merge/CI gate, not a debugging
+tool.
+
+Running the whole workspace after every edit to see whether it still fails
+is the expensive anti-pattern: sampled transcripts show 673
+`cargo test --workspace` mentions across 22 Claude sessions, many
+immediately after a failure where a single filtered test would have
+answered the question in seconds. Even a *filtered* workspace run
+(`just test <filter>`) still builds and links every crate in the tree;
+`tests::scoped` limits compilation to the crate under edit, which is what
+keeps the edit→test loop fast.
+
+Pair this with Retry Discipline: a scoped test that fails gets one change
+and one scoped re-run — never an unscoped sweep used as a substitute for
+reading the error.
+
+## One Shell Setup Per Worktree
+
+Set up the environment **once** per shell — `source scripts/dev-env.sh` at
+the top — and then run plain commands. Do not re-export
+`MVM_HOME`/`CARGO_TARGET_DIR`/`CARGO_HOME` inline on individual commands,
+and do not prefix every command with `cd /abs/path/to/worktree &&`.
+
+Transcript baselines show 100+ character prefixes like
+`cd …/.worktrees/mvm-x && MVM_HOME=… CARGO_TARGET_DIR=… cargo test` repeated
+8–16 times per session. Besides the noise, the copies drift: one invocation
+drops a variable, another points at a different worktree, and the failure
+that follows looks intermittent but is self-inflicted.
+
+- The session cwd IS the worktree root — commands already run there.
+- `source scripts/dev-env.sh` exports the three isolation vars for every
+  child process; anything more targeted is a special case, not the default.
+- For a one-off `mvmctl` call from an unconfigured shell, use `bin/dev …`
+  instead of hand-assembling the exports.
+- Inline `VAR=value command` overrides remain legitimate for the rare case
+  that genuinely needs a different value for one call — but reaching for
+  them as the default pattern is the anti-pattern.
+
+If you find yourself typing the same env prefix twice, stop and source
+`scripts/dev-env.sh` instead.
+
+## Reasoning Budget: Think, Then Act
+
+Deliberation is for deciding the next action, not for re-deriving what the
+last tool output already told you. A reasoning chain that does not end in a
+tool call, a question to the user, or a committed hypothesis is pure
+context burn — sampled Codex transcripts average 380 reasoning items per
+session, and the longest chains correlate with the sessions that finish
+least.
+
+- **One reasoning turn per decision point.** Read the tool output, think
+  once, act. If the action's result disagrees with the hypothesis, that is
+  data — reason once more with it, act again.
+- **After 2 consecutive reasoning turns with no action, stop and do
+  something**: make the tool call, ask the user, or write the hypothesis
+  down and test it. Momentum beats perfection.
+- **Reserve deep deliberation for genuinely ambiguous design decisions.**
+  Mechanical phases (edits the plan already specifies, boilerplate, test
+  fixes with obvious error messages) get minimal deliberation — the
+  reasoning budget is the scarcest resource in a long session.
+- This complements Retry Discipline: reasoning is not a substitute for
+  running the scoped test, and running the test is cheaper than thinking
+  about what it might say.
+
+## Long Operations Go to Background
+
+Any command expected to run **longer than 60 seconds** — full builds,
+workspace test sweeps, image builds, CI watches — goes to a **background
+task**, not a foreground blocking call. The foreground stays free, the
+harness notifies you on completion, and you keep working or explicitly wait
+on the task rather than holding a Shell call open.
+
+Blocking foreground calls teach bad habits: they serialize your attention
+on one thing, they inflate the Shell-call timeout until huge values feel
+normal, and when they time out at 300 s the natural (wrong) response is to
+re-run them. Background tasks invert that: launch, note the task id, check
+the log tail when the current step is done.
+
+- Builds and sweeps: background task; check the log tail when it finishes.
+- CI: `gh pr checks <n> --watch` blocks efficiently in ONE call, or run
+  `gh pr checks` as a background task — never sleep-then-poll (see No
+  Sleep-Polling).
+- Quick commands stay foreground: a scoped `just tests::scoped` run under
+  60 s is faster to await inline than to round-trip through a task.
+- If a foreground command times out, do not just re-run it with a bigger
+  timeout — that is a Retry Discipline violation. Ask why it is slow
+  (cold cache? wrong scope? hung process?) and move it to background.
+
+## Context Hygiene: Snapshots and Budgets
+
+Long sessions are the norm here, and compaction is not lossless — sampled
+Claude transcripts hit compaction mid-task, and sampled Codex transcripts
+reach 200 MB. What survives compaction is structure, not intent; intent has
+to be written down before the window shrinks.
+
+- **Snapshot at every phase boundary.** When a plan phase or sub-task
+  completes, emit a ~10-line snapshot into the todo list or the plan doc:
+  decisions made (with the why), files touched, current blocker if any, and
+  the exact next step. After compaction, the snapshot is the difference
+  between resuming and re-deriving.
+- **Budget awareness.** Past ~50 tool calls without reaching the session's
+  goal, stop and re-plan: write the remaining work as a fresh todo list
+  before continuing. Grinding past 50 calls on one goal without a plan
+  update is how sessions end up 200 MB with nothing landed.
+- **Close or split long sessions.** A session that has served its purpose
+  (PR opened, task done) should end; a genuinely multi-part effort should be
+  split at phase boundaries so each session carries only the context it
+  needs. Resuming a three-day-old session costs more re-orientation than a
+  fresh one with a good snapshot.
+
+## Subagent Pre-Flight
+
+A subagent that launches into an environment it cannot use is pure waste:
+the launch, the first tool call, the denial, and the "blocked" summary all
+burn context and time (observed directly: three analysis subagents each
+died on the first call with workspace-boundary denials).
+
+Every subagent prompt must carry:
+
+1. **Path pre-flight.** Declare the exact paths it will touch and confirm
+   they are inside the workspace boundary. If it needs anything outside,
+   say so in the prompt and let the operator decide before launch — not
+   after the denial.
+2. **Environment pre-flight.** Declare the env vars it depends on
+   (sourced `scripts/dev-env.sh`? specific exports?) and any setup steps it
+   must run first.
+3. **Scope declaration.** Read-only research or write-capable? Which tools
+   it will use and why. The operator approves with full information.
+4. **Fallback instruction.** What to do when a tool call is denied or a
+   path is missing: report precisely what was needed and stop — no
+   workarounds, no retries against the boundary.
+
+If you cannot fill in all four, you are not ready to launch the subagent.
+
 ## Privacy & Security
 
 Privacy and security are **critical priorities** for this project and must be considered in every decision. All code changes, architecture decisions, and feature additions must be evaluated through a security lens:
@@ -585,4 +745,56 @@ re-read whole files.
 
 After big code changes, refresh the graph with `graft build` (deterministic,
 no API key, $0).
+
+### MCP-native usage (agent harnesses)
+
+When your harness exposes graft as MCP tools (graft_find_code,
+graft_find_all, graft_trace_calls, graft_file_api, graft_repo_map),
+use those *before* the generic Grep/Glob/ReadFile tools — they return ranked
+answers with code spans inlined instead of raw hit lists you have to read
+your way out of. The routing rule:
+
+- **Understanding / "where does X live / how does Y work"** →
+  graft_find_code (or graft_repo_map when new to an area).
+- **Exhaustive literal search** ("every occurrence", "every caller") →
+  graft_find_all / graft_trace_calls, not the Grep tool.
+- **API surface of one file** → graft_file_api, not reading the file.
+- **Raw Grep/Glob** → only for unindexed files or when graft returns nothing
+  useful. Transcript baselines show thousands of raw Grep/Glob/Shell calls
+  per week where graft would have answered in one round-trip — that is the
+  waste this routing rule exists to stop.
 <!-- graft:end -->
+
+## Retry Discipline
+
+Never re-issue an identical command that just failed. Transcript analysis
+(2026-09-28) shows retry loops are the single largest agent inefficiency:
+30% of Kimi and 18% of Codex sessions re-ran the *same* failing command
+back-to-back, in one case 16 times in a row — every re-run has a
+predictable outcome and burns the session's time and context.
+
+The recovery sequence after any tool failure is:
+
+1. **Read the full error output.** Not the first line — the whole thing.
+2. **Form a root-cause hypothesis.** What changed? What does the error
+   actually say?
+3. **Change exactly one thing.** A fix, a flag, a scope reduction — one.
+4. **Re-run a scoped version of the command**, not the original blast radius
+   (see "Scoped test runs" in the plan of the day if one is active).
+
+For `mvmctl`/cargo one-offs, use `mvm_run <cmd>` (defined by
+`scripts/dev-env.sh`): it records the failing command fingerprint in
+`.mvm-test/last-failed-cmd` and refuses an immediate identical re-run. After
+genuinely diagnosing, clear the marker (`rm .mvm-test/last-failed-cmd`) or
+run the changed command, which clears it automatically on success.
+
+**Failure journal.** Error clustering is the second-largest observed waste:
+33 of 40 sampled Kimi sessions accumulated 5+ tool errors, meaning retries
+without diagnosis are the norm, not the exception. `mvm_run` appends every
+failure to `.mvm-test/failure-journal.log` and, at 3+ recorded failures,
+reminds you to stop and write the journal before the next attempt — three
+lines: what failed / why / next single change. At that point you are
+guessing; the journal forces the guess to become a hypothesis. Even outside
+`mvm_run`, adopt the same rule manually: 3 failures on one task ⇒ write the
+three lines before attempt 4. If the "why" is the same twice in a row, the
+hypothesis is wrong — change strategy, not just the command.

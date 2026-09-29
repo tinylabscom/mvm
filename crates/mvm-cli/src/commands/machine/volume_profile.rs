@@ -1,10 +1,27 @@
 //! Which `--mount`/`--volume` specs a persistent machine accepts under its
 //! profile.
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
-use super::RunProfile;
+use super::{MachineRunArgs, RunProfile};
 use crate::commands::shared::{VolumeSpec, parse_volume_spec};
+
+pub(super) fn machine_run_volume_specs(args: &MachineRunArgs) -> Result<Vec<String>> {
+    enforce_volume_profile(args.run.profile, &args.run.mounts)?;
+    let mut out = Vec::with_capacity(args.run.mounts.len());
+    for raw in &args.run.mounts {
+        let spec = parse_volume_spec(raw)?;
+        let vmv = crate::commands::shared::vm_volume_from_spec_validated(&spec)
+            .with_context(|| format!("volume {raw:?}"))?;
+        // Pin the canonical absolute host path; keep the guest[:size][:mode]
+        // tail verbatim so disk volumes and modifiers survive the round-trip.
+        let (_, tail) = raw
+            .split_once(':')
+            .expect("parse_volume_spec guarantees a host:guest separator");
+        out.push(format!("{}:{}", vmv.host, tail));
+    }
+    Ok(out)
+}
 
 /// Why a persistent machine refuses a host-directory volume.
 ///

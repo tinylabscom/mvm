@@ -473,8 +473,80 @@ fn stage_fixture(name: &str, dir: &Path, home: &Path) {
             )
             .expect("stage release signature bundle");
         }
+        // `trust instructions sign|verify ./my-agent` name a directory of
+        // agent instruction files. Sign with this home's host key, which is
+        // the key `trust instructions init` writes a policy trusting, so the
+        // verify example passes whether or not that policy exists yet.
+        "instruction-files" => stage_instruction_files(dir),
+        "signed-instruction-files" => {
+            stage_instruction_files(dir);
+            let output = crate::steps::cli::mvmctl_command()
+                .isolated_home(home)
+                .env("MVM_SKIP_RECONCILE", "1")
+                .current_dir(dir)
+                .args(["trust", "instructions", "sign", "./my-agent"])
+                .output()
+                .expect("spawn mvmctl to sign the instruction-file fixture");
+            assert!(
+                output.status.success(),
+                "signing the instruction-file fixture failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         other => panic!("unknown fixture {other:?} in the tier manifest"),
     }
+}
+
+/// The `./my-agent` directory the instruction-provenance guide signs.
+fn stage_instruction_files(dir: &Path) {
+    let agent = dir.join("my-agent");
+    std::fs::create_dir_all(&agent).expect("create instruction-file fixture");
+    std::fs::write(agent.join("CLAUDE.md"), "Answer in one sentence.\n")
+        .expect("write instruction-file fixture");
+}
+
+#[then(expr = "the instruction trust workflow runs {string} then {string} then {string}")]
+fn instruction_trust_examples_run(
+    _world: &mut CliWorld,
+    init: String,
+    sign: String,
+    verify: String,
+) {
+    let scratch = tempfile::tempdir().expect("create instruction trust example directory");
+    let home = scratch.path().join("home");
+    let dir = scratch.path().join("work");
+    std::fs::create_dir_all(&dir).expect("create instruction trust work directory");
+    stage_instruction_files(&dir);
+
+    let run = |args: &str| {
+        crate::steps::cli::mvmctl_command()
+            .isolated_home(&home)
+            .env("MVM_SKIP_RECONCILE", "1")
+            .current_dir(&dir)
+            .args(args.split_whitespace())
+            .output()
+            .expect("run instruction trust example")
+    };
+
+    assert!(
+        run(&init).status.success(),
+        "instruction trust init must pass"
+    );
+    assert!(
+        !run(&verify).status.success(),
+        "unsigned instructions must fail verification"
+    );
+    assert!(run(&sign).status.success(), "instruction signing must pass");
+    assert!(
+        run(&verify).status.success(),
+        "signed instructions must pass verification"
+    );
+    std::fs::write(dir.join("my-agent/CLAUDE.md"), "Changed instructions.\n")
+        .expect("tamper with signed instructions");
+    assert!(
+        !run(&verify).status.success(),
+        "tampered instructions must fail verification"
+    );
 }
 
 #[then(expr = "every side-effect-free documented example executes successfully")]
@@ -1456,7 +1528,7 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 /// deliberate act that should carry its reason in the commit, because the
 /// alternative is what happened before this existed: the count drifted up
 /// while everyone believed coverage was improving.
-const PARSE_TIER_PIN: usize = 69;
+const PARSE_TIER_PIN: usize = 70;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {

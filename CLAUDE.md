@@ -447,9 +447,7 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
     This bullet used to claim that "`mvmctl up` emits an opt-in warning when
     the resolved policy is `unrestricted`", with an escape hatch of
     `MVM_ACK_UNRESTRICTED_NETWORK=1`. **None of that exists.** `up` is not a
-    dispatched verb — `up::Args` is not a `Commands` variant, so its
-    `--network-preset` and `--network-allow` fields are unreachable CLI
-    surface. The acknowledgement env var is read nowhere in the workspace;
+    dispatched verb and its leftover `Args` struct has been deleted. The acknowledgement env var is read nowhere in the workspace;
     its only occurrence is a doc comment in `mvm-contract::stream::edge`
     saying another mechanism is "shaped after" it:
 
@@ -786,10 +784,6 @@ test gate — it's process-parallel and faster than `cargo test` on this
 `cargo test --workspace --doc` line above (wrapped as `just tests::doc`, and
 folded into `just ci`) keeps doc-fence coverage gated. `cargo test
 --workspace` still works as a fallback if nextest isn't installed.
-
-For fast inner-loop iteration across worktrees, `just tests::cached` wraps rustc
-in sccache to share compilation across branches (needs `cargo install
-sccache`).
 
 **`--all-targets` has two blind spots**, and a change to a shared type's shape
 (a new struct field, trait method, or enum variant) walks into both. It skips

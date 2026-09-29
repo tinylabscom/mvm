@@ -40,6 +40,7 @@ pub(super) fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {
         auth_type: AuthType::Bearer,
         allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         sigv4: None,
+        inject: Default::default(),
     }
 }
 
@@ -55,6 +56,7 @@ pub(super) fn sigv4_ref(name: &str, hosts: &[&str], service: &str, region: &str)
             region: region.into(),
             service: service.into(),
         }),
+        inject: Default::default(),
     }
 }
 
@@ -65,6 +67,7 @@ pub(super) fn sigv4_ref_no_params(name: &str, hosts: &[&str]) -> SecretRef {
         auth_type: AuthType::Sigv4,
         allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         sigv4: None,
+        inject: Default::default(),
     }
 }
 
@@ -75,6 +78,7 @@ pub(super) fn hmac_ref(name: &str, hosts: &[&str]) -> SecretRef {
         auth_type: AuthType::Hmac,
         allowed_hosts: hosts.iter().map(|h| h.to_string()).collect(),
         sigv4: None,
+        inject: Default::default(),
     }
 }
 

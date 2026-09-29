@@ -334,7 +334,6 @@ mod tests {
         }
         (child, pid)
     }
-
     #[test]
     fn a_process_running_an_unaccepted_executable_is_not_signalled() {
         let (mut child, pid) = spawn_sleep();

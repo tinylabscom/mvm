@@ -72,7 +72,8 @@ The next SDK work should close the highest-value gaps in this order:
 
 1. Receipt/audit correlation on the `ExecResult` returned by
    `sandbox.exec(...)`, which today carries only exit code, stdout, and stderr.
-2. `logs(...)` with redaction and bounded streaming.
+2. `sandbox.logs(...)` with redaction and bounded streaming on the sandbox
+   handle; `Machine.logs(...)` is already shipped.
 3. Declarative `network.ports` ingress with explicit policy.
 4. `snapshot(...)`, `cold()`, `resume()`, `destroy()`, and `detach()` with
    backend-aware state types.

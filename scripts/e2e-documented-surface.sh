@@ -305,6 +305,19 @@ just payload::supervisors
 # with "the host library ... was not found" before a machine is asked for.
 echo "==> building the SDK host library beside mvmctl"
 cargo build -p mvm-hostlib
+hostlib_ext="so"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  hostlib_ext="dylib"
+fi
+hostlib_path="$(dirname "$MVMCTL")/libmvm_hostlib.${hostlib_ext}"
+if [[ ! -f "$hostlib_path" ]]; then
+  echo "!!! expected host library at $hostlib_path, but it was not built." >&2
+  exit 1
+fi
+# The runtime-SDK scenarios launch scripts through `mvmctl run --mode live`.
+# Export the exact library path so the in-repo SDK does not depend on PATH
+# propagation through that launch boundary.
+export MVM_HOSTLIB_PATH="$hostlib_path"
 
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"

@@ -67,3 +67,66 @@ export MVM_NO_LEGACY_BANNER="${MVM_NO_LEGACY_BANNER:-1}"
 
 unset -f _mvm_dev_env_claim
 unset _mvm_name _mvm_want _mvm_have
+
+# Blind-retry guard. mvm_run <cmd...> runs the command; on failure it records a
+# non-reversible argv fingerprint in .mvm-test/last-failed-cmd, and the next
+# mvm_run of the identical argv is refused until the marker is cleared (by a
+# successful different command, `rm .mvm-test/last-failed-cmd`, or editing the
+# command). Re-running a failed command verbatim is the single largest
+# observed agent inefficiency; this makes the failure visible and forces a
+# diagnose-first step. Variables are _mvm_run_*-prefixed; no `local` so the
+# file stays POSIX-sh sourceable.
+_mvm_run_hash_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    elif command -v openssl >/dev/null 2>&1; then
+        openssl dgst -sha256 -r | awk '{print $1}'
+    else
+        cksum | awk '{print $1 "-" $2}'
+    fi
+}
+
+_mvm_run_fingerprint() {
+    (
+        for _mvm_run_arg do
+            _mvm_run_len=${#_mvm_run_arg}
+            printf '%s\n%s\n' "${_mvm_run_len}" "${_mvm_run_arg}"
+        done
+    ) | _mvm_run_hash_stream
+}
+
+mvm_run() {
+    _mvm_run_state="${dev_state_root}/last-failed-cmd"
+    _mvm_run_key="$(_mvm_run_fingerprint "$@")"
+
+    if [ -f "${_mvm_run_state}" ] && [ "$(cat "${_mvm_run_state}")" = "${_mvm_run_key}" ]; then
+        printf 'mvm_run: refusing blind re-run of a command that just failed (fingerprint %s)\n' "${_mvm_run_key}" >&2
+        printf 'mvm_run: diagnose the failure, change one thing, or clear the marker: rm %s\n' "${_mvm_run_state}" >&2
+        return 1
+    fi
+
+    "$@"
+    _mvm_run_rc=$?
+
+    if [ "${_mvm_run_rc}" -ne 0 ]; then
+        mkdir -p "${dev_state_root}"
+        printf '%s' "${_mvm_run_key}" > "${_mvm_run_state}"
+        # Failure journal: append every failure. At 3+ failures the reminder
+        # enforces the recovery discipline — a session that has failed three
+        # times on one task is guessing, and must write down what failed,
+        # why, and the next single change before attempting again.
+        _mvm_run_journal="${dev_state_root}/failure-journal.log"
+        printf '%s rc=%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u)" "${_mvm_run_rc}" "${_mvm_run_key}" >> "${_mvm_run_journal}"
+        _mvm_run_fails=$(wc -l < "${_mvm_run_journal}" | tr -d ' ')
+        if [ "${_mvm_run_fails}" -ge 3 ]; then
+            printf 'mvm_run: %s recorded failures — stop and write the failure journal before the next attempt:\n' "${_mvm_run_fails}" >&2
+            printf 'mvm_run:   what failed / why / next single change → %s\n' "${_mvm_run_journal}" >&2
+        fi
+    else
+        rm -f "${_mvm_run_state}"
+    fi
+
+    return "${_mvm_run_rc}"
+}

@@ -69,3 +69,11 @@ fn declared_modules_exist() {
     let _site = include_str!("../just/site/mod.just");
     let _tests = include_str!("../just/tests/mod.just");
 }
+
+#[test]
+fn test_module_keeps_scoped_runs_without_the_removed_cache_wrapper() {
+    let tests = include_str!("../just/tests/mod.just");
+    assert!(tests.contains("scoped CRATE FILTER=\"\""));
+    assert!(tests.contains("nextest run -p {{ CRATE }} -E 'test({{ FILTER }})'"));
+    assert!(!tests.contains("cached FILTER="));
+}

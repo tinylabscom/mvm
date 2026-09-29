@@ -850,6 +850,7 @@ fn helper_to_env_value(v: Value, path: &Path, line: usize) -> Result<EnvValue, P
                     // SigV4 scope params are operator-set in the local binding,
                     // not authored in source — the keyholder reconstructs them.
                     sigv4: None,
+                    inject: Default::default(),
                 },
             })
         }

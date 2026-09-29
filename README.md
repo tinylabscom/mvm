@@ -868,17 +868,16 @@ brew install zig          # or your distro's zig
 cargo install cargo-zigbuild cargo-nextest
 ```
 
-The root [`flake.nix`](flake.nix) is a development environment, not a
-workload image. `nix develop` provides the pinned Rust toolchain, Cargo tools,
-formatters, linters, Zig, and documentation tooling used by the contributor
-workflow. Host Nix remains optional for running `mvmctl`: workload Nix
-evaluation and image builds still run inside the managed builder VM. The
-microVM library and image-building flake lives separately under [`nix/`](nix/).
+The root [`flake.nix`](flake.nix) provides a lean `nix develop` shell with the
+pinned Rust toolchain, Zig, and the tools needed for the normal edit and build
+loop. `nix develop .#full` adds release, lint, and documentation tools. The
+root flake also offers `#prebuilt`, a hash-pinned host CLI release. Host Nix is
+optional for running `mvmctl`. Distributed image construction and publication
+belong to [mvm-images](https://github.com/tinylabscom/mvm-images); `mvm` consumes
+its signed image set.
 
-When opened interactively, the development shell replaces Nix’s default Bash
-with login zsh, so aliases and functions from your normal zsh startup files
-remain available. The shell also best-effort installs the
-`wasm32-unknown-unknown` target when `rustup` is available.
+The full shell switches interactive sessions to login zsh. Neither shell
+installs Rust targets on entry.
 
 After building, run `mvmctl doctor` — it reports the resolved builder backend
 and emits install hints for anything missing.
