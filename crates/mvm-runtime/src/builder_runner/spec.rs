@@ -7,31 +7,18 @@
 use std::path::{Path, PathBuf};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
+use mvm_build::builder_boot::{BuilderBoot, builder_boot_cmdline};
 use mvm_net::channel::GuestService;
-
-/// The builder's kernel cmdline, minus the console tokens.
-///
-/// Boots the builder's PID 1 (`/sbin/mvm-host-vm-init`, not the workload
-/// `/init`), mounts the rootfs read-only, and selects the disk transport with its
-/// input/output block devices. The device names match `mvm-host-vm-init`'s
-/// defaults (`/dev/vdc` in, `/dev/vdd` out) and the slot order below.
-///
-/// The console tokens are not here because they are not the builder's to
-/// choose. HVF's device model exposes a PL011 (`ttyAMA0`); Firecracker's is a
-/// 16550 (`ttyS0`). This used to be one constant carrying HVF's pair, which is
-/// correct on exactly one backend: on Firecracker the kernel got a console
-/// device that does not exist, and every `mvm-host-vm-init:` line — the only
-/// diagnostics a failed build leaves — went nowhere.
-pub const BUILDER_CMDLINE_TAIL: &str = "root=/dev/vda ro rootfstype=ext4 \
-     init=/sbin/mvm-host-vm-init mvm.builder_transport=disk mvm.builder_input=/dev/vdc \
-     mvm.builder_output=/dev/vdd mvm.vsock_egress=1";
-const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
 
 /// The resolved host artifacts a builder VM boots with. Disk slots are fixed:
 /// `vda` rootfs (RO), `vdb` nix-store (RW, persistent), `vdc` input (RO), `vdd`
-/// output (RW, persistent) — matching [`BUILDER_CMDLINE_TAIL`] and the guest init.
+/// output (RW, persistent) — matching the builder boot contract's cmdline and
+/// the guest init.
 pub struct BuilderSpecInputs<'a> {
     pub name: &'a str,
+    /// How this boot reaches its PID 1: the boot payload, loaded as the
+    /// initramfs, or a legacy image's baked init.
+    pub boot: &'a BuilderBoot,
     /// arm64 boot `Image` for the builder VM.
     pub kernel: &'a Path,
     /// Builder rootfs (mounted read-only; its baked Nix store is the seed).
@@ -53,8 +40,11 @@ pub struct BuilderSpecInputs<'a> {
     /// client, which will not bind without them.
     pub identity_drive: &'a Path,
     /// The console tokens for the VMM that will boot this, taken from
-    /// `VmmDriver::workload_base_bootargs(false)`. See [`BUILDER_CMDLINE_TAIL`]
-    /// for why the builder cannot choose them itself.
+    /// `VmmDriver::workload_base_bootargs(false)`. The builder cannot choose
+    /// them: HVF's device model exposes a PL011 (`ttyAMA0`), Firecracker's a
+    /// 16550 (`ttyS0`), and a console device that does not exist sends every
+    /// `mvm-host-vm-init:` line — the only diagnostics a failed build leaves —
+    /// nowhere.
     pub console_base: &'a str,
     pub vcpus: u32,
     pub memory_mib: u32,
@@ -102,12 +92,11 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
     // tree, which can outlast the wait.
     let vsock = vec![builder_egress_port(&inputs.egress_socket)];
 
-    let cmdline = format!("{} {BUILDER_CMDLINE_TAIL}", inputs.console_base.trim());
-    let cmdline = if inputs.runtime_overlay.is_some() {
-        format!("{cmdline} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
-    } else {
-        cmdline
-    };
+    let cmdline = builder_boot_cmdline(
+        inputs.console_base,
+        inputs.boot,
+        inputs.runtime_overlay.is_some(),
+    );
     // Seed the guest's wall clock from the host: PID 1 (mvm-host-vm-init) reads
     // this token and calls settimeofday, so an RTC-less guest's HTTPS fetch
     // doesn't fail cert validation against a ~1970 clock.
@@ -133,7 +122,7 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
     VmmSpec {
         name: inputs.name.to_string(),
         kernel: KernelImage::Path(inputs.kernel.to_path_buf()),
-        initramfs: None,
+        initramfs: inputs.boot.initramfs().map(Path::to_path_buf),
         cmdline,
         vcpus: inputs.vcpus,
         // The builder VM is the trusted build engine, not a workload. Nothing
@@ -159,12 +148,10 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
 
 /// Stage 0's kernel cmdline, minus the console tokens.
 ///
-/// Three tokens differ from [`BUILDER_CMDLINE_TAIL`], and each one is why Stage 0
-/// needs its own: the root is **writable** (the seed's PID 1 creates its
-/// bootstrap state and deletes the size reserve baked into the image), PID 1 is
-/// the seed's own `/init` rather than the builder rootfs's
-/// `/sbin/mvm-host-vm-init`, and `rootwait` is present because the root device
-/// is the one disk Stage 0 cannot retry.
+/// Stage 0 boots no payload and is not a builder boot in the contract's sense:
+/// the root is **writable** (the seed's PID 1 creates its bootstrap state and
+/// deletes the size reserve baked into the image), and PID 1 is the seed's own
+/// `/init`, which the host assembled with the seed.
 ///
 /// `mvm.builder_transport=disk` is load-bearing beyond transport selection:
 /// `stage0-init` refuses to run without it on any backend that is not QEMU.
@@ -274,6 +261,8 @@ pub fn stage0_spec(inputs: &Stage0SpecInputs<'_>) -> VmmSpec {
 /// output disk once per dispatch instead of once per VM.
 pub struct PersistentBuilderSpecInputs<'a> {
     pub name: &'a str,
+    /// How this session reaches its PID 1; see [`BuilderSpecInputs::boot`].
+    pub boot: &'a BuilderBoot,
     /// arm64 boot `Image` for the builder VM.
     pub kernel: &'a Path,
     /// Builder rootfs (mounted read-only; its baked Nix store is the seed).
@@ -310,7 +299,8 @@ pub struct PersistentBuilderSpecInputs<'a> {
     /// life matches the VM's.
     pub builder_egress_endpoint: mvm_vmm::host::hvf_supervisor::BuilderEgressEndpoint,
     /// The console tokens for the VMM that will boot this, taken from
-    /// `VmmDriver::workload_base_bootargs(false)`. See [`BUILDER_CMDLINE_TAIL`].
+    /// `VmmDriver::workload_base_bootargs(false)`; see
+    /// [`BuilderSpecInputs::console_base`].
     pub console_base: &'a str,
     pub vcpus: u32,
     pub memory_mib: u32,
@@ -340,13 +330,14 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
         block(inputs.input_disk, 2, true),   // vdc: input tar, RO
         block(inputs.output_disk, 3, false), // vdd: output tar, RW persist
     ];
-    let base = format!("{} {BUILDER_CMDLINE_TAIL}", inputs.console_base.trim());
-    let cmdline = if let Some(runtime_overlay) = inputs.runtime_overlay {
+    if let Some(runtime_overlay) = inputs.runtime_overlay {
         blocks.push(block(runtime_overlay, 4, true)); // vde: runtime overlay, RO
-        format!("{base} mvm.runtime_data={BUILDER_RUNTIME_DEVICE}")
-    } else {
-        base
-    };
+    }
+    let cmdline = builder_boot_cmdline(
+        inputs.console_base,
+        inputs.boot,
+        inputs.runtime_overlay.is_some(),
+    );
     // Appended last and found in the guest by ext4 label rather than by slot,
     // so the optional overlay above cannot shift it out from under the guest.
     let identity_slot = blocks.len() as u8;
@@ -374,7 +365,7 @@ pub fn persistent_builder_spec(inputs: &PersistentBuilderSpecInputs<'_>) -> VmmS
     VmmSpec {
         name: inputs.name.to_string(),
         kernel: KernelImage::Path(inputs.kernel.to_path_buf()),
-        initramfs: None,
+        initramfs: inputs.boot.initramfs().map(Path::to_path_buf),
         cmdline,
         vcpus: inputs.vcpus,
         cpu_grant: None,
@@ -404,15 +395,25 @@ mod tests {
     const HVF_CONSOLE_BASE: &str =
         "earlycon=pl011,0x9000000 console=ttyAMA0 panic=-1 nokaslr loglevel=8";
 
-    /// The builder cmdline before the console moved to the driver, verbatim.
-    const PRE_REFACTOR_BUILDER_CMDLINE: &str = "earlycon=pl011,0x9000000 console=ttyAMA0 \
-         panic=-1 nokaslr loglevel=8 root=/dev/vda ro rootfstype=ext4 \
-         init=/sbin/mvm-host-vm-init mvm.builder_transport=disk mvm.builder_input=/dev/vdc \
-         mvm.builder_output=/dev/vdd mvm.vsock_egress=1";
+    /// Where the builder boot contract puts the runtime overlay.
+    const BUILDER_RUNTIME_DEVICE: &str = "/dev/vde";
+
+    /// A legacy image booted with no payload.
+    static BAKED: BuilderBoot = BuilderBoot::Baked;
+
+    const PAYLOAD_DIGEST: &str = "15ed68a00c9fed2e2cdb9c479b20cd770271b6a9df721e1ebf065e8e42b77ba0";
+
+    fn payload_boot() -> BuilderBoot {
+        BuilderBoot::Payload {
+            initramfs: PathBuf::from("/state/boot-payload.cpio"),
+            digest: mvm_build::builder_boot::PayloadDigest::parse(PAYLOAD_DIGEST).unwrap(),
+        }
+    }
 
     fn persistent_inputs() -> PersistentBuilderSpecInputs<'static> {
         PersistentBuilderSpecInputs {
             name: "bld-persistent",
+            boot: &BAKED,
             kernel: Path::new("/img/Image"),
             rootfs: Path::new("/img/builder-rootfs.ext4"),
             nix_store: Path::new("/cache/nix-store.img"),
@@ -542,6 +543,7 @@ mod tests {
         BuilderSpecInputs {
             identity_drive: Path::new("/state/flowmux-identity.ext4"),
             name: "bld",
+            boot: &BAKED,
             kernel: Path::new("/img/Image"),
             rootfs: Path::new("/img/builder-rootfs.ext4"),
             nix_store: Path::new("/cache/nix-store.img"),
@@ -615,16 +617,53 @@ mod tests {
         assert_eq!(spec.vsock[0].direction, VsockDirection::GuestDials);
     }
 
-    /// The refactor that moved the console tokens to the driver must not have
-    /// moved a single byte for the one backend already in production.
+    /// A payload boot hands the VMM the payload as the initramfs and names its
+    /// digest in place of an `init=`, on both builder shapes.
     #[test]
-    fn the_builder_cmdline_on_hvf_is_byte_identical_to_the_old_constant() {
-        let one_shot = builder_spec(&inputs()).cmdline;
-        let persistent = persistent_builder_spec(&persistent_inputs()).cmdline;
-        for (which, cmdline) in [("one-shot", &one_shot), ("persistent", &persistent)] {
+    fn a_payload_boot_loads_the_payload_and_names_no_init() {
+        let boot = payload_boot();
+        let mut one_shot = inputs();
+        one_shot.boot = &boot;
+        let mut persistent = persistent_inputs();
+        persistent.boot = &boot;
+        for spec in [
+            builder_spec(&one_shot),
+            persistent_builder_spec(&persistent),
+        ] {
+            assert_eq!(
+                spec.initramfs.as_deref(),
+                Some(Path::new("/state/boot-payload.cpio"))
+            );
             assert!(
-                cmdline.starts_with(PRE_REFACTOR_BUILDER_CMDLINE),
-                "{which} HVF builder cmdline drifted:\n  was: {PRE_REFACTOR_BUILDER_CMDLINE}\n  now: {cmdline}"
+                spec.cmdline
+                    .contains(&format!("mvm.boot_payload={PAYLOAD_DIGEST}")),
+                "{}",
+                spec.cmdline
+            );
+            assert!(!spec.cmdline.contains("init="), "{}", spec.cmdline);
+            // The root is still read-only at the VMM, and still the image.
+            assert!(spec.blocks[0].read_only);
+        }
+    }
+
+    /// A legacy boot without a payload is what HVF booted before the payload
+    /// existed: the image's own init, no initramfs.
+    #[test]
+    fn a_baked_boot_loads_no_initramfs() {
+        for spec in [
+            builder_spec(&inputs()),
+            persistent_builder_spec(&persistent_inputs()),
+        ] {
+            assert_eq!(spec.initramfs, None);
+            assert!(
+                spec.cmdline.starts_with(HVF_CONSOLE_BASE),
+                "{}",
+                spec.cmdline
+            );
+            assert!(
+                spec.cmdline.contains(" init=/sbin/mvm-host-vm-init "),
+                "{}",
+                spec.cmdline
             );
         }
     }

@@ -8,9 +8,11 @@ description: Complete command reference for mvmctl.
 `mvmctl` is the local microVM substrate CLI: it builds images, boots local
 microVMs, talks to guest agents over vsock, manages local artifacts, and exposes
 developer/SDK workflows. Fleet and tenant control-plane verbs live in `mvmd`.
-In particular, `mvmctl` does not expose `tenant`, `policy`, or `deploy`
-subcommands; tenant lifecycle, tenant policy authoring/review, and deployment to
-the hosted control plane are `mvmd` responsibilities.
+`mvmctl deploy` builds and records a local workload artifact and can request
+authenticated delivery to `mvmd` with `--mvmd-url`; `mvmctl deployments ls`
+lists the local records. `mvmctl` does not expose `tenant` or `policy`
+subcommands; tenant lifecycle and tenant policy authoring/review remain `mvmd`
+responsibilities.
 
 **Command grouping (Plan 178).** The surface is organized into a small set
 of top-level daily-driver verbs plus noun groups; operations on a single
@@ -27,8 +29,8 @@ verification under `trust`. Domains that already own their own subcommands
 | `build <sub>`              | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay`                                                                                        |
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
-| `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                        |
-| Already-grouped top-level  | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`                                                           |
+| `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                                        |
+| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`                                  |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -1320,8 +1322,8 @@ running microVM.
 | `mvmctl template list`                 | List available templates (bundled plus cached remote)                                                                                                                     |
 | `mvmctl template search <query>`       | Search the remote registry for matching templates                                                                                                                         |
 | `mvmctl template info <name>`          | Show details for one bundled or remote template                                                                                                                           |
-| `mvmctl deploy <ir.json>`              | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd                           |
-| `mvmctl deploy --from-ir <path>`       | Read the Workload IR from a file instead of a positional path or stdin                                                                                                    |
+| `mvmctl deploy <ir.json> --boot-artifact <path>` | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd with `--mvmd-url` |
+| `mvmctl deploy --from-ir <path> --boot-artifact <path>` | Read the Workload IR from a file instead of a positional path or stdin; a boot artifact is still required |
 | `mvmctl deployments ls`                | Inventory of recorded local deployments (`--workload <ir-hash>` to filter, `--json` for machine output); unreadable records surface as named skips                        |
 | `mvmctl prepare`                       | Report whether a verified runtime pack is ready for instant launch                                                                                                        |
 | `mvmctl plugin list`                   | List the coding agents mvm can emit an integration for                                                                                                                    |

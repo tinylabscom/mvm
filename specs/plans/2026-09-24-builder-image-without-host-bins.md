@@ -3,10 +3,15 @@
 Backing: preview
 Validation: none
 
-**Status:** DRAFT. This is a design; nothing here is implemented. It was
-written against `origin/main` at `9ebb81b459` on 2026-09-24. Re-verify every
-file:line citation before starting a workstream, because the builder code
-moves quickly.
+**Status:** IN PROGRESS. W0–W6 and W9–W11 are implemented in `mvm`; W7 is
+the `mvm-images` side, and W8a, what is left of W8, and W12 remain. The
+cutover plan's W8 Waves 1+2 (#3774, 2026-09-27) removed every in-tree image
+build, the builder source fingerprint and the Stage 0 builder-image build,
+which took several W8 items with them; W8 below says which. The design was
+written against `origin/main` at `9ebb81b459` on 2026-09-24, so its
+file:line citations — and everything it says about fingerprint layers and
+the in-tree flake — describe the code before these changes; re-verify them
+before starting one that remains.
 
 **Related:** `specs/plans/2026-09-22-builder-image-source-freshness.md` (#3524,
 the loader-side freshness check this plan narrows),
@@ -584,12 +589,14 @@ kernel-pin bumps and image-extraction work, which leave this repository with W8.
 
 ## Migration and cache invalidation
 
-- `BUILDER_VM_CACHE_CONTRACT_VERSION` 4 → 5. Every existing
-  `builder-vm/<arch>/` cache (Stage 0, pair or fetched) is rebuilt or
-  refetched **once**, because the fingerprint shape changes and the new image
-  lacks nothing the new payload needs. Say so in the release notes. The shared
-  seed at `~/.mvm/cache/builder-vm` fails the contract check and is not copied
-  (`builder_vm_image.rs:185-225`).
+- `BUILDER_VM_CACHE_CONTRACT_VERSION` 4 → 5 when an ABI 1 image first enters
+  a cache. The fingerprint reason this bullet first gave is gone with the
+  fingerprint (#3774); the reason that stays is that an `mvmctl` older than
+  the payload must not boot an ABI 1 image from a cache it shares, because
+  the image has no init of its own. Every existing `builder-vm/<arch>/` cache
+  is refetched or rebuilt **once**. Say so in the release notes. The shared
+  seed at `~/.mvm/cache/builder-vm` fails the contract check and is not
+  copied.
 - `builder-vm/hvf/<key>/` entries become orphans. `mvmctl cache prune` learns to
   remove them. They are removed rather than migrated.
 - Persistent builders from an older CLI are stopped on first contact, under the
@@ -608,13 +615,13 @@ kernel-pin bumps and image-extraction work, which leave this repository with W8.
 2. `mvm-images`: stop consuming `mvm.lib.hostBinaries` and `MVM_HOST_BIN_DIR`,
    write the ABI marker, drop `build-host-binaries.sh` from the builder job,
    and publish an image set with `builder_boot_abi = 1`.
-3. `mvm`: pin that set (`update-image-pin.yml`), then remove layer 2, the in-tree
-   bake (if W8 has not already deleted the in-tree flake), the `hostBinaries`
-   export and its sync gate, and the job-side `mvm-bins` packing.
+3. `mvm`: pin that set (`update-image-pin.yml`), then remove the `hostBinaries`
+   export and its sync gate, the host-binary build for pair jobs, and the
+   job-side `mvm-bins` packing.
 
-W8 of `2026-09-24-image-cutover-and-deletion.md` may delete
-`nix/images/builder-vm` first. If so, the in-tree edits in step 3 are moot, and
-the Stage 0 flake reference follows W8's re-pointing.
+The cutover plan's W8 Waves 1+2 (#3774) landed first: it removed the in-tree
+builds and the builder source fingerprint, so step 3 no longer has a layer 2
+or an in-tree bake to remove.
 
 ## Workstreams
 
@@ -629,14 +636,26 @@ the Stage 0 flake reference follows W8's re-pointing.
         `HOST_BINARIES` is now `mvm-host-vm-init` and `mvm-builderd`;
         `mvm-egress-proxy` is retired. Delivery note:
         `specs/sprint/delivery/builder-key-baked-bins-only.md`.
-- [ ] **W1 — payload assembly.** In `mvm-build`, next to
+      - Superseded 2026-09-27: #3774 removed the builder source fingerprint,
+        layer 2 included, and `is_baked_into_rootfs` with it. What W0 kept
+        out of the key is still kept out: the pair key's host-binary term
+        (W10) folds the `mvm-build` package that builds the baked binaries,
+        and only while the target contract says the image needs them.
+- [x] **W1 — payload assembly.** In `mvm-build`, next to
       `rootfs_inject::build_newc_cpio`, add a deterministic payload builder
       that takes the extracted host-bin directory and returns bytes plus a
       digest. Use a builder struct, not positional arguments. Tests:
       byte-identical output across runs and input orders, the `MANIFEST`
       matches the bytes, a tampered input file is refused because extraction
       verification fails, and golden-digest stability.
-- [ ] **W2 — stage 1 in `mvm-host-vm-init`.** Detection, payload-digest check,
+      - Done: `mvm_build::builder_boot::payload` (`BuilderBootPayload::builder()`),
+        the payload digest is the SHA-256 of `MANIFEST`, so the guest can
+        recompute it from unpacked files; `host_binaries::extract::builder_boot_payload`
+        holds each member to the compiled-in digest. The payload manifest moved
+        from `mvm-cli` to `crates/mvm-build/src/host_payload_manifest.rs` so
+        `mvm-build` reads the one list; `BUILDER_HOST_BINARIES` is gone and the
+        sync gate's fourth mirror with it.
+- [x] **W2 — stage 1 in `mvm-host-vm-init`.** Detection, payload-digest check,
       root mount, ABI check, tmpfs copy, `pivot_to_root` reuse, and re-exec.
       Stage 2 tolerates pre-mounted pseudo-filesystems and resolves siblings
       from `/run/mvm/host-bins`. Tests: unit tests for cmdline parsing,
@@ -644,12 +663,32 @@ the Stage 0 flake reference follows W8's re-pointing.
       mismatch refusal; a Linux-gated test of the copy and pivot plan against a
       temp root. Run `just check-gated`, because this is `cfg(target_os =
       "linux")` code macOS cannot compile.
-- [ ] **W3 — one builder boot-contract cmdline.** Converge
+      - Done: `mvm-host-vm-init/stage1.rs` reuses `mount_early_filesystems`,
+        `mount_rootfs` (the image mounts at `/mnt/root`, not `/sysroot`) and
+        `pivot_to_root`; the ABI type is `mvm_core::image_set::BuilderBootAbi`
+        and the marker rules are `mvm_build::builder_boot::abi`. The copy and
+        the image checks run against temp roots on every host rather than
+        Linux only, because nothing in them needs Linux; the pivot's reach is
+        pinned by `PIVOT_MOVED_MOUNTS`. In-guest callers resolve builder
+        binaries through `builder_guest_paths::guest_host_binary`, which
+        prefers the payload copy: `mvm-builderd`'s before-build hook runner
+        and the persistent dispatch script used to name `/sbin` outright.
+- [x] **W3 — one builder boot-contract cmdline.** Converge
       `BUILDER_CMDLINE_TAIL`, `SYNTHESIZED_BUILDER_VM_CMDLINE`, the QEMU
       rewrite and the libkrun call sites on one function that emits
       `mvm.boot_payload=` and no `init=`. Tests: one table test over all four
       backends' console tokens.
-- [ ] **W4 — wire every backend.** HVF and Firecracker `builder_spec` and
+      - Done: `mvm_build::builder_boot::builder_boot_cmdline(console_base,
+        &BuilderBoot, runtime_overlay)`. `BuilderBoot` is `Payload { initramfs,
+        digest }` or `Baked`; a boot without a payload emits
+        `init=/sbin/mvm-host-vm-init` on every backend, so libkrun and QEMU no
+        longer chain through busybox `/init` (the payload `/init` bypasses it
+        either way). The image's `cmdline.txt` is no longer read for a builder
+        boot; `synthesized_builder_vm_cmdline()` writes it from the contract.
+        Every backend stages its boot through `stage_builder_boot` /
+        `stage_image_boot`. Table test:
+        `the_builder_boot_contract_composes_onto_every_shipped_driver`.
+- [x] **W4 — wire every backend.** HVF and Firecracker `builder_spec` and
       `persistent_builder_spec`; libkrun, including relaxing `validate_boot_config`
       with a test that `rootfs + initramfs` is accepted and `root_dir +
       initramfs` still refused; QEMU steady state. Stop packing job-side
@@ -665,28 +704,72 @@ the Stage 0 flake reference follows W8's re-pointing.
       Live witnesses: a builder job completes on HVF (Apple Silicon
       host) and Firecracker (the KVM box). libkrun and QEMU get one explicit
       `--builder` run each; record them in the delivery note.
-- [ ] **W5 — persistent-builder payload staleness.** Record the payload digest
+      - Done: `mvmctl` registers `host_binaries::extract::EmbeddedBootPayload`
+        as the payload source at startup, so every builder boot on every
+        backend (one-shot, shell job, persistent) carries the payload, legacy
+        ABI-0 images included. The VMM-level wiring and the read-only roots
+        landed with W3. Deviation: job-side `mvm-bins` packing stays. The
+        in-tree builder flake and a pair build of `builder-vm.default` still
+        read `MVM_HOST_BIN_DIR=/mvm-bins` inside a builder job, so removing it
+        now would break the nested builder-image build; it goes with W8, as
+        *Sequencing* step 3 already lists it.
+- [x] **W5 — persistent-builder payload staleness.** Record the payload digest
       in the persistent builder's state; on mismatch, stop and restart it.
       Tests: a mismatched digest triggers a restart and a matching one reuses.
-- [ ] **W6 — delete the HVF patcher.** Remove `hvf_builder_image.rs`'s bake,
+      - Done: `boot_payload_digest` in both session records;
+        `persistent_builder::session_payload_is_current` decides, and
+        `read_active_session` (every build's adoption path) and the CLI's
+        `start` stop a session booted with other binaries — or with none,
+        from an `mvmctl` that predates the payload — before starting afresh.
+- [x] **W6 — delete the HVF patcher.** Remove `hvf_builder_image.rs`'s bake,
       `builder_runner/inject.rs`, the `mvm-rootfs-patcher` bin and its
       `SEED_BINARIES` entry, and `hvf-rootfs-inject`. Teach `cache prune`
       about `builder-vm/hvf/`. Measure boot overhead (payload assembly plus
       guest stage 1) on HVF and Firecracker, and record it in the delivery note.
+      - Done: HVF and Firecracker resolve their image through one
+        `driver_builder_image::resolve_driver_builder_image`, which goes
+        through `ensure_builder_vm_image` — the freshness decision (cache
+        contract, source fingerprint, shared-cache seed, auto-bootstrap) the
+        libkrun and QEMU builders already took. The two in-house resolvers
+        used to check only that `vmlinux` and `rootfs.ext4` existed, so a
+        stale or contract-mismatched cache booted on HVF and Firecracker
+        while libkrun and QEMU refused it. `cache prune` removes
+        `builder-vm/hvf/`. Boot overhead was measured on HVF only (about 1 ms
+        of initramfs unpack and 5 ms of stage 1); Firecracker is still to
+        measure. See `specs/sprint/delivery/builder-boot-payload.md`.
 - [ ] **W7 — the `mvm-images` side** (a PR in that repository). Stop consuming
       `hostBinaries`/`MVM_HOST_BIN_DIR`, write `/etc/mvm/builder-boot-abi`,
       drop the builder job's host-binary build, drop `--impure` for the builder
       attribute, add `builder_boot_abi` to `assemble-release.py` and the
       manifest schema, and publish.
-- [ ] **W8 — `mvm` cut-over.** Pin the new set. Remove fingerprint layer 2
-      and the unembedded `BootstrapPreflight` path. Remove the in-tree bake
-      (unless already deleted by the cutover plan's W8),
-      `nix/lib/mvm-host-binaries.nix`, `xtask check-mvm-host-binaries-sync`
-      and Stage 0's `MVM_HOST_BIN_DIR` export. Replace the Stage 0
-      `/sbin/mvm-host-vm-init` check with the ABI-marker check. Move the cache
-      contract 4 → 5. Tests: update the fingerprint layer tests
-      (`builder_vm_bootstrap_tests.rs`) so a change to the embed table no
-      longer moves the key and every Nix input still does.
+- [ ] **W8a — refuse a local set without `builder_boot_abi`.** After
+      mvm-images#31 (the emitter writes the field) has landed, a local image
+      set that omits it is refused by name, with a message saying the
+      manifest predates the builder boot ABI and must be regenerated. One
+      condition in `validate_local` plus its test. Releases published before
+      the field existed keep reading as ABI 0.
+- [ ] **W8 — `mvm` cut-over.** What remains after #3774, which removed every
+      in-tree image build, the builder source fingerprint (layer 2 and the
+      unembedded `BootstrapPreflight` path included) and the Stage 0
+      builder-image build — so none of those is W8's any more, and the
+      fingerprint layer tests they needed are gone with them:
+      - [ ] Pin the first image set whose builder declares
+        `builder_boot_abi = 1`, and move the cache contract 4 → 5 in the same
+        change (see *Migration*).
+      - [ ] Remove `nix/lib/mvm-host-binaries.nix`, the `hostBinaries` export
+        and `xtask check-mvm-host-binaries-sync` once the paired builder no
+        longer reads them; W7 is what stops it.
+      - [ ] Stop exporting `MVM_HOST_BIN_DIR` to builder jobs: Stage 0's
+        (`stage0-init`), the pair build's (`image_source/build.rs`, which
+        stages host binaries for a contract with `needs_host_binaries`) and
+        the job-side `mvm-bins` packing (`runner.rs`, `hvf_persistent.rs`,
+        `libkrun_builder.rs`, `qemu_builder.rs`). All of them serve an image
+        that bakes the binaries; W4 kept them for that reason.
+      - [x] **Amend ADR-030 item 4.** Done 2026-09-27, after #3774: the rule
+        now names the selected `mvm-images` checkout rather than
+        `nix/images/builder-vm/`, says that without one a build uses the
+        signed set, and keeps the `source: fetched` rule. Recorded as a dated
+        amendment in the item itself.
 - [x] **W9 — `mvm-setpriv` leaf.** Move the binary into a package with a
       `libc`-only closure (pending the crate-count decision), vendoring
       `configure_close_fds`. Point `nix/packages/mvm-setpriv.nix` and
@@ -729,10 +812,23 @@ the Stage 0 flake reference follows W8's re-pointing.
       baking them. The extraction plan's open item "make cache keys include
       both repository commits" is the coarse key this replaces for the
       builder role; that plan was not edited here.
-- [ ] **W11 — ADR amendments** (ADR-004, ADR-030, ADR-018 cross-reference),
+- [x] **W11 — ADR amendments** (ADR-004, ADR-030, ADR-018 cross-reference),
       landed in the same PR as W8, with the text above. Update `CLAUDE.md`
       §"Builder backend selection", the contributor guide's builder section,
       and `specs/REFACTOR-STATUS.md`.
+      - Done ahead of W8, worded for the transition rather than the end
+        state: ADR-004 carries the payload decision and a versioned
+        *builder boot contract* section (where it lives, what ABI 0 and 1
+        mean, what every ABI promises the payload, what the host commits to),
+        says the cache key keeps the baked-binary term until the images move
+        to ABI 1, and corrects the backend paragraph (four backends,
+        Firecracker on Linux with KVM). ADR-030 item 4 gains the
+        never-a-published-artifact sentence; ADR-018's Context points at the
+        builder analogue.
+      - Updated 2026-09-27 for #3774: ADR-004's cache sentence now describes
+        the pair key's host-binary term rather than a builder source
+        fingerprint, and ADR-030 item 4 carries the amendment for the
+        in-tree flake's removal.
 - [ ] **W12 — measured acceptance.** On the Apple Silicon workstation and the
       KVM box: after a one-line `mvm-core` edit plus `just embed`, time
       `mvmctl machine run` end to end, before and after. Acceptance: no Stage 0
@@ -774,6 +870,22 @@ Taken on 2026-09-24.
 2. **Schema field.** The boot ABI gets its own `builder_boot_abi` field in the
    signed image-set `[compatibility]` section, so a Nix-only change can bump
    `builder_cache_contract` without claiming an ABI change.
+   - Landed on the `mvm` side in #3776, ahead of the payload because
+     mvm-images#31 landed early and broke every pair build with
+     `unknown field builder_boot_abi`: `ImageSetCompatibility::builder_boot_abi`
+     (`Option<BuilderBootAbi>`), `HostProtocolSupport::builder_boot_abi`,
+     refusal of an ABI outside the host's range at acquisition, and
+     `xtask repin-image-lock` copying the field into `images.lock`. #3776's
+     host range is `0..=0`; the payload branch makes it `0..=1` when a payload
+     source is registered and leaves `0..=0` without one. A
+     **release** set without the field means ABI 0 (published before it
+     existed). A **local** set without it also reads as ABI 0 for
+     now. `ImageSetCompatibility` denies unknown fields, so `mvm` has to know
+     the field before `mvm-images`' emitter can write it (mvm-images#31), and
+     refusing its absence before then would break every existing local set.
+     Once the emitter writes it, a local set without the field means a stale
+     emitter, and reading it as ABI 0 could take the baked-binaries path
+     against an image with none, so W8 refuses it by name.
 3. **Legacy ABI 0 support window.** Marker-less images stay accepted for one
    release cycle: until the `image-set` carrying `builder_boot_abi = 1` is the
    only pinned set and the W7 window of the cutover plan has closed.

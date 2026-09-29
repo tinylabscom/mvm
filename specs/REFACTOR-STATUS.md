@@ -72,9 +72,30 @@ Last updated: 2026-09-29
   - [ ] PS-16 Nix developer experience — #3725
   - [x] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
+    - [x] eight capability pages mapped in the guides index, with current limits and link validation
+    - [x] lineage recovery guide and documentation regression test; remaining pages still open
+    - [x] workload provenance guide and documentation regression test; remaining pages still open
+    - [x] durable agent-session guide and documentation regression test; remaining pages still open
+    - [ ] stale CLI deploy and durable-session status corrections implemented; workspace test validation pending
+    - [ ] client guides, authoring guides, and generated schema reference
   - [ ] PS-19 fewer feature flags — #3728
   - [x] PS-20 unreachable CLI surface and stale references — #3729
   - [ ] PS-21 CLI thin over `mvm-client` — #3730
+- [ ] **Builder image without baked host binaries.**
+      `specs/plans/2026-09-24-builder-image-without-host-bins.md`. Done: W0
+      (the key folds only baked binaries; superseded when #3774 removed the
+      builder source fingerprint), W1 (deterministic boot payload),
+      W2 (stage 1 in `mvm-host-vm-init`), W3 (one boot-contract cmdline), W4
+      (every backend boots the payload; libkrun and QEMU roots read-only at
+      the VMM), W5 (persistent-builder payload staleness), W6 (HVF patcher
+      deleted; HVF and Firecracker resolve through `ensure_builder_vm_image`),
+      W11 (ADR-004/030/018 amendments); `builder_boot_abi` in the signed
+      image-set compatibility section. W9 (`mvm-setpriv` leaf) and W10 (per-role pair key) are in #3741.
+      #3774 took W8's fingerprint, in-tree-bake and Stage 0 builder-build
+      items; ADR-030 item 4 is amended. Open: W7 (`mvm-images`), W8a, the
+      rest of W8 (pin the ABI 1 set, contract 4 → 5, drop `hostBinaries` and
+      `MVM_HOST_BIN_DIR`), W12 (measurement).
+
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by

@@ -619,8 +619,8 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     let ram = guest_ram.as_ptr();
 
     // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
-    // dev override wins, then the caller-supplied cmdline (the builder rootfs needs
-    // `init=/sbin/mvm-host-vm-init`, not the workload `init=/init`), then the
+    // dev override wins, then the caller-supplied cmdline (a builder boots the
+    // builder boot contract's own line, not the workload `init=/init`), then the
     // built-in default. The append hook lets a caller thread runtime-discovered
     // values (e.g. a dynamically bound egress target) on top without reproducing
     // the whole base.
