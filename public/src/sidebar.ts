@@ -111,6 +111,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "Machine use cases", slug: "guides/machine-use-cases" },
       { label: "Machine limitations", slug: "guides/machine-limitations" },
       { label: "Policy Profiles", slug: "guides/policy-profiles" },
+      { label: "Policy and Profiles (authored)", slug: "guides/policy-and-profiles" },
       { label: "Config & Secrets", slug: "guides/config-secrets" },
       { label: "Secrets and Credentials", slug: "guides/secrets-and-credentials" },
       { label: "Persistent Workspaces", slug: "guides/persistent-workspaces" },
@@ -208,6 +209,7 @@ export const sidebar: SidebarGroup[] = [
     items: [
       { label: "CLI Commands", slug: "reference/cli-commands" },
       { label: "Evidence archive format", slug: "reference/mvmev-format" },
+      { label: "Policy Schema", slug: "reference/policy-schema" },
       { label: "Programmatic Use", slug: "reference/programmatic-use" },
       { label: "Architecture", slug: "reference/architecture" },
       { label: "Isolation Tiers", slug: "reference/isolation-tiers" },

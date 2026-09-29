@@ -68,6 +68,20 @@ pub struct RunGrants {
 /// Precedence is per dimension: a `--cpu-limit` on the command line does not
 /// discard an egress allow-list the manifest declared.
 pub fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result<RunGrants> {
+    resolve_policy_run_grants(inputs, None)
+}
+
+/// Fold every grant surface, then apply an authored policy as the final
+/// narrowing boundary.
+///
+/// This is distinct from surface precedence: a grants file, manifest, or host
+/// default may supply a dimension the command line did not name, but none of
+/// those lower surfaces may reopen a destination the authored policy blocks
+/// or denies.
+pub fn resolve_policy_run_grants(
+    inputs: GrantInputs<'_>,
+    policy: Option<&crate::policy_profiles::PolicyBody>,
+) -> Result<RunGrants> {
     let cli = cli_layer(&inputs)?;
     let file = match inputs.grants_file {
         Some(path) => load_grants_file(path)?,
@@ -88,7 +102,10 @@ pub fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result<RunGrants> {
 
     let resolved = resolve_grants(&layers);
     let provenance = *resolved.provenance();
-    let plan_grants = resolved.into_plan_grants();
+    let mut plan_grants = resolved.into_plan_grants();
+    if let Some(policy) = policy {
+        narrow_egress_with_policy(&mut plan_grants, policy);
+    }
     if let Some(grants) = plan_grants.as_ref() {
         refuse_over_ceiling(grants, &provenance, inputs.config)?;
     }
@@ -111,6 +128,28 @@ pub fn resolve_run_grants(inputs: GrantInputs<'_>) -> Result<RunGrants> {
         network_policy,
         provenance,
     })
+}
+
+fn narrow_egress_with_policy(
+    grants: &mut Option<Grants>,
+    policy: &crate::policy_profiles::PolicyBody,
+) {
+    let network = &policy.network;
+    if network.block != Some(true) && network.deny.is_empty() {
+        return;
+    }
+    let grants = grants.get_or_insert_with(Grants::default);
+    let egress = grants.egress.get_or_insert_with(EgressGrant::default);
+    if network.block == Some(true) {
+        egress.allow.clear();
+        return;
+    }
+    egress.allow.retain(|entry| {
+        !network
+            .deny
+            .iter()
+            .any(|deny| crate::policy_profiles::merge::deny_covers(deny, &entry.host, entry.port))
+    });
 }
 
 /// Refuse a resolved grant this host's ceiling will not admit, naming the
@@ -317,6 +356,57 @@ mod tests {
             .expect("an allow-list resolves to rules");
         assert_eq!(rules, vec![HostPort::new("api.example.com", 443)]);
         assert!(!resolved.network_policy.is_unrestricted());
+    }
+
+    #[test]
+    fn authored_policy_narrows_egress_from_lower_grant_surfaces() {
+        let cfg = MvmConfig::default();
+        let manifest = Grants {
+            egress: Some(EgressGrant {
+                allow: vec![
+                    HostPort::new("allowed.test", 443),
+                    HostPort::new("denied.test", 443),
+                ],
+            }),
+            ..Default::default()
+        };
+        let mut policy = crate::policy_profiles::PolicyBody::default();
+        policy.network.deny = vec!["denied.test".to_string()];
+        let resolved = resolve_policy_run_grants(
+            GrantInputs {
+                manifest: Some(&manifest),
+                ..inputs(&cfg, &[])
+            },
+            Some(&policy),
+        )
+        .expect("resolves");
+        assert_eq!(
+            resolved.plan_grants.and_then(|grants| grants.egress),
+            Some(EgressGrant {
+                allow: vec![HostPort::new("allowed.test", 443)],
+            })
+        );
+
+        policy.network.block = Some(true);
+        let resolved = resolve_policy_run_grants(
+            GrantInputs {
+                manifest: Some(&manifest),
+                ..inputs(&cfg, &[])
+            },
+            Some(&policy),
+        )
+        .expect("resolves");
+        assert_eq!(
+            resolved.plan_grants.and_then(|grants| grants.egress),
+            Some(EgressGrant::default())
+        );
+        assert!(
+            resolved
+                .network_policy
+                .resolve_rules()
+                .expect("deny-all resolves")
+                .is_empty()
+        );
     }
 
     #[test]

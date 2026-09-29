@@ -206,6 +206,11 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "ManifestApproval::is_empty")]
     pub approval: ManifestApproval,
 
+    /// The authored policy this project's workload runs under: a profile and
+    /// extra groups (`[policy]`). A `--policy` flag replaces it.
+    #[serde(default, skip_serializing_if = "ManifestPolicy::is_empty")]
+    pub policy: ManifestPolicy,
+
     /// Human-readable data disk size; `"0"` means no data disk.
     #[serde(default = "default_data_disk")]
     pub data_disk: String,
@@ -735,6 +740,29 @@ impl ManifestGrants {
     }
 }
 
+/// The `[policy]` table: which authored policy profile the project's workload
+/// runs under, and extra groups on top of it. Names resolve in the user's
+/// policy directory and then among the built-ins; paths resolve against the
+/// manifest's directory. Resolution lives in `mvm_client::policy_profiles`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ManifestPolicy {
+    /// A profile name or path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Extra groups, by name or path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
+}
+
+impl ManifestPolicy {
+    /// Whether the table says nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.profile.is_none() && self.include.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ManifestDev {
@@ -1101,6 +1129,36 @@ impl PersistedManifest {
 
 #[cfg(test)]
 mod tests {
+    use super::ManifestPolicy;
+
+    #[test]
+    fn a_policy_table_names_a_profile_and_extra_groups() {
+        let manifest = Manifest::from_toml_str(
+            "flake = \".\"\n[policy]\nprofile = \"agent-apis\"\ninclude = [\"./extra.toml\"]\n",
+        )
+        .expect("parses");
+        assert_eq!(
+            manifest.policy,
+            ManifestPolicy {
+                profile: Some("agent-apis".into()),
+                include: vec!["./extra.toml".into()],
+            }
+        );
+        let again = Manifest::from_toml_str(&toml::to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(again.policy, manifest.policy);
+        assert!(
+            Manifest::from_toml_str("flake = \".\"\n")
+                .unwrap()
+                .policy
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_unknown_key_in_the_policy_table_is_refused() {
+        assert!(Manifest::from_toml_str("flake = \".\"\n[policy]\nprofiles = \"x\"\n").is_err());
+    }
+
     use super::*;
     use crate::util::test_env::TestEnv;
     use tempfile::TempDir;

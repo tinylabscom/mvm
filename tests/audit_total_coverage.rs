@@ -645,6 +645,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Sprint 52 W2 — bundles + trust store.
     ("bundle", AuditPosture::DelegatesToSub(BUNDLE_SUB)),
     ("trust", AuditPosture::DelegatesToSub(TRUST_SUB)),
+    // Authored workload policy: resolving, showing, validating, diffing and
+    // listing only read policy files. `resolve -o` writes the caller's own
+    // output file, not host state.
+    ("policy", AuditPosture::ReadOnly),
     (
         "agent-session",
         AuditPosture::DelegatesToSub(AGENT_SESSION_SUB),
