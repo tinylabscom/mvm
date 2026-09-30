@@ -1,7 +1,7 @@
 # Default-backend host-services broker witness
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status:** IN PROGRESS
 **Date:** 2026-08-28

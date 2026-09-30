@@ -1,7 +1,7 @@
 # Security lane red repair
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issues:** [#2982](https://github.com/tinylabscom/mvm/issues/2982),
 [#2986](https://github.com/tinylabscom/mvm/issues/2986)

@@ -1,7 +1,7 @@
 # Agent efficiency overhaul: how we work with Claude, Codex, and Kimi
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: check-all
 
 **Status:** AGREEMENTS LANDED — Phases 1–10 implemented on
 `chore/agent-efficiency-overhaul`. All AGENTS.md working agreements, the
