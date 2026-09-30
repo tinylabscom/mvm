@@ -854,6 +854,42 @@ change can merge.
 
 Contributions are welcome. The short version:
 
+### Issue-driven development
+
+GitHub issues are the only mutable work ledger. Before changing code, claim the
+issue, then generate a disposable briefing from its live state, explicitly
+linked ADRs/contracts, related pull requests, and Graft:
+
+```bash
+gh issue edit 3892 --add-assignee @me
+just maint::task-context 3892
+```
+
+Use the briefing to follow one route through the project:
+
+1. The issue owns the outcome, scope, dependencies, priority, and acceptance
+   evidence.
+2. Linked files under [`specs/adrs/`](specs/adrs/) and
+   [`specs/contracts/`](specs/contracts/) own durable decisions and interfaces.
+3. Graft locates the current implementation and its blast radius.
+4. The pull request records the change and validation and includes
+   `Closes #3892` (or `Refs #3892` for a partial slice).
+
+Do not recursively read `specs/` or create a sprint/progress document: that
+directory also contains frozen historical research and plans. The generated
+task briefing is terminal output, not another file to maintain. See the
+[`specs/` authority and lifecycle rules](specs/README.md) and the full
+[AI-assisted issue-to-PR workflow](public/src/content/docs/contributing/ai-coding-workflow.md).
+
+Open the PR only after the local checks below pass. Required GitHub checks and
+review remain the merge gate; use auto-merge/merge queue rather than bypassing
+them:
+
+```bash
+gh pr create --fill
+gh pr merge --auto --squash
+```
+
 ### Setup
 
 ```bash
