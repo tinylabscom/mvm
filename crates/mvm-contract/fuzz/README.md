@@ -1,8 +1,8 @@
 # mvm-contract fuzz targets
 
-This standalone fuzz crate hardens the network-flow wire contract shared by
-the mvm host and guest. It drives both individual frame decoding and sequences
-of frames through the state machine that enforces stream and session rules.
+This standalone fuzz crate hardens the network-flow and egress-policy contracts
+shared by the mvm host and guest. It covers frame decoding and session state as
+well as endpoint-route decisions and secret-placeholder request positions.
 
 ## Who uses it
 
@@ -20,6 +20,8 @@ The harnesses call the same `mvm-contract` code used at the host/guest boundary:
 - `fuzz_network_flow_state` interprets input as a sequence of operations and
   drives the session/stream state machine through ordering and lifecycle edge
   cases.
+- `fuzz_substitution_positions` exercises URL/header placeholder
+  classification plus Basic and percent encoding round trips.
 
 Random input is expected to be rejected frequently. A finding is a panic,
 unbounded behavior, or an invalid transition being accepted—not an ordinary
@@ -32,6 +34,7 @@ From this directory, run either target with nightly Rust and `cargo-fuzz`:
 ```bash
 cargo +nightly fuzz run fuzz_network_flow_decode
 cargo +nightly fuzz run fuzz_network_flow_state
+cargo +nightly fuzz run fuzz_substitution_positions
 ```
 
 A bounded smoke run can append `-- -max_total_time=300`. Keep useful regression

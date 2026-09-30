@@ -92,18 +92,21 @@ rules = [
 | Field | Meaning |
 | --- | --- |
 | `id` | Recorded on every decision the route makes. `[a-z0-9._-]`. |
-| `host` | An exact host, or a `*.suffix` wildcard over two or more labels. |
+| `host` | An exact host, or a `*.suffix` wildcard over two or more labels. An exact host is admitted at L4; a wildcard only narrows destinations admitted by another network grant. |
 | `port` | Default `443`. |
 | `rules` | `{ id?, method?, path, outcome }`, tried in order. `outcome` is `allow`, `deny` or `ask`. |
 | `otherwise` | What a request no rule matches gets. Default `deny`. |
 | `intercept` | Whether the host may terminate this destination's TLS to read requests. |
 
 A run reads the manifest `--manifest` points at, or the one in a local `--flake`
-directory, and admits each route host. An `--allow-endpoint` for a destination
-the manifest already routes is refused rather than merged, because adding an
-allow rule would widen what the project declared. Routes are not yet recorded
-on a persistent machine; `machine run --name`, `-d` and `machine create` refuse
-them.
+directory, and admits each exact route host. A wildcard route cannot safely be
+pre-resolved, so it applies only to matching hosts admitted by another network
+grant. An `--allow-endpoint` for a destination the manifest already routes is
+refused rather than merged, because adding an
+allow rule would widen what the project declared. Persistent `machine run
+--name`/`-d` and `machine create --manifest` validate and store routes in
+`MachineSpec`, include them in drift checks, reconstruct the same network policy
+on restart, and show them in `machine inspect`.
 
 Rules can only be enforced where the host reads the request. A destination a
 secret is bound to is terminated already. Any other destination is terminated

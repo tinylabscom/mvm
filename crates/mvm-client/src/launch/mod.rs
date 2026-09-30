@@ -481,6 +481,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         net: false,
         allow_host: vec![],
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: request.ports.clone(),
         cpus: request.cpus,

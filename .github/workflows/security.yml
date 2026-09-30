@@ -468,6 +468,13 @@ jobs:
         # builds a valid route.
         run: cargo fuzz run fuzz_egress_routes -- -max_total_time="$DURATION"
 
+      - name: Fuzz secret substitution positions (fuzz_substitution_positions)
+        working-directory: crates/mvm-contract
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_substitution_positions -- -max_total_time="$DURATION"
+
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:

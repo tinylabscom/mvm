@@ -5,13 +5,15 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
+use mvm_contract::policy::routes::EgressRoute;
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
 
 #[derive(Debug)]
 pub(super) struct MachineManifestSource {
     pub(super) workflow: ManifestMachineWorkflow,
     pub(super) base_dir: PathBuf,
+    pub(super) routes: Vec<EgressRoute>,
     /// The manifest's `[policy]` and `[network] allow_hosts`.
     pub(super) project: mvm_client::policy_profiles::ProjectPolicy,
 }
@@ -21,13 +23,7 @@ pub(super) fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifest
         .with_context(|| format!("resolving machine manifest {}", arg.display()))?;
     let manifest = Manifest::read_file(&manifest_path)
         .with_context(|| format!("reading machine manifest {}", manifest_path.display()))?;
-    if !manifest.network.routes.is_empty() {
-        bail!(
-            "{} declares [[network.routes]], which a persistent machine does not record yet; \
-             a restart would drop them. Run it transiently, or remove the routes",
-            manifest_path.display()
-        );
-    }
+    let routes = manifest.network.routes.clone();
     let workflow = manifest.machine_workflow().ok_or_else(|| {
         anyhow!(
             "machine create --manifest requires an image-backed manifest; flake-backed manifests belong to `mvmctl machine run --flake`"
@@ -42,6 +38,7 @@ pub(super) fn load_machine_manifest_source(arg: &Path) -> Result<MachineManifest
     Ok(MachineManifestSource {
         workflow,
         base_dir,
+        routes,
         project,
     })
 }

@@ -96,6 +96,10 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
         net: args.create_flags.net,
         allow_host: &args.create_flags.allow_host,
         peer: &args.create_flags.peer,
+        routes: manifest_source
+            .as_ref()
+            .map(|source| source.routes.as_slice())
+            .unwrap_or_default(),
         gpu: args.create_flags.gpu,
         gpu_device: args.create_flags.gpu_device,
         ai: None,

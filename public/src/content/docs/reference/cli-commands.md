@@ -269,6 +269,7 @@ one. Keyless (`<file>.sigstore.json`) signatures are produced in CI by
 | `mvmctl secret put <name> --value <value>`                | Store or replace a local secret from an inline value. Avoid in interactive shells because the value may be saved in shell history |
 | `mvmctl secret set <name> --provider <provider>`          | Store a secret and bind it to a catalogued provider's destinations and auth type                                                  |
 | `mvmctl secret set <name> --host <host> --type <auth>`    | Store a secret and bind it to explicit destinations. Repeat `--host`; `*.` subdomain wildcards supported                          |
+| `mvmctl secret set <name> ... --inject <mode>`            | Restrict substitution to `header` (default), `query_param`, `url_path`, or `basic_auth`                                            |
 | `mvmctl secret providers`                                 | List the built-in service providers `--provider` accepts                                                                          |
 | `mvmctl secret providers --search <query>`                | Filter providers by name, description, or tag                                                                                     |
 | `mvmctl secret get <name>`                                | Verify that a local secret exists without printing the value                                                                      |
@@ -283,6 +284,13 @@ mistyped host does not fail loudly — it withholds the credential, surfacing as
 unrelated upstream auth error. `--provider` and `--host`/`--type` are mutually
 exclusive, and an unrecognised provider name is refused rather than falling back
 to a default.
+
+`--inject` is part of the durable binding. `header` works with every auth type;
+`query_param` and `url_path` work with bearer and basic credentials; and
+`basic_auth` requires `--type basic`. The host refuses a placeholder found in
+any position other than the one the binding declares. URL values are
+percent-encoded and Basic credentials are decoded, substituted, and re-encoded
+without exposing the raw secret to the guest.
 
 The catalog is expanded once, when `secret set` runs, and the resulting literal
 hosts are what get stored and enforced; it is never consulted again for that
@@ -472,7 +480,7 @@ into the image; Nix-built production guests may also use
 | `mvmctl run --mount HOST:GUEST:ro -- <cmd>`                         | Attach a read-only host directory, materialized into an ext4 image at boot (a snapshot, not a live share)                                                                                                                                                                                                                                                                             |
 | `mvmctl run --output HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]] -- <cmd>` | Give the workload a fresh writable disk at `/GUEST`; after it exits, copy its regular files and directories into `HOST_DIR` (absent or empty) under a byte bound (default `64M`) and an entry bound (default `10000`), refusing the whole collection past either. Repeatable; also on `machine run` (foreground only); disabled by `--profile restrictive`                            |
 | `mvmctl run --env KEY=VAL -- <cmd>`                                 | Inject an explicit environment variable. Repeatable; disabled by `--profile restrictive`                                                                                                                                                                                                                                                                                              |
-| `mvmctl run --allow-endpoint "GET https://host/path/**" -- <cmd>`   | Admit a host and allow only the listed method and path glob there; every other request to it is refused. Repeatable; flags for one host form one route. Transient runs only                                                                                                                                                                                                           |
+| `mvmctl run --allow-endpoint "GET https://host/path/**" -- <cmd>`   | Admit a host and allow only the listed method and path glob there; every other request to it is refused. Repeatable; flags for one host form one route. Named and detached `machine run` invocations persist validated routes                                                                                                                                                          |
 | `mvmctl run --allow-env NAME --env NAME=VAL -- <cmd>`               | Re-admit one denied variable (loader, shell, interpreter, or password-manager session) by exact name; patterns are refused. Without it, a denied `--env` or launch-plan variable refuses the run                                                                                                                                                                                      |
 | `mvmctl run --secret <name>[:<host>,...] -- <cmd>`                  | Bind a stored secret. The guest gets an opaque placeholder under the provider's variable (`ANTHROPIC_API_KEY`, …) and the host substitutes the real value into requests to the bound destinations. Hosts narrow the binding, never widen it. Repeatable; refused before boot                                                                                                          |
 | `mvmctl run --cpus <n> --memory <size> -- <cmd>`                    | Resize the transient VM                                                                                                                                                                                                                                                                                                                                                               |

@@ -1474,6 +1474,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.example.com".into()],
                     sigv4: None,
+                    inject: Default::default(),
                     provider: Some("catalog-provider".into()),
                     approve: Default::default(),
                     oauth: None,

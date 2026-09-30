@@ -117,6 +117,10 @@ pub(in crate::commands) enum SecretAction {
         /// unless `--provider` supplies it.
         #[arg(long = "type", value_enum, required_unless_present = "provider")]
         auth_type: Option<AuthTypeArg>,
+        /// Where the guest places this secret's opaque placeholder. The host
+        /// substitutes only in that position and refuses it everywhere else.
+        #[arg(long, value_enum, default_value = "header")]
+        inject: InjectionModeArg,
         /// AWS access-key id (e.g. `AKIA…`). Required with `--type sigv4`,
         /// rejected otherwise. Public (it pairs with the secret-access-key
         /// value, which is the stored secret) — not the signing key.
@@ -183,6 +187,27 @@ pub(in crate::commands) enum AuthTypeArg {
     Basic,
 }
 
+/// Clap mirror of [`mvm_contract::ir::InjectionMode`].
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub(in crate::commands) enum InjectionModeArg {
+    Header,
+    QueryParam,
+    UrlPath,
+    BasicAuth,
+}
+
+impl From<InjectionModeArg> for mvm_contract::ir::InjectionMode {
+    fn from(value: InjectionModeArg) -> Self {
+        match value {
+            InjectionModeArg::Header => Self::Header,
+            InjectionModeArg::QueryParam => Self::QueryParam,
+            InjectionModeArg::UrlPath => Self::UrlPath,
+            InjectionModeArg::BasicAuth => Self::BasicAuth,
+        }
+    }
+}
+
 impl From<AuthTypeArg> for AuthType {
     fn from(a: AuthTypeArg) -> Self {
         match a {
@@ -225,6 +250,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
             provider,
             hosts,
             auth_type,
+            inject,
             aws_access_key_id,
             region,
             service: aws_service,
@@ -240,6 +266,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
                 provider,
                 hosts,
                 auth_type: auth_type.map(Into::into),
+                inject: inject.into(),
                 aws_access_key_id,
                 region,
                 service: aws_service,
@@ -285,6 +312,7 @@ struct SetArgs {
     provider: Option<String>,
     hosts: Vec<String>,
     auth_type: Option<AuthType>,
+    inject: mvm_contract::ir::InjectionMode,
     aws_access_key_id: Option<String>,
     region: Option<String>,
     service: Option<String>,
@@ -317,6 +345,7 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         provider,
         hosts,
         auth_type,
+        inject,
         aws_access_key_id,
         region,
         service: aws_service,
@@ -333,6 +362,13 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         region,
         aws_service,
     })?;
+    if !inject.admits(resolved.auth_type) {
+        anyhow::bail!(
+            "--inject {} is incompatible with --type {}; signing credentials stay in headers, and basic_auth requires type basic",
+            inject.label(),
+            auth_type_label(resolved.auth_type)
+        );
+    }
     let input = value.resolve(&name)?;
     service.put(&tenant, &name, input)?;
     // Binding after value: the service refuses to bind a secret with no
@@ -344,6 +380,7 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
             auth_type: resolved.auth_type,
             allowed_hosts: resolved.allowed_hosts,
             sigv4: resolved.sigv4,
+            inject,
             provider: resolved.provider,
             approve,
             oauth: None,
@@ -554,6 +591,9 @@ fn ls_line(name: &str, binding: Option<&SecretBindingMeta>) -> String {
                 auth_type_label(b.auth_type),
                 b.allowed_hosts.join(",")
             );
+            if !b.inject.is_header() {
+                line.push_str(&format!("\tinject={}", b.inject.label()));
+            }
             // SigV4 scope is non-secret operator metadata. access_key_id is
             // identifying but public (it pairs with the secret-access-key, which
             // is never shown); region/service name the credential scope.
@@ -738,6 +778,7 @@ mod tests {
                 provider: None,
                 hosts: hosts.iter().map(|h| h.to_string()).collect(),
                 auth_type: Some(auth_type),
+                inject: Default::default(),
                 aws_access_key_id: None,
                 region: None,
                 service: None,
@@ -759,6 +800,7 @@ mod tests {
                 provider: None,
                 hosts: vec!["api.github.com".into()],
                 auth_type: Some(AuthType::Bearer),
+                inject: Default::default(),
                 aws_access_key_id: None,
                 region: None,
                 service: None,
@@ -778,6 +820,60 @@ mod tests {
         };
         assert_eq!(approve("plain"), SecretApproval::Never);
         assert_eq!(approve("gated"), SecretApproval::Ask);
+    }
+
+    #[test]
+    fn set_records_non_header_injection_mode() {
+        let f = fixture();
+        cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: "query-key".into(),
+                provider: None,
+                hosts: vec!["api.example.com".into()],
+                auth_type: Some(AuthType::Bearer),
+                inject: mvm_contract::ir::InjectionMode::QueryParam,
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                approve: SecretApproval::Never,
+                value: inline("secret-value".into()),
+            },
+        )
+        .unwrap();
+        let binding = f
+            .service
+            .metadata("local", "query-key")
+            .unwrap()
+            .and_then(|metadata| metadata.binding)
+            .expect("binding recorded");
+        assert_eq!(binding.inject, mvm_contract::ir::InjectionMode::QueryParam);
+        assert!(ls_line("query-key", Some(&binding)).contains("inject=query_param"));
+    }
+
+    #[test]
+    fn set_refuses_incompatible_injection_mode_before_storing_value() {
+        let f = fixture();
+        let error = cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: "bad-signer".into(),
+                provider: None,
+                hosts: vec!["api.example.com".into()],
+                auth_type: Some(AuthType::Hmac),
+                inject: mvm_contract::ir::InjectionMode::UrlPath,
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                approve: SecretApproval::Never,
+                value: inline("secret-value".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("incompatible"));
+        assert!(f.service.metadata("local", "bad-signer").unwrap().is_none());
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -1001,6 +1097,20 @@ mod tests {
             ])
             .is_ok()
         );
+        assert!(
+            Probe::try_parse_from([
+                "probe",
+                "set",
+                "k",
+                "--host",
+                "h.example",
+                "--type",
+                "bearer",
+                "--inject",
+                "query_param",
+            ])
+            .is_ok()
+        );
     }
 
     /// The stored binding carries literal hosts, not the provider name. This is
@@ -1017,6 +1127,7 @@ mod tests {
                 provider: Some("openai".into()),
                 hosts: vec![],
                 auth_type: None,
+                inject: Default::default(),
                 aws_access_key_id: None,
                 region: None,
                 service: None,
@@ -1108,6 +1219,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into()],
             sigv4: None,
+            inject: Default::default(),
             provider: Some("openai".into()),
             approve: Default::default(),
             oauth: None,
@@ -1134,6 +1246,7 @@ mod tests {
                 provider: None,
                 hosts: vec!["s3.us-east-1.amazonaws.com".into()],
                 auth_type: Some(AuthType::Sigv4),
+                inject: Default::default(),
                 aws_access_key_id: Some("AKIAIOSFODNN7EXAMPLE".into()),
                 region: Some("us-east-1".into()),
                 service: Some("s3".into()),
@@ -1213,6 +1326,7 @@ mod tests {
                 region: "us-east-1".into(),
                 service: "s3".into(),
             }),
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
             oauth: None,
@@ -1233,6 +1347,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into(), "*.openai.com".into()],
             sigv4: None,
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
             oauth: None,
