@@ -155,6 +155,37 @@ impl ImageSetFixture {
         self
     }
 
+    /// Append one more artifact to an existing `build_mode: dev` member for
+    /// `role`/`target` (the dev rootfs's meta sidecar).
+    #[must_use]
+    pub fn publish_dev_extra(
+        mut self,
+        role: ImageSetRole,
+        target: MemberTarget,
+        name: &str,
+        bytes: Vec<u8>,
+    ) -> Self {
+        let artifact = MemberArtifact {
+            name: ArtifactName::new(name).unwrap(),
+            format: ArtifactFormat::TarGz,
+            sha256: Sha256Hex::from_bytes(&bytes),
+            size: u64::try_from(bytes.len()).unwrap(),
+        };
+        let index = self
+            .manifest
+            .members
+            .iter()
+            .position(|member| {
+                member.build_mode == Some(mvm_core::image_set::MemberBuildMode::Dev)
+                    && member.role == role
+                    && member.target == target
+            })
+            .expect("publish_dev_extra follows a publish_dev of the same dev member");
+        self.manifest.members[index].artifacts.push(artifact);
+        self.served.insert(name.to_string(), bytes);
+        self
+    }
+
     /// Stamp `source_fingerprint` on every SDK sidecar member for `arch`
     /// (None clears it), for the fetch-when-unchanged tests.
     #[must_use]
