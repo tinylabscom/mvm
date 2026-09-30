@@ -79,6 +79,23 @@ pinned and re-verified themselves.
 
 ## Staging the lab
 
+For the repeatable disposable-cloud path, the following command creates an
+Intel `c3-standard-4` Spot VM with nested KVM, uploads the current checkout,
+stages and runs this scenario, downloads an evidence bundle under `/tmp`, and
+deletes the outer VM even when the witness fails:
+
+```sh
+just lab::cve-3655-gcp
+```
+
+It uses the active `gcloud` account and project. `--project`, `--zone`,
+`--machine-type`, `--evidence-dir`, `--dry-run`, and the diagnostic-only
+`--keep-instance` override are available after the recipe name. Cloud
+credentials never enter the repository. A kept instance remains billable;
+ordinary runs always delete it.
+
+For a manually supplied KVM host, stage the artifacts directly:
+
 ```sh
 # Fetches the pinned exploit source, verifies its tarball digest, and builds
 # the guest-delivered artifact. Then fetches the target kernel's linux-image
