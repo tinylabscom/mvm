@@ -269,7 +269,14 @@ fn run_stage0_qemu(
     let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
     cmd.arg(STAGE0_TIMEOUT_SECS.to_string()).arg(&qemu_bin);
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
-    cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    cmd.args([
+        "-nic",
+        "none",
+        "-m",
+        &mem_arg,
+        "-smp",
+        &QEMU_BUILD_VCPUS.to_string(),
+    ]);
     if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {
         cmd.args(["-machine", machine]);
     }
@@ -1044,7 +1051,14 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
     let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
     cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
-    cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    cmd.args([
+        "-nic",
+        "none",
+        "-m",
+        &mem_arg,
+        "-smp",
+        &QEMU_BUILD_VCPUS.to_string(),
+    ]);
     if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {
         cmd.args(["-machine", machine]);
     }
@@ -1321,7 +1335,14 @@ fn run_build_qemu(
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
     let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
     cmd.arg(timeout_secs.to_string()).arg(&qemu_bin);
-    cmd.args(["-m", &mem_arg, "-smp", &QEMU_BUILD_VCPUS.to_string()]);
+    cmd.args([
+        "-nic",
+        "none",
+        "-m",
+        &mem_arg,
+        "-smp",
+        &QEMU_BUILD_VCPUS.to_string(),
+    ]);
     if let Some(machine) = qemu_machine_for_arch(std::env::consts::ARCH) {
         cmd.args(["-machine", machine]);
     }

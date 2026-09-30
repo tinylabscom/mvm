@@ -70,6 +70,7 @@ const NIC_GUARDED_PATHS: &[&str] = &[
     "crates/mvm-backends/src/driver/hvf_restore.rs",
     "crates/mvm-backends/src/driver/libkrun.rs",
     "crates/mvm-backends/src/driver/qemu.rs",
+    "crates/mvm-backends/src/driver/qemu_process.rs",
     "crates/mvm-runtime/src/backend.rs",
     "crates/mvm-runtime/src/apple_container_backend.rs",
     "crates/mvm-runtime/src/workload_runner",
@@ -142,13 +143,7 @@ const BUILDER_SOCKET_EXEMPTIONS: &[(&str, &str)] = &[(
 /// QEMU takes its devices as string arguments, which `production_code`
 /// blanks, so its launch code is read with only comments removed.
 const QEMU_BUILDER_RS: &str = "crates/mvm-build/src/qemu_builder.rs";
-const QEMU_NIC_ARGS: &[&str] = &[
-    "\"-netdev\"",
-    "\"-nic\"",
-    "\"-net\"",
-    "virtio-net",
-    "user,id=",
-];
+const QEMU_NIC_ARGS: &[&str] = &["\"-netdev\"", "\"-net\"", "virtio-net", "user,id="];
 
 const SOCKET_TOKENS: &[&str] = &[
     "TcpStream::connect(",
@@ -654,6 +649,7 @@ fn check_builder_egress(workspace: &Path) -> Result<()> {
             .any(|(path, _)| rel == path)
     });
     violations.extend(builder_socket_violations(&sources));
+    violations.extend(builder_tap_violations(&sources));
 
     for rel in BUILDER_BINARY_MANIFESTS {
         let raw = read(workspace, rel)?;
@@ -706,6 +702,14 @@ fn builder_socket_violations(sources: &[(String, String)]) -> Vec<String> {
     violations
 }
 
+fn builder_tap_violations(sources: &[(String, String)]) -> Vec<String> {
+    sources
+        .iter()
+        .filter(|(_, code)| code.contains("setup_tap("))
+        .map(|(rel, _)| format!("{rel}: builder VM TAP setup bypasses the vsock-only egress path"))
+        .collect()
+}
+
 fn retired_builder_binary_violations(rel: &str, raw: &str) -> Vec<String> {
     RETIRED_BUILDER_BINARIES
         .iter()
@@ -730,7 +734,7 @@ fn qemu_nic_violations(rel: &str, raw: &str) -> Vec<String> {
         .filter(|line| !line.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
-    QEMU_NIC_ARGS
+    let mut violations: Vec<String> = QEMU_NIC_ARGS
         .iter()
         .filter(|arg| code.contains(*arg))
         .map(|arg| {
@@ -739,7 +743,18 @@ fn qemu_nic_violations(rel: &str, raw: &str) -> Vec<String> {
                  vsock device and the host endpoint behind it."
             )
         })
-        .collect()
+        .collect();
+    let launches = code.matches("helper_command(\"timeout\")").count();
+    let disabled = Regex::new(r#"cmd\.args\(\[\s*"-nic",\s*"none",\s*"-m""#)
+        .expect("static QEMU NIC-disable regex")
+        .find_iter(&code)
+        .count();
+    if launches != disabled || code.matches("\"-nic\"").count() != disabled {
+        violations.push(format!(
+            "{rel}: every QEMU launch must pass exactly `-nic none` to disable its implicit user-network NIC (launches={launches}, disabled={disabled})"
+        ));
+    }
+    violations
 }
 
 /// Read every non-test Rust source under each entry, verbatim.
@@ -1024,11 +1039,23 @@ fn probe() {
 
     #[test]
     fn a_qemu_nic_argument_is_named_and_a_comment_or_test_is_not() {
-        let clean = "// no virtio-net here\nfn launch() { cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }\n\
+        let clean = "// no virtio-net here\nfn launch() { let mut cmd = helper_command(\"timeout\"); cmd.args([\"-nic\", \"none\", \"-m\"]); cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }\n\
                      #[cfg(test)]\nmod tests { fn t() { assert!(!a.contains(\"-netdev\")); } }\n";
         assert!(qemu_nic_violations(QEMU_BUILDER_RS, clean).is_empty());
+        let implicit_nic = "fn launch() { let mut cmd = helper_command(\"timeout\"); cmd.arg(\"-device\").arg(\"vhost-vsock-pci\"); }";
+        assert!(!qemu_nic_violations(QEMU_BUILDER_RS, implicit_nic).is_empty());
         let nic = "fn launch() { cmd.args([\"-netdev\", \"user,id=n0\"]); }";
-        assert_eq!(qemu_nic_violations(QEMU_BUILDER_RS, nic).len(), 2);
+        assert!(!qemu_nic_violations(QEMU_BUILDER_RS, nic).is_empty());
+        let unsafe_nic = "fn launch() { let mut cmd = helper_command(\"timeout\"); cmd.args([\"-nic\", \"user\", \"-m\"]); }";
+        assert!(!qemu_nic_violations(QEMU_BUILDER_RS, unsafe_nic).is_empty());
+    }
+
+    #[test]
+    fn builder_tap_setup_is_rejected() {
+        let source = "fn boot(env: &dyn BuildEnvironment) { env.setup_tap(net, bridge); }";
+        let sources = [("builder.rs".to_string(), source.to_string())];
+        assert_eq!(builder_tap_violations(&sources).len(), 1);
+        assert!(builder_tap_violations(&[("builder.rs".into(), "fn boot() {}".into())]).is_empty());
     }
 
     #[test]

@@ -3,7 +3,6 @@ pub mod app_deps_gate;
 /// Compiled distribution channel and the default build-vs-download contract
 /// shared by every launch-critical artifact resolver.
 pub mod artifact_acquisition;
-pub mod artifacts;
 pub mod backend;
 /// Production admission gate over the base-image sidecar pair: missing
 /// scan, foreign shape, digest mismatch, or a high/critical finding
@@ -73,7 +72,6 @@ pub mod egress_readiness;
 /// it.
 pub mod embed_toolchain;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
-pub mod firecracker;
 pub mod guest_elf;
 /// Which libc a materialized guest rootfs carries, observed while the tree is
 /// still a directory the host can read.

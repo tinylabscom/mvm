@@ -42,7 +42,7 @@ fn other_arch(arch: &str) -> &'static str {
     }
 }
 
-/// A release as the boot image workflow publishes it: four assets, and a
+/// A release as the boot image workflow publishes it: five assets, and a
 /// checksum manifest whose signature verification either yielded pins or
 /// refused.
 struct FakeRelease {
@@ -72,6 +72,11 @@ impl FakeRelease {
             fetched: RefCell::new(Vec::new()),
         };
         release.publish(&names.kernel, kernel);
+        release.publish(
+            &names.kernel_config,
+            b"# CONFIG_NETDEVICES is not set\nCONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n"
+                .to_vec(),
+        );
         release.publish(&names.rootfs, rootfs);
         release.publish(&names.cmdline, cmdline);
         let manifest = release.manifest_json();
@@ -102,11 +107,13 @@ impl FakeRelease {
             "name": "mvm-builder-vm",
             "system": format!("{}-linux", self.arch),
             "vmlinux": pin(&names.kernel),
+            "kernel_config": pin(&names.kernel_config),
             "rootfs_ext4": pin(&names.rootfs),
             "cmdline": "console=hvc0",
-            "cache_contract_version": 4,
+            "cache_contract_version": mvm_build::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
             "runtime_overlay_ready": true,
             "vsock_egress_ready": true,
+            "no_network_devices_ready": true,
         })
     }
 

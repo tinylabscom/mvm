@@ -29,6 +29,7 @@ MANIFEST="$("$SCRIPT_DIR/locked-image-tag.sh" image_set manifest_asset)"
 MANIFEST_SHA256="$("$SCRIPT_DIR/locked-image-tag.sh" image_set manifest_sha256)"
 WORKFLOW="$("$SCRIPT_DIR/locked-image-tag.sh" image_set workflow)"
 TAG_REF="$("$SCRIPT_DIR/locked-image-tag.sh" image_set tag_ref)"
+BUILDER_CACHE_CONTRACT="$("$SCRIPT_DIR/locked-image-tag.sh" compatibility builder_cache_contract)"
 
 echo "=== Downloading qemu-wasm-smoke-pack ==="
 echo "Output directory: $OUTPUT_DIR"
@@ -74,10 +75,10 @@ cosign verify-blob \
   "$DOWNLOAD_DIR/$MANIFEST"
 
 # Compatibility is established before the member is requested.
-jq -e '
+jq -e --argjson contract "$BUILDER_CACHE_CONTRACT" '
   .compatibility.guest_agent_protocol.min <= 2 and
   .compatibility.guest_agent_protocol.max >= 2 and
-  .compatibility.builder_cache_contract == 4
+  .compatibility.builder_cache_contract == $contract
 ' "$DOWNLOAD_DIR/$MANIFEST" >/dev/null
 
 echo "Downloading qemu-wasm-smoke-pack from $TAG..."

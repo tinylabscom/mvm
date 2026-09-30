@@ -20,6 +20,49 @@ struct BuilderVmCacheManifest {
     runtime_overlay_ready: bool,
     #[serde(default)]
     vsock_egress_ready: bool,
+    #[serde(default)]
+    no_network_devices_ready: bool,
+}
+
+/// Validate the resolved kernel configuration carried with a builder image.
+/// A configuration is only trusted when its bytes are part of the same
+/// verified image set or locally built image output as the kernel.
+pub fn validate_builder_vm_kernel_config(config: &str) -> Result<(), BuilderVmError> {
+    if !config
+        .lines()
+        .any(|line| line == "# CONFIG_NETDEVICES is not set")
+    {
+        return Err(BuilderVmError::ExtractionFailed(
+            "builder kernel enables or does not explicitly disable network devices".into(),
+        ));
+    }
+    for symbol in [
+        "NETDEVICES",
+        "VIRTIO_NET",
+        "TUN",
+        "VETH",
+        "BRIDGE",
+        "MACVLAN",
+    ] {
+        if config.lines().any(|line| {
+            line == format!("CONFIG_{symbol}=y") || line == format!("CONFIG_{symbol}=m")
+        }) {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "builder kernel enables forbidden CONFIG_{symbol}"
+            )));
+        }
+    }
+    for symbol in ["VSOCKETS", "VIRTIO_VSOCKETS"] {
+        if !config
+            .lines()
+            .any(|line| line == format!("CONFIG_{symbol}=y"))
+        {
+            return Err(BuilderVmError::ExtractionFailed(format!(
+                "builder kernel lacks required CONFIG_{symbol}=y"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn append_cmdline_token(base: &str, token: &str) -> String {
@@ -83,17 +126,30 @@ fn validate_cache(arch_dir: &Path) -> Result<String, BuilderVmError> {
         &crate::builder_vm::builder_hostepoch_cmdline_token(),
     );
     let manifest = read_manifest(&arch_dir.join("manifest.json"), arch_dir)?;
+    let kernel_config =
+        std::fs::read_to_string(arch_dir.join("kernel.config")).map_err(|error| {
+            BuilderVmError::ExtractionFailed(format!(
+                "builder VM cache at {} has no readable kernel.config: {error}",
+                arch_dir.display()
+            ))
+        })?;
+    validate_builder_vm_kernel_config(&kernel_config)?;
     if manifest.cache_contract_version != BUILDER_VM_CACHE_CONTRACT_VERSION
         || !manifest.runtime_overlay_ready
         || !manifest.vsock_egress_ready
+        || !manifest.no_network_devices_ready
     {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version={BUILDER_VM_CACHE_CONTRACT_VERSION}`, `runtime_overlay_ready=true`, and `vsock_egress_ready=true`. Delete {} and re-run `mvmctl bootstrap` to re-bootstrap a current vsock-only builder image.",
-            arch_dir.display(),
+            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version={BUILDER_VM_CACHE_CONTRACT_VERSION}`, `runtime_overlay_ready=true`, `vsock_egress_ready=true`, and `no_network_devices_ready=true`. Re-bootstrap from a current no-NIC image set.",
             arch_dir.display(),
         )));
     }
     Ok(cmdline)
+}
+
+/// Check a cached builder image before it can be reused by bootstrap code.
+pub fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<(), BuilderVmError> {
+    validate_cache(arch_dir).map(|_| ())
 }
 
 fn load_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, BuilderVmError> {
@@ -487,6 +543,11 @@ mod tests {
     fn write_test_cache(dir: &Path) {
         std::fs::create_dir_all(dir).expect("create cache");
         std::fs::write(dir.join("vmlinux"), b"kernel").expect("write kernel");
+        std::fs::write(
+            dir.join("kernel.config"),
+            b"# CONFIG_NETDEVICES is not set\nCONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n",
+        )
+        .expect("write kernel config");
         std::fs::write(dir.join("rootfs.ext4"), b"rootfs").expect("write rootfs");
         std::fs::write(
             dir.join("cmdline.txt"),
@@ -496,10 +557,31 @@ mod tests {
         std::fs::write(
             dir.join("manifest.json"),
             format!(
-                "{{\"cache_contract_version\":{BUILDER_VM_CACHE_CONTRACT_VERSION},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}"
+                "{{\"cache_contract_version\":{BUILDER_VM_CACHE_CONTRACT_VERSION},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true,\"no_network_devices_ready\":true}}"
             ),
         )
         .expect("write manifest");
+    }
+
+    #[test]
+    fn builder_kernel_config_rejects_tun_and_missing_vsock() {
+        let valid = "# CONFIG_NETDEVICES is not set\nCONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n";
+        validate_builder_vm_kernel_config(valid).expect("NIC-less vsock kernel");
+        assert!(validate_builder_vm_kernel_config(&format!("{valid}CONFIG_TUN=y\n")).is_err());
+        assert!(validate_builder_vm_kernel_config("# CONFIG_NETDEVICES is not set\n").is_err());
+    }
+
+    #[test]
+    fn a_legacy_builder_cache_cannot_boot_without_a_validated_config() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache(cache.path());
+        std::fs::remove_file(cache.path().join("kernel.config")).expect("remove config");
+        assert!(load_from_cache(cache.path()).is_err());
+
+        write_test_cache(cache.path());
+        std::fs::write(cache.path().join("kernel.config"), b"CONFIG_TUN=y\n")
+            .expect("write unsafe config");
+        assert!(load_from_cache(cache.path()).is_err());
     }
 
     #[test]

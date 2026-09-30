@@ -210,6 +210,12 @@ pub fn resolve_bootstrap_kernel(
 
 /// Compatibility range compiled into the host and builder cache implementation.
 pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocolSupport {
+    // Unit tests exercise the locked set as an mvmctl with its boot payload
+    // registered. A separate negative test supplies the payload-less range.
+    #[cfg(test)]
+    let builder_boot_abi = crate::builder_boot::payload_supported_abis();
+    #[cfg(not(test))]
+    let builder_boot_abi = crate::builder_boot::supported_image_abis();
     mvm_core::image_set::HostProtocolSupport {
         guest_agent_protocol: mvm_core::image_set::ProtocolRange::new(
             mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
@@ -219,7 +225,7 @@ pub fn current_image_set_protocol_support() -> mvm_core::image_set::HostProtocol
         builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
         // Payload ABIs only when this process can hand a builder the payload;
         // an image with no builder binaries of its own is unbootable without.
-        builder_boot_abi: crate::builder_boot::supported_image_abis(),
+        builder_boot_abi,
     }
 }
 
@@ -591,7 +597,8 @@ mod tests {
     #[test]
     fn a_set_whose_builder_needs_a_boot_payload_is_refused_before_fetching() {
         use mvm_core::image_set::BuilderBootAbi;
-        let host = current_image_set_protocol_support();
+        let mut host = current_image_set_protocol_support();
+        host.builder_boot_abi = crate::builder_boot::baked_only_abis();
         let compatibility = |abi| mvm_core::image_set::ImageSetCompatibility {
             guest_agent_protocol: host.guest_agent_protocol,
             builder_cache_contract: host.builder_cache_contract,
@@ -617,6 +624,16 @@ mod tests {
             Stage0KernelError::ProtocolIncompatible { .. }
         ));
         assert_eq!(fetcher.calls(), 0);
+    }
+
+    #[test]
+    fn the_test_host_accepts_the_locked_builder_boot_abi() {
+        let lock = mvm_core::image_set::image_train_lock();
+        mvm_core::image_set::check_declared_protocol_compatibility(
+            &lock.compatibility,
+            &current_image_set_protocol_support(),
+        )
+        .expect("the test host models an mvmctl with a registered boot payload");
     }
 
     /// The classification this module exists for, unchanged by the move to a
