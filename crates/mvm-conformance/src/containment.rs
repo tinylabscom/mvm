@@ -141,11 +141,9 @@ pub fn digest_matches_pin(pinned_hex: &str, observed_hex: &str) -> bool {
 
 // --- Victim boot mode ---------------------------------------------------------
 
-/// The prefix of the guest's own compromise-report lines. Only the PoC prints
-/// these; the detonation initramfs's scaffolding reports boot and exit under
-/// the distinct [`BOOT_MARKER_PREFIX`] / [`EXIT_MARKER_PREFIX`] prefixes, so
-/// scaffolding can never masquerade as the exploit's verdict.
-pub const CANARY_PREFIX: &str = "CVE-CANARY:";
+/// The prefix of the pinned PoC's native compromise report. The full line is
+/// validated by [`canary_lines`]; a prefix match alone is not evidence.
+pub const CANARY_PREFIX: &str = "CONTAINER_ESCAPE_SUCCESS uid=";
 
 /// The prefix of the line the detonation initramfs prints before running the
 /// exploit, carrying the booted kernel's `uname -r` — the transcript proof
@@ -323,7 +321,21 @@ pub fn canary_lines(guest_output: &str) -> Vec<&str> {
     guest_output
         .lines()
         .map(str::trim)
-        .filter(|line| line.contains(CANARY_PREFIX))
+        .filter(|line| {
+            let Some(rest) = line.strip_prefix(CANARY_PREFIX) else {
+                return false;
+            };
+            let Some((uid, rest)) = rest.split_once(" host=") else {
+                return false;
+            };
+            let Some((host, docker)) = rest.split_once(" docker=") else {
+                return false;
+            };
+            uid == "0"
+                && !host.is_empty()
+                && !host.chars().any(char::is_whitespace)
+                && matches!(docker, "yes" | "no")
+        })
         .collect()
 }
 
@@ -333,7 +345,7 @@ pub fn boot_marker_line(guest_output: &str) -> Option<&str> {
     guest_output
         .lines()
         .map(str::trim)
-        .find(|line| line.contains(BOOT_MARKER_PREFIX))
+        .find(|line| line.starts_with(BOOT_MARKER_PREFIX))
 }
 
 /// Enforce the witness contract of the pinned-kernel boot. Detonating the PoC
@@ -365,7 +377,7 @@ pub fn exit_marker_code(guest_output: &str) -> Option<i32> {
     let line = guest_output
         .lines()
         .map(str::trim)
-        .find(|l| l.contains(EXIT_MARKER_PREFIX))?;
+        .find(|line| line.starts_with(EXIT_MARKER_PREFIX))?;
     line.rsplit("rc=").next()?.trim().parse().ok()
 }
 
@@ -664,10 +676,22 @@ mod tests {
     fn canary_lines_picks_out_only_the_exploits_own_report() {
         let output = "kernel boot noise\n\
                       CVE-LAB-BOOT: kernel=7.0.0-31-generic\n\
-                      CVE-CANARY: uid=0, escaped\n\
+                      CONTAINER_ESCAPE_SUCCESS uid=0 host=mvm docker=no\n\
                       CVE-LAB-EXIT: rc=0\n";
-        assert_eq!(canary_lines(output), vec!["CVE-CANARY: uid=0, escaped"]);
+        assert_eq!(
+            canary_lines(output),
+            vec!["CONTAINER_ESCAPE_SUCCESS uid=0 host=mvm docker=no"]
+        );
         assert!(canary_lines("no canary here\nCVE-LAB-EXIT: rc=1\n").is_empty());
+        assert!(
+            canary_lines(
+                "prefix CONTAINER_ESCAPE_SUCCESS uid=0 host=mvm docker=no\n\
+                 CONTAINER_ESCAPE_SUCCESS uid=1000 host=mvm docker=no\n\
+                 CONTAINER_ESCAPE_SUCCESS uid=0 host=mvm docker=maybe\n"
+            )
+            .is_empty(),
+            "embedded, non-root, and malformed native reports are not evidence"
+        );
     }
 
     #[test]
@@ -689,7 +713,7 @@ mod tests {
         )
         .expect_err("a witnessed non-compromise on the target kernel is a failed experiment");
         assert!(err.contains("failed experiment"), "got: {err}");
-        require_witnessed_compromise(&boot, "CVE-CANARY: uid=0\n")
+        require_witnessed_compromise(&boot, "CONTAINER_ESCAPE_SUCCESS uid=0 host=mvm docker=no\n")
             .expect("a printed canary satisfies the witness contract");
     }
 
@@ -707,6 +731,7 @@ mod tests {
             "a run that never reached the marker reports nothing"
         );
         assert_eq!(exit_marker_code("CVE-LAB-EXIT: rc=abc\n"), None);
+        assert_eq!(exit_marker_code("noise CVE-LAB-EXIT: rc=0\n"), None);
     }
 
     #[test]
@@ -725,5 +750,12 @@ mod tests {
         )
         .expect_err("a different booted kernel fails against the pin");
         assert!(err.contains("does not match"), "got: {err}");
+
+        let err = require_booted_kernel_matches_pin(
+            "noise CVE-LAB-BOOT: kernel=7.0.0-31-generic arch=x86_64\n",
+            "7.0.0-31-generic",
+        )
+        .expect_err("an embedded marker is not boot evidence");
+        assert!(err.contains("printed no"), "got: {err}");
     }
 }

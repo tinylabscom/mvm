@@ -61,9 +61,12 @@ the destructive-lab ceiling exists for. In this mode:
 - **Host-surface, sibling-digest, and teardown assertions are unchanged.**
   They are host-side observations and bind both modes identically.
 - **The guest canary becomes load-bearing.** The initramfs prints the booted
-  kernel's `uname -r` (checked against the pinned target), runs the PoC, and
-  prints its exit code. Booting the PoC's exact target kernel and *not*
-  observing the compromise canary **fails the scenario** — a witnessed
+  kernel's `uname -r` (checked against the pinned target), runs the binary as
+  `/payload` (the pathname its reviewed usermode helper searches), and prints
+  its exit code. The initramfs supplies only the BusyBox applets that helper
+  needs. A compromise is accepted only from the pinned PoC's complete native
+  `CONTAINER_ESCAPE_SUCCESS uid=0 host=... docker=yes|no` line. Booting the
+  exact target kernel without that report **fails the scenario** — a witnessed
   non-compromise on the vulnerable kernel means the delivery broke or the
   wrong kernel was staged, and the containment assertions measured nothing.
 
@@ -91,8 +94,9 @@ just lab::cve-3655-gcp
 It uses the active `gcloud` account and project. `--project`, `--zone`,
 `--machine-type`, `--evidence-dir`, `--dry-run`, and the diagnostic-only
 `--keep-instance` override are available after the recipe name. Cloud
-credentials never enter the repository. A kept instance remains billable;
-ordinary runs always delete it.
+credentials never enter the repository or instance: the VM has no Google
+service account or OAuth scopes and blocks project-wide SSH keys. A kept
+instance remains billable; ordinary runs always delete it.
 
 For a manually supplied KVM host, stage the artifacts directly:
 
@@ -109,13 +113,14 @@ scripts/stage-cve-2026-80521-lab.sh
 Then run only this scenario:
 
 ```sh
+lab_dir="${MVM_CVE_LAB_DIR:-${TMPDIR:-/tmp}/mvm-cve-2026-80521-lab}"
 MVM_BDD_LIVE=1 \
 MVM_BDD_DESTRUCTIVE_LAB=1 \
-MVM_BDD_CVE_EXPLOIT=/path/to/staged/exploit-image \
-MVM_BDD_CVE_KERNEL=/path/to/staged/vmlinux \
-MVM_BDD_CVE_INITRAMFS=/path/to/staged/detonation-initramfs.cpio.gz \
+MVM_BDD_CVE_EXPLOIT="$lab_dir/src/pocs/CVE-2026-80521/poc" \
+MVM_BDD_CVE_KERNEL="$lab_dir/vmlinux" \
+MVM_BDD_CVE_INITRAMFS="$lab_dir/detonation-initramfs.cpio.gz" \
 MVM_BDD_ONLY_TAG=destructive_lab_only \
-just bdd
+just bdd::run
 ```
 
 `MVM_BDD_CVE_EXPLOIT` names the admitted image (OCI reference or local image

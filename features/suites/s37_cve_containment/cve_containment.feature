@@ -22,8 +22,8 @@ Feature: s37_cve_containment
 
   @live @firecracker @destructive_lab_only
   Scenario: A public container-escape exploit inside a sealed guest crosses no boundary
-    Given the host surface is recorded
-    And a bystander sibling guest is booted and its rootfs digest recorded
+    Given a bystander sibling guest is booted and its rootfs digest recorded
+    And the host surface is recorded
     And the CVE-2026-80521 exploit is staged from its pinned source
     When a sealed victim guest runs the staged exploit
     Then the guest-side compromise report is recorded as a candidate observation

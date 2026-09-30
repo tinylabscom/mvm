@@ -61,9 +61,10 @@ just lab::cve-3655-gcp
 The real command uses the active `gcloud` account and project to create an
 Intel C3 Spot VM with nested KVM, upload a filtered copy of the current
 worktree, run only the destructive witness, download an evidence archive under
-the printed `/tmp` path, and delete the outer VM on success or failure. Before
-the real invocation, obtain explicit operator authorization for both the
-billable VM and transfer of the filtered checkout unless that exact run was
+the printed `/tmp` path, and delete the outer VM on success or failure. The VM
+has no Google service account or OAuth scopes and refuses project-wide SSH
+keys. Before the real invocation, obtain explicit operator authorization for
+both the billable VM and transfer of the filtered checkout unless that exact run was
 already authorized. Do not substitute an ad-hoc cloud VM or use this host for
 ordinary builds, evals, or runtime work; the builder-VM boundary above remains
 the default.

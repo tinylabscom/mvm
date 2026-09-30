@@ -42,6 +42,7 @@ use crate::world::CliWorld;
 
 const SIBLING_NAME: &str = "mvm-cve-bystander";
 const VICTIM_NAME: &str = "mvm-cve-victim";
+const EVIDENCE_DIR_ENV: &str = "MVM_BDD_CVE_EVIDENCE_DIR";
 
 /// How long the target-kernel detonation gets to print its exit marker before
 /// the victim is torn down. The guest serves no agent and dials no host
@@ -87,44 +88,6 @@ fn file_digest(path: &Path) -> String {
     let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    hex::encode(hasher.finalize())
-}
-
-/// A content digest over an entire directory tree: every file's relative path
-/// and bytes folded into one hash, so any change to any file — or the set of
-/// files — moves the digest. Used for the bystander guest's on-host state.
-fn dir_digest(root: &Path) -> String {
-    let mut entries: Vec<PathBuf> = Vec::new();
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(read) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for entry in read.filter_map(Result::ok) {
-            let path = entry.path();
-            if path.is_dir() {
-                walk(&path, out);
-            } else {
-                out.push(path);
-            }
-        }
-    }
-    walk(root, &mut entries);
-    entries.sort();
-    let mut hasher = Sha256::new();
-    for path in &entries {
-        hasher.update(
-            path.strip_prefix(root)
-                .unwrap_or(path.as_path())
-                .to_string_lossy()
-                .as_bytes(),
-        );
-        hasher.update([0u8]);
-        if let Ok(bytes) = std::fs::read(path) {
-            hasher.update((bytes.len() as u64).to_le_bytes());
-            hasher.update(&bytes);
-        }
-        hasher.update([0u8]);
-    }
     hex::encode(hasher.finalize())
 }
 
@@ -228,6 +191,75 @@ fn machine_dir(name: &str) -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+fn sibling_rootfs(dir: &Path) -> PathBuf {
+    let rootfs = dir.join("rootfs.ext4");
+    assert!(
+        rootfs.is_file(),
+        "the bystander state directory has no rootfs image at {}",
+        rootfs.display()
+    );
+    rootfs
+}
+
+/// Copy the victim's transcript before teardown removes its driver state.
+/// Returns the number of copied files; zero means collection was not requested
+/// or no victim state existed yet (for example, a failure before boot).
+fn preserve_victim_evidence() -> Result<usize, String> {
+    let Some(destination) = std::env::var_os(EVIDENCE_DIR_ENV).map(PathBuf::from) else {
+        return Ok(0);
+    };
+    let state = mvm_core::config::vm_state_dir_at(e2e_home(), VICTIM_NAME);
+    if !state.is_dir() {
+        return Ok(0);
+    }
+    std::fs::create_dir_all(&destination).map_err(|error| {
+        format!(
+            "create CVE evidence directory {}: {error}",
+            destination.display()
+        )
+    })?;
+    let mut copied = 0;
+    for name in ["console.log", "firecracker.log", "qemu.log"] {
+        let source = state.join(name);
+        if !source.is_file() {
+            continue;
+        }
+        std::fs::copy(&source, destination.join(name))
+            .map_err(|error| format!("preserve {}: {error}", source.display()))?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+fn cleanup_guest_state(world: &mut CliWorld) {
+    for name in [SIBLING_NAME, VICTIM_NAME] {
+        let _ = run_mvmctl(&["machine", "stop", name, "--yes"], &[]);
+        let _ = run_mvmctl(&["machine", "rm", name, "--yes"], &[]);
+    }
+    // A low-level victim has no machine-registry entry for `machine rm`.
+    let victim_dir = mvm_core::config::vm_state_dir_at(e2e_home(), VICTIM_NAME);
+    if victim_dir.exists() {
+        std::fs::remove_dir_all(&victim_dir).unwrap_or_else(|error| {
+            panic!(
+                "remove the victim's driver state dir {}: {error}",
+                victim_dir.display()
+            )
+        });
+    }
+    world.cve_sibling = None;
+    world.cve_victim_name = None;
+    world.cve_victim_boot = None;
+}
+
+/// Failure-safe cleanup called by cucumber's after hook. It is idempotent with
+/// the explicit final Then step and runs even when an earlier assertion fails.
+pub(crate) fn cleanup_after_scenario(world: &mut CliWorld) {
+    if let Err(error) = preserve_victim_evidence() {
+        eprintln!("[cve-containment] preserve failure evidence: {error}");
+    }
+    cleanup_guest_state(world);
+}
+
 /// Every audit-chain line under the lab home, across tenants and segments.
 fn audit_lines() -> Vec<String> {
     let audit_dir = e2e_home().join("audit");
@@ -279,7 +311,7 @@ fn boot_sibling(world: &mut CliWorld) {
             machine_state_root().display()
         )
     });
-    world.cve_sibling = Some((SIBLING_NAME.to_string(), dir_digest(&dir)));
+    world.cve_sibling = Some((SIBLING_NAME.to_string(), file_digest(&sibling_rootfs(&dir))));
 }
 
 #[given("the CVE-2026-80521 exploit is staged from its pinned source")]
@@ -509,7 +541,7 @@ fn run_victim_target_kernel(
     let deadline = started + std::time::Duration::from_secs(DETONATION_TIMEOUT_SECS);
     loop {
         let log = std::fs::read_to_string(&console_log).unwrap_or_default();
-        let finished = log.contains(containment::EXIT_MARKER_PREFIX);
+        let finished = containment::exit_marker_code(&log).is_some();
         let alive = matches!(vm.status(), Ok(mvm_core::vm_backend::VmStatus::Running));
         if finished || !alive || std::time::Instant::now() >= deadline {
             break;
@@ -650,7 +682,7 @@ fn sibling_digest_unchanged(world: &mut CliWorld) {
         .expect("a Given step must record the sibling digest");
     let dir = machine_dir(&name)
         .unwrap_or_else(|| panic!("the bystander guest {name} vanished during the detonation"));
-    let after = dir_digest(&dir);
+    let after = file_digest(&sibling_rootfs(&dir));
     assert_eq!(
         before, after,
         "containment FAILED: the bystander sibling guest's on-host state changed"
@@ -659,36 +691,19 @@ fn sibling_digest_unchanged(world: &mut CliWorld) {
 
 #[then("both guests are torn down and leave no residue")]
 fn teardown_no_residue(world: &mut CliWorld) {
-    for name in [SIBLING_NAME, VICTIM_NAME] {
-        let _ = run_mvmctl(&["machine", "stop", name, "--yes"], &[]);
-        let _ = run_mvmctl(&["machine", "rm", name, "--yes"], &[]);
+    let evidence_requested = std::env::var_os(EVIDENCE_DIR_ENV).is_some();
+    let copied = preserve_victim_evidence().unwrap_or_else(|error| panic!("{error}"));
+    if evidence_requested {
+        assert!(
+            copied >= 2,
+            "evidence collection requested through {EVIDENCE_DIR_ENV}, but only {copied} victim log(s) existed"
+        );
     }
-    if world
-        .cve_victim_boot
-        .as_ref()
-        .is_some_and(VictimBoot::is_target_kernel)
-    {
-        // The low-level victim boot has no machine-registry entry for
-        // `machine rm` to sweep; its state dir is the driver's own, removed
-        // here once the guest is dead (the When step killed it and fails the
-        // scenario otherwise).
-        let dir = mvm_core::config::vm_state_dir_at(e2e_home(), VICTIM_NAME);
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).unwrap_or_else(|e| {
-                panic!(
-                    "remove the victim's driver state dir {}: {e}",
-                    dir.display()
-                )
-            });
-        }
-    }
+    cleanup_guest_state(world);
     for name in [SIBLING_NAME, VICTIM_NAME] {
         assert!(
             machine_dir(name).is_none(),
             "residue: {name} still has an on-host state directory after teardown"
         );
     }
-    world.cve_sibling = None;
-    world.cve_victim_name = None;
-    world.cve_victim_boot = None;
 }

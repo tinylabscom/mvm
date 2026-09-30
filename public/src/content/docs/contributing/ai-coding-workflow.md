@@ -98,7 +98,8 @@ just lab::cve-3655-gcp
 ```
 
 This is the normal agent path: the controller creates an Intel C3 Spot VM with
-nested KVM, waits for SSH readiness, transfers the filtered current worktree,
+nested KVM and no Google service account or OAuth scopes, refuses project-wide
+SSH keys, waits for SSH readiness, transfers the filtered current worktree,
 runs the remote bootstrap and destructive witness, downloads the evidence
 archive to the printed local `/tmp` directory, and deletes the instance even
 when the witness fails. The remote execution details are owned by
