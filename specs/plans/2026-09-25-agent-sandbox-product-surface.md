@@ -359,6 +359,10 @@ Security-bearing gaps first, then the foundations the UX needs:
 
 ### PS-13 — Tool-level privileges (#3723)
 - [ ] per-tool policy in profiles (argv patterns, routes, secrets, allow/deny/ask)
+  - [x] `[tools] allow/ask/deny` plus `[tools.detail.<name>] argv/deny/routes/secrets`,
+        merge rules that only narrow (first definition sets the grant, later
+        layers subset it; deny unions), `show`/`diff`/`why` rendering, schema
+        regenerated — recorded-only until enforcement lands
 - [ ] MCP tool gate wired to a live path; secrets bound to (tool, destination)
 - [ ] in-guest command mediation for declared tools, reported over vsock and audited
 

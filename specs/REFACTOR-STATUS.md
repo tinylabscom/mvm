@@ -77,6 +77,8 @@ Last updated: 2026-09-29
     - [ ] mvm-scout indicator scan (tinylabscom/mvm-assurance#202, in review)
   - [x] PS-12 environment hygiene denylist — #3722
   - [ ] PS-13 tool-level privileges — #3723
+    - [x] per-tool policy model in profiles (allow/ask/deny + argv/routes/secrets
+          detail, narrowing merge) — recorded-only until enforcement lands
   - [ ] PS-15 packaging: deb, rpm, AUR, nixpkgs, crates.io, native lib in wheels/npm — #3724
   - [ ] PS-16 Nix developer experience — #3725
   - [x] PS-17 task-runner surface — #3726

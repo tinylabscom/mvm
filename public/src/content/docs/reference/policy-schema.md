@@ -636,12 +636,54 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
       },
       "additionalProperties": false
     },
+    "ToolDetail": {
+      "description": "Per-tool detail under `[tools.detail.<name>]`.",
+      "type": "object",
+      "properties": {
+        "argv": {
+          "description": "Argv patterns permitted for this tool, glob-style and matched against the command line (`git *`). An empty list means any argv the tool is invoked with. Composition narrows: a later layer may only name patterns an earlier layer set.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "deny": {
+          "description": "Argv patterns refused whatever `argv` allows. Unions across layers and beats `argv` on conflict.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "routes": {
+          "description": "Destinations (`HOST[:PORT]`) this tool may reach through the one host egress gate. Composition narrows like secret destinations: a later layer may list a subset, never a destination outside them.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "secrets": {
+          "description": "Secret names bound to this tool; the binding is enforced where the secret is substituted. Composition narrows like `routes`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "ToolsSection": {
-      "description": "`[tools]` — per-tool privileges. Parsed, merged and shown so profiles can be written ahead of enforcement; nothing enforces it yet, and `mvmctl policy validate --strict` refuses a policy that relies on it.",
+      "description": "`[tools]` — per-tool privileges. Parsed, merged and shown so profiles can be written ahead of enforcement; nothing enforces it yet, and `mvmctl policy validate --strict` refuses a policy that relies on it.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union.",
       "type": "object",
       "properties": {
         "allow": {
           "description": "Tool names allowed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "ask": {
+          "description": "Tool names where every call asks the runtime approver first.",
           "type": "array",
           "items": {
             "type": "string"
@@ -652,6 +694,13 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "detail": {
+          "description": "Per-tool argv, route and secret restrictions, keyed by tool name.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/definitions/ToolDetail"
           }
         }
       },

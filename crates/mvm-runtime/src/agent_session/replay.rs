@@ -280,7 +280,7 @@ mod tests {
             session_id: session_id.clone(),
             generation: 2,
             journal_cursor: 4,
-            approval_head: ApprovalHead::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            approval_head: ApprovalHead::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
             replay_input_digest: None,
         }))
         .build();
@@ -307,7 +307,7 @@ mod tests {
             session_id: session_id.clone(),
             generation: 2,
             journal_cursor: 7,
-            approval_head: ApprovalHead::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            approval_head: ApprovalHead::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
             replay_input_digest: Some(input.artifact_digest.clone()),
         }))
         .build();
