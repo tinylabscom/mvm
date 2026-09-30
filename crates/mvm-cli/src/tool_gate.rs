@@ -20,12 +20,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result};
 use mvm_client::approval_broker::ApprovalBackend;
-use mvm_client::policy_profiles::model::ToolsSection;
 use mvm_client::policy_profiles::{
     Platform, PolicySelection, PolicyStore, ProjectPolicy, ResolvedPolicy, resolve,
 };
 use mvm_contract::policy::approval::ApprovalOutcome;
 use mvm_contract::policy::approval_prompt::{ApprovalPrompt, ApprovalSubject};
+use mvm_contract::policy::tool_rules::{ToolDecision, ToolRules};
 use mvm_core::policy::audit::LocalAuditKind;
 use mvm_mcp::{ToolCallGate, ToolGateDenial};
 use serde_json::Map;
@@ -35,7 +35,7 @@ use crate::approval::tty::TerminalBackend;
 
 /// Authorize MCP tool calls against one resolved `[tools]` section.
 pub struct McpToolGate {
-    tools: ToolsSection,
+    rules: ToolRules,
     approver: Arc<dyn ApprovalBackend>,
     sequence: AtomicU64,
 }
@@ -54,14 +54,14 @@ impl McpToolGate {
             return Ok(None);
         }
         Ok(Some(Self::new(
-            policy.tools,
+            policy.tools.to_tool_rules(),
             Arc::new(TerminalBackend::controlling(false)),
         )))
     }
 
-    fn new(tools: ToolsSection, approver: Arc<dyn ApprovalBackend>) -> Self {
+    fn new(rules: ToolRules, approver: Arc<dyn ApprovalBackend>) -> Self {
         Self {
-            tools,
+            rules,
             approver,
             sequence: AtomicU64::new(0),
         }
@@ -82,47 +82,44 @@ impl McpToolGate {
 
 impl ToolCallGate for McpToolGate {
     fn authorize(&self, tool: &str, _arguments: &Map<String, Value>) -> Result<(), ToolGateDenial> {
-        let tools = &self.tools;
-        if tools.deny.iter().any(|listed| listed == tool) {
-            let reason = format!("policy denies this tool (tools.deny names {tool:?})");
-            self.record(tool, "denied", &reason);
-            return Err(ToolGateDenial::new(reason));
-        }
-        if tools.ask.iter().any(|listed| listed == tool) {
-            let prompt = ApprovalPrompt {
-                request_id: self.next_request_id(),
-                subject: ApprovalSubject::ToolCall {
-                    tool: tool.to_string(),
-                },
-                expires_in_ms: 0,
-            };
-            let answer = self.approver.decide(&prompt);
-            return match answer.outcome {
-                ApprovalOutcome::Approved => {
-                    self.record(tool, "ask_granted", "the terminal approver granted the ask");
-                    Ok(())
+        // The MCP surface has no command line: the whole-tool decision from
+        // the shared evaluator stands (an empty section admits everything).
+        match self.rules.decide(tool, None) {
+            ToolDecision::Allow => Ok(()),
+            ToolDecision::Deny(rule) => {
+                let reason = format!("policy denies this tool ({rule})");
+                self.record(tool, "denied", &reason);
+                Err(ToolGateDenial::new(reason))
+            }
+            ToolDecision::Ask => {
+                let prompt = ApprovalPrompt {
+                    request_id: self.next_request_id(),
+                    subject: ApprovalSubject::ToolCall {
+                        tool: tool.to_string(),
+                    },
+                    expires_in_ms: 0,
+                };
+                let answer = self.approver.decide(&prompt);
+                match answer.outcome {
+                    ApprovalOutcome::Approved => {
+                        self.record(tool, "ask_granted", "the terminal approver granted the ask");
+                        Ok(())
+                    }
+                    ApprovalOutcome::Denied => {
+                        let reason = format!(
+                            "the ask was denied{}",
+                            answer
+                                .reason
+                                .as_deref()
+                                .map(|label| format!(" ({label})"))
+                                .unwrap_or_default()
+                        );
+                        self.record(tool, "ask_denied", &reason);
+                        Err(ToolGateDenial::new(reason))
+                    }
                 }
-                ApprovalOutcome::Denied => {
-                    let reason = format!(
-                        "the ask was denied{}",
-                        answer
-                            .reason
-                            .as_deref()
-                            .map(|label| format!(" ({label})"))
-                            .unwrap_or_default()
-                    );
-                    self.record(tool, "ask_denied", &reason);
-                    Err(ToolGateDenial::new(reason))
-                }
-            };
+            }
         }
-        if tools.allow.iter().any(|listed| listed == tool) {
-            return Ok(());
-        }
-        let reason =
-            format!("policy does not allow this tool (tools.allow does not name {tool:?})");
-        self.record(tool, "denied", &reason);
-        Err(ToolGateDenial::new(reason))
     }
 }
 
@@ -157,7 +154,7 @@ fn resolve_project_policy(
 mod tests {
     use super::*;
     use mvm_client::approval_broker::DenyBackend;
-    use mvm_client::policy_profiles::model::ToolDetail;
+    use mvm_client::policy_profiles::model::{ToolDetail, ToolsSection};
 
     fn tools_section(allow: &[&str], ask: &[&str], deny: &[&str]) -> ToolsSection {
         ToolsSection {
@@ -169,7 +166,7 @@ mod tests {
     }
 
     fn gate(tools: ToolsSection) -> McpToolGate {
-        McpToolGate::new(tools, Arc::new(DenyBackend))
+        McpToolGate::new(tools.to_tool_rules(), Arc::new(DenyBackend))
     }
 
     #[test]
@@ -194,11 +191,7 @@ mod tests {
         let denial = gate
             .authorize("mvm.machine.rm", &Map::new())
             .expect_err("unlisted tool refuses");
-        assert!(
-            denial.reason.contains("does not allow"),
-            "{}",
-            denial.reason
-        );
+        assert!(denial.reason.contains("does not name"), "{}", denial.reason);
     }
 
     #[test]
@@ -240,10 +233,6 @@ mod tests {
         let denial = gate
             .authorize("mvm.machine.list", &Map::new())
             .expect_err("detail alone does not allow");
-        assert!(
-            denial.reason.contains("does not allow"),
-            "{}",
-            denial.reason
-        );
+        assert!(denial.reason.contains("does not name"), "{}", denial.reason);
     }
 }
