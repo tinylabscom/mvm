@@ -1,7 +1,7 @@
 # Vsock-only guest devices
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: check-declared-backing
 
 ## Problem
 
