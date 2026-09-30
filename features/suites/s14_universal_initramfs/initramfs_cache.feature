@@ -15,6 +15,7 @@ Feature: Universal initramfs cache attachment
   scenario stays green because the kernel check fails first, which is the whole
   point of it.
 
+  @no_local_images_checkout
   @cli
   Scenario: a nearer precondition failure is reported instead of the initramfs
     Given an isolated mvm home with a cached non-verity workload kernel

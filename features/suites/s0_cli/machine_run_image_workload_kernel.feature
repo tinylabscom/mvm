@@ -6,6 +6,7 @@ Feature: machine run --image workload-kernel precondition
   pulling the image. This hermetic scenario points reacquisition at a closed
   local endpoint so it proves the transition without network or Stage 0.
 
+  @no_local_images_checkout
   Scenario: machine run --image evicts an incompatible workload kernel and reacquires it
     Given an isolated mvm home with a cached non-verity workload kernel
     When I run mvmctl in the isolated mvm home with "machine run --image alpine -- /bin/true"
