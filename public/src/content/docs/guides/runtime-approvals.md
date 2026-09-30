@@ -171,8 +171,11 @@ still holds only a placeholder; the value is substituted after the approval,
 exactly as for any bound secret. `mvmctl secret ls` shows `approve=ask` on the
 binding.
 
-Approval covers placeholders carried in request headers, which is where the
-endpoint substitutes today.
+Approval covers every supported injection position: a request header, a
+decoded Basic credential, a query-parameter value, or a URL-path segment. The
+endpoint locates the placeholder first, checks that its position matches the
+signed binding, and asks before resolving or substituting the value. A
+placeholder in any other URL position or in the request body is refused.
 
 ## What the endpoint enforces
 

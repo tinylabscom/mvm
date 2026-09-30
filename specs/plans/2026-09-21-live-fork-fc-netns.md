@@ -1,7 +1,7 @@
 # Live-parent fork activation on Firecracker (vsock-only)
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 Issue: tinylabscom/mvm#3552 — fork a running machine: advertise live-memory
 save/restore on Firecracker. Kickoff: `specs/prompts/2026-09-21-live-fork-fc-netns.md`

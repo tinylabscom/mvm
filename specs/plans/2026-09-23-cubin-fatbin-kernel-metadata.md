@@ -1,7 +1,7 @@
 # Cubin and fatbin kernel-parameter metadata
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issue:** [#3564](https://github.com/tinylabscom/mvm/issues/3564)
 

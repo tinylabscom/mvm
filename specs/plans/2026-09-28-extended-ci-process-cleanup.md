@@ -1,7 +1,7 @@
 # Extended CI process-group cleanup
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: check-all
 
 **Status: IN PROGRESS**
 
