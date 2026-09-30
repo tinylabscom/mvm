@@ -1200,6 +1200,7 @@ jobs:
             echo "IMAGE_MANIFEST_SHA256=$(./scripts/locked-image-tag.sh image_set manifest_sha256)"
             echo "IMAGE_WORKFLOW=$(./scripts/locked-image-tag.sh image_set workflow)"
             echo "IMAGE_TAG_REF=$(./scripts/locked-image-tag.sh image_set tag_ref)"
+            echo "IMAGE_BUILDER_CACHE_CONTRACT=$(./scripts/locked-image-tag.sh compatibility builder_cache_contract)"
           } >> "$GITHUB_ENV"
 
       - name: Fetch and verify the pinned bootable image
@@ -1222,10 +1223,10 @@ jobs:
             --certificate-identity "https://github.com/${IMAGE_REPO}/${IMAGE_WORKFLOW}@${IMAGE_TAG_REF}" \
             --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
             image-set.json
-          jq -e '
+          jq -e --argjson contract "$IMAGE_BUILDER_CACHE_CONTRACT" '
             .compatibility.guest_agent_protocol.min <= 2 and
             .compatibility.guest_agent_protocol.max >= 2 and
-            .compatibility.builder_cache_contract == 4
+            .compatibility.builder_cache_contract == $contract
           ' image-set.json >/dev/null
           for f in default-microvm-vmlinux-x86_64 default-microvm-rootfs-x86_64.ext4 \
                    runtime-overlay-x86_64.tar.gz; do

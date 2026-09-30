@@ -1,7 +1,7 @@
 #!/bin/sh
 # Print a release tag pinned by `crates/mvm-core/images.lock`.
 #
-# Usage: scripts/locked-image-tag.sh [image_set|boot_image|stage0_kernel] [field]
+# Usage: scripts/locked-image-tag.sh [image_set|boot_image|stage0_kernel|compatibility] [field]
 #
 # The Rust side reads the same file through
 # `mvm_core::image_set::image_train_lock()`, and `xtask release-boot-image tag`
@@ -29,10 +29,17 @@ case "$field" in
     value=$(sed -n 's/^repository[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$lock" | head -n 1)
     ;;
   workflow|tag_ref)
-    value=$(sed -n "/^\\[$section.signing_identity\\]/,/^\\[/ s/^$field[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$lock")
+    value=$(sed -n "/^\\[${section}.signing_identity\\]/,/^\\[/ s/^${field}"'[[:space:]]*=[[:space:]]*'"\"\\([^\"]*\\)\".*/\\1/p" "$lock")
     ;;
   release_tag|manifest_asset|manifest_sha256)
-    value=$(sed -n "/^\\[$section\\]/,/^\\[/ s/^$field[[:space:]]*=[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$lock")
+    value=$(sed -n "/^\\[${section}\\]/,/^\\[/ s/^${field}"'[[:space:]]*=[[:space:]]*'"\"\\([^\"]*\\)\".*/\\1/p" "$lock")
+    ;;
+  builder_cache_contract)
+    if [ "$section" != compatibility ]; then
+      echo "locked-image-tag: builder_cache_contract is only under [compatibility]" >&2
+      exit 1
+    fi
+    value=$(sed -n '/^\[compatibility\]/,/^\[/ s/^builder_cache_contract[[:space:]]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$lock")
     ;;
   *)
     echo "locked-image-tag: unsupported field $field" >&2

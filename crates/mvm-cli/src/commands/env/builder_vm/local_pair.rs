@@ -251,13 +251,21 @@ mod tests {
                 format: "ext4",
             },
             TestArtifact {
+                name: "kernel.config",
+                bytes: b"# CONFIG_NETDEVICES is not set\nCONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n".to_vec(),
+                format: "text",
+            },
+            TestArtifact {
                 name: "cmdline.txt",
                 bytes: b"console=hvc0\n".to_vec(),
                 format: "text",
             },
             TestArtifact {
                 name: "manifest.json",
-                bytes: b"{}\n".to_vec(),
+                bytes: format!(
+                    "{{\"cache_contract_version\":{},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true,\"no_network_devices_ready\":true}}\n",
+                    mvm_build::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION
+                ).into_bytes(),
                 format: "json",
             },
         ]

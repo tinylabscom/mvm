@@ -4,6 +4,12 @@ Last updated: 2026-09-29
 
 ## In progress
 
+- [ ] **Vsock-only guest devices.** Remove implicit QEMU NICs and retire the
+      TAP-backed pool builder; the signed `image-set/v0.2.3` and contract-5
+      consumer close the cached builder-kernel capability gap. The full host
+      suite passes; Linux validation and the consumer PR remain pending. See
+      `specs/plans/2026-09-29-vsock-only-guest-devices.md`.
+
 - [ ] **Pack signing input isolation — #3794.** Fix, regression, actionlint, host workspace Clippy and real signing smoke pass. The restore-timeout fixture is deterministic and all 262 backend tests pass; full workspace tests, Linux and final PR checks are pending. See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
 - [ ] **Security mutation witnesses — #3679.** Contract/filesystem validation (1,524 tests), all four base-image tests, the source-root test and final host workspace Clippy pass. Full workspace and mutation validation remain pending; Linux builder initialization is blocked. See `specs/plans/2026-09-28-security-mutation-witnesses.md`.
 

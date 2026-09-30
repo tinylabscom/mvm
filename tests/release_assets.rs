@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
@@ -1368,6 +1369,44 @@ fn image_pin_updates_rewrite_the_lock_through_the_checked_parser() {
         !workflow.contains("python3"),
         "the pin update must not carry a second, untested lock writer"
     );
+}
+
+#[test]
+fn image_contract_reader_agrees_with_the_checked_lock() {
+    let output = Command::new("./scripts/locked-image-tag.sh")
+        .args(["compatibility", "builder_cache_contract"])
+        .output()
+        .expect("run image-lock reader");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let printed = String::from_utf8(output.stdout).expect("reader prints UTF-8");
+    let expected = mvmctl::core::image_set::image_train_lock()
+        .compatibility
+        .builder_cache_contract;
+    assert_eq!(printed.trim(), expected.to_string());
+
+    let wrong_section = Command::new("./scripts/locked-image-tag.sh")
+        .args(["image_set", "builder_cache_contract"])
+        .output()
+        .expect("run image-lock reader with the wrong section");
+    assert!(!wrong_section.status.success());
+}
+
+#[test]
+fn remote_image_contract_checks_follow_the_locked_version() {
+    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("ci workflow");
+    let downloader = fs::read_to_string("scripts/download-qemu-wasm-smoke-pack.sh")
+        .expect("WebLinux downloader");
+    let pin_update =
+        fs::read_to_string(".github/workflows/update-image-pin.yml").expect("image pin workflow");
+    assert!(ci.contains("locked-image-tag.sh compatibility builder_cache_contract"));
+    assert!(ci.contains(".compatibility.builder_cache_contract == $contract"));
+    assert!(downloader.contains("locked-image-tag.sh\" compatibility builder_cache_contract"));
+    assert!(downloader.contains(".compatibility.builder_cache_contract == $contract"));
+    assert!(pin_update.contains(".compatibility.builder_cache_contract == 5"));
 }
 
 #[test]

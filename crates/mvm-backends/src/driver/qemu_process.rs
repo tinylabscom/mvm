@@ -32,17 +32,6 @@ pub(crate) const BRIDGE_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 pub(crate) const STOP_TIMEOUT: Duration = Duration::from_secs(3);
 pub const FORCE_KILL_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// QEMU's unprivileged user-mode network gives dev/test guests transparent
-/// TCP and UDP without requiring a host TAP device or elevated setup.
-pub fn qemu_user_network_args() -> [&'static str; 4] {
-    [
-        "-netdev",
-        "user,id=n0",
-        "-device",
-        "virtio-net-pci,netdev=n0",
-    ]
-}
-
 /// Per-VM file names under `vm_state_dir(name)`.
 pub(crate) const QEMU_PID_FILE: &str = "qemu.pid";
 pub(crate) const QEMU_LOG_FILE: &str = "qemu.log";

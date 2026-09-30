@@ -15,6 +15,15 @@
       instead of requiring lossless delivery under backpressure. The CI-scope
       aggregate harness executes its script as a Bash command, so an expected
       early refusal cannot break a producer writing to standard input.
+
+- [ ] **Enforce vsock-only guest devices.** QEMU workload and builder launches
+      must explicitly disable QEMU's default NIC; the retired TAP-backed pool
+      builder must fail closed. The signed `image-set/v0.2.3` now publishes
+      checked no-network-device builder configs for both architectures, and
+      this branch rejects the old macOS cache and pins contract 5. The full
+      serialized host workspace suite passes; Linux/live-boot validation and
+      the consumer PR remain pending. See
+      `specs/plans/2026-09-29-vsock-only-guest-devices.md`.
 - [x] **Composable policy files and authored profiles — issue #3715.**
       Rust-derived policy/profile schema, user and project discovery,
       `policy resolve|show|validate|diff`, and `--policy`/`--plan` now lower
