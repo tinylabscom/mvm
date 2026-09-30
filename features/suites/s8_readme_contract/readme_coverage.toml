@@ -113,11 +113,11 @@ language = "sh"
 [[block]]
 classification = "static-only"
 language = "bash"
-[[block]]
-classification = "static-only"
-language = "sh"
 
 [[block]]
 classification = "static-only"
 language = "sh"
 
+[[block]]
+classification = "static-only"
+language = "sh"

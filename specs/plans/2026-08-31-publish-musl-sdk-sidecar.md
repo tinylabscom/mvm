@@ -1,7 +1,7 @@
 # Publish both SDK sidecar libc variants
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 ## Goal
 

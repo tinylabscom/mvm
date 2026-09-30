@@ -1,7 +1,7 @@
 # Promote the documented examples still proven only by parsing
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 `parse` proves that clap accepts an invocation. It cannot see a verb that parses
 and then refuses at runtime — the shape `machine forward` had decayed into while

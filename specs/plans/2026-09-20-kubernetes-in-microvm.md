@@ -1,7 +1,7 @@
 # Kubernetes in a single microVM
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Tracking:** tinylabscom/mvm#3554 (runtime), tinylabscom/mvm-templates#2
 (guest template PR) and tinylabscom/mvm-templates#1 (template tracking).

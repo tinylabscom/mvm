@@ -1,7 +1,7 @@
 # Quantum-safe cryptography transition for mvm and mvmd
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status:** NOT STARTED
 **Date:** 2026-08-25

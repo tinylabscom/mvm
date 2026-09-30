@@ -1,7 +1,7 @@
 # HVF machine restore dispatch
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issue:** #2961  
 **Status:** COMPLETE

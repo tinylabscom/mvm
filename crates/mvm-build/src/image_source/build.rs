@@ -470,6 +470,112 @@ pub fn emit_argv(request: &EmitRequest<'_>) -> Result<Vec<OsString>, LocalImageB
     Ok(argv)
 }
 
+/// Whether `path` sits at or under `root`, both resolved the way the emitter
+/// resolves them (symlinks followed). A cache inside a checkout — the
+/// documented dev setup points `MVM_HOME` at a worktree-local state dir —
+/// is how a staging directory ends up in one; that content is gitignored, so
+/// the identity the set records is unaffected.
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    path.starts_with(&root)
+}
+
+/// Emit the local manifest into the cache's `staged_dir`, honoring the
+/// emitter's contract that `--out` stays outside both checkouts. Staging
+/// normally is outside them and the emitter writes the set directly; when the
+/// cache lives inside a checkout, emit beside the nearest ancestor outside
+/// both and move the set into staging.
+fn emit_manifest_into_staging(
+    images_root: &Path,
+    mvm_root: &Path,
+    arch: GuestArch,
+    built: &Path,
+    staged_dir: &Path,
+    contract: &TargetContract,
+) -> Result<(), LocalImageBuildError> {
+    let emit = |out: &Path| {
+        emit_local_manifest(&EmitRequest {
+            images_root,
+            mvm_root,
+            arch,
+            builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
+            built,
+            out,
+            contract,
+        })
+    };
+    if !path_is_within(staged_dir, mvm_root) && !path_is_within(staged_dir, images_root) {
+        return emit(staged_dir);
+    }
+    let parent =
+        emit_parent_outside_checkouts(staged_dir, &[images_root, mvm_root]).ok_or_else(|| {
+            LocalImageBuildError::Tool {
+                what: "staging the emitted set outside the checkouts".to_string(),
+                detail: format!(
+                    "no ancestor of {} is outside both checkouts",
+                    staged_dir.display()
+                ),
+            }
+        })?;
+    let temp = tempfile::Builder::new()
+        .prefix("emit-")
+        .tempdir_in(&parent)
+        .map_err(|source| LocalImageBuildError::Io {
+            op: "creating an emit directory in",
+            path: parent,
+            source,
+        })?;
+    let out = temp.path().join("set");
+    emit(&out)?;
+    move_emitted_set(&out, staged_dir)
+}
+
+/// The nearest ancestor of `staged_dir` outside every checkout root, so the
+/// emitted set moves into staging with same-filesystem renames. The walk
+/// terminates at the filesystem root, which is outside any checkout.
+fn emit_parent_outside_checkouts(staged_dir: &Path, checkouts: &[&Path]) -> Option<PathBuf> {
+    let staged = std::fs::canonicalize(staged_dir).unwrap_or_else(|_| staged_dir.to_path_buf());
+    staged
+        .ancestors()
+        .skip(1)
+        .map(|ancestor| std::fs::canonicalize(ancestor).unwrap_or_else(|_| ancestor.to_path_buf()))
+        .find(|ancestor| !checkouts.iter().any(|root| path_is_within(ancestor, root)))
+}
+
+/// Move every file of the emitted set into the cache staging directory.
+/// Renames keep the move cheap; a cross-device fall-back copies, for the case
+/// where a checkout root is itself a mount point.
+fn move_emitted_set(from: &Path, to: &Path) -> Result<(), LocalImageBuildError> {
+    let entries = std::fs::read_dir(from).map_err(|source| LocalImageBuildError::Io {
+        op: "listing",
+        path: from.to_path_buf(),
+        source,
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|source| LocalImageBuildError::Io {
+            op: "listing",
+            path: from.to_path_buf(),
+            source,
+        })?;
+        let source_path = entry.path();
+        let target = to.join(entry.file_name());
+        if std::fs::rename(&source_path, &target).is_err() {
+            std::fs::copy(&source_path, &target).map_err(|source| LocalImageBuildError::Io {
+                op: "copying the emitted set into",
+                path: target.clone(),
+                source,
+            })?;
+            std::fs::remove_file(&source_path).map_err(|source| LocalImageBuildError::Io {
+                op: "removing",
+                path: source_path.clone(),
+                source,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn read_kernel_format(path: &Path) -> Result<KernelFormat, LocalImageBuildError> {
     let bytes = read_head(path)?;
     KernelFormat::sniff_magic(&bytes).ok_or_else(|| LocalImageBuildError::Tool {
@@ -688,15 +794,14 @@ pub fn build_target_for_pair(
             what: "staging the local image cache entry".to_string(),
             detail: error.to_string(),
         })?;
-    emit_local_manifest(&EmitRequest {
-        images_root: checkout.root(),
+    emit_manifest_into_staging(
+        checkout.root(),
         mvm_root,
         arch,
-        builder_cache_contract: crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
-        built: &out,
-        out: staged.dir(),
+        &out,
+        staged.dir(),
         contract,
-    })?;
+    )?;
     let outcome = cache
         .publish(staged, &ctx)
         .map_err(|error| LocalImageBuildError::Tool {
@@ -711,8 +816,8 @@ pub fn build_target_for_pair(
 }
 
 /// Mutable scratch for one build, removed when the build returns. It sits in
-/// the mvm cache rather than inside either checkout, whose identity it would
-/// otherwise change.
+/// the mvm cache, which the dev setup may point inside a checkout; the scratch
+/// is gitignored state there, so the identity a set records never changes.
 fn scratch_dir() -> Result<tempfile::TempDir, LocalImageBuildError> {
     let parent = Path::new(&mvm_core::config::mvm_cache_dir()).join("local-image-builds");
     std::fs::create_dir_all(&parent).map_err(|source| LocalImageBuildError::Io {
@@ -979,6 +1084,81 @@ mod tests {
             argv.iter().filter(|a| *a == "--artifact").count(),
             contract.files.len()
         );
+    }
+
+    #[test]
+    fn path_within_resolves_symlinks_and_components() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("checkout");
+        let nested = root.join("state").join("cache");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert!(path_is_within(&nested, &root));
+        assert!(path_is_within(&root, &root));
+        let sibling = root.with_file_name("checkout-2");
+        std::fs::create_dir_all(&sibling).unwrap();
+        assert!(!path_is_within(&sibling, &root));
+        // A sibling sharing the root's name prefix is not inside the root:
+        // component-wise, not string-wise.
+        let prefixed = root.with_file_name("checkout-extra");
+        std::fs::create_dir_all(&prefixed).unwrap();
+        assert!(!path_is_within(&prefixed, &root));
+    }
+
+    #[test]
+    fn staging_inside_a_checkout_emits_beside_the_outside_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("mvm");
+        let staging = checkout.join(".mvm-test/cache/local-images/v1/.staging/entry.tmp.1.0");
+        std::fs::create_dir_all(&staging).unwrap();
+        // The nearest ancestor outside the checkout is the temp dir itself —
+        // the same filesystem, so the moves into staging are renames.
+        assert_eq!(
+            emit_parent_outside_checkouts(&staging, &[checkout.as_path()]),
+            std::fs::canonicalize(tmp.path()).ok()
+        );
+    }
+
+    #[test]
+    fn staging_outside_checkouts_needs_no_emit_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let checkout = tmp.path().join("mvm");
+        let staging = tmp.path().join("elsewhere/staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        assert!(path_is_within(&staging, tmp.path()));
+        assert!(!path_is_within(&staging, &checkout));
+        // Already outside the checkout: the immediate parent answers, so the
+        // emitter writes as close to the cache as the contract allows.
+        assert_eq!(
+            emit_parent_outside_checkouts(&staging, &[checkout.as_path()]),
+            std::fs::canonicalize(staging.parent().unwrap()).ok()
+        );
+    }
+
+    #[test]
+    fn move_emitted_set_moves_every_file_into_staging() {
+        let tmp = tempfile::tempdir().unwrap();
+        let from = tmp.path().join("set");
+        let to = tmp.path().join("staging");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+        write(&from.join("image-set.json"), b"{}");
+        write(&from.join("builder_vm-aarch64-vmlinux"), b"kernel");
+
+        move_emitted_set(&from, &to).unwrap();
+
+        assert_eq!(std::fs::read(to.join("image-set.json")).unwrap(), b"{}");
+        assert_eq!(
+            std::fs::read(to.join("builder_vm-aarch64-vmlinux")).unwrap(),
+            b"kernel"
+        );
+        assert!(std::fs::read_dir(&from).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn move_emitted_set_refuses_a_missing_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = move_emitted_set(&tmp.path().join("nope"), tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("listing"), "{err}");
     }
 
     #[test]
