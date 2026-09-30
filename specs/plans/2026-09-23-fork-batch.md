@@ -3,7 +3,7 @@
 # Batch fork: `machine fork --count N`
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 Issue: tinylabscom/mvm#3641 — `machine fork --count N` — one capture, N live children
 

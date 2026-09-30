@@ -787,7 +787,6 @@ mod tests {
                 .expect("seed secret store");
             let (auth_type, inject) = routing
                 .secret_shape
-                .clone()
                 .unwrap_or((AuthType::Bearer, InjectionMode::Header));
             let placeholder = registry.mint(SecretRef {
                 name: binding.secret.into(),

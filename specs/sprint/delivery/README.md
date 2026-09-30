@@ -1,7 +1,8 @@
-# Delivery entries — one file per landed change
+# Delivery entries — frozen historical archive
 
-Write a **new file here** when you land something. Do not append to
-`specs/SPRINT.md`.
+This directory preserves delivery notes written before GitHub issues and pull
+requests became the sole work-tracking and delivery record. Do not add or
+update entries here as part of ordinary work.
 
 ```
 specs/sprint/delivery/<issue-or-plan>-<slug>.md
@@ -9,8 +10,7 @@ specs/sprint/delivery/<issue-or-plan>-<slug>.md
 
 e.g. `2365-audit-log-rotation.md`, `2321-workload-runner-root.md`.
 
-No frontmatter, no index to update, no ordering to agree on. The file name is
-the identity and `git log` is the ordering.
+The file name is the historical identity and `git log` is the ordering.
 
 ## Why this exists rather than a list in one file
 
@@ -36,14 +36,6 @@ Separate files cannot conflict with each other. That removes the collision
 instead of making it cheaper to resolve, and it makes losing an entry take a
 deliberate `git rm` rather than a moment's inattention.
 
-`xtask check-sprint-append` keeps the old section from growing back.
-
-## Reading them together
-
-```sh
-cargo run -p xtask -- sprint
-```
-
-Renders every entry newest-first by commit date. Deliberately not committed —
-a generated file in the tree is one more thing to conflict over, which is the
-problem this directory exists to solve.
+The former sprint and refactor dashboards are preserved under
+`specs/archive/status/`. Current status belongs in GitHub issues, and delivery
+and validation belong in pull requests.

@@ -1,9 +1,22 @@
 #!/usr/bin/env bash
-# Run this checkout's mvmctl paired with a local mvm-images checkout.
+# Run this checkout's mvmctl. Pairing with an mvm-images checkout is
+# automatic when one is available; a lone mvm checkout works on its own.
 #
+#   bin/dev machine run ...                     # solo: images resolve from the
+#                                               # released set pinned by
+#                                               # images.lock — no image
+#                                               # checkout needed
 #   MVM_IMAGES_DIR=../mvm-images bin/dev build image-set builder-vm
+#                                               # paired: build images from the
+#                                               # named checkout (strict)
 #
-# The pair is this mvm checkout and the image checkout MVM_IMAGES_DIR names.
+# Selection: an explicit MVM_IMAGES_DIR always wins. Otherwise a sibling
+# mvm-images checkout next to this one is discovered and paired. With
+# neither, the pair is this checkout alone ("solo") and the selector stays
+# unset, so image resolution follows the released set — one clone of mvm is
+# a complete development environment.
+#
+# The pair is this mvm checkout and, when present, the image checkout.
 # Everything mutable the pair needs is keyed by a digest of the two canonical
 # roots:
 #
@@ -46,24 +59,41 @@ sha256_hex() {
 }
 
 mvm_root=$(canonical_dir "$(dirname -- "${BASH_SOURCE[0]}")/.." "mvm checkout")
-[ -n "${MVM_IMAGES_DIR:-}" ] ||
-  die "MVM_IMAGES_DIR is not set; name the mvm-images checkout to pair with this one"
-images_root=$(canonical_dir "$MVM_IMAGES_DIR" "MVM_IMAGES_DIR=")
-[ "$images_root" != "$mvm_root" ] || die "MVM_IMAGES_DIR names this mvm checkout"
 
-pair_id=$(printf '%s\n%s\n' "$mvm_root" "$images_root" | sha256_hex | cut -c1-16)
+# Pair selection: explicit selector > discovered sibling > solo. A discovered
+# sibling that does not look like an mvm-images checkout (no flake.nix) is
+# ignored rather than failing — discovery is a convenience, not a gate.
+images_root=""
+if [ -n "${MVM_IMAGES_DIR:-}" ]; then
+  images_root=$(canonical_dir "$MVM_IMAGES_DIR" "MVM_IMAGES_DIR=")
+  [ "$images_root" != "$mvm_root" ] || die "MVM_IMAGES_DIR names this mvm checkout"
+else
+  sibling="$mvm_root/../mvm-images"
+  if [ -f "$sibling/flake.nix" ] && [ -f "$sibling/flake.lock" ]; then
+    images_root=$(canonical_dir "$sibling" "sibling mvm-images checkout")
+    echo "bin/dev: paired with the sibling mvm-images checkout $images_root" >&2
+  else
+    echo "bin/dev: no mvm-images checkout selected; images resolve from the released set" >&2
+  fi
+fi
+
+if [ -n "$images_root" ]; then
+  pair_id=$(printf '%s\n%s\n' "$mvm_root" "$images_root" | sha256_hex | cut -c1-16)
+else
+  pair_id=$(printf '%s\n' "$mvm_root" | sha256_hex | cut -c1-16)
+fi
 pairs_dir=${MVM_PAIRS_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/mvm/pairs}
 mkdir -p -- "$pairs_dir"
 pairs_dir=$(canonical_dir "$pairs_dir" "MVM_PAIRS_DIR=")
 state="$pairs_dir/$pair_id"
-for root in "$mvm_root" "$images_root"; do
+for root in "$mvm_root" $images_root; do
   ! inside "$state" "$root" || die "the pair state $state would be inside the checkout $root"
 done
 mkdir -p -- "$state/home"
 chmod 0700 "$state" "$state/home"
-printf 'mvm=%s\nimages=%s\n' "$mvm_root" "$images_root" > "$state/pair"
+printf 'mvm=%s\nimages=%s\n' "$mvm_root" "${images_root:-released-set}" > "$state/pair"
 
-export MVM_IMAGES_DIR="$images_root"
+[ -z "$images_root" ] || export MVM_IMAGES_DIR="$images_root"
 export MVM_HOME="$state/home"
 export CARGO_TARGET_DIR="$mvm_root/target/pair-$pair_id"
 

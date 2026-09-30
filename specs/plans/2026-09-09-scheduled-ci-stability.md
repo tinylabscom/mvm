@@ -1,7 +1,7 @@
 # Scheduled CI stability
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Opened:** 2026-09-09
 **Baseline:** `main` at `e3abd2808f`
