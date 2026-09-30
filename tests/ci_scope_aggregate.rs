@@ -148,6 +148,11 @@ impl Verdict {
             .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
+            .env("CORE_RESULT", self.lanes)
+            .env("POLICY_RESULT", "success")
+            .env("FEATURES_RESULT", self.lanes)
+            .env("FEATURES_SUPPORT_RESULT", self.lanes)
+            .env("FEATURES_EMBED_RESULT", self.lanes)
             .env("WORKSPACE_RESULT", self.lanes)
             // The aarch64 workspace lane carries the same `code` scope as the
             // other four in the loop, so it moves with them rather than getting
