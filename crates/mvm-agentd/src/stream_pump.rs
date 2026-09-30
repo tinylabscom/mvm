@@ -1659,27 +1659,38 @@ mod tests {
     }
 
     #[test]
-    fn a_slow_sink_receives_every_byte_exactly_once() {
-        // Delivery, not non-stalling: a pump that ran the sink on the reader
-        // thread would also pass this. What it does catch is loss or
-        // duplication when the consumer trails far behind the producer —
-        // 512 KiB is eight pipe buffers, so the reader is always well ahead.
+    fn a_slow_sink_accounts_for_delivered_and_dropped_bytes() {
+        // A bounded handoff may discard output when the consumer trails the
+        // producer. Every byte must either reach the sink or appear in its
+        // loss record; 512 KiB is enough to exercise backpressure.
         // `a_blocked_sink_does_not_stall_the_child` is the non-stalling
         // witness.
         let mut child = sh("head -c 524288 /dev/zero");
-        let mut total = 0usize;
+        let mut delivered = 0u64;
+        let mut dropped = 0u64;
         let outcome = pump_child(
             &mut child,
-            &mut |e| {
-                if let EntrypointEvent::Stdout { chunk } = e {
-                    total += chunk.len();
+            &mut |e| match e {
+                EntrypointEvent::Stdout { chunk } => {
+                    delivered += u64::try_from(chunk.len()).expect("chunk length fits u64");
                     std::thread::sleep(Duration::from_millis(5));
                 }
+                EntrypointEvent::Control { header_json, .. } => {
+                    let header: serde_json::Value =
+                        serde_json::from_str(&header_json).expect("control header is JSON");
+                    if header["kind"] == GAP_RECORD_KIND && header["stream"] == "stdout" {
+                        dropped += header["dropped_bytes"]
+                            .as_u64()
+                            .expect("gap records count dropped bytes");
+                    }
+                }
+                _ => {}
             },
             &caps_with_stdout_max(1024 * 1024),
         );
         assert_eq!(outcome, PumpOutcome::Exited(0));
-        assert_eq!(total, 524288);
+        assert!(delivered > 0, "the sink must receive some output");
+        assert_eq!(delivered + dropped, 524288);
     }
 
     #[test]
