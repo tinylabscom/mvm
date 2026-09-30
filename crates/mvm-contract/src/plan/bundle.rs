@@ -33,7 +33,11 @@ use serde::{Deserialize, Serialize};
 /// Newer verifiers reading a v1 bundle accept the missing field
 /// via `#[serde(default)]` and fall back to operator-config
 /// defaults at launch time.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 2;
+/// Bumped 2 → 3 when `BundleManifest` gained backend-neutral member
+/// classes. The first class embeds one complete image-set manifest and binds
+/// its member artifacts to ordinary bundle artifacts. Older bundles remain
+/// readable because `members` defaults to an empty list.
+pub const BUNDLE_SCHEMA_VERSION: u32 = 3;
 
 /// Filename inside the archive for the canonical-JSON manifest.
 pub const MANIFEST_FILENAME: &str = "manifest.json";
@@ -120,6 +124,22 @@ pub struct BundleArtifact {
     pub size_bytes: u64,
 }
 
+/// A typed, backend-neutral member carried by a portable bundle.
+///
+/// Member classes describe how a group of ordinary [`BundleArtifact`] files
+/// is interpreted. They never name a host backend. A future sealed-checkpoint
+/// class can therefore evolve independently without changing the image-set
+/// contract or duplicating its artifact bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BundleMember {
+    /// A complete `mvm_core::image_set::ImageSetManifest`. The named bundle
+    /// artifact contains the JSON manifest; every artifact named by that
+    /// manifest must also appear as an ordinary bundle artifact with the same
+    /// name, size, and SHA-256.
+    EmbeddedImageSet { manifest_artifact: String },
+}
+
 /// Resource expectations the bundle publisher recorded at build
 /// time. Optional on the wire (`#[serde(default)]` via the parent
 /// struct's `Option<BundleResources>`), present in v2+ bundles.
@@ -157,10 +177,10 @@ pub struct VerityInfo {
 /// (via `serde_json::to_vec`); the signed bytes are exactly those.
 ///
 /// `deny_unknown_fields` keeps the wire format strict: a future
-/// field added in v2 will fail to parse in a v1 verifier. The
+/// field added in a newer schema will fail to parse in an older verifier. The
 /// `schema_version` sniff happens *after* signature check (same
 /// pattern as `ExecutionPlan`), so an attacker who flips
-/// `schema_version` doesn't slip in a v2 plan past a v1 build.
+/// `schema_version` doesn't slip a newer bundle past an older build.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleManifest {
@@ -195,6 +215,10 @@ pub struct BundleManifest {
     /// JSON for determinism; consumers find artifacts by `role` or
     /// `name`, not by index.
     pub artifacts: Vec<BundleArtifact>,
+    /// Typed groups of artifacts with their own validation contracts. Empty
+    /// for schema-v1/v2 workload-only bundles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<BundleMember>,
     /// dm-verity binding, when the rootfs was built verified.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verity: Option<VerityInfo>,
@@ -311,10 +335,24 @@ mod tests {
     }
 
     #[test]
-    fn bundle_schema_version_is_two() {
+    fn bundle_schema_version_is_three() {
         // Pin the current version constant — bumps are deliberate;
         // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 2);
+        assert_eq!(BUNDLE_SCHEMA_VERSION, 3);
+    }
+
+    #[test]
+    fn embedded_image_set_member_round_trips() {
+        let member = BundleMember::EmbeddedImageSet {
+            manifest_artifact: "image-set.json".to_string(),
+        };
+        let value = serde_json::to_value(&member).expect("serialize member");
+        assert_eq!(value["class"], "embedded_image_set");
+        assert_eq!(value["manifest_artifact"], "image-set.json");
+        assert_eq!(
+            serde_json::from_value::<BundleMember>(value).expect("deserialize member"),
+            member
+        );
     }
 
     #[test]

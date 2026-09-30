@@ -254,6 +254,27 @@ fn backend() -> BackendImageSupport {
     }
 }
 
+#[test]
+fn linux_direct_backend_support_is_explicit_and_non_linux_tiers_refuse() {
+    use crate::vm_backend::BackendKind;
+
+    let firecracker = BackendImageSupport::for_backend(BackendKind::Firecracker)
+        .expect("firecracker is Linux-direct");
+    assert!(
+        firecracker
+            .boot_protocols
+            .contains(&BootProtocol::LinuxDirect)
+    );
+    assert!(
+        firecracker
+            .device_capabilities
+            .contains(&GuestDeviceRequirement::DmVerity)
+    );
+    assert!(BackendImageSupport::for_backend(BackendKind::Wasm).is_none());
+    assert!(BackendImageSupport::for_backend(BackendKind::WebLinux).is_none());
+    assert!(BackendImageSupport::for_backend(BackendKind::AppleContainer).is_none());
+}
+
 fn host() -> HostProtocolSupport {
     HostProtocolSupport {
         guest_agent_protocol: ProtocolRange::new(2, 3).unwrap(),

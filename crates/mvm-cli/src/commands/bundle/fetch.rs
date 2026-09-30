@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_core::plan::bundle::{FsTrustStore, bundle_sha256, read_and_verify_bundle};
+use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, bundle_sha256, read_and_verify_bundle};
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::oci::ImageReference;
 
@@ -41,6 +41,10 @@ pub(in crate::commands) struct Args {
     /// `~/.mvm/trusted-publishers/`.
     #[arg(long, value_name = "DIR")]
     pub trust_store: Option<PathBuf>,
+    /// Override the bundle registry whose sibling image-set cache receives
+    /// embedded boot artifacts. Defaults to `~/.mvm/bundles/`.
+    #[arg(long, value_name = "DIR")]
+    pub registry: Option<PathBuf>,
     /// Output the verified manifest as JSON instead of a
     /// human-readable summary.
     #[arg(long)]
@@ -196,12 +200,23 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
     let verified = read_and_verify_bundle(&bytes, &trust)
         .with_context(|| format!("verifying bundle from {}", args.source))?;
+    let sha = bundle_sha256(&bytes);
+    if !verified.embedded_image_sets.is_empty() {
+        let registry = match args.registry {
+            Some(path) => BundleRegistry::new(path),
+            None => BundleRegistry::default_path()
+                .context("resolving default bundle registry root (~/.mvm/bundles/)")?,
+        };
+        registry
+            .cache_embedded_image_sets(&verified, &sha)
+            .with_context(|| format!("caching embedded image set from {}", args.source))?;
+    }
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&verified.manifest)?);
     } else {
         let summary = BundleSummary {
-            bundle_sha256: bundle_sha256(&bytes),
+            bundle_sha256: sha,
             resolved: loaded.resolved.as_ref().map(display_reference),
             key_id: verified.key_id.0.clone(),
             publisher: verified.manifest.publisher.clone(),
@@ -209,6 +224,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             profile: verified.manifest.profile.clone(),
             workload_label: verified.manifest.workload_label.clone(),
             artifact_count: verified.manifest.artifacts.len(),
+            embedded_image_set_count: verified.embedded_image_sets.len(),
             has_verity: verified.manifest.verity.is_some(),
         };
         summary.render();
@@ -225,6 +241,7 @@ struct BundleSummary {
     profile: Option<String>,
     workload_label: Option<String>,
     artifact_count: usize,
+    embedded_image_set_count: usize,
     has_verity: bool,
 }
 
@@ -245,6 +262,7 @@ impl BundleSummary {
             println!("  label:     {l}");
         }
         println!("  artifacts: {}", self.artifact_count);
+        println!("  image sets: {}", self.embedded_image_set_count);
         println!(
             "  verity:    {}",
             if self.has_verity { "yes" } else { "no" }
@@ -450,6 +468,7 @@ mod tests {
                 created_at: "2026-09-16T00:00:00Z".to_string(),
                 labels: Default::default(),
                 artifacts: vec![artifact],
+                members: Vec::new(),
                 verity: None,
                 resources: None,
             };

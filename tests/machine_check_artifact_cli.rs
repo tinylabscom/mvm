@@ -2,7 +2,56 @@
 //! host's arch, then verify + preview its admission. Read-only — no boot.
 
 use assert_cmd::cargo::CommandCargoExt;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+fn signed_bundle_fixture(root: &Path) -> (PathBuf, PathBuf) {
+    use mvmctl::core::plan::bundle::{
+        ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, key_id_from_pubkey,
+        sha256_hex, write_bundle,
+    };
+
+    let key = ed25519_dalek::SigningKey::from_bytes(&[91; 32]);
+    let key_id = key_id_from_pubkey(&key.verifying_key());
+    let kernel = b"portable bundle kernel".to_vec();
+    let manifest = BundleManifest {
+        schema_version: BUNDLE_SCHEMA_VERSION,
+        publisher: "check-artifact-test".to_string(),
+        key_id: key_id.clone(),
+        arch: std::env::consts::ARCH.to_string(),
+        kernel_version: None,
+        profile: None,
+        workload_label: Some("portable-test".to_string()),
+        created_at: "2026-09-29T00:00:00Z".to_string(),
+        labels: Default::default(),
+        artifacts: vec![BundleArtifact {
+            name: "vmlinux".to_string(),
+            role: ArtifactRole::Kernel,
+            path: "artifacts/vmlinux".to_string(),
+            sha256: sha256_hex(&kernel),
+            size_bytes: kernel.len() as u64,
+        }],
+        members: Vec::new(),
+        verity: None,
+        resources: None,
+    };
+    let archive = write_bundle(
+        &manifest,
+        &key,
+        vec![("artifacts/vmlinux".to_string(), kernel)],
+    )
+    .expect("write bundle");
+    let archive_path = root.join("app.mvmpkg");
+    std::fs::write(&archive_path, archive).expect("write bundle archive");
+    let trust_dir = root.join("trusted");
+    std::fs::create_dir_all(&trust_dir).expect("create trust directory");
+    std::fs::write(
+        trust_dir.join(format!("{}.pub", key_id.0)),
+        key.verifying_key().to_bytes(),
+    )
+    .expect("enrol publisher key");
+    (archive_path, trust_dir)
+}
 
 #[test]
 fn check_artifact_reports_verified_runnable_and_admission_preview() {
@@ -91,4 +140,33 @@ fn check_artifact_reports_verified_runnable_and_admission_preview() {
         stdout.contains(&format!("\"target_arch\": \"{host_arch}\"")),
         "expected target_arch={host_arch}, got: {stdout}"
     );
+}
+
+#[test]
+fn check_artifact_verifies_a_signed_mvmpkg_without_booting() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let data = tmp.path().join("data");
+    let (artifact, trust_dir) = signed_bundle_fixture(tmp.path());
+
+    #[allow(deprecated)]
+    let check = Command::cargo_bin("mvmctl")
+        .expect("mvmctl binary")
+        .env("HOME", &data)
+        .env("MVM_HOME", &data)
+        .args(["machine", "check-artifact"])
+        .arg(&artifact)
+        .arg("--trust-store")
+        .arg(&trust_dir)
+        .arg("--json")
+        .output()
+        .expect("run check-artifact");
+    assert!(
+        check.status.success(),
+        "check-artifact failed: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let verdict: serde_json::Value = serde_json::from_slice(&check.stdout).expect("JSON verdict");
+    assert_eq!(verdict["verified"], true);
+    assert_eq!(verdict["artifact_count"], 1);
+    assert_eq!(verdict["embedded_image_sets"], serde_json::json!([]));
 }

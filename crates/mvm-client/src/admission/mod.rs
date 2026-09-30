@@ -14,8 +14,8 @@ use mvm_core::plan::{StreamRetention, SynthesisInput, Variant};
 use mvm_core::policy::PolicyBundle;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_hostd::plan_admission::{
-    AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, RunPosture, SystemClock,
-    admit_for_run,
+    AdmittedPlan, BundleAdmissionContext, BundleImageAdmissionContext, InMemoryNonceLedger,
+    RunPosture, SystemClock, admit_for_run,
 };
 use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_artifact};
 
@@ -440,26 +440,60 @@ pub fn admit_plan_for_boot_with_ingress(
     // archive — defence in depth between CLI synth and backend
     // dispatch. Errors surface before admit so the user sees them
     // without a confusing post-sign rejection.
-    let (bundle_pin, bundle_resolver, bundle_trust) = match p.bundle_pin {
-        Some(path) => {
-            let bytes = std::fs::read(path)
-                .with_context(|| format!("reading bundle archive at {}", path.display()))?;
-            let trust = mvm_core::plan::FsTrustStore::default_path()
-                .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;
-            let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
-                .with_context(|| format!("verifying bundle at {}", path.display()))?;
-            let pin =
-                bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(|| {
-                    format!("extracting signature from bundle at {}", path.display())
-                })?;
-            // Use an in-memory resolver scoped to this admission —
-            // the caller supplied the path, so we already have the
-            // bytes; no need to walk the FS registry again.
-            let resolver = InMemoryBundleResolver::new(bytes);
-            (Some(pin), Some(resolver), Some(trust))
-        }
-        None => (None, None, None),
-    };
+    let bundle_image_support = p
+        .backend_kind
+        .and_then(mvm_core::image_set::BackendImageSupport::for_backend);
+    let bundle_host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
+    let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images) =
+        match p.bundle_pin {
+            Some(path) => {
+                let bytes = std::fs::read(path)
+                    .with_context(|| format!("reading bundle archive at {}", path.display()))?;
+                let trust = mvm_core::plan::FsTrustStore::default_path()
+                    .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?;
+                let verified = mvm_core::plan::read_and_verify_bundle(&bytes, &trust)
+                    .with_context(|| format!("verifying bundle at {}", path.display()))?;
+                if !verified.embedded_image_sets.is_empty() {
+                    let kind = p.backend_kind.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "bundle {} embeds an image set but no boot backend was selected",
+                            path.display()
+                        )
+                    })?;
+                    let support = bundle_image_support.as_ref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "backend {} has no Linux-direct embedded image-set contract",
+                            kind.as_str()
+                        )
+                    })?;
+                    for embedded in &verified.embedded_image_sets {
+                        mvm_core::plan::check_embedded_image_set_for_backend(
+                            embedded,
+                            mvm_core::arch::GuestArch::host(),
+                            support,
+                            &bundle_host_protocols,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "backend {} refuses embedded image set in {}",
+                                kind.as_str(),
+                                path.display()
+                            )
+                        })?;
+                    }
+                }
+                let has_embedded_images = !verified.embedded_image_sets.is_empty();
+                let pin = bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(
+                    || format!("extracting signature from bundle at {}", path.display()),
+                )?;
+                // Use an in-memory resolver scoped to this admission —
+                // the caller supplied the path, so we already have the
+                // bytes; no need to walk the FS registry again.
+                let resolver = InMemoryBundleResolver::new(bytes);
+                (Some(pin), Some(resolver), Some(trust), has_embedded_images)
+            }
+            None => (None, None, None, false),
+        };
 
     // Pin the kernel alongside the image. Through the shared digest cache, the
     // same way `image_sha256` above is derived — a pin that re-read the whole
@@ -608,6 +642,13 @@ pub fn admit_plan_for_boot_with_ingress(
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
             resolver: r,
             trust: t,
+            image: bundle_has_embedded_images.then(|| BundleImageAdmissionContext {
+                arch: mvm_core::arch::GuestArch::host(),
+                backend: bundle_image_support
+                    .as_ref()
+                    .expect("embedded image backend checked above"),
+                host_protocols: &bundle_host_protocols,
+            }),
         }),
         _ => None,
     };
