@@ -37,6 +37,10 @@ artifact_sha256 = "fbc61130ed76ab91e073c25402e1979a77c963321981f5739313d70597359
 # exploit carries offsets and symbol assumptions for this exact build.
 target_distro = "Ubuntu 26.04"
 target_version = "7.0.0-31-generic"
+# Exact package bytes used to derive both kernel boot formats. This digest is
+# reviewable independently of the archive mirror serving the package.
+deb_url = "https://archive.ubuntu.com/ubuntu/pool/main/l/linux-signed/linux-image-7.0.0-31-generic_7.0.0-31.31_amd64.deb"
+deb_sha256 = "f144b113c6957c186c404f31646ca749bf30107b12d78ad30d04ff1f3beb08ef"
 # The bootable vmlinux the scenario boots the victim guest on through the
 # low-level Firecracker path (see the suite README's "Boot modes"). The
 # staging script produces it from the target distro's linux-image .deb with
@@ -49,3 +53,7 @@ vmlinux_sha256 = "e4f4486afd398740007df6680e0128e9c8511f035bf82363880fd1f18693e3
 # (QEMU's -kernel does not load a bare ELF; MVM_BDD_CVE_HYPERVISOR=qemu boots
 # this and verifies it against this pin). See the README's "Boot modes".
 vmlinuz_sha256 = "19fd789cd5e6b4adfe18c9c6b92a1ce8c8b2eef6ff88456cef80ee2dca9b3f72"
+# Canonical Ubuntu 24.04 staging output. The archive controls PID 1 and the
+# serial evidence channel, so the scenario verifies it before boot rather than
+# trusting a matching console string from arbitrary guest userspace.
+initramfs_sha256 = "c184ec04011d0086c43a430be4919d2fe9de7af62ea8565301eb69d7499f20ad"

@@ -73,12 +73,12 @@ the destructive-lab ceiling exists for. In this mode:
 ## Pins
 
 `pins.toml` records the exploit source (by commit + tarball sha256), the
-proof-of-concept subdirectory, the target kernel identity, and the digests of
-the two staged artifacts (the built exploit binary and the bootable vmlinux).
-Nothing is vendored; the staging script fetches by digest at scenario time.
-The detonation initramfs is deliberately *not* pinned: it is transport
-scaffolding whose two payloads — the exploit binary and the kernel — are each
-pinned and re-verified themselves.
+proof-of-concept subdirectory, the target kernel package URL and sha256, and
+the digests of every boot input: the built exploit binary, both kernel boot
+formats, and the detonation initramfs. Nothing is vendored; the staging script
+fetches by digest at scenario time. The initramfs is load-bearing evidence
+machinery because it controls PID 1 and the serial console, so the scenario
+verifies its digest before accepting any guest report.
 
 ## Staging the lab
 
@@ -103,8 +103,8 @@ For a manually supplied KVM host, stage the artifacts directly:
 ```sh
 # Fetches the pinned exploit source, verifies its tarball digest, and builds
 # the guest-delivered artifact. Then fetches the target kernel's linux-image
-# .deb from archive.ubuntu.com (verified against the sha256 published in the
-# archive's own Packages index), extracts a bootable vmlinux with
+# .deb from the reviewed URL in pins.toml (verified against its independently
+# pinned sha256), extracts a bootable vmlinux with
 # scripts/extract-vmlinux, and packs the detonation initramfs. Prints the
 # digests to record in pins.toml and the paths to export below.
 scripts/stage-cve-2026-80521-lab.sh
@@ -130,15 +130,12 @@ staging instructions when it is unset rather than running a half-set-up
 detonation.
 
 `MVM_BDD_CVE_KERNEL` and `MVM_BDD_CVE_INITRAMFS` are required exactly when
-`kernel.vmlinux_sha256` is pinned: the kernel is digest-verified against the
-pin before boot, and either variable missing fails fast with the staging
-instructions. With the pin empty they are ignored.
+`kernel.vmlinux_sha256` is pinned: both files are digest-verified against their
+reviewed pins before boot, and either variable missing fails fast with the
+staging instructions. With the kernel pin empty they are ignored.
 
 ## Staging script environment
 
 - `MVM_CVE_LAB_DIR` — staging workdir (default `$TMPDIR/mvm-cve-2026-80521-lab`).
-- `MVM_CVE_LAB_SUITE` — pin the Ubuntu archive suite to fetch the kernel from,
-  skipping the archive scan.
-- `MVM_CVE_LAB_DEB_URL` + `MVM_CVE_LAB_DEB_SHA256` — pin the exact kernel .deb
-  and its digest, skipping index lookup entirely (the digest is still
-  enforced).
+The exact kernel package URL and digest are reviewable fields in `pins.toml`;
+the staging environment cannot override them.

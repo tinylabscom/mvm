@@ -250,6 +250,15 @@ pub struct KernelCandidate {
     pub sha256: String,
 }
 
+/// A staged initramfs and its caller-computed digest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitramfsCandidate {
+    /// Path to the staged initramfs.
+    pub path: PathBuf,
+    /// Its observed sha256, lowercase hex.
+    pub sha256: String,
+}
+
 /// Decide the victim boot mode from the suite's kernel pin and the operator's
 /// staged artifacts.
 ///
@@ -267,8 +276,9 @@ pub struct KernelCandidate {
 pub fn resolve_victim_boot(
     vmlinux_pin: &str,
     vmlinuz_pin: &str,
+    initramfs_pin: &str,
     kernel: Option<KernelCandidate>,
-    initramfs: Option<PathBuf>,
+    initramfs: Option<InitramfsCandidate>,
     backend: VictimBackend,
 ) -> Result<VictimBoot, String> {
     if vmlinux_pin.trim().is_empty() {
@@ -308,9 +318,24 @@ pub fn resolve_victim_boot(
          features/suites/s37_cve_containment/README.md."
             .to_string()
     })?;
+    if initramfs_pin.trim().is_empty() {
+        return Err(
+            "pins.toml kernel.initramfs_sha256 is empty. The initramfs controls PID 1 and \
+             the serial evidence channel, so it must be reviewed and pinned before boot."
+                .to_string(),
+        );
+    }
+    if !digest_matches_pin(initramfs_pin, &initramfs.sha256) {
+        return Err(format!(
+            "staged initramfs digest does not match the pin.\n  pinned:   {}\n  observed: {}\n\
+             Refusing to boot evidence-producing guest userspace that was not reviewed.",
+            initramfs_pin.trim(),
+            initramfs.sha256
+        ));
+    }
     Ok(VictimBoot::TargetKernel {
         kernel: kernel.path,
-        initramfs,
+        initramfs: initramfs.path,
         backend,
     })
 }
@@ -504,10 +529,17 @@ mod tests {
         }
     }
 
+    fn initramfs(sha: &str) -> InitramfsCandidate {
+        InitramfsCandidate {
+            path: PathBuf::from("/lab/initrd.cpio.gz"),
+            sha256: sha.to_string(),
+        }
+    }
+
     #[test]
     fn an_empty_kernel_pin_keeps_the_admitted_boot() {
         for pin in ["", "   ", "\n"] {
-            let boot = resolve_victim_boot(pin, "", None, None, VictimBackend::Firecracker)
+            let boot = resolve_victim_boot(pin, "", "", None, None, VictimBackend::Firecracker)
                 .expect("empty pin admits");
             assert_eq!(boot, VictimBoot::Admitted);
             assert!(!boot.is_target_kernel());
@@ -521,8 +553,9 @@ mod tests {
         let boot = resolve_victim_boot(
             "",
             "",
+            "",
             Some(candidate("aa")),
-            Some(PathBuf::from("/lab/initrd")),
+            Some(initramfs("aa")),
             VictimBackend::Firecracker,
         )
         .expect("empty pin admits");
@@ -534,8 +567,9 @@ mod tests {
         let err = resolve_victim_boot(
             "aa",
             "",
+            "aa",
             None,
-            Some(PathBuf::from("/lab/initrd")),
+            Some(initramfs("aa")),
             VictimBackend::Firecracker,
         )
         .expect_err("a pinned kernel demands MVM_BDD_CVE_KERNEL");
@@ -548,8 +582,9 @@ mod tests {
         let err = resolve_victim_boot(
             "aa",
             "",
+            "aa",
             Some(candidate("bb")),
-            Some(PathBuf::from("/lab/initrd")),
+            Some(initramfs("aa")),
             VictimBackend::Firecracker,
         )
         .expect_err("a mismatched staged kernel must not boot");
@@ -561,6 +596,7 @@ mod tests {
         let err = resolve_victim_boot(
             "aa",
             "",
+            "aa",
             Some(candidate("aa")),
             None,
             VictimBackend::Firecracker,
@@ -574,8 +610,9 @@ mod tests {
         let boot = resolve_victim_boot(
             "  AA \n",
             "",
+            "  CC \n",
             Some(candidate("aa")),
-            Some(PathBuf::from("/lab/initrd.cpio.gz")),
+            Some(initramfs("cc")),
             VictimBackend::Firecracker,
         )
         .expect("verified staged artifacts select the target-kernel boot");
@@ -595,8 +632,9 @@ mod tests {
         let boot = resolve_victim_boot(
             "aa",
             "  BB \n",
+            "cc",
             Some(candidate("bb")),
-            Some(PathBuf::from("/lab/initrd.cpio.gz")),
+            Some(initramfs("cc")),
             VictimBackend::Qemu,
         )
         .expect("a verified bzImage selects the qemu target-kernel boot");
@@ -615,8 +653,9 @@ mod tests {
         let err = resolve_victim_boot(
             "aa",
             "",
+            "aa",
             Some(candidate("aa")),
-            Some(PathBuf::from("/lab/initrd")),
+            Some(initramfs("aa")),
             VictimBackend::Qemu,
         )
         .expect_err("qemu mode without a bzImage pin must refuse");
@@ -628,12 +667,44 @@ mod tests {
         let err = resolve_victim_boot(
             "aa",
             "bb",
+            "aa",
             Some(candidate("cc")),
-            Some(PathBuf::from("/lab/initrd")),
+            Some(initramfs("aa")),
             VictimBackend::Qemu,
         )
         .expect_err("a mismatched bzImage must not boot");
         assert!(err.contains("does not match the pin"), "got: {err}");
+    }
+
+    #[test]
+    fn a_target_kernel_requires_an_initramfs_pin() {
+        let err = resolve_victim_boot(
+            "aa",
+            "",
+            "",
+            Some(candidate("aa")),
+            Some(initramfs("bb")),
+            VictimBackend::Firecracker,
+        )
+        .expect_err("unreviewed evidence-producing userspace must not boot");
+        assert!(err.contains("initramfs_sha256"), "got: {err}");
+    }
+
+    #[test]
+    fn a_target_kernel_refuses_an_initramfs_digest_mismatch() {
+        let err = resolve_victim_boot(
+            "aa",
+            "",
+            "bb",
+            Some(candidate("aa")),
+            Some(initramfs("cc")),
+            VictimBackend::Firecracker,
+        )
+        .expect_err("a substituted initramfs must not boot");
+        assert!(
+            err.contains("initramfs digest does not match"),
+            "got: {err}"
+        );
     }
 
     #[test]

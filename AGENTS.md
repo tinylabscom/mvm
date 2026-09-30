@@ -58,8 +58,9 @@ Run the requested test from its worktree:
 just lab::gcp-kvm just bdd::live-ci
 ```
 
-The command creates an Intel C3 Spot VM with nested KVM, uploads a filtered
-copy of the current worktree, prepares the pinned Rust/Zig/Firecracker
+The command creates an Intel C3 Spot VM with nested KVM, uploads only files
+tracked by git from the current worktree, prepares the pinned
+Rust/Zig/Firecracker
 toolchain, runs the exact argument vector after `lab::gcp-kvm`, downloads a
 result archive under the printed `/tmp` path, and deletes the outer VM on
 success or failure. Put artifacts that must be downloaded in
@@ -71,7 +72,7 @@ This host is a test/dev-tier KVM provider only. Never use it for Nix builds or
 evals, ordinary compilation, or work the builder VM can perform. The VM has no
 Google service account or OAuth scopes and refuses project-wide SSH keys.
 Before every real invocation, obtain explicit operator authorization for both
-the billable VM and transfer of the filtered checkout unless that exact run was
+the billable VM and transfer of the tracked-file checkout unless that exact run was
 already authorized.
 
 Issue #3655's destructive witness is the pinned preset:

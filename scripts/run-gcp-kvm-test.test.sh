@@ -13,6 +13,7 @@ run_case() {
   upload_status="$4"
   remote_status="$5"
   download_status="$6"
+  expected_deletes="$7"
   case_dir="$scratch/$name"
   mkdir -p "$case_dir/results"
   log="$case_dir/gcloud.log"
@@ -39,8 +40,10 @@ run_case() {
     sed -n '1,200p' "$output" >&2
     exit 1
   }
-  [[ "$(grep -c '^compute instances delete ' "$log")" -eq 1 ]] || {
-    printf '%s: disposable instance was not deleted exactly once\n' "$name" >&2
+  actual_deletes="$(grep -c '^compute instances delete ' "$log" || true)"
+  [[ "$actual_deletes" -eq "$expected_deletes" ]] || {
+    printf '%s: expected %s instance deletions, got %s\n' \
+      "$name" "$expected_deletes" "$actual_deletes" >&2
     sed -n '1,200p' "$log" >&2
     exit 1
   }
@@ -49,11 +52,11 @@ run_case() {
   grep -q -- '--metadata=block-project-ssh-keys=true' "$log"
 }
 
-run_case success 0 0 0 0 0
-run_case create-failure 13 13 0 0 0
-run_case upload-failure 17 0 17 0 0
-run_case remote-failure 23 0 0 23 0
-run_case results-failure 1 0 0 0 29
+run_case success 0 0 0 0 0 1
+run_case create-failure 13 13 0 0 0 0
+run_case upload-failure 17 0 17 0 0 1
+run_case remote-failure 23 0 0 23 0 1
+run_case results-failure 1 0 0 0 29 1
 
 argv_log="$scratch/success/gcloud.log.argv"
 grep -Fxq 'printf' "$argv_log"
@@ -77,10 +80,13 @@ grep -Fq "PROGRAM is required after '--'" "$scratch/missing.out"
 grep -Fq -- '--run-name must be' "$scratch/name.out"
 
 runner="$repo_root/scripts/run-gcp-kvm-test.sh"
-grep -Fq -- "--exclude='._*'" "$runner"
+grep -Fq 'git -C "$repo_root" ls-files -z' "$runner"
+grep -Fq -- '--from0 --files-from="$tracked_files"' "$runner"
 grep -Fq 'COPYFILE_DISABLE=1 tar' "$runner"
 remote_runner="$repo_root/scripts/run-gcp-kvm-test-remote.sh"
 grep -Fq 'selecting the canonical Ubuntu archive mirror' "$remote_runner"
 grep -Fq 'archive.ubuntu.com/ubuntu' "$remote_runner"
+grep -Fq 'firecracker_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558' "$remote_runner"
+grep -Fq '| sha256sum -c -' "$remote_runner"
 
 echo "disposable GCP KVM runner lifecycle tests passed"

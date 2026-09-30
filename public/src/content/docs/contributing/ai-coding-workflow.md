@@ -103,12 +103,12 @@ scripts/run-gcp-kvm-test.sh --project mvm-dev-495501 -- just bdd::live-ci
 
 The controller creates an Intel C3 Spot VM with nested KVM and no Google
 service account or OAuth scopes, refuses project-wide SSH keys, waits for SSH
-readiness, transfers the filtered current worktree, prepares the repository's
+readiness, transfers only git-tracked files from the current worktree, prepares the repository's
 pinned Rust/Zig/Firecracker test toolchain, runs the request, downloads results, and deletes
 the instance even when the test fails. This is only a test/dev-tier KVM
 provider: do not use it for Nix builds/evals, ordinary compilation, or work the
 builder VM can perform. Before each real run, obtain explicit operator
-authorization for both the billable VM and filtered-checkout transfer unless
+authorization for both the billable VM and tracked-file checkout transfer unless
 that exact invocation was already authorized.
 
 ## CVE-2026-80521 preset
@@ -123,7 +123,7 @@ just lab::cve-3655-gcp --dry-run
 ```
 
 After the operator explicitly authorizes the billable VM and upload of the
-filtered checkout for that run, start the complete lifecycle with:
+tracked-file checkout for that run, start the complete lifecycle with:
 
 ```bash
 just lab::cve-3655-gcp

@@ -192,7 +192,7 @@ fn machine_dir(name: &str) -> Option<PathBuf> {
 }
 
 fn sibling_rootfs(name: &str) -> PathBuf {
-    let meta = mvm_vmm::host::runtime_meta::read(name)
+    let meta = mvm_vmm::host::runtime_meta::read_at(&e2e_home(), name)
         .unwrap_or_else(|error| panic!("read runtime metadata for {name}: {error}"))
         .unwrap_or_else(|| panic!("the bystander guest {name} has no runtime metadata"));
     let rootfs = meta.rootfs_path.map(PathBuf::from).unwrap_or_else(|| {
@@ -372,14 +372,15 @@ fn staged_kernel_candidate() -> Option<containment::KernelCandidate> {
 }
 
 /// The operator-supplied detonation initramfs, when staged.
-fn staged_initramfs() -> Option<PathBuf> {
+fn staged_initramfs() -> Option<containment::InitramfsCandidate> {
     let path = std::env::var_os("MVM_BDD_CVE_INITRAMFS").map(PathBuf::from)?;
     assert!(
         path.is_file(),
         "MVM_BDD_CVE_INITRAMFS does not name a readable file: {}",
         path.display()
     );
-    Some(path)
+    let sha256 = file_digest(&path);
+    Some(containment::InitramfsCandidate { path, sha256 })
 }
 
 #[when("a sealed victim guest runs the staged exploit")]
@@ -391,6 +392,7 @@ fn run_victim(world: &mut CliWorld) {
 
     let vmlinux_pin = pin("kernel", "vmlinux_sha256").unwrap_or_default();
     let vmlinuz_pin = pin("kernel", "vmlinuz_sha256").unwrap_or_default();
+    let initramfs_pin = pin("kernel", "initramfs_sha256").unwrap_or_default();
     let backend = containment::VictimBackend::parse(
         &std::env::var("MVM_BDD_CVE_HYPERVISOR").unwrap_or_default(),
     )
@@ -398,6 +400,7 @@ fn run_victim(world: &mut CliWorld) {
     let boot = containment::resolve_victim_boot(
         &vmlinux_pin,
         &vmlinuz_pin,
+        &initramfs_pin,
         staged_kernel_candidate(),
         staged_initramfs(),
         backend,

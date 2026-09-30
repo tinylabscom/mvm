@@ -67,12 +67,15 @@ timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends \
   coreutils busybox-static just
 
 firecracker_version=1.17.0
+firecracker_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558
 if ! command -v firecracker >/dev/null 2>&1 \
   || [[ "$(firecracker --version 2>/dev/null)" != *"v$firecracker_version"* ]]; then
   firecracker_archive="firecracker-v${firecracker_version}-x86_64.tgz"
   firecracker_dir="release-v${firecracker_version}-x86_64"
   curl -fsSL -o "/tmp/$firecracker_archive" \
     "https://github.com/firecracker-microvm/firecracker/releases/download/v${firecracker_version}/$firecracker_archive"
+  printf '%s  %s\n' "$firecracker_sha256" "/tmp/$firecracker_archive" \
+    | sha256sum -c -
   rm -rf "/tmp/$firecracker_dir"
   tar -xzf "/tmp/$firecracker_archive" -C /tmp
   install -m 0755 \

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run one repository test command on a disposable Google Cloud Spot VM with
-# nested KVM. The current checkout is filtered before upload, results are
+# nested KVM. Only git-tracked files from the current checkout are uploaded,
+# results are
 # downloaded, and the VM is deleted on every exit unless explicitly retained.
 set -euo pipefail
 
@@ -96,7 +97,7 @@ if [[ ! "$run_name" =~ ^[a-z0-9][a-z0-9-]{0,19}$ ]]; then
   exit 64
 fi
 
-for tool in gcloud rsync tar; do
+for tool in gcloud git rsync tar; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "error: required command '$tool' is not installed" >&2
     exit 1
@@ -203,8 +204,8 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 echo ">> creating the Spot instance"
-instance_created=1
 gcloud "${create_args[@]}"
+instance_created=1
 
 # Compute RUNNING does not mean the independently owned guest sshd is ready.
 # Google exposes no sshd-ready event, so reconcile it at most five times with
@@ -226,16 +227,15 @@ if ((ssh_ready == 0)); then
   exit 1
 fi
 
-echo ">> preparing a secret-free source archive and exact command argv"
+echo ">> preparing a tracked-source archive and exact command argv"
 mkdir -p "$local_stage/tree"
-rsync -a \
-  --exclude='/.git' --exclude='/target' --exclude='/.mvm-test' \
-  --exclude='/.venv' --exclude='/.direnv' --exclude='/.env' \
-  --exclude='/.env.*' --exclude='/.agent-memory' --exclude='/.claude' \
-  --exclude='/.codex' --exclude='/.agents' --exclude='/node_modules' \
-  --exclude='/out' --exclude='/output' --exclude='/artifacts' \
-  --exclude='/graft/.cache' --exclude='*.pem' --exclude='*.key' \
-  --exclude='._*' \
+tracked_files="$local_stage/tracked-files.nul"
+git -C "$repo_root" ls-files -z >"$tracked_files"
+if [[ ! -s "$tracked_files" ]]; then
+  echo "error: repository tracked-file allowlist is empty" >&2
+  exit 1
+fi
+rsync -a --from0 --files-from="$tracked_files" \
   "$repo_root/" "$local_stage/tree/"
 # macOS libarchive otherwise emits AppleDouble `._*` entries for source-file
 # extended attributes; those look like feature files to the Linux BDD parser.

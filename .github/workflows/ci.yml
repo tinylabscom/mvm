@@ -209,6 +209,12 @@ jobs:
                      scripts/dev-run-guard.test.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
+                     scripts/run-gcp-kvm-test.sh \
+                     scripts/run-gcp-kvm-test-remote.sh \
+                     scripts/run-gcp-kvm-test.test.sh \
+                     scripts/run-cve-2026-80521-gcp.sh \
+                     scripts/run-cve-2026-80521-gcp-remote.sh \
+                     scripts/run-cve-2026-80521-gcp.test.sh \
                      scripts/installer-compat/*.sh \
                      scripts/smoke-fresh-install.sh \
                      scripts/pin-installer-default.sh \
@@ -217,6 +223,11 @@ jobs:
 
       - name: Release-asset verifier gate tests
         run: bash nix/packaging/release/verify-release-assets.test.sh
+
+      - name: Disposable GCP KVM controller tests
+        run: |
+          bash scripts/run-gcp-kvm-test.test.sh
+          bash scripts/run-cve-2026-80521-gcp.test.sh
 
       # The hook narrows clippy to the packages owning the staged files. When
       # it picked a package cargo cannot address with `-p`, it reported that as
