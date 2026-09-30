@@ -40,6 +40,7 @@ impl ImageSetFixture {
         let lock = &train.image_set;
         let mut compatibility = train.compatibility.clone();
         compatibility.builder_cache_contract = crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION;
+        compatibility.builder_boot_abi = Some(crate::builder_boot::supported_image_abis().max());
         let manifest = ImageSetManifest {
             schema_version: mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION,
             set_version: lock.release_tag.version().clone(),

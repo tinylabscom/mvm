@@ -1,5 +1,8 @@
 # Vsock-only guest devices
 
+Backing: shipped-source
+Validation: check-sprint-append
+
 ## Problem
 
 QEMU creates a user-network NIC when no networking option is supplied. The
