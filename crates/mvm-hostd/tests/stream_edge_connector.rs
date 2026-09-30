@@ -124,6 +124,7 @@ fn admitted_with_grant(vm: &str) -> AdmittedPlan {
         assets: Vec::new(),
         redaction: RedactionPolicy::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        tools: Default::default(),
         caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,

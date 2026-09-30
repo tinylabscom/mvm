@@ -209,6 +209,32 @@ pub struct ToolsSection {
 }
 
 impl ToolsSection {
+    /// The resolved section in the contract's plan-carried shape.
+    #[must_use]
+    pub fn to_tool_rules(&self) -> mvm_contract::policy::tool_rules::ToolRules {
+        use mvm_contract::policy::tool_rules::{ToolRuleDetail, ToolRules};
+        ToolRules {
+            allow: self.allow.clone(),
+            ask: self.ask.clone(),
+            deny: self.deny.clone(),
+            detail: self
+                .detail
+                .iter()
+                .map(|(name, detail)| {
+                    (
+                        name.clone(),
+                        ToolRuleDetail {
+                            argv: detail.argv.clone(),
+                            deny: detail.deny.clone(),
+                            routes: detail.routes.clone(),
+                            secrets: detail.secrets.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.allow.is_empty()

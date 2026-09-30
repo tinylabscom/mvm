@@ -172,6 +172,17 @@ pub struct ExecutionPlan {
     /// over the supervisor's vsock RPC).
     pub tool_policy: PolicyRef,
 
+    /// Resolved per-tool rules carried inline so the per-VM endpoint can
+    /// answer tool questions — the host-mediated registry, MCP surface, and
+    /// in-guest mediation all read this, never a bundle. The default is the
+    /// all-empty section: the dimension is opt-in, and an empty section
+    /// admits everything.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::policy::tool_rules::ToolRules::is_empty"
+    )]
+    pub tools: crate::policy::tool_rules::ToolRules,
+
     pub artifact_policy: ArtifactPolicy,
 
     /// Optional opaque caller commitment fixed before execution. The bytes are
@@ -435,6 +446,7 @@ pub(crate) fn minimal_plan() -> ExecutionPlan {
         redaction: Default::default(),
         reversible_replacement: Default::default(),
         tool_policy: PolicyRef("local-default".to_string()),
+        tools: Default::default(),
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),
             retention_days: 0,

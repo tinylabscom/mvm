@@ -109,6 +109,7 @@ pub fn synthesis_for_resume<'a>(
         assets: Vec::new(),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
+        tools: Default::default(),
         caller_commitment: None,
         audit_labels: session_audit_labels(record),
         agent_verbs: None,
