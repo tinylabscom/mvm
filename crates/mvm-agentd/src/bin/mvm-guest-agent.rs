@@ -51,15 +51,16 @@ mod transport;
 
 use ed25519_dalek::SigningKey;
 use std::io::Write;
-use std::os::fd::{FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mvm_agentd::vsock::{
-    AuthenticatedSession, GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, TrafficPlane,
-    TrustDecision, VERB_TRUST_POLICY_PATH, current_uid, enforce_drive_grant, enforce_verb_grant,
-    is_verb_trust_baseline, launch_requires_grant, load_host_signer_verifying_key,
-    load_pinned_verb_grant, load_verb_trust_policy, trust_decision, workload_privilege_refusal,
+    AuthenticatedSession, GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ToolCheckReply,
+    TrafficPlane, TrustDecision, VERB_TRUST_POLICY_PATH, current_uid, enforce_drive_grant,
+    enforce_verb_grant, is_verb_trust_baseline, launch_requires_grant,
+    load_host_signer_verifying_key, load_pinned_verb_grant, load_verb_trust_policy, trust_decision,
+    workload_privilege_refusal,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -130,8 +131,8 @@ use handlers::{
 };
 use interactive::{
     handle_console_attach, handle_console_close, handle_console_detach, handle_console_list,
-    handle_console_open, handle_console_resize, handle_exec, handle_exec_batch, handle_run_code,
-    handle_run_detached,
+    handle_console_open, handle_console_resize, handle_exec, handle_exec_batch,
+    handle_mediated_exec, handle_run_code, handle_run_detached,
 };
 
 /// Shared references every per-verb handler needs: the state Arcs
@@ -155,6 +156,33 @@ fn send_authenticated_response(
 ) {
     let mut sink = AuthenticatedWriter::new(file, session);
     write_response(&mut sink, response);
+}
+
+/// Bound a host approval wait on this one-shot control connection. The
+/// connection closes after the command, so the timeout need not be restored.
+fn arm_tool_reply_timeout(fd: RawFd) -> std::io::Result<()> {
+    let timeout = libc::timeval {
+        tv_sec: 130,
+        tv_usec: 0,
+    };
+    let len = libc::socklen_t::try_from(std::mem::size_of_val(&timeout))
+        .expect("timeval size fits socklen_t");
+    // SAFETY: `fd` is a live accepted socket; `timeout` is a valid timeval
+    // whose address remains live for the entire setsockopt call.
+    let result = unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            (&raw const timeout).cast(),
+            len,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
 }
 
 fn handle_client(
@@ -334,6 +362,64 @@ fn handle_client(
         None
     };
 
+    let req = match req {
+        GuestRequest::MediatedExec(call) => {
+            let Some(invocation) = call.tool_check() else {
+                send_authenticated_response(
+                    &mut file,
+                    &mut session,
+                    &GuestResponse::Error {
+                        message: "invalid declared tool invocation".to_string(),
+                    },
+                );
+                return;
+            };
+            if session
+                .write(
+                    &mut file,
+                    &GuestResponse::ToolCheckRequired(invocation.clone()),
+                )
+                .is_err()
+            {
+                return;
+            }
+            let decision = arm_tool_reply_timeout(file.as_raw_fd()).and_then(|_| {
+                session
+                    .read::<ToolCheckReply>(&mut file)
+                    .map_err(std::io::Error::other)
+            });
+            if !matches!(decision, Ok(ToolCheckReply::Allow)) {
+                send_authenticated_response(
+                    &mut file,
+                    &mut session,
+                    &GuestResponse::Error {
+                        message: "declared tool invocation denied".to_string(),
+                    },
+                );
+                return;
+            }
+            let resp = {
+                let mut sink = AuthenticatedWriter::new(&mut file, &mut session);
+                let mut ctx = HandlerCtx {
+                    file: &mut sink,
+                    state,
+                    integration_state,
+                    probe_state,
+                    boot_state,
+                };
+                handle_mediated_exec(
+                    &mut ctx,
+                    &call.argv,
+                    call.stdin.as_deref(),
+                    call.timeout_secs,
+                )
+            };
+            send_authenticated_response(&mut file, &mut session, &resp);
+            return;
+        }
+        other => other,
+    };
+
     let resp = {
         let mut sink = AuthenticatedWriter::new(&mut file, &mut session);
         let mut ctx = HandlerCtx {
@@ -408,6 +494,10 @@ fn handle_client(
                 stdin,
                 timeout_secs,
             } => handle_exec(&mut ctx, command, stdin, timeout_secs),
+
+            GuestRequest::MediatedExec(_) => {
+                unreachable!("mediated exec reached ordinary dispatch")
+            }
 
             GuestRequest::ExecBatch {
                 stages,
@@ -1021,6 +1111,92 @@ mod tests {
         assert!(reused.is_err(), "operational sessions must not be reusable");
 
         handle.join().expect("handle_client thread");
+    }
+
+    #[test]
+    fn mediated_exec_waits_for_the_host_decision_before_spawn() {
+        if current_uid() == Some(0) {
+            return;
+        }
+        for (reply, should_spawn) in [(ToolCheckReply::Deny, false), (ToolCheckReply::Allow, true)]
+        {
+            let dir = tempfile::tempdir().expect("temporary directory");
+            let marker = dir.path().join("spawned");
+            let call = mvm_agentd::vsock::MediatedExecCall {
+                tool: "shell".to_string(),
+                argv: vec!["/usr/bin/touch".to_string(), marker.display().to_string()],
+                stdin: None,
+                timeout_secs: Some(5),
+            };
+            let invocation = call.tool_check().expect("valid tool call");
+            let (mut host, guest) = UnixStream::pair().expect("unix stream pair");
+            host.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            host.set_write_timeout(Some(Duration::from_secs(5)))
+                .expect("write timeout");
+            let state = Arc::new(Mutex::new(AgentState::new()));
+            let integration_state = Arc::new(Mutex::new(IntegrationState {
+                integrations: vec![],
+            }));
+            let probe_state = Arc::new(Mutex::new(ProbeState { probes: vec![] }));
+            let boot_state = Arc::new(AgentBootState::new(
+                AgentProfile::Dev,
+                std::time::Instant::now(),
+            ));
+            boot_state.mark_vsock_bound();
+            let host_key = SigningKey::from_bytes(&[7u8; 32]);
+            let guest_key = SigningKey::from_bytes(&[9u8; 32]);
+            boot_state
+                .inner
+                .lock()
+                .expect("boot state lock")
+                .host_signer_key = Some(host_key.verifying_key());
+            let handle = std::thread::spawn(move || {
+                handle_client(
+                    guest.into_raw_fd(),
+                    &state,
+                    &integration_state,
+                    &probe_state,
+                    &boot_state,
+                    &guest_key,
+                );
+            });
+            let mut session = AuthenticatedSession::host(&mut host, "tool-check", host_key)
+                .expect("authenticated host session");
+            session
+                .write(
+                    &mut host,
+                    &GuestRequest::ProtocolHello {
+                        host_protocol_version: mvm_agentd::vsock::PROTOCOL_VERSION,
+                        min_supported_version: mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                        host_version: "test-host".to_string(),
+                        requested_capabilities: vec![],
+                    },
+                )
+                .expect("protocol hello");
+            let _: GuestResponse = session.read(&mut host).expect("hello answer");
+            session
+                .write(&mut host, &GuestRequest::MediatedExec(call))
+                .expect("mediated exec request");
+            let question: GuestResponse = session.read(&mut host).expect("tool question");
+            assert!(
+                matches!(question, GuestResponse::ToolCheckRequired(reported) if reported == invocation)
+            );
+            assert!(!marker.exists(), "command spawned before the decision");
+            session.write(&mut host, &reply).expect("tool decision");
+            let answer: GuestResponse = session.read(&mut host).expect("command answer");
+            if should_spawn {
+                assert!(matches!(
+                    answer,
+                    GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Exit { code: 0 })
+                ));
+                assert!(marker.exists(), "allowed command did not spawn");
+            } else {
+                assert!(matches!(answer, GuestResponse::Error { .. }));
+                assert!(!marker.exists(), "denied command spawned");
+            }
+            handle.join().expect("guest handler");
+        }
     }
 
     /// A control connection without the pinned host identity must fail during

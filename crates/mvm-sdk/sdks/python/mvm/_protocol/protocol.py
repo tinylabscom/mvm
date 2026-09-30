@@ -435,14 +435,20 @@ class GuestCapability1(Enum):
 
 
 class GuestCapability2(Enum):
-    unix_socket_forward = 'unix_socket_forward'
+    mediated_exec = 'mediated_exec'
 
 
 class GuestCapability3(Enum):
+    unix_socket_forward = 'unix_socket_forward'
+
+
+class GuestCapability4(Enum):
     readiness = 'readiness'
 
 
-GuestCapability = Union[GuestCapability1, GuestCapability2, GuestCapability3]
+GuestCapability = Union[
+    GuestCapability1, GuestCapability2, GuestCapability3, GuestCapability4
+]
 
 
 @dataclass
@@ -527,7 +533,7 @@ class RunEntrypoint:
 
 
 @dataclass
-class GuestRequest14:
+class GuestRequest15:
     RunEntrypoint: RunEntrypoint
 
 
@@ -539,7 +545,7 @@ class DriveOpen:
 
 
 @dataclass
-class GuestRequest15:
+class GuestRequest16:
     DriveOpen: DriveOpen
 
 
@@ -549,7 +555,7 @@ class DriveFile:
 
 
 @dataclass
-class GuestRequest16:
+class GuestRequest17:
     DriveFile: DriveFile
 
 
@@ -560,18 +566,18 @@ class RunDetached:
 
 
 @dataclass
-class GuestRequest19:
+class GuestRequest20:
     RunDetached: RunDetached
 
 
 TokenItem = int
 
 
-class GuestRequest21(Enum):
+class GuestRequest22(Enum):
     FsDiff = 'FsDiff'
 
 
-class GuestRequest22(Enum):
+class GuestRequest23(Enum):
     SyncFilesystems = 'SyncFilesystems'
 
 
@@ -583,7 +589,7 @@ class StartUnixSocketForward:
 
 
 @dataclass
-class GuestRequest23:
+class GuestRequest24:
     StartUnixSocketForward: StartUnixSocketForward
 
 
@@ -597,7 +603,7 @@ class ConsoleOpen:
 
 
 @dataclass
-class GuestRequest24:
+class GuestRequest25:
     ConsoleOpen: ConsoleOpen
 
 
@@ -610,7 +616,7 @@ class ConsoleAttach:
 
 
 @dataclass
-class GuestRequest25:
+class GuestRequest26:
     ConsoleAttach: ConsoleAttach
 
 
@@ -620,11 +626,11 @@ class ConsoleDetach:
 
 
 @dataclass
-class GuestRequest26:
+class GuestRequest27:
     ConsoleDetach: ConsoleDetach
 
 
-class GuestRequest27(Enum):
+class GuestRequest28(Enum):
     ConsoleList = 'ConsoleList'
 
 
@@ -634,7 +640,7 @@ class ConsoleClose:
 
 
 @dataclass
-class GuestRequest28:
+class GuestRequest29:
     ConsoleClose: ConsoleClose
 
 
@@ -646,15 +652,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest30:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest30(Enum):
+class GuestRequest31(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest31(Enum):
+class GuestRequest32(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -667,7 +673,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest32:
+class GuestRequest33:
     FsRead: FsRead
 
 
@@ -683,7 +689,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest33:
+class GuestRequest34:
     FsWrite: FsWrite
 
 
@@ -694,7 +700,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest34:
+class GuestRequest35:
     FsList: FsList
 
 
@@ -705,7 +711,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest35:
+class GuestRequest36:
     FsStat: FsStat1
 
 
@@ -717,7 +723,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest36:
+class GuestRequest37:
     FsMkdir: FsMkdir
 
 
@@ -729,7 +735,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest37:
+class GuestRequest38:
     FsRemove: FsRemove
 
 
@@ -741,7 +747,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest38:
+class GuestRequest39:
     FsMove: FsMove
 
 
@@ -755,11 +761,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest39:
+class GuestRequest40:
     ProcStart: ProcStart
 
 
-class GuestRequest40(Enum):
+class GuestRequest41(Enum):
     ProcList = 'ProcList'
 
 
@@ -770,7 +776,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest41:
+class GuestRequest42:
     ProcSignal: ProcSignal
 
 
@@ -781,7 +787,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest42:
+class GuestRequest43:
     ProcSendInput: ProcSendInput
 
 
@@ -792,7 +798,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest43:
+class GuestRequest44:
     ProcWait: ProcWait
 
 
@@ -802,7 +808,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest44:
+class GuestRequest45:
     ProcKill: ProcKill
 
 
@@ -814,7 +820,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest45:
+class GuestRequest46:
     MountVolume: MountVolume
 
 
@@ -825,7 +831,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest46:
+class GuestRequest47:
     UnmountVolume: UnmountVolume
 
 
@@ -835,7 +841,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest47:
+class GuestRequest48:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -846,12 +852,12 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest48:
+class GuestRequest49:
     RunCode: RunCode
 
 
 @dataclass
-class GuestRequest50:
+class GuestRequest51:
     CloseStreamInput: CloseInput
 
 
@@ -1021,7 +1027,7 @@ class ExecBatchResult:
 
 
 @dataclass
-class GuestResponse24:
+class GuestResponse25:
     ExecBatchResult: ExecBatchResult
 
 
@@ -1031,11 +1037,11 @@ class DetachedStarted:
 
 
 @dataclass
-class GuestResponse25:
+class GuestResponse26:
     DetachedStarted: DetachedStarted
 
 
-class GuestResponse28(Enum):
+class GuestResponse29(Enum):
     FilesystemsSynced = 'FilesystemsSynced'
 
 
@@ -1046,7 +1052,7 @@ class UnixSocketForwardStarted:
 
 
 @dataclass
-class GuestResponse29:
+class GuestResponse30:
     UnixSocketForwardStarted: UnixSocketForwardStarted
 
 
@@ -1057,7 +1063,7 @@ class ConsoleOpened:
 
 
 @dataclass
-class GuestResponse30:
+class GuestResponse31:
     ConsoleOpened: ConsoleOpened
 
 
@@ -1070,7 +1076,7 @@ class ConsoleAttached:
 
 
 @dataclass
-class GuestResponse31:
+class GuestResponse32:
     ConsoleAttached: ConsoleAttached
 
 
@@ -1080,7 +1086,7 @@ class ConsoleBusy:
 
 
 @dataclass
-class GuestResponse32:
+class GuestResponse33:
     ConsoleBusy: ConsoleBusy
 
 
@@ -1091,7 +1097,7 @@ class ConsoleDetached:
 
 
 @dataclass
-class GuestResponse33:
+class GuestResponse34:
     ConsoleDetached: ConsoleDetached
 
 
@@ -1101,7 +1107,7 @@ class ConsoleSessions:
 
 
 @dataclass
-class GuestResponse34:
+class GuestResponse35:
     ConsoleSessions: ConsoleSessions
 
 
@@ -1112,7 +1118,7 @@ class ConsoleExited:
 
 
 @dataclass
-class GuestResponse35:
+class GuestResponse36:
     ConsoleExited: ConsoleExited
 
 
@@ -1122,7 +1128,7 @@ class ConsoleResized:
 
 
 @dataclass
-class GuestResponse36:
+class GuestResponse37:
     ConsoleResized: ConsoleResized
 
 
@@ -1134,7 +1140,7 @@ class EntrypointStatusReport:
 
 
 @dataclass
-class GuestResponse37:
+class GuestResponse38:
     EntrypointStatusReport: EntrypointStatusReport
 
 
@@ -1145,7 +1151,7 @@ class UpdateIdleTimeoutAck:
 
 
 @dataclass
-class GuestResponse43:
+class GuestResponse44:
     UpdateIdleTimeoutAck: UpdateIdleTimeoutAck
 
 
@@ -1190,6 +1196,14 @@ IntegrationStatus = Union[
     IntegrationStatus4,
     IntegrationStatus5,
 ]
+
+
+@dataclass
+class MediatedExecCall:
+    argv: List[str]
+    tool: str
+    stdin: Optional[str] = None
+    timeout_secs: Optional[int] = None
 
 
 Nonce = str
@@ -1533,6 +1547,12 @@ class StreamInputResult3:
 StreamInputResult = Union[StreamInputResult1, StreamInputResult2, StreamInputResult3]
 
 
+@dataclass
+class ToolCheckRequest:
+    argv: str
+    tool: str
+
+
 VerbId = str
 
 
@@ -1714,6 +1734,11 @@ FsResult = Union[
 
 
 @dataclass
+class GuestRequest13:
+    MediatedExec: MediatedExecCall
+
+
+@dataclass
 class ExecBatch:
     commands: List[List[str]]
     stages: List[StageFile]
@@ -1721,7 +1746,7 @@ class ExecBatch:
 
 
 @dataclass
-class GuestRequest13:
+class GuestRequest14:
     ExecBatch: ExecBatch
 
 
@@ -1731,7 +1756,7 @@ class RunExtension:
 
 
 @dataclass
-class GuestRequest17:
+class GuestRequest18:
     RunExtension: RunExtension
 
 
@@ -1741,12 +1766,12 @@ class CancelExtension:
 
 
 @dataclass
-class GuestRequest18:
+class GuestRequest19:
     CancelExtension: CancelExtension
 
 
 @dataclass
-class GuestRequest49:
+class GuestRequest50:
     StreamInput: InputFrame
 
 
@@ -1784,6 +1809,11 @@ class GuestResponse20:
 
 
 @dataclass
+class GuestResponse24:
+    ToolCheckRequired: ToolCheckRequest
+
+
+@dataclass
 class PostRestoreAck:
     success: bool
     clock_resynced: Optional[bool] = None
@@ -1793,7 +1823,7 @@ class PostRestoreAck:
 
 
 @dataclass
-class GuestResponse26:
+class GuestResponse27:
     PostRestoreAck: PostRestoreAck
 
 
@@ -1803,32 +1833,32 @@ class FsDiffResult:
 
 
 @dataclass
-class GuestResponse27:
+class GuestResponse28:
     FsDiffResult: FsDiffResult
 
 
 @dataclass
-class GuestResponse38:
+class GuestResponse39:
     ReadinessStatusReport: ReadinessReport
 
 
 @dataclass
-class GuestResponse39:
+class GuestResponse40:
     FsResult: FsResult
 
 
 @dataclass
-class GuestResponse41:
+class GuestResponse42:
     ProcWaitEvent: ProcWaitEvent
 
 
 @dataclass
-class GuestResponse42:
+class GuestResponse43:
     VolumeMountResult: VolumeMountResult
 
 
 @dataclass
-class GuestResponse44:
+class GuestResponse45:
     StreamInputResult: StreamInputResult
 
 
@@ -1923,7 +1953,7 @@ class PostRestore:
 
 
 @dataclass
-class GuestRequest20:
+class GuestRequest21:
     PostRestore: PostRestore
 
 
@@ -1938,7 +1968,7 @@ class GuestResponse15:
 
 
 @dataclass
-class GuestResponse40:
+class GuestResponse41:
     ProcResult: ProcResult
 
 
@@ -1987,6 +2017,7 @@ GuestResponse = Union[
     GuestResponse42,
     GuestResponse43,
     GuestResponse44,
+    GuestResponse45,
 ]
 
 
@@ -2063,6 +2094,7 @@ GuestRequest = Union[
     GuestRequest48,
     GuestRequest49,
     GuestRequest50,
+    GuestRequest51,
 ]
 
 

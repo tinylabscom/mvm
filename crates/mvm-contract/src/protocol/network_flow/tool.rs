@@ -12,6 +12,7 @@ pub const MAX_TOOL_ARGV_BYTES: usize = 16 * 1024;
 /// One guest-reported invocation, sent before the command is spawned.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ToolCheckRequest {
     /// Name in the admitted plan's tool rules.
     pub tool: String,
@@ -30,6 +31,51 @@ impl fmt::Debug for ToolCheckRequest {
 }
 
 impl ToolCheckRequest {
+    /// Build the policy-visible command line from the exact argv vector that
+    /// the guest will execute. Shell metacharacters are quoted for display;
+    /// the guest still spawns argv directly, without a shell.
+    #[must_use]
+    pub fn from_argv(tool: String, argv: &[String]) -> Option<Self> {
+        let first = argv.first()?;
+        if first.is_empty() || argv.iter().any(|arg| arg.contains('\0')) {
+            return None;
+        }
+        let raw_len = argv.iter().try_fold(0usize, |len, arg| {
+            len.checked_add(arg.len())?.checked_add(1)
+        })?;
+        if raw_len > MAX_TOOL_ARGV_BYTES {
+            return None;
+        }
+        let mut command_line = String::new();
+        for (index, arg) in argv.iter().enumerate() {
+            if index > 0 {
+                command_line.push(' ');
+            }
+            if !arg.is_empty()
+                && arg
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._/-+=:@".contains(&byte))
+            {
+                command_line.push_str(arg);
+            } else {
+                command_line.push('\'');
+                for character in arg.chars() {
+                    if character == '\'' {
+                        command_line.push_str("'\\''");
+                    } else {
+                        command_line.push(character);
+                    }
+                }
+                command_line.push('\'');
+            }
+        }
+        let request = Self {
+            tool,
+            argv: command_line,
+        };
+        request.is_valid().then_some(request)
+    }
+
     /// Reject empty, oversized, or NUL-containing fields before policy lookup.
     #[must_use]
     pub fn is_valid(&self) -> bool {
@@ -102,5 +148,20 @@ mod tests {
         let debug = alloc::format!("{request:?}");
         assert!(!debug.contains("private-tool"));
         assert!(!debug.contains("secret-on-command-line"));
+    }
+
+    #[test]
+    fn argv_rendering_preserves_arguments_without_shell_interpretation() {
+        let request = ToolCheckRequest::from_argv(
+            "git".into(),
+            &["git".into(), "status; rm -rf /".into(), "a'b".into()],
+        )
+        .expect("valid argv");
+        assert_eq!(request.argv, "git 'status; rm -rf /' 'a'\\''b'");
+        assert!(ToolCheckRequest::from_argv("git".into(), &[]).is_none());
+        assert!(ToolCheckRequest::from_argv("git".into(), &["".into()]).is_none());
+        assert!(
+            ToolCheckRequest::from_argv("git".into(), &["git".into(), "x\0y".into()]).is_none()
+        );
     }
 }
