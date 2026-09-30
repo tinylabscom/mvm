@@ -386,6 +386,11 @@ Security-bearing gaps first, then the foundations the UX needs:
         layers subset it; deny unions), `show`/`diff`/`why` rendering, schema
         regenerated — recorded-only until enforcement lands
 - [ ] MCP tool gate wired to a live path; secrets bound to (tool, destination)
+  - [x] `mvmctl ops mcp` binds a gate over the resolved `[tools]` section:
+        deny refuses pre-backend, ask prompts the terminal approver
+        fail-closed, unlisted fails closed, `ToolGateDecision` local audit
+        per non-allow; secrets-to-(tool, destination) binding waits for the
+        in-guest mediation that carries tool identity to the endpoint
 - [ ] in-guest command mediation for declared tools, reported over vsock and audited
 
 ### PS-14 — Existing enforcement plans
