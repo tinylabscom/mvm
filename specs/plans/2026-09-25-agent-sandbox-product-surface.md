@@ -396,10 +396,17 @@ apply goes through the protected-path gate.
 ### PS-15 — Packaging (#3724)
 - [ ] deb and rpm built and attested in the release workflow; AUR; nixpkgs-ready derivation
 - [ ] crates.io publish for the embeddable crates, ordered and idempotent
-- [ ] per-platform wheels and npm packages carrying `libmvm_hostlib` — the
-      loaders already look in `mvm/_native/` (Python) and `native/` (npm) before
-      falling back to beside `mvmctl`; the release tarball also has to ship the
-      library beside `mvmctl`
+- [x] per-platform wheels and npm packages carrying `libmvm_hostlib` — the
+      loaders already look in `mvm/_native/` (Python) and `native/` (npm)
+      before falling back to beside `mvmctl`; the release tarball also has to
+      ship the library beside `mvmctl`
+      — the release workflow builds the cdylib per target and packs it
+      fail-closed beside `mvmctl` (tarball listing asserts it); publish-pypi
+      builds a wheel per platform (Linux + macOS) with the library embedded at
+      `mvm/_native/` and a `py3-none-<platform>` tag decided by a hatchling
+      build hook only when the library is present (sdist stays source-only);
+      publish-npm builds both platform libraries on a matrix, assembles
+      `native/`, and smoke-installs asserting the packaged library
 - [ ] per-artifact release smoke tests
 
 ### PS-16 — Nix developer experience (#3725)
