@@ -1,7 +1,7 @@
 # Obscura browser workload and SDK provider
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status:** OPT-IN PILOT IMPLEMENTED — LIVE PROOF DEFERRED
 

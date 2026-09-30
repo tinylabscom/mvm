@@ -197,8 +197,9 @@ Security-bearing gaps first, then the foundations the UX needs:
       (foreground `run` / `machine run` and `machine logs -f`; `run --json` carries
       `egress_denials`; `mvmctl explain` lists a finished run's refusals. Read from
       the chain the per-VM endpoint already writes, now attributed with `vm_name`)
-- [ ] denial → policy draft selector (Grant / Skip), never auto-granting
-- [ ] `mvmctl why --host | --path | --tool | --secret` against a resolved policy, `--json`
+- [x] denial → policy draft selector (Grant / Skip), never auto-granting
+- [x] `mvmctl why --host | --path | --tool | --secret` against a resolved policy, `--json`
+      — execution checklist: `specs/plans/2026-09-28-denial-feedback.md`
 
 ### PS-05 — Policy files, profiles, resolved manifest (#3715)
 - [x] TOML policy groups and profiles (`extends`, `groups.include/exclude`, `when`, overrides)
@@ -272,10 +273,30 @@ Security-bearing gaps first, then the foundations the UX needs:
       diff verb on the existing request policy; `--from`/`--to`, `--stat`,
       `--side-by-side`, `--json`, and output caps; `workspace.rs` is the apply
       seam for the remaining undo/redo/replay items
-- [ ] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
-- [ ] session exclusions persisted so restore never deletes ignored files
-- [ ] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a checkpoint with recorded input
-- [ ] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
+- [x] exit prompt + `--apply`; pre-apply content-addressed host snapshot; journal; crash recovery
+      — `mvmctl machine apply` (reviewed prompt, `--yes` non-interactive,
+      `--dry-run`); `mvm-fs::workspace_apply` stages pre+post images into a
+      content-addressed store, persists the manifest + Merkle root, journals
+      begin/commit, and writes through tmp+rename; a crash after begin without
+      the done marker rolls back from the snapshot, after the marker completes
+      the commit on the next open
+- [x] session exclusions persisted so restore never deletes ignored files
+      — operator `--exclude` globs persist into the apply manifest and are the
+      only list undo/redo ever consults; no default list is ever rebuilt
+- [~] `mvmctl undo` / `redo` — landed as journal verbs reversing/re-applying
+      the most recent effective apply. Replay now has encrypted,
+      content-addressed input artifacts; session-bound, parent-linked
+      `vm_full` step checkpoints; a durable session-record commit point; and
+      a chain-verified ordered replay planner/dispatcher. Production step
+      orchestration and an operator replay command remain because the general
+      agent prompt transport is not exposed through `mvmctl` yet
+- [x] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
+      — chain-signed `workspace.applied`/`workspace.undone`/
+      `workspace.redone` entries carry the committed manifest Merkle root;
+      session seals derive their snapshot root from ordered checkpoint
+      creation digests; apply plans through the shared
+      `ProtectedPathSet` (default CI/build/test classes + `--protected-path`)
+      and one match refuses the whole apply
 
 ### PS-09 — Detachable sessions (#3719)
 - [x] console reattach with bounded scrollback; single client; dev-only and grant-gated (claim 15)
@@ -297,8 +318,9 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] hash-chained session ledger (plan id, image/kernel identity) — derived
       from the chain: each seal links the previous one, so there is no second
       file or trust root
-- [ ] session ledger carries snapshot roots — the `seal.snapshot_root` field is
-      reserved and unset until PS-08 records snapshot lineage per session
+- [~] session ledger carries snapshot roots — when no explicit root is supplied,
+      `session.sealed` derives it from the ordered checkpoint-creation digests
+      recorded for that session
 - [x] `mvmctl audit list | show | verify <session>` with `VERIFIED` / `MISMATCH`, filters, `--json`
       — as `trust audit sessions`, `trust audit show <session>` (`--kind`,
       `--since`, `--until`), `trust audit verify <session>`; also `UNSEALED`

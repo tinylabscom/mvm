@@ -1,7 +1,7 @@
 # Warm-launch gate contract repair
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 The launch-mode BDD called a warm claim but compared its one observed dispatch
 window with the 200 ms prepared-cold target. That mixed two different contracts:

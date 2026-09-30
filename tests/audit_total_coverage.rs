@@ -302,6 +302,11 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("fs", AuditPosture::Emits("VmFsMutate")),
     ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
     ("diff", AuditPosture::ReadOnly),
+    // Reviewed workspace apply: snapshots the host tree it overwrites,
+    // journals the apply, and emits the manifest Merkle root.
+    ("apply", AuditPosture::Emits("WorkspaceApply")),
+    ("undo", AuditPosture::Emits("WorkspaceUndo")),
+    ("redo", AuditPosture::Emits("WorkspaceRedo")),
     ("wait", AuditPosture::ReadOnly),
     ("boot-report", AuditPosture::ReadOnly),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
@@ -607,7 +612,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // VM lifecycle. `up` and `invoke` are retired (folded into `machine run`'s
     // argv lifecycle + `--entrypoint` action). `run` survives hidden as the SDK
     // Sandbox transport (`run --mode live/plan`); its posture is unchanged.
-    ("explain", AuditPosture::ReadOnly),
+    // Read-only unless --review explicitly writes a confirmed project-policy
+    // edit, so classify the whole verb by its strongest posture.
+    ("explain", AuditPosture::InteractiveOrControl),
+    ("why", AuditPosture::ReadOnly),
     ("run", AuditPosture::InteractiveOrControl),
     ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
     ("__builder-vm-bootstrap", AuditPosture::InteractiveOrControl),
@@ -866,6 +874,9 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "VmTtlSet",
         "VmVolumeAdd",
         "VmVolumeRemove",
+        "WorkspaceApply",
+        "WorkspaceRedo",
+        "WorkspaceUndo",
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",

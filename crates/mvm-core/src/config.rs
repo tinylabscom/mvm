@@ -116,6 +116,16 @@ pub fn mvm_home() -> String {
     format!("{}/.mvm", home_dir())
 }
 
+/// The last successful ambient release check: `<mvm_home>/update-check.json`.
+pub fn mvm_update_check_path() -> std::path::PathBuf {
+    mvm_update_check_path_at(mvm_home())
+}
+
+/// The ambient release-check record beneath an explicit mvm home.
+pub fn mvm_update_check_path_at(mvm_home: impl AsRef<std::path::Path>) -> std::path::PathBuf {
+    mvm_home.as_ref().join("update-check.json")
+}
+
 /// Like [`mvm_home`] but fails instead of silently falling back to
 /// `/tmp` when neither `MVM_HOME` nor `$HOME` is set. Use this for
 /// security-sensitive state — secrets, signed bundles, the trusted-
@@ -2026,6 +2036,20 @@ mod tests {
         assert_eq!(
             mvm_cache_dir_at("/isolated/mvm"),
             std::path::PathBuf::from("/isolated/mvm/cache")
+        );
+    }
+
+    #[test]
+    fn update_check_path_uses_the_single_mvm_home() {
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", "/isolated/mvm");
+        assert_eq!(
+            mvm_update_check_path(),
+            std::path::PathBuf::from("/isolated/mvm/update-check.json")
+        );
+        assert_eq!(
+            mvm_update_check_path_at("/other/mvm"),
+            std::path::PathBuf::from("/other/mvm/update-check.json")
         );
     }
 

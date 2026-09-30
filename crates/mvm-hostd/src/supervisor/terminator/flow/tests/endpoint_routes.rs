@@ -273,6 +273,14 @@ impl RuntimeApprover for Fixed {
 }
 
 fn secret_asking(verdict: ApprovalVerdict) -> (Assembled, Arc<RecordingForwarder>, Arc<Fixed>) {
+    secret_asking_with(verdict, AuthType::Bearer, InjectionMode::Header)
+}
+
+fn secret_asking_with(
+    verdict: ApprovalVerdict,
+    auth_type: AuthType,
+    inject: InjectionMode,
+) -> (Assembled, Arc<RecordingForwarder>, Arc<Fixed>) {
     let forwarder = recording();
     let approver = Arc::new(Fixed {
         verdict,
@@ -288,6 +296,7 @@ fn secret_asking(verdict: ApprovalVerdict) -> (Assembled, Arc<RecordingForwarder
         Routing {
             approver: Some(approver.clone()),
             approval_required: ["model-api".to_string()].into_iter().collect(),
+            secret_shape: Some((auth_type, inject)),
             ..Routing::default()
         },
     );
@@ -340,4 +349,59 @@ fn a_secret_that_needs_approval_is_substituted_once_approved() {
     // A request without the placeholder asks nothing.
     send(&vm, BOUND_HOST, "GET", "/v1/models", None);
     assert_eq!(approver.asked.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn secret_approval_covers_every_injection_mode() {
+    for (auth_type, inject) in [
+        (AuthType::Bearer, InjectionMode::QueryParam),
+        (AuthType::Bearer, InjectionMode::UrlPath),
+        (AuthType::Basic, InjectionMode::BasicAuth),
+    ] {
+        let (vm, forwarder, approver) = secret_asking_with(
+            ApprovalVerdict::Denied {
+                reason: "approval_denied",
+            },
+            auth_type,
+            inject,
+        );
+        let placeholder = &vm.placeholders[0];
+        let (target, auth) = match inject {
+            InjectionMode::QueryParam => (format!("/v1/models?token={placeholder}"), None),
+            InjectionMode::UrlPath => (format!("/v1/models/{placeholder}"), None),
+            InjectionMode::BasicAuth => (
+                "/v1/models".to_string(),
+                Some(mvm_contract::substitution::basic_header(&format!(
+                    "user:{placeholder}"
+                ))),
+            ),
+            InjectionMode::Header => unreachable!("header mode has dedicated coverage"),
+        };
+        let auth = auth
+            .map(|value| format!("authorization: {value}\r\n"))
+            .unwrap_or_default();
+        let request = format!(
+            "GET {target} HTTP/1.1\r\nhost: {BOUND_HOST}\r\n{auth}content-length: 0\r\n\r\n"
+        );
+        let refused = exchange_with(&vm, BOUND_HOST, &vm.intermediate_pem, request.as_bytes())
+            .expect("the guest's tls client completes its handshake");
+
+        assert!(
+            status_line(&refused).starts_with("HTTP/1.1 502"),
+            "{inject:?}: {}",
+            String::from_utf8_lossy(&refused)
+        );
+        assert!(
+            forwarder.seen.lock().unwrap().is_none(),
+            "{inject:?} must not reach the forward leg after denial"
+        );
+        assert_eq!(
+            approver.asked.lock().unwrap().as_slice(),
+            [ApprovalSubject::SecretUse {
+                secret: "model-api".into(),
+                destination: BOUND_HOST.into(),
+            }],
+            "{inject:?} must ask before substitution"
+        );
+    }
 }

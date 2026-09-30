@@ -119,6 +119,31 @@ fn a_sealed_session_verifies_and_the_seal_describes_it() {
     assert_eq!(report.late_entries, 0);
 }
 
+#[test]
+fn a_session_seal_commits_the_ordered_checkpoint_roots() {
+    let chain = Chain::new();
+    let p = plan("sha256:snapshot1");
+    let first = format!("sha256:{}", "a".repeat(64));
+    let second = format!("sha256:{}", "b".repeat(64));
+    chain.emitter.emit_admitted(&p, "host:test").unwrap();
+    chain
+        .emitter
+        .emit_checkpoint_created(&p, "step-1", "vm_full", &first, "worker")
+        .unwrap();
+    chain
+        .emitter
+        .emit_checkpoint_created(&p, "step-2", "vm_full", &second, "worker")
+        .unwrap();
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+
+    let seal = chain.emitter.seal_session(&p, SealReason::Exited).unwrap();
+    assert_eq!(
+        seal.snapshot_root,
+        Some(hex(&merkle_root(&[first.as_str(), second.as_str()])))
+    );
+    assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
+}
+
 /// The durability policy for the records that bound a session and a segment.
 /// Each is a completeness claim — "this session had N entries", "this segment
 /// ended here" — and a claim that can be lost in a crash while the entries it

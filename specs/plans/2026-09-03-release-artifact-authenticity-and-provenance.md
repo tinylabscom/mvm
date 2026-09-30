@@ -1,7 +1,7 @@
 # Claim the release-artifact authenticity we already ship, then decide on provenance
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status: IN PROGRESS — WS-A and WS-B COMPLETE; WS-C remains.**
 

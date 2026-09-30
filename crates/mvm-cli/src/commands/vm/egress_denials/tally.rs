@@ -36,6 +36,27 @@ pub(in crate::commands) struct DeniedDestination {
     pub hint: String,
 }
 
+impl DeniedDestination {
+    /// The exact `allow_hosts` entry this refusal can safely become.
+    ///
+    /// `None` is the security-important answer: metadata, loopback,
+    /// link-local, SSH and operational failures never acquire a grant merely
+    /// because they appeared in an audit record.
+    pub(in crate::commands) fn grant_target(&self) -> Option<&str> {
+        match &self.remedy {
+            Remedy::AllowHost { flag } | Remedy::NameExplicitly { flag } => {
+                flag.strip_prefix("--allow-host ")
+            }
+            Remedy::EditRoute { .. } | Remedy::Never { .. } | Remedy::Advice { .. } => None,
+        }
+    }
+
+    /// Whether granting requires naming a restricted address exactly.
+    pub(in crate::commands) fn requires_explicit_name(&self) -> bool {
+        matches!(self.remedy, Remedy::NameExplicitly { .. })
+    }
+}
+
 /// The dedup key: the same destination refused for the same reason is one
 /// line however often it recurs.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]

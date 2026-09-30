@@ -615,6 +615,10 @@ tier = "parse"
 # suite fails if one ships, so the docs get updated when it does.
 reason = "a long-lived watcher: it never exits on its own"
 
+[[command]]
+path = "why"
+tier = "exec"
+
 [[planned]]
 path = "manifest push"
 reason = "registry sharing is designed but unimplemented; the docs mark the section planned"

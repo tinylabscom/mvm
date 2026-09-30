@@ -1,7 +1,7 @@
 # Wasm SDK host-service admission
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issue:** [#2977](https://github.com/tinylabscom/mvm/issues/2977)
 

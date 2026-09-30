@@ -14,7 +14,7 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 use super::{
     checkpoint, cp, diff, display, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl,
-    snapshot, volume, wait,
+    snapshot, volume, wait, workspace_apply,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -52,6 +52,16 @@ pub(in crate::commands) enum VmCmd {
     Proc(proc::Args),
     /// Show what a machine changed in its workspace volumes, with content
     Diff(diff::Args),
+    /// Review and apply a machine's workspace changes back to the host
+    /// directory, with a pre-apply snapshot and a journal
+    #[command(hide = true)]
+    Apply(workspace_apply::ApplyArgs),
+    /// Reverse the most recent reviewed apply on a workspace
+    #[command(hide = true)]
+    Undo(workspace_apply::UndoArgs),
+    /// Re-apply the most recent undone apply on a workspace
+    #[command(hide = true)]
+    Redo(workspace_apply::RedoArgs),
     /// Serve view-only display frames on a tokenized loopback URL
     Display(display::Args),
     /// Wait for guest readiness
@@ -120,6 +130,7 @@ impl VmCmd {
             VmCmd::Fs(_) => "fs",
             VmCmd::Proc(_) => "proc",
             VmCmd::Diff(_) => "diff",
+            VmCmd::Apply(_) | VmCmd::Undo(_) | VmCmd::Redo(_) => "machine",
             VmCmd::Display(_) => "display",
             VmCmd::Wait(_) => "wait",
             VmCmd::BootReport(_) => "boot-report",
@@ -144,6 +155,9 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Fs(a) => fs::run(cli, a, cfg),
         VmCmd::Proc(a) => proc::run(cli, a, cfg),
         VmCmd::Diff(a) => diff::run(cli, a, cfg),
+        VmCmd::Apply(a) => workspace_apply::run_apply(cli, a, cfg),
+        VmCmd::Undo(a) => workspace_apply::run_undo(cli, a, cfg),
+        VmCmd::Redo(a) => workspace_apply::run_redo(cli, a, cfg),
         VmCmd::Display(a) => display::run(cli, a, cfg),
         VmCmd::Wait(a) => wait::run_wait(cli, a, cfg),
         VmCmd::BootReport(a) => wait::run_boot_report(cli, a, cfg),

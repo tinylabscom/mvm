@@ -1,7 +1,7 @@
 # Restore the sealed-dependency flow to the README
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status: OPEN** — cut from the README on 2026-09-03 for the 0.18 release.
 

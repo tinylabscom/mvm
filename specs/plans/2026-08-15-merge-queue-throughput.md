@@ -27,6 +27,15 @@ self-hosted runners, and is limited to 20 standard hosted jobs. Two speculative
 merge groups currently fan out into CI, architecture, and kernel workflows,
 which is enough to saturate that pool before ordinary pull-request work.
 
+On 2026-09-29, four successful pull-request CI runs took 65, 80, 112, and 120
+minutes even though their longest executing job took only 20-24 minutes. Each
+run allocated 11 substantive lanes and consumed 132-150 runner-minutes. A
+representative 65-minute run waited 19 minutes for the 12-second scope job,
+then rebuilt `cargo-zigbuild` for 7-9 minutes in each of two feature lanes; its
+zero-second Lint aggregate waited another five minutes for runner admission.
+A successful merge-group run consumed 204 runner-minutes across 15 substantive
+lanes. Fourteen open pull requests were competing for the same 20-job pool.
+
 ## Work
 
 - [x] Add structural regression coverage for scope-first scheduling,
@@ -43,6 +52,13 @@ which is enough to saturate that pool before ordinary pull-request work.
       default-branch cache warmer; restore them in validation jobs.
 - [x] Remove duplicated feature-test work and validate the optimized workflow
       shape with actionlint and focused tests.
+- [x] Restore the trusted-main Rust cache before installing the embedded-host
+      toolchain in both PR feature lanes. The cache already carries
+      `~/.cargo/bin`, so the pinned `cargo-zigbuild` install can reuse the
+      trusted binary instead of compiling it for 7-9 minutes per lane.
+- [x] Remove the broad 25-30 GB runner cleanup from the focused eBPF lane. Its
+      measured run spent 4m14s deleting unrelated preinstalled tools, then only
+      3m37s on both toolchain setup and its one-object/one-crate validation.
 - [x] Move the `aarch64-no-kvm-smoke` job out of the merge queue. The cold
       QEMU TCG path can take hours, and making it a required gate serialized
       every merge. It remains in `ci-full.yml` (nightly + manual dispatch) so
@@ -54,8 +70,9 @@ which is enough to saturate that pool before ordinary pull-request work.
       back the live queue policy: use `HEADGREEN`, batch two validated entries
       with a five-minute bound, and raise speculative width only to the level
       supported by the measured post-consolidation runner demand.
-- [ ] Record post-change timings and the organization-owner-only capacity
-      boundary in the sprint and refactor rollups.
+- [ ] Record post-change PR and merge-group timings after this ordering change
+      lands; compare p50/p90 wall time, scope admission, and total
+      runner-minutes against the 2026-09-29 sample above.
 
 ## Safety boundaries
 
