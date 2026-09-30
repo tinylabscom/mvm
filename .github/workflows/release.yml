@@ -156,6 +156,10 @@ jobs:
               --bin mvm-audit-signer
             cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-gpu \
               --bin mvm-gpu-endpoint
+            # The in-process SDK host library: the language SDKs load it by
+            # the platform file name, and the release ships it beside
+            # mvmctl so a downloaded install needs nothing else.
+            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostlib
           else
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-host-agent \
@@ -165,6 +169,7 @@ jobs:
               --bin mvm-audit-signer
             cargo build --release --target "${BUILD_TARGET}" -p mvm-gpu \
               --bin mvm-gpu-endpoint
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostlib
           fi
 
       - name: Verify Linux release payloads are statically linked
@@ -260,6 +265,22 @@ jobs:
             cp "$src" "staging/${ARCHIVE_NAME}/"
             echo "bundled ${hostbin}"
           done
+          # The SDK host library, beside mvmctl: the SDKs' third lookup is
+          # the platform file name next to the resolved mvmctl, and a
+          # downloaded install has no other source. Fail closed like the
+          # per-VM host binaries above.
+          HOSTLIB_EXT="so"
+          if [[ "${TARGET}" == *apple-darwin ]]; then
+            HOSTLIB_EXT="dylib"
+          fi
+          HOSTLIB_SRC="target/${BUILD_TARGET}/release/libmvm_hostlib.${HOSTLIB_EXT}"
+          if [ ! -f "${HOSTLIB_SRC}" ]; then
+            echo "::error::libmvm_hostlib.${HOSTLIB_EXT} was not built for ${TARGET}; the language SDKs load it in-process and have no fallback on a downloaded install" >&2
+            exit 1
+          fi
+          cp "${HOSTLIB_SRC}" "staging/${ARCHIVE_NAME}/"
+          echo "bundled libmvm_hostlib.${HOSTLIB_EXT}"
+
           cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           # Include generated man pages
@@ -269,6 +290,10 @@ jobs:
 
           cd staging
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          tar tzf "${ARCHIVE_NAME}.tar.gz" | grep -q "libmvm_hostlib\.${HOSTLIB_EXT}$" || {
+            echo "::error::the release tarball is missing libmvm_hostlib.${HOSTLIB_EXT}" >&2
+            exit 1
+          }
 
           # Generate SHA256 checksum for the tarball
           shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"

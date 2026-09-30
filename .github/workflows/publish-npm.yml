@@ -12,7 +12,44 @@ on:
         required: false
 
 jobs:
+  hostlib:
+    # The package's native/ directory carries the host library for every
+    # supported platform file name, and the loader picks by platform — so
+    # each runner builds its own library and the pack job assembles them.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build the in-process host library for this platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOSTLIB_EXT="so"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            HOSTLIB_EXT="dylib"
+          fi
+          cargo build --release -p mvm-hostlib
+          SRC="$(find target/release -maxdepth 1 -name "libmvm_hostlib.${HOSTLIB_EXT}" -print -quit)"
+          test -n "${SRC}" || { echo "::error::libmvm_hostlib.${HOSTLIB_EXT} was not built" >&2; exit 1; }
+          echo "built ${SRC}"
+
+      - name: Upload the platform library
+        uses: actions/upload-artifact@v7
+        with:
+          name: hostlib-${{ matrix.runner }}
+          path: target/release/libmvm_hostlib.*
+          retention-days: 1
+
   build:
+    needs: hostlib
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -61,12 +98,31 @@ jobs:
           )
           PY
 
+      - name: Download the platform libraries
+        uses: actions/download-artifact@v8
+        with:
+          pattern: hostlib-*
+          path: native-downloads
+          merge-multiple: true
+
+      - name: Place the libraries in native/ and verify both platforms
+        run: |
+          set -euo pipefail
+          mkdir -p native
+          cp native-downloads/libmvm_hostlib.* native/
+          test -f native/libmvm_hostlib.so || { echo "::error::the Linux host library is missing" >&2; exit 1; }
+          test -f native/libmvm_hostlib.dylib || { echo "::error::the macOS host library is missing" >&2; exit 1; }
+          ls -la native/
+
       - name: Install + build
         run: |
           npm ci
           npm run build
 
       - name: Pack npm artifact
+        # native/ was assembled from both platform artifacts above; npm
+        # pack fails closed here if a library is missing because the
+        # place step already refused to continue without both.
         run: |
           mkdir -p dist
           npm pack --pack-destination dist
@@ -80,9 +136,21 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install "$TARBALL" >/dev/null
           node --input-type=module - <<'EOF'
+          import { createRequire } from "node:module";
+          import { existsSync } from "node:fs";
+          import { fileURLToPath } from "node:url";
+          import path from "node:path";
           import { Sandbox } from "@runmvm/mvm";
           if (typeof Sandbox?.create !== "function") {
             throw new Error("packed SDK did not expose Sandbox.create");
+          }
+          // The packed package must carry this platform's host library.
+          const require = createRequire(import.meta.url);
+          const pkgRoot = path.dirname(path.dirname(require.resolve("@runmvm/mvm/package.json")));
+          const libName = process.platform === "darwin" ? "libmvm_hostlib.dylib" : "libmvm_hostlib.so";
+          const libPath = path.join(pkgRoot, "native", libName);
+          if (!existsSync(libPath)) {
+            throw new Error(`packed SDK is missing ${libPath}`);
           }
           EOF
 

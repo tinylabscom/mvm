@@ -10,7 +10,14 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # One wheel per platform: the wheel embeds the platform's host
+    # library, so its tag must match the machine that built it. The sdist
+    # is built once, on Linux.
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     steps:
@@ -19,6 +26,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - name: Validate SDK release manifest and package metadata
         run: |
@@ -49,21 +58,49 @@ jobs:
           )
           PY
 
+      - name: Build the in-process host library and embed it in the package
+        shell: bash
+        run: |
+          set -euo pipefail
+          HOSTLIB_EXT="so"
+          if [[ "${RUNNER_OS}" == "macOS" ]]; then
+            HOSTLIB_EXT="dylib"
+          fi
+          cargo build --release -p mvm-hostlib
+          SRC="$(find target/release -maxdepth 1 -name "libmvm_hostlib.${HOSTLIB_EXT}" -print -quit)"
+          test -n "${SRC}" || { echo "::error::libmvm_hostlib.${HOSTLIB_EXT} was not built" >&2; exit 1; }
+          mkdir -p crates/mvm-sdk/sdks/python/mvm/_native
+          cp "${SRC}" crates/mvm-sdk/sdks/python/mvm/_native/
+          echo "embedded ${SRC}"
+
       - name: Build sdist + wheel
         run: |
           python -m pip install --upgrade build twine
-          python -m build crates/mvm-sdk/sdks/python --outdir dist
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            python -m build crates/mvm-sdk/sdks/python --outdir dist
+          else
+            # One sdist, from Linux; every runner builds its own wheel.
+            python -m build --wheel crates/mvm-sdk/sdks/python --outdir dist
+          fi
           python -m twine check dist/*
 
       - name: Smoke install built wheel
+        shell: bash
         run: |
           python -m venv .venv-smoke
           . .venv-smoke/bin/activate
           python -m pip install --upgrade pip
           python -m pip install dist/*.whl
           python - <<'PY'
+          import pathlib
           import mvm
           assert mvm.__name__ == "mvm"
+          # The wheel must carry the host library: a platform wheel that
+          # installed without it would leave the SDK without its transport.
+          native = pathlib.Path(mvm.__file__).parent / "_native"
+          libs = [p for p in native.iterdir() if p.name.startswith("libmvm_hostlib")]
+          assert libs, f"wheel installed without a host library in {native}"
+          print("smoke install passed; packaged library:", libs[0].name)
           PY
 
       - name: Upload built artifacts
