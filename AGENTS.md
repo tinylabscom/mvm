@@ -114,7 +114,7 @@ bridge, and TAP devices; the Nix store (shared by design; Nix locking handles
 it). The builder VM itself is shared across worktrees — **never fork a
 per-worktree VM** (boot cost, duplicated tens-of-GB store, warm-cache loss).
 
-One-time per clone: `just install-hooks` points `core.hooksPath` at
+One-time per clone: `just maint::hooks` points `core.hooksPath` at
 `.githooks/`. The pre-commit hook runs `cargo fmt --all` (auto-restaging),
 scoped stable clippy `-D warnings`, `nix fmt` for staged `.nix` files, and
 `actionlint` for workflow changes — never the full test suite; heavy gates run
