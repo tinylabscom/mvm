@@ -1,7 +1,7 @@
 # Extended CI documented-surface repair
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issues:** [#2938](https://github.com/tinylabscom/mvm/issues/2938),
 [#2979](https://github.com/tinylabscom/mvm/issues/2979)

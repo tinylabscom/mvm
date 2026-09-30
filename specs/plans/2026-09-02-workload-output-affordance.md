@@ -1,7 +1,7 @@
 # A workload needs a way to hand results back
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status: IN PROGRESS — `--output` collection, signed grant, and `plan.outputs` landed; hardlink identity and restored-run coverage remain.**
 

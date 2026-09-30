@@ -1,7 +1,7 @@
 # GitHub Actions open-issue repair
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issues:** [#3601](https://github.com/tinylabscom/mvm/issues/3601),
 [#3598](https://github.com/tinylabscom/mvm/issues/3598),

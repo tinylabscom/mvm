@@ -1,7 +1,7 @@
 # Evidence that earns trust
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status: OPEN** — written 2026-09-04, after the 0.18 release candidate work.
 

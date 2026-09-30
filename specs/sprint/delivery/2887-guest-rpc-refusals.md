@@ -1,7 +1,7 @@
 # 2887 — Guest RPC refusal handling and explicit SDK dev profile
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 ## What shipped
 
