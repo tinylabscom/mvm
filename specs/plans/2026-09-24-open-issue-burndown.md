@@ -134,6 +134,10 @@ campaign.
     intact.
   - Lab-only (KVM box). It must never gate a PR. Pin the vulnerable kernel
     and the exploit source by digest.
+  - 2026-09-29: the pinned QEMU/KVM scenario booted the target kernel on an AMD
+    Ryzen 5 3600 and ran all 48 exploit attempts, but the prefetch oracle found
+    no timing separation and emitted no canary. This second CPU family leaves
+    the item open pending hardware known to support the exploit's oracle.
 
 ### Wave 3: P2 agent-sandbox surface (sequential where noted)
 

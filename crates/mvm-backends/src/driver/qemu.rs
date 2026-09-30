@@ -220,10 +220,13 @@ fn qemu_boot_argv_for_arch(
     // + `-numa` pair went with them, since it existed only because
     // vhost-user-fs requires a shared memory backend whose size equals `-m`.
 
-    // virtio-vsock on the per-VM guest CID. The host reaches the guest's
-    // listeners through the AF_VSOCK↔UNIX bridge spawned after the boot.
-    args.push("-device".into());
-    args.push(format!("vhost-vsock-pci,guest-cid={cid}"));
+    // Attach virtio-vsock only when the physical recipe declares a channel.
+    // Guests with an empty channel list are intentionally unable to reach the
+    // host through vsock and must not require the host vhost-vsock device.
+    if !spec.vsock.is_empty() {
+        args.push("-device".into());
+        args.push(format!("vhost-vsock-pci,guest-cid={cid}"));
+    }
 
     args.push("-display".into());
     args.push("none".into());
@@ -819,7 +822,10 @@ mod tests {
     fn argv_maps_the_spec_verbatim_and_carries_no_nic() {
         let spec = spec_with(
             KernelImage::Path("/img/vmlinux".into()),
-            vec![],
+            vec![host_dials(
+                GuestService::MachineControl,
+                "/state/w/agent.sock",
+            )],
             vec![
                 // Out of slot order, mixed read-only policy — proves sorting
                 // and per-disk flags land in device-letter order.
@@ -893,6 +899,20 @@ mod tests {
             Some("file:/state/w/console.log")
         );
         assert_eq!(argvalue(&argv, "-D"), Some("/state/w/qemu.log"));
+    }
+
+    #[test]
+    fn argv_omits_vsock_device_when_spec_declares_no_channels() {
+        let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
+        let argv = qemu_boot_argv(
+            &spec,
+            Path::new("/img/vmlinux"),
+            7,
+            true,
+            Path::new("/state/w/qemu.pid"),
+        );
+
+        assert!(!argv.iter().any(|arg| arg.contains("vhost-vsock-pci")));
     }
 
     #[test]
