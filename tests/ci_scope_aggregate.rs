@@ -72,6 +72,7 @@ struct Verdict {
     bdd: &'static str,
     boot: &'static str,
     nix: &'static str,
+    guest_image_scope: &'static str,
     guest_image: &'static str,
 }
 
@@ -86,6 +87,7 @@ impl Verdict {
             bdd: "success",
             boot: "skipped",
             nix: "skipped",
+            guest_image_scope: "true",
             guest_image: "skipped",
         }
     }
@@ -100,6 +102,7 @@ impl Verdict {
             bdd: "skipped",
             boot: "skipped",
             nix: "skipped",
+            guest_image_scope: "false",
             guest_image: "skipped",
         }
     }
@@ -116,14 +119,24 @@ impl Verdict {
         }
     }
 
-    /// A docs-only merge group still executes the Nix job so its stable check
-    /// name reports success, while all scoped steps and the boot ceiling skip.
+    /// A docs-only merge group still executes Nix, while scoped lanes skip.
     fn queue_out_of_scope() -> Self {
         Self {
             event_name: "merge_group",
             nix: "success",
-            guest_image: "success",
             ..Self::out_of_scope()
+        }
+    }
+
+    /// Host-only code still runs the code matrix, but cannot change guest bytes.
+    fn queue_without_guest_image() -> Self {
+        Self {
+            event_name: "merge_group",
+            boot: "success",
+            nix: "success",
+            guest_image_scope: "false",
+            guest_image: "skipped",
+            ..Self::in_scope()
         }
     }
 
@@ -146,6 +159,7 @@ impl Verdict {
             .env("BDD_RESULT", self.bdd)
             .env("BOOT_RESULT", self.boot)
             .env("NIX_RESULT", self.nix)
+            .env("GUEST_IMAGE_SCOPE", self.guest_image_scope)
             .env("GUEST_IMAGE_RESULT", self.guest_image)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -173,13 +187,14 @@ fn a_fully_in_scope_green_run_is_admitted() {
     assert!(Verdict::in_scope().accepts());
     assert!(Verdict::queue_in_scope().accepts());
     assert!(Verdict::queue_out_of_scope().accepts());
+    assert!(Verdict::queue_without_guest_image().accepts());
 }
 
 /// The gate must not have been widened into a rubber stamp. Each of these is a
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 11] = [
+    let cases: [(&str, Verdict); 13] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -259,6 +274,20 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             Verdict {
                 guest_image: "skipped",
                 ..Verdict::queue_in_scope()
+            },
+        ),
+        (
+            "a tree-built guest witness that ran while out of scope",
+            Verdict {
+                guest_image: "success",
+                ..Verdict::queue_without_guest_image()
+            },
+        ),
+        (
+            "an invalid guest-image scope",
+            Verdict {
+                guest_image_scope: "unexpected",
+                ..Verdict::queue_without_guest_image()
             },
         ),
     ];
