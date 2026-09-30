@@ -80,11 +80,18 @@ fn refuse_a_local_builder_build(
 /// quiet fall-through to the released set.
 pub(crate) fn selected_local_checkout()
 -> Result<Option<mvm_build::image_source::LocalImageCheckout>> {
-    use mvm_build::image_source::{ImageSource, resolve_current_source};
-    Ok(match resolve_current_source()? {
+    use mvm_build::image_source::resolve_current_source;
+    Ok(selected_local_checkout_from(resolve_current_source()?))
+}
+
+pub(super) fn selected_local_checkout_from(
+    source: mvm_build::image_source::ImageSource,
+) -> Option<mvm_build::image_source::LocalImageCheckout> {
+    use mvm_build::image_source::ImageSource;
+    match source {
         ImageSource::LocalCheckout(checkout) => Some(checkout),
         ImageSource::Released => None,
-    })
+    }
 }
 
 /// Prepare the builder-VM image the local image-set build itself runs in:
