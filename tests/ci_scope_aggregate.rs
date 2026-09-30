@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 fn aggregate_script() -> String {
     let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
         .expect("failed to read .github/workflows/ci.yml");
-    const STEP: &str = "- name: Require every test lane to pass";
+    const STEP: &str = "- name: Require every merge-group test lane to pass";
     let step = workflow
         .find(STEP)
         .expect("ci.yml must still have the test-aggregate step");

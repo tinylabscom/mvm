@@ -36,6 +36,14 @@ zero-second Lint aggregate waited another five minutes for runner admission.
 A successful merge-group run consumed 204 runner-minutes across 15 substantive
 lanes. Fourteen open pull requests were competing for the same 20-job pool.
 
+On 2026-09-30, the latest 100 merged pull requests took 5h25m at the median and
+20h50m at p90 from creation to merge. Head validation itself took 62 minutes at
+the median even though its longest common job took 22 minutes. In 23 successful
+merge-group runs, jobs started 4.7 minutes after the workflow at the median and
+46.6 minutes at p90; the six-second required aggregates waited as long as
+80-87 minutes. The same expensive matrix ran first on the pull-request commit
+and then on the integrated merge-group commit.
+
 ## Work
 
 - [x] Add structural regression coverage for scope-first scheduling,
@@ -64,12 +72,19 @@ lanes. Fourteen open pull requests were competing for the same 20-job pool.
       every merge. It remains in `ci-full.yml` (nightly + manual dispatch) so
       the path is still exercised, and the structural tests assert it no longer
       blocks the `Test` aggregate.
+- [x] Make pull requests publish the stable `Lint` and `Test` contexts through
+      compile-free admission checks, and run the expensive matrix only against
+      the integrated merge-group commit. Structural tests pin every expensive
+      lane to that event boundary.
+- [x] Configure the live queue to batch at least two and at most five entries
+      with a five-minute bound. Limit speculative width to one full merge group:
+      its roughly 17 concurrent runner jobs fit the 20-job pool and leave room
+      for pull-request admission, instead of two groups requesting about 34.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
-- [ ] Land the workflow change through the merge queue, then update and read
-      back the live queue policy: use `HEADGREEN`, batch two validated entries
-      with a five-minute bound, and raise speculative width only to the level
-      supported by the measured post-consolidation runner demand.
+- [ ] Land the workflow change through the merge queue. The live queue policy
+      has been read back as `HEADGREEN`, one group building, two-to-five entries
+      per merge, and a five-minute minimum-entry wait.
 - [ ] Record post-change PR and merge-group timings after this ordering change
       lands; compare p50/p90 wall time, scope admission, and total
       runner-minutes against the 2026-09-29 sample above.

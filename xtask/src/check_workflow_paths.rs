@@ -684,6 +684,21 @@ mod tests {
         let workflow = ci_workflow();
         let lint = job_block(&workflow, "lint");
         assert!(lint.contains("name: Lint (fmt + clippy + policy)"));
+        assert!(lint.contains("if: ${{ always() }}"));
+        assert!(
+            lint.contains("name: Require CI scope to pass")
+                && lint.contains("CI scope did not pass: $SCOPE_RESULT"),
+            "the required lint context must fail closed when classification fails"
+        );
+        assert!(
+            lint.contains("name: PR admission lint")
+                && lint.contains("cargo fmt -- --check")
+                && lint.contains("Require expensive lint lanes to stay out of pull requests"),
+            "pull requests must publish the required lint context without compiling the workspace"
+        );
+        assert!(lint.contains(
+            "- name: Require every merge-group lint lane to pass\n        if: github.event_name != 'pull_request'"
+        ));
         // A lane that runs but is not in the aggregate's `needs` cannot fail
         // the merge, so pin every lane by name.
         for lane in [
@@ -785,11 +800,48 @@ mod tests {
 
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
+        assert!(test.contains("if: ${{ always() }}"));
+        assert!(
+            test.contains("name: Require CI scope to pass")
+                && test.contains("CI scope did not pass: $SCOPE_RESULT"),
+            "the required test context must fail closed when classification fails"
+        );
+        assert!(
+            test.contains("name: PR admission smoke")
+                && test.contains("cargo metadata --locked --format-version 1 --no-deps")
+                && test.contains("Require expensive test lanes to stay out of pull requests"),
+            "pull requests must publish the required test context without running the full suite"
+        );
+        assert!(test.contains(
+            "- name: Require every merge-group test lane to pass\n        if: github.event_name != 'pull_request'"
+        ));
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
              test-release-witness, test-ebpf-telemetry, bdd-conformance, \
              boot-latency, guest-image-boot, nix-flake-check]"
         ));
+
+        // Full compilation and tests run once, against the integrated
+        // merge-group commit. A missing event guard silently doubles the
+        // repository's dominant CI cost on every pull-request update.
+        for lane in [
+            "lint-core",
+            "lint-policy",
+            "lint-features",
+            "lint-features-test-support",
+            "lint-features-embed",
+            "bdd-conformance",
+            "test-workspace",
+            "test-workspace-aarch64",
+            "test-release-witness",
+            "test-linux",
+            "test-ebpf-telemetry",
+        ] {
+            assert!(
+                job_block(&workflow, lane).contains("github.event_name != 'pull_request'"),
+                "{lane} must not repeat expensive validation on the pull-request commit"
+            );
+        }
 
         // Every lane the aggregate names must also be read back in the loop that
         // compares results against the scope decision. A lane in `needs` but not
@@ -880,12 +932,14 @@ mod tests {
             bdd_workflow.contains("just bdd"),
             "bdd-conformance must still run the Gherkin suite"
         );
-        // ...and it has to be reachable on every run the Linux lane covers,
-        // which is what taking the suite from that lane made it responsible
-        // for. `bdd` is a strict subset of `code`, so this is the wider gate.
+        // ...and it has to be reachable on every integrated code run the Linux
+        // lane covers, which is what taking the suite from that lane made it
+        // responsible for. `bdd` is a strict subset of `code`, so this is the
+        // wider gate. Pull requests deliberately stop at admission checks.
         assert!(
-            job_block(&workflow, "bdd-conformance")
-                .contains("if: needs.scope.outputs.code == 'true'"),
+            job_block(&workflow, "bdd-conformance").contains(
+                "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
+            ),
             "bdd-conformance must carry the code scope it inherited with the suite"
         );
     }
@@ -931,7 +985,9 @@ mod tests {
                 "{job} must depend on CI scope"
             );
             assert!(
-                block.contains("if: needs.scope.outputs.code == 'true'"),
+                block.contains(
+                    "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
+                ),
                 "{job} must skip expensive Rust work for non-code diffs"
             );
         }
@@ -953,6 +1009,7 @@ mod tests {
 
         let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
+        assert!(policy.contains("if: github.event_name != 'pull_request'"));
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
