@@ -28,32 +28,46 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
     run_steps(production)?;
     let kernel = acquire_bootstrap_artifacts_with(
         super::builder_vm::bootstrap_builder_vm_image,
+        prewarm_host_aux_helpers,
         prepare_launch_runtime_artifacts,
+        prepare_pair_launch_artifacts,
         super::builder_vm::ensure_workload_kernel,
     )?;
     ui::success(&format!(
-        "\nBootstrap complete. Builder VM, workload kernel, runtime overlay, initramfs, and OCI guest shims are ready.\nFuture machine runs will reuse these artifacts.\nWorkload kernel: {kernel}"
+        "\nBootstrap complete. Builder VM, host helpers, workload kernel, runtime overlay, SDK sidecars, initramfs, and OCI guest shims are ready.\nFuture machine runs will reuse these artifacts.\nWorkload kernel: {kernel}"
     ));
     Ok(())
 }
 
-fn acquire_bootstrap_artifacts_with<B, R, K>(
+fn acquire_bootstrap_artifacts_with<B, A, R, P, K>(
     builder: B,
+    host_helpers: A,
     runtime: R,
+    pair: P,
     workload_kernel: K,
 ) -> Result<String>
 where
     B: FnOnce() -> Result<()>,
+    A: FnOnce() -> Result<()>,
     K: FnOnce() -> Result<String>,
     R: FnOnce() -> Result<()>,
+    P: FnOnce() -> Result<()>,
 {
     ui::info("Preparing builder VM...");
     builder().context("preparing builder VM")?;
     ui::success("Builder VM ready.");
 
+    ui::info("Preparing host helper binaries...");
+    host_helpers().context("preparing host helper binaries")?;
+    ui::success("Host helper binaries ready.");
+
     ui::info("Preparing shared guest runtime...");
     runtime().context("preparing shared guest runtime")?;
     ui::success("Shared guest runtime ready.");
+
+    // Announced inside the step: only a selected image checkout gives it work.
+    pair().context("preparing pair-stamped launch artifacts")?;
+
     ui::info("Preparing workload kernel...");
     let kernel = workload_kernel().context("preparing workload kernel")?;
     ui::success("Workload kernel ready.");
@@ -107,6 +121,84 @@ fn prepare_launch_runtime_artifacts() -> Result<()> {
     Ok(())
 }
 
+/// Resolve — building from this checkout when a helper is missing or older
+/// than its sources — every per-VM host helper the launch path probes at
+/// spawn, so a later `machine run` never cold-builds one.
+fn prewarm_host_aux_helpers() -> Result<()> {
+    prewarm_host_aux_helpers_for(&mvm_vmm::host::aux_bin::HostProcess::current())
+}
+
+fn prewarm_host_aux_helpers_for(host: &mvm_vmm::host::aux_bin::HostProcess) -> Result<()> {
+    use mvm_vmm::host::aux_bin;
+
+    // A release binary, a library embedder, or any process that did not
+    // declare source helper builds ships or manages its own helpers: nothing
+    // this process may build, so nothing to prewarm.
+    if !host.builds_helpers_from_source() {
+        return Ok(());
+    }
+    for spec in launch_helper_specs() {
+        let bin = spec.bin;
+        // `available` is the resolver's own gate: true only when resolution
+        // succeeds or a source build can produce the helper. Skipping a false
+        // answer keeps this a no-op wherever the resolver would decline
+        // rather than build.
+        if !aux_bin::available(&spec) {
+            continue;
+        }
+        aux_bin::resolve_verified_for(&spec, host)
+            .with_context(|| format!("bootstrap: prewarming the {bin} helper"))?;
+    }
+    Ok(())
+}
+
+/// The per-VM host helper binaries a launch probes at spawn, limited to the
+/// ones this platform's backends spawn: the network endpoint everywhere, and
+/// on macOS the supervisors the libkrun default path and the HVF builder path
+/// spawn.
+fn launch_helper_specs() -> Vec<mvm_vmm::host::aux_bin::AuxBin<'static>> {
+    use mvm_vmm::host::aux_bin::AuxBin;
+    use mvm_vmm::host::codesign::RequiredEntitlement;
+
+    let mut specs = vec![AuxBin::new(
+        "mvm-network-endpoint",
+        "MVM_SUBSTITUTION_ENDPOINT_PATH",
+        "mvm-hostd",
+    )];
+    if cfg!(target_os = "macos") {
+        specs.push(
+            AuxBin::new("mvm-hvf-supervisor", "MVM_HVF_SUPERVISOR_PATH", "mvm-hostd")
+                .signed_with(RequiredEntitlement::Hypervisor),
+        );
+        specs.push(
+            AuxBin::new(
+                "mvm-libkrun-supervisor",
+                "MVM_LIBKRUN_SUPERVISOR_PATH",
+                "mvm-hostd",
+            )
+            .requiring_features(&["libkrun-sys"])
+            .signed_with(RequiredEntitlement::Hypervisor),
+        );
+    }
+    specs
+}
+
+/// Under a selected image checkout, install the pair-stamped runtime overlay
+/// and SDK sidecars the boot path's stamp checks look for. Without a selected
+/// checkout the pair arms never run at boot, so there is nothing to do.
+fn prepare_pair_launch_artifacts() -> Result<()> {
+    super::builder_vm::with_pair_artifact_source(|pair| match pair {
+        Some(pair) => {
+            ui::info("Preparing pair-stamped runtime overlay and SDK sidecars...");
+            mvm_client::launch::runtime_source::prepare_pair_launch_artifacts(pair)
+                .context("installing the pair-stamped runtime overlay and SDK sidecars")?;
+            ui::success("Pair-stamped runtime overlay and SDK sidecars ready.");
+            Ok(())
+        }
+        None => Ok(()),
+    })
+}
+
 /// Run the host-tooling bootstrap steps only (no builder-image prefetch) —
 /// exposed so `dev` can re-bootstrap without going through the dispatcher.
 pub(super) fn run_steps(production: bool) -> Result<()> {
@@ -129,11 +221,14 @@ pub(super) fn run_steps(production: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::acquire_bootstrap_artifacts_with;
+    use super::{
+        acquire_bootstrap_artifacts_with, launch_helper_specs, prewarm_host_aux_helpers_for,
+    };
+    use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact};
     use std::cell::RefCell;
 
     #[test]
-    fn bootstrap_acquires_runtime_before_workload_kernel() {
+    fn bootstrap_acquires_every_artifact_in_launch_path_order() {
         let calls = RefCell::new(Vec::new());
         let kernel = acquire_bootstrap_artifacts_with(
             || {
@@ -141,7 +236,15 @@ mod tests {
                 Ok(())
             },
             || {
+                calls.borrow_mut().push("helpers");
+                Ok(())
+            },
+            || {
                 calls.borrow_mut().push("runtime");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("pair");
                 Ok(())
             },
             || {
@@ -151,7 +254,10 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(calls.into_inner(), ["builder", "runtime", "workload"]);
+        assert_eq!(
+            calls.into_inner(),
+            ["builder", "helpers", "runtime", "pair", "workload"]
+        );
         assert_eq!(kernel, "/cache/workload/vmlinux");
     }
 
@@ -160,10 +266,12 @@ mod tests {
         let runtime_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || anyhow::bail!("builder failed"),
+            || Ok(()),
             || {
                 runtime_called.set(true);
                 Ok(())
             },
+            || Ok(()),
             || Ok("/cache/workload/vmlinux".to_string()),
         );
 
@@ -174,6 +282,8 @@ mod tests {
     #[test]
     fn bootstrap_fails_when_workload_kernel_is_not_ready() {
         let result = acquire_bootstrap_artifacts_with(
+            || Ok(()),
+            || Ok(()),
             || Ok(()),
             || Ok(()),
             || anyhow::bail!("kernel acquisition failed"),
@@ -188,7 +298,9 @@ mod tests {
         let workload_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
+            || Ok(()),
             || anyhow::bail!("overlay unavailable"),
+            || Ok(()),
             || {
                 workload_called.set(true);
                 Ok("/cache/workload/vmlinux".to_string())
@@ -201,5 +313,323 @@ mod tests {
             "unexpected error: {err}"
         );
         assert!(!workload_called.get());
+    }
+
+    #[test]
+    fn bootstrap_fails_when_host_helpers_are_not_ready() {
+        let runtime_called = std::cell::Cell::new(false);
+        let result = acquire_bootstrap_artifacts_with(
+            || Ok(()),
+            || anyhow::bail!("supervisor unavailable"),
+            || {
+                runtime_called.set(true);
+                Ok(())
+            },
+            || Ok(()),
+            || Ok("/cache/workload/vmlinux".to_string()),
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("host helper binaries"),
+            "unexpected error: {err}"
+        );
+        assert!(!runtime_called.get());
+    }
+
+    #[test]
+    fn helper_prewarm_is_a_no_op_for_a_process_that_may_not_build_helpers() {
+        let host = mvm_vmm::host::aux_bin::HostProcess::undeclared();
+        assert!(!host.builds_helpers_from_source());
+        prewarm_host_aux_helpers_for(&host).expect("the decline must be a quiet no-op");
+    }
+
+    #[test]
+    fn helper_specs_cover_this_platforms_spawn_paths() {
+        let bins: Vec<&str> = launch_helper_specs().iter().map(|spec| spec.bin).collect();
+        assert!(bins.contains(&"mvm-network-endpoint"), "{bins:?}");
+        if cfg!(target_os = "macos") {
+            assert!(bins.contains(&"mvm-hvf-supervisor"), "{bins:?}");
+            assert!(bins.contains(&"mvm-libkrun-supervisor"), "{bins:?}");
+        }
+    }
+
+    /// Probe-answering scripts stand in for installed helpers through the
+    /// per-helper path override: prewarming verifies them and must not try
+    /// to build.
+    #[cfg(unix)]
+    #[test]
+    fn helper_prewarm_verifies_installed_helpers_without_building() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let dir = tempfile::tempdir().unwrap();
+        for spec in launch_helper_specs() {
+            let helper = dir.path().join(spec.bin);
+            std::fs::write(
+                &helper,
+                format!(
+                    "#!/bin/sh\nprintf '%s\\n' '{}'",
+                    mvm_vmm::host::helper_contract::probe_response(spec.bin).trim_end()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            env.set(spec.env_var, &helper);
+        }
+
+        let host =
+            mvm_vmm::host::aux_bin::HostProcess::undeclared().allowing_helper_builds_from_source();
+        prewarm_host_aux_helpers_for(&host).expect("installed helpers verify without a build");
+    }
+
+    /// The pair-stamped installs bootstrap leaves are exactly the ones a boot
+    /// checks: the runtime overlay and both SDK sidecar libc variants, each
+    /// stamped with its pair key digest — and a second prewarm builds nothing.
+    #[test]
+    fn pair_prewarm_installs_every_stamp_the_launch_path_checks() {
+        use mvm_build::image_source::{
+            CacheLookup, EntryContext, ImageBuildRole, ImageBuildTarget, KeyInputs,
+            LocalImageCache, LocalImageCacheKey, contract_for, mvm_source_checkout,
+        };
+        use mvm_build::sdk_sidecar::LOCAL_SOURCE_FINGERPRINT_FILE;
+        use mvm_fs::sdk_sidecar::SdkSidecarLayout;
+        use std::cell::Cell;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let pair = Pair::new();
+        let home = pair.tmp.path().join("home");
+        env.isolate_mvm_home(&home);
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = mvm_core::arch::GuestArch::host();
+
+        publish_pair_overlay(&pair, version);
+        for libc in [
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        ] {
+            publish_pair_sidecar(&pair, version, libc);
+        }
+
+        let mvm_root = mvm_source_checkout(mvm_build::artifact_acquisition::compiled_channel())
+            .expect("the compiled-from mvm checkout is on disk");
+        let builds = Cell::new(0u32);
+        let mut build = |checkout: &mvm_build::image_source::LocalImageCheckout,
+                         target: ImageBuildTarget| {
+            builds.set(builds.get() + 1);
+            let key = LocalImageCacheKey::derive(&KeyInputs {
+                images: checkout,
+                mvm_checkout: &mvm_root,
+                target: &target,
+                arch,
+            })
+            .expect("key derives from the synthetic pair");
+            let ctx = EntryContext {
+                images: checkout,
+                mvm_checkout: &mvm_root,
+                roles: contract_for(&target)
+                    .expect("contract for the target")
+                    .set_roles,
+            };
+            match LocalImageCache::open_default()
+                .lookup(&key, &ctx)
+                .expect("the fixture cache reads")
+            {
+                CacheLookup::Hit(entry) => Ok(*entry),
+                other => panic!("the fixture published {target}, got {other:?}"),
+            }
+        };
+        let mut source = mvm_client::launch::runtime_source::PairArtifactSource {
+            checkout: &pair.images,
+            build: &mut build,
+        };
+        mvm_client::launch::runtime_source::prepare_pair_launch_artifacts(&mut source)
+            .expect("the pair prewarm installs every stamped artifact");
+
+        let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+        let overlay_stamp = std::fs::read_to_string(
+            cache_root
+                .join("runtime-overlay")
+                .join(version)
+                .join(format!("{arch}.pair")),
+        )
+        .expect("the overlay pair stamp is written");
+        assert_eq!(
+            overlay_stamp.trim(),
+            launch_key(&pair, ImageBuildRole::RuntimeOverlay, "default")
+                .digest()
+                .as_str(),
+            "the stamp is the pair's cache-key digest, which is what a boot compares"
+        );
+
+        for (libc, attr) in [
+            (
+                mvm_contract::guest_libc::GuestLibc::Glibc,
+                "sdk-sidecar-image",
+            ),
+            (
+                mvm_contract::guest_libc::GuestLibc::Musl,
+                "sdk-sidecar-image-musl",
+            ),
+        ] {
+            let layout = SdkSidecarLayout::under(&cache_root, version, &arch.to_string(), libc);
+            let stamp =
+                std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE))
+                    .expect("the sidecar pair stamp is written");
+            assert_eq!(
+                stamp.trim(),
+                launch_key(&pair, ImageBuildRole::RuntimeOverlay, attr)
+                    .digest()
+                    .as_str(),
+                "the {libc} stamp is the pair's cache-key digest"
+            );
+        }
+        assert_eq!(builds.get(), 3, "one build per cold stamped artifact");
+
+        // Warm stamps answer the second prewarm without a single build.
+        mvm_client::launch::runtime_source::prepare_pair_launch_artifacts(&mut source)
+            .expect("a warm prewarm is quiet");
+        assert_eq!(builds.get(), 3, "warm stamps must not rebuild");
+    }
+
+    /// The cache key the launch path actually derives: against the
+    /// compiled-from mvm checkout, like `Pair::publish` — not the fixture's
+    /// synthetic mvm tree, which only standalone fixture publishers key on.
+    fn launch_key(
+        pair: &Pair,
+        role: mvm_build::image_source::ImageBuildRole,
+        attr: &str,
+    ) -> mvm_build::image_source::LocalImageCacheKey {
+        let mvm_root = mvm_build::image_source::mvm_source_checkout(
+            mvm_build::artifact_acquisition::compiled_channel(),
+        )
+        .expect("the compiled-from mvm checkout is on disk");
+        mvm_build::image_source::LocalImageCacheKey::derive(&mvm_build::image_source::KeyInputs {
+            images: &pair.images,
+            mvm_checkout: &mvm_root,
+            target: &Pair::target(role, attr),
+            arch: mvm_core::arch::GuestArch::host(),
+        })
+        .expect("key derives from the pair")
+    }
+
+    /// Publish the pair's `runtime-overlay.default` target whose overlay
+    /// carries `version` in its `VERSION` file.
+    fn publish_pair_overlay(pair: &Pair, version: &str) {
+        pair.publish(
+            mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
+            "default",
+            &[(
+                mvm_core::image_set::ImageSetRole::RuntimeOverlay,
+                None,
+                vec![
+                    TestArtifact {
+                        name: "overlay.ext4",
+                        // A real ext4: the overlay reader validates the
+                        // superblock, not just the magic.
+                        bytes: mvm_fs::ext4::build_image(
+                            mvm_fs::overlay::REQUIRED_OVERLAY_GUEST_PATHS
+                                .iter()
+                                .map(|path| mvm_fs::ext4::Node::File {
+                                    path: path.to_string(),
+                                    mode: 0o755,
+                                    data: b"overlay guest binary\n".to_vec(),
+                                    xattrs: Vec::new(),
+                                    owner: mvm_fs::ext4::Owner::ROOT,
+                                })
+                                .collect(),
+                            &Default::default(),
+                        )
+                        .expect("build the overlay ext4 fixture"),
+                        format: "ext4",
+                    },
+                    TestArtifact {
+                        name: "overlay.verity",
+                        bytes: b"verity tree\n".to_vec(),
+                        format: "verity_hash_tree",
+                    },
+                    TestArtifact {
+                        name: "overlay.roothash",
+                        bytes: format!("{}\n", "ab".repeat(32)).into_bytes(),
+                        format: "verity_root_hash",
+                    },
+                    TestArtifact {
+                        name: "VERSION",
+                        bytes: format!("{version}\n").into_bytes(),
+                        format: "text",
+                    },
+                ],
+                &["virtio_blk", "dm_verity"],
+            )],
+        );
+    }
+
+    /// Publish one libc variant of the pair's SDK sidecar target, with the
+    /// checksum manifest the installer verifies.
+    fn publish_pair_sidecar(pair: &Pair, version: &str, libc: mvm_contract::guest_libc::GuestLibc) {
+        use mvm_core::packs::Sha256Hex;
+
+        let attr = match libc {
+            mvm_contract::guest_libc::GuestLibc::Glibc => "sdk-sidecar-image",
+            mvm_contract::guest_libc::GuestLibc::Musl => "sdk-sidecar-image-musl",
+            other => panic!("no pair sidecar target for {other}"),
+        };
+        let image = sidecar_ext4_bytes(libc);
+        let version_file = format!("{version}\n");
+        let checksums = format!(
+            "{}  sdk.ext4\n{}  VERSION\n",
+            Sha256Hex::from_bytes(&image).as_str(),
+            Sha256Hex::from_bytes(version_file.as_bytes()).as_str(),
+        );
+        pair.publish(
+            mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
+            attr,
+            &[(
+                mvm_core::image_set::ImageSetRole::SdkSidecar(libc),
+                None,
+                vec![
+                    TestArtifact {
+                        name: "sdk.ext4",
+                        bytes: image,
+                        format: "ext4",
+                    },
+                    TestArtifact {
+                        name: "VERSION",
+                        bytes: version_file.into_bytes(),
+                        format: "text",
+                    },
+                    TestArtifact {
+                        name: "checksums-sha256.txt",
+                        bytes: checksums.into_bytes(),
+                        format: "text",
+                    },
+                ],
+                &["virtio_blk"],
+            )],
+        );
+    }
+
+    /// A minimal sidecar ext4 whose cdylib names `libc`, the one property the
+    /// installer proves about the payload.
+    fn sidecar_ext4_bytes(libc: mvm_contract::guest_libc::GuestLibc) -> Vec<u8> {
+        use mvm_fs::ext4::{Node, Owner};
+        let nodes = vec![
+            Node::Dir {
+                path: "/lib".into(),
+                mode: 0o555,
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            },
+            Node::File {
+                path: "/lib/libmvm_host_services.so".into(),
+                mode: 0o555,
+                data: mvm_fs::elf::test_fixture::shared_object(&[
+                    "libgcc_s.so.1",
+                    libc.libc_soname().expect("a fixture names a real libc"),
+                ]),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            },
+        ];
+        mvm_fs::ext4::build_image(nodes, &Default::default()).expect("build sidecar ext4 fixture")
     }
 }

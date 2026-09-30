@@ -743,6 +743,19 @@ pub struct PairBuild {
     pub built: bool,
 }
 
+/// Populate an isolated local-image cache from the default home's before a
+/// pair build decides to compile. Seeding is opportunistic: a failure is
+/// logged and the build proceeds cold, so a broken seed never blocks a build
+/// the way a missing entry would not.
+fn seed_local_images_from_default_home(cache: &LocalImageCache) {
+    if let Err(error) = cache.seed_from_default() {
+        tracing::warn!(
+            %error,
+            "seeding the local image cache from the default home failed; building from the pair"
+        );
+    }
+}
+
 /// Build `target` from the checkout pair and publish it to `cache`, answering
 /// an unchanged pair from the cache without booting anything.
 ///
@@ -783,6 +796,9 @@ pub fn build_target_for_pair(
             what: "deriving the local image cache key".to_string(),
             detail: error.to_string(),
         })?;
+    // A worktree-isolated home starts with an empty local-image cache; inherit
+    // the default home's entries before deciding to build.
+    seed_local_images_from_default_home(cache);
     match cache
         .lookup(&key, &ctx)
         .map_err(|error| LocalImageBuildError::Tool {
@@ -797,6 +813,13 @@ pub fn build_target_for_pair(
             });
         }
         CacheLookup::Evicted { .. } | CacheLookup::Miss => {}
+    }
+
+    if let Some(message) = mvm_core::cold_build::refusal(&format!("the {target} image")) {
+        return Err(LocalImageBuildError::Tool {
+            what: "cold local-image cache".to_string(),
+            detail: message,
+        });
     }
 
     prepare_builder().map_err(|detail| LocalImageBuildError::Tool {
@@ -1313,5 +1336,25 @@ mod tests {
         let err = emit_argv(&request).unwrap_err();
 
         assert!(err.to_string().contains("neither an ELF"), "{err}");
+    }
+
+    #[test]
+    fn a_failed_seed_is_logged_and_never_fails_the_build_path() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let scratch = tempfile::tempdir().unwrap();
+        env.set("HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path().join("isolated"));
+
+        // The default home ($HOME/.mvm/cache) has an entry to offer...
+        let entry = scratch.path().join(".mvm/cache/local-images/v1/entry-a");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("image-set.json"), b"{}\n").unwrap();
+        // ...but the isolated cache's layout path is a file, so the install
+        // fails. The build path must carry on regardless.
+        let cache = LocalImageCache::open_default();
+        std::fs::create_dir_all(cache.root()).unwrap();
+        std::fs::write(cache.root().join("v1"), b"blocked").unwrap();
+
+        super::seed_local_images_from_default_home(&cache);
     }
 }

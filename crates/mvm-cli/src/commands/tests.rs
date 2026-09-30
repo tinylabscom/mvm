@@ -5742,6 +5742,28 @@ fn infra_commands_still_invoke() {
 }
 
 #[test]
+fn machine_run_build_flag_opts_into_cold_source_builds() {
+    let command = cli_command();
+    let run = command
+        .find_subcommand("machine")
+        .and_then(|machine| machine.find_subcommand("run"))
+        .expect("machine run command must exist");
+    let build = run
+        .get_arguments()
+        .find(|arg| arg.get_id() == "build")
+        .expect("machine run must carry a --build flag");
+    let help = build
+        .get_long_help()
+        .or_else(|| build.get_help())
+        .map(|help| help.to_string())
+        .unwrap_or_default();
+    assert!(
+        help.contains("bootstrap"),
+        "--build help must point cold-cache runs at `mvmctl bootstrap`"
+    );
+}
+
+#[test]
 fn machine_help_lists_run_first() {
     let mut machine_cmd = cli_command()
         .find_subcommand_mut("machine")

@@ -30,6 +30,10 @@ pub(crate) fn mvmctl_command() -> Command {
         }
         cmd.env("PATH", path);
     }
+    // The scenarios exercise the launch path, not the cold-build refusal:
+    // opt every spawned `mvmctl` back into automatic cold builds so a live
+    // run never stops at the upfront gate.
+    cmd.env("MVM_COLD_BUILD", "auto");
 
     cmd
 }
