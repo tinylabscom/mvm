@@ -101,40 +101,6 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
             ));
         }
 
-        // `machine diff` covers workspace volumes — host-directory snapshots
-        // attached read-write — since the content-diff rewrite; a guest with
-        // none exits 1 with attach instructions. Attach one before the start
-        // so the diff scenario exercises the documented contract, not the
-        // refusal.
-        let workspace_host = std::env::temp_dir().join("mvm-journey-workspace");
-        std::fs::create_dir_all(&workspace_host).expect("create journey workspace host dir");
-        std::fs::write(
-            workspace_host.join("baseline.txt"),
-            b"journey workspace baseline\n",
-        )
-        .expect("write journey workspace baseline");
-        let mount = run_in_journey_home([
-            "machine",
-            "volume",
-            "mount",
-            JOURNEY_MACHINE,
-            "--volume",
-            "workspace",
-            "--host",
-            workspace_host
-                .to_str()
-                .expect("utf-8 journey workspace path"),
-            "--guest",
-            "/work",
-            "--rw",
-        ]);
-        if !mount.status.success() {
-            return Err(format!(
-                "machine volume mount failed: {}",
-                String::from_utf8_lossy(&mount.stderr).trim()
-            ));
-        }
-
         let start = run_in_journey_home(["machine", "start", JOURNEY_MACHINE]);
         if !start.status.success() {
             return Err(format!(
@@ -167,6 +133,64 @@ fn journey_machine_is_running(world: &mut CliWorld) {
         Err(problem) => panic!("the journey guest could not be booted: {problem}"),
     }
     world.journey_machine = Some(JOURNEY_MACHINE.to_string());
+}
+
+/// Attach a workspace volume to the journey machine, restarting it once to
+/// apply the mount. Runs only for the diff scenario, after the checkpoint
+/// scenarios, on purpose: a writable volume makes HVF refuse full-VM
+/// checkpoints (a snapshot carries no device backing bytes), and `machine
+/// diff` is the only verb here that needs a workspace.
+#[given(expr = "the journey machine has a workspace volume")]
+fn journey_machine_has_workspace_volume(_world: &mut CliWorld) {
+    static ATTACHED: OnceLock<Result<(), String>> = OnceLock::new();
+    let result = ATTACHED.get_or_init(|| {
+        let stop = run_in_journey_home(["machine", "stop", JOURNEY_MACHINE, "--yes"]);
+        if !stop.status.success() {
+            return Err(format!(
+                "machine stop before the workspace mount failed: {}",
+                String::from_utf8_lossy(&stop.stderr).trim()
+            ));
+        }
+        let workspace_host = std::env::temp_dir().join("mvm-journey-workspace");
+        std::fs::create_dir_all(&workspace_host).expect("create journey workspace host dir");
+        std::fs::write(
+            workspace_host.join("baseline.txt"),
+            b"journey workspace baseline\n",
+        )
+        .expect("write journey workspace baseline");
+        let mount = run_in_journey_home([
+            "machine",
+            "volume",
+            "mount",
+            JOURNEY_MACHINE,
+            "--volume",
+            "workspace",
+            "--host",
+            workspace_host
+                .to_str()
+                .expect("utf-8 journey workspace path"),
+            "--guest",
+            "/work",
+            "--rw",
+        ]);
+        if !mount.status.success() {
+            return Err(format!(
+                "machine volume mount failed: {}",
+                String::from_utf8_lossy(&mount.stderr).trim()
+            ));
+        }
+        let start = run_in_journey_home(["machine", "start", JOURNEY_MACHINE]);
+        if !start.status.success() {
+            return Err(format!(
+                "machine start after the workspace mount failed: {}",
+                String::from_utf8_lossy(&start.stderr).trim()
+            ));
+        }
+        Ok(())
+    });
+    if let Err(problem) = result {
+        panic!("the journey workspace volume could not be attached: {problem}");
+    }
 }
 
 /// Drive a documented command against the running journey machine.

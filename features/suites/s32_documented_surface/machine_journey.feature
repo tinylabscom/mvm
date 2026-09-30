@@ -88,6 +88,7 @@ Feature: The documented machine verbs operate a real guest
   # every other filesystem verb. Nothing short of a live guest could see that.
   @live
   Scenario: the guest reports its filesystem changes
+    Given the journey machine has a workspace volume
     When I run mvmctl against the journey machine with "machine diff bdd-journey"
     Then the command exits with code 0
     Then the journey machine is still running
