@@ -29,6 +29,28 @@ agent, not the agent itself.
    automatically on merge. Never close an issue manually while a linked PR is
    still open.
 
+## Task context and specifications
+
+Use one route from intent to implementation:
+
+1. The GitHub issue owns the current outcome, scope, dependencies, priority, and
+   acceptance evidence.
+2. ADRs and contracts linked from that issue own durable decisions and
+   interfaces.
+3. Graft locates the implementation and its blast radius.
+4. The pull request records what changed and how it was verified.
+
+Do not recursively read `specs/`: it contains historical research and frozen
+pre-migration plans alongside durable documents. For a read-only briefing, run
+`just maint::task-context <issue-number>`. Its output is generated from the live
+issue, linked repository documents, open pull requests, and Graft; do not save it
+as another status file.
+
+A fast advisory agent may generate this briefing, classify or link work, and
+flag drift. It must propose consequential changes for review rather than
+silently closing issues, changing priority, or rewriting architectural
+decisions.
+
 ## The required worktree workflow
 
 Every change — code, docs, dependency bumps, refactors, typo fixes — is developed
@@ -198,9 +220,8 @@ builder VM, self-hosted runner lanes), not a surprise formatting error.
 3. Respond to review by pushing fixup commits to the same branch; keep the
    issue status comment current.
 4. After merge: sync main, remove the worktree
-   (`git worktree remove ../.worktrees/mvm-<slug>`), and update
-   `specs/SPRINT.md` / the plan checkboxes / `specs/REFACTOR-STATUS.md` per the
-   Definition of Done in `AGENTS.md`.
+   (`git worktree remove ../.worktrees/mvm-<slug>`). The linked issue closes
+   through the PR; there is no separate status document to update.
 
 ## Safe parallelism
 

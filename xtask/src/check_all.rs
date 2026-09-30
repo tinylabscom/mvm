@@ -204,6 +204,7 @@ pub const GATES: &[Gate] = &[
         crate::check_feature_closure_budget::run,
     ),
     ("check-duplicate-majors", crate::check_duplicate_majors::run),
+    ("check-spec-hygiene", crate::check_spec_hygiene::run),
     ("check-workflow-paths", crate::check_workflow_paths::run),
     (
         "check-guest-agent-runtime-free",
