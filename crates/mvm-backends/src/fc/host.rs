@@ -73,13 +73,16 @@ pub fn install() -> Result<()> {
     run_in_vm_visible(&format!(
         r#"
         cd /tmp
+        # Root needs no privilege-escalation helper — and root hosts such as
+        # rescue shells and root containers often have no sudo at all.
+        SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
         wget --progress=bar:force:noscroll https://github.com/firecracker-microvm/firecracker/releases/download/{fc_version}/firecracker-{fc_version}-{arch}.tgz
         tar -xzf firecracker-{fc_version}-{arch}.tgz
-        sudo mv release-{fc_version}-{arch}/firecracker-{fc_version}-{arch} /usr/local/bin/firecracker
-        sudo chmod +x /usr/local/bin/firecracker
+        $SUDO mv release-{fc_version}-{arch}/firecracker-{fc_version}-{arch} /usr/local/bin/firecracker
+        $SUDO chmod +x /usr/local/bin/firecracker
         if [ -f release-{fc_version}-{arch}/jailer-{fc_version}-{arch} ]; then
-            sudo mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
-            sudo chmod +x /usr/local/bin/jailer
+            $SUDO mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
+            $SUDO chmod +x /usr/local/bin/jailer
         fi
         rm -rf firecracker-{fc_version}-{arch}.tgz release-{fc_version}-{arch}
         firecracker --version
@@ -97,11 +100,13 @@ fn install_jailer_from_tarball(version: &str) -> Result<()> {
     run_in_vm_visible(&format!(
         r#"
         cd /tmp
+        # Root needs no privilege-escalation helper — see install_firecracker.
+        SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
         wget -q https://github.com/firecracker-microvm/firecracker/releases/download/{fc_version}/firecracker-{fc_version}-{arch}.tgz
         tar -xzf firecracker-{fc_version}-{arch}.tgz
         if [ -f release-{fc_version}-{arch}/jailer-{fc_version}-{arch} ]; then
-            sudo mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
-            sudo chmod +x /usr/local/bin/jailer
+            $SUDO mv release-{fc_version}-{arch}/jailer-{fc_version}-{arch} /usr/local/bin/jailer
+            $SUDO chmod +x /usr/local/bin/jailer
             echo "Jailer installed."
         else
             echo "Jailer binary not found in release tarball."
@@ -217,14 +222,17 @@ pub fn prepare_rootfs() -> Result<()> {
             echo '[mvm] ext4 rootfs already exists, skipping.'
         else
             echo '[mvm] Extracting squashfs...'
-            sudo rm -rf squashfs-root
-            sudo unsquashfs $squashfs_file
+            # Root needs no privilege-escalation helper — and root hosts such
+            # as rescue shells and root containers often have no sudo at all.
+            SUDO=""; [ "$(id -u)" -eq 0 ] || SUDO="sudo"
+            $SUDO rm -rf squashfs-root
+            $SUDO unsquashfs $squashfs_file
 
             echo '[mvm] Creating ext4 filesystem (1GB)...'
             truncate -s 1G "ubuntu-${{ubuntu_version}}.ext4"
-            sudo mkfs.ext4 -d squashfs-root -F "ubuntu-${{ubuntu_version}}.ext4"
+            $SUDO mkfs.ext4 -d squashfs-root -F "ubuntu-${{ubuntu_version}}.ext4"
 
-            sudo rm -rf squashfs-root
+            $SUDO rm -rf squashfs-root
             echo '[mvm] Root filesystem prepared.'
         fi
 
