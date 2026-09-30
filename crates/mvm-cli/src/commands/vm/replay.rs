@@ -4,9 +4,9 @@
 //! The input journal on the machine that created the checkpoint records
 //! every `machine exec` argv in order (never the output). A replay:
 //!
-//! 1. reads the checkpoint and the journal, and selects the entries
-//!    recorded at or after the checkpoint — everything earlier is already
-//!    part of the checkpoint's frozen state;
+//! 1. reads the exact input cursor sealed into the checkpoint and selects
+//!    later journal entries — everything through the cursor is already part
+//!    of the checkpoint's frozen state;
 //! 2. fork-boots the checkpoint exactly like `machine revert` does — a
 //!    fresh, re-admitted VM whose workspace images are the checkpoint's
 //!    frozen copies, so the re-run starts from byte-identical state;
@@ -144,7 +144,13 @@ fn plan_replay(
     let _ = store;
     let entries = input_journal::read(&mvm_core::config::machine_state_dir(&meta.vm_name))
         .with_context(|| format!("reading the input journal of {:?}", meta.vm_name))?;
-    let selected = input_journal::select_after(&entries, meta.created_unix);
+    let cursor = meta.machine_input_cursor.with_context(|| {
+        format!(
+            "checkpoint {:?} predates exact machine-input cursors and cannot be replayed safely",
+            meta.id.as_str()
+        )
+    })?;
+    let selected = input_journal::select_after_cursor(&entries, cursor);
     let restored_name = match &args.as_name {
         Some(name) => {
             validate_vm_name(name).with_context(|| format!("Invalid VM name: {name:?}"))?;
@@ -227,6 +233,7 @@ mod tests {
             vm.to_string(),
         )
         .created_unix(created_unix)
+        .machine_input_cursor(Some(1))
         .build()
     }
 
@@ -258,19 +265,19 @@ mod tests {
     }
 
     #[test]
-    fn selection_uses_the_checkpoint_timestamp() {
+    fn selection_uses_the_checkpoint_cursor_even_with_equal_timestamps() {
         let home = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(home.path());
         let state = mvm_core::config::machine_state_dir("web");
         std::fs::create_dir_all(&state).expect("state dir");
-        let lines = [
-            r#"{"seq":1,"at_unix":50,"argv":["before"],"outcome":"ok"}"#,
-            r#"{"seq":2,"at_unix":150,"argv":["during"],"outcome":"ok"}"#,
-        ]
-        .join("\n");
-        std::fs::write(input_journal::journal_path(&state), format!("{lines}\n"))
-            .expect("write journal");
+        {
+            let _lock = input_journal::lock(&state).expect("lock");
+            let first = input_journal::begin_exec(&state, &["before".into()]).expect("begin");
+            input_journal::finish_exec(&state, first, true).expect("finish");
+            let second = input_journal::begin_exec(&state, &["during".into()]).expect("begin");
+            input_journal::finish_exec(&state, second, true).expect("finish");
+        }
 
         let store = mvm_runtime::checkpoint::CheckpointStore::open();
         let args = ReplayArgs {

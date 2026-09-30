@@ -11,15 +11,17 @@ general agent prompt transport reaching `mvmctl`).
 
 ## What landed
 
-The last PS-08 item. `machine exec` now records every executed argv into a
-per-machine input journal (JSONL, append + fsync, argv + outcome only —
-never output; an empty argv is an interactive shell, not input; a torn
-final line from a crash is dropped on read). `mvmctl machine replay
+The last PS-08 item. `machine exec` now records every executed argv as an
+encrypted, content-addressed artifact. Its per-machine JSONL journal contains
+only start/finish sequencing, an encrypted artifact reference, and a success
+bit — never argv, errors, or output. A shared per-machine lock serializes exec
+with checkpoint capture; an unfinished exec fails closed, while a torn final
+line from a crash is dropped on read. `mvmctl machine replay
 <checkpoint>`:
 
-1. reads the checkpoint and the journal of the machine that created it,
-   selecting the entries recorded at or after the checkpoint — everything
-   earlier is already part of its frozen state;
+1. reads the exact input-journal cursor sealed into the checkpoint and selects
+   later entries from the machine that created it — no wall-clock ordering or
+   same-second ambiguity;
 2. fork-boots the checkpoint exactly like `machine revert` — a fresh,
    re-admitted VM whose workspace images are the checkpoint's frozen
    copies, so the re-run starts from byte-identical state (no host-dir
@@ -41,8 +43,8 @@ A mid-replay failure leaves the restored VM at the last good step.
 
 ## Tests
 
-8 unit tests (journal record/read/torn-line/selection; replay planning:
-name validation, default naming, checkpoint-timestamp selection); 2 BDD
+unit tests cover encrypted-at-rest journal roundtrips, torn lines, unfinished
+exec refusal, exact-cursor selection, and replay planning; 2 BDD
 scenarios on the fail-closed surface; audit kind `machine_replay` with
 pinned wire string and posture row.
 

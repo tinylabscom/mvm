@@ -1433,26 +1433,12 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
         MachineAction::Exec(exec_args) => {
-            let outcome = match exec_machine(cli, exec_args.clone(), cfg) {
-                Ok(()) => "ok".to_string(),
-                Err(error) => format!("error: {error:#}"),
-            };
-            // Record the input for `machine replay`: argv only, never
-            // output; an empty argv is an interactive shell, not input.
-            if let Err(error) = input_journal::record_exec(
-                &config::machine_state_dir(&exec_args.name),
-                &exec_args.argv,
-                &outcome,
-            ) {
-                ui::warn(&format!(
-                    "could not record the exec in the input journal: {error}"
-                ));
-            }
-            if outcome == "ok" {
-                Ok(())
-            } else {
-                Err(anyhow::anyhow!("{outcome}"))
-            }
+            let state_dir = config::machine_state_dir(&exec_args.name);
+            let _journal_lock = input_journal::lock(&state_dir)?;
+            let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
+            let outcome = exec_machine(cli, exec_args, cfg);
+            input_journal::finish_exec(&state_dir, pending, outcome.is_ok())?;
+            outcome
         }
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
