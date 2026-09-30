@@ -318,7 +318,11 @@ pub(super) fn require_console_target(name: &str) -> Result<()> {
     )
 }
 
-pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn exec_machine(
+    cli: &Cli,
+    args: MachineExecArgs,
+    cfg: &MvmConfig,
+) -> Result<()> {
     require_console_target(&args.name)?;
     let command = if args.argv.is_empty() {
         None

@@ -16,7 +16,8 @@
 
 mod checkpoint;
 mod create_policy;
-mod lifecycle;
+pub(crate) mod input_journal;
+pub(crate) mod lifecycle;
 mod list;
 mod manifest_source;
 mod portable;
@@ -1431,7 +1432,28 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
-        MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
+        MachineAction::Exec(exec_args) => {
+            let outcome = match exec_machine(cli, exec_args.clone(), cfg) {
+                Ok(()) => "ok".to_string(),
+                Err(error) => format!("error: {error:#}"),
+            };
+            // Record the input for `machine replay`: argv only, never
+            // output; an empty argv is an interactive shell, not input.
+            if let Err(error) = input_journal::record_exec(
+                &config::machine_state_dir(&exec_args.name),
+                &exec_args.argv,
+                &outcome,
+            ) {
+                ui::warn(&format!(
+                    "could not record the exec in the input journal: {error}"
+                ));
+            }
+            if outcome == "ok" {
+                Ok(())
+            } else {
+                Err(anyhow::anyhow!("{outcome}"))
+            }
+        }
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),

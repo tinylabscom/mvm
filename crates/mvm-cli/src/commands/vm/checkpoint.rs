@@ -771,16 +771,16 @@ fn restore(id: &str, json: bool) -> Result<()> {
 }
 
 /// Inputs for [`fork`].
-struct ForkCmdParams<'a> {
-    id: &'a str,
-    new_id: Option<String>,
-    boot: bool,
-    hypervisor: &'a str,
-    cpus: Option<u32>,
-    memory: Option<&'a str>,
-    declared_secrets: &'a [mvm_core::plan::SecretBinding],
-    allow_secret_drop: bool,
-    json: bool,
+pub(in crate::commands) struct ForkCmdParams<'a> {
+    pub id: &'a str,
+    pub new_id: Option<String>,
+    pub boot: bool,
+    pub hypervisor: &'a str,
+    pub cpus: Option<u32>,
+    pub memory: Option<&'a str>,
+    pub declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    pub allow_secret_drop: bool,
+    pub json: bool,
 }
 
 /// Parse `--secret` values into plan bindings.
@@ -815,7 +815,7 @@ pub(in crate::commands) fn parse_declared_secrets(
         .collect()
 }
 
-fn fork(p: ForkCmdParams<'_>) -> Result<()> {
+pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
     let ForkCmdParams {
         id,
         new_id,
