@@ -202,6 +202,28 @@ cargo build --bin mvmctl --features user,embed-host-bins
 echo "==> building the per-VM host helpers"
 just payload::supervisors
 
+# The language SDKs drive machines in-process through the host library and find
+# it beside the `mvmctl` on PATH. `cargo build --bin mvmctl` never builds it,
+# so without this the runtime-SDK scenarios fail with "the host library ... was
+# not found" before a machine is asked for — the same block
+# e2e-documented-surface.sh carries; a cold `just e2e::launch` has no earlier
+# lane to have left the library behind.
+echo "==> building the SDK host library beside mvmctl"
+cargo build -p mvm-hostlib
+hostlib_ext="so"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  hostlib_ext="dylib"
+fi
+hostlib_path="$(dirname "$MVMCTL")/libmvm_hostlib.${hostlib_ext}"
+if [[ ! -f "$hostlib_path" ]]; then
+  echo "!!! expected host library at $hostlib_path, but it was not built." >&2
+  exit 1
+fi
+# The runtime-SDK scenarios launch scripts through `mvmctl run --mode live`.
+# Export the exact library path so the in-repo SDK does not depend on PATH
+# propagation through that launch boundary.
+export MVM_HOSTLIB_PATH="$hostlib_path"
+
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.
 #
