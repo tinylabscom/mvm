@@ -1,7 +1,7 @@
 # SDK sidecar source build
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 ## Problem
 

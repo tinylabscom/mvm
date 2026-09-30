@@ -302,6 +302,11 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("fs", AuditPosture::Emits("VmFsMutate")),
     ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
     ("diff", AuditPosture::ReadOnly),
+    // Reviewed workspace apply: snapshots the host tree it overwrites,
+    // journals the apply, and emits the manifest Merkle root.
+    ("apply", AuditPosture::Emits("WorkspaceApply")),
+    ("undo", AuditPosture::Emits("WorkspaceUndo")),
+    ("redo", AuditPosture::Emits("WorkspaceRedo")),
     ("wait", AuditPosture::ReadOnly),
     ("boot-report", AuditPosture::ReadOnly),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
@@ -869,6 +874,9 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "VmTtlSet",
         "VmVolumeAdd",
         "VmVolumeRemove",
+        "WorkspaceApply",
+        "WorkspaceRedo",
+        "WorkspaceUndo",
         // Plan-64 audit-chain events.
         "plan.admitted",
         "plan.launched",

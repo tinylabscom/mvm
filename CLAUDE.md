@@ -898,7 +898,9 @@ macOS / Linux Host
 - `public/src/content/docs/guides/troubleshooting.md` -- common issues and fixes
 - `public/src/content/docs/contributing/adr/001-firecracker-only.md` -- ADR: Firecracker-only execution
 - `public/src/content/docs/reference/cli-commands.md` -- complete CLI command reference
-- `specs/plans/` -- implementation specs and plans
+- `specs/plans/` -- technical implementation plans for active issues; issues
+  own their status and legacy plans remain only as context
+- `specs/README.md` -- current specs policy and retention rules
 
 ## Naming a new plan
 
@@ -918,38 +920,16 @@ hundreds of `Plan NNN` references for no benefit. `xtask check-plan-names`
 freezes that set and fails a _new_ number-named plan. Refer to a plan by its
 path or title rather than a bare number.
 
-## Sprint Management
+## Work tracking and specifications
 
-- Active sprint spec: `specs/SPRINT.md`
-- Completed sprints archived to: `specs/backlog/` (e.g. `specs/backlog/01-foundation.md`)
-- When a sprint is completed, rename `specs/SPRINT.md` to `specs/backlog/<NN>-<name>.md` and create a new `specs/SPRINT.md` for the next sprint
-- **Record what you delivered in its own file: `specs/sprint/delivery/<issue>-<slug>.md`.**
-  Do **not** append to `specs/SPRINT.md` — its delivery section is a closed
-  archive and `xtask check-sprint-append` fails if it grows. One append point
-  shared by every concurrent session conflicted on essentially every rebase, and
-  because a rebase forces a full re-gate, a paragraph of prose cost the other
-  sessions ~20 minutes of re-proving code that had not changed. Separate files
-  cannot collide. Read them together with `cargo run -p xtask -- sprint`.
-- **Keep the rest of `specs/SPRINT.md` current as you work.** After completing any
-  phase, task, or sub-task, reflect it in the active sprint spec in the SAME
-  change: check off items (`- [x]`), update status labels (e.g.
-  `**Status: COMPLETE**`), and add new test counts or notes. The sprint spec must
-  always match what is actually implemented — see AGENTS.md §"Definition of Done"
-  items 5–7, which bind the sprint spec, the plan checkboxes, and
-  `specs/REFACTOR-STATUS.md` together.
-- **Resolve a conflict in any of these by keeping BOTH sides.** Never take one
-  side wholesale: upstream may have _rewritten_ an entry your branch also edited,
-  so `--ours`/`--theirs` silently drops someone's work. Verify after resolving
-  that both entries are still present.
+GitHub issues are the only source of truth for work status, remaining scope,
+dependencies, and acceptance criteria. Pull requests record delivery and
+validation. Do not maintain a parallel sprint, refactor, delivery, or progress
+dashboard under `specs/`.
 
-## Refactor status
-
-We are in the middle of a major multi-plan refactor. `specs/REFACTOR-STATUS.md`
-is the hand-maintained rollup of every in-flight plan's workstream checkboxes.
-**Keep it current.** Whenever you land, merge, or descope a workstream in any
-plan, tick/strike the matching box in `specs/REFACTOR-STATUS.md` in the SAME
-change and bump its "Last updated" date. It is a quick index, not the source of
-truth — if it disagrees with a `specs/plans/` doc, the plan doc wins; fix the
-rollup. `specs/REFACTOR-STATUS.md` and `specs/SPRINT.md` move together with the
-plan checkboxes — updating one and leaving the others stale is not done.
-Trigger CI rebuild
+`specs/` is reserved for durable decisions and contracts plus technical design
+material that is still useful while an issue is open. A plan may explain the
+implementation, but its checkboxes do not own status and need not be updated as
+work lands. Legacy documents may still instruct readers to update retired
+dashboards; those instructions are historical and are superseded by this
+section and `specs/README.md`.

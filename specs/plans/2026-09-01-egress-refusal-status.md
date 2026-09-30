@@ -1,7 +1,7 @@
 # Egress refusal status contract
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 Issue #3040 exposed that the guest loopback HTTP proxy translated every failed
 FlowMux TCP open into `502 Bad Gateway`. That erased the distinction between a

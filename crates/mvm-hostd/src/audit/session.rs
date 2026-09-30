@@ -342,6 +342,20 @@ pub fn compute_seal(lines: &[String], request: &SealRequest<'_>) -> Result<Sessi
             .and_then(|leaf| leaf.entry.labels.get(key).cloned())
     };
     let session_lines: Vec<&str> = session.iter().map(|leaf| leaf.line).collect();
+    let snapshot_digests: Vec<&str> = session
+        .iter()
+        .filter(|leaf| leaf.entry.event == crate::audit::emitter::checkpoint_audit::CREATED_EVENT)
+        .filter_map(|leaf| {
+            leaf.entry
+                .labels
+                .get(crate::audit::emitter::checkpoint_audit::LABEL_META_DIGEST)
+                .map(String::as_str)
+        })
+        .collect();
+    let snapshot_root = request
+        .snapshot_root
+        .clone()
+        .or_else(|| (!snapshot_digests.is_empty()).then(|| hex(&merkle_root(&snapshot_digests))));
     Ok(SessionSeal {
         event_count: session.len() as u64,
         first_seq: first.seq,
@@ -358,7 +372,7 @@ pub fn compute_seal(lines: &[String], request: &SealRequest<'_>) -> Result<Sessi
         exit_code: last_label("plan.exited", "exit_code"),
         error_class: last_label("plan.failed", "error_class"),
         compute_environment: request.compute_environment.clone(),
-        snapshot_root: request.snapshot_root.clone(),
+        snapshot_root,
     })
 }
 

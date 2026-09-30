@@ -1,9 +1,9 @@
 # AI coding workflow docs
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: check-all
 
-**Status: IN REVIEW — implementation complete in PR #3815, not yet merged.**
+**Status: COMPLETE — merged in PR #3815.**
 
 ## Scope
 

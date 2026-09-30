@@ -171,3 +171,36 @@ Feature: Encrypted block volume lifecycle and attachment
     And the output contains "dir-volume-refreshed"
     When I run mvmctl in the isolated mvm home with "machine stop bdd-refresh-dir-volume --yes"
     Then the command exits with code 0
+
+  # Reviewed workspace apply (PS-08): the registered snapshot is both the
+  # baseline and the live image until a guest writes, so these scenarios
+  # exercise the apply surface — refusal, prompting, and empty history —
+  # without a live guest. The engine's write/undo/crash semantics are
+  # covered by mvm-fs's workspace_apply tests against real ext4 images.
+  Scenario: applying with no workspace volume names the remedy
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine create bdd-apply-none --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine apply bdd-apply-none --yes"
+    Then the command exits with code 1
+    And the error output contains "no workspace volume"
+
+  Scenario: an unchanged workspace has nothing to apply
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine create bdd-apply-dry --image alpine"
+    Then the command exits with code 0
+    When I register host directory volume "applyvol" read-write at "/data/applyvol" for machine "bdd-apply-dry"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine apply bdd-apply-dry --yes"
+    Then the command exits with code 0
+    And the output contains "no changes"
+
+  Scenario: undo with no apply history says so
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine create bdd-undo-none --image alpine"
+    Then the command exits with code 0
+    When I register host directory volume "undovol" read-write at "/data/undovol" for machine "bdd-undo-none"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine undo bdd-undo-none"
+    Then the command exits with code 0
+    And the output contains "nothing to undo"

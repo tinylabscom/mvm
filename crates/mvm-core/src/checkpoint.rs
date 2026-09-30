@@ -373,6 +373,8 @@ pub enum ApprovalHeadParseError {
 /// capture is consistent with, and `approval_head` names the approval-ledger
 /// state the capture was admitted under — a resume bounds its fresh grants
 /// against that head rather than against whatever the ledger holds later.
+/// `replay_input_digest`, when present, commits the encrypted input artifact
+/// executed immediately before this step was captured.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionBinding {
@@ -380,6 +382,11 @@ pub struct SessionBinding {
     pub generation: u64,
     pub journal_cursor: u64,
     pub approval_head: ApprovalHead,
+    /// Content-address of the encrypted input committed at this step. Optional
+    /// for older and non-step session checkpoints; replay accepts only a step
+    /// carrying this binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_input_digest: Option<String>,
 }
 
 /// On-disk metadata for one checkpoint (`<checkpoints_dir>/<id>/meta.json`).
@@ -967,9 +974,18 @@ mod tests {
                 .session(Some(other_binding))
                 .build();
 
+        let mut input_binding = test_binding();
+        input_binding.replay_input_digest = Some(format!("sha256:{}", "ef".repeat(32)));
+        let with_input =
+            CheckpointMeta::builder(CheckpointId::new("cp-1"), CheckpointClass::VmFull, "vm-1")
+                .session(Some(input_binding))
+                .build();
+
         assert_ne!(base.meta_digest, bumped.meta_digest);
+        assert_ne!(base.meta_digest, with_input.meta_digest);
         assert_eq!(base.meta_digest, base.compute_meta_digest());
         assert_eq!(bumped.meta_digest, bumped.compute_meta_digest());
+        assert_eq!(with_input.meta_digest, with_input.compute_meta_digest());
     }
 
     #[test]
@@ -1092,6 +1108,7 @@ mod tests {
             generation: 3,
             journal_cursor: 118,
             approval_head: ApprovalHead::parse(format!("sha256:{}", "cd".repeat(32))).unwrap(),
+            replay_input_digest: None,
         }
     }
 

@@ -1,7 +1,7 @@
 # Cold-boot guest wall clock
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issue:** [#2956](https://github.com/tinylabscom/mvm/issues/2956)
 
