@@ -235,8 +235,11 @@ rsync -a \
   --exclude='/.codex' --exclude='/.agents' --exclude='/node_modules' \
   --exclude='/out' --exclude='/output' --exclude='/artifacts' \
   --exclude='/graft/.cache' --exclude='*.pem' --exclude='*.key' \
+  --exclude='._*' \
   "$repo_root/" "$local_stage/tree/"
-tar -C "$local_stage" -czf "$local_stage/mvm-source.tar.gz" tree
+# macOS libarchive otherwise emits AppleDouble `._*` entries for source-file
+# extended attributes; those look like feature files to the Linux BDD parser.
+COPYFILE_DISABLE=1 tar -C "$local_stage" -czf "$local_stage/mvm-source.tar.gz" tree
 printf '%s\0' "${remote_command[@]}" >"$local_stage/mvm-command.argv"
 
 gcloud compute scp \

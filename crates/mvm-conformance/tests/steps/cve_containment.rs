@@ -191,11 +191,16 @@ fn machine_dir(name: &str) -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-fn sibling_rootfs(dir: &Path) -> PathBuf {
-    let rootfs = dir.join("rootfs.ext4");
+fn sibling_rootfs(name: &str) -> PathBuf {
+    let meta = mvm_vmm::host::runtime_meta::read(name)
+        .unwrap_or_else(|error| panic!("read runtime metadata for {name}: {error}"))
+        .unwrap_or_else(|| panic!("the bystander guest {name} has no runtime metadata"));
+    let rootfs = meta.rootfs_path.map(PathBuf::from).unwrap_or_else(|| {
+        panic!("the bystander guest {name} runtime metadata has no rootfs path")
+    });
     assert!(
         rootfs.is_file(),
-        "the bystander state directory has no rootfs image at {}",
+        "the bystander runtime metadata names no rootfs image at {}",
         rootfs.display()
     );
     rootfs
@@ -305,13 +310,16 @@ fn boot_sibling(world: &mut CliWorld) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    let dir = machine_dir(SIBLING_NAME).unwrap_or_else(|| {
+    machine_dir(SIBLING_NAME).unwrap_or_else(|| {
         panic!(
             "the bystander guest booted but left no state directory under {}",
             machine_state_root().display()
         )
     });
-    world.cve_sibling = Some((SIBLING_NAME.to_string(), file_digest(&sibling_rootfs(&dir))));
+    world.cve_sibling = Some((
+        SIBLING_NAME.to_string(),
+        file_digest(&sibling_rootfs(SIBLING_NAME)),
+    ));
 }
 
 #[given("the CVE-2026-80521 exploit is staged from its pinned source")]
@@ -680,9 +688,9 @@ fn sibling_digest_unchanged(world: &mut CliWorld) {
         .cve_sibling
         .clone()
         .expect("a Given step must record the sibling digest");
-    let dir = machine_dir(&name)
+    machine_dir(&name)
         .unwrap_or_else(|| panic!("the bystander guest {name} vanished during the detonation"));
-    let after = file_digest(&sibling_rootfs(&dir));
+    let after = file_digest(&sibling_rootfs(&name));
     assert_eq!(
         before, after,
         "containment FAILED: the bystander sibling guest's on-host state changed"

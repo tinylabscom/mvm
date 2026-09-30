@@ -76,4 +76,8 @@ grep -Fq "PROGRAM is required after '--'" "$scratch/missing.out"
 [[ "$name_status" -eq 64 ]]
 grep -Fq -- '--run-name must be' "$scratch/name.out"
 
+runner="$repo_root/scripts/run-gcp-kvm-test.sh"
+grep -Fq -- "--exclude='._*'" "$runner"
+grep -Fq 'COPYFILE_DISABLE=1 tar' "$runner"
+
 echo "disposable GCP KVM runner lifecycle tests passed"
