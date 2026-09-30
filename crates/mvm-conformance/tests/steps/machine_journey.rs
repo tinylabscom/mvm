@@ -101,6 +101,35 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
             ));
         }
 
+        // `machine diff` covers workspace volumes — host-directory snapshots
+        // attached read-write — since the content-diff rewrite; a guest with
+        // none exits 1 with attach instructions. Attach one before the start
+        // so the diff scenario exercises the documented contract, not the
+        // refusal.
+        let workspace_host = std::env::temp_dir().join("mvm-journey-workspace");
+        std::fs::create_dir_all(&workspace_host).expect("create journey workspace host dir");
+        std::fs::write(workspace_host.join("baseline.txt"), b"journey workspace baseline\n")
+            .expect("write journey workspace baseline");
+        let mount = run_in_journey_home([
+            "machine",
+            "volume",
+            "mount",
+            JOURNEY_MACHINE,
+            "--volume",
+            "workspace",
+            "--host",
+            workspace_host.to_str().expect("utf-8 journey workspace path"),
+            "--guest",
+            "/work",
+            "--rw",
+        ]);
+        if !mount.status.success() {
+            return Err(format!(
+                "machine volume mount failed: {}",
+                String::from_utf8_lossy(&mount.stderr).trim()
+            ));
+        }
+
         let start = run_in_journey_home(["machine", "start", JOURNEY_MACHINE]);
         if !start.status.success() {
             return Err(format!(
