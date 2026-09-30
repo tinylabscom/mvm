@@ -882,6 +882,23 @@ installs Rust targets on entry.
 After building, run `mvmctl doctor` — it reports the resolved builder backend
 and emits install hints for anything missing.
 
+One clone of this repo is a complete development environment: every image a
+guest boots resolves from the released set pinned by `images.lock` — no image
+checkout, no image building. [`bin/dev`](bin/dev) runs this checkout's mvmctl
+with isolated state and pairs automatically when an `mvm-images` checkout is
+available:
+
+```sh
+bin/dev machine run -- uname -a     # solo: released images, nothing else needed
+MVM_IMAGES_DIR=../mvm-images \
+  bin/dev build image-set builder-vm  # paired: build images from that checkout
+```
+
+`bin/dev` picks the image source itself — an explicit `MVM_IMAGES_DIR` wins, a
+sibling `mvm-images` checkout is discovered, and with neither the selector
+stays unset and the released set is used. Pairing is needed only for
+image-definition work; developing the in-guest binaries never leaves this repo.
+
 ### Build, test, lint
 
 ```bash
@@ -942,91 +959,78 @@ details.
 
 ### Release workflows
 
-This project maintains **two separate release trains** that version and publish
-independently:
+This project maintains **two release trains** with independent lifecycles, in
+**two repositories**:
 
-| Release train   | Tag pattern          | What it releases                                 | Workflow file                              | Key command                    |
-| --------------- | -------------------- | ------------------------------------------------ | ------------------------------------------ | ------------------------------ |
-| **CLI release** | `v*` (e.g. `v1.2.3`) | `mvmctl` binary, initramfs, crates.io packages   | `.github/workflows/release.yml`            | `just release::pr <version>`       |
-| **Boot image**  | `boot-image/v*`      | Rootfs, builder VM, runtime overlay, SDK sidecar | `.github/workflows/release-boot-image.yml` | `just release::image <version>` |
+| Train        | Where                    | Tag pattern                  | What it releases                                                        | Key command              |
+| ------------ | ------------------------ | ---------------------------- | ----------------------------------------------------------------------- | ------------------------ |
+| **CLI**      | this repo                | `v*` (e.g. `v0.18.3`)        | `mvmctl` binaries, manifests — no image bytes                             | `just release::pr 0.18.4`  |
+| **Images**   | `tinylabscom/mvm-images` | `image-set/v*` (e.g. `v0.2.2`) | The complete signed image set: builder/default images, kernels, overlay, SDK sidecars, initramfs | `just release 0.2.3`     |
 
-**Why two trains?** The CLI and boot image have independent lifecycles:
+`mvm` consumes the image train through one checked-in lock
+(`crates/mvm-core/images.lock`) — every fetch cosign-verifies the signed
+`image-set.json` root and digest-checks every member before touching a byte.
 
-- A kernel or rootfs security fix can ship via `boot-image/v1.2.4` without a
-  CLI version bump.
-- A CLI bug fix doesn't need to rebuild unchanged images.
+The dependency direction, stated once: **for images, `mvm` depends on
+`mvm-images`** — every byte a guest boots is built, signed, and published
+there, and this repo only ever fetches the published sets. The one reverse
+edge is **source**, not images: the guest binaries' source (agent, egress
+client, the shared `mvm-core`/`mvm-contract` protocol crates) lives here,
+because they compile against this workspace's `Cargo.lock` and are exercised
+by its tests, and `mvm-images` builds them from a pinned `mvm` commit as a
+source input. Image construction never happens in this repo.
 
 #### CLI release (`v*`)
 
-The **CLI release train** packages the `mvmctl` binary, the initramfs, and
-publishes Rust crates to crates.io. It runs on `v*` tags and produces:
-
-- `mvmctl-{target}.tar.gz` (macOS Apple Silicon, Linux x86_64/aarch64)
-- `initramfs-{arch}.tar.gz` (universal initramfs)
-- `checksums-sha256.txt` (combined checksums)
-- SBOM (`sbom.cdx`)
+The CLI train packages `mvmctl` for all targets. It runs on `v*` tags and
+publishes CLI archives, checksums, and an SBOM — nothing else: since W8 the CLI
+release never builds, mirrors, or re-signs image bytes.
 
 To prepare the next version from conventional commits, run `just release::pr`.
-To choose the version explicitly, run `just release::pr 1.2.3`. Both commands run
-the local release gates, update the workspace and Nix package versions, prepend
-the generated changelog, and open a `release/v<version>` pull request. After
-that pull request merges, run `just release::tag 1.2.3`; it tags the merged
-`origin/main` commit and triggers the CLI workflow.
+To choose the version explicitly, run `just release::pr 0.18.4`. Both run the
+local release gates, bump the workspace version, prepend the changelog, and open
+a `release/v<version>` pull request. After it merges, run
+`just release::tag 0.18.4`; it tags `origin/main` and triggers the workflow,
+which builds, runs the full documented-surface e2e on Linux and macOS, stages
+the release, and promotes it only after a fresh-install smoke passes.
 
-The workflow runs on tag push and:
+#### Image releases (`image-set/v*` in `mvm-images`)
 
-1. Builds `mvmctl` for all targets (cross-compiling Linux binaries)
-2. Builds per-VM host binaries (supervisors, agent, signer, broker)
-3. Builds the universal initramfs for both arches
-4. Runs BDD and e2e-docs tests (all documented examples must pass)
-5. Packages binaries, generates checksums, signs with cosign (keyless OIDC)
-6. Creates a GitHub release with all artifacts
+Image construction lives entirely in
+[`tinylabscom/mvm-images`](https://github.com/tinylabscom/mvm-images) — kernels,
+workload rootfses, the builder VM, the runtime overlay, SDK sidecars, and the
+initramfs are built, signed, and published there as one immutable, atomic set
+per release. Releasing new images is deliberately small:
 
-**Critical gate:** A CLI release **must** include boot-image assets. If no
-`boot-image/v*` release exists (or it's incomplete), the publish fails with an
-error. This prevents fresh installs from 404ing on first boot.
+```sh
+# in the mvm-images checkout, on main:
+git pull --ff-only
+just release 0.2.3   # verifies, tags image-set/v0.2.3; the workflow builds
+                     # both arches, signs the root, verifies it with the
+                     # pinned mvm, and publishes (protected-env review)
+```
 
-#### Boot image release (`boot-image/v*`)
+Then advance this repo's pin — the `update-image-pin` workflow proposes the
+lock update with the cosign evidence (a maintainer opens the pushed branch by
+hand until the "Actions can open PRs" setting is enabled), or by hand:
 
-The **boot image release train** produces all artifacts needed to boot a
-microVM:
+```sh
+gh release download image-set/v0.2.3 --repo tinylabscom/mvm-images   -p image-set.json -p image-set.json.bundle
+cosign verify-blob --bundle image-set.json.bundle   --certificate-identity-regexp   'https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/image-set/v0.2.3'   --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'   image-set.json
+cargo xtask repin-image-lock image-set.json   # rewrites tag + sha256 from the
+                                              # verified root; nothing to hand-edit
+```
 
-- `builder-vm-*` (builder VM vmlinux, rootfs, SBOM, pack manifest)
-- `runtime-overlay-{arch}.tar.gz` (read-only overlay for agent/seccomp/SDK)
-- `sdk-sidecar-{arch}-{libc}.tar.gz` (SDK server runtime, per libc)
-- `default-microvm-*` (default prod image: vmlinux, verity-sealed rootfs)
-
-To publish a boot image release, run `just release::image 1.2.3`. The command
-refreshes `origin/main`, refuses to reuse an existing tag, and tags the merged
-main commit as `boot-image/v1.2.3`. Pushing that tag triggers the boot-image
-workflow.
-
-The workflow runs on `boot-image/v*` tags and:
-
-1. Builds the builder VM image (cross-compiles host-vm binaries)
-2. Builds the runtime overlay image
-3. Builds SDK sidecar images (4 variants: x86_64/aarch64 × glibc/musl)
-4. Builds the default microVM (prod variant, sealed + verity)
-5. Generates checksums and SBOMs
-6. Signs all artifacts with cosign (keyless OIDC)
-7. Creates a GitHub release under `boot-image/v*`
-
-**Key differences from CLI release:**
-
-- Uses protected environment `boot-image-signing` (restricted to `boot-image/v*` refs)
-- No `--features embed-host-bins` (no CLI binary to embed)
-- Builds Nix images (`nix/images/builder-vm`, `nix/images/runtime-overlay`, etc.)
-- Produces raw kernel/initramfs/rootfs blobs, not packaged binaries
+That is the whole upgrade: consumers resolve the new set at the next fetch.
+**An image-only change never needs a CLI release**, and rollback is pointing
+the lock back at a previous verified set — no binary is rebuilt either way.
 
 #### Verifying a release
 
-Run `mvmctl image boot check` to compare the locally recorded boot-image tag
-with the latest published image release. Run `mvmctl trust audit verify` to
-verify the local audit chain, and `mvmctl doctor` to inspect the host and boot
-image acquisition posture.
-
-For more details, see the [CLI release workflow](.github/workflows/release.yml)
-and [boot image release workflow](.github/workflows/release-boot-image.yml).
+Run `mvmctl image boot check` to compare the cached image against the pinned
+set, and `mvmctl image boot verify` for the offline root/member verification
+path. `mvmctl doctor` reports the acquisition posture (tier, source, digests),
+and `mvmctl trust audit verify` checks the local audit chain.
 
 ### Repository layout
 
