@@ -21,7 +21,7 @@
 use std::fmt;
 use std::path::Path;
 
-use mvm_core::image_set::RepoIdentity;
+use mvm_core::image_set::{BuilderBootAbi, RepoIdentity};
 use mvm_core::packs::Sha256Hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -117,7 +117,12 @@ fn consumed_inputs(
     fold_nix_inputs(&mut hasher, mvm_root, BUILDER_FLAKE_NIX_INPUTS);
     fold_package_source_identity(&mut hasher, mvm_root, SETPRIV_PACKAGE)
         .map_err(|e| format!("{e:#}"))?;
-    if contract.needs_host_binaries {
+    // ABI 1+ builder images bake no host binaries — they arrive at boot in
+    // mvmctl's initramfs payload — so the host-binary sources cannot affect
+    // the built image and stay out of the key.
+    let boot_abi = crate::image_source::build::checkout_builder_boot_abi(images_root)
+        .map_err(|e| format!("reading the checkout's builder boot ABI: {e:#}"))?;
+    if contract.needs_host_binaries && boot_abi == BuilderBootAbi::LEGACY {
         fold_package_source_identity(&mut hasher, mvm_root, HOST_BINARY_PACKAGE)
             .map_err(|e| format!("{e:#}"))?;
         fold_listed(
