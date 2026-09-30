@@ -16,6 +16,11 @@ pub(in crate::commands) struct Args {
     /// Production mode (skip Homebrew, assume Linux with apt)
     #[arg(long)]
     pub production: bool,
+
+    /// Allow building the builder VM image from a local `mvm-images` checkout for this invocation.
+    /// Sets MVM_ALLOW_LOCAL_BUILDER_BUILD=1 for the process.
+    #[arg(long)]
+    pub allow_local_builder_build: bool,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {

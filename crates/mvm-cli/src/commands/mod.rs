@@ -644,6 +644,26 @@ fn apply_startup_env(cli: &Cli) {
     if let Some(ref source) = cli.kernel_source {
         set_cli_env("MVM_KERNEL_SOURCE", source);
     }
+
+    // Honor per-invocation opt-in for building the builder image from a local
+    // `mvm-images` checkout. This sets the same process env var the bootstrap
+    // path reads (`MVM_ALLOW_LOCAL_BUILDER_BUILD=1`) so callers that expect the
+    // env-var semantics continue to work.
+    let allow_local_builder = match &cli.command {
+        Commands::Build(group_args) => group_args.allow_local_builder_build,
+        Commands::Machine(m_args) => match &m_args.action {
+            crate::commands::machine::MachineAction::Build(b) => b.allow_local_builder_build,
+            _ => false,
+        },
+        Commands::Env(env_args) => match &env_args.action {
+            env::group::EnvCmd::Bootstrap(bootstrap_args) => bootstrap_args.allow_local_builder_build,
+            _ => false,
+        },
+        _ => false,
+    };
+    if allow_local_builder {
+        set_cli_env("MVM_ALLOW_LOCAL_BUILDER_BUILD", "1");
+    }
 }
 
 /// Let a build start a persistent builder when it finds the store image busy.
