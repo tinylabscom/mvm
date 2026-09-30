@@ -320,7 +320,27 @@ Last updated: 2026-09-29
       W4 receive-only authentication now integrates with the resident signer via
       a typed, domain-restricted operation and deadline-bounded async client.
       Seven integration tests, workspace clippy and Linux all-target cross-check
-      pass. VM-lifetime collection and generation registration remain unimplemented.
+      pass. That authentication merged as PR #3472 and boot-generation
+      registration merged as PR #3597; VM-lifetime collection remains open.
+      W4 collector worker merged (PR #3658, queue commit
+      `e2cbf029a2c97e01c8300abac4bb85d52a06ac2d`): per-VM worker composing
+      resolve → assert-current → connect → authenticated receive into a
+      bounded non-waiting RecordSink, CoverageStatus snapshot, capped
+      re-resolving backoff picking up re-registered warm/restored boots, and
+      prompt stop; five socket-pair tests pass. Supervision, boot-path wiring
+      and real-socket wiring remain open. Evidence:
+      `specs/sprint/delivery/3423-telemetry-collector-worker.md`.
+      Maintainer decisions (2026-09-29) recorded in the plan: W3 stdio capture
+      stays invocation-scoped, sealed-agent capture is events-only pending a
+      real span producer, the `@wip` s34 scenarios un-tag only in a joint
+      end-to-end change, and flood fairness must be re-measured on the
+      Firecracker reference hardware before capture enablement. Per the PR
+      #3826 review outcome, the per-VM collector runs embedded as threads in
+      the per-VM network-endpoint process (no separate binary; reaped with
+      the endpoint at teardown), with provisioning as one decision consumed
+      by the endpoint config and the guest's mvm.telemetry=1 assertion: a
+      configured OTLP exporter endpoint implies collection, and
+      MVM_TELEMETRY_COLLECT=1 enables collection without export.
       W1-W7 remain open: remaining inventory, typed encrypted service, guest capture,
       VM-lifetime host collector, host views/export, real-backend certification,
       default-on rollout and merge-queue delivery. Design is not implementation.

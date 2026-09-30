@@ -436,7 +436,29 @@ docs commit went out as #3581). Under the
       W4 receive-only authentication now integrates with the resident signer via
       a typed, domain-restricted operation and deadline-bounded async client.
       Seven integration tests, workspace clippy and Linux all-target cross-check
-      pass. VM-lifetime collection and generation registration remain unimplemented.
+      pass. That authentication merged as PR #3472 and boot-generation
+      registration merged as PR #3597; VM-lifetime collection remains open.
+      W4 collector worker merged (PR #3658, queue commit
+      `e2cbf029a2c97e01c8300abac4bb85d52a06ac2d`): a per-VM worker composes
+      resolve → assert-current → connect → authenticated receive per attempt
+      into a bounded non-waiting RecordSink, with a CoverageStatus snapshot,
+      capped exponential backoff that re-resolves the registration each
+      attempt so re-registered warm/restored boots are picked up through the
+      gate, and prompt stop; five socket-pair tests pass. Supervision,
+      boot-path wiring and real-socket wiring remain open. Evidence:
+      `specs/sprint/delivery/3423-telemetry-collector-worker.md`.
+      Maintainer decisions (2026-09-29) recorded in the plan: W3 stdio capture
+      stays invocation-scoped (detached stdio remains a registered gap until
+      W4 collector machinery exists), sealed-agent capture is events-only
+      pending a real span producer, the `@wip` s34 scenarios un-tag only in a
+      joint end-to-end change, and flood fairness must be re-measured on the
+      Firecracker reference hardware before capture enablement. Per the PR
+      #3826 review outcome, the per-VM collector runs embedded as threads in
+      the per-VM network-endpoint process (no separate binary; it dies with
+      the endpoint at teardown), and provisioning is one decision consumed by
+      both the endpoint config and the guest's mvm.telemetry=1 cmdline
+      assertion: a configured OTLP exporter endpoint implies collection, and
+      MVM_TELEMETRY_COLLECT=1 enables collection without export.
       Typed encrypted guest telemetry, VM-lifetime host collection, bounded
       non-waiting emission, explicit loss/coverage, and host-only export.
 
