@@ -536,6 +536,21 @@ pub enum LocalAuditKind {
     /// A transcript operation refused fail-closed (tamper, wrong key, bound).
     ///   `tenant=<t> vm=<v> capture=<id> reason=<msg>`
     TranscriptRefused,
+
+    // --- Reviewed workspace apply (PS-08) ---
+    /// `mvmctl machine apply` reviewed a machine's workspace changes back
+    /// onto the host directory: every overwritten host byte was snapshotted
+    /// content-addressed first, the apply is journaled, and the manifest's
+    /// Merkle root lands here. Detail:
+    ///   `action=workspace.apply outcome=<applied|refused> volume=<v>     ///    files=<n> merkle_root=<64hex>`
+    WorkspaceApply,
+    /// `mvmctl machine undo` reversed the most recent reviewed apply,
+    /// restoring its pre-images (also a journaled apply). Detail:
+    ///   `action=workspace.undo volume=<v> undo=<id> target=<id>`
+    WorkspaceUndo,
+    /// `mvmctl machine redo` re-applied the most recent undone apply.
+    /// Detail: `action=workspace.redo volume=<v> redo=<id> target=<id>`
+    WorkspaceRedo,
 }
 
 /// A single local audit log entry.
@@ -1244,6 +1259,10 @@ mod tests {
             LocalAuditKind::FlowPolicyDecision,
             // Vendored-blob supply-chain fetch.
             LocalAuditKind::VendorBlobFetched,
+            // Reviewed workspace apply.
+            LocalAuditKind::WorkspaceApply,
+            LocalAuditKind::WorkspaceUndo,
+            LocalAuditKind::WorkspaceRedo,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
@@ -1302,6 +1321,11 @@ mod tests {
             // load-bearing: `mvmctl audit` + log shippers
             // filter on `kind == "vendor_blob_fetched"`.
             (LocalAuditKind::VendorBlobFetched, "vendor_blob_fetched"),
+            // Reviewed workspace apply: wire strings are load-bearing for
+            // `mvmctl audit` filters, pinned like the siblings above.
+            (LocalAuditKind::WorkspaceApply, "workspace_apply"),
+            (LocalAuditKind::WorkspaceUndo, "workspace_undo"),
+            (LocalAuditKind::WorkspaceRedo, "workspace_redo"),
         ];
         for (kind, expected) in kinds_and_strings {
             let json = serde_json::to_string(&kind).unwrap();

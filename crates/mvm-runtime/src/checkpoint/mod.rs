@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::{
-    CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob,
+    CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta, ContentBlob, SessionBinding,
 };
 use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotId, SnapshotStore};
 use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
@@ -838,6 +838,7 @@ fn capture_vm_full_inner(
     snapshot_store: Option<&FsSnapshotStore>,
     trusted_backend: Option<&dyn TrustedSnapshotBackend>,
 ) -> Result<CheckpointMeta> {
+    validate_step_lineage(store, params.parent.as_ref(), params.session.as_ref())?;
     // Everything is written under a private staging name and appears under
     // the checkpoint's own name only once it is complete and durable.
     let staged = staging::StagedCapture::begin(store, &params.id)?;
@@ -1061,15 +1062,48 @@ fn capture_vm_full_inner(
 
     let meta = CheckpointMeta::builder(params.id, CheckpointClass::VmFull, params.vm_name)
         .tag(params.tag)
+        .parent(params.parent)
         .created_unix(params.created_unix)
         .content(content)
         .supervisor_config_digest(params.supervisor_config_digest)
         .runtime_overlay_version(params.runtime_overlay_version)
         .snapshot_id(snapshot_id)
         .grants(params.grants)
+        .session(params.session)
         .build();
     staged.commit(&meta)?;
     Ok(meta)
+}
+
+fn validate_step_lineage(
+    store: &CheckpointStore,
+    parent: Option<&CheckpointDigest>,
+    session: Option<&SessionBinding>,
+) -> Result<()> {
+    let Some(parent_digest) = parent else {
+        return Ok(());
+    };
+    let child_session =
+        session.context("a step checkpoint with a parent needs a session binding")?;
+    let parent_meta = store
+        .by_digest(parent_digest)?
+        .with_context(|| format!("step checkpoint parent {parent_digest} does not exist"))?;
+    let parent_session = parent_meta
+        .session
+        .context("step checkpoint parent has no session binding")?;
+    if parent_session.session_id != child_session.session_id
+        || parent_session.generation != child_session.generation
+    {
+        anyhow::bail!("step checkpoint parent belongs to another session generation");
+    }
+    if parent_session.journal_cursor >= child_session.journal_cursor {
+        anyhow::bail!(
+            "step checkpoint cursor {} must advance past parent cursor {}",
+            child_session.journal_cursor,
+            parent_session.journal_cursor
+        );
+    }
+    Ok(())
 }
 
 /// Restores a vm_full checkpoint's saved state into a target VM, abstracted so
@@ -1700,12 +1734,12 @@ mod tests {
             generation: 2,
             journal_cursor: 40,
             approval_head: ApprovalHead::parse(format!("sha256:{}", "ab".repeat(32))).unwrap(),
+            replay_input_digest: None,
         }
     }
 
-    /// Rewrites `meta`'s stored record to carry a `SessionBinding`, as if it
-    /// were captured from a VM resuming a durable agent session. Used only to
-    /// build fork-test fixtures; capture itself does not yet wire a session in.
+    /// Rewrites `meta`'s stored record to carry a `SessionBinding`. Used to
+    /// build fork-test fixtures without requiring a live full-VM capture.
     fn bind_to_session(store: &CheckpointStore, meta: &CheckpointMeta) -> CheckpointMeta {
         let bound = CheckpointMeta::builder(meta.id.clone(), meta.class, meta.vm_name.clone())
             .tag(meta.tag.clone())
@@ -1719,6 +1753,33 @@ mod tests {
             .build();
         store.write_meta(&bound).unwrap();
         bound
+    }
+
+    #[test]
+    fn step_lineage_requires_same_session_generation_and_forward_cursor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = seed_fs_quick_checkpoint(&store, tmp.path(), "step-parent");
+        let parent = bind_to_session(&store, &parent);
+        let mut next = test_session_binding();
+        next.journal_cursor += 1;
+        validate_step_lineage(&store, Some(&parent.meta_digest), Some(&next)).unwrap();
+
+        let mut stale = next.clone();
+        stale.journal_cursor = 40;
+        let error = validate_step_lineage(&store, Some(&parent.meta_digest), Some(&stale))
+            .expect_err("a step cursor must advance");
+        assert!(error.to_string().contains("must advance"), "{error:#}");
+
+        let mut other_generation = next;
+        other_generation.generation += 1;
+        let error =
+            validate_step_lineage(&store, Some(&parent.meta_digest), Some(&other_generation))
+                .expect_err("a parent cannot cross session generations");
+        assert!(
+            error.to_string().contains("another session generation"),
+            "{error:#}"
+        );
     }
 
     #[test]
@@ -2066,6 +2127,8 @@ mod tests {
                 created_unix: 9,
                 retain_paused,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -2118,6 +2181,8 @@ mod tests {
                 created_unix: 9,
                 retain_paused: false,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -2174,6 +2239,8 @@ mod tests {
                 created_unix: 10,
                 retain_paused: false,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -2243,6 +2310,8 @@ mod tests {
                 created_unix: 11,
                 retain_paused: false,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -2305,6 +2374,8 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -2658,6 +2729,8 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -2712,6 +2785,8 @@ mod tests {
                 created_unix: 2,
                 retain_paused: false,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -3004,6 +3079,8 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,
@@ -3191,6 +3268,8 @@ mod tests {
                 created_unix: 1,
                 retain_paused: false,
                 grants: None,
+                parent: None,
+                session: None,
                 workspace_volumes: Vec::new(),
             },
             &ctl,

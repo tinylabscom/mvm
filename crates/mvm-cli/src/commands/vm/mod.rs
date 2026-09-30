@@ -12,6 +12,7 @@ pub(super) mod diff;
 pub(super) mod display;
 pub(super) mod down;
 pub(in crate::commands) mod egress_denials;
+pub(in crate::commands) mod workspace_apply;
 use mvm_client::admission::entrypoint_resolve;
 pub(super) mod exec;
 pub(in crate::commands) mod explain;
