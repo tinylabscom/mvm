@@ -532,11 +532,19 @@ fn run_victim_target_kernel(
         }
         containment::VictimBackend::Qemu => {
             use mvm_runtime::driver::QemuDriver;
-            QemuDriver::new().boot(&spec).unwrap_or_else(|e| {
-                let console = state_dir.join("console.log");
-                let log = std::fs::read_to_string(&console).unwrap_or_default();
-                panic!("the target-kernel victim boot failed: {e:#}\n--- console.log ---\n{log}");
-            })
+            // The pinned PoC was calibrated against q35's PCI/MMIO hole and
+            // relocated high-RAM segment; QEMU's x86 default is i440FX and
+            // gives its prefetch/PFN oracles a different physical map.
+            QemuDriver::new()
+                .with_machine_type("q35")
+                .boot(&spec)
+                .unwrap_or_else(|e| {
+                    let console = state_dir.join("console.log");
+                    let log = std::fs::read_to_string(&console).unwrap_or_default();
+                    panic!(
+                        "the target-kernel victim boot failed: {e:#}\n--- console.log ---\n{log}"
+                    );
+                })
         }
     };
     let started = std::time::Instant::now();

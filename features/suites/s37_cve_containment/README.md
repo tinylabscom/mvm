@@ -43,10 +43,10 @@ the warm-restore harness uses), from a staged initramfs that runs the exploit
 and reports over the serial console. The backend is selected by
 `MVM_BDD_CVE_HYPERVISOR`: `fc` (default) boots the extracted vmlinux through
 `FcDriver::boot`; `qemu` boots the distro bzImage through `QemuDriver::boot`
-(`-cpu host`, KVM — the PoC's reference environment) and verifies it against
-the `kernel.vmlinuz_sha256` pin. Use `qemu` when the PoC was proven under
-QEMU and its timing oracles misbehave under Firecracker's CPU model. Either
-way the boot is NIC-less, agentless, and **deliberately outside admission** —
+(`q35`, `-cpu host`, KVM — the PoC's reference environment) and verifies it
+against the `kernel.vmlinuz_sha256` pin. Use `qemu` when the PoC was proven
+under QEMU and its timing oracles misbehave under Firecracker's CPU model.
+Either way the boot is NIC-less, agentless, and **deliberately outside admission** —
 the admitted path cannot boot an arbitrary kernel, and fencing that is what
 the destructive-lab ceiling exists for. In this mode:
 
