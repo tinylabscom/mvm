@@ -1,7 +1,7 @@
 # Which image sources move, and which stay
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 W4 of `specs/plans/2026-09-16-image-repository-extraction.md` moves image
 building to `tinylabscom/mvm-images`. Its first step is an exact inventory, and

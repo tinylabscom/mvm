@@ -1,7 +1,7 @@
 # GPU compute inside microVMs by API remoting over vsock
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Epic:** [#3560](https://github.com/tinylabscom/mvm/issues/3560) — GPU
 support for microVMs. Follow-ups: [#3561](https://github.com/tinylabscom/mvm/issues/3561)

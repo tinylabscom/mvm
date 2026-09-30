@@ -1,7 +1,7 @@
 # Extended CI red repair
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issues:** [#2979](https://github.com/tinylabscom/mvm/issues/2979),
 [#3007](https://github.com/tinylabscom/mvm/issues/3007),

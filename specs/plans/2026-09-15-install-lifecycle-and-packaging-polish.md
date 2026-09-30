@@ -1,7 +1,7 @@
 # Install lifecycle: a monitored URL, an atomic upgrade, and a way out
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status: COMPLETE**
 
