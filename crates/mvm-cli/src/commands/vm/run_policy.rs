@@ -267,17 +267,16 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_reference_is_refused() {
+    fn a_pack_reference_without_an_installed_pack_points_at_pull() {
         let (_env, _home) = isolated();
         let mut args = RunArgs {
             policy: vec!["acme/agent".into()],
             ..RunArgs::default()
         };
         let err = apply_run_policy(&mut args).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("packs are not yet supported"),
-            "{err:#}"
-        );
+        let shown = format!("{err:#}");
+        assert!(shown.contains("mvmctl pull"), "{shown}");
+        assert!(shown.contains("acme/agent"), "{shown}");
     }
 
     #[test]

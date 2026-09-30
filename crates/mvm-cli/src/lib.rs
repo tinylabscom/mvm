@@ -20,6 +20,7 @@ pub mod json_out;
 pub mod logging;
 pub mod metrics_server;
 pub(crate) mod mount_cache;
+pub mod pack_registry;
 pub mod shell_init;
 pub mod signal;
 pub mod template_cmd;

@@ -320,14 +320,84 @@ impl PolicyStore {
     ) -> Result<Loaded<T>, PolicyError> {
         match reference {
             PolicyRef::Pack {
-                namespace, name, ..
-            } => Err(PolicyError::new(
-                referrer,
-                format!(
-                    "{} `{namespace}/{name}` is a pack reference; packs are not yet supported",
-                    kind.noun()
-                ),
-            )),
+                namespace,
+                name,
+                version,
+            } => {
+                let spelling = match version {
+                    Some(version) => format!("{namespace}/{name}@{version}"),
+                    None => format!("{namespace}/{name}"),
+                };
+                let noun = kind.noun();
+                let reference: mvm_core::registry_pack::PackReference =
+                    spelling.parse().map_err(|error| {
+                        PolicyError::new(
+                            referrer,
+                            format!("{noun} `{spelling}` is not a valid pack reference: {error}"),
+                        )
+                    })?;
+                let lock = mvm_core::registry_pack_store::load_pack_lockfile(
+                    &mvm_core::config::pack_lockfile_path(),
+                )
+                .map_err(|error| {
+                    PolicyError::new(
+                        referrer,
+                        format!("{noun} `{spelling}` could not read the pack lockfile: {error}"),
+                    )
+                })?;
+                let publisher_policy = mvm_core::registry_pack_store::load_publisher_policy(
+                    &mvm_core::config::registry_pack_publisher_policy_path(),
+                )
+                .map_err(|error| {
+                    PolicyError::new(
+                        referrer,
+                        format!(
+                            "{noun} `{spelling}` has no usable publisher trust policy: {error}"
+                        ),
+                    )
+                })?;
+                let (installed, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+                    &mvm_core::config::registry_pack_cache_dir(),
+                    &lock,
+                    &publisher_policy,
+                    &reference,
+                )
+                .map_err(|error| {
+                    PolicyError::new(
+                        referrer,
+                        format!(
+                            "{noun} `{spelling}` is not installed and verified; run `mvmctl pull {spelling}` first ({error})"
+                        ),
+                    )
+                })?;
+                let document = match kind {
+                    Kind::Profile => mvm_core::registry_pack_store::PackPolicyDocument::Profile,
+                    Kind::Group => mvm_core::registry_pack_store::PackPolicyDocument::Group,
+                };
+                let (path, text) = mvm_core::registry_pack_store::read_pack_policy_document(
+                    &installed, &verified, document,
+                )
+                .map_err(|error| {
+                    PolicyError::new(referrer, format!("{noun} `{spelling}`: {error}"))
+                })?;
+                let doc: T = toml::from_str(&text).map_err(|error| {
+                    PolicyError::new(
+                        referrer,
+                        format!("{noun} `{spelling}` does not parse: {error}"),
+                    )
+                })?;
+                Ok(Loaded {
+                    doc,
+                    label: format!("{noun} `{spelling}` (pack)"),
+                    file: Some(path),
+                    identity: format!(
+                        "pack:{}#{}",
+                        verified.manifest().reference,
+                        verified.manifest_sha256().as_str()
+                    ),
+                    origin: LayerOrigin::Pack,
+                })
+            }
             PolicyRef::Path(path) => {
                 let path = match base {
                     Some(base) if path.is_relative() => base.join(path),
@@ -493,7 +563,22 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_reference_is_refused_as_not_yet_supported() {
+    fn a_pack_reference_without_an_installed_pack_points_at_pull() {
+        // Names are rejected inside the test process's real MVM_HOME scope;
+        // isolate the whole home so a developer's installed packs never
+        // decide the outcome.
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        // An empty-but-present trust policy reaches the lockfile lookup, so
+        // the refusal names the remedy rather than the policy bootstrap.
+        let empty_policy = mvm_core::registry_pack::RegistryPackPublisherPolicy::new(Vec::new())
+            .expect("an empty policy is valid");
+        mvm_core::registry_pack_store::save_publisher_policy(
+            &mvm_core::config::registry_pack_publisher_policy_path(),
+            &empty_policy,
+        )
+        .expect("write empty publisher policy");
         let store = PolicyStore::at(tempfile::tempdir().unwrap().path());
         let err = store
             .load_profile(
@@ -503,7 +588,25 @@ mod tests {
                 "--policy",
             )
             .unwrap_err();
-        assert!(err.message.contains("packs are not yet supported"), "{err}");
+        assert!(err.message.contains("mvmctl pull"), "{err}");
+        assert!(err.message.contains("acme/agent"), "{err}");
+    }
+
+    #[test]
+    fn a_pack_reference_with_an_invalid_version_is_refused() {
+        let store = PolicyStore::at(tempfile::tempdir().unwrap().path());
+        let err = store
+            .load_profile(
+                &PolicyRef::parse("acme/agent@not semver").unwrap(),
+                None,
+                LayerOrigin::User,
+                "--policy",
+            )
+            .unwrap_err();
+        assert!(
+            err.message.contains("is not a valid pack reference"),
+            "{err}"
+        );
     }
 
     #[test]

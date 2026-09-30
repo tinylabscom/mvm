@@ -29,7 +29,9 @@ mod policy;
 /// bridge-admitted launches) and top the pool back up. `pub(crate)` so the
 /// crate-root `exec` runner can reach the glue.
 pub(crate) mod pool;
+mod pull;
 mod qemu_bridge;
+mod search;
 mod seccomp_audit;
 pub(crate) mod shared;
 mod storage;
@@ -252,6 +254,12 @@ pub(in crate::commands) enum Commands {
     /// Resolve, show, validate and compare authored policy profiles
     #[command(display_order = 13)]
     Policy(policy::Args),
+    /// Fetch, verify, install, and pin a signed registry pack
+    #[command(display_order = 13)]
+    Pull(pull::Args),
+    /// Search the signed pack registry
+    #[command(display_order = 13)]
+    Search(search::Args),
     /// Inspect, park, and resume durable agent sessions
     #[command(name = "agent-session", display_order = 12)]
     AgentSession(agent_session::Args),

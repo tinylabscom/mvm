@@ -238,6 +238,11 @@ Security-bearing gaps first, then the foundations the UX needs:
   - [x] content-addressed local installation with exact trust sidecars, atomic
         same-filesystem promotion, verify-on-reuse, and poisoned-entry repair
 - [ ] `mvmctl search`, `pull ns/name[@ver]`, `run --profile ns/name -- CMD`, `pack ls|rm|update`
+  - [x] `mvmctl search` + `pull ns/name[@ver]` against a `file://`-testable index,
+        and `pack registry ls|rm|update` (nested under `pack`, whose existing
+        subcommands stay the attested-pack cache); `run --policy ns/name[@ver]`
+        resolves pack profiles/groups from installed packs, re-verifying the
+        locked digest and exact payload on every use
 - [ ] lockfile with digest pins; admission refuses drift (signed-bundle path, claim 9)
   - [x] strict `namespace/name[@version]` references and a versioned lockfile
         that refuses missing pins, duplicate package names, requested-version

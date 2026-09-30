@@ -1528,11 +1528,10 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 /// deliberate act that should carry its reason in the commit, because the
 /// alternative is what happened before this existed: the count drifted up
 /// while everyone believed coverage was improving.
-// 74 after the workspace-apply surface landed (docs: guides/workspace-apply):
-// machine apply/undo/redo/save document hermetically-exercised paths whose
-// full forms need a workspace fixture or a live boot; the pin grows
-// deliberately, each new entry carrying its reason.
-const PARSE_TIER_PIN: usize = 74;
+// Workspace-apply forms need a live workspace fixture. Pack `pull` and
+// `search` need a reachable registry; their fail-closed paths are exercised
+// by tests/cli.rs against a file:// registry.
+const PARSE_TIER_PIN: usize = 76;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {
