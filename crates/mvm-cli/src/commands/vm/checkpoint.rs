@@ -1474,6 +1474,7 @@ mod tests {
                     sigv4: None,
                     provider: Some("catalog-provider".into()),
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();

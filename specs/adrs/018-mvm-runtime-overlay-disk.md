@@ -22,6 +22,10 @@ is supposed to preserve. It would also mean every rootfs source
 (mkGuest, OCI unpack, any future image factory) has to re-implement the
 same "inject the agent" step.
 
+The builder VM follows the same rule for its own binaries: ADR-004's builder
+boot payload carries `mvm-host-vm-init` and `mvm-builderd` beside the builder
+image rather than inside it, so no builder image is mutated to receive them.
+
 ## Decision
 
 **Every mvm microVM boots two block devices: a rootfs (`/dev/vda`, user

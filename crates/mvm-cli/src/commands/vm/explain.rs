@@ -9,7 +9,7 @@
 //! this is a read-only render over data other commands already emit.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -17,7 +17,7 @@ use clap::Args as ClapArgs;
 use ed25519_dalek::VerifyingKey;
 use serde::Serialize;
 
-use mvm_hostd::supervisor::{PlanAuditEntry, verify_audit_chain};
+use mvm_hostd::supervisor::PlanAuditEntry;
 
 use super::audit_chain::{audit_path_for_tenant, default_audit_dir};
 use super::audit_follow::{ChainLine, parse_chain_line};
@@ -35,6 +35,12 @@ pub(in crate::commands) struct Args {
     /// Emit a machine-readable JSON object instead of the human summary.
     #[arg(long)]
     pub json: bool,
+    /// Review grantable denials and, after confirmation, update mvm.toml
+    #[arg(long, conflicts_with = "json")]
+    pub review: bool,
+    /// Project directory whose mvm.toml receives reviewed grants (default: .)
+    #[arg(long, value_name = "DIR", requires = "review")]
+    pub project: Option<PathBuf>,
 }
 
 pub(in crate::commands) fn run(args: Args) -> Result<()> {
@@ -47,6 +53,14 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
         crate::json_out::emit_json(&explanation)
     } else {
         explanation.render();
+        if args.review {
+            if !explanation.chain_verified {
+                bail!("refusing to draft grants from an audit chain that does not verify");
+            }
+            let project = args.project.as_deref().unwrap_or_else(|| Path::new("."));
+            let manifest = super::denial_review::manifest_path(project)?;
+            super::denial_review::review_destinations(&explanation.egress_denials, &manifest)?;
+        }
         Ok(())
     }
 }
@@ -201,21 +215,35 @@ pub(in crate::commands) fn collect_run(
         );
     }
 
-    let content = std::fs::read_to_string(path)
-        .with_context(|| format!("reading audit chain {}", path.display()))?;
-
-    let mut all_entries: Vec<PlanAuditEntry> = Vec::new();
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
+    let audit_dir = path
+        .parent()
+        .with_context(|| format!("audit chain path {} has no parent", path.display()))?;
+    let base = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .with_context(|| format!("audit chain path {} has no file stem", path.display()))?;
+    let (all_entries, verification) = match mvm_hostd::supervisor::audit_set::verify_segment_entries(
+        audit_dir,
+        base,
+        verifying_key,
+    ) {
+        Ok(entries) => {
+            let count = entries.len();
+            (entries, Ok(count))
         }
-        // Unparsable lines are skipped, matching the tolerant read in
-        // `ops/audit.rs::print_chain_line` — a foreign line shouldn't
-        // sink the whole explain.
-        if let ChainLine::Entry(entry) = parse_chain_line(line) {
-            all_entries.push(*entry);
+        Err(error) => {
+            let content = std::fs::read_to_string(path)
+                .with_context(|| format!("reading audit chain {}", path.display()))?;
+            let entries = content
+                .lines()
+                .filter_map(|line| match parse_chain_line(line) {
+                    ChainLine::Entry(entry) => Some(*entry),
+                    ChainLine::Foreign(_) => None,
+                })
+                .collect();
+            (entries, Err(error))
         }
-    }
+    };
 
     let matches: Vec<&PlanAuditEntry> = all_entries
         .iter()
@@ -266,11 +294,10 @@ pub(in crate::commands) fn collect_run(
 
     let egress_denials = run_denials(&all_entries, &plan_id, &image_name);
 
-    let (chain_verified, chain_entry_count, verify_error) =
-        match verify_audit_chain(path, verifying_key) {
-            Ok(count) => (true, count, None),
-            Err(e) => (false, 0, Some(e.to_string())),
-        };
+    let (chain_verified, chain_entry_count, verify_error) = match verification {
+        Ok(count) => (true, count, None),
+        Err(e) => (false, 0, Some(e.to_string())),
+    };
 
     Ok(RunExplanation {
         run_id: run_id.to_string(),

@@ -12,6 +12,10 @@
 # documented path with no entry here fails the coverage scenario by name.
 
 [[command]]
+path = "agent-session ls"
+tier = "exec"
+
+[[command]]
 path = "bootstrap"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"
@@ -582,6 +586,10 @@ tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
+path = "policy"
+tier = "exec"
+
+[[command]]
 path = "prepare"
 tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
@@ -607,6 +615,10 @@ tier = "parse"
 # suite fails if one ships, so the docs get updated when it does.
 reason = "a long-lived watcher: it never exits on its own"
 
+[[command]]
+path = "why"
+tier = "exec"
+
 [[planned]]
 path = "manifest push"
 reason = "registry sharing is designed but unimplemented; the docs mark the section planned"
@@ -629,10 +641,6 @@ reason = "renamed to `build validate`; the reference records the rename"
 [[absent]]
 path = "dev"
 reason = "removed with `dev import-image`; the airgap and release guides describe its removal"
-
-[[absent]]
-path = "policy"
-reason = "deliberately not a public verb — the reference says policy authoring lives in mvmd"
 
 [[absent]]
 path = "addon"
@@ -735,3 +743,7 @@ reason = "\"any mvmctl command that signs to initialize\" — a noun phrase"
 [[prose]]
 text = "mvmctl template init"
 reason = "correctly describes a removed mode in the past tense: \"was a `mvmctl template init --vm` mode that no longer exists\""
+
+[[prose]]
+text = "mvmctl surface"
+reason = "\"tenant policy verbs are not mvmctl surface\" — a noun, not an invocation"

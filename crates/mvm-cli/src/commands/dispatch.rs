@@ -22,6 +22,7 @@ impl TopLevelCommand for Commands {
             #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(a) => builder_shell_job::run(cli, a, cfg),
             Commands::Explain(a) => vm::explain::run(a),
+            Commands::Why(a) => why::run(a),
             Commands::Run(a) => vm::exec::run_transient(cli, a, cfg),
             Commands::Bench(a) => bench::run(a),
             Commands::Plugin(a) => plugin::run(a),
@@ -53,6 +54,7 @@ impl TopLevelCommand for Commands {
             Commands::Secret(a) => ops::secret::run(cli, a, cfg),
             Commands::Bundle(a) => bundle::run(cli, a, cfg),
             Commands::Trust(a) => trust::run(cli, a, cfg),
+            Commands::Policy(a) => policy::run(cli, a, cfg),
             Commands::AgentSession(a) => agent_session::run(cli, a, cfg),
             Commands::Deps(a) => deps::run(cli, a, cfg),
             Commands::Capture(a) => capture::run(cli, a, cfg),

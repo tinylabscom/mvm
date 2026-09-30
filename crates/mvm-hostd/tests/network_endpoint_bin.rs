@@ -118,6 +118,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
                 sigv4: None,
                 provider: None,
                 approve: Default::default(),
+                oauth: None,
             },
         )
         .unwrap();
@@ -241,6 +242,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
                 sigv4: None,
                 provider: None,
                 approve: Default::default(),
+                oauth: None,
             },
         )
         .unwrap();

@@ -155,6 +155,7 @@ impl Commands {
     pub(super) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
             Commands::Run(a) => a.run.json,
+            Commands::Why(a) => a.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
                 // Folded advanced ops delegate to their own check.
@@ -238,6 +239,7 @@ impl Commands {
             #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(_) => "__builder-shell-job",
             Commands::Explain(_) => "explain",
+            Commands::Why(_) => "why",
             Commands::Bench(_) => "bench",
             Commands::Plugin(_) => "plugin",
             Commands::Completions(_) => "completions",
@@ -275,6 +277,7 @@ impl Commands {
             // `trust <sub>` delegates: attest/receipt/audit keep their own
             // verbs, publisher add/list/remove keep `trust`.
             Commands::Trust(a) => a.action.verb_name(),
+            Commands::Policy(_) => "policy",
             Commands::AgentSession(_) => "agent-session",
             Commands::Deps(_) => "deps",
             Commands::Capture(a) => a.action.verb_name(),

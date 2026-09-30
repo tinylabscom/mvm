@@ -693,6 +693,7 @@ mod tests {
                         sigv4: None,
                         provider: None,
                         approve: Default::default(),
+                        oauth: None,
                     },
                 )
                 .unwrap();

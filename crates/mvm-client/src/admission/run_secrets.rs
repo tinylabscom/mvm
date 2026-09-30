@@ -412,6 +412,7 @@ mod tests {
                     sigv4: None,
                     provider: provider.map(str::to_string),
                     approve: Default::default(),
+                    oauth: None,
                 },
             )
             .unwrap();

@@ -3,7 +3,11 @@
 Backing: preview
 Validation: none
 
-**Status:** Design. Not implemented.
+**Status:** Partially implemented. The CLI and several session-store,
+transition, retention, and audit paths have shipped; the remaining work is
+tracked in Workstreams below. The problem statement records the original gap,
+not the current delivery state.
+
 **Date:** 2026-08-18
 **Depends on:** ADR-045 (capability-secure intelligent workflow controllers),
 ADR-046 (secure message fabric), Plan 2167 (durable agent session contract),

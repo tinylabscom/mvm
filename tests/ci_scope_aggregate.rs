@@ -142,7 +142,7 @@ impl Verdict {
 
     /// `true` when the aggregate admits this combination.
     fn accepts(&self) -> bool {
-        Command::new("bash")
+        let mut child = Command::new("bash")
             .arg("-c")
             .arg(aggregate_script())
             .env("EVENT_NAME", self.event_name)
@@ -163,9 +163,9 @@ impl Verdict {
             .env("GUEST_IMAGE_RESULT", self.guest_image)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .expect("failed to run the aggregate script")
-            .success()
+            .spawn()
+            .expect("failed to spawn bash");
+        child.wait().expect("bash did not exit").success()
     }
 }
 

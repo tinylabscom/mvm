@@ -16,6 +16,25 @@ policy decision, or troubleshooting path.
 | Guides | Understanding and operating a capability. | Concepts, policies, limits, and production decisions. |
 | [Reference](/reference/cli-commands/) | Looking up exact commands, flags, paths, and constraints. | Exhaustive facts, not narrative. |
 
+## Agent sandbox capabilities
+
+Each capability has one feature page with its current boundary. These pages
+describe what the shipped CLI and host enforce today; they do not turn work in
+progress into a guarantee. For the platform and backend limits behind any
+example, check [capability status](/security/capability-status/) and
+`mvmctl doctor`.
+
+| Capability | Read | Current boundary |
+| --- | --- | --- |
+| Isolation | [Feature page](/security/matryoshka/) | The microVM is the workload boundary; the host and selected hypervisor are trusted. |
+| Undo, redo, and replay | [Feature page](/guides/lineage-recovery/) | Signed lineage can restore a new VM; external side effects are not undone. Working-tree apply is separate work. |
+| Audit trail | [Feature page](/guides/audit-and-receipts/) | Receipts and signed chains provide evidence; an unsealed session is not proof of completeness. |
+| Provenance | [Feature page](/guides/workload-provenance/) | Pinned source, signed plan, receipt, and chain are distinct; derived exports are not new signatures. |
+| Runtime approvals | [Feature page](/guides/runtime-approvals/) | A host-side approver answers an `ask` rule; an unavailable approver refuses. |
+| Network filtering | [Feature page](/guides/network-egress-policy/) | Guest egress crosses vsock to the host endpoint and starts denied. |
+| Credential injection | [Feature page](/guides/secrets-and-credentials/) | Managed substitution keeps raw values on the host; manual guest-visible files do not inherit that guarantee. |
+| Sessions | [Feature page](/guides/durable-agent-sessions/) | A durable record can be re-admitted; boot is optional and retention expiry is not automatic cleanup. |
+
 ## Core operating guides
 
 | Guide | Use it when |
@@ -26,6 +45,7 @@ policy decision, or troubleshooting path.
 | [Building MicroVM Images](/guides/building-microvm-images/) | You need to turn a flake and manifest into a bootable image. |
 | [Nix and OCI](/guides/nix-and-oci/) | You need the Nix-first model plus OCI compatibility rules. |
 | [Policy Profiles](/guides/policy-profiles/) | You need repeatable security defaults for sandbox classes. |
+| [Policy and profiles](/guides/policy-and-profiles/) | You want what a workload may do written once, as composable groups and profiles, and resolved into the signed plan. |
 | [Secrets and Credentials](/guides/secrets-and-credentials/) | You need to pass sensitive values without widening exposure. |
 | [Network Egress Policy](/guides/network-egress-policy/) | You need explicit outbound network policy and auditability. |
 | [Runtime Approvals](/guides/runtime-approvals/) | Some requests or secret uses need a person, or a webhook, to say yes first. |

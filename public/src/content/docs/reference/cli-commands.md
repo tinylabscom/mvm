@@ -8,9 +8,12 @@ description: Complete command reference for mvmctl.
 `mvmctl` is the local microVM substrate CLI: it builds images, boots local
 microVMs, talks to guest agents over vsock, manages local artifacts, and exposes
 developer/SDK workflows. Fleet and tenant control-plane verbs live in `mvmd`.
-In particular, `mvmctl` does not expose `tenant`, `policy`, or `deploy`
-subcommands; tenant lifecycle, tenant policy authoring/review, and deployment to
-the hosted control plane are `mvmd` responsibilities.
+`mvmctl deploy` builds and records a local workload artifact and can request
+authenticated delivery to `mvmd` with `--mvmd-url`; `mvmctl deployments ls`
+lists the local records. `mvmctl` does not expose `tenant` subcommands;
+tenant lifecycle and tenant policy authoring/review remain `mvmd`
+responsibilities. `mvmctl policy` covers only a workload's own authored
+policy, resolved on this host.
 
 **Command grouping (Plan 178).** The surface is organized into a small set
 of top-level daily-driver verbs plus noun groups; operations on a single
@@ -28,7 +31,7 @@ verification under `trust`. Domains that already own their own subcommands
 | `ops <sub>`                | `metrics`, `config`, `mcp`                                                                                                                                              |
 | `env <sub>`                | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign`                                                                                                                   |
 | `trust <sub>`              | `add`/`list`/`remove` (publishers), `instructions`, `attest`, `receipt`, `audit`                                                                                        |
-| Already-grouped top-level  | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`                                                           |
+| Other top-level            | `image`, `catalog`, `manifest`, `network`, `cache`, `pool`, `secret`, `bundle`, `deps`, `artifact`, `capture`, `deploy`, `deployments`, `policy`                         |
 
 **Beginner vs. advanced surfaces.** [`mvmctl machine`](#machine-beginner-ux)
 (further down) is the beginner-facing front door — one small command group for
@@ -303,12 +306,30 @@ Secret audit entries in `~/.mvm/audit/secrets.jsonl` record the operation
 metadata plus `secret_visibility: "write_only"` and
 `storage_security: "encrypted_at_rest"`; secret values are never logged.
 
+## Authored Policy
+
+Composable groups and profiles for what a workload may do. See
+[Policy and profiles](/guides/policy-and-profiles/) for the file format, merge
+rules and discovery order, and the [policy schema](/reference/policy-schema/).
+
+| Command | Description |
+| --- | --- |
+| `mvmctl policy show [PROFILE] [--format toml\|json\|plan] [--project DIR] [--backend KIND]` | Print the merged policy: TOML with its layers, JSON with per-item provenance, or the grants, egress rules, routes and bindings the signed plan would carry. Without `PROFILE`, reads the project's `mvm.toml` `[policy]` table |
+| `mvmctl policy resolve [PROFILE] [-o FILE] [--project DIR] [--backend KIND]` | Write the resolved manifest `run --plan` accepts |
+| `mvmctl policy validate [PROFILE\|PATH] [--strict]` | Check a profile, or one profile or group file. `--strict` refuses every warning, the unenforced `[tools]` section, and secrets the store would not bind |
+| `mvmctl policy diff A B [--json] [--backend KIND]` | What each profile allows or denies that the other does not |
+| `mvmctl policy groups [--json]` | List built-in and user groups and profiles |
+| `mvmctl why --host H[:P] \| --path P \| --tool T \| --secret S [--profile NAME\|PATH \| --plan FILE] [--project DIR] [--json]` | Resolve policy without booting and explain one allow/deny answer. Defaults to the current project's `mvm.toml`; `--profile` selects an authored profile and `--plan` reads `policy resolve` output. Tool answers say when the authored rule is not yet runtime-enforced |
+| `mvmctl run --policy NAME\|PATH -- <cmd>` | Run under an authored profile. Also on `machine run`, `machine create` and `machine start`. Replaces the project's `[policy]` table; the project's `[network] allow_hosts` still applies, and applies on every verb even with no policy. Flags add to its allows and cannot reach its denies, blocks or ceilings. `ns/name` pack references are refused for now |
+| `mvmctl run --plan FILE -- <cmd>` | Run under a resolved manifest. Mutually exclusive with `--policy`, `--net`, `--network-preset`, `--allow-host`, `--allow-endpoint`, `--peer`, `--cpu-limit`, `--grants-file`, `--mount`, `--allow-env` and `--secret`. The file is re-validated, and a plan or signature in it is refused: admission signs the plan itself |
+
 ## Policy Contracts
 
 `mvmctl machine run` still synthesizes and admits signed execution plans with policy
 references. The default local ref is `local-default`; tenant-scoped policy
-authoring, diffing, rollout, and review are exposed by `mvmd`, not by a public
-`mvmctl policy` command.
+bundle authoring, diffing, rollout, and review are exposed by `mvmd`. An
+authored workload policy (above) is lowered into the same flags a launch
+carries before synthesis, so it reaches the plan the same way.
 
 When admission resolves a workload policy bundle, `[audit].chain_signing = true`
 is required. The default local chain remains active, and `file://...` entries in
@@ -644,6 +665,7 @@ guest, on any tier.
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>`                                  | Same, with a stable transient VM name while it runs                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine create <name> --image <ref>`                                                   | Persist a named OCI-backed machine spec without booting it                                                                                                                                                                                                                                                                           |
 | `mvmctl machine create <name> --manifest <path>`                                               | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml`                                                                                                                                                                                                                                                        |
+| `mvmctl machine create <name> --manifest <path> --policy NAME\|PATH`                          | Persist a spec under an authored policy profile, resolved with the manifest's `[policy]` and `[network] allow_hosts` exactly as `run` resolves them; the spec records the resulting network and resource grants. Also on `machine start --image/--manifest` |
 | `mvmctl machine create <name> --image <ref> --net --allow-host <host[:port]>`                  | Persist a named spec with opt-in egress settings for future lifecycle starts                                                                                                                                                                                                                                                         |
 | `mvmctl machine create <name> --manifest <path>`                                               | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec                                                                                                                                                                                                                                                          |
 | `mvmctl machine create <name> --image <ref> --force`                                           | Overwrite an existing named machine spec                                                                                                                                                                                                                                                                                             |
@@ -1320,8 +1342,8 @@ running microVM.
 | `mvmctl template list`                 | List available templates (bundled plus cached remote)                                                                                                                     |
 | `mvmctl template search <query>`       | Search the remote registry for matching templates                                                                                                                         |
 | `mvmctl template info <name>`          | Show details for one bundled or remote template                                                                                                                           |
-| `mvmctl deploy <ir.json>`              | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd                           |
-| `mvmctl deploy --from-ir <path>`       | Read the Workload IR from a file instead of a positional path or stdin                                                                                                    |
+| `mvmctl deploy <ir.json> --boot-artifact <path>` | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd with `--mvmd-url` |
+| `mvmctl deploy --from-ir <path> --boot-artifact <path>` | Read the Workload IR from a file instead of a positional path or stdin; a boot artifact is still required |
 | `mvmctl deployments ls`                | Inventory of recorded local deployments (`--workload <ir-hash>` to filter, `--json` for machine output); unreadable records surface as named skips                        |
 | `mvmctl prepare`                       | Report whether a verified runtime pack is ready for instant launch                                                                                                        |
 | `mvmctl plugin list`                   | List the coding agents mvm can emit an integration for                                                                                                                    |
@@ -1331,7 +1353,8 @@ running microVM.
 | `mvmctl bench --runs <n> --warmup <n>` | Sample counts. Below 20 measured runs the report is indicative only, not publication-grade                                                                                |
 | `mvmctl bench --json`                  | Emit the versioned report JSON — the same shape the CI gate produces, so the two are comparable                                                                           |
 | `mvmctl bench -- <launch>`             | Measure a specific launch instead of the reproducible default (`run --no-detect -- /bin/true`)                                                                            |
-| `mvmctl explain <run>`                 | Explain a run after the fact from the chain-signed audit log                                                                                                              |
+| `mvmctl explain <run>`                 | Explain a run and its egress refusals from the chain-signed audit log: each refused destination, its count, and how to allow it where a grant can                           |
+| `mvmctl explain <run> --review [--project DIR]` | Open the same Grant / Skip review used after a foreground run. Only grantable denials from a verified audit chain are offered; selected grants are shown as a draft and require a second confirmation before `mvm.toml` changes |
 | `mvmctl watch <ir.json>`               | Rebuild a workload when its local inputs change                                                                                                                           |
 
 ## Packs, Bundles, and Dependencies

@@ -324,7 +324,41 @@ pub(in crate::commands) struct RunArgs {
     /// Select the VMM (firecracker, hvf, libkrun, qemu, or web-linux).
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
+    /// Run under an authored policy profile (NAME or PATH).
+    #[arg(long = "policy", value_name = "NAME|PATH", conflicts_with = "plan")]
+    pub policy: Option<String>,
+    /// Run under a resolved manifest from `mvmctl policy resolve`.
+    #[arg(long = "plan", value_name = "FILE", conflicts_with_all = PLAN_EXCLUDES)]
+    pub plan: Option<PathBuf>,
+    /// Internal (not a CLI flag): endpoint routes an authored policy
+    /// contributes, merged with `--allow-endpoint` where routes resolve.
+    #[arg(skip)]
+    pub policy_routes: Vec<mvm_contract::policy::routes::EgressRoute>,
+    /// Internal: the resolved authored policy, retained so lower grant
+    /// surfaces cannot reopen something it denied.
+    #[arg(skip)]
+    pub applied_policy: Option<mvm_client::policy_profiles::PolicyBody>,
+    /// Internal: backend used to resolve a backend-conditioned policy.
+    #[arg(skip)]
+    pub policy_backend: Option<mvm_core::protocol::vm_backend::BackendKind>,
 }
+
+/// Every flag that authors policy. A resolved manifest is the whole policy,
+/// so `--plan` stands alone: mixing it with any of these would leave two
+/// answers to one question.
+const PLAN_EXCLUDES: [&str; 11] = [
+    "policy",
+    "net",
+    "network_preset",
+    "allow_host",
+    "allow_endpoint",
+    "peer",
+    "cpu_limit",
+    "grants_file",
+    "mounts",
+    "allow_env",
+    "secret",
+];
 
 /// The SDK transport surface, carried by `mvmctl run` alone.
 ///
@@ -367,76 +401,6 @@ pub(in crate::commands) struct TransientRunArgs {
     pub run: RunArgs,
     #[command(flatten)]
     pub sdk: SdkTransportArgs,
-}
-
-/// The same values clap fills in when a flag is absent.
-///
-/// Two consumers want a `RunArgs` without spelling thirty fields: the
-/// `machine` dispatch sites that build one programmatically, and the tests.
-/// Writing them out by hand meant every new field edited every one of those
-/// sites, so they drifted toward whatever the author happened to type rather
-/// than toward what the CLI actually does.
-///
-/// The risk this introduces is that these values and the `#[arg(default_value)]`
-/// attributes above disagree. `parsed_defaults_match_the_default_impl` is the
-/// witness: it parses a bare `run -- x` and compares the result field by field.
-impl Default for RunArgs {
-    fn default() -> Self {
-        Self {
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            detected_libc: mvm_contract::guest_libc::GuestLibc::Unknown,
-            manifest: None,
-            image: None,
-            flake: None,
-            flake_profile: None,
-            deployment: None,
-            warm_pool_size: 0,
-            gpu: false,
-            gpu_device: None,
-            pty: false,
-            vm_name: None,
-            runtime_pack: false,
-            runtime: None,
-            no_detect: false,
-            net: false,
-            network_preset: None,
-            allow_host: Vec::new(),
-            allow_endpoint: Vec::new(),
-            approval: Vec::new(),
-            approval_mode: None,
-            ai_token_budget: None,
-            peer: Vec::new(),
-            // Must track the clap default, which is resolved from the backend
-            // this host selects — a test pins the two together, because a
-            // `Default` that disagrees with the parsed default is a silent
-            // difference between constructing args and parsing them.
-            cpus: crate::commands::shared::default_vcpus(),
-            cpu_limit: None,
-            grants_file: None,
-            memory: "512M".to_string(),
-            profile: RunProfile::Standard,
-            mounts: Vec::new(),
-            env: Vec::new(),
-            allow_env: Vec::new(),
-            secret: Vec::new(),
-            timeout: None,
-            receipt: None,
-            caller_commitment: None,
-            assets: Vec::new(),
-            outputs: Vec::new(),
-            json: false,
-            dry_run: false,
-            launch_plan: None,
-            from_workload_ir: None,
-            prod: false,
-            argv: Vec::new(),
-            agent_verb: Vec::new(),
-            host_service: Vec::new(),
-            stdin: Vec::new(),
-            healthcheck: None,
-            hypervisor: None,
-        }
-    }
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on
@@ -564,6 +528,7 @@ pub(in crate::commands) fn run_transient(
     // with `machine run`, where `-d` boots with no command.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
+    super::run_policy::apply_run_policy(&mut args.run)?;
     let image_supplies_entrypoint =
         args.run.prod && (args.run.image.is_some() || args.run.runtime.is_some());
     if args.run.argv.is_empty() && args.run.launch_plan.is_none() && !image_supplies_entrypoint {
@@ -604,6 +569,17 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
+    let review_manifest = if args.json {
+        None
+    } else {
+        match super::run_routes::project_manifest(&args)? {
+            Some((path, _)) => Some(path),
+            None => {
+                let cwd = std::env::current_dir().context("resolving policy review directory")?;
+                Some(super::denial_review::manifest_path(&cwd)?)
+            }
+        }
+    };
     // Prepare outputs before admission binds them to the grant.
     let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
     let admit_outputs = outputs.grants();
@@ -612,18 +588,21 @@ pub(in crate::commands) fn run_secure_with_source(
     let routes = super::run_routes::launch_routes(&args)?;
     crate::approval::configure(super::run_routes::launch_approval(&args)?);
     let allow_host = routes.with_allow_host(&args.allow_host);
-    let resolved_grants = super::shared::resolve_run_grants(super::shared::GrantInputs {
-        cpu_limit_millicores: args.cpu_limit,
-        timeout_secs: args.timeout,
-        allow_host: &allow_host,
-        peer: &args.peer,
-        net: args.net,
-        network_preset: args.network_preset,
-        grants_file: args.grants_file.as_deref(),
-        manifest: None,
-        config: &host_config,
-        ai: ai_policy.as_ref(),
-    })?;
+    let resolved_grants = super::shared::resolve_policy_run_grants(
+        super::shared::GrantInputs {
+            cpu_limit_millicores: args.cpu_limit,
+            timeout_secs: args.timeout,
+            allow_host: &allow_host,
+            peer: &args.peer,
+            net: args.net,
+            network_preset: args.network_preset,
+            grants_file: args.grants_file.as_deref(),
+            manifest: None,
+            config: &host_config,
+            ai: ai_policy.as_ref(),
+        },
+        args.applied_policy.as_ref(),
+    )?;
     let network_policy = resolved_grants
         .network_policy
         .clone()
@@ -643,6 +622,16 @@ pub(in crate::commands) fn run_secure_with_source(
         &network_policy,
         args.hypervisor.as_deref(),
     )?;
+    if let Some(policy_backend) = args.policy_backend
+        && selected_backend.kind() != policy_backend
+    {
+        anyhow::bail!(
+            "the authored policy was resolved for backend {}, but launch selected {}; pass \
+             --hypervisor explicitly so backend-conditioned policy cannot drift",
+            policy_backend.as_str(),
+            selected_backend.kind().as_str()
+        );
+    }
     // The typed kind, taken off the backend object itself: admission measures a
     // declared grant against the mechanisms this tier really has, and a name
     // parsed back into a tier would be measuring against whatever was typed.
@@ -836,6 +825,11 @@ pub(in crate::commands) fn run_secure_with_source(
         if !json_requested {
             network_access.announce_exit(output.exit_code, &super::host_notices::Stderr);
         }
+        if let Some(manifest) = review_manifest.as_deref()
+            && let Err(error) = super::denial_review::review(&refused, manifest)
+        {
+            ui::warn(&format!("could not review denied egress: {error:#}"));
+        }
         if output.exit_code != 0 {
             mvm_observability::exit(output.exit_code);
         }
@@ -861,6 +855,7 @@ pub(in crate::commands) fn run_secure_with_source(
             outputs: &outputs,
             denials: &denials,
             network: network_access,
+            review_manifest: review_manifest.as_deref(),
         },
     )
 }
@@ -907,6 +902,8 @@ struct RunAudit<'a> {
     denials: &'a super::egress_denials::PendingWatch,
     /// Whether the run could reach the network at all.
     network: NetworkAccess,
+    /// The single project manifest an explicitly confirmed draft updates.
+    review_manifest: Option<&'a Path>,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -951,13 +948,18 @@ fn run_run_args(
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
     let result = crate::exec::run_with_posture(req, audit.admit, &posture);
-    audit.denials.finish_and_summarize(true);
+    let refused = audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs
         .close_run(audit.ctx, audit.backend, posture.get(), result)?;
     audit
         .network
         .announce_exit(exit_code, &super::host_notices::Stderr);
+    if let Some(manifest) = audit.review_manifest
+        && let Err(error) = super::denial_review::review(&refused, manifest)
+    {
+        ui::warn(&format!("could not review denied egress: {error:#}"));
+    }
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }
@@ -1294,6 +1296,7 @@ struct RunReceiptSignature {
 pub(in crate::commands) mod env_args;
 mod preflight;
 mod receipt_verify;
+mod run_args_default;
 use env_args::{check_run_env, parse_env_pair};
 #[cfg(test)]
 use preflight::RunPreflightImage;
@@ -2124,6 +2127,16 @@ mod tests {
             .expect("plan resolves")
             .unwrap();
         assert_eq!(mode, RunMode::Plan);
+    }
+
+    #[test]
+    fn sdk_modes_refuse_an_authored_policy_they_cannot_apply() {
+        let _env = sdk_mode_free_env();
+        let mut args = run_args(RunProfile::Standard);
+        args.policy = Some("offline".to_string());
+        let error = resolve_run_mode(&sdk(Some(RunMode::Plan), false), &args)
+            .expect_err("SDK mode must not skip policy");
+        assert!(error.to_string().contains("--policy"));
     }
 
     /// An SDK mode chosen by the environment never swallows `--prod`.

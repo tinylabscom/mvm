@@ -942,6 +942,10 @@ mod tests {
         // merge, an unpinned install lets a publish elsewhere block the queue.
         let ebpf = job_block(&ci, "test-ebpf-telemetry");
         assert!(
+            !ebpf.contains("uses: ./.github/actions/free-disk"),
+            "the focused eBPF lane must not spend minutes deleting unrelated runner tools"
+        );
+        assert!(
             ebpf.contains("cargo +nightly install --locked --version ")
                 && ebpf.contains("bpf-linker"),
             "eBPF lane must install a pinned bpf-linker version"
@@ -1374,6 +1378,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn signing_smoke_keeps_pack_inputs_outside_output_directory() {
+        let smoke = workflow("pack-signing-smoke.yml").replace("\\\n", " ");
+        let mut producers = 0;
+        for invocation in smoke.split("cargo run").skip(1) {
+            let command = invocation.lines().next().unwrap();
+            if !command.contains("mvm-builder-pack-tool") {
+                continue;
+            }
+            producers += 1;
+            let args: Vec<_> = command.split_whitespace().collect();
+            let output = args.windows(2).find(|pair| pair[0] == "--out-dir").unwrap()[1];
+            for flag in ["--vmlinux", "--rootfs", "--verity", "--roothash"] {
+                if let Some(pair) = args.windows(2).find(|pair| pair[0] == flag) {
+                    assert_ne!(
+                        std::path::Path::new(pair[1]).parent(),
+                        Some(std::path::Path::new(output)),
+                        "{flag} must not copy a pack input onto itself"
+                    );
+                }
+            }
+        }
+        assert_eq!(producers, 2, "both pack producers must be checked");
+    }
+
     /// Claim 3's `ci:` witness and its no-SSH companion assert properties of
     /// the image every installed mvmctl boots, which is built in mvm-images.
     /// So each must fetch the runtime overlay the lock pins and verify it the
@@ -1461,6 +1490,7 @@ mod tests {
         let cache_action = workflow("../actions/rust-cache/action.yml");
         assert!(cache_action.contains("prefix-key: v1-rust"));
         assert!(cache_action.contains("cache-workspace-crates: \"true\""));
+        assert!(cache_action.contains("cache-bin: \"true\""));
         assert!(cache_action.contains("save-if: ${{ inputs.save }}"));
 
         let warm = workflow("cache-warm.yml");
@@ -1473,6 +1503,27 @@ mod tests {
         let ci = ci_workflow();
         let support = job_block(&ci, "lint-features-test-support");
         assert!(support.contains("key: test-support"));
+        let support_cache = support
+            .find("uses: ./.github/actions/rust-cache")
+            .expect("test-support must restore the trusted cache");
+        let support_zig = support
+            .find("uses: ./.github/actions/install-zigbuild")
+            .expect("test-support must install the embedded-host toolchain");
+        assert!(
+            support_cache < support_zig,
+            "test-support must restore cached cargo binaries before installing cargo-zigbuild"
+        );
+        let embed = job_block(&ci, "lint-features-embed");
+        let embed_cache = embed
+            .find("uses: ./.github/actions/rust-cache")
+            .expect("embed-host-bins must restore the trusted cache");
+        let embed_zig = embed
+            .find("uses: ./.github/actions/install-zigbuild")
+            .expect("embed-host-bins must install the embedded-host toolchain");
+        assert!(
+            embed_cache < embed_zig,
+            "embed-host-bins must restore cached cargo binaries before installing cargo-zigbuild"
+        );
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("DeterminateSystems/magic-nix-cache-action@v14"));
         assert!(nix.contains("use-flakehub: false"));

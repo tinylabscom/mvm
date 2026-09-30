@@ -10,6 +10,28 @@
 
 ## In progress
 
+- [x] **Repair shared host-side test gates.** The slow-sink regression now
+      accounts for each produced byte as delivered output or an explicit gap
+      instead of requiring lossless delivery under backpressure. The CI-scope
+      aggregate harness executes its script as a Bash command, so an expected
+      early refusal cannot break a producer writing to standard input.
+- [x] **Composable policy files and authored profiles — issue #3715.**
+      Rust-derived policy/profile schema, user and project discovery,
+      `policy resolve|show|validate|diff`, and `--policy`/`--plan` now lower
+      into the signed execution path. Security regressions cover deny
+      precedence across lower grant surfaces, Workload IR secrets,
+      launch-plan environment, canonical share paths, conditional override
+      order, backend drift, and persistent-machine refusal for policy a spec
+      cannot record. See `specs/sprint/delivery/3715-policy-profiles.md`.
+- [ ] **Complete capability and client documentation — issue #3727.**
+      Corrections for the stale `deploy` CLI denial and durable-session status
+      are drafted with two passing documentation regression tests; workspace
+      test validation remains pending. Lineage recovery, workload provenance,
+      and durable agent sessions now have navigable guides and three further
+      passing documentation regression tests. All eight named capabilities
+      now link to feature pages with current limits. Client, authoring, and
+      generated schema documentation remains open.
+
 - [ ] **Document the AI coding workflow and slim AGENTS.md to a rule index.**
       `specs/plans/2026-09-28-ai-coding-workflow-docs.md`. The issue-to-PR
       playbook for agent-driven work now lives at
@@ -19,7 +41,7 @@
       linkage, safe parallelism), linked from the development guide and the
       docs sidebar. `AGENTS.md` is condensed while retaining the newly landed
       session, test, and retry rules. Shared MCP files intentionally keep only
-      graft. PR #3815 is open; merge is pending.
+      graft. PR #3815 is merged.
 
 - [x] **Remove sccache from the contributor toolchain.** The machine-wide
       Cargo wrapper was producing build failures while its measured
@@ -29,6 +51,16 @@
       rust-objcopy loader wrapper remains because it solves a separate dynamic
       linker requirement. Justfile parsing, focused wrapper-environment tests,
       formatting, workspace check, and zero-warning Clippy are green.
+
+- [x] **Complete denial feedback and resolved-policy explanations — issue #3714.**
+      Grantable egress refusals now enter one explicit Grant / Skip review in
+      foreground runs or through `mvmctl explain RUN --review`; an exact draft
+      and separate confirmation precede the atomic `mvm.toml` update, while
+      absolute and operational refusals are never offered. `mvmctl why` answers
+      one host, path, tool, or secret question from the discovered project,
+      explicit profile, or resolved manifest without booting a workload. See
+      `specs/plans/2026-09-28-denial-feedback.md` and
+      `specs/sprint/delivery/3714-denial-feedback.md`.
 
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
@@ -4003,6 +4035,11 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
 - [x] Preserve the required `Invariant` and per-architecture kernel check
       names while removing duplicate runner allocations and feature tests.
 - [x] Add trusted default-branch Rust workspace and Nix cache warming.
+- [x] Restore cached Cargo binaries before the two pinned `cargo-zigbuild`
+      installs and stop the focused eBPF lane from spending four minutes on a
+      full hosted-runner disk scrub. The 2026-09-29 baseline found 65-120 minute
+      PR wall times against only 20-24 minutes of actual critical-path work;
+      these changes remove about 18-22 runner-minutes without dropping a lane.
 - [x] Pass actionlint, shellcheck, formatting, workspace check, focused
       workflow tests, host all-target Clippy, and the affected crate's complete
       serial test suite.
@@ -4857,10 +4894,17 @@ workspace Clippy pass. Full
 workspace validation is retrying with bounded concurrency after an unchanged
 agent deadline test failed; Linux builder initialization remains blocked.
 
+## 2026-09-28 Pack signing smoke — #3794
+
+- [x] Reproduce and remove the pack input/output collision; focused Cargo test,
+      actionlint and host workspace Clippy pass.
+- [x] Pass the real signing smoke on the branch (run 36472914601).
+- [x] Remove the restore-timeout test fixture scheduling race; all 262 backend
+      tests and the final host workspace Clippy rerun pass.
+- [ ] Complete workspace and Linux builder validation, PR checks, merge and closure.
+See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
 ## 2026-09-28 Security evidence freshness — #3750
-
 - [ ] Restore successful scheduled Security evidence after #3679, verify the freshness gate and issue closure.
-
 Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-security-witness-freshness.md`.
 
 ## 2026-09-28 runtime approval SDK completion — #3717

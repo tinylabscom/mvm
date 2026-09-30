@@ -203,6 +203,7 @@ fn build_service(
                 sigv4: None,
                 provider: None,
                 approve: Default::default(),
+                oauth: None,
             },
         )
         .expect("seed secret binding");

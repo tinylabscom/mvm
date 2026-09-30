@@ -113,6 +113,11 @@ pub enum ImageSetError {
         recorded: GitCommit,
     },
     #[error(
+        "locally built image set declares no builder boot ABI; its manifest predates the \
+         builder boot ABI and must be regenerated with a current emitter"
+    )]
+    LocalBuilderBootAbiMissing,
+    #[error(
         "image set was built from local checkouts, not published by a release, and cannot be \
          verified as one"
     )]
@@ -361,7 +366,8 @@ impl ImageSetError {
             | Self::ReleaseMemberFieldMissing { .. }
             | Self::LocalFieldPresent { .. }
             | Self::LocalMemberFieldPresent { .. }
-            | Self::LocalMvmCommitMismatch { .. } => ImageSetStage::Structure,
+            | Self::LocalMvmCommitMismatch { .. }
+            | Self::LocalBuilderBootAbiMissing => ImageSetStage::Structure,
             Self::NotARelease | Self::LocalSetClaimsRelease { .. } => ImageSetStage::Provenance,
             Self::StaleLocalSet { .. } => ImageSetStage::Freshness,
             Self::RepositoryMismatch { .. }

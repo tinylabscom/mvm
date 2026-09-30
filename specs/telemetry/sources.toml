@@ -344,8 +344,8 @@ activation = "legacy"
 
 [[launch_edge]]
 producer = "mvm-build/mvm-host-vm-init"
-launcher = "crates/mvm-cli/src/commands/env/builder_vm.rs"
-anchor = "mvm.chain_init=/sbin/mvm-host-vm-init"
+launcher = "crates/mvm-build/src/builder_boot/cmdline.rs"
+anchor = "init={BAKED_INIT}"
 activation = "always"
 
 [[launch_edge]]
@@ -357,13 +357,7 @@ condition = "persistent builder dispatch loop"
 
 [[launch_edge]]
 producer = "mvm-build/stage0-init"
-launcher = "crates/mvm-cli/src/host_binaries/manifest.rs"
-anchor = "SEED_BINARIES"
-activation = "seed"
-
-[[launch_edge]]
-producer = "mvm-build/mvm-rootfs-patcher"
-launcher = "crates/mvm-cli/src/host_binaries/manifest.rs"
+launcher = "crates/mvm-build/src/host_payload_manifest.rs"
 anchor = "SEED_BINARIES"
 activation = "seed"
 

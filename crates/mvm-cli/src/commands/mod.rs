@@ -22,6 +22,7 @@ mod manifest;
 mod ops;
 mod pack;
 mod plugin;
+mod policy;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
 /// (`try_warm_claim`) the transient `machine run` path
 /// (`crate::exec::run_inner`) calls to claim a warm standby (auto-named,
@@ -36,6 +37,7 @@ mod template;
 mod trust;
 pub(crate) mod vm;
 mod watch;
+mod why;
 
 /// Source-resolution and worker-construction surface used by the resident
 /// warm-artifact service. It is separate from foreground launch commands so
@@ -162,6 +164,9 @@ pub(in crate::commands) enum Commands {
     /// Explain a run and its egress refusals from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
+    /// Explain whether a resolved policy allows one host, path, tool, or secret
+    #[command(display_order = 7)]
+    Why(why::Args),
     /// Measure this host's launch latency against the published budgets
     #[command(display_order = 7)]
     Bench(bench::Args),
@@ -244,6 +249,9 @@ pub(in crate::commands) enum Commands {
     /// Manage trusted bundle publishers
     #[command(display_order = 13)]
     Trust(trust::Args),
+    /// Resolve, show, validate and compare authored policy profiles
+    #[command(display_order = 13)]
+    Policy(policy::Args),
     /// Inspect, park, and resume durable agent sessions
     #[command(name = "agent-session", display_order = 12)]
     AgentSession(agent_session::Args),
@@ -632,6 +640,11 @@ fn declare_embedded_host_binaries() {
     mvm_build::builder_vm_bootstrap::declare_current_exe_provides_host_binaries(
         crate::host_binaries::source::payload_available(),
     );
+    // Every builder boot carries this binary's own builder binaries as its
+    // boot payload, whether the image bakes older copies or none at all.
+    mvm_build::builder_boot::register_boot_payload_source(Box::new(
+        crate::host_binaries::extract::EmbeddedBootPayload,
+    ));
 }
 
 #[cfg(not(feature = "builder-vm"))]
@@ -651,30 +664,32 @@ fn register_inhouse_builder() {
         type Boxed = Box<dyn mvm_build::builder_vm::BuilderVm>;
         match choice {
             Choice::Hvf => Some(
-                crate::commands::build::hvf_builder_image::resolve_hvf_builder_image().map(
-                    |(kernel, rootfs, closure_nar)| {
+                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
+                    |image| {
                         Box::new(
                             DriverBuilderVm::new(
                                 mvm_backends::driver::hvf::HvfDriver::new(),
-                                kernel,
-                                rootfs,
+                                image.kernel,
+                                image.rootfs,
                             )
-                            .with_closure_nar(closure_nar),
+                            .with_closure_nar(image.closure_nar),
                         ) as Boxed
                     },
                 ),
             ),
             Choice::Firecracker => Some(
-                crate::commands::build::fc_builder_image::resolve_fc_builder_image().map(|image| {
-                    Box::new(
-                        DriverBuilderVm::new(
-                            mvm_backends::driver::fc::FcDriver::new(),
-                            image.kernel,
-                            image.rootfs,
-                        )
-                        .with_closure_nar(image.closure_nar),
-                    ) as Boxed
-                }),
+                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
+                    |image| {
+                        Box::new(
+                            DriverBuilderVm::new(
+                                mvm_backends::driver::fc::FcDriver::new(),
+                                image.kernel,
+                                image.rootfs,
+                            )
+                            .with_closure_nar(image.closure_nar),
+                        ) as Boxed
+                    },
+                ),
             ),
             Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
         }

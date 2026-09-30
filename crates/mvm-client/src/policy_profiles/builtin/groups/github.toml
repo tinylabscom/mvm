@@ -1,0 +1,4 @@
+description = "GitHub: the web host and the REST API."
+
+[network]
+allow = ["github.com:443", "api.github.com:443"]

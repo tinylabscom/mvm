@@ -4,6 +4,7 @@ Last updated: 2026-09-29
 
 ## In progress
 
+- [ ] **Pack signing input isolation — #3794.** Fix, regression, actionlint, host workspace Clippy and real signing smoke pass. The restore-timeout fixture is deterministic and all 262 backend tests pass; full workspace tests, Linux and final PR checks are pending. See `specs/plans/2026-09-28-pack-signing-input-isolation.md`.
 - [ ] **Security mutation witnesses — #3679.** Contract/filesystem validation (1,524 tests), all four base-image tests, the source-root test and final host workspace Clippy pass. Full workspace and mutation validation remain pending; Linux builder initialization is blocked. See `specs/plans/2026-09-28-security-mutation-witnesses.md`.
 
 - [ ] **Extended CI process cleanup — #3773.** All 47 integration regressions and final host workspace Clippy pass; full tests are pending. Linux builder initialization is blocked; the final live Firecracker lane remains active. See `specs/plans/2026-09-28-extended-ci-process-cleanup.md`.
@@ -46,8 +47,14 @@ Last updated: 2026-09-29
     - [x] provider routes with credential headers (gitlab, gemini added)
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
-  - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
-  - [ ] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
+  - [x] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+    - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
+    - [x] denial → policy draft selector (Grant / Skip)
+    - [x] `mvmctl why` against a resolved policy
+  - [x] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
+    - [x] groups, profiles (`extends`, include/exclude, `when`, overrides), merge rules, cycle/depth limits
+    - [x] `mvmctl policy resolve|show|validate|diff|groups`, `run --policy`, `run --plan`, `mvm.toml [policy]`
+    - [x] JSON Schema generated from the types and published in docs
   - [ ] PS-06 signed packs in mvm-templates, `search`/`pull`/`run --profile`, agent packs — #3716
   - [x] PS-07 runtime approval supervisor for network, tools and secrets — #3717
     - [x] endpoint-held `ask` for routes and secret use, ledger-backed, fail-closed, rate-limited, audited
@@ -71,9 +78,30 @@ Last updated: 2026-09-29
   - [ ] PS-16 Nix developer experience — #3725
   - [x] PS-17 task-runner surface — #3726
   - [ ] PS-18 docs per capability and per agent — #3727
+    - [x] eight capability pages mapped in the guides index, with current limits and link validation
+    - [x] lineage recovery guide and documentation regression test; remaining pages still open
+    - [x] workload provenance guide and documentation regression test; remaining pages still open
+    - [x] durable agent-session guide and documentation regression test; remaining pages still open
+    - [ ] stale CLI deploy and durable-session status corrections implemented; workspace test validation pending
+    - [ ] client guides, authoring guides, and generated schema reference
   - [ ] PS-19 fewer feature flags — #3728
   - [x] PS-20 unreachable CLI surface and stale references — #3729
   - [ ] PS-21 CLI thin over `mvm-client` — #3730
+- [ ] **Builder image without baked host binaries.**
+      `specs/plans/2026-09-24-builder-image-without-host-bins.md`. Done: W0
+      (the key folds only baked binaries; superseded when #3774 removed the
+      builder source fingerprint), W1 (deterministic boot payload),
+      W2 (stage 1 in `mvm-host-vm-init`), W3 (one boot-contract cmdline), W4
+      (every backend boots the payload; libkrun and QEMU roots read-only at
+      the VMM), W5 (persistent-builder payload staleness), W6 (HVF patcher
+      deleted; HVF and Firecracker resolve through `ensure_builder_vm_image`),
+      W11 (ADR-004/030/018 amendments); `builder_boot_abi` in the signed
+      image-set compatibility section. W9 (`mvm-setpriv` leaf) and W10 (per-role pair key) are in #3741.
+      #3774 took W8's fingerprint, in-tree-bake and Stage 0 builder-build
+      items; ADR-030 item 4 is amended. Open: W7 (`mvm-images`), the
+      rest of W8 (pin the ABI 1 set, contract 4 → 5, drop `hostBinaries` and
+      `MVM_HOST_BIN_DIR`), W12 (measurement).
+
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
       build shared between `build.rs` and `mvmctl`; release builds embed by
@@ -2372,8 +2400,12 @@ resume` takes a `current_head` and refuses when it differs from the
 - [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
       checks now share the main CI scope gate, required check names are
       preserved transitively, duplicate runner allocations are removed, and
-      trusted default-branch Rust/Nix cache warming is added. Repository and
-      host validation are green; landing, Linux CI, and verified live queue
+      trusted default-branch Rust/Nix cache warming is added. The 2026-09-29
+      follow-up measured 65-120 minute PR runs whose longest job executed for
+      only 20-24 minutes, then moved both pinned `cargo-zigbuild` installs after
+      the trusted binary-cache restore and removed a measured 4m14s unrelated
+      disk scrub from the focused eBPF lane. Repository and host validation are
+      green; landing, post-change timing, Linux CI, and verified live queue
       settings remain open.
 
 - [~] Plan 330 — Decision provenance layer
