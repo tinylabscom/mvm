@@ -1021,6 +1021,24 @@ fn the_zig_toolchain_action_runs_without_sudo_or_modern_python_once_provisioned(
         !action.contains("import tomllib"),
         "the system python3 on macOS is 3.9 and has no tomllib"
     );
+    assert!(
+        !action.contains("cargo install cargo-zigbuild"),
+        "hosted jobs must not spend ten minutes compiling a published tool binary"
+    );
+    for expected in [
+        "TARGET=x86_64-unknown-linux-gnu",
+        "TARGET=aarch64-unknown-linux-gnu",
+        "TARGET=x86_64-apple-darwin",
+        "TARGET=aarch64-apple-darwin",
+        "ARCHIVE=\"cargo-zigbuild-${TARGET}.tar.xz\"",
+        "sha256sum -c -",
+        "shasum -a 256 -c -",
+    ] {
+        assert!(
+            action.contains(expected),
+            "the prebuilt cargo-zigbuild installer must contain {expected:?}"
+        );
+    }
 }
 
 #[test]
