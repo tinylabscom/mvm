@@ -1,7 +1,7 @@
 # Portable embedded image set
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: check-declared-backing
 
 **Issue:** #3551  
 **Status:** IN PROGRESS
@@ -38,4 +38,3 @@ boot or a silent local rebuild.
       format here.
 - [ ] Run the portable artifact plus checkpoint witnesses on distinct physical
       hosts and close #3551 only after those records are attached.
-
