@@ -131,9 +131,8 @@ deliberately, only for image-definition work (packages, kernels, roles), and
 even then this repo stays the front door (`bin/dev build image-set`). The
 acceptance test is the one-clone bootstrap: a contributor who clones only
 `mvm` and follows the quickstart never needs to know the image repository
-exists. The repo split itself stands on the tripwire in
-`specs/plans/2026-09-29-guest-bins-artifact-decoupling.md` — queue wall under
-20 minutes, or the topology decision re-opens.
+exists. The repo split has a queue-wall tripwire: keep it under 20 minutes,
+or re-open the topology decision.
 
 ## Definition of Done
 
