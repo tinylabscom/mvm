@@ -83,12 +83,17 @@ fn validate_cache(arch_dir: &Path) -> Result<String, BuilderVmError> {
         &crate::builder_vm::builder_hostepoch_cmdline_token(),
     );
     let manifest = read_manifest(&arch_dir.join("manifest.json"), arch_dir)?;
-    if manifest.cache_contract_version != BUILDER_VM_CACHE_CONTRACT_VERSION
+    // Floor, not equality: a manifest from a NEWER contract (e.g. the
+    // images-side added `no_network_devices_ready` at 5) still provides
+    // everything this host requires — refusing it would make every
+    // images-side bump a breaking change for all older hosts, and the
+    // "delete and re-bootstrap" remedy would loop on the same manifest.
+    if manifest.cache_contract_version < BUILDER_VM_CACHE_CONTRACT_VERSION
         || !manifest.runtime_overlay_ready
         || !manifest.vsock_egress_ready
     {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version={BUILDER_VM_CACHE_CONTRACT_VERSION}`, `runtime_overlay_ready=true`, and `vsock_egress_ready=true`. Delete {} and re-run `mvmctl bootstrap` to re-bootstrap a current vsock-only builder image.",
+            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version>={BUILDER_VM_CACHE_CONTRACT_VERSION}`, `runtime_overlay_ready=true`, and `vsock_egress_ready=true`. Delete {} and re-run `mvmctl bootstrap` to re-bootstrap a current vsock-only builder image.",
             arch_dir.display(),
             arch_dir.display(),
         )));
@@ -485,6 +490,10 @@ mod tests {
     use super::*;
 
     fn write_test_cache(dir: &Path) {
+        write_test_cache_with_contract(dir, BUILDER_VM_CACHE_CONTRACT_VERSION);
+    }
+
+    fn write_test_cache_with_contract(dir: &Path, contract: u32) {
         std::fs::create_dir_all(dir).expect("create cache");
         std::fs::write(dir.join("vmlinux"), b"kernel").expect("write kernel");
         std::fs::write(dir.join("rootfs.ext4"), b"rootfs").expect("write rootfs");
@@ -496,7 +505,7 @@ mod tests {
         std::fs::write(
             dir.join("manifest.json"),
             format!(
-                "{{\"cache_contract_version\":{BUILDER_VM_CACHE_CONTRACT_VERSION},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}"
+                "{{\"cache_contract_version\":{contract},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}"
             ),
         )
         .expect("write manifest");
@@ -509,6 +518,33 @@ mod tests {
 
         load_from_cache(cache.path()).expect("a complete cache loads");
         assert!(shared_cache_source(cache.path()).is_some());
+    }
+
+    /// A manifest from a NEWER cache contract (the images side bumped the
+    /// version and added attestations this host does not know) still provides
+    /// everything this host requires, so it loads. Equality here would refuse
+    /// every images-side bump — the exact drift that made v0.2.3's contract-5
+    /// builder unrecoverable for a v4 host (#3901).
+    #[test]
+    fn a_newer_cache_contract_still_loads() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache_with_contract(cache.path(), BUILDER_VM_CACHE_CONTRACT_VERSION + 1);
+
+        load_from_cache(cache.path()).expect("a newer-contract cache loads");
+    }
+
+    /// A manifest from an OLDER cache contract is stale and must be refused —
+    /// it may predate guarantees this host relies on (e.g. vsock egress).
+    #[test]
+    fn an_older_cache_contract_is_refused() {
+        let cache = tempfile::tempdir().expect("tempdir");
+        write_test_cache_with_contract(cache.path(), BUILDER_VM_CACHE_CONTRACT_VERSION - 1);
+
+        let error = load_from_cache(cache.path()).expect_err("an older-contract cache is stale");
+        assert!(
+            error.to_string().contains("cache_contract_version>="),
+            "{error}"
+        );
     }
 
     /// A process that validated the cached image and is reading it must keep
