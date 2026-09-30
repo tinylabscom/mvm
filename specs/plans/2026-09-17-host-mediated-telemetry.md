@@ -250,6 +250,11 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
         recorded as effectively zero (first-scheduled producer monopolizes,
         ~49% contended) — a documented deficiency, not a budget. Allocation
         evidence stays with the existing native+Miri outbox regressions.
+        Per maintainer requirement (2026-09-29): the flood-fairness
+        measurement must additionally be run on the Firecracker reference
+        hardware (the W1e i7-7700 KVM host) before capture enablement; the
+        committed M3 Max record alone does not qualify the feature for
+        enablement.
   - [x] W1e — Hardware-qualified control latency: five repetitions of 30
         serial Firecracker boots of the verified published image on a
         dedicated KVM host (i7-7700), boot-to-agent-ready p50 502–549 ms with
@@ -369,6 +374,15 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
 
 ### W3 — Guest capture with bounded non-waiting emission
 
+Decisions (2026-09-29, maintainer): (a) stdio capture stays invocation-scoped
+for W3 — detached stdio remains a registered inventory gap until the W4
+collector machinery exists to own a VM-lifetime consumer; (b) sealed-agent
+capture is events-only in this workstream — span support waits for a real
+span producer (the SDK adapters); (c) the three `@wip` `s34_telemetry_capture`
+scenarios un-tag only in the joint change where guest capture through the
+authenticated collector demonstrably passes end to end — individual W3 slices
+flip their named unit regressions only.
+
 - [ ] Wire subscribers and adapters for all inventoried sources, including
       outside-span events and log bridges; preserve span parent/link relationships.
 - [ ] Bound every upstream/downstream queue and active-span/field allocation;
@@ -397,16 +411,35 @@ runtime coverage, a startup witness, or evidence of nonblocking delivery.
 
 ### W4 — Host collector owned for the VM lifetime
 
-Receive-only authentication is being integrated on `codex/telemetry-collector`.
-The local receiver now supports an external signer, retains no host signing key,
-pins the registered guest before requesting a signature, and verifies the signer
-result before confirming the handshake. A typed, domain-restricted resident-signer
-operation and deadline-bounded async client now pass seven integration tests,
-including encrypted record reception through the real signer socket, cancellation
-with socket closure, and rejection of other service domains with valid guest proofs.
-Workspace clippy and Linux all-target cross-compilation pass. This is not yet a
-running VM-lifetime collector; generation registration and runtime ownership remain
-open. Existing `SignPlan` is not reused for telemetry signing.
+Receive-only authentication merged as PR #3472: the local receiver supports an
+external signer, retains no host signing key, pins the registered guest before
+requesting a signature, and verifies the signer result before confirming the
+handshake; the typed, domain-restricted resident-signer operation and
+deadline-bounded async client are covered by seven integration tests, including
+encrypted record reception through the real signer socket, cancellation with
+socket closure, and rejection of other service domains with valid guest proofs.
+Boot-generation registration merged as PR #3597. The first collector slice
+merged as PR #3658: `mvm_hostd::telemetry_collector` is a per-VM worker
+composing resolve → assert-current → connect → authenticated receive per
+attempt, delivering into a bounded non-waiting `RecordSink`, surfacing a
+`CoverageStatus` snapshot (Connecting / Collecting with generation / Degraded
+with a static code / Stopped), recovering under capped exponential backoff that
+re-resolves the registration each attempt so a re-registered warm or restored
+boot is picked up through the gate, and stopping promptly; five socket-pair
+tests cover it. See the
+[delivery record](../sprint/delivery/3423-telemetry-collector-worker.md).
+This is not yet a running VM-lifetime collector; supervision, boot-path wiring
+and real-socket witnesses remain open. Existing `SignPlan` is not reused for
+telemetry signing.
+
+Architecture revision (2026-09-29, review outcome on the in-flight PR #3826):
+the per-VM collector runs embedded, as threads in the per-VM network-endpoint
+process — no separate collector binary or subprocess — so it lives and dies
+with the endpoint and is reaped by the existing endpoint teardown. Provisioning
+is one decision, consumed by both the endpoint configuration and the guest's
+`mvm.telemetry=1` cmdline assertion: a configured OTLP exporter endpoint
+implies collection, and `MVM_TELEMETRY_COLLECT=1` enables collection without
+export.
 
 - [ ] Supervise per-VM collection independently of CLI/grants, bind identity and
       generation, and reuse stream validation/redaction/retention/fanout helpers.
