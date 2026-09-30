@@ -122,7 +122,7 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if grep -zE '^(nix/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "nix=true" >> "$GITHUB_OUTPUT"
           else
             echo "nix=false" >> "$GITHUB_OUTPUT"
