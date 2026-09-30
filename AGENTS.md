@@ -50,27 +50,42 @@ Linux (vsock, jailer/seccomp, dm-verity, network namespaces, `/dev/kvm`,
 run inside the builder VM. `mvmctl` via `cargo run` (`build`, `up`, `down`,
 `logs`, `ls`) runs inside the builder VM (explicit `wasm` target excepted).
 
-**Disposable CVE-2026-80521 lab host.** Issue #3655's destructive witness has
-one repository-owned remote lifecycle; run it from that issue's worktree:
+**Disposable GCP KVM test host.** Linux/KVM E2E tests that cannot run on the
+builder VM or GitHub-hosted runners have one repository-owned remote lifecycle.
+Run the requested test from its worktree:
+
+```bash
+just lab::gcp-kvm just bdd::live-ci
+```
+
+The command creates an Intel C3 Spot VM with nested KVM, uploads a filtered
+copy of the current worktree, prepares the pinned Rust/Zig/Firecracker
+toolchain, runs the exact argument vector after `lab::gcp-kvm`, downloads a
+result archive under the printed `/tmp` path, and deletes the outer VM on
+success or failure. Put artifacts that must be downloaded in
+`$MVM_GCP_KVM_RESULTS_DIR`. Use the direct
+`scripts/run-gcp-kvm-test.sh [options] -- PROGRAM [ARG ...]` entry point for
+project, zone, machine, result-directory, dry-run, or diagnostic options.
+
+This host is a test/dev-tier KVM provider only. Never use it for Nix builds or
+evals, ordinary compilation, or work the builder VM can perform. The VM has no
+Google service account or OAuth scopes and refuses project-wide SSH keys.
+Before every real invocation, obtain explicit operator authorization for both
+the billable VM and transfer of the filtered checkout unless that exact run was
+already authorized.
+
+Issue #3655's destructive witness is the pinned preset:
 
 ```bash
 just lab::cve-3655-gcp --dry-run
 just lab::cve-3655-gcp
 ```
 
-The real command uses the active `gcloud` account and project to create an
-Intel C3 Spot VM with nested KVM, upload a filtered copy of the current
-worktree, run only the destructive witness, download an evidence archive under
-the printed `/tmp` path, and delete the outer VM on success or failure. The VM
-has no Google service account or OAuth scopes and refuses project-wide SSH
-keys. Before the real invocation, obtain explicit operator authorization for
-both the billable VM and transfer of the filtered checkout unless that exact run was
-already authorized. Do not substitute an ad-hoc cloud VM or use this host for
-ordinary builds, evals, or runtime work; the builder-VM boundary above remains
-the default.
+It delegates host ownership to the generic runner and supplies only the pinned
+CVE bootstrap and witness command. Do not substitute an ad-hoc cloud VM.
 
-Do not pass `--keep-instance` unless the operator explicitly requests an
-interactive diagnostic host. When requested, the runner prints exact
+Do not pass `--keep-instance` to either entry point unless the operator
+explicitly requests an interactive diagnostic host. When requested, the runner prints exact
 `gcloud compute ssh` and `gcloud compute instances delete` commands. Run the
 printed delete command as soon as diagnosis ends and verify the instance is
 gone. If automatic cleanup reports a failure, use that same printed delete

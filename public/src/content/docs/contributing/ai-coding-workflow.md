@@ -79,7 +79,39 @@ cd ../.worktrees/mvm-example
   one-off `mvmctl` calls); it redirects `MVM_HOME`, `CARGO_TARGET_DIR`, and
   `CARGO_HOME` under the worktree.
 
-## Disposable remote KVM lab for issue #3655
+## Disposable remote KVM test host
+
+For a Linux/KVM E2E test that cannot run on the builder VM or a GitHub-hosted
+runner, use the repository-owned disposable host from the task's worktree:
+
+```bash
+just lab::gcp-kvm just bdd::live-ci
+```
+
+The command after `lab::gcp-kvm` is preserved as an exact argument vector; it
+is not interpolated into a remote shell. When shell syntax is intentional, pass
+`bash -lc` explicitly. Tests can retain logs or other artifacts by writing them
+to `$MVM_GCP_KVM_RESULTS_DIR`; the controller downloads that directory as the
+result archive printed at exit.
+
+Use the direct entry point to inspect or override cloud settings:
+
+```bash
+scripts/run-gcp-kvm-test.sh --dry-run -- just bdd::live-ci
+scripts/run-gcp-kvm-test.sh --project mvm-dev-495501 -- just bdd::live-ci
+```
+
+The controller creates an Intel C3 Spot VM with nested KVM and no Google
+service account or OAuth scopes, refuses project-wide SSH keys, waits for SSH
+readiness, transfers the filtered current worktree, prepares the repository's
+pinned Rust/Zig/Firecracker test toolchain, runs the request, downloads results, and deletes
+the instance even when the test fails. This is only a test/dev-tier KVM
+provider: do not use it for Nix builds/evals, ordinary compilation, or work the
+builder VM can perform. Before each real run, obtain explicit operator
+authorization for both the billable VM and filtered-checkout transfer unless
+that exact invocation was already authorized.
+
+## CVE-2026-80521 preset
 
 The CVE-2026-80521 containment witness needs a hardware profile that the shared
 builder cannot guarantee. From the issue worktree, first confirm the selected
@@ -97,12 +129,9 @@ filtered checkout for that run, start the complete lifecycle with:
 just lab::cve-3655-gcp
 ```
 
-This is the normal agent path: the controller creates an Intel C3 Spot VM with
-nested KVM and no Google service account or OAuth scopes, refuses project-wide
-SSH keys, waits for SSH readiness, transfers the filtered current worktree,
-runs the remote bootstrap and destructive witness, downloads the evidence
-archive to the printed local `/tmp` directory, and deletes the instance even
-when the witness fails. The remote execution details are owned by
+This preset delegates the cloud lifecycle to the generic runner, then runs only
+the remote bootstrap and destructive witness. The CVE-specific execution
+details are owned by
 `scripts/run-cve-2026-80521-gcp-remote.sh`; agents should not reproduce those
 steps manually.
 
