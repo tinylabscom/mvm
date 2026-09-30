@@ -108,8 +108,11 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
         // refusal.
         let workspace_host = std::env::temp_dir().join("mvm-journey-workspace");
         std::fs::create_dir_all(&workspace_host).expect("create journey workspace host dir");
-        std::fs::write(workspace_host.join("baseline.txt"), b"journey workspace baseline\n")
-            .expect("write journey workspace baseline");
+        std::fs::write(
+            workspace_host.join("baseline.txt"),
+            b"journey workspace baseline\n",
+        )
+        .expect("write journey workspace baseline");
         let mount = run_in_journey_home([
             "machine",
             "volume",
@@ -118,7 +121,9 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
             "--volume",
             "workspace",
             "--host",
-            workspace_host.to_str().expect("utf-8 journey workspace path"),
+            workspace_host
+                .to_str()
+                .expect("utf-8 journey workspace path"),
             "--guest",
             "/work",
             "--rw",
