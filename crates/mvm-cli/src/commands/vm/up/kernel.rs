@@ -23,6 +23,18 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
     vmlinux_path: &str,
     hypervisor: &str,
 ) -> anyhow::Result<String> {
+    resolve_workload_kernel_with(vmlinux_path, hypervisor, || {
+        crate::commands::env::builder_vm::selected_local_checkout()
+    })
+}
+
+fn resolve_workload_kernel_with(
+    vmlinux_path: &str,
+    hypervisor: &str,
+    selected_checkout: impl FnOnce() -> anyhow::Result<
+        Option<mvm_build::image_source::LocalImageCheckout>,
+    >,
+) -> anyhow::Result<String> {
     if std::path::Path::new(vmlinux_path).exists() {
         return Ok(vmlinux_path.to_string());
     }
@@ -34,7 +46,7 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
     // A selected checkout is the fallback's source too: the pair's
     // `default-tenant` set carries the workload kernel.
     #[cfg(feature = "builder-vm")]
-    if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
+    if let Some(checkout) = selected_checkout()? {
         return Ok(
             crate::commands::env::builder_vm::ensure_pair_workload_kernel(
                 &checkout,
@@ -44,6 +56,8 @@ pub(in crate::commands::vm) fn resolve_workload_kernel(
             .to_string(),
         );
     }
+    #[cfg(not(feature = "builder-vm"))]
+    let _ = selected_checkout;
     let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();
     let fallback = mvm_build::kernel_fetch::cached_kernel_path(&cache_dir, &arch, "workload");
@@ -169,12 +183,19 @@ mod resolve_workload_kernel_tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    fn resolve_released_workload_kernel(
+        vmlinux_path: &str,
+        hypervisor: &str,
+    ) -> anyhow::Result<String> {
+        resolve_workload_kernel_with(vmlinux_path, hypervisor, || Ok(None))
+    }
+
     #[test]
     fn existing_path_passes_through_unchanged() {
         let tmp = tempfile::tempdir().unwrap();
         let vmlinux = tmp.path().join("vmlinux");
         std::fs::write(&vmlinux, b"kernel").unwrap();
-        let result = resolve_workload_kernel(vmlinux.to_str().unwrap(), "hvf").unwrap();
+        let result = resolve_released_workload_kernel(vmlinux.to_str().unwrap(), "hvf").unwrap();
         assert_eq!(result, vmlinux.to_str().unwrap());
     }
 
@@ -182,8 +203,8 @@ mod resolve_workload_kernel_tests {
     fn non_hvf_hypervisor_passes_through_even_when_missing() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
-        let result = resolve_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
+        env.isolate_mvm_home(tmp.path());
+        let result = resolve_released_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
         assert_eq!(result, "/nonexistent/vmlinux");
     }
 
@@ -209,9 +230,9 @@ mod resolve_workload_kernel_tests {
     fn hvf_missing_kernel_falls_back_to_cached_workload_kernel() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
         let fallback = stage_cached_workload_kernel(tmp.path(), b"builder-kernel", true);
-        let result = resolve_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap();
+        let result = resolve_released_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
     }
 
@@ -223,9 +244,10 @@ mod resolve_workload_kernel_tests {
         // vmlinux) can't boot under firecracker.
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
         let fallback = stage_cached_workload_kernel(tmp.path(), b"builder-kernel", true);
-        let result = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap();
+        let result =
+            resolve_released_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
     }
 
@@ -236,9 +258,10 @@ mod resolve_workload_kernel_tests {
         // above passed without a digest before this change.
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
         let kernel = stage_cached_workload_kernel(tmp.path(), b"builder-kernel", false);
-        let err = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap_err();
+        let err =
+            resolve_released_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap_err();
         assert!(
             err.to_string().contains("no verified workload kernel"),
             "expected the verification refusal, got: {err}"
@@ -253,11 +276,12 @@ mod resolve_workload_kernel_tests {
     fn a_tampered_fallback_kernel_is_refused() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
         let kernel = stage_cached_workload_kernel(tmp.path(), b"the real kernel", true);
         // Same length, so a size check would not notice.
         std::fs::write(&kernel, b"the fake kernel").unwrap();
-        let err = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap_err();
+        let err =
+            resolve_released_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap_err();
         assert!(
             err.to_string().contains("no verified workload kernel"),
             "expected the verification refusal, got: {err}"
@@ -269,8 +293,8 @@ mod resolve_workload_kernel_tests {
     fn hvf_both_missing_returns_error_mentioning_bootstrap() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
-        let err = resolve_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap_err();
+        env.isolate_mvm_home(tmp.path());
+        let err = resolve_released_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("mvmctl kernel build --which workload"),

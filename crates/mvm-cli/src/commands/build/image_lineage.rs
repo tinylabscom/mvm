@@ -1607,7 +1607,7 @@ mod tests {
     fn record_flake_build_node_creates_and_audits_a_node() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let slot_hash = "slot-under-test";
         let revision_hash = "rev-flake-1";
@@ -1641,7 +1641,7 @@ mod tests {
     fn record_flake_build_node_identical_rebuild_skips_hashing() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let slot_hash = "slot-hot";
         let revision_hash = "rev-hot-1";
@@ -1669,7 +1669,7 @@ mod tests {
     fn record_flake_build_node_self_heals_a_crash_orphaned_tip() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let slot_hash = "slot-orphan";
         let revision_hash = "rev-orphan-1";
@@ -1728,7 +1728,7 @@ mod tests {
     fn record_flake_build_node_heals_an_orphaned_ancestor_across_revisions() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let slot_hash = "slot-cross";
         let store = ImageStore::open();
@@ -1785,7 +1785,7 @@ mod tests {
     fn record_image_node_heals_a_deep_orphan_beneath_an_unmarked_ancestor() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let slot_hash = "slot-deep";
         let store = ImageStore::open();
@@ -1873,7 +1873,7 @@ mod tests {
     fn record_oci_pull_node_creates_and_audits_a_node() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_HOME", tmp.path());
+        env.isolate_mvm_home(tmp.path());
 
         let rootfs = tmp.path().join("oci-rootfs.ext4");
         std::fs::write(&rootfs, b"oci-rootfs-bytes").unwrap();

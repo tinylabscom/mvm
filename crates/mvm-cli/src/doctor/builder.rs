@@ -390,14 +390,17 @@ fn builder_backend_check_for(
 /// `<choice> — <source> — <availability>` shape as the builder backend line, so
 /// the override path is observable rather than folklore.
 pub(super) fn boot_image_acquisition_check() -> Check {
-    use mvm_build::boot_image_select::{BootImageAcquisition, resolve};
-
     use crate::commands::env::builder_vm as builder_vm_mod;
     let pair_selected = builder_vm_mod::selected_local_checkout()
         .ok()
         .flatten()
         .map(|checkout| checkout.root().display().to_string());
-    let resolved = resolve(None, builder_vm_mod::images_built_from_source());
+    boot_image_acquisition_check_with(pair_selected, builder_vm_mod::images_built_from_source())
+}
+
+fn boot_image_acquisition_check_with(pair_selected: Option<String>, source_build: bool) -> Check {
+    use mvm_build::boot_image_select::{BootImageAcquisition, resolve};
+    let resolved = resolve(None, source_build);
 
     // The arm can be chosen and still be unsatisfiable: `build` without an
     // image checkout has nothing to build from. Say so here rather than
@@ -915,7 +918,7 @@ mod tests {
         let mut env = TestEnv::new();
         env.set(mvm_build::boot_image_select::MVM_BOOT_IMAGE_ENV, "fetch");
 
-        let c = boot_image_acquisition_check();
+        let c = boot_image_acquisition_check_with(None, false);
 
         assert!(c.ok);
         assert_eq!(c.name, "boot image");
@@ -944,7 +947,7 @@ mod tests {
         let mut env = TestEnv::new();
         env.remove(mvm_build::boot_image_select::MVM_BOOT_IMAGE_ENV);
 
-        let c = boot_image_acquisition_check();
+        let c = boot_image_acquisition_check_with(None, false);
 
         assert!(
             c.info.contains("auto-detected"),

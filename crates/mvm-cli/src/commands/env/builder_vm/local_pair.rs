@@ -404,11 +404,11 @@ mod tests {
     #[test]
     fn the_selector_routes_the_bootstrap_to_a_checkout_only_when_one_is_selected() {
         let mut env = TestEnv::new();
-        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         assert!(
-            super::super::bootstrap::selected_local_checkout()
-                .expect("no selector resolves")
-                .is_none(),
+            super::super::bootstrap::selected_local_checkout_from(
+                mvm_build::image_source::ImageSource::Released
+            )
+            .is_none(),
             "without a selector the bootstrap stays on the tool builder"
         );
 
