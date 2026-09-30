@@ -501,7 +501,7 @@ mod server_tests {
             })
             .await;
         assert!(
-            matches!(&resp, WireResponse::Refused { message } if message.contains("header")),
+            matches!(&resp, WireResponse::Refused { message } if message.contains("request body")),
             "{resp:?}"
         );
         assert!(

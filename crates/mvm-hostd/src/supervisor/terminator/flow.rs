@@ -30,7 +30,7 @@ use super::read::{ReadError, read_http_request};
 use super::request::{method_of, proxy_request_from_connect_authority};
 use super::tls::{is_framing_header, reason_phrase, server_config_for_sni, smuggles_crlf};
 use crate::supervisor::network_endpoint_proxy::{
-    ForwardStreamResponse, PLACEHOLDER_OUTSIDE_HEADERS, REASON_PLACEHOLDER_IN_BODY,
+    ForwardStreamResponse, PLACEHOLDER_IN_BODY_MESSAGE, REASON_PLACEHOLDER_IN_BODY,
     SubstitutionService, TerminationMode,
 };
 
@@ -327,7 +327,7 @@ impl TerminatedFlow {
                 // refused before the forward leg exists at all — not partway
                 // through a send whose headers already carried the credential.
                 self.audit(REASON_PLACEHOLDER_IN_BODY);
-                write_refusal(io, BAD_GATEWAY, PLACEHOLDER_OUTSIDE_HEADERS, Some(&method))?;
+                write_refusal(io, BAD_GATEWAY, PLACEHOLDER_IN_BODY_MESSAGE, Some(&method))?;
                 return Ok(());
             }
             let head = HttpFlowHead {
@@ -604,7 +604,7 @@ mod tests {
 
     use async_trait::async_trait;
     use ed25519_dalek::SigningKey;
-    use mvm_contract::ir::{AuthType, SecretMount, SecretRef};
+    use mvm_contract::ir::{AuthType, InjectionMode, SecretMount, SecretRef};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
     use mvm_core::plan::TenantId;
     use rustls::pki_types::pem::PemObject;
@@ -760,6 +760,7 @@ mod tests {
         routes: Vec<mvm_contract::policy::routes::EgressRoute>,
         approver: Option<Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>>,
         approval_required: std::collections::BTreeSet<String>,
+        secret_shape: Option<(AuthType, InjectionMode)>,
     }
 
     /// [`assemble`] with the gate carrying `routing.routes`, and the egress
@@ -784,15 +785,19 @@ mod tests {
             store
                 .put(TENANT, binding.secret, &SecretBox::new(Box::new(value)))
                 .expect("seed secret store");
+            let (auth_type, inject) = routing
+                .secret_shape
+                .clone()
+                .unwrap_or((AuthType::Bearer, InjectionMode::Header));
             let placeholder = registry.mint(SecretRef {
                 name: binding.secret.into(),
                 mount: SecretMount::Env {
                     var: "API_KEY".into(),
                 },
-                auth_type: AuthType::Bearer,
+                auth_type,
                 allowed_hosts: vec![binding.pattern.to_string()],
                 sigv4: None,
-                inject: Default::default(),
+                inject,
             });
             placeholders.push(placeholder.as_str().to_string());
         }
