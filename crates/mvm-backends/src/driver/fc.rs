@@ -477,6 +477,12 @@ fn fc_linux_signal_route(euid: libc::uid_t) -> FcSignalRoute {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn fc_linux_pid(pid: u32) -> Option<libc::pid_t> {
+    let pid = libc::pid_t::try_from(pid).ok()?;
+    (pid > 0).then_some(pid)
+}
+
 /// `kill(2)` the captured PID from a root process. Delivery failure is
 /// warn-only; the caller's liveness probe is the authority on the outcome.
 #[cfg(target_os = "linux")]
@@ -485,9 +491,16 @@ fn fc_direct_kill(pid: u32, signal: FcStopSignal) {
         FcStopSignal::Terminate => libc::SIGTERM,
         FcStopSignal::ForceKill => libc::SIGKILL,
     };
-    // SAFETY: `kill` takes a plain pid and signal number; both are valid here
-    // and the call has no preconditions beyond the process existing.
-    let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
+    let Some(pid_t) = fc_linux_pid(pid) else {
+        tracing::warn!(
+            "Firecracker stop signal {signal:?} was NOT delivered: pid {pid} is outside the \
+             positive pid_t range"
+        );
+        return;
+    };
+    // SAFETY: `pid_t` is positive, so `kill` targets exactly that process
+    // rather than the caller's process group or a group selected by a negative PID.
+    let rc = unsafe { libc::kill(pid_t, sig) };
     if rc != 0 {
         let error = std::io::Error::last_os_error();
         tracing::warn!(
@@ -524,7 +537,9 @@ fn fc_linux_signal_args(pid: u32, signal: FcStopSignal) -> Vec<String> {
 fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
     #[cfg(target_os = "linux")]
     {
-        if fc_linux_signal_route(unsafe { libc::geteuid() }) == FcSignalRoute::Direct {
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        let euid = unsafe { libc::geteuid() };
+        if fc_linux_signal_route(euid) == FcSignalRoute::Direct {
             fc_direct_kill(pid, signal);
         } else {
             let args = fc_linux_signal_args(pid, signal);
@@ -2319,6 +2334,15 @@ mod tests {
             fc_linux_signal_route(1000),
             FcSignalRoute::Sudo,
             "a non-root caller cannot kill a root-owned VMM without sudo"
+        );
+
+        let max_pid = u32::try_from(libc::pid_t::MAX).expect("positive pid_t max fits u32");
+        assert_eq!(fc_linux_pid(0), None, "pid zero targets a process group");
+        assert_eq!(fc_linux_pid(max_pid), Some(libc::pid_t::MAX));
+        assert_eq!(
+            fc_linux_pid(max_pid.checked_add(1).expect("pid_t max is below u32 max")),
+            None,
+            "a wrapped negative pid_t could target an unrelated process group"
         );
 
         // Exercise the direct route for real when the suite itself runs as
