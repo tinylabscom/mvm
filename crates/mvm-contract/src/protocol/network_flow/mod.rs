@@ -29,6 +29,7 @@ pub mod hello;
 pub mod limits;
 pub mod opcode;
 pub mod state;
+pub mod tool;
 
 /// The vsock port a workload's FlowMux session is carried on.
 ///

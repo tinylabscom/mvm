@@ -769,6 +769,9 @@ mod tests {
             (Opcode::IcmpEcho, 0x60),
             (Opcode::IcmpReply, 0x61),
             (Opcode::IcmpRefused, 0x62),
+            (Opcode::ToolCheck, 0x70),
+            (Opcode::ToolAllowed, 0x71),
+            (Opcode::ToolDenied, 0x72),
         ];
         assert_eq!(pinned.len(), Opcode::ALL.len());
         for (op, want) in pinned {

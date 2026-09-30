@@ -180,7 +180,14 @@ mod tests {
             Arc::new(NoopAuditSigner),
             TenantId("local".into()),
         ));
-        let gate = ToolDecisionGate::new(ToolRules::default(), approver, recorder);
+        let gate = ToolDecisionGate::new(
+            ToolRules {
+                allow: vec!["shell".into()],
+                ..ToolRules::default()
+            },
+            approver,
+            recorder,
+        );
         assert!(gate.decide("shell", "echo ok").await.is_err());
     }
 }

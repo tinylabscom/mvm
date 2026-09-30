@@ -403,6 +403,10 @@ impl SessionValidator {
                 self.streams.clear();
                 Ok(())
             }
+            (
+                Opcode::ToolCheck | Opcode::ToolAllowed | Opcode::ToolDenied,
+                SessionState::Established,
+            ) => Ok(()),
             (_, SessionState::Closed) => Err(StateError::SessionClosed { opcode }),
             (Opcode::Hello | Opcode::HelloAck, SessionState::Established) => {
                 Err(StateError::SessionAlreadyEstablished { opcode })
@@ -801,6 +805,28 @@ mod tests {
                 "{op:?}"
             );
         }
+    }
+
+    #[test]
+    fn tool_check_requires_established_session_and_correct_direction() {
+        let mut v = SessionValidator::default();
+        assert_eq!(
+            v.admit(&FrameFacts::new(G, Opcode::ToolCheck, 0)),
+            Err(StateError::SessionNotEstablished { opcode: 0x70 })
+        );
+        v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
+            .expect("hello");
+        v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
+            .expect("ack");
+        v.admit(&FrameFacts::new(G, Opcode::ToolCheck, 0))
+            .expect("check");
+        v.admit(&FrameFacts::new(H, Opcode::ToolDenied, 0))
+            .expect("denial");
+        assert_eq!(v.live_streams(), 0);
+        assert_eq!(
+            v.admit(&FrameFacts::new(G, Opcode::ToolAllowed, 0)),
+            Err(StateError::WrongSender { opcode: 0x71 })
+        );
     }
 
     // ── stream lifecycle ─────────────────────────────────────────────

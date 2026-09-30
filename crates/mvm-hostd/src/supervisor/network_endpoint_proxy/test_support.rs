@@ -133,6 +133,17 @@ pub(super) fn service_with(value: &str, hosts: &[&str]) -> TestService {
     service_with_gate(value, hosts, gate_admitting_bound_hosts(hosts))
 }
 
+pub(crate) fn service_with_tool_gate(
+    gate: Arc<crate::supervisor::tool_decision::ToolDecisionGate>,
+) -> (Arc<SubstitutionService>, tempfile::TempDir) {
+    let (service, _, _, dir) = service_with("secret-value", &[]);
+    let service = Arc::try_unwrap(service)
+        .ok()
+        .expect("single service owner")
+        .with_tool_gate(gate);
+    (Arc::new(service), dir)
+}
+
 /// [`service_with`] under a caller-chosen gate.
 pub(super) fn service_with_gate(value: &str, hosts: &[&str], gate: Arc<EgressGate>) -> TestService {
     build_service(value, hosts, None, None, gate)
