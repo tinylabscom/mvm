@@ -263,7 +263,23 @@ fn probe_caps() -> RuntimeCaps {
         wall_clock_enforced: wall_clock_enforced(),
         warm_claim: std::env::var_os("MVM_BDD_WARM_CLAIM").is_some(),
         destructive_lab_opted_in: std::env::var_os("MVM_BDD_DESTRUCTIVE_LAB").is_some(),
+        local_images_checkout: local_images_checkout_selected(),
     }
+}
+
+/// Whether the mvmctl under test resolves its image source to a local
+/// mvm-images checkout. Probed once per process: the resolution fingerprints
+/// both checkouts with git, far too heavy for the per-scenario filter
+/// callback. Discovery cannot change mid-run — it is compile-time-pathed and
+/// env-driven — so caching cannot go stale.
+fn local_images_checkout_selected() -> bool {
+    static SELECTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SELECTED.get_or_init(|| {
+        matches!(
+            mvm_build::image_source::resolve_current_source(),
+            Ok(mvm_build::image_source::ImageSource::LocalCheckout(_))
+        )
+    })
 }
 
 /// Whether the SDK sidecar image is in the version-keyed cache.

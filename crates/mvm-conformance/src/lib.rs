@@ -149,6 +149,14 @@ pub const WARM_CLAIM_TAG: &str = "warm_claim";
 /// never carries this tag) can reach it. It runs only where a human named this
 /// exact variable, which is nowhere in CI.
 pub const DESTRUCTIVE_LAB_ONLY_TAG: &str = "destructive_lab_only";
+/// Scenarios whose premise is a *cached* workload kernel being the kernel
+/// source. When a local image checkout is selected (an explicit
+/// `MVM_IMAGES_DIR`, or the standard two-repo sibling layout discovered at
+/// compile time), the kernel comes from the pair build instead and the
+/// cached-kernel path — including the capability check these scenarios stage
+/// a fixture for — is never reached. Inverted gate: skips when a checkout
+/// *is* selected.
+pub const NO_LOCAL_IMAGES_CHECKOUT_TAG: &str = "no_local_images_checkout";
 
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
@@ -212,6 +220,13 @@ pub struct RuntimeCaps {
     /// `live_opted_in` on purpose: it must be impossible for any lane that only
     /// set `MVM_BDD_LIVE` to reach a scenario that detonates an exploit.
     pub destructive_lab_opted_in: bool,
+    /// A local mvm-images checkout is selected for the mvmctl under test
+    /// (explicit `MVM_IMAGES_DIR`, or a sibling checkout discovered from the
+    /// build path), so the workload kernel resolves from the pair build and
+    /// the cached-kernel path is not exercised. Read by
+    /// [`NO_LOCAL_IMAGES_CHECKOUT_TAG`], which skips when this is *true* — an
+    /// inverted gate, like `UNENFORCEABLE_WALL_CLOCK_TAG`.
+    pub local_images_checkout: bool,
 }
 
 /// Decide whether a scenario with `tags` should run given the host `caps`.
@@ -272,6 +287,10 @@ pub enum ScenarioGate {
     /// scenario that runs a real exploit against its own guest, so the opt-in
     /// is separate from `@live` and absent everywhere in CI.
     NeedsDestructiveLabOptIn,
+    /// Tagged [`NO_LOCAL_IMAGES_CHECKOUT_TAG`] on a host where a local image
+    /// checkout is selected: the workload kernel resolves from the pair, so
+    /// the cached-kernel premise the scenario stages cannot be reached.
+    NeedsNoLocalImagesCheckout,
     /// The lane selected one tag with `MVM_BDD_ONLY_TAG`, and this scenario
     /// does not carry it.
     OutsideSelectedTag,
@@ -300,6 +319,7 @@ impl ScenarioGate {
             Self::NeedsUnenforceableWallClock => "needs-unenforceable-wall-clock",
             Self::NeedsWarmClaim => "needs-warm-claim",
             Self::NeedsDestructiveLabOptIn => "needs-destructive-lab-opt-in",
+            Self::NeedsNoLocalImagesCheckout => "needs-no-local-images-checkout",
             Self::OutsideSelectedTag => "outside-selected-tag",
         }
     }
@@ -329,6 +349,12 @@ pub fn scenario_gate(tags: &[String], caps: RuntimeCaps) -> ScenarioGate {
     // live lane can reach it.
     if tagged(DESTRUCTIVE_LAB_ONLY_TAG) && !caps.destructive_lab_opted_in {
         return ScenarioGate::NeedsDestructiveLabOptIn;
+    }
+    // Inverted, like the wall-clock gate: the scenario asserts a
+    // cached-kernel path that a selected checkout replaces with the pair
+    // build, so it runs only where no checkout is selected.
+    if tagged(NO_LOCAL_IMAGES_CHECKOUT_TAG) && caps.local_images_checkout {
+        return ScenarioGate::NeedsNoLocalImagesCheckout;
     }
     if tagged(BUNDLE_TAG) && !caps.bundle_fixture {
         return ScenarioGate::NeedsBundleFixture;
@@ -415,6 +441,12 @@ impl ScenarioGate {
                 "need a backend with no wall-clock mechanism, so the refusal this \
                  asserts can happen (Firecracker and QEMU leave no process to hold \
                  a deadline; libkrun and HVF do, and admit the grant instead)",
+            ),
+            Self::NeedsNoLocalImagesCheckout => Some(
+                "need no selected mvm-images checkout: a local checkout routes the \
+                 workload kernel through the pair build, so the cached-kernel path \
+                 this scenario stages cannot be reached (unset MVM_IMAGES_DIR, or \
+                 build mvmctl where no sibling mvm-images checkout is discovered)",
             ),
             Self::NeedsWarmClaim => Some(
                 "need MVM_BDD_WARM_CLAIM=1 on a host where a forked child answers \
@@ -819,6 +851,7 @@ mod tests {
         wall_clock_enforced: false,
         warm_claim: false,
         destructive_lab_opted_in: false,
+        local_images_checkout: false,
     };
     const ALL: RuntimeCaps = RuntimeCaps {
         live_opted_in: true,
@@ -835,6 +868,7 @@ mod tests {
         wall_clock_enforced: true,
         warm_claim: true,
         destructive_lab_opted_in: true,
+        local_images_checkout: false,
     };
 
     /// The `DestructiveLabOnly` ceiling skips unless the operator raised it,
@@ -998,6 +1032,42 @@ mod tests {
                 }
             ));
         }
+    }
+
+    /// Inverted like the wall-clock gate: a selected local image checkout
+    /// routes the workload kernel through the pair build, so a scenario whose
+    /// premise is the *cached* kernel skips — and an untagged scenario is
+    /// unaffected either way.
+    #[test]
+    fn no_local_images_checkout_skips_only_when_a_checkout_is_selected() {
+        assert_eq!(
+            scenario_gate(
+                &tags(&["no_local_images_checkout"]),
+                RuntimeCaps {
+                    local_images_checkout: true,
+                    ..ALL
+                },
+            ),
+            ScenarioGate::NeedsNoLocalImagesCheckout,
+            "a selected checkout replaces the cached-kernel path the scenario stages"
+        );
+        assert!(scenario_should_run(
+            &tags(&["no_local_images_checkout"]),
+            ALL
+        ));
+        for selected in [true, false] {
+            assert!(scenario_should_run(
+                &tags(&["live"]),
+                RuntimeCaps {
+                    local_images_checkout: selected,
+                    ..ALL
+                }
+            ));
+        }
+        assert_eq!(
+            ScenarioGate::NeedsNoLocalImagesCheckout.as_str(),
+            "needs-no-local-images-checkout"
+        );
     }
 
     #[test]
@@ -1179,6 +1249,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
         ));
     }
@@ -1202,6 +1273,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
         ));
         assert!(scenario_should_run(&tags(&["live", "firecracker"]), ALL));
@@ -1227,6 +1299,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
         ));
         // Live opt-in but missing capability → skipped.
@@ -1247,6 +1320,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
         ));
         // Both present → runs.
@@ -1274,6 +1348,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1290,6 +1365,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1306,6 +1382,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
             RuntimeCaps {
                 live_opted_in: true,
@@ -1322,6 +1399,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
             RuntimeCaps {
                 live_opted_in: false,
@@ -1338,6 +1416,7 @@ mod tests {
                 wall_clock_enforced: false,
                 warm_claim: false,
                 destructive_lab_opted_in: false,
+                local_images_checkout: false,
             },
         ];
         let shapes = [
@@ -1380,6 +1459,7 @@ mod tests {
             wall_clock_enforced: false,
             warm_claim: false,
             destructive_lab_opted_in: false,
+            local_images_checkout: false,
         };
         let live_only = RuntimeCaps {
             live_opted_in: true,
@@ -1396,6 +1476,7 @@ mod tests {
             wall_clock_enforced: false,
             warm_claim: false,
             destructive_lab_opted_in: false,
+            local_images_checkout: false,
         };
         let bootable = RuntimeCaps {
             live_opted_in: true,
@@ -1412,6 +1493,7 @@ mod tests {
             wall_clock_enforced: false,
             warm_claim: false,
             destructive_lab_opted_in: false,
+            local_images_checkout: false,
         };
 
         assert_eq!(
@@ -1472,6 +1554,7 @@ mod tests {
                     wall_clock_enforced: false,
                     warm_claim: false,
                     destructive_lab_opted_in: false,
+                    local_images_checkout: false,
                 },
                 Some(CI_LIVE_TAG),
             ),
