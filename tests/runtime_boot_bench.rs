@@ -20,6 +20,13 @@
 //! - `MVM_RUNTIME_BOOT_READY=start-return|guest-agent`.
 //! - `MVM_RUNTIME_BOOT_INITRD`, `MVM_RUNTIME_BOOT_ROOTFS_VERITY`, and
 //!   `MVM_RUNTIME_BOOT_ROOTFS_ROOTHASH` to exercise a sealed rootfs boot.
+//! - `MVM_RUNTIME_BOOT_GRANT=1` (or `grant = true` in the TOML config) to
+//!   provision each boot with the signed verb-grant sidecar an admitted run
+//!   carries. Every backend boots guests under `mvm.require_grant=1`, so a
+//!   raw boot's guest agent refuses the stop-time filesystem-flush verb and
+//!   every stop lands on the kill path; with the grant provisioned the stop
+//!   distribution measures graceful stops. Off by default so the existing
+//!   lane's behavior is unchanged.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
@@ -55,6 +62,7 @@ const MEMORY_MIB_VAR: &str = "MVM_RUNTIME_BOOT_MEMORY_MIB";
 const OVERLAY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY";
 const OVERLAY_VERITY_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_VERITY";
 const OVERLAY_ROOTHASH_VAR: &str = "MVM_RUNTIME_BOOT_OVERLAY_ROOTHASH";
+const GRANT_VAR: &str = "MVM_RUNTIME_BOOT_GRANT";
 
 const DEFAULT_BACKEND: &str = "firecracker";
 const DEFAULT_RUNS: usize = 5;
@@ -88,6 +96,127 @@ fn ensure_host_signer_key() -> Result<()> {
 fn ensure_host_signer_key_at(keys_dir: &Path) -> Result<()> {
     mvm_hostd::audit::host_keypair::load_or_init_at(keys_dir)
         .context("initialize the host signer key the boot path requires")?;
+    Ok(())
+}
+
+/// The stop-time filesystem-flush verb the graceful stop path sends. Named
+/// here only to assert it rides in the provisioned grant — the grant set
+/// itself comes from the production default, never from this constant.
+const STOP_FLUSH_VERB: &str = "sleep-prep";
+
+/// The signed verb set a grant-provisioned bench boot carries: the same
+/// attenuated ProdSafe default an admitted non-interactive run receives —
+/// no host shares, no input-plane grant — which includes the stop-time
+/// flush verb the graceful stop path needs.
+fn bench_grant_verbs() -> Vec<mvm_core::plan::VerbId> {
+    mvm_client::admission::agent_verbs::default_agent_verbs(true, false, false)
+        .expect("the restricted default verb set is always present")
+}
+
+/// What one grant-provisioned boot's plan says about itself. A struct rather
+/// than positional arguments so the synthesis call sites stay readable and
+/// testable.
+struct GrantPlanParams<'a> {
+    vm_name: &'a str,
+    backend: &'a str,
+    image_sha256: &'a str,
+    kernel_sha256: Option<&'a str>,
+    cpus: u32,
+    memory_mib: u32,
+}
+
+/// Synthesize the unsigned plan a grant-provisioned bench boot is admitted
+/// under, through the production synthesis path: closed network mode, no
+/// grants, no shares, and the attenuated default agent-verb set.
+fn synthesize_grant_plan(params: &GrantPlanParams<'_>) -> Result<mvm_core::plan::ExecutionPlan> {
+    let input = mvm_core::plan::SynthesisInput::builder()
+        .vm_name(params.vm_name)
+        .backend_name(params.backend)
+        .image_name(params.vm_name)
+        .image_sha256(params.image_sha256)
+        .kernel_sha256(params.kernel_sha256)
+        .seccomp_tier(mvm_core::plan::PlanSeccompTier::Standard)
+        .secret_release(mvm_core::plan::SecretReleasePolicy::None)
+        .secrets(Vec::new())
+        .network_mode(mvm_core::plan::NetworkMode::None)
+        .cpus(params.cpus)
+        .mem_mib(u64::from(params.memory_mib))
+        .disk_mib(0)
+        .boot_timeout_secs(60)
+        .destroy_on_exit(true)
+        .shares(Vec::new())
+        .redaction(mvm_core::policy::RedactionPolicy::default())
+        .reversible_replacement(mvm_core::policy::ReversibleReplacementPolicy::default())
+        .audit_labels(mvm_core::plan::AuditLabels::default())
+        .agent_verbs(bench_grant_verbs())
+        .services(Vec::new())
+        .stream_edges(Vec::new())
+        .stream_retention(mvm_core::plan::StreamRetention::Persist)
+        .build()
+        .context("building the synthesis input for the bench verb grant")?;
+    mvm_core::plan::synthesize_plan(&input).context("synthesizing the bench verb-grant plan")
+}
+
+/// Provision the signed verb-grant sidecar an admitted run's boot carries.
+///
+/// The plan is synthesized, signed by the host signer, and admitted through
+/// the production admission routine, and the sidecar is written by the same
+/// production mint the admitted-run producers call — so the bench boots with
+/// exactly the grant shape a real launch provisions, and `mvm.require_grant=1`
+/// stays untouched for every other boot. The launch config handed to
+/// `backend.start` is unchanged: the backend's cmdline builders pick the
+/// sidecar up from the per-VM state dir, as they do for an admitted run.
+fn provision_boot_grant(spec: &BenchSpec, config: &VmStartConfig) -> Result<()> {
+    let image_sha256 = mvm_core::crypto::image_verify::sha256_file_cached(&spec.rootfs)
+        .with_context(|| {
+            format!(
+                "hashing rootfs {} for the bench plan",
+                spec.rootfs.display()
+            )
+        })?;
+    let kernel_sha256 = mvm_core::crypto::image_verify::sha256_file_cached(&spec.kernel)
+        .with_context(|| {
+            format!(
+                "hashing kernel {} for the bench plan",
+                spec.kernel.display()
+            )
+        })?;
+    let plan = synthesize_grant_plan(&GrantPlanParams {
+        vm_name: &config.name,
+        backend: &spec.backend,
+        image_sha256: &image_sha256,
+        kernel_sha256: Some(&kernel_sha256),
+        cpus: spec.cpus,
+        memory_mib: spec.memory_mib,
+    })?;
+    let admitted = mvm_hostd::plan_admission::admit_plan_for_run(
+        &plan,
+        &mvm_hostd::plan_admission::SystemClock,
+        &mvm_hostd::plan_admission::InMemoryNonceLedger::new(),
+        None,
+        None,
+        mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
+    )
+    .context("admitting the bench verb-grant plan")?;
+    let plan_json = serde_json::to_string(admitted.signed())
+        .context("serializing the admitted plan envelope")?;
+    let stash_config = VmStartConfig {
+        plan_json: Some(plan_json),
+        ..config.clone()
+    };
+    let minted = mvm_hostd::plan_admission::stash_plan_and_mint_verb_grant(&stash_config)
+        .context("minting the verb-grant sidecar from the admitted plan")?;
+    anyhow::ensure!(
+        minted.is_some(),
+        "the admitted plan carried agent verbs but no verb-grant sidecar was minted"
+    );
+    // Close the loop against the exact reader every backend's launch path
+    // uses: a sidecar the cmdline builder cannot encode would boot a guest
+    // that still refuses the flush verb.
+    anyhow::ensure!(
+        mvm_vmm::host::egress_bridge::verb_grant_cmdline_token(&config.name).is_some(),
+        "the minted verb-grant sidecar did not round-trip through the cmdline builder"
+    );
     Ok(())
 }
 
@@ -147,15 +276,16 @@ fn report_stop_summary(label: &str, spec: &BenchSpec, measurements: &[BootMeasur
     let failed = measurements.len() - stops.len();
     if stops.is_empty() {
         eprintln!(
-            "[runtime_boot_bench] {label} stop backend={} stopped=0 failed={failed}",
-            spec.backend,
+            "[runtime_boot_bench] {label} stop backend={} grant={} stopped=0 failed={failed}",
+            spec.backend, spec.grant,
         );
         return;
     }
     stops.sort();
     eprintln!(
-        "[runtime_boot_bench] {label} stop backend={} stopped={} failed={failed} p50={}ms p95={}ms max={}ms",
+        "[runtime_boot_bench] {label} stop backend={} grant={} stopped={} failed={failed} p50={}ms p95={}ms max={}ms",
         spec.backend,
+        spec.grant,
         stops.len(),
         percentile(&stops, 50).as_millis(),
         percentile(&stops, 95).as_millis(),
@@ -176,6 +306,10 @@ struct BenchSpec {
     memory_mib: u32,
     overlay: Option<OverlaySpec>,
     rootfs_integrity: Option<RootfsIntegritySpec>,
+    /// Provision each boot with the signed verb-grant sidecar an admitted run
+    /// carries, so the guest agent authorizes the stop-time flush verb and
+    /// the stop distribution measures the graceful path. Off by default.
+    grant: bool,
 }
 
 /// The initramfs and both dm-verity inputs are one boot mode. Supplying only
@@ -231,6 +365,7 @@ impl BenchSpec {
             memory_mib: env_u32(MEMORY_MIB_VAR, config.memory_mib, 256)?,
             overlay,
             rootfs_integrity,
+            grant: env_bool(GRANT_VAR, config.grant, false)?,
         }))
     }
 }
@@ -259,6 +394,7 @@ struct RawBenchConfig {
     overlay_verity: Option<PathBuf>,
     #[serde(alias = "overlay_roothash")]
     overlay_roothash: Option<String>,
+    grant: Option<bool>,
 }
 
 impl RawBenchConfig {
@@ -399,6 +535,14 @@ fn start_config(spec: &BenchSpec, name: String) -> VmStartConfig {
 fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
     let backend = AnyBackend::from_hypervisor(&spec.backend);
     let config = start_config(spec, name.clone());
+
+    // Before the boot timer starts: grant provisioning is admission work a
+    // real launch pays before its backend start too, and the bench measures
+    // backend launch, not admission.
+    if spec.grant {
+        provision_boot_grant(spec, &config)
+            .with_context(|| format!("provisioning the verb grant for {name}"))?;
+    }
 
     let started = Instant::now();
     let id = backend
@@ -678,6 +822,25 @@ fn env_u64(var: &str, configured: Option<u64>, default: u64) -> Result<u64> {
     }
 }
 
+fn env_bool(var: &str, configured: Option<bool>, default: bool) -> Result<bool> {
+    resolve_bool(std::env::var(var).ok().as_deref(), configured, default)
+        .with_context(|| format!("parsing {var}"))
+}
+
+/// The pure half of [`env_bool`]: an env value (highest priority; empty =
+/// unset, matching the path knobs), then the config file, then the default.
+/// An unrecognized env value is an error rather than silently off — a lane
+/// that misspells the opt-in must not measure the kill path believing it
+/// measured the graceful one.
+fn resolve_bool(env_value: Option<&str>, configured: Option<bool>, default: bool) -> Result<bool> {
+    match env_value {
+        None | Some("") => Ok(configured.unwrap_or(default)),
+        Some("1") | Some("true") => Ok(true),
+        Some("0") | Some("false") => Ok(false),
+        Some(other) => bail!("expected 1, true, 0, or false, got {other:?}"),
+    }
+}
+
 fn unique_vm_name(label: &str) -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -755,6 +918,106 @@ memory-mib = 256
         default_ready_for_backend(&config.backend),
         ReadySignal::StartReturn.as_str()
     );
+    // Not configured => the grant knob stays on its off default.
+    assert_eq!(config.grant, None);
+}
+
+#[test]
+fn config_file_shape_accepts_the_grant_flag() {
+    let config: RawBenchConfig = toml::from_str(
+        r#"
+kernel = "/tmp/vmlinux"
+rootfs = "/tmp/rootfs.ext4"
+grant = true
+"#,
+    )
+    .expect("parse runtime boot bench config with grant");
+    assert_eq!(config.grant, Some(true));
+}
+
+#[test]
+fn grant_knob_resolves_env_over_config_and_defaults_off() {
+    // Default: off, so the existing lane's behavior is unchanged.
+    assert!(!resolve_bool(None, None, false).expect("unset resolves"));
+    // Config file alone turns it on; an empty env value is unset.
+    assert!(resolve_bool(None, Some(true), false).expect("config resolves"));
+    assert!(resolve_bool(Some(""), Some(true), false).expect("empty env falls through"));
+    // Env wins over config, in both directions.
+    assert!(resolve_bool(Some("1"), Some(false), false).expect("env on"));
+    assert!(resolve_bool(Some("true"), Some(false), false).expect("env on spelled out"));
+    assert!(!resolve_bool(Some("0"), Some(true), false).expect("env off"));
+    assert!(!resolve_bool(Some("false"), Some(true), false).expect("env off spelled out"));
+}
+
+#[test]
+fn grant_knob_refuses_an_unrecognized_value() {
+    let err = resolve_bool(Some("yes"), None, false)
+        .expect_err("a misspelled opt-in must not silently measure the kill path")
+        .to_string();
+    assert!(err.contains("yes"), "{err}");
+}
+
+/// The whole point of the provisioned grant is the stop-time flush verb; the
+/// attenuations are what keep it the same set an admitted run receives.
+#[test]
+fn bench_grant_verbs_carry_the_stop_flush_verb_and_stay_attenuated() {
+    let verbs = bench_grant_verbs();
+    let names: Vec<&str> = verbs.iter().map(|v| v.as_str()).collect();
+    assert!(names.contains(&STOP_FLUSH_VERB), "{names:?}");
+    // No shares => no volume verbs; no input-plane grant => no input verbs.
+    assert!(!names.contains(&"mount-volume"), "{names:?}");
+    assert!(!names.contains(&"unmount-volume"), "{names:?}");
+    assert!(!names.contains(&"stream-input"), "{names:?}");
+    assert!(!names.contains(&"close-stream-input"), "{names:?}");
+}
+
+#[cfg(test)]
+fn grant_plan_fixture_params(image_sha256: &str) -> GrantPlanParams<'_> {
+    GrantPlanParams {
+        vm_name: "mvm-boot-bench-grant-fixture",
+        backend: "firecracker",
+        image_sha256,
+        kernel_sha256: None,
+        cpus: 1,
+        memory_mib: 256,
+    }
+}
+
+#[test]
+fn grant_plan_carries_the_verbs_and_an_open_validity_window() {
+    let sha = "c".repeat(64);
+    let plan = synthesize_grant_plan(&grant_plan_fixture_params(&sha))
+        .expect("synthesize the bench grant plan");
+    let verbs = plan
+        .agent_verbs
+        .as_ref()
+        .expect("the bench plan always carries agent verbs");
+    assert!(verbs.iter().any(|v| v.as_str() == STOP_FLUSH_VERB));
+    assert_eq!(plan.workload.0, "mvm-boot-bench-grant-fixture");
+    assert!(
+        plan.valid_until > chrono::Utc::now(),
+        "a plan minted dead would make the guest refuse activation"
+    );
+}
+
+/// The signed envelope the bench stashes must be the exact shape the
+/// production sidecar mint parses back out of `plan_json`: a
+/// `SignedExecutionPlan` whose payload decodes to a plan carrying the verbs.
+#[test]
+fn signed_grant_plan_json_is_the_shape_the_sidecar_mint_reads() {
+    let sha = "d".repeat(64);
+    let plan = synthesize_grant_plan(&grant_plan_fixture_params(&sha))
+        .expect("synthesize the bench grant plan");
+    let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+    let signed = mvm_core::plan::sign_plan(&plan, &key, "bench");
+    let json = serde_json::to_string(&signed).expect("serialize the signed envelope");
+
+    let parsed: mvm_core::plan::SignedExecutionPlan =
+        serde_json::from_str(&json).expect("the sidecar mint parses the envelope");
+    let payload: mvm_core::plan::ExecutionPlan =
+        serde_json::from_slice(&parsed.0.payload).expect("the payload decodes to a plan");
+    let verbs = payload.agent_verbs.expect("verbs survive the round trip");
+    assert!(verbs.iter().any(|v| v.as_str() == STOP_FLUSH_VERB));
 }
 
 #[test]
@@ -908,6 +1171,7 @@ fn prod_shaped_spec(overlay: Option<OverlaySpec>) -> BenchSpec {
         memory_mib: 256,
         overlay,
         rootfs_integrity: None,
+        grant: false,
     }
 }
 

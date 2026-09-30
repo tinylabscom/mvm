@@ -500,6 +500,9 @@ which.workspace = true
 # `tests/audit_receipt_export.rs` builds a synthetic chain-signed audit log
 # directly with the same primitives the host uses.
 mvm-hostd = { workspace = true, default-features = false }
+# `tests/runtime_boot_bench.rs` provisions grant-bearing boots with the same
+# attenuated default agent-verb set an admitted run receives.
+mvm-client.workspace = true
 
 [features]
 # ── The two product surfaces — the only two things this project ships ─────────
