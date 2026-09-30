@@ -164,6 +164,18 @@ fn main() -> Result<()> {
         confine_endpoint(&cfg)?;
         #[cfg(not(target_os = "linux"))]
         confine_endpoint_without_lsm(&cfg)?;
+        // The embedded telemetry collector starts after confinement so its
+        // threads inherit the confined policy; its state-dir grant is part
+        // of the confinement spec. It lives and dies with this process —
+        // nothing here stops or joins it.
+        let _telemetry = cfg
+            .telemetry
+            .as_ref()
+            .map(|telemetry| {
+                mvm_hostd::telemetry_collector::start_embedded(&cfg.instance_id, telemetry)
+            })
+            .transpose()
+            .context("starting the embedded telemetry collector")?;
         serve(
             ServeParams::builder()
                 .cfg(&cfg)
@@ -554,6 +566,7 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
         resolver_uds_path(cfg),
     )
     .with_session_marker_parent(session_marker_parent)
+    .with_telemetry_state(cfg.telemetry.as_ref().map(|t| t.state_dir.as_path()))
     .with_approval_socket_parent(
         cfg.approval_socket
             .as_deref()
@@ -1227,6 +1240,7 @@ mod tests {
 
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
+            telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
             secrets: Vec::new(),
@@ -1265,6 +1279,7 @@ mod tests {
     /// matter — this test never spawns or serves.
     fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
         EndpointConfig {
+            telemetry: None,
             tenant_id: "acme".into(),
             instance_id: "test".into(),
             secrets: vec![],
@@ -1745,6 +1760,7 @@ mod tests {
         let host_key = [1u8; 32];
         let guest_key = [2u8; 32];
         let cfg = EndpointConfig {
+            telemetry: None,
             tenant_id: "tenant".into(),
             instance_id: "test".into(),
             secrets: Vec::new(),

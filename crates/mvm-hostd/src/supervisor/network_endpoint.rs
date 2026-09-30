@@ -190,6 +190,11 @@ pub struct EndpointConfig {
     /// baseline; a profile opts a destination into entropy/name redaction.
     #[serde(default)]
     pub redaction: mvm_core::policy::RedactionPolicy,
+    /// Embed the per-VM telemetry collector in this endpoint process: the
+    /// collector's inputs when this boot is provisioned for collection,
+    /// absent otherwise. See `mvm_hostd::telemetry_collector`.
+    #[serde(default)]
+    pub telemetry: Option<crate::telemetry_collector::TelemetryEmbedConfig>,
     /// Per-destination reversible replacement policy, carried from the signed
     /// `ExecutionPlan.reversible_replacement`. Default (disabled) preserves the
     /// current one-way-only behavior.
@@ -710,6 +715,7 @@ mod tests {
 
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
+            telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
             secrets,

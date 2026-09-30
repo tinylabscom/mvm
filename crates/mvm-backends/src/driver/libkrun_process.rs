@@ -260,6 +260,10 @@ pub fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    if let Some(token) = mvm_vmm::host::egress_bridge::telemetry_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     if let Some(verity_args) = libkrun_verity_enabled(config)
         .then(|| libkrun_verity_cmdline_args(config))
         .flatten()

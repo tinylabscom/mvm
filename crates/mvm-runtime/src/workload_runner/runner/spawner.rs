@@ -153,6 +153,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
+            telemetry: mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
             tenant: req.tenant,
             secrets: req.secrets,
             redaction: req.redaction,
