@@ -119,7 +119,7 @@ ALLOWED_SKIPS="needs-perf-budget-host,needs-dir-share"
 # fails the cucumber pipeline the moment any scenario fails, and the floor is
 # only checked after a fully green run.
 MIN_SCENARIOS=26
-SCENARIO_LOG="$(mktemp -t mvm-e2e-scenarios)"
+SCENARIO_LOG="$(mktemp "${TMPDIR:-/tmp}/mvm-e2e-scenarios.XXXXXX")"
 TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 MVMCTL="$TARGET_DIR/debug/mvmctl"
 
