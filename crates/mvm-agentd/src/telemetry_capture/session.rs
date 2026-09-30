@@ -45,17 +45,26 @@ const SUMMARY_EVERY_TICKS: u32 = 40;
 /// Serve one capture session over an accepted, peer-gated stream: announce
 /// coverage under the shared epoch, then drain records and summarize losses
 /// until the peer dies, the queue closes, or `stop` is set.
+///
+/// `bound_reads` runs once, after the handshake succeeds and before the
+/// first probe: the caller installs its read timeout there. Installing it
+/// earlier races the handshake — a peer thread scheduled late makes the
+/// handshake read time out and the session fail spuriously, stranding a
+/// test (or a collector) that then blocks on the half-open socket — so
+/// handshake reads stay patient and only the probes are bounded.
 pub fn serve_capture_session<S: Read + Write>(
     stream: &mut S,
     signing_key: SigningKey,
     host_anchor: &VerifyingKey,
     capture: &CaptureState,
     stop: &AtomicBool,
+    bound_reads: impl FnOnce(&mut S),
 ) -> SessionEnd {
     let mut sender = match TelemetrySender::connect(stream, signing_key, host_anchor) {
         Ok(sender) => sender,
         Err(_) => return SessionEnd::Failed,
     };
+    bound_reads(stream);
     let announced = capture.prepare_direct(
         SourceKind::GuestAgent,
         ProducerId::AgentDiagnostics,
@@ -242,8 +251,9 @@ mod tests {
         )
     }
 
-    /// The probe contract: the serving side's reads must be bounded.
-    fn bound(stream: &UnixStream) {
+    /// The probe contract: reads become bounded only after the handshake,
+    /// via the serve hook — earlier would race a slow peer thread.
+    fn bound(stream: &mut UnixStream) {
         stream
             .set_read_timeout(Some(Duration::from_millis(10)))
             .unwrap();
@@ -311,7 +321,6 @@ mod tests {
         diagnostic(&capture, "before-two");
 
         let (mut guest, host) = UnixStream::pair().unwrap();
-        bound(&guest);
         let collector = host_receives(host, anchor_key.clone(), guest_key.verifying_key(), 3);
         let stop = AtomicBool::new(false);
         let end = serve_capture_session(
@@ -320,6 +329,7 @@ mod tests {
             &anchor_key.verifying_key(),
             &capture,
             &stop,
+            bound,
         );
         // The host closes after three records; the idle probe observes it
         // without any further write.
@@ -354,7 +364,6 @@ mod tests {
         }
 
         let (mut guest, host) = UnixStream::pair().unwrap();
-        bound(&guest);
         // Announcement + the kept record + one loss summary.
         let collector = host_receives(host, anchor_key.clone(), guest_key.verifying_key(), 3);
         let stop = AtomicBool::new(false);
@@ -364,6 +373,7 @@ mod tests {
             &anchor_key.verifying_key(),
             &capture,
             &stop,
+            bound,
         );
         let received = collector.join().unwrap();
         let loss = received
@@ -389,7 +399,6 @@ mod tests {
         let mut epochs = Vec::new();
         for expected in [3usize, 1] {
             let (mut guest, host) = UnixStream::pair().unwrap();
-            bound(&guest);
             let collector = host_receives(
                 host,
                 anchor_key.clone(),
@@ -402,6 +411,7 @@ mod tests {
                 &anchor_key.verifying_key(),
                 &capture,
                 &stop,
+                bound,
             );
             let received = collector.join().unwrap();
             epochs.push(received[0].epoch());
@@ -425,7 +435,6 @@ mod tests {
         let (guest_key, anchor_key) = keys();
         let capture = capture_over(1);
         let (mut guest, host) = UnixStream::pair().unwrap();
-        bound(&guest);
         let collector = host_receives(host, anchor_key.clone(), guest_key.verifying_key(), 1);
         let stop = Arc::new(AtomicBool::new(false));
         let stopper = {
@@ -442,6 +451,7 @@ mod tests {
             &anchor_key.verifying_key(),
             &capture,
             &stop,
+            bound,
         );
         assert_eq!(end, SessionEnd::PeerClosed);
         assert!(started.elapsed() < Duration::from_secs(2));
@@ -463,6 +473,7 @@ mod tests {
             &anchor_key.verifying_key(),
             &capture,
             &stop,
+            bound,
         );
         assert_eq!(end, SessionEnd::Failed);
     }
