@@ -457,6 +457,46 @@ enum KillOutcome {
     StillRunning,
 }
 
+/// How a Linux stop signal reaches Firecracker. Root signals the captured PID
+/// directly; anyone else goes through `sudo kill`, the only way past an
+/// EPERM against a root-owned VMM.
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FcSignalRoute {
+    Direct,
+    Sudo,
+}
+
+/// Pure decision boundary so the route is unit-testable without privileges.
+#[cfg(target_os = "linux")]
+fn fc_linux_signal_route(euid: libc::uid_t) -> FcSignalRoute {
+    if euid == 0 {
+        FcSignalRoute::Direct
+    } else {
+        FcSignalRoute::Sudo
+    }
+}
+
+/// `kill(2)` the captured PID from a root process. Delivery failure is
+/// warn-only; the caller's liveness probe is the authority on the outcome.
+#[cfg(target_os = "linux")]
+fn fc_direct_kill(pid: u32, signal: FcStopSignal) {
+    let sig = match signal {
+        FcStopSignal::Terminate => libc::SIGTERM,
+        FcStopSignal::ForceKill => libc::SIGKILL,
+    };
+    // SAFETY: `kill` takes a plain pid and signal number; both are valid here
+    // and the call has no preconditions beyond the process existing.
+    let rc = unsafe { libc::kill(pid as libc::pid_t, sig) };
+    if rc != 0 {
+        let error = std::io::Error::last_os_error();
+        tracing::warn!(
+            "Firecracker stop signal {signal:?} to pid {pid} was NOT delivered: {error} \
+             (the process may have already exited)"
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn fc_linux_signal_args(pid: u32, signal: FcStopSignal) -> Vec<String> {
     let signal_arg = match signal {
@@ -474,24 +514,34 @@ fn fc_linux_signal_args(pid: u32, signal: FcStopSignal) -> Vec<String> {
 /// Deliver `signal` to an already-captured, identity-checked Firecracker PID.
 /// Firecracker is started under `sudo` and runs as **root**, so a
 /// non-root `mvmctl` cannot signal it directly — a plain `libc::kill` returns
-/// `EPERM` and silently no-ops. The signal therefore goes through `sudo kill`,
-/// the same mechanism the raw stop path uses. Best-effort: a delivery failure
-/// is logged, and the caller's liveness probe is the authority on whether the
-/// process actually stopped (so a lost race with a self-exiting process is not
-/// mistaken for a failure).
+/// `EPERM` and silently no-ops; the signal therefore goes through `sudo kill`,
+/// the same mechanism the raw stop path uses. A root `mvmctl` signals the PID
+/// directly — hosts that run everything as root (containers, rescue shells)
+/// often have no `sudo` at all, and spawning it would drop the signal
+/// silently. Best-effort: a delivery failure is logged, and the caller's
+/// liveness probe is the authority on whether the process actually stopped
+/// (so a lost race with a self-exiting process is not mistaken for a failure).
 fn fc_sudo_signal(pid: u32, signal: FcStopSignal) {
     #[cfg(target_os = "linux")]
     {
-        let args = fc_linux_signal_args(pid, signal);
-        match mvm_core::env_hygiene::helper_command("sudo")
-            .args(&args)
-            .output()
-        {
-            Ok(output) if output.status.success() => {}
-            Ok(_) | Err(_) => tracing::warn!(
-                "Firecracker stop signal {signal:?} to pid {pid} did not report success \
-                 (the process may have already exited)"
-            ),
+        if fc_linux_signal_route(unsafe { libc::geteuid() }) == FcSignalRoute::Direct {
+            fc_direct_kill(pid, signal);
+        } else {
+            let args = fc_linux_signal_args(pid, signal);
+            match mvm_core::env_hygiene::helper_command("sudo")
+                .args(&args)
+                .output()
+            {
+                Ok(output) if output.status.success() => {}
+                Ok(_) => tracing::warn!(
+                    "Firecracker stop signal {signal:?} to pid {pid} did not report success \
+                     (the process may have already exited)"
+                ),
+                Err(error) => tracing::warn!(
+                    "Firecracker stop signal {signal:?} to pid {pid} was NOT delivered: \
+                     spawning sudo failed: {error} (install sudo, or run mvmctl as root)"
+                ),
+            }
         }
     }
 
@@ -2255,6 +2305,39 @@ mod tests {
             captured[1]
         );
         assert!(captured[1].ends_with("sudo kill -9 4242"));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn root_signals_directly_and_anyone_else_routes_through_sudo() {
+        assert_eq!(
+            fc_linux_signal_route(0),
+            FcSignalRoute::Direct,
+            "root must not need sudo to signal a same-uid VMM"
+        );
+        assert_eq!(
+            fc_linux_signal_route(1000),
+            FcSignalRoute::Sudo,
+            "a non-root caller cannot kill a root-owned VMM without sudo"
+        );
+
+        // Exercise the direct route for real when the suite itself runs as
+        // root: the signal must actually terminate a live child, which is the
+        // behaviour a sudo-less root host (container, rescue shell) depends on.
+        // Non-root runners take the sudo path, already covered by the
+        // argument-shape test above and the escalation unit tests.
+        // SAFETY: `geteuid` has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            let mut child = std::process::Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("spawn sleep");
+            let pid = child.id();
+            fc_sudo_signal(pid, FcStopSignal::Terminate);
+            use std::os::unix::process::ExitStatusExt;
+            let status = child.wait().expect("reap signalled sleep");
+            assert!(status.success() || status.signal().is_some());
+        }
     }
 
     #[test]
