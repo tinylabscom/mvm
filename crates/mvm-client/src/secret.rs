@@ -543,6 +543,7 @@ mod tests {
             sigv4: None,
             provider: None,
             approve: Default::default(),
+            oauth: None,
         }
     }
 
@@ -1061,6 +1062,7 @@ mod tests {
             sigv4: None,
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         assert!(validate_binding_meta("local", "aws", &missing).is_err());
         // SigV4 with scope → accepted.
@@ -1070,6 +1072,7 @@ mod tests {
             sigv4: Some(sigv4.clone()),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         validate_binding_meta("local", "aws", &good).unwrap();
         // Non-SigV4 carrying scope → refused (would be silently ignored).
@@ -1079,6 +1082,7 @@ mod tests {
             sigv4: Some(sigv4),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         assert!(validate_binding_meta("local", "k", &stray).is_err());
     }

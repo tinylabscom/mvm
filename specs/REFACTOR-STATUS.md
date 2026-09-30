@@ -47,10 +47,10 @@ Last updated: 2026-09-29
     - [x] provider routes with credential headers (gitlab, gemini added)
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
-  - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+  - [x] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
     - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
-    - [ ] denial → policy draft selector (Grant / Skip)
-    - [ ] `mvmctl why` against a resolved policy
+    - [x] denial → policy draft selector (Grant / Skip)
+    - [x] `mvmctl why` against a resolved policy
   - [x] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
     - [x] groups, profiles (`extends`, include/exclude, `when`, overrides), merge rules, cycle/depth limits
     - [x] `mvmctl policy resolve|show|validate|diff|groups`, `run --policy`, `run --plan`, `mvm.toml [policy]`
@@ -102,7 +102,7 @@ Last updated: 2026-09-29
       W11 (ADR-004/030/018 amendments); `builder_boot_abi` in the signed
       image-set compatibility section. W9 (`mvm-setpriv` leaf) and W10 (per-role pair key) are in #3741.
       #3774 took W8's fingerprint, in-tree-bake and Stage 0 builder-build
-      items; ADR-030 item 4 is amended. Open: W7 (`mvm-images`), W8a, the
+      items; ADR-030 item 4 is amended. Open: W7 (`mvm-images`), the
       rest of W8 (pin the ABI 1 set, contract 4 → 5, drop `hostBinaries` and
       `MVM_HOST_BIN_DIR`), W12 (measurement).
 

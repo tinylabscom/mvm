@@ -265,6 +265,7 @@ serde = { version = "1", default-features = false, features = ["derive", "std"] 
 serde_json = { version = "1", default-features = false, features = ["std"] }
 thiserror = "2"
 toml = "0.8"
+toml_edit = "0.22"
 
 # CLI
 # `error-context` is what makes a parse error name the offending argument;

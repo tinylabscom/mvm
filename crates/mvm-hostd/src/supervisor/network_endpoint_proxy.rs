@@ -119,6 +119,23 @@ pub struct SubstitutionService {
     /// Every credential value substituted so far in this VM, so a response
     /// that echoes one back is scrubbed before it reaches the guest.
     reflection: reflection::ReflectionGuard,
+    /// OAuth response-token capture rules by secret name.
+    oauth_capture_by_secret: std::collections::BTreeMap<String, OAuthCaptureRule>,
+}
+
+#[derive(Debug, Clone)]
+struct OAuthCaptureRule {
+    response_access_token_pointer: String,
+}
+
+impl OAuthCaptureRule {
+    fn response_access_token_pointer(&self) -> &str {
+        if self.response_access_token_pointer.is_empty() {
+            "/access_token"
+        } else {
+            &self.response_access_token_pointer
+        }
+    }
 }
 
 #[cfg(test)]

@@ -197,8 +197,9 @@ Security-bearing gaps first, then the foundations the UX needs:
       (foreground `run` / `machine run` and `machine logs -f`; `run --json` carries
       `egress_denials`; `mvmctl explain` lists a finished run's refusals. Read from
       the chain the per-VM endpoint already writes, now attributed with `vm_name`)
-- [ ] denial → policy draft selector (Grant / Skip), never auto-granting
-- [ ] `mvmctl why --host | --path | --tool | --secret` against a resolved policy, `--json`
+- [x] denial → policy draft selector (Grant / Skip), never auto-granting
+- [x] `mvmctl why --host | --path | --tool | --secret` against a resolved policy, `--json`
+      — execution checklist: `specs/plans/2026-09-28-denial-feedback.md`
 
 ### PS-05 — Policy files, profiles, resolved manifest (#3715)
 - [x] TOML policy groups and profiles (`extends`, `groups.include/exclude`, `when`, overrides)

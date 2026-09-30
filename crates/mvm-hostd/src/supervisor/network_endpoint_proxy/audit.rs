@@ -1,10 +1,8 @@
 //! Payload-free audit emission for the substitution endpoint: which secret
 //! was substituted where, and what was redacted or refused, never the bytes.
 
-use mvm_contract::ir::AuthType;
-
 use super::SubstitutionService;
-use super::prepare::{PreparedFlow, destination_host};
+use super::prepare::{PreparedFlow, SubstitutedSecret, destination_host};
 use crate::supervisor::redactor::RedactionHits;
 use crate::supervisor::secret_audit::{
     ForwardOutcome, emit_rewrite_proof, emit_secret_flow_refused, emit_secret_forward_outcome,
@@ -130,15 +128,26 @@ impl SubstitutionService {
     /// fails the request. No-op when no recorder is wired.
     async fn audit_substitutions(
         &self,
-        substituted: &[(String, AuthType)],
+        substituted: &[SubstitutedSecret],
         destination: Option<&str>,
     ) {
         let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
             return;
         };
-        for (name, auth_type) in substituted {
-            if let Err(e) = emit_secret_substituted(recorder, name, dest, *auth_type).await {
-                tracing::warn!(error = %e, secret = %name, "secret.substituted audit emit failed");
+        for substituted_secret in substituted {
+            if let Err(e) = emit_secret_substituted(
+                recorder,
+                &substituted_secret.name,
+                dest,
+                substituted_secret.auth_type,
+            )
+            .await
+            {
+                tracing::warn!(
+                    error = %e,
+                    secret = %substituted_secret.name,
+                    "secret.substituted audit emit failed"
+                );
             }
         }
     }
