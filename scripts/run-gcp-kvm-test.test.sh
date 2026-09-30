@@ -80,7 +80,7 @@ runner="$repo_root/scripts/run-gcp-kvm-test.sh"
 grep -Fq -- "--exclude='._*'" "$runner"
 grep -Fq 'COPYFILE_DISABLE=1 tar' "$runner"
 remote_runner="$repo_root/scripts/run-gcp-kvm-test-remote.sh"
-grep -Fq 'regional Ubuntu mirror timed out' "$remote_runner"
+grep -Fq 'selecting the canonical Ubuntu archive mirror' "$remote_runner"
 grep -Fq 'archive.ubuntu.com/ubuntu' "$remote_runner"
 
 echo "disposable GCP KVM runner lifecycle tests passed"

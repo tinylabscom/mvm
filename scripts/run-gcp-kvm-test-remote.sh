@@ -52,16 +52,14 @@ apt_opts=(
   -o Acquire::http::Timeout=15
   -o Acquire::https::Timeout=15
 )
-if ! timeout 240 apt-get "${apt_opts[@]}" update; then
-  echo "warning: regional Ubuntu mirror timed out; retrying the canonical archive mirror" >&2
-  for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
-    [[ -f "$source_file" ]] || continue
-    sed -E -i \
-      's#https?://[[:alnum:].-]+\.gce\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
-      "$source_file"
-  done
-  timeout 240 apt-get "${apt_opts[@]}" update
-fi
+echo ">> selecting the canonical Ubuntu archive mirror"
+for source_file in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do
+  [[ -f "$source_file" ]] || continue
+  sed -E -i \
+    's#https?://[[:alnum:].-]+\.gce\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
+    "$source_file"
+done
+timeout 240 apt-get "${apt_opts[@]}" update
 timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends \
   build-essential ca-certificates clang cmake curl file git lld \
   libcap-ng-dev libssl-dev musl-tools pkg-config protobuf-compiler \
