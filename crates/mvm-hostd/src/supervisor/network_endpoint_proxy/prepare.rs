@@ -6,8 +6,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_contract::ir::{AuthType, InjectionMode};
 use mvm_contract::substitution::{
-    PlaceholderPosition, PrepareError, PreparedRequest, ProxyRequest, SubstitutionDriver,
-    contains_minted_placeholder, locate_placeholders, prepare_request as prepare_request_core,
+    LocatedPlaceholder, PlaceholderPosition, PrepareError, PreparedRequest, ProxyRequest,
+    SubstitutionDriver, contains_minted_placeholder, locate_placeholders,
+    prepare_request as prepare_request_core,
 };
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use url::Url;
@@ -39,7 +40,7 @@ pub enum ProxyError {
     #[error("refusing to forward: {0}")]
     Refused(String),
     #[error(
-        "a secret placeholder is not allowed in this request position ({})",
+        "a secret placeholder is substituted only where its binding says; refusing one found here ({})",
         .0.refusal_label()
     )]
     PlaceholderOutOfPosition(PlaceholderPosition),
@@ -163,8 +164,9 @@ const REASON_MALFORMED: &str = "malformed";
 pub(super) const UNPARSEABLE_DESTINATION: &str = "unparseable";
 /// The reason a request carrying a placeholder in its body is refused.
 pub(crate) const REASON_PLACEHOLDER_IN_BODY: &str = "placeholder_in_body";
-/// What the workload is told when it sends a placeholder outside a header.
-pub(crate) const PLACEHOLDER_OUTSIDE_HEADERS: &str = "a secret placeholder is substituted only in a request header; refusing a request that carries one in its body";
+/// What the workload is told when it sends a placeholder in a request body.
+pub(crate) const PLACEHOLDER_IN_BODY_MESSAGE: &str =
+    "a secret placeholder is never substituted in a request body; refusing the request";
 
 /// Finds a minted placeholder in a body that arrives in chunks, including one
 /// split across two chunks.
@@ -249,18 +251,17 @@ fn claim10_decision(
 /// `resolve_meta` touches no secret value.
 pub(crate) fn collect_substituted_meta(
     endpoint: &NetworkEndpoint<'_>,
-    url: &str,
-    headers: &[(String, String)],
+    placeholders: &[LocatedPlaceholder],
 ) -> Vec<SubstitutedSecret> {
-    locate_placeholders(url, headers)
-        .into_iter()
+    placeholders
+        .iter()
         .filter_map(|located| {
             endpoint
                 .resolve_meta(&located.placeholder)
                 .map(|(name, auth_type)| SubstitutedSecret {
                     name,
                     auth_type,
-                    placeholder: located.placeholder,
+                    placeholder: located.placeholder.clone(),
                 })
         })
         .collect()
@@ -293,8 +294,7 @@ impl SubstitutionService {
     /// not bound for is refused later without bothering anyone.
     async fn approve_secret_use(
         &self,
-        url: &str,
-        headers: &[(String, String)],
+        placeholders: &[LocatedPlaceholder],
         destination: Option<&str>,
     ) -> Result<(), &'static str> {
         if self.approval_required.is_empty() {
@@ -304,12 +304,13 @@ impl SubstitutionService {
             return Ok(());
         };
         let mut asked: Vec<&str> = Vec::new();
-        for located in locate_placeholders(url, headers) {
+        for located in placeholders {
             let Some(secret) = self.registry.resolve(&located.placeholder) else {
                 continue;
             };
             if !self.approval_required.contains(&secret.name)
                 || !mvm_contract::ir::host_is_bound(&secret.allowed_hosts, destination)
+                || located.position.mode().as_ref() != Some(&secret.inject)
                 || asked.contains(&secret.name.as_str())
             {
                 continue;
@@ -410,24 +411,21 @@ impl SubstitutionService {
                 });
             }
         }
-        // Request bodies have no injection mode. A placeholder there would go
-        // to the destination as the token itself, so refuse before forwarding.
-        let placeholder_elsewhere = if contains_minted_placeholder(&req.body) {
-            Some(REASON_PLACEHOLDER_IN_BODY)
-        } else {
-            None
-        };
-        if let Some(reason) = placeholder_elsewhere {
+        // No binding substitutes into a request body. URL placeholders are
+        // allowed only in the path/query positions their signed binding names;
+        // `prepare_request` validates those positions below.
+        if contains_minted_placeholder(&req.body) {
             self.audit_flow_refused(
                 destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
-                reason,
+                REASON_PLACEHOLDER_IN_BODY,
             )
             .await;
             return Err(WireResponse::Refused {
-                message: PLACEHOLDER_OUTSIDE_HEADERS.into(),
+                message: PLACEHOLDER_IN_BODY_MESSAGE.into(),
             });
         }
-        let substituted = collect_substituted_meta(&endpoint, &req.url, &req.headers);
+        let placeholders = locate_placeholders(&req.url, &req.headers);
+        let substituted = collect_substituted_meta(&endpoint, &placeholders);
         // Resolve the per-destination redaction action; clone so it outlives
         // `req` (which `redact_outbound` then `prepare_request` consume).
         let action = destination
@@ -459,14 +457,14 @@ impl SubstitutionService {
         }
         // Whether the request smuggled a host placeholder at all — decides if a
         // refusal is a claim-12 placeholder drop (audited) or a plain bad request.
-        let carried_placeholder = !locate_placeholders(&req.url, &req.headers).is_empty();
+        let carried_placeholder = !placeholders.is_empty();
         // Scrub undeclared secret-shaped / PII content before any
         // substitution. Runs first so a declared placeholder (not secret-shaped,
         // host-reserved) survives to be substituted, while an undeclared secret
         // the guest put in the body or a non-placeholder header is masked and
         // never reaches the wire.
         if let Err(reason) = self
-            .approve_secret_use(&req.url, &req.headers, destination.as_deref())
+            .approve_secret_use(&placeholders, destination.as_deref())
             .await
         {
             self.audit_flow_refused(
@@ -500,14 +498,20 @@ impl SubstitutionService {
         };
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
-            Err(e) => {
-                if let ProxyError::PlaceholderOutOfPosition(position) = &e {
-                    self.audit_flow_refused(
-                        destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
-                        position.refusal_label(),
-                    )
-                    .await;
+            Err(ProxyError::PlaceholderOutOfPosition(position)) => {
+                self.audit_flow_refused(
+                    destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
+                    position.refusal_label(),
+                )
+                .await;
+                if carried_placeholder {
+                    self.audit_placeholder_dropped(destination.as_deref()).await;
                 }
+                return Err(WireResponse::Refused {
+                    message: ProxyError::PlaceholderOutOfPosition(position).to_string(),
+                });
+            }
+            Err(e) => {
                 // A placeholder-bearing request refused before forwarding is a
                 // claim-12 drop — audit it (metadata only). A refusal with no
                 // placeholder is a plain bad request and not secret-relevant.
@@ -557,8 +561,9 @@ mod tests {
             ("authorization".into(), format!("Basic {basic}")),
             ("x-api-key".into(), token.to_string()),
         ];
+        let located = locate_placeholders(&url, &headers);
 
-        let substituted = collect_substituted_meta(&endpoint, &url, &headers);
+        let substituted = collect_substituted_meta(&endpoint, &located);
         assert_eq!(substituted.len(), 4);
         for secret in substituted {
             assert_eq!(secret.name, "openai");

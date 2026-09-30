@@ -4929,6 +4929,18 @@ Diagnosis: the schedule fired; its run failed. See `specs/plans/2026-09-28-secur
 - [x] Cover callback decoding, failures, scopes, socket lifecycle, and SDK
       facades with focused Rust, Python, and TypeScript tests.
 
+## 2026-09-29 runtime approval injection-mode follow-up — #3717
+
+- [x] Reproduce the missing approval prompt for a query-parameter secret in
+      the terminated-flow harness.
+- [x] Discover approval candidates through the contract's position-aware
+      parser, including URL paths and decoded Basic credentials, and require
+      the located position to match the signed binding.
+- [x] Keep request-body and out-of-position placeholders fail-closed before
+      forwarding.
+- [ ] Pass focused and full workspace tests, workspace Clippy/check, and gated
+      target compilation.
+
 ## 2026-09-28 Agent efficiency overhaul — Phases 1–10
 
 - [x] Quantified baseline from ~120 sampled transcripts across the three
