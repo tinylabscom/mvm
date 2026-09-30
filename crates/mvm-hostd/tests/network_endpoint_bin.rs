@@ -132,6 +132,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         .unwrap();
 
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![SecretBinding {
@@ -257,6 +258,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         .unwrap();
 
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![SecretBinding {
@@ -350,6 +352,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     let b64 = base64::engine::general_purpose::STANDARD;
 
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],
@@ -453,6 +456,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
     let guest_key = ed25519_dalek::SigningKey::from_bytes(&[19u8; 32]);
     let b64 = base64::engine::general_purpose::STANDARD;
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],
@@ -557,6 +561,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
     let sock = dir.path().join("network.sock");
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut cfg = serde_json::to_value(EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],

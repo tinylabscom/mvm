@@ -598,6 +598,10 @@ pub struct SubstitutionSpawnParams<'a> {
     /// `(cert_pem, key_pem)` of the per-VM intermediate for the `https`
     /// terminator; the key never reaches the guest. `None` ⇒ `http`-only.
     pub tls_intermediate: Option<(String, String)>,
+    /// Embed the per-VM telemetry collector in the endpoint process. Set by
+    /// the workload spawner from the host's provisioning decision; the
+    /// builder-VM and wasm endpoints never collect.
+    pub telemetry: bool,
     /// The VM's resolved claim-10 network policy. `Some` ⇒ the endpoint gates
     /// egress itself (the relay path — the run loop no longer gates); `None` ⇒
     /// ungated here (the legacy in-loop gate is the enforcer).
@@ -639,6 +643,7 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     redaction: Option<&'a mvm_core::policy::RedactionPolicy>,
     transport: Option<EndpointTransport>,
     tls_intermediate: Option<(String, String)>,
+    telemetry: bool,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     network_limits: Option<mvm_core::plan::NetworkLimits>,
     ingress: Option<&'a [IngressMapping]>,
@@ -653,6 +658,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            telemetry: false,
             vm_name: None,
             state_dir: None,
             tenant: None,
@@ -719,6 +725,15 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         tls_intermediate: impl Into<Option<(String, String)>>,
     ) -> Self {
         self.tls_intermediate = tls_intermediate.into();
+        self
+    }
+
+    /// Embed the per-VM telemetry collector in the endpoint process.
+    /// Defaults to off; only the workload spawner turns it on, from the
+    /// host's provisioning decision.
+    #[must_use]
+    pub fn telemetry(mut self, telemetry: bool) -> Self {
+        self.telemetry = telemetry;
         self
     }
 
@@ -806,6 +821,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
                 "transport",
             ))?,
             tls_intermediate: self.tls_intermediate,
+            telemetry: self.telemetry,
             network_policy: self.network_policy,
             network_limits: self.network_limits.ok_or(BuilderError::missing(
                 "SubstitutionSpawnParams",
@@ -887,6 +903,7 @@ pub fn endpoint_config_for_identity(
         },
         egress_proxy: None,
         session_marker: None,
+        telemetry: false,
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
@@ -927,6 +944,23 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         "network_limits": params.network_limits,
         "ingress": params.ingress,
     });
+    if params.telemetry {
+        // The embedded collector's inputs, derived here so the spawner's one
+        // provisioning decision fans out to every path the endpoint needs.
+        cfg["telemetry"] = serde_json::json!({
+            "state_dir": params.state_dir,
+            "telemetry_sock": mvm_core::config::vm_hvf_vsock_port_socket_at(
+                params.state_dir,
+                mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            ),
+            "signer_sock": params.state_dir.join(
+                super::broker_services_spawn::AUDIT_SIGNER_SOCK,
+            ),
+            "host_anchor_path": mvm_core::config::mvm_keys_dir()
+                .join(super::broker_services_spawn::HOST_SIGNER_PUB),
+            "records_byte_cap": super::telemetry_provisioning::DEFAULT_RECORDS_BYTE_CAP,
+        });
+    }
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
     }
@@ -1029,7 +1063,10 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     params.session_marker = Some(session_marker);
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
-        vm_name, state_dir, ..
+        telemetry: _,
+        vm_name,
+        state_dir,
+        ..
     } = params;
 
     let bin = resolve_network_endpoint_path()?;
@@ -2081,6 +2118,7 @@ mod tests {
         let sock = dir.join("vsock-5253.sock");
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let res = spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: "uds-xport-vm",
             state_dir: &dir,
             tenant: "tenant-x",
@@ -2144,6 +2182,7 @@ mod tests {
         }
         let redaction = mvm_core::policy::RedactionPolicy::default();
         spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: vm,
             state_dir: &dir,
             tenant: "tenant-x",
@@ -2218,6 +2257,7 @@ mod tests {
         let vm = "handshake-garbage-vm";
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let err = spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: vm,
             state_dir: &dir,
             tenant: "tenant-x",
@@ -2287,6 +2327,7 @@ mod tests {
 
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let result = spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: "rollback-vm",
             state_dir: &state_dir,
             tenant: "tenant-x",
@@ -2348,6 +2389,7 @@ mod tests {
         network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     ) -> SubstitutionSpawnParams<'a> {
         SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: "cfg-vm",
             state_dir: Path::new("/tmp"),
             tenant: "tenant-x",
