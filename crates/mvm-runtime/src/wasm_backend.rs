@@ -455,6 +455,7 @@ fn wasm_network_endpoint_spawn_params<'a>(
         tenant: &plan.tenant,
         secrets: &plan.secrets,
         redaction: &plan.redaction,
+        tools: None,
         transport: crate::network_endpoint_spawn::EndpointTransport::Uds {
             path: plan.socket_path.clone(),
         },

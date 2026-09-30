@@ -112,6 +112,8 @@ pub struct SubstitutionService {
     /// Answers `ask` decisions. [`crate::supervisor::runtime_approval::NoApprovalBackend`]
     /// until an approval backend is configured, which refuses every one.
     approver: Arc<dyn crate::supervisor::runtime_approval::RuntimeApprover>,
+    /// Per-VM tool decisions over the same approver and chain recorder.
+    tool_gate: Option<Arc<crate::supervisor::tool_decision::ToolDecisionGate>>,
     /// Secrets whose binding says `approve = "ask"`, by registry name. A
     /// request carrying one of their placeholders is held for an approval
     /// before anything is substituted.
