@@ -16,7 +16,7 @@ use super::SubstitutionService;
 use super::ai_budget::AiRequestMeta;
 use super::forward::{ForwardError, ForwardResponse, ForwardStreamResponse};
 use super::prepare::{
-    BodyPlaceholderScan, PLACEHOLDER_OUTSIDE_HEADERS, PreparedFlow, REASON_PLACEHOLDER_IN_BODY,
+    BodyPlaceholderScan, PLACEHOLDER_IN_BODY_MESSAGE, PreparedFlow, REASON_PLACEHOLDER_IN_BODY,
     UNPARSEABLE_DESTINATION, destination_host,
 };
 use super::reflection::{ScrubCounts, StreamingScrubber, body_is_readable, merge_counts};
@@ -371,7 +371,7 @@ impl SubstitutionService {
                             REASON_PLACEHOLDER_IN_BODY,
                         )
                         .await;
-                    let _ = sender.send(Err(PLACEHOLDER_OUTSIDE_HEADERS.into())).await;
+                    let _ = sender.send(Err(PLACEHOLDER_IN_BODY_MESSAGE.into())).await;
                     return Err(SensitiveDetectionError);
                 }
                 let (ready, chunk_hits) = match redactor.push(&service.redactor, &action, &chunk) {
