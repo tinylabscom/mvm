@@ -1,7 +1,7 @@
 # Repair the ADR-001 ledger drift left by the v1 restructure
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Status: NOT STARTED — this is the repair plan, not the repair.**
 

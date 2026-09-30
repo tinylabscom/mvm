@@ -8,8 +8,9 @@
 //! repo adds roughly three plans a day across many concurrent branches, so two
 //! authors routinely pick the same next-free number, and neither can see the
 //! other: the number a branch has claimed is invisible until its PR opens. 18
-//! numbers were already shared by two plans when this gate was written, and
-//! `specs/REFACTOR-STATUS.md` carries two entries under one number.
+//! numbers were already shared by two plans when this gate was written, and a
+//! former hand-maintained status dashboard carried two entries under one
+//! number.
 //!
 //! A helper that scanned open PRs before picking was considered and is not
 //! enough. Measured against the two collisions that prompted this: one rival

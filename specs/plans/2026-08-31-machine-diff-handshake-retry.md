@@ -1,7 +1,7 @@
 # machine diff handshake retry
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 ## Goal
 

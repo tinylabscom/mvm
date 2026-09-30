@@ -1,7 +1,7 @@
 # ADR-048 — MvmClient-backed local MCP server
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: `cargo test -p mvm-mcp`
 
 **Status:** Accepted
 **Date:** 2026-08-19

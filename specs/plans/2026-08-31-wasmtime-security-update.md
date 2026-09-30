@@ -1,7 +1,7 @@
 # Wasmtime security update
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 **Issues:** [#3018](https://github.com/tinylabscom/mvm/issues/3018),
 [#3020](https://github.com/tinylabscom/mvm/issues/3020)

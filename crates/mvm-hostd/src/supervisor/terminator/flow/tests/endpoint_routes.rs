@@ -363,7 +363,7 @@ fn secret_approval_covers_every_injection_mode() {
                 reason: "approval_denied",
             },
             auth_type,
-            inject.clone(),
+            inject,
         );
         let placeholder = &vm.placeholders[0];
         let (target, auth) = match inject {

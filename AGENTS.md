@@ -1,7 +1,7 @@
 # Agent Working Agreement
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: check-all
 
 This file is the short, always-applicable rule index loaded into every session.
 The fuller AI-assisted issue-to-PR playbook lives in
@@ -138,24 +138,19 @@ or re-open the topology decision.
 
 No task is complete without all of:
 
-1. **Tests first** — new/changed behavior covered before the task is marked
-   done: unit tests for logic, integration tests for CLI/cross-crate behavior.
-2. **All tests green** — `cargo test --workspace`, zero failures.
-3. **Zero clippy warnings** — `cargo clippy --workspace -- -D warnings`.
-4. **Compiling workspace** — `cargo check --workspace` clean. `--all-targets` is
-   not exhaustive: it skips `required-features` targets and cannot compile
-   `cfg(target_os = "linux")` files on macOS — including Linux-gated _test_
-   files — so any change to a shared type's shape (field, trait method, enum
-   variant) needs `just check::gated` before pushing.
-5. **Sprint spec** — `specs/SPRINT.md` reflects the new state (checked boxes,
-   status labels, test counts).
-6. **Plan checkboxes** — tick each finished task in the active plan under
-   `specs/plans/` (slug-named, e.g. `2026-08-15-<slug>.md`). The plan's boxes
-   are the source of truth for progress; never tick before tests are green.
-7. **Refactor rollup** — tick/strike the matching entry in
-   `specs/REFACTOR-STATUS.md` in the same change and bump its "Last updated".
-   Items 5–7 move together; if the rollup disagrees with a plan doc, the plan
-   wins — fix the rollup.
+1. **Tests first**: Write or update tests covering the new/changed behavior before marking a task done. Unit tests for logic, integration tests for CLI and cross-crate interactions.
+2. **All tests green**: Run `cargo test --workspace` and confirm zero failures. New tests must pass alongside all existing tests.
+3. **Zero clippy warnings/errors**: Run `cargo clippy --workspace -- -D warnings` and fix all findings before calling a feature done. Never suppress a clippy lint with `#[allow(...)]` — fix the underlying issue instead.
+4. **Compiling workspace**: Run `cargo check --workspace` (or full `cargo test`/`cargo build`) and fix any errors before you finish. Never leave the workspace in a non-compiling state. **`--all-targets` is not exhaustive**: it silently skips targets behind `required-features` (the `mvm-conformance` cucumber runner needs `--features bdd`), and on macOS it cannot compile `cfg(target_os = "linux")` files at all — including Linux-gated _test_ files, which `just check-linux` also misses because that recipe is `--lib` only. Changing the shape of a shared type (adding a struct field, a trait method, an enum variant) therefore needs `just check-gated` before pushing. Skipping it surfaces in CI as `check-nextest-groups` failing with "cargo nextest list failed", which names neither the file nor the field.
+5. **Keep the issue authoritative**: GitHub issues own work status, remaining
+   scope, dependencies, and acceptance criteria. Link the PR to its issue and
+   leave verification results in the PR. Do not create or update a shared
+   sprint, refactor, delivery, or progress dashboard in `specs/`.
+6. **Update active technical documents only when their substance changes**:
+   plans explain how unusually complex work should be implemented; they do not
+   mirror issue status. When implementation changes a durable decision, update
+   or supersede the owning ADR. Legacy plan checklists and instructions to
+   update retired status files are historical and are not completion gates.
 
 ## Test expectations
 
@@ -211,7 +206,7 @@ do not extend a foreground timeout and rerun the same command.
 
 ## Scoped feedback and worktree shell
 
-Debug with `just tests::scoped <crate> <filter>`: read the failure, make one
+Debug with `just test-scoped <crate> <filter>`: read the failure, make one
 change, and rerun that scoped test. Run the full workspace suite once before
 declaring the task done, not after each edit. Source `scripts/dev-env.sh` once
 per worktree shell and then use plain commands; do not repeat inline

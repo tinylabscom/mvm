@@ -940,10 +940,11 @@ Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
 - **Reuse first.** Search the workspace before adding a helper — duplicated logic
   is this repo's most common bug source. All `~/.mvm` paths go
   through `mvm-core::config` helpers, never inline `$HOME` joins.
-- **Specs discipline.** Design docs live in `specs/` (ADRs in `specs/adrs/`,
-  plans in `specs/plans/`). If your change lands a plan workstream, tick the
-  matching boxes in the plan and refresh the
-  [refactor status dashboard](specs/refactor/README.md) in the same PR. If it
+- **Specs discipline.** GitHub issues own work status and PRs own delivery
+  evidence; do not mirror either in shared files under `specs/`. Keep durable
+  decisions in `specs/adrs/`, stable behavioral contracts in
+  `specs/contracts/`, and technical design material only while it remains
+  useful to active work. See [the specs policy](specs/README.md). If a change
   touches a security claim, keep the conformance claim catalog in
   [ADR-001](specs/adrs/001-microvm-security-posture.md) in sync — the
   claim→witness mapping is machine-checked.

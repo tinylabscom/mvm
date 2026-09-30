@@ -1,7 +1,7 @@
 # `mvm-images` governance closeout
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: linked issues, pull requests, and repository history
 
 W2 of `specs/plans/2026-09-16-image-repository-extraction.md` establishes the
 image repository before it can publish. This record audits the repository at

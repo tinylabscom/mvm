@@ -1,7 +1,7 @@
 # #3717 follow-up: runtime approval across secret injection modes
 
 Backing: shipped-source
-Validation: check-sprint-append
+Validation: secret_approval_covers_every_injection_mode
 
 ## Problem
 

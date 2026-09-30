@@ -19,9 +19,8 @@ workflow (never commit on main, never work in another session's worktree),
 Definition of Done, reuse first, Rust best practices, no placeholders, no
 plan/PR/issue references in code comments, no assistant attribution in commits
 or PR bodies. The plan is
-`specs/plans/2026-09-16-image-repository-extraction.md`; the rollups are
-`specs/REFACTOR-STATUS.md` and `specs/SPRINT.md`, and each piece of work adds
-`specs/sprint/delivery/<issue>-<slug>.md`.
+`specs/plans/2026-09-16-image-repository-extraction.md`; the issues named below
+own current status, and each pull request records its delivery and validation.
 
 ## Where it stands
 
