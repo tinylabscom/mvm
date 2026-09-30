@@ -267,6 +267,22 @@ impl AssuranceSessionRequest {
         Ok(parsed)
     }
 
+    /// Encode the validated provider half for encrypted replay storage.
+    ///
+    /// The assembled AI envelope remains serialize-only and carries the
+    /// effective admission binding. This method deliberately serializes only
+    /// the request half so a replay can be admitted again under a fresh
+    /// binding instead of copying an old plan identity forward.
+    pub fn to_json(&self) -> Result<alloc::string::String, SessionInputError> {
+        self.validate()?;
+        let encoded = serde_json::to_string(self)
+            .map_err(|error| SessionInputError::Malformed(alloc::format!("{error}")))?;
+        if encoded.len() > MAX_SESSION_INPUT_BYTES {
+            return Err(SessionInputError::TooLarge);
+        }
+        Ok(encoded)
+    }
+
     /// Check every bound serde cannot express.
     pub fn validate(&self) -> Result<(), SessionInputError> {
         if self.schema != AI_SESSION_REQUEST_SCHEMA {
@@ -470,6 +486,12 @@ pub struct AiSessionInput {
     synthetic_inputs: SyntheticInputs,
     output_contract: OutputContract,
     mvm_binding: MvmBindingWire,
+    /// The validated provider half is retained only in host memory so an
+    /// adapter can encrypt it for replay. It is intentionally omitted from
+    /// the wire envelope; the counterparty receives the effective authority
+    /// and admitted binding above.
+    #[serde(skip)]
+    requested: RequestedAuthority,
 }
 
 impl AiSessionInput {
@@ -494,6 +516,7 @@ impl AiSessionInput {
             synthetic_inputs: request.synthetic_inputs,
             output_contract: request.output_contract,
             mvm_binding: MvmBindingWire::from(binding),
+            requested: request.authority,
         })
     }
 
@@ -519,6 +542,22 @@ impl AiSessionInput {
     #[must_use]
     pub fn source(&self) -> &SourceRef {
         &self.source
+    }
+
+    /// Reconstruct the validated request half for encrypted replay storage.
+    /// The caller must bind the returned request again before delivery; no
+    /// prior plan or effective authority is carried across this boundary.
+    #[must_use]
+    pub fn request(&self) -> AssuranceSessionRequest {
+        AssuranceSessionRequest {
+            schema: String::from(AI_SESSION_REQUEST_SCHEMA),
+            session: self.session.clone(),
+            source: self.source.clone(),
+            narrative: self.narrative.clone(),
+            authority: self.requested.clone(),
+            synthetic_inputs: self.synthetic_inputs.clone(),
+            output_contract: self.output_contract.clone(),
+        }
     }
 
     /// Encode the envelope for delivery.
