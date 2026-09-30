@@ -224,7 +224,8 @@ fn answer_path(resolved: &ResolvedPolicy, path: &Path) -> PolicyAnswer {
 }
 
 fn answer_tool(resolved: &ResolvedPolicy, value: &str) -> PolicyAnswer {
-    if resolved.policy.tools.deny.iter().any(|tool| tool == value) {
+    let tools = &resolved.policy.tools;
+    if tools.deny.iter().any(|tool| tool == value) {
         return PolicyAnswer::deny(
             "tool",
             value.to_string(),
@@ -233,13 +234,29 @@ fn answer_tool(resolved: &ResolvedPolicy, value: &str) -> PolicyAnswer {
             Some(format!("tools.deny = {value:?}")),
         );
     }
-    if resolved.policy.tools.allow.iter().any(|tool| tool == value) {
+    if tools.ask.iter().any(|tool| tool == value) {
+        return PolicyAnswer::allow(
+            "tool",
+            value.to_string(),
+            false,
+            "the resolved policy asks before every call of this tool; tool enforcement is not wired yet",
+            Some(format!("tools.ask = {value:?}")),
+        );
+    }
+    if tools.allow.iter().any(|tool| tool == value) {
+        let detail = tools.detail.get(value);
         return PolicyAnswer::allow(
             "tool",
             value.to_string(),
             false,
             "the resolved policy allows this tool, but tool enforcement is not wired yet",
-            Some(format!("tools.allow = {value:?}")),
+            Some(match detail {
+                None => format!("tools.allow = {value:?}"),
+                Some(detail) => format!(
+                    "tools.allow = {value:?}; detail argv={:?} routes={:?} secrets={:?}",
+                    detail.argv, detail.routes, detail.secrets
+                ),
+            }),
         );
     }
     PolicyAnswer::deny(
@@ -371,6 +388,7 @@ mod tests {
             tools: ToolsSection {
                 allow: vec!["read".into()],
                 deny: vec!["shell".into()],
+                ..ToolsSection::default()
             },
             secrets: SecretsSection {
                 bind: vec![SecretGrant {

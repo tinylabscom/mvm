@@ -91,7 +91,15 @@ deny  = ["DEBUG"]
 # readmit = ["LD_PRELOAD"]               # escape hatch: user-authored profiles only
 
 [tools]                                  # recorded, not yet enforced
-allow = ["git"]
+allow = ["git", "bash"]
+ask = ["git"]                            # every call asks the approver first
+deny = ["curl"]
+
+[tools.detail.bash]                      # per-tool restrictions
+argv = ["git *", "cargo *"]              # permitted command lines (glob)
+deny = ["rm *"]                          # refused whatever argv allows
+routes = ["github.com:443"]              # destinations this tool may reach
+secrets = ["GITHUB_TOKEN"]               # secrets bound to this tool
 
 [resources]                              # every value is a ceiling; the smallest wins
 cpu_millicores = 1500
@@ -163,6 +171,8 @@ These are the security contract of composition:
 | Rule | Effect |
 | --- | --- |
 | Allows are unioned | Hosts, secrets, shares, env names and tools from every layer add up. |
+| Tool `ask` sits between | `deny` beats `ask` beats `allow` for whole-tool decisions. |
+| Tool detail only narrows | A later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them; per-tool `deny` argv patterns union. |
 | Denies are unioned, and a deny beats an allow | Anything a deny covers is removed from the result, whichever layer allowed it. The note says which layer did what. |
 | Blocked network stays blocked | Once a layer sets `network.block = true`, every allowed host and route is dropped. A later `block = false` is an error, not a no-op. |
 | Required groups cannot be excluded | `groups.exclude` naming a required group that is already included is an error. |
@@ -266,7 +276,8 @@ missing one.
 
 ## Not yet
 
-- `[tools]` is parsed, merged and shown, but nothing enforces it.
+- `[tools]` is parsed, merged, shown and answerable through `mvmctl why --tool`,
+  but nothing enforces it at runtime yet.
 - Pack profiles (`namespace/name`) are refused.
 - Endpoint routes from a policy are refused on a persistent machine
   (`machine run --name`), the same as `--allow-endpoint`: they would not be
