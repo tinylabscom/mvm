@@ -378,6 +378,8 @@ fn capture_vm_full_for_running_vm(
         grants: admitted_grants_for(args.name)?,
         // Frozen in the same pause window, so `vm diff --from/--to` can
         // compare what the workspace held at each checkpoint.
+        parent: None,
+        session: None,
         workspace_volumes: super::workspace::capture_set(&super::workspace::workspaces_of(
             args.name,
         )?),
