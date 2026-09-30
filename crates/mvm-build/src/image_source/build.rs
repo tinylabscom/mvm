@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ImageSetRole, WorkloadImageProfile};
+use mvm_core::image_set::{BuilderBootAbi, ImageSetRole, WorkloadImageProfile};
 use mvm_core::kernel_format::KernelFormat;
 use thiserror::Error;
 
@@ -39,6 +39,11 @@ use crate::host_payload_manifest::host_binary_names;
 
 /// The image checkout's host-binary build script, relative to its root.
 pub const HOST_BINARIES_SCRIPT: &str = "scripts/build-host-binaries.sh";
+/// The file declaring the boot ABI the checkout builds its builder image to,
+/// relative to the checkout root. Present since the ABI was declared; an
+/// absent file means a checkout from before it, which builds the legacy
+/// (host-binaries-baked) image.
+pub const BUILDER_BOOT_ABI_FILE: &str = "images/builder-vm/boot-abi.nix";
 /// The image checkout's local-manifest emitter, relative to its root.
 pub const EMIT_MANIFEST_SCRIPT: &str = "scripts/emit-local-manifest.py";
 
@@ -367,6 +372,58 @@ pub fn stage_work_tree(
         }
     }
     Ok(())
+}
+
+/// The boot ABI the checkout's builder image is built to, read from
+/// `images/builder-vm/boot-abi.nix` — the same file the image build, the
+/// release assembly, and the manifest emitter read, so every consumer agrees.
+///
+/// A checkout predating the file builds the legacy image: host binaries baked
+/// in from `MVM_HOST_BIN_DIR`. That is also exactly the checkout shape that
+/// still carries `scripts/build-host-binaries.sh`, so an absent marker never
+/// routes a build at the deleted script.
+pub fn checkout_builder_boot_abi(
+    images_root: &Path,
+) -> Result<BuilderBootAbi, LocalImageBuildError> {
+    let path = images_root.join(BUILDER_BOOT_ABI_FILE);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(BuilderBootAbi::LEGACY);
+    };
+    let values: Vec<u32> = text
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            trimmed
+                .chars()
+                .all(|c| c.is_ascii_digit())
+                .then_some(trimmed)?
+                .parse()
+                .ok()
+        })
+        .collect();
+    match values.as_slice() {
+        [one] => Ok(BuilderBootAbi::new(*one)),
+        _ => Err(LocalImageBuildError::Tool {
+            what: format!("reading the builder boot ABI at {}", path.display()),
+            detail: format!(
+                "the file must hold exactly one bare integer, found {}",
+                values.len()
+            ),
+        }),
+    }
+}
+
+/// Whether a pair build of `target` must build the builder's host binaries
+/// from the checkouts and stage them into `/work`. Only the legacy (ABI 0)
+/// image bakes them in; from ABI 1 on they arrive at boot in mvmctl's own
+/// initramfs payload, and the images checkout no longer carries the build
+/// script.
+fn target_stages_host_binaries(
+    checkout: &LocalImageCheckout,
+    contract: &TargetContract,
+) -> Result<bool, LocalImageBuildError> {
+    Ok(contract.needs_host_binaries
+        && checkout_builder_boot_abi(checkout.root())? == BuilderBootAbi::LEGACY)
 }
 
 /// Build the builder image's host binaries from `mvm_root` with the image
@@ -746,7 +803,7 @@ pub fn build_target_for_pair(
         what: "preparing the builder VM image".to_string(),
         detail,
     })?;
-    let host_bins = if contract.needs_host_binaries {
+    let host_bins = if target_stages_host_binaries(checkout, contract)? {
         Some(build_host_binaries(checkout.root(), mvm_root, arch)?)
     } else {
         None
@@ -1159,6 +1216,79 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = move_emitted_set(&tmp.path().join("nope"), tmp.path()).unwrap_err();
         assert!(err.to_string().contains("listing"), "{err}");
+    }
+
+    #[test]
+    fn boot_abi_reads_the_one_bare_integer_through_comments() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abi_file = tmp.path().join(BUILDER_BOOT_ABI_FILE);
+        std::fs::create_dir_all(abi_file.parent().unwrap()).unwrap();
+
+        // A checkout predating the marker file builds the legacy image.
+        assert_eq!(
+            checkout_builder_boot_abi(tmp.path()).unwrap(),
+            BuilderBootAbi::LEGACY
+        );
+
+        std::fs::write(&abi_file, "1\n").unwrap();
+        assert_eq!(
+            checkout_builder_boot_abi(tmp.path()).unwrap(),
+            BuilderBootAbi::PAYLOAD
+        );
+
+        // The shipped file carries explanatory comments around its integer.
+        let commented = "# The builder boot ABI this repository builds to.\n\
+                         # 0 — host binaries baked in.\n\
+                         # 1 — they arrive in the boot payload.\n\
+                         0\n";
+        std::fs::write(&abi_file, commented).unwrap();
+        assert_eq!(
+            checkout_builder_boot_abi(tmp.path()).unwrap(),
+            BuilderBootAbi::LEGACY
+        );
+    }
+
+    #[test]
+    fn boot_abi_with_no_single_integer_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let abi_file = tmp.path().join(BUILDER_BOOT_ABI_FILE);
+        std::fs::create_dir_all(abi_file.parent().unwrap()).unwrap();
+
+        std::fs::write(&abi_file, "# only comments\n").unwrap();
+        let err = checkout_builder_boot_abi(tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly one bare integer"),
+            "{err}"
+        );
+
+        std::fs::write(&abi_file, "1\n2\n").unwrap();
+        let err = checkout_builder_boot_abi(tmp.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("exactly one bare integer"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn abi_one_checkouts_do_not_stage_host_binaries() {
+        // The pair build's staging decision is `needs_host_binaries && ABI ==
+        // LEGACY`. The builder-vm contract still declares host binaries (an
+        // ABI-0 checkout needs them); the checkout's ABI is what turns the
+        // staging off, so a v0.2.3+ checkout never reaches the script the
+        // repository no longer carries.
+        let tmp = tempfile::tempdir().unwrap();
+        let abi_file = tmp.path().join(BUILDER_BOOT_ABI_FILE);
+        std::fs::create_dir_all(abi_file.parent().unwrap()).unwrap();
+        std::fs::write(&abi_file, "1\n").unwrap();
+        assert_ne!(
+            checkout_builder_boot_abi(tmp.path()).unwrap(),
+            BuilderBootAbi::LEGACY
+        );
+        assert!(
+            contract_for(&target(ImageBuildRole::BuilderVm, "default"))
+                .unwrap()
+                .needs_host_binaries
+        );
     }
 
     #[test]
