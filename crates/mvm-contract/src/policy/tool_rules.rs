@@ -76,25 +76,27 @@ impl ToolRules {
         if self.deny.iter().any(|listed| listed == tool) {
             return ToolDecision::Deny("tools.deny names this tool");
         }
-        if self.ask.iter().any(|listed| listed == tool) {
-            return ToolDecision::Ask;
-        }
-        if !self.allow.iter().any(|listed| listed == tool) {
+        let asks = self.ask.iter().any(|listed| listed == tool);
+        if !asks && !self.allow.iter().any(|listed| listed == tool) {
             return ToolDecision::Deny("tools.allow does not name this tool");
         }
-        let Some(argv) = argv else {
-            return ToolDecision::Allow;
-        };
-        let Some(detail) = self.detail.get(tool) else {
-            return ToolDecision::Allow;
-        };
-        if detail.deny.iter().any(|pattern| glob_match(pattern, argv)) {
-            return ToolDecision::Deny("an argv pattern this tool denies matches the command line");
+        if let (Some(argv), Some(detail)) = (argv, self.detail.get(tool)) {
+            if detail.deny.iter().any(|pattern| glob_match(pattern, argv)) {
+                return ToolDecision::Deny(
+                    "an argv pattern this tool denies matches the command line",
+                );
+            }
+            if !detail.argv.is_empty()
+                && !detail.argv.iter().any(|pattern| glob_match(pattern, argv))
+            {
+                return ToolDecision::Deny("no permitted argv pattern matches the command line");
+            }
         }
-        if !detail.argv.is_empty() && !detail.argv.iter().any(|pattern| glob_match(pattern, argv)) {
-            return ToolDecision::Deny("no permitted argv pattern matches the command line");
+        if asks {
+            ToolDecision::Ask
+        } else {
+            ToolDecision::Allow
         }
-        ToolDecision::Allow
     }
 }
 
@@ -237,6 +239,21 @@ mod decide_tests {
     fn ask_tools_ask_with_or_without_argv() {
         assert_eq!(rules().decide("write", None), ToolDecision::Ask);
         assert_eq!(rules().decide("write", Some("write x")), ToolDecision::Ask);
+    }
+
+    #[test]
+    fn ask_cannot_override_argv_restrictions() {
+        let mut rules = rules();
+        rules.ask.push("bash".to_string());
+        assert_eq!(rules.decide("bash", Some("git status")), ToolDecision::Ask);
+        assert_eq!(
+            rules.decide("bash", Some("git push --force")),
+            ToolDecision::Deny("an argv pattern this tool denies matches the command line")
+        );
+        assert_eq!(
+            rules.decide("bash", Some("rm -rf /")),
+            ToolDecision::Deny("no permitted argv pattern matches the command line")
+        );
     }
 
     #[test]
