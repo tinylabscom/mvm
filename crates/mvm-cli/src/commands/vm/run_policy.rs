@@ -268,7 +268,16 @@ mod tests {
 
     #[test]
     fn a_pack_reference_without_an_installed_pack_points_at_pull() {
-        let (_env, _home) = isolated();
+        let (_env, home) = isolated();
+        // An empty-but-present trust policy keeps the refusal deterministic:
+        // the lookup reaches the lockfile rather than policy bootstrap.
+        let registry_state = home.path().join("registry");
+        std::fs::create_dir_all(&registry_state).unwrap();
+        std::fs::write(
+            registry_state.join("publishers.toml"),
+            b"schema_version = 1\npublishers = []\n",
+        )
+        .unwrap();
         let mut args = RunArgs {
             policy: vec!["acme/agent".into()],
             ..RunArgs::default()

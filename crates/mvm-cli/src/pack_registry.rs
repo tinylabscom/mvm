@@ -118,6 +118,12 @@ pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Res
     if versions.is_empty() {
         bail!("pack {} publishes no versions", entry.coordinate());
     }
+    let released = |spelling: &str| {
+        mvm_core::release_version::ReleaseVersion::parse(
+            spelling,
+            mvm_core::release_version::VersionSyntax::Strict,
+        )
+    };
     let spelling = match requested.version() {
         Some(version) => {
             let spelling = version.to_string();
@@ -132,9 +138,10 @@ pub fn resolve_version(entry: &PackIndexEntry, requested: &PackReference) -> Res
         }
         None => versions
             .iter()
-            .max_by_key(|version| version.parse::<PackReference>().ok())
-            .cloned()
-            .expect("versions is non-empty"),
+            .filter_map(|spelling| released(spelling).map(|version| (version, spelling)))
+            .max_by(|(a, _), (b, _)| a.cmp(b))
+            .map(|(_, spelling)| spelling.clone())
+            .expect("PackVersion already validated every published version as strict semver"),
     };
     format!("{}@{spelling}", entry.coordinate())
         .parse()

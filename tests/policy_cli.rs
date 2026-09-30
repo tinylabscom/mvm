@@ -169,11 +169,20 @@ fn a_cycle_and_a_pack_reference_are_refused() {
     let out = host.mvmctl(&["policy", "show", "a"]);
     assert!(text(&out.stderr).contains("cycle"), "{}", text(&out.stderr));
 
+    // An empty-but-present trust policy keeps the refusal deterministic.
+    let registry_state = host.home.path().join("registry");
+    std::fs::create_dir_all(&registry_state).unwrap();
+    std::fs::write(
+        registry_state.join("publishers.toml"),
+        b"schema_version = 1\npublishers = []\n",
+    )
+    .unwrap();
     let out = host.mvmctl(&["policy", "show", "acme/agent"]);
+    let shown = text(&out.stderr);
+    assert!(shown.contains("acme/agent"), "{shown}");
     assert!(
-        text(&out.stderr).contains("packs are not yet supported"),
-        "{}",
-        text(&out.stderr)
+        shown.contains("mvmctl pull") || shown.contains("publisher trust policy"),
+        "{shown}"
     );
 }
 

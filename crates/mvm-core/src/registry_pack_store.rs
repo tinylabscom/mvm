@@ -192,6 +192,13 @@ pub(crate) fn adopt_install_and_pin_with(
     )?;
     let lock = upsert_pack_pin(lock, pin)?;
     save_pack_lockfile(lock_path, &lock)?;
+    crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackPin)
+        .detail(format!(
+            "pack={} manifest_sha256={}",
+            verified.manifest().reference,
+            verified.manifest_sha256().as_str()
+        ))
+        .emit();
     Ok(installed)
 }
 
@@ -294,7 +301,9 @@ pub fn remove_installed_registry_pack(
     let Some(pin) = pin else {
         return Ok(false);
     };
-    let entry = cache_root.join(pin.manifest_sha256().as_str());
+    let pin_reference = pin.reference().to_string();
+    let pin_digest = pin.manifest_sha256().as_str().to_string();
+    let entry = cache_root.join(&pin_digest);
     if std::fs::symlink_metadata(&entry).is_ok() {
         let metadata = std::fs::symlink_metadata(&entry).map_err(io_at(&entry))?;
         if metadata.is_dir() && !metadata.file_type().is_symlink() {
@@ -306,6 +315,9 @@ pub fn remove_installed_registry_pack(
     let (lock, removed) = remove_pack_pin(lock, requested);
     if removed {
         save_pack_lockfile(lock_path, &lock)?;
+        crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRemove)
+            .detail(format!("pack={pin_reference} manifest_sha256={pin_digest}"))
+            .emit();
     }
     Ok(true)
 }

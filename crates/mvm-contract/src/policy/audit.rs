@@ -139,6 +139,15 @@ pub enum LocalAuditKind {
     /// the reason. Plain allows are not audited (the catalog is static and
     /// the call then proceeds to the backend's own audit trail).
     ToolGateDecision,
+    /// `mvmctl pull` verified and installed a signed registry pack and
+    /// recorded (or replaced) its lockfile pin. Pinning is security state:
+    /// it decides what a pack reference resolves to, so the mutation is
+    /// recorded with the coordinate and manifest digest.
+    RegistryPackPin,
+    /// `mvmctl pack registry rm` removed a registry pack's cache entry and
+    /// lockfile pin. Detail carries the coordinate and manifest digest the
+    /// pin had recorded.
+    RegistryPackRemove,
     /// `mvmctl cleanup` ran a host-side tier sweep
     /// (`--cache` / `--state` / `--nuclear`). The detail field carries
     /// the tier name, byte count freed, and number of top-level paths
@@ -1243,6 +1252,8 @@ mod tests {
             LocalAuditKind::CachePrune,
             LocalAuditKind::SlotRemove,
             LocalAuditKind::SlotPrune,
+            LocalAuditKind::RegistryPackPin,
+            LocalAuditKind::RegistryPackRemove,
             // Session lifecycle.
             LocalAuditKind::SessionStart,
             LocalAuditKind::SessionAttach,
