@@ -254,6 +254,23 @@ the run by its machine name and bounded by the run's own start and exit:
 mvmctl explain agent-sandbox
 ```
 
+When a foreground run ends with grantable denials and an operator has a
+controlling terminal, mvm opens a Grant / Skip review. Grant only stages the
+destination: mvm then shows the exact `[network].allow_hosts` additions and
+asks separately before atomically updating the project's `mvm.toml`. Skipping,
+cancelling, a missing terminal, and every non-grantable refusal leave the file
+unchanged. Metadata, loopback, link-local, SSH and operational failures are
+never offered as grants.
+
+Detached and background work uses the durable audit record instead:
+
+```sh
+mvmctl explain agent-sandbox --review
+```
+
+The audit chain must verify before the review opens. Use `--project DIR` when
+the policy file is not in the current project.
+
 This is observation only. The per-VM network endpoint is still the only place
 an egress decision is made; the notices read what it recorded and change
 nothing it decides.

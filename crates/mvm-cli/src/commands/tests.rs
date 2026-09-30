@@ -5558,6 +5558,7 @@ fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
         "doctor",
         "bootstrap",
         "explain",
+        "why",
         "prepare",
         "watch",
         "pack",
@@ -5597,6 +5598,63 @@ fn top_level_help_shows_user_facing_groups_and_hides_dev_tooling() {
             "dev-tooling command `{hidden}` must be hidden from top-level help but was found"
         );
     }
+}
+
+#[test]
+fn why_requires_exactly_one_subject_and_parses_policy_sources() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "why",
+        "--host",
+        "api.example.com:443",
+        "--profile",
+        "agent-apis",
+        "--json",
+    ])
+    .expect("why host against a profile must parse");
+    let Commands::Why(args) = cli.command else {
+        panic!("expected why command")
+    };
+    assert_eq!(args.host.as_deref(), Some("api.example.com:443"));
+    assert_eq!(args.profile.as_deref(), Some("agent-apis"));
+    assert!(args.json);
+
+    assert!(Cli::try_parse_from(["mvmctl", "why"]).is_err());
+    assert!(
+        Cli::try_parse_from(["mvmctl", "why", "--host", "a.test", "--secret", "TOKEN"]).is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "why",
+            "--tool",
+            "shell",
+            "--profile",
+            "p",
+            "--plan",
+            "p.json"
+        ])
+        .is_err()
+    );
+}
+
+#[test]
+fn explain_review_and_project_parse_together_but_json_conflicts() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "explain",
+        "run-1",
+        "--review",
+        "--project",
+        "/tmp/project",
+    ])
+    .expect("after-the-fact denial review must parse");
+    let Commands::Explain(args) = cli.command else {
+        panic!("expected explain command")
+    };
+    assert!(args.review);
+    assert_eq!(args.project.as_deref(), Some(Path::new("/tmp/project")));
+    assert!(Cli::try_parse_from(["mvmctl", "explain", "run-1", "--review", "--json"]).is_err());
 }
 
 #[test]

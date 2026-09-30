@@ -27,6 +27,27 @@ use serde::{Deserialize, Serialize};
 use crate::config::mvm_home_strict;
 use crate::crypto::keystore::validate_shell_id;
 
+/// Non-secret OAuth metadata for a secret binding.
+///
+/// This metadata is enough for host-driven OAuth exchange/refresh logic while
+/// keeping the real token set and client secret in the secret value store.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OAuthBindingMeta {
+    /// OAuth authorization endpoint.
+    pub authorization_url: String,
+    /// OAuth token endpoint.
+    pub token_url: String,
+    /// Public OAuth client id.
+    pub client_id: String,
+    /// Scopes requested for this binding.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    /// JSON pointer to the response field that carries the access token.
+    /// Defaults to `/access_token` when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_access_token_pointer: Option<String>,
+}
+
 /// Per-(tenant, name) binding metadata. No secret bytes — safe to print.
 // allow(secret-debug): metadata only — auth_type + allowed_hosts. The
 // secret value lives in `SecretStore`, never here; Debug prints the
@@ -57,6 +78,10 @@ pub struct SecretBindingMeta {
     /// Host-side policy, like `allowed_hosts`.
     #[serde(default, skip_serializing_if = "SecretApproval::is_never")]
     pub approve: SecretApproval,
+    /// Optional OAuth metadata for host-side token acquisition/refresh and
+    /// response-token placeholder capture.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<OAuthBindingMeta>,
 }
 
 /// Whether a secret's use needs a run-time approval.
@@ -250,6 +275,7 @@ mod tests {
             sigv4: None,
             provider: None,
             approve: Default::default(),
+            oauth: None,
         }
     }
 
@@ -267,6 +293,7 @@ mod tests {
             }),
             provider: None,
             approve: Default::default(),
+            oauth: None,
         };
         store.put("local", "aws", &m).unwrap();
         assert_eq!(store.get("local", "aws").unwrap(), Some(m));
@@ -357,6 +384,7 @@ mod tests {
             sigv4: None,
             provider: None,
             approve: Default::default(),
+            oauth: None,
         }
     }
 

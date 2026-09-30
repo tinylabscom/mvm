@@ -23,6 +23,7 @@ pub mod manifest;
 pub mod merge;
 pub mod model;
 pub mod preview;
+pub mod query;
 pub mod resolve;
 pub mod source;
 

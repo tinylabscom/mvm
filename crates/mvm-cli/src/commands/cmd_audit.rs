@@ -155,6 +155,7 @@ impl Commands {
     pub(super) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
             Commands::Run(a) => a.run.json,
+            Commands::Why(a) => a.json,
             Commands::SdkNoVm(_) => true,
             Commands::Machine(a) => match &a.action {
                 // Folded advanced ops delegate to their own check.
@@ -238,6 +239,7 @@ impl Commands {
             #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(_) => "__builder-shell-job",
             Commands::Explain(_) => "explain",
+            Commands::Why(_) => "why",
             Commands::Bench(_) => "bench",
             Commands::Plugin(_) => "plugin",
             Commands::Completions(_) => "completions",
