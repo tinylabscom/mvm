@@ -79,6 +79,42 @@ cd ../.worktrees/mvm-example
   one-off `mvmctl` calls); it redirects `MVM_HOME`, `CARGO_TARGET_DIR`, and
   `CARGO_HOME` under the worktree.
 
+## Disposable remote KVM lab for issue #3655
+
+The CVE-2026-80521 containment witness needs a hardware profile that the shared
+builder cannot guarantee. From the issue worktree, first confirm the selected
+account, project, zone, machine, source worktree, and create command without
+changing cloud state:
+
+```bash
+just lab::cve-3655-gcp --dry-run
+```
+
+After the operator explicitly authorizes the billable VM and upload of the
+filtered checkout for that run, start the complete lifecycle with:
+
+```bash
+just lab::cve-3655-gcp
+```
+
+This is the normal agent path: the controller creates an Intel C3 Spot VM with
+nested KVM, waits for SSH readiness, transfers the filtered current worktree,
+runs the remote bootstrap and destructive witness, downloads the evidence
+archive to the printed local `/tmp` directory, and deletes the instance even
+when the witness fails. The remote execution details are owned by
+`scripts/run-cve-2026-80521-gcp-remote.sh`; agents should not reproduce those
+steps manually.
+
+Interactive access is diagnostic-only and requires an explicit operator
+request. Run `just lab::cve-3655-gcp --keep-instance`; after the witness, the
+controller prints fully populated `gcloud compute ssh` and
+`gcloud compute instances delete` commands for that instance. Use the printed
+SSH command for the requested diagnosis, then run the printed delete command
+immediately and verify the instance no longer exists. If ordinary automatic
+cleanup fails, the controller prints the same deletion command; cleanup is
+part of the task, not optional follow-up. This specialized host does not relax
+the normal builder-VM boundary for any other work.
+
 ## Graft and Serena: division of responsibility
 
 Both tools answer "where does this live and who calls it", but at different

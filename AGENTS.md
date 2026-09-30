@@ -50,6 +50,31 @@ Linux (vsock, jailer/seccomp, dm-verity, network namespaces, `/dev/kvm`,
 run inside the builder VM. `mvmctl` via `cargo run` (`build`, `up`, `down`,
 `logs`, `ls`) runs inside the builder VM (explicit `wasm` target excepted).
 
+**Disposable CVE-2026-80521 lab host.** Issue #3655's destructive witness has
+one repository-owned remote lifecycle; run it from that issue's worktree:
+
+```bash
+just lab::cve-3655-gcp --dry-run
+just lab::cve-3655-gcp
+```
+
+The real command uses the active `gcloud` account and project to create an
+Intel C3 Spot VM with nested KVM, upload a filtered copy of the current
+worktree, run only the destructive witness, download an evidence archive under
+the printed `/tmp` path, and delete the outer VM on success or failure. Before
+the real invocation, obtain explicit operator authorization for both the
+billable VM and transfer of the filtered checkout unless that exact run was
+already authorized. Do not substitute an ad-hoc cloud VM or use this host for
+ordinary builds, evals, or runtime work; the builder-VM boundary above remains
+the default.
+
+Do not pass `--keep-instance` unless the operator explicitly requests an
+interactive diagnostic host. When requested, the runner prints exact
+`gcloud compute ssh` and `gcloud compute instances delete` commands. Run the
+printed delete command as soon as diagnosis ends and verify the instance is
+gone. If automatic cleanup reports a failure, use that same printed delete
+command immediately; never leave a retained or uncertain instance billable.
+
 ## Git: one operator, one main
 
 **Git runs only from the main `mvm/` checkout** — never from inside a worktree
