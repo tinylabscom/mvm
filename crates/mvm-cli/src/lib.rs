@@ -27,6 +27,7 @@ pub mod template_registry;
 pub mod ts_runner;
 pub mod ui;
 pub mod update;
+pub(crate) mod update_notice;
 pub mod watch;
 pub(crate) use mvm_build::workspace_graph;
 

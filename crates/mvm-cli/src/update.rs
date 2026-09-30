@@ -16,7 +16,7 @@ const RELEASE_HOST_BINS: &[&str] = &[
 ];
 
 /// Current version compiled into the binary (from Cargo.toml).
-fn current_version() -> &'static str {
+pub(crate) fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
@@ -66,7 +66,7 @@ fn github_api_base() -> String {
 }
 
 /// Query the GitHub releases API for the latest release tag name.
-fn fetch_latest_version() -> Result<String> {
+pub(crate) fn fetch_latest_version() -> Result<String> {
     let url = format!(
         "{}/repos/{}/releases/latest",
         github_api_base(),
