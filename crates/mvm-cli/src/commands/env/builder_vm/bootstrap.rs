@@ -71,10 +71,16 @@ fn decide_builder_image_acquisition(
     }
     if let Some(BootImageAcquisition::Build) = env_override {
         if !allow_local_build {
-            return Err(mvm_build::image_source::ImageConstructionRefused::new("the builder VM image").into());
+            return Err(mvm_build::image_source::ImageConstructionRefused::new(
+                "the builder VM image",
+            )
+            .into());
         }
         if !has_local_checkout {
-            return Err(mvm_build::image_source::ImageConstructionRefused::new("the builder VM image").into());
+            return Err(mvm_build::image_source::ImageConstructionRefused::new(
+                "the builder VM image",
+            )
+            .into());
         }
         return Ok(BootImageAcquisition::Build);
     }
@@ -103,32 +109,20 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
             Ok(mvm_build::boot_image_select::BootImageAcquisition::Build) => {
                 // Safe to unwrap: the decision only returns Build when a
                 // checkout exists and was permitted.
-                return bootstrap_builder_vm_image_from_local_pair(&checkout.expect("checkout present"));
+                bootstrap_builder_vm_image_from_local_pair(&checkout.expect("checkout present"))?;
             }
             Ok(mvm_build::boot_image_select::BootImageAcquisition::Fetch) => {
-                return bootstrap_tool_builder_vm_image();
+                bootstrap_tool_builder_vm_image()?;
             }
             Err(e) => return Err(e),
         }
+        Ok(())
     }
 
     #[cfg(not(feature = "builder-vm"))]
     bootstrap_tool_builder_vm_image()
 }
 
-/// Without a checkout there is nothing to build the builder image from, so a
-/// caller that forces a local build is refused rather than handed the fetched
-/// image it asked not to have.
-fn refuse_a_local_builder_build(
-    acquisition: Option<mvm_build::boot_image_select::BootImageAcquisition>,
-) -> Result<()> {
-    if acquisition == Some(mvm_build::boot_image_select::BootImageAcquisition::Build) {
-        return Err(
-            mvm_build::image_source::ImageConstructionRefused::new("the builder VM image").into(),
-        );
-    }
-    Ok(())
-}
 
 /// The local image checkout the selector names, if that is the selected
 /// source. A configured path that does not resolve is an error here, never a
@@ -337,24 +331,29 @@ mod decide_tests {
 
     #[test]
     fn env_override_fetch_wins() {
-        let got = decide_builder_image_acquisition(false, Some(BootImageAcquisition::Fetch), true).unwrap();
+        let got = decide_builder_image_acquisition(false, Some(BootImageAcquisition::Fetch), true)
+            .unwrap();
         assert_eq!(got, BootImageAcquisition::Fetch);
-        let got2 = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Fetch), true).unwrap();
+        let got2 = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Fetch), true)
+            .unwrap();
         assert_eq!(got2, BootImageAcquisition::Fetch);
     }
 
     #[test]
     fn env_override_build_requires_allow_and_checkout() {
         // Not allowed -> refused
-        let err = decide_builder_image_acquisition(false, Some(BootImageAcquisition::Build), true).unwrap_err();
+        let err = decide_builder_image_acquisition(false, Some(BootImageAcquisition::Build), true)
+            .unwrap_err();
         assert!(err.to_string().contains("the builder VM image"));
 
         // Allowed but no checkout -> refused
-        let err2 = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Build), false).unwrap_err();
+        let err2 = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Build), false)
+            .unwrap_err();
         assert!(err2.to_string().contains("the builder VM image"));
 
         // Allowed and checkout present -> build
-        let ok = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Build), true).unwrap();
+        let ok = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Build), true)
+            .unwrap();
         assert_eq!(ok, BootImageAcquisition::Build);
     }
 }
