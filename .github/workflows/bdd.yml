@@ -48,7 +48,7 @@ jobs:
 
       # Restore-only, through the shared action, for the reason its own
       # comment gives: the repo cache is capped at 10 GB with LRU eviction, so
-      # a lane that writes a whole `target` directory from every pull-request
+      # a lane that writes a whole `target` directory from every merge-group
       # and merge-queue ref evicts the entry every other lane restores.
       #
       # This job used to do exactly that with a raw `actions/cache` over
@@ -74,10 +74,9 @@ jobs:
       - name: Run the language SDK unit suites
         run: just sdk::test
 
-  # The hermetic suite is intentionally cheap enough for every PR update. This
-  # companion proves the smallest useful documented lifecycle against a real
-  # Firecracker guest only after the PR reaches the merge queue, where the
-  # repository already runs its KVM-backed boot gate.
+  # Both jobs run on the integrated merge-group commit. This companion proves
+  # the smallest useful documented lifecycle against a real Firecracker guest,
+  # alongside the repository's KVM-backed boot gate.
   bdd-live:
     name: BDD live microVM witness
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'

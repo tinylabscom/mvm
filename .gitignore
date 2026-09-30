@@ -6,6 +6,8 @@
 .playwright-mcp/
 .superpowers/
 .codex/
+/.cursor/
+/.delta/
 .claude/*
 !.claude/settings.json
 **/node_modules
