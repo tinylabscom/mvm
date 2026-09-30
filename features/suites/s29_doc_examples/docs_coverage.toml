@@ -214,6 +214,7 @@ covered = [
     "mvmctl trust instructions init",
     "mvmctl trust instructions sign ./my-agent",
     "mvmctl trust instructions verify ./my-agent",
+    "mvmctl why --host api.github.com:443",
 ]
 uncovered = [
     "mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true",
@@ -250,6 +251,7 @@ uncovered = [
     "mvmctl env update --check",
     "mvmctl env verify-release mvmctl-aarch64-apple-darwin.tar.gz --tag v0.18.0-rc.1",
     "mvmctl explain agent-sandbox",
+    "mvmctl explain agent-sandbox --review",
     "mvmctl image inspect alpine",
     "mvmctl init .",
     "mvmctl init ./agent-sandbox --preset python",
@@ -505,4 +507,6 @@ uncovered = [
     "mvmctl trust receipt verify /tmp/agent-run-receipt.json",
     "mvmctl trust receipt verify /tmp/run-receipt.json",
     "mvmctl trust receipt verify /tmp/run-receipt.json --pubkey ./host-signer.pub",
+    "mvmctl why --path ./src",
+    "mvmctl why --tool shell --profile agent-apis",
 ]

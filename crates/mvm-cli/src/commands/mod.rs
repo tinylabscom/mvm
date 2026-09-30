@@ -37,6 +37,7 @@ mod template;
 mod trust;
 pub(crate) mod vm;
 mod watch;
+mod why;
 
 /// Source-resolution and worker-construction surface used by the resident
 /// warm-artifact service. It is separate from foreground launch commands so
@@ -163,6 +164,9 @@ pub(in crate::commands) enum Commands {
     /// Explain a run and its egress refusals from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
+    /// Explain whether a resolved policy allows one host, path, tool, or secret
+    #[command(display_order = 7)]
+    Why(why::Args),
     /// Measure this host's launch latency against the published budgets
     #[command(display_order = 7)]
     Bench(bench::Args),

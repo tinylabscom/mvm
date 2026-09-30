@@ -20,6 +20,11 @@
       Position fuzzing joins the existing route fuzzer in the security
       workflow. See `specs/sprint/delivery/3712-egress-route-model.md`.
 
+- [x] **Repair shared host-side test gates.** The slow-sink regression now
+      accounts for each produced byte as delivered output or an explicit gap
+      instead of requiring lossless delivery under backpressure. The CI-scope
+      aggregate harness executes its script as a Bash command, so an expected
+      early refusal cannot break a producer writing to standard input.
 - [x] **Composable policy files and authored profiles — issue #3715.**
       Rust-derived policy/profile schema, user and project discovery,
       `policy resolve|show|validate|diff`, and `--policy`/`--plan` now lower
@@ -56,6 +61,16 @@
       rust-objcopy loader wrapper remains because it solves a separate dynamic
       linker requirement. Justfile parsing, focused wrapper-environment tests,
       formatting, workspace check, and zero-warning Clippy are green.
+
+- [x] **Complete denial feedback and resolved-policy explanations — issue #3714.**
+      Grantable egress refusals now enter one explicit Grant / Skip review in
+      foreground runs or through `mvmctl explain RUN --review`; an exact draft
+      and separate confirmation precede the atomic `mvm.toml` update, while
+      absolute and operational refusals are never offered. `mvmctl why` answers
+      one host, path, tool, or secret question from the discovered project,
+      explicit profile, or resolved manifest without booting a workload. See
+      `specs/plans/2026-09-28-denial-feedback.md` and
+      `specs/sprint/delivery/3714-denial-feedback.md`.
 
 - [x] **Extend the CVE admission gate to base images and the guest kernel — issue #3646.**
       `specs/plans/2026-09-24-base-image-cve-gate.md`. `mvm-fs` inventories
@@ -4030,6 +4045,11 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
 - [x] Preserve the required `Invariant` and per-architecture kernel check
       names while removing duplicate runner allocations and feature tests.
 - [x] Add trusted default-branch Rust workspace and Nix cache warming.
+- [x] Restore cached Cargo binaries before the two pinned `cargo-zigbuild`
+      installs and stop the focused eBPF lane from spending four minutes on a
+      full hosted-runner disk scrub. The 2026-09-29 baseline found 65-120 minute
+      PR wall times against only 20-24 minutes of actual critical-path work;
+      these changes remove about 18-22 runner-minutes without dropping a lane.
 - [x] Pass actionlint, shellcheck, formatting, workspace check, focused
       workflow tests, host all-target Clippy, and the affected crate's complete
       serial test suite.

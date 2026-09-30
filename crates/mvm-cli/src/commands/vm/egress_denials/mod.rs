@@ -16,7 +16,7 @@
 //!   allow what can be allowed;
 //! - after the fact: [`denials_in_window`], which `mvmctl explain` uses.
 
-mod denial;
+pub(super) mod denial;
 mod reason;
 mod tally;
 mod watch;
@@ -26,6 +26,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use mvm_hostd::supervisor::PlanAuditEntry;
 
@@ -40,6 +41,18 @@ use super::host_notices::{NoticeSink, Stderr};
 fn local_chain() -> Option<PathBuf> {
     let dir = default_audit_dir().ok()?;
     Some(audit_path_for_tenant(&dir, mvm_core::plan::DEFAULT_TENANT))
+}
+
+/// Verify the local chain before a live observation is allowed to propose a
+/// policy change. Watching remains best-effort display; authoring requires the
+/// stronger, signed source.
+pub(in crate::commands) fn verify_local_chain() -> Result<()> {
+    let path = local_chain().context("the local audit-chain path is unavailable")?;
+    let signer =
+        super::host_signer::load_or_init().context("loading the host signer for denial review")?;
+    mvm_hostd::supervisor::verify_audit_chain(&path, &signer.verifying)
+        .with_context(|| format!("verifying audit chain {}", path.display()))?;
+    Ok(())
 }
 
 /// Start watching `vm_name`'s refusals in the local tenant's chain. `None`

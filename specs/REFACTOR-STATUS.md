@@ -47,10 +47,10 @@ Last updated: 2026-09-29
     - [x] provider routes with credential headers (gitlab, gemini added)
     - [x] `[secrets]` in `mvm.toml`, merged with `--secret` by narrowing
     - [ ] OAuth2 — #3743
-  - [ ] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
+  - [x] PS-04 denial feedback (live egress denials, denial → policy draft, `why`) — #3714
     - [x] live, deduplicated egress denials with the remedy per reason, exit summary, `run --json`, `explain`
-    - [ ] denial → policy draft selector (Grant / Skip)
-    - [ ] `mvmctl why` against a resolved policy
+    - [x] denial → policy draft selector (Grant / Skip)
+    - [x] `mvmctl why` against a resolved policy
   - [x] PS-05 TOML policy groups, authored profiles, resolved manifest — #3715
     - [x] groups, profiles (`extends`, include/exclude, `when`, overrides), merge rules, cycle/depth limits
     - [x] `mvmctl policy resolve|show|validate|diff|groups`, `run --policy`, `run --plan`, `mvm.toml [policy]`
@@ -98,9 +98,10 @@ Last updated: 2026-09-29
       W11 (ADR-004/030/018 amendments); `builder_boot_abi` in the signed
       image-set compatibility section. W9 (`mvm-setpriv` leaf) and W10 (per-role pair key) are in #3741.
       #3774 took W8's fingerprint, in-tree-bake and Stage 0 builder-build
-      items; ADR-030 item 4 is amended. Open: W7 (`mvm-images`), W8a, the
-      rest of W8 (pin the ABI 1 set, contract 4 → 5, drop `hostBinaries` and
-      `MVM_HOST_BIN_DIR`), W12 (measurement).
+      items; ADR-030 item 4 is amended. W7 (mvm-images#33/#37) and W8a
+      (#3840) are done. Open: the rest of W8 (pin the first published ABI 1
+      set, contract 4 → 5, drop `hostBinaries` and `MVM_HOST_BIN_DIR` — the
+      mvm-images side landed in mvm-images#37), W12 (measurement).
 
 - [x] **One `mvmctl`, one command: the host payload without a second binary.**
       `specs/plans/2026-09-24-single-binary-payload.md`. W1–W6: the payload
@@ -2400,8 +2401,12 @@ resume` takes a `current_head` and refuses when it differs from the
 - [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
       checks now share the main CI scope gate, required check names are
       preserved transitively, duplicate runner allocations are removed, and
-      trusted default-branch Rust/Nix cache warming is added. Repository and
-      host validation are green; landing, Linux CI, and verified live queue
+      trusted default-branch Rust/Nix cache warming is added. The 2026-09-29
+      follow-up measured 65-120 minute PR runs whose longest job executed for
+      only 20-24 minutes, then moved both pinned `cargo-zigbuild` installs after
+      the trusted binary-cache restore and removed a measured 4m14s unrelated
+      disk scrub from the focused eBPF lane. Repository and host validation are
+      green; landing, post-change timing, Linux CI, and verified live queue
       settings remain open.
 
 - [~] Plan 330 — Decision provenance layer

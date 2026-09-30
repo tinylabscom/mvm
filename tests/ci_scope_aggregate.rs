@@ -17,7 +17,6 @@
 //! A restatement is a second copy of the logic and drifts from it silently;
 //! executing the real bytes cannot.
 
-use std::io::Write;
 use std::process::{Command, Stdio};
 
 /// Lift the aggregate's `run:` body out of the workflow, dedented.
@@ -131,7 +130,8 @@ impl Verdict {
     /// `true` when the aggregate admits this combination.
     fn accepts(&self) -> bool {
         let mut child = Command::new("bash")
-            .arg("-s")
+            .arg("-c")
+            .arg(aggregate_script())
             .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
@@ -147,17 +147,10 @@ impl Verdict {
             .env("BOOT_RESULT", self.boot)
             .env("NIX_RESULT", self.nix)
             .env("GUEST_IMAGE_RESULT", self.guest_image)
-            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn bash");
-        child
-            .stdin
-            .take()
-            .expect("piped stdin")
-            .write_all(aggregate_script().as_bytes())
-            .expect("failed to feed the script to bash");
         child.wait().expect("bash did not exit").success()
     }
 }

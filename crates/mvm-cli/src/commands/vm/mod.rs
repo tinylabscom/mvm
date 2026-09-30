@@ -7,6 +7,7 @@ pub(in crate::commands) mod audit_follow;
 pub(in crate::commands) mod checkpoint;
 pub(crate) mod console;
 pub(super) mod cp;
+pub(in crate::commands) mod denial_review;
 pub(super) mod diff;
 pub(super) mod display;
 pub(super) mod down;
