@@ -816,9 +816,11 @@ mod tests {
             "- name: Require every merge-group test lane to pass\n        if: github.event_name != 'pull_request'"
         ));
         assert!(test.contains(
-            "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, \
-             boot-latency, guest-image-boot, nix-flake-check]"
+            "needs: [scope, lint-core, lint-policy, lint-features, \
+             lint-features-test-support, lint-features-embed, test-workspace, \
+             test-workspace-aarch64, test-linux, test-release-witness, \
+             test-ebpf-telemetry, bdd-conformance, boot-latency, \
+             guest-image-boot, nix-flake-check]"
         ));
 
         // Full compilation and tests run once, against the integrated
@@ -850,6 +852,11 @@ mod tests {
         // the `code` scope, off the Linux lane.
         for expected in [
             "\"$WORKSPACE_RESULT\"",
+            "\"$CORE_RESULT\"",
+            "\"$POLICY_RESULT\"",
+            "\"$FEATURES_RESULT\"",
+            "\"$FEATURES_SUPPORT_RESULT\"",
+            "\"$FEATURES_EMBED_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
             "\"$EBPF_RESULT\"",
