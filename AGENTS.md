@@ -30,7 +30,23 @@ anything this file describes, update this file in the same change.
 `mvmctl` runtime commands (anything that boots, talks to, or manages microVMs),
 and Linux-specific syscalls MUST run inside the project builder VM — never a
 Lima VM; do not use `limactl` for this repo. The builder VM is the Linux
-execution boundary. Owner-approved exceptions:
+execution boundary.
+
+Builder VM images are treated as published artifacts produced by the `mvm-images`
+repository and are downloaded and verified by default. Building the builder VM
+from a local `mvm-images` checkout is a contributor-only, opt-in path and is
+not performed automatically. Operator-facing knobs:
+
+- To opt into a local builder-image build for a single invocation, set
+  `MVM_IMAGES_DIR` to an `mvm-images` checkout and set
+  `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` in the same environment. Without
+  `MVM_ALLOW_LOCAL_BUILDER_BUILD` present, `mvmctl` will prefer the published
+  builder image even when an `mvm-images` checkout is available locally.
+- `MVM_BOOT_IMAGE` continues to accept `build` / `fetch` values, but a
+  `build` request without `MVM_ALLOW_LOCAL_BUILDER_BUILD` is refused rather
+  than silently falling back.
+
+Owner-approved exceptions (unchanged):
 
 - **Lima as a test-environment KVM provider only** — a virtual `/dev/kvm` for
   Firecracker / Linux-KVM E2E tests that cannot run on the builder VM or

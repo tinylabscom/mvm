@@ -613,6 +613,28 @@ fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::Dis
 }
 
 fn apply_startup_env(cli: &Cli) {
+    // Default: do not auto-bootstrap the builder VM. Most commands do not need
+    // the builder VM to be running; only explicit build/bootstrap/persistent
+    // builder paths should allow it. Operators can override this with the
+    // existing MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP env var (set to any value)
+    // to force skipping regardless.
+    set_cli_env("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP", "1");
+
+    // Allowlist commands that are permitted to auto-bootstrap the builder VM.
+    let allow_bootstrap = match &cli.command {
+        Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
+        #[cfg(feature = "builder-vm")]
+        Commands::PersistentBuilder(_) => true,
+        Commands::Env(env_args) => matches!(env_args.action, env::group::EnvCmd::Bootstrap(_)),
+        _ => false,
+    };
+
+    if allow_bootstrap {
+        // Clear the skip marker so library call sites that auto-bootstrap
+        // proceed as before for explicit build/bootstrap commands.
+        unsafe { std::env::remove_var("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP"); }
+    }
+
     if let Some(ref version) = cli.fc_version {
         set_cli_env("MVM_FC_VERSION", version);
     }

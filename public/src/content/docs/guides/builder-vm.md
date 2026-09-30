@@ -5,6 +5,8 @@ description: How mvm builds Linux microVM images from the host without requiring
 
 The short version: **you run `mvmctl machine build` from the host, and mvm runs Nix inside the builder VM.** You do not need to enter an interactive dev shell to build a template or runtime image.
 
+Builder VM images are treated as published artifacts by default: `mvmctl` will download and verify the pinned builder image from the signed image set. Rebuilding the builder image from a local `mvm-images` checkout is supported for contributors but is opt-in only — set `MVM_IMAGES_DIR` and `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` to enable a local builder-image build. Without that opt-in, `mvmctl` prefers the published image even when an `mvm-images` checkout is present.
+
 The host process is the control plane. The builder VM is the Linux execution boundary for Nix evaluation, Nix builds, and image assembly. The runtime backend is separate: after the image is built, mvm boots the prebuilt kernel and rootfs with the selected microVM backend, such as Firecracker on Linux or native HVF on supported Apple Silicon macOS hosts. libkrun is an optional development integration, not a standard macOS dependency.
 
 ```text
