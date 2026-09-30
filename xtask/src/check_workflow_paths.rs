@@ -818,7 +818,7 @@ mod tests {
         assert!(test.contains(
             "needs: [scope, test-workspace, test-workspace-aarch64, test-linux, \
              test-release-witness, test-ebpf-telemetry, bdd-conformance, \
-             boot-latency, guest-image-boot, nix-flake-check]"
+             boot-latency, nix-flake-check]"
         ));
 
         // Full compilation and tests run once, against the integrated
@@ -855,7 +855,6 @@ mod tests {
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$BOOT_RESULT\"",
-            "\"$GUEST_IMAGE_RESULT\"",
             "\"$NIX_RESULT\"",
         ] {
             assert!(
@@ -1020,6 +1019,9 @@ mod tests {
 
         let guest = job_block(&ci, "guest-image-boot");
         assert!(guest.contains("needs: [scope]"));
+        assert!(guest.contains(
+            "if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.guest_image == 'true'"
+        ));
         assert!(guest.contains("needs.scope.outputs.nix == 'true'"));
         assert!(guest.contains("Boot the mvm-images-built image"));
         assert!(
@@ -1028,8 +1030,8 @@ mod tests {
         );
         assert!(
             guest.contains("ref: ${{ steps.images-ref.outputs.ref }}"),
-            "the guest-image witness gates the merge queue, so it must build the image \
-             sources images.lock pins rather than mvm-images main"
+            "the manual guest-image diagnostic must build the image sources images.lock \
+             pins rather than mvm-images main"
         );
         assert!(guest.contains("MVM_RUNTIME_BOOT_READY: guest-agent"));
         assert!(
