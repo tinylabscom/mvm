@@ -26,6 +26,7 @@ use mvm_runtime::checkpoint::{
 
 use super::Cli;
 use super::shared::clap_vm_name;
+use crate::commands::machine::input_journal;
 use crate::ui;
 
 mod fork_vm_full;
@@ -294,6 +295,8 @@ pub(in crate::commands) fn now_unix() -> u64 {
 fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     let rootfs = resolve_quiesced_vm_rootfs(name)?;
     let state_dir = vm_state_dir(name);
+    let _input_lock = input_journal::lock(&state_dir)?;
+    let input_cursor = input_journal::cursor(&state_dir)?;
     let runtime_overlay_version = runtime_contract_for_checkpoint(name)?;
     let store = CheckpointStore::open();
     let now = now_unix();
@@ -314,6 +317,7 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
         },
     )
     .with_context(|| format!("capturing fs_quick checkpoint of {name:?}"))?;
+    let meta = seal_machine_input_cursor(&store, &meta, input_cursor)?;
 
     // Best-effort audit binding: a missing plan/signer or flaky audit fs warns
     // and continues — the checkpoint is already sealed on disk.
@@ -397,6 +401,8 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
         bail!("checkpoint --class vm-full requires a running VM; start '{name}' first");
     }
     let state_dir = vm_state_dir(name);
+    let _input_lock = input_journal::lock(&state_dir)?;
+    let input_cursor = input_journal::cursor(&state_dir)?;
     let store = CheckpointStore::open();
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
@@ -411,6 +417,7 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
         created_unix: now,
     })
     .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
+    let meta = seal_machine_input_cursor(&store, &meta, input_cursor)?;
 
     // Best-effort audit binding, same policy as fs_quick capture.
     bind_checkpoint_created(name, &meta);
@@ -439,6 +446,8 @@ pub(in crate::commands) fn capture_vm_full_for_machine(
         bail!("machine fork requires a running VM; start '{name}' first");
     }
     let state_dir = vm_state_dir(name);
+    let _input_lock = input_journal::lock(&state_dir)?;
+    let input_cursor = input_journal::cursor(&state_dir)?;
     let store = CheckpointStore::open();
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
@@ -453,9 +462,22 @@ pub(in crate::commands) fn capture_vm_full_for_machine(
         created_unix: now,
     })
     .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
+    let meta = seal_machine_input_cursor(&store, &meta, input_cursor)?;
 
     bind_checkpoint_created(name, &meta);
     Ok(id)
+}
+
+fn seal_machine_input_cursor(
+    store: &CheckpointStore,
+    meta: &CheckpointMeta,
+    cursor: u64,
+) -> Result<CheckpointMeta> {
+    let sealed = meta.with_machine_input_cursor(cursor);
+    store
+        .write_meta(&sealed)
+        .context("sealing the machine input cursor into checkpoint metadata")?;
+    Ok(sealed)
 }
 
 /// The permission set `name` was admitted under, read off its persisted plan so
@@ -771,16 +793,16 @@ fn restore(id: &str, json: bool) -> Result<()> {
 }
 
 /// Inputs for [`fork`].
-struct ForkCmdParams<'a> {
-    id: &'a str,
-    new_id: Option<String>,
-    boot: bool,
-    hypervisor: &'a str,
-    cpus: Option<u32>,
-    memory: Option<&'a str>,
-    declared_secrets: &'a [mvm_core::plan::SecretBinding],
-    allow_secret_drop: bool,
-    json: bool,
+pub(in crate::commands) struct ForkCmdParams<'a> {
+    pub id: &'a str,
+    pub new_id: Option<String>,
+    pub boot: bool,
+    pub hypervisor: &'a str,
+    pub cpus: Option<u32>,
+    pub memory: Option<&'a str>,
+    pub declared_secrets: &'a [mvm_core::plan::SecretBinding],
+    pub allow_secret_drop: bool,
+    pub json: bool,
 }
 
 /// Parse `--secret` values into plan bindings.
@@ -815,7 +837,7 @@ pub(in crate::commands) fn parse_declared_secrets(
         .collect()
 }
 
-fn fork(p: ForkCmdParams<'_>) -> Result<()> {
+pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
     let ForkCmdParams {
         id,
         new_id,

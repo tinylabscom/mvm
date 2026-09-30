@@ -297,13 +297,21 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] session exclusions persisted so restore never deletes ignored files
       — operator `--exclude` globs persist into the apply manifest and are the
       only list undo/redo ever consults; no default list is ever rebuilt
-- [~] `mvmctl undo` / `redo` — landed as journal verbs reversing/re-applying
-      the most recent effective apply. Replay now has encrypted,
+- [x] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a
+      checkpoint with recorded input
+      — two input channels, one replay model. Agent sessions: encrypted,
       content-addressed input artifacts; session-bound, parent-linked
-      `vm_full` step checkpoints; a durable session-record commit point; and
-      a chain-verified ordered replay planner/dispatcher. Production step
-      orchestration and an operator replay command remain because the general
-      agent prompt transport is not exposed through `mvmctl` yet
+      `vm_full` step checkpoints; a durable session-record commit point; and a
+      chain-verified ordered replay planner/dispatcher (the foundations).
+      Operator command: `machine exec` records argv+outcome into a
+      per-machine input journal (never output; a torn final line is dropped),
+      and `mvmctl machine replay <checkpoint> [--as NAME] [--dry-run]`
+      fork-boots the checkpoint through the ordinary admission path like
+      `machine revert`, re-executes the journal entries recorded at or after
+      it, and takes a `vm_full` checkpoint per step — every replayed step is
+      a first-class `checkpoint ls` restore point. Remaining: agent-prompt
+      step orchestration, blocked on the general agent prompt transport
+      reaching `mvmctl`
 - [x] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
       — chain-signed `workspace.applied`/`workspace.undone`/
       `workspace.redone` entries carry the committed manifest Merkle root;

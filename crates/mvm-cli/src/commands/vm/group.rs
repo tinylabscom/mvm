@@ -13,8 +13,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::{
-    checkpoint, cp, diff, display, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl,
-    snapshot, volume, wait, workspace_apply,
+    checkpoint, cp, diff, display, forward, fs, pause, proc, rekernel, replay, sandbox, session,
+    set_ttl, snapshot, volume, wait, workspace_apply,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -62,6 +62,10 @@ pub(in crate::commands) enum VmCmd {
     /// Re-apply the most recent undone apply on a workspace
     #[command(hide = true)]
     Redo(workspace_apply::RedoArgs),
+    /// Re-run recorded input from a checkpoint's state, checkpointing
+    /// each replayed step
+    #[command(hide = true)]
+    Replay(replay::ReplayArgs),
     /// Serve view-only display frames on a tokenized loopback URL
     Display(display::Args),
     /// Wait for guest readiness
@@ -130,7 +134,7 @@ impl VmCmd {
             VmCmd::Fs(_) => "fs",
             VmCmd::Proc(_) => "proc",
             VmCmd::Diff(_) => "diff",
-            VmCmd::Apply(_) | VmCmd::Undo(_) | VmCmd::Redo(_) => "machine",
+            VmCmd::Apply(_) | VmCmd::Undo(_) | VmCmd::Redo(_) | VmCmd::Replay(_) => "machine",
             VmCmd::Display(_) => "display",
             VmCmd::Wait(_) => "wait",
             VmCmd::BootReport(_) => "boot-report",
@@ -158,6 +162,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         VmCmd::Apply(a) => workspace_apply::run_apply(cli, a, cfg),
         VmCmd::Undo(a) => workspace_apply::run_undo(cli, a, cfg),
         VmCmd::Redo(a) => workspace_apply::run_redo(cli, a, cfg),
+        VmCmd::Replay(a) => replay::run_replay(cli, a, cfg),
         VmCmd::Display(a) => display::run(cli, a, cfg),
         VmCmd::Wait(a) => wait::run_wait(cli, a, cfg),
         VmCmd::BootReport(a) => wait::run_boot_report(cli, a, cfg),

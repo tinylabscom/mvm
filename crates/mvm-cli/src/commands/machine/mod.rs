@@ -16,7 +16,8 @@
 
 mod checkpoint;
 mod create_policy;
-mod lifecycle;
+pub(crate) mod input_journal;
+pub(crate) mod lifecycle;
 mod list;
 mod manifest_source;
 mod portable;
@@ -1432,7 +1433,14 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
-        MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
+        MachineAction::Exec(exec_args) => {
+            let state_dir = config::machine_state_dir(&exec_args.name);
+            let _journal_lock = input_journal::lock(&state_dir)?;
+            let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
+            let outcome = exec_machine(cli, exec_args, cfg);
+            input_journal::finish_exec(&state_dir, pending, outcome.is_ok())?;
+            outcome
+        }
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),

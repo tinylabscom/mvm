@@ -220,6 +220,7 @@ uncovered = [
     "mvmctl machine apply <name>",
     "mvmctl machine apply <name> --dry-run",
     "mvmctl machine redo <name>",
+    "mvmctl machine replay <checkpoint>",
     "mvmctl machine undo <name>",
     "mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true",
     "mvmctl bench --lane prepared-cold --runs 20 --warmup 2",

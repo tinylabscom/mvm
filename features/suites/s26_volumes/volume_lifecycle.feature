@@ -204,3 +204,19 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine undo bdd-undo-none"
     Then the command exits with code 0
     And the output contains "nothing to undo"
+
+  # Replay (PS-08): re-run recorded input from a checkpoint. The full
+  # fork-boot-reexec flow needs a live VM; these scenarios pin the
+  # fail-closed surface. Selection and the input journal itself are
+  # unit-tested in mvm-cli.
+  Scenario: replaying an unknown checkpoint names the error
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine replay ckpt-nope"
+    Then the command exits with code 1
+    And the error output contains "no checkpoint"
+
+  Scenario: replay with a name for the restored VM still verifies the checkpoint first
+    Given an isolated mvm home
+    When I run mvmctl in the isolated mvm home with "machine replay ckpt-nope --as replayed-vm"
+    Then the command exits with code 1
+    And the error output contains "no checkpoint"
