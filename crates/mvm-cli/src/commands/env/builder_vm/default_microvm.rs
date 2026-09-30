@@ -405,11 +405,19 @@ fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)>
     dev_image_from(super::bootstrap::selected_local_checkout()?, cache_dir)
 }
 
+/// The local cache slot holding the dev default image
+/// (`<mvm home>/cache/default-microvm/dev`).
+#[cfg(feature = "builder-vm")]
+pub(crate) fn dev_default_image_cache_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_core::config::default_microvm_cache_dir())
+        .join(DefaultMicrovmVariant::Dev.cache_subdir())
+}
+
 /// Build the dev image from `checkout`, or answer from a cache a previous
 /// build left. Without a checkout and without a cache there is nothing to
 /// build it from: the released set publishes the sealed image only.
 #[cfg(feature = "builder-vm")]
-fn dev_image_from(
+pub(crate) fn dev_image_from(
     checkout: Option<mvm_build::image_source::LocalImageCheckout>,
     cache_dir: &str,
 ) -> Result<(String, String)> {

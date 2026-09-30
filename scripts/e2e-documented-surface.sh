@@ -442,15 +442,22 @@ echo "==> adopting or building the source-matched SDK sidecar through unembedded
 MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" \
   MVM_FETCH_UNCHANGED_IMAGES=1 "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 
-# The dev default image (`mvmctl run` with no image) is built from an image
-# checkout too; without one, and with nothing cached, `run` refuses. The one
-# scenario that boots it is Firecracker-only (the cached dev rootfs must stay
-# byte-identical across launches), so only the Linux lane builds it, once, into
-# the warm home every scenario shares, through the same single-step hand-off.
+# The dev default image (`mvmctl run` with no image) is the writable variant.
+# `image dev ensure` adopts it from the pinned set when the set's dev members
+# were built from this tree (fetch-when-unchanged), and pair-builds from the
+# checkout when they were not; the verb reports which arm ran. Only the ensure
+# step names the checkout: a fetched install carries no pair identity, and
+# the warm boot below must answer from the completed cache, not rebuild it.
+# The one scenario that boots the dev image is Firecracker-only (the cached
+# dev rootfs must stay byte-identical across launches), so only the Linux
+# lane prepares it, into the warm home every scenario shares.
 if [[ "$(uname -s)" == Linux ]]; then
   e2e_phase dev-image
-  echo "==> building the dev default image through the mvm-images checkout"
-  MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" "$MVMCTL" run --no-detect -- /bin/true
+  echo "==> ensuring the dev default image (adopt from the pinned set when unchanged)"
+  MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" \
+    MVM_FETCH_UNCHANGED_IMAGES=1 "$MVMCTL" image dev ensure
+  echo "==> booting the dev default image once to warm and prove the launch path"
+  MVM_HOME="$E2E_HOME" "$MVMCTL" run --no-detect -- /bin/true
 fi
 
 # ---------------------------------------------------------------------------

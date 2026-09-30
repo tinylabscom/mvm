@@ -196,12 +196,18 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
     ("verify", AuditPosture::ReadOnly),
 ];
 
+// `mvmctl image dev ensure` primes the dev default-tenant image cache, the
+// same build-time cache-preparation class as `build sdk-sidecar build`: it
+// does not emit a local audit-chain entry of its own.
+const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
+
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("CachePrune")),
     ("boot", AuditPosture::DelegatesToSub(IMAGE_BOOT_SUB)),
+    ("dev", AuditPosture::DelegatesToSub(IMAGE_DEV_SUB)),
 ];
 
 // `mvmctl pack` — the versioned attested-pack cache lifecycle
