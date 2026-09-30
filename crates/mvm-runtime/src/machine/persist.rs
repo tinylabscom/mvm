@@ -12,6 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use mvm_contract::policy::routes::EgressRoute;
 use mvm_core::network_policy::AiPolicy;
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +59,10 @@ pub struct MachineSpec {
     /// parsing happens once at launch where a refusal can be reported.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peer: Vec<String>,
+    /// Endpoint-aware egress policy persisted with the machine so every
+    /// subsequent start enforces the same method/path rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<EgressRoute>,
     /// Optional AI egress metering/budget policy, carried from the manifest's
     /// `[network.ai]` table so the policy survives across machine starts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +271,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.net == b.net
         && same_allow_host(&a.allow_host, &b.allow_host)
         && a.peer == b.peer
+        && a.routes == b.routes
         && a.ports == b.ports
         && a.cpus == b.cpus
         && a.memory == b.memory
@@ -303,6 +309,9 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.peer != desired.peer {
         changed.push("peer");
+    }
+    if current.routes != desired.routes {
+        changed.push("routes");
     }
     if current.ports != desired.ports {
         changed.push("ports");
@@ -483,6 +492,7 @@ mod tests {
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
+            routes: Vec::new(),
             ai: None,
             ports: vec![],
             cpus: 2,
@@ -801,6 +811,7 @@ mod tests {
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
+            routes: Vec::new(),
             ai: None,
             ports: vec![],
             cpus: 2,
@@ -1074,5 +1085,58 @@ mod peer_persistence_tests {
         let b = spec_with_peers(&["db.mvm.peer:5432=127.0.0.1:34567"]);
         assert!(machine_config_matches(&a, &b));
         assert!(!machine_config_diff(&a, &b).contains("peer"));
+    }
+}
+
+#[cfg(test)]
+mod endpoint_route_persistence_tests {
+    use super::*;
+    use mvm_contract::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+    fn route() -> EgressRoute {
+        EgressRoute {
+            id: "github-api".into(),
+            host: "api.github.com".into(),
+            port: 443,
+            rules: vec![EndpointRule {
+                id: None,
+                method: Some("GET".into()),
+                path: "/repos/**".into(),
+                outcome: RouteOutcome::Allow,
+            }],
+            otherwise: RouteOutcome::Deny,
+            intercept: true,
+        }
+    }
+
+    fn spec_with_routes(routes: Vec<EgressRoute>) -> MachineSpec {
+        let mut spec = super::tests::spec_fixture("routed");
+        spec.routes = routes;
+        spec
+    }
+
+    #[test]
+    fn endpoint_routes_round_trip_through_the_stored_spec() {
+        let spec = spec_with_routes(vec![route()]);
+        let json = serde_json::to_string(&spec).expect("serialize");
+        let back: MachineSpec = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.routes, spec.routes);
+    }
+
+    #[test]
+    fn a_legacy_spec_defaults_to_no_endpoint_routes() {
+        let spec = super::tests::spec_fixture("legacy-routes");
+        let mut value = serde_json::to_value(&spec).expect("serialize");
+        value.as_object_mut().expect("object").remove("routes");
+        let back: MachineSpec = serde_json::from_value(value).expect("legacy spec loads");
+        assert!(back.routes.is_empty());
+    }
+
+    #[test]
+    fn changed_endpoint_routes_are_reported_as_drift() {
+        let current = spec_with_routes(Vec::new());
+        let desired = spec_with_routes(vec![route()]);
+        assert!(!machine_config_matches(&current, &desired));
+        assert!(machine_config_diff(&current, &desired).contains("routes"));
     }
 }

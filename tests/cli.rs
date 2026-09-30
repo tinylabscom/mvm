@@ -1447,6 +1447,63 @@ fn run_and_machine_run_help_list_the_secret_flag() {
     }
 }
 
+/// Endpoint routes are part of both run surfaces, including the persistent
+/// `machine run --name` path that records them in `MachineSpec`.
+#[test]
+fn run_and_machine_run_help_list_the_allow_endpoint_flag() {
+    for verb in [&["run", "--help"][..], &["machine", "run", "--help"][..]] {
+        let help = mvmctl_help(verb);
+        assert!(help.contains("--allow-endpoint"), "{verb:?}: {help}");
+        assert!(help.contains("[METHOD ]URL"), "{verb:?}: {help}");
+    }
+}
+
+#[test]
+fn secret_set_help_and_parser_cover_every_injection_mode() {
+    let help = mvmctl_help(&["secret", "set", "--help"]);
+    assert!(help.contains("--inject"), "secret set help: {help}");
+
+    let home = tempfile::tempdir().unwrap();
+    for (name, auth_type, mode) in [
+        ("header-key", "bearer", "header"),
+        ("query-key", "bearer", "query_param"),
+        ("path-key", "bearer", "url_path"),
+        ("basic-key", "basic", "basic_auth"),
+    ] {
+        let stored = isolated_secret_mvmctl(home.path())
+            .args([
+                "secret",
+                "set",
+                name,
+                "--host",
+                "api.example.com",
+                "--type",
+                auth_type,
+                "--inject",
+                mode,
+                "--value",
+                "test-only-value",
+            ])
+            .output()
+            .expect("run mvmctl secret set");
+        assert!(
+            stored.status.success(),
+            "secret set must accept {mode}: {}",
+            String::from_utf8_lossy(&stored.stderr)
+        );
+    }
+    let listed = isolated_secret_mvmctl(home.path())
+        .args(["secret", "ls"])
+        .output()
+        .expect("run mvmctl secret ls");
+    assert!(listed.status.success());
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.contains("header-key\ttype=bearer"), "{listed}");
+    for mode in ["query_param", "url_path", "basic_auth"] {
+        assert!(listed.contains(&format!("inject={mode}")), "{listed}");
+    }
+}
+
 /// An isolated `mvmctl` whose secrets live in the file store, so nothing
 /// reaches the operator's keychain.
 fn isolated_secret_mvmctl(home: &std::path::Path) -> Command {

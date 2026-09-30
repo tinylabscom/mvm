@@ -307,6 +307,12 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("apply", AuditPosture::Emits("WorkspaceApply")),
     ("undo", AuditPosture::Emits("WorkspaceUndo")),
     ("redo", AuditPosture::Emits("WorkspaceRedo")),
+    // Replay: fork-boots a checkpoint and re-runs the input journal,
+    // emitting one MachineReplay per run plus the fork/step audits.
+    (
+        "replay",
+        AuditPosture::Emits("MachineReplay+CheckpointCreated"),
+    ),
     ("wait", AuditPosture::ReadOnly),
     ("boot-report", AuditPosture::ReadOnly),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
@@ -821,6 +827,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "ConsoleSessionEnd",
         "DepsAudit",
         "Kill",
+        "MachineReplay",
         "ManifestAliasRemove",
         "ManifestAliasSet",
         "ManifestTagAdd",

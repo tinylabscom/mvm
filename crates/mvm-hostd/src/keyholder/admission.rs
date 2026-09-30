@@ -70,6 +70,14 @@ pub fn assemble_registry(
             .ok_or_else(|| AssembleError::NoBinding {
                 name: address.clone(),
             })?;
+        if !meta.inject.admits(meta.auth_type) {
+            return Err(anyhow::anyhow!(
+                "secret {address:?} binding uses injection mode {} with incompatible authentication type {:?}",
+                meta.inject.label(),
+                meta.auth_type
+            )
+            .into());
+        }
         // The placeholder is valid only where the signed plan says: the stored
         // allow-list, narrowed to the binding's own destinations when it names
         // any. A plan naming a destination outside the stored allow-list is
@@ -90,7 +98,7 @@ pub fn assemble_registry(
             // forward-path signer reads it to name the credential. None for
             // every non-SigV4 secret.
             sigv4: meta.sigv4,
-            inject: Default::default(),
+            inject: meta.inject,
         };
         let placeholder = registry.mint(secret_ref);
         handed.push((b.name.clone(), placeholder));
@@ -102,7 +110,7 @@ pub fn assemble_registry(
 mod tests {
     use super::*;
     use crate::keyholder::{FileBindingStore, SecretBindingMeta};
-    use mvm_contract::ir::AuthType;
+    use mvm_contract::ir::{AuthType, InjectionMode};
     use tempfile::tempdir;
 
     fn keystore_binding(guest_name: &str, address: &str) -> SecretBinding {
@@ -127,6 +135,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
+                    inject: InjectionMode::QueryParam,
                     provider: None,
                     approve: Default::default(),
                     oauth: None,
@@ -147,6 +156,7 @@ mod tests {
         let secret_ref = registry.resolve(placeholder.as_str()).unwrap();
         assert_eq!(secret_ref.name, "openai");
         assert_eq!(secret_ref.auth_type, AuthType::Bearer);
+        assert_eq!(secret_ref.inject, InjectionMode::QueryParam);
         assert_eq!(secret_ref.allowed_hosts, vec!["api.openai.com"]);
 
         // The guest env carries the var → placeholder, never a value.
@@ -174,6 +184,7 @@ mod tests {
                         region: "us-east-1".into(),
                         service: "s3".into(),
                     }),
+                    inject: Default::default(),
                     provider: None,
                     approve: Default::default(),
                     oauth: None,
@@ -194,6 +205,31 @@ mod tests {
         assert_eq!(params.service, "s3");
     }
 
+    #[test]
+    fn refuses_an_incompatible_stored_injection_mode() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "signer",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Hmac,
+                    allowed_hosts: vec!["api.example.com".into()],
+                    sigv4: None,
+                    inject: InjectionMode::UrlPath,
+                    provider: None,
+                    approve: Default::default(),
+                    oauth: None,
+                },
+            )
+            .unwrap();
+
+        let error = assemble_registry(&[keystore_binding("SIGNER", "signer")], "local", &store)
+            .expect_err("invalid binding must fail closed");
+        assert!(error.to_string().contains("incompatible"));
+    }
+
     fn store_with_two_hosts(dir: &std::path::Path) -> FileBindingStore {
         let store = FileBindingStore::with_dir(dir);
         store
@@ -204,6 +240,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.anthropic.com".into(), "platform.claude.com".into()],
                     sigv4: None,
+                    inject: Default::default(),
                     provider: Some("anthropic".into()),
                     approve: Default::default(),
                     oauth: None,
@@ -252,6 +289,7 @@ mod tests {
                     auth_type: AuthType::Bearer,
                     allowed_hosts: vec!["api.github.com".into()],
                     sigv4: None,
+                    inject: Default::default(),
                     provider: Some("github".into()),
                     approve: Default::default(),
                     oauth: None,

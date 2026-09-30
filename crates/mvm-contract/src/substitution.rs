@@ -394,6 +394,9 @@ pub struct PreparedRequest {
 pub enum PrepareError<E> {
     /// More than one signing placeholder appeared in one request.
     MultipleSigningPlaceholders,
+    /// A single header/basic field carried more than one placeholder. Refuse
+    /// rather than risk substituting one and forwarding another unchanged.
+    MultiplePlaceholdersInField,
     /// A placeholder sat somewhere its binding does not substitute.
     PlaceholderOutOfPosition(PlaceholderPosition),
     /// The driver produced an error.
@@ -411,6 +414,9 @@ impl<E: core::fmt::Display> core::fmt::Display for PrepareError<E> {
         match self {
             Self::MultipleSigningPlaceholders => {
                 write!(f, "more than one signing placeholder in one request")
+            }
+            Self::MultiplePlaceholdersInField => {
+                write!(f, "more than one secret placeholder in one request field")
             }
             Self::PlaceholderOutOfPosition(position) => write!(
                 f,
@@ -497,6 +503,9 @@ pub fn prepare_request<D: SubstitutionDriver>(
         if let Some(credential) = basic_credential(&name, &value)
             && let Some(ph) = find_placeholder(&credential)
         {
+            if placeholder_count(&credential) != 1 {
+                return Err(PrepareError::MultiplePlaceholdersInField);
+            }
             let ph = ph.to_string();
             require_position(driver, &ph, PlaceholderPosition::BasicAuth)?;
             let substituted = driver.substitute(&ph, destination, &credential)?;
@@ -507,6 +516,9 @@ pub fn prepare_request<D: SubstitutionDriver>(
         }
         let new_value = match find_placeholder(&value) {
             Some(ph) => {
+                if placeholder_count(&value) != 1 {
+                    return Err(PrepareError::MultiplePlaceholdersInField);
+                }
                 let ph = ph.to_string();
                 match driver.auth_type(&ph) {
                     Some(AuthType::Sigv4 | AuthType::Hmac) => {
@@ -545,6 +557,16 @@ pub fn prepare_request<D: SubstitutionDriver>(
     })
 }
 
+fn placeholder_count(text: &str) -> usize {
+    let mut count = 0;
+    let mut rest = text;
+    while let Some(placeholder) = find_placeholder(rest) {
+        count += 1;
+        let offset = rest.find(placeholder).unwrap_or(0) + placeholder.len();
+        rest = &rest[offset..];
+    }
+    count
+}
 /// The base64 token of a `Basic <token>` header.
 fn token_of(header: &str) -> &str {
     header.split_once(' ').map_or(header, |(_, token)| token)
@@ -801,6 +823,27 @@ mod prepare_tests {
         };
         let err = prepare_request(&driver, "api.example.com", req).unwrap_err();
         assert!(matches!(err, PrepareError::MultipleSigningPlaceholders));
+    }
+
+    #[test]
+    fn refuses_two_placeholders_in_one_header_or_basic_credential() {
+        let driver = driver_with("value");
+        for headers in [
+            vec![(
+                "X-Key".to_string(),
+                "mvm-secret-bea70000,mvm-secret-a0e70000".to_string(),
+            )],
+            vec![(
+                "Authorization".to_string(),
+                basic_header("mvm-secret-ba5c0000:mvm-secret-bea70000"),
+            )],
+        ] {
+            let request = ProxyRequest { headers, ..req() };
+            assert_eq!(
+                prepare_request(&driver, "api.example.com", request).unwrap_err(),
+                PrepareError::MultiplePlaceholdersInField
+            );
+        }
     }
 
     #[test]

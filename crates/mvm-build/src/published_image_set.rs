@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::{
     ImageSetManifest, ImageSetRequirement, ImageSetRole, ImageTrainLock, MemberArtifact,
-    MemberTarget, ReleaseTag, WorkloadImageProfile, check_against_lock,
+    MemberBuildMode, MemberTarget, ReleaseTag, WorkloadImageProfile, check_against_lock,
     check_protocol_compatibility, require_complete, validate_structure,
 };
 use mvm_core::packs::Sha256Hex;
@@ -291,6 +291,73 @@ impl PublishedImageSet {
         }
         .write_to_dir(dir)
         .context("write default image sidecar derived from signed manifest")?;
+        Ok(())
+    }
+
+    /// Fetch the dev (accessible) variant of the default workload into `dir`
+    /// — the dev-slot install a pair build produces: kernel, rootfs, and the
+    /// meta sidecar. Only `build_mode: dev` members are selected; sets that
+    /// predate the dev members, or whose dev rootfs member omits the meta
+    /// artifact, refuse with [`ImageSetMemberError`] so the caller falls back
+    /// to a local build.
+    pub fn fetch_dev_workload(&self, arch: GuestArch, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("create dev image cache {}", dir.display()))?;
+        let target = MemberTarget::Arch(arch);
+        let member = |role: ImageSetRole| {
+            self.manifest
+                .members
+                .iter()
+                .find(|member| {
+                    member.build_mode == Some(MemberBuildMode::Dev)
+                        && member.role == role
+                        && member.target == target
+                })
+                .ok_or_else(|| ImageSetMemberError::NoMember {
+                    release_tag: self.release_tag.clone(),
+                    role,
+                    target,
+                })
+        };
+        let kernel = member(ImageSetRole::WorkloadKernel(
+            WorkloadImageProfile::DefaultTenant,
+        ))?;
+        let rootfs = member(ImageSetRole::WorkloadRootfs(
+            WorkloadImageProfile::DefaultTenant,
+        ))?;
+        let kernel_artifact =
+            kernel
+                .artifacts
+                .first()
+                .ok_or_else(|| ImageSetMemberError::NoArtifact {
+                    release_tag: self.release_tag.clone(),
+                    role: kernel.role,
+                    target,
+                    name: "dev kernel".to_string(),
+                })?;
+        let rootfs_artifact = rootfs
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name.as_str().ends_with(".ext4"))
+            .ok_or_else(|| ImageSetMemberError::NoArtifact {
+                release_tag: self.release_tag.clone(),
+                role: rootfs.role,
+                target,
+                name: "dev rootfs".to_string(),
+            })?;
+        let meta_artifact = rootfs
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name.as_str().ends_with(".json"))
+            .ok_or_else(|| ImageSetMemberError::NoArtifact {
+                release_tag: self.release_tag.clone(),
+                role: rootfs.role,
+                target,
+                name: "dev meta sidecar".to_string(),
+            })?;
+        self.fetch_artifact(kernel_artifact, &dir.join("vmlinux"))?;
+        self.fetch_artifact(rootfs_artifact, &dir.join("rootfs.ext4"))?;
+        self.fetch_artifact(meta_artifact, &dir.join("mvm-meta.json"))?;
         Ok(())
     }
 

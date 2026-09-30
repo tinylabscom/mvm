@@ -343,6 +343,7 @@ mod tests {
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
+            routes: Vec::new(),
             ai: None,
             ports: vec![],
             cpus: 2,

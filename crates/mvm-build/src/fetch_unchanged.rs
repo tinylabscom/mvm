@@ -16,7 +16,7 @@ use std::path::Path;
 
 use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
-use mvm_core::image_set::{ImageSetRole, MemberTarget};
+use mvm_core::image_set::{ImageSetRole, MemberTarget, WorkloadImageProfile};
 
 use crate::guest_agent_build;
 use crate::published_image_set::PublishedImageSet;
@@ -68,6 +68,32 @@ pub fn set_sidecars_match_tree(
                     .is_some_and(|fp| fp.as_str() == fingerprint)
         })
     })
+}
+
+/// The set publishes the dev variant of the default tenant for `arch` (a dev
+/// kernel and a dev rootfs member), and — by the accepted v1
+/// over-approximation — the sidecars' source fingerprint equals this tree's,
+/// which is the predicate the sidecar arm uses.
+pub fn set_dev_members_match_tree(
+    set: &PublishedImageSet,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> bool {
+    let dev = set
+        .manifest()
+        .members
+        .iter()
+        .filter(|member| {
+            member.build_mode == Some(mvm_core::image_set::MemberBuildMode::Dev)
+                && member.target == MemberTarget::Arch(arch)
+                && matches!(
+                    member.role,
+                    ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant)
+                        | ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant)
+                )
+        })
+        .count();
+    dev == 2 && set_sidecars_match_tree(set, arch, fingerprint)
 }
 
 /// Fetch both sidecars from an already-acquired, verified set into
@@ -127,6 +153,39 @@ mod tests {
         assert!(
             !set_sidecars_match_tree(&set, ARCH, &fingerprint("ab")),
             "a set published before the fingerprint field must not adopt"
+        );
+    }
+
+    #[test]
+    fn dev_members_match_only_with_both_variants_and_a_matching_fingerprint() {
+        let fp = fingerprint("ab");
+        let set = set_with_sidecar_fingerprints(Some(fp.clone()));
+        assert!(
+            !set_dev_members_match_tree(&set, ARCH, &fp),
+            "the current train has no dev members, so nothing adopts"
+        );
+        let _env2 = unsigned_env();
+        let fixture = ImageSetFixture::complete()
+            .with_sidecar_fingerprints(ARCH, Some(fp.clone()))
+            .publish_dev(
+                ImageSetRole::WorkloadKernel(WorkloadImageProfile::DefaultTenant),
+                MemberTarget::Arch(ARCH),
+                "default-microvm-dev-vmlinux-aarch64",
+                b"dev-kernel".to_vec(),
+            )
+            .publish_dev(
+                ImageSetRole::WorkloadRootfs(WorkloadImageProfile::DefaultTenant),
+                MemberTarget::Arch(ARCH),
+                "default-microvm-dev-rootfs-aarch64.ext4",
+                b"dev-rootfs".to_vec(),
+            );
+        let served = tempfile::tempdir().unwrap();
+        let set = PublishedImageSet::acquire_from(fixture.serve_from(served.path()))
+            .expect("the fixture set acquires");
+        assert!(set_dev_members_match_tree(&set, ARCH, &fp));
+        assert!(
+            !set_dev_members_match_tree(&set, ARCH, &fingerprint("cd")),
+            "a fingerprint mismatch must not adopt the dev slot either"
         );
     }
 

@@ -551,6 +551,13 @@ pub enum LocalAuditKind {
     /// `mvmctl machine redo` re-applied the most recent undone apply.
     /// Detail: `action=workspace.redo volume=<v> redo=<id> target=<id>`
     WorkspaceRedo,
+
+    // --- Replay (PS-08) ---
+    /// `mvmctl machine replay` forked a checkpoint into a fresh,
+    /// re-admitted VM and re-ran the recorded input journal on it,
+    /// checkpointing each step. Detail:
+    ///   `action=replay.begin|replay.end from=<id> source_vm=<v> entries=<n>     ///    steps=<n>`
+    MachineReplay,
 }
 
 /// A single local audit log entry.
@@ -1263,6 +1270,8 @@ mod tests {
             LocalAuditKind::WorkspaceApply,
             LocalAuditKind::WorkspaceUndo,
             LocalAuditKind::WorkspaceRedo,
+            // Replay.
+            LocalAuditKind::MachineReplay,
         ];
         for kind in kinds {
             let json = serde_json::to_string(&kind).unwrap();
@@ -1326,6 +1335,7 @@ mod tests {
             (LocalAuditKind::WorkspaceApply, "workspace_apply"),
             (LocalAuditKind::WorkspaceUndo, "workspace_undo"),
             (LocalAuditKind::WorkspaceRedo, "workspace_redo"),
+            (LocalAuditKind::MachineReplay, "machine_replay"),
         ];
         for (kind, expected) in kinds_and_strings {
             let json = serde_json::to_string(&kind).unwrap();

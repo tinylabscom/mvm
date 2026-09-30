@@ -1033,6 +1033,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         net: false,
         allow_host: vec![],
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 2,
@@ -1092,6 +1093,33 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
         Some("ab".repeat(32))
     );
     assert!(spec.workload_dir.is_none());
+}
+
+#[test]
+fn run_spec_persists_endpoint_routes_and_their_concrete_hosts() {
+    let args = parse_run(&[
+        "run",
+        "--image",
+        "alpine:3.20",
+        "--name",
+        "routed",
+        "--allow-endpoint",
+        "GET https://api.github.com/repos/**",
+    ])
+    .expect("parse");
+    let spec = machine_run_spec(&args, "routed".to_string(), None).expect("spec");
+    assert_eq!(spec.allow_host, vec!["api.github.com:443"]);
+    assert_eq!(spec.routes.len(), 1);
+    assert_eq!(spec.routes[0].host, "api.github.com");
+    assert_eq!(spec.routes[0].rules[0].method.as_deref(), Some("GET"));
+    assert_eq!(
+        super::spec_ops::endpoint_routes_line(&spec.routes).as_deref(),
+        Some("endpoint-api.github.com-443=api.github.com:443 (1 rule)")
+    );
+
+    let json = serde_json::to_string(&spec).expect("serialize");
+    let restored: MachineSpec = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(restored.routes, spec.routes);
 }
 
 #[test]
@@ -1501,6 +1529,32 @@ fn create_accepts_a_rw_disk_image_under_standard() {
             dir.path().join("state.img").display()
         )]
     );
+}
+
+#[test]
+fn create_persists_manifest_endpoint_routes() {
+    let project = tempfile::tempdir().expect("project dir");
+    let manifest = project.path().join("mvm.toml");
+    std::fs::write(
+        &manifest,
+        r#"
+image = "alpine:latest"
+
+[[network.routes]]
+id = "github"
+host = "api.github.com"
+intercept = true
+rules = [{ method = "GET", path = "/repos/org/**", outcome = "allow" }]
+"#,
+    )
+    .expect("manifest");
+
+    let spec = create_args_from_manifest(&manifest, None)
+        .into_spec()
+        .expect("persistent route spec");
+    assert_eq!(spec.allow_host, vec!["api.github.com:443"]);
+    assert_eq!(spec.routes.len(), 1);
+    assert_eq!(spec.routes[0].id, "github");
 }
 
 /// ...and refuses a host directory at create time under every profile,
@@ -2145,6 +2199,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 2,
@@ -2406,6 +2461,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 4,
@@ -2502,6 +2558,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 2,
@@ -2573,6 +2630,7 @@ fn create_refuses_overwrite_without_force() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 2,
@@ -2611,6 +2669,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 2,
@@ -2651,6 +2710,7 @@ fn seed_machine_spec(name: &str) {
         net: false,
         allow_host: Vec::new(),
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 2,
@@ -3226,6 +3286,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         net: false,
         allow_host: vec![],
         peer: Vec::new(),
+        routes: Vec::new(),
         ai: None,
         ports: vec![],
         cpus: 2,

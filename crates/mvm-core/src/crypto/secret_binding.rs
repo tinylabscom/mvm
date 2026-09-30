@@ -21,7 +21,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use mvm_contract::ir::{AuthType, Sigv4Params};
+use mvm_contract::ir::{AuthType, InjectionMode, Sigv4Params};
 use serde::{Deserialize, Serialize};
 
 use crate::config::mvm_home_strict;
@@ -49,7 +49,7 @@ pub struct OAuthBindingMeta {
 }
 
 /// Per-(tenant, name) binding metadata. No secret bytes — safe to print.
-// allow(secret-debug): metadata only — auth_type + allowed_hosts. The
+// allow(secret-debug): metadata only — auth_type + injection policy + allowed_hosts. The
 // secret value lives in `SecretStore`, never here; Debug prints the
 // destination policy, which `mvmctl secret ls` already shows in cleartext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +65,11 @@ pub struct SecretBindingMeta {
     /// the forward-path signer can name the credential scope. `None` otherwise.
     #[serde(default)]
     pub sigv4: Option<Sigv4Params>,
+    /// The only request position in which this binding's placeholder may be
+    /// substituted. Older binding records default to ordinary header
+    /// injection.
+    #[serde(default, skip_serializing_if = "InjectionMode::is_header")]
+    pub inject: InjectionMode,
     /// The catalog entry this binding was authored from, when it was authored
     /// with `--provider`. Display and audit only — enforcement reads
     /// `allowed_hosts`, which was resolved once at `set` time. Recording the
@@ -273,6 +278,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into()],
             sigv4: None,
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
             oauth: None,
@@ -291,6 +297,7 @@ mod tests {
                 region: "us-east-1".into(),
                 service: "s3".into(),
             }),
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
             oauth: None,
@@ -305,6 +312,25 @@ mod tests {
         let store = FileBindingStore::with_dir(dir.path());
         store.put("local", "openai", &meta()).unwrap();
         assert_eq!(store.get("local", "openai").unwrap(), Some(meta()));
+    }
+
+    #[test]
+    fn non_header_injection_mode_roundtrips() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        let mut binding = meta();
+        binding.inject = InjectionMode::QueryParam;
+        store.put("local", "query-key", &binding).unwrap();
+        assert_eq!(store.get("local", "query-key").unwrap(), Some(binding));
+    }
+
+    #[test]
+    fn legacy_binding_defaults_to_header_injection() {
+        let binding: SecretBindingMeta = serde_json::from_str(
+            r#"{"auth_type":"bearer","allowed_hosts":["api.example.com"],"sigv4":null,"provider":null,"approve":"never"}"#,
+        )
+        .unwrap();
+        assert_eq!(binding.inject, InjectionMode::Header);
     }
 
     #[test]
@@ -382,6 +408,7 @@ mod tests {
             auth_type: AuthType::Bearer,
             allowed_hosts: vec!["api.openai.com".into(), "*.example.com".into()],
             sigv4: None,
+            inject: Default::default(),
             provider: None,
             approve: Default::default(),
             oauth: None,

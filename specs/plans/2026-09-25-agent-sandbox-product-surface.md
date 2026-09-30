@@ -150,16 +150,17 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] route + endpoint-rule types in `mvm-contract` (`deny_unknown_fields`, fuzzed)
       — `policy::routes`, `fuzz_egress_routes`; carried on `NetworkPolicy` in the signed plan
 - [x] injection modes: header, url_path, query_param, basic_auth; per-destination placeholders
-      — `SecretRef.inject` declares the mode; the position parser refuses a
-      placeholder outside its binding before anything forwards; basic_auth is
-      decoded/substituted/re-encoded; `mvm-contract` substitution + hostd
-      keyholder tests
+      — `secret set --inject` records the mode durably, admission validates the
+      mode/authentication pairing, and the host endpoint substitutes only in
+      the selected request position; response scrubbing covers every encoded
+      wire representation and `fuzz_substitution_positions` exercises the
+      position parser and fail-closed cases
 - [x] L7 endpoint rules (method + path glob) → allow / deny / ask
       — decided by `EgressGate::decide_route` on every read request; an unbound
       host is terminated only on an explicit `intercept` grant; `ask` is held and
       answered through PS-07's approval supervisor;
-      `--allow-endpoint` and `[[network.routes]]` (transient runs; persistent
-      machines refuse routes for now)
+      `--allow-endpoint` and `[[network.routes]]`; persistent runs record the
+      validated routes in `MachineSpec`
 - [x] default deny for loopback, RFC1918, CGNAT, link-local and metadata ranges; DNS pinned at the endpoint
       — one classifier (`mvm_contract::policy::restricted_address`) for every
       connect, datagram, DNS answer and forward-leg dial; metadata, loopback,
@@ -169,7 +170,9 @@ Security-bearing gaps first, then the foundations the UX needs:
       through the gate's recorded answer
 - [x] enforcement only in `EgressGate`; every decision audited with route id and rule
       — `host.route.decided { route, rule, outcome, destination, method }`
-- [ ] endpoint routes recorded on persistent machines (`MachineSpec`)
+- [x] endpoint routes recorded on persistent machines (`MachineSpec`)
+      — restart reconstructs the signed network policy from stored routes,
+      drift comparison includes them, and `machine inspect` renders them
 
 ### PS-03 — Credential injection UX (#3713)
 - [x] `--secret NAME[:HOST,...]` on `run` and `machine run` (finish #3333), fail-closed before boot
@@ -228,9 +231,20 @@ Security-bearing gaps first, then the foundations the UX needs:
 
 ### PS-06 — Signed packs and agent profiles (#3716)
 - [ ] pack manifest schema and keyless signing workflow in `mvm-templates`
+  - [x] strict product-pack manifest schema and lock-first, publisher-bound
+        keyless verification in `mvm-core`; publication workflow remains
+  - [x] exact signed-file payload verification that refuses missing, tampered,
+        undeclared, non-regular, and symlinked content before installation
+  - [x] content-addressed local installation with exact trust sidecars, atomic
+        same-filesystem promotion, verify-on-reuse, and poisoned-entry repair
 - [ ] `mvmctl search`, `pull ns/name[@ver]`, `run --profile ns/name -- CMD`, `pack ls|rm|update`
 - [ ] lockfile with digest pins; admission refuses drift (signed-bundle path, claim 9)
+  - [x] strict `namespace/name[@version]` references and a versioned lockfile
+        that refuses missing pins, duplicate package names, requested-version
+        drift, and raw manifest-byte digest drift before parsing
 - [ ] publisher trust policy; escape-hatch fields stripped from pack profiles; no host-config writes
+  - [x] namespace-scoped publisher trust policy with unique authorities,
+        explicit issuer/identity sets, and fail-closed untrusted namespaces
 - [ ] agent packs: claude, codex, pi, opencode, goose; runtime packs: python, node, rust, go
 
 ### PS-07 — Runtime approval supervisor (#3717)
@@ -283,13 +297,21 @@ Security-bearing gaps first, then the foundations the UX needs:
 - [x] session exclusions persisted so restore never deletes ignored files
       — operator `--exclude` globs persist into the apply manifest and are the
       only list undo/redo ever consults; no default list is ever rebuilt
-- [~] `mvmctl undo` / `redo` — landed as journal verbs reversing/re-applying
-      the most recent effective apply. Replay now has encrypted,
+- [x] `mvmctl undo` / `redo`; per-step checkpoints; `replay` from a
+      checkpoint with recorded input
+      — two input channels, one replay model. Agent sessions: encrypted,
       content-addressed input artifacts; session-bound, parent-linked
-      `vm_full` step checkpoints; a durable session-record commit point; and
-      a chain-verified ordered replay planner/dispatcher. Production step
-      orchestration and an operator replay command remain because the general
-      agent prompt transport is not exposed through `mvmctl` yet
+      `vm_full` step checkpoints; a durable session-record commit point; and a
+      chain-verified ordered replay planner/dispatcher (the foundations).
+      Operator command: `machine exec` records argv+outcome into a
+      per-machine input journal (never output; a torn final line is dropped),
+      and `mvmctl machine replay <checkpoint> [--as NAME] [--dry-run]`
+      fork-boots the checkpoint through the ordinary admission path like
+      `machine revert`, re-executes the journal entries recorded at or after
+      it, and takes a `vm_full` checkpoint per step — every replayed step is
+      a first-class `checkpoint ls` restore point. Remaining: agent-prompt
+      step orchestration, blocked on the general agent prompt transport
+      reaching `mvmctl`
 - [x] snapshot Merkle roots in the audit chain; protected-path gate applies to apply
       — chain-signed `workspace.applied`/`workspace.undone`/
       `workspace.redone` entries carry the committed manifest Merkle root;
@@ -359,6 +381,10 @@ Security-bearing gaps first, then the foundations the UX needs:
 
 ### PS-13 — Tool-level privileges (#3723)
 - [ ] per-tool policy in profiles (argv patterns, routes, secrets, allow/deny/ask)
+  - [x] `[tools] allow/ask/deny` plus `[tools.detail.<name>] argv/deny/routes/secrets`,
+        merge rules that only narrow (first definition sets the grant, later
+        layers subset it; deny unions), `show`/`diff`/`why` rendering, schema
+        regenerated — recorded-only until enforcement lands
 - [ ] MCP tool gate wired to a live path; secrets bound to (tool, destination)
 - [ ] in-guest command mediation for declared tools, reported over vsock and audited
 
@@ -505,6 +531,12 @@ issue #3731 carries the same status as a comment.
 | #3798 | PS-05 (#3715) | composable policy groups/profiles and resolved manifests; security audit fixes added; focused checks, Clippy, and host workspace tests validated (one parallel image-lock race passed on serial rerun); Linux and required-feature gates pending CI |
 | mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
 
+### Resumed after the snapshot (2026-09-28)
+
+| Branch | Workstream | State |
+|---|---|---|
+| `feat/issue-3712-egress-routes` | PS-02 (#3712) | Completed durable injection modes and persistent-machine endpoint routes; focused suites, host workspace split, workspace check/Clippy, gated-target compilation, and the single-network-path invariant are green |
+
 ### Stopped mid-flight (2026-09-27)
 
 All program agents were stopped at the user's request on 2026-09-27. Their
@@ -517,7 +549,7 @@ every branch needs a rebase onto main, the full gates, and a PR.
 | `fix/verb-grant-expiry` | #3752 | 3 commits, complete per its agent |
 | `feat/no-network-hint` | PS-04 (#3714) | 1 commit, complete per its agent |
 | `feat/vm-diff-content` | PS-08 (#3718) | 1 commit + `wip:` (guest diff verb, `diff/`, `workspace.rs`) |
-| `feat/egress-injection-modes` | PS-02 (#3712) | `wip:` only (`query_param` / `url_path` / `basic_auth`) |
+| `feat/egress-injection-modes` | PS-02 (#3712) | WIP snapshot folded into `feat/issue-3712-egress-routes` and completed on 2026-09-28 |
 | `fix/oci-proxy-env-resolution` | #3757 | `wip:` only (`exec/oci_boot.rs`, delivery note drafted) |
 | `fix/transient-launch-initramfs` | transient `LocalBackend::launch` | `wip:` only (`universal_initramfs.rs`, `host_shell.rs`) |
 | `wip/instruction-provenance-ci-fix` | PS-11 (#3753) | `wip:` on top of `feat/instruction-provenance`: the unfinished CI fix; fold into #3753 |

@@ -65,6 +65,9 @@ pub fn prepare_request(
         Err(PrepareError::MultipleSigningPlaceholders) => Err(ProxyError::Refused(
             "more than one signing placeholder in one request".into(),
         )),
+        Err(PrepareError::MultiplePlaceholdersInField) => Err(ProxyError::Refused(
+            "more than one secret placeholder in one request field".into(),
+        )),
         Err(PrepareError::Driver(e)) => Err(e),
         Err(PrepareError::PlaceholderOutOfPosition(position)) => {
             Err(ProxyError::PlaceholderOutOfPosition(position))
@@ -83,6 +86,9 @@ impl<'a> SubstitutionDriver for NetworkEndpoint<'a> {
         self.resolve_ref(placeholder).map(|r| r.inject)
     }
 
+    fn reflect(&self, placeholder: &str, guest: &str, wire: &str) {
+        self.observe_wire_form(placeholder, guest, wire);
+    }
     fn substitute(
         &self,
         placeholder: &str,
@@ -498,6 +504,9 @@ impl SubstitutionService {
                     position.refusal_label(),
                 )
                 .await;
+                if carried_placeholder {
+                    self.audit_placeholder_dropped(destination.as_deref()).await;
+                }
                 return Err(WireResponse::Refused {
                     message: ProxyError::PlaceholderOutOfPosition(position).to_string(),
                 });
@@ -540,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_keeps_placeholders_from_every_approved_request_position() {
+    fn substituted_metadata_covers_headers_basic_auth_and_url_positions() {
         let (_dir, resolver) = resolver_with("openai", "sk-live-zzz");
         let mut registry = SubstitutionRegistry::new();
         let placeholder = registry.mint(bearer_ref("openai", &["api.openai.com"]));

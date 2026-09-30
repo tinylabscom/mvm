@@ -2,6 +2,71 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.19.0] — 2026-09-30
+
+### Added
+- **audit**: Per-session seals, a derived session ledger, and trust audit sessions|show|verify <session>
+- **sdk**: Restore command, template, dispatch and log follow in-process (PS-01)
+- **vmm**: A source checkout builds its own per-VM host helpers
+- **agentd,runtime**: Guest telemetry listener and the full-chain witness (W2b, #3421)
+- **trust**: Provenance for agent instruction files — signed policy, pre-boot scan, audited verdicts
+- **run**: Name --allow-host when a failed run had no network access
+- **egress**: Query_param, url_path and basic_auth injection modes
+- **nix**: Pinned release package and lean dev shell
+- **hostd**: Cumulative ActionLedger tracker (ledger plan Phase 1)
+- **console**: Detachable console sessions with scrollback reattach
+- **image-set**: Members carry dev build modes and source fingerprints
+- **approvals**: Complete SDK runtime callbacks
+- **vm**: Content diff for vm diff and the workspace apply seam
+- **builder**: Supply the builder's host binaries at every boot — a versioned builder boot contract
+- **policy**: Composable groups, authored profiles, and a resolved manifest (PS-05)
+- **build**: Fetch-when-unchanged adopts published sidecars whose fingerprint matches
+- **image-set**: Refuse a local set without builder_boot_abi
+- Add denial policy review and why queries
+- **workspace**: Sign history and add replay foundations
+- **cli**: An ambient update-available notice on interactive terminals
+
+### Changed
+- **build**: Remove sccache integration
+- **cli**: Delete unreachable up::Args and stale CLI references
+- **just**: Reduce the task-runner surface to a CI-mirroring top level with namespaced modules
+- **image-set**: Pin image-set/v0.2.2
+
+### Documentation
+- **plan**: Record the W8 re-measure on v0.18.3 and open the e2e follow-up
+- Track scheduled Security witness recovery
+- **plan**: Refresh open issue priority and ownership
+- **plans**: Agent efficiency overhaul for Claude/Codex/Kimi harness behaviors
+- **contributing**: Add AI coding workflow guide and slim AGENTS.md to a rule index
+- Correct deploy and session status claims
+- **plans**: Tick W7 of the builder-image-without-host-bins plan
+- **plan**: Guest-bins artifact decoupling
+
+### Fixed
+- **launch**: One OCI-boot answer feeds the backend choice and the guest proxy env
+- **launch**: Attach the universal initramfs on transient LocalBackend boots
+- **ci**: Preserve exited child outcomes during bounded cleanup
+- **launch**: Admit after preparation so a cold build cannot spend the verb grant window
+- **build**: Production set selection never matches a dev member
+- **ci**: Separate signing smoke inputs from pack outputs
+- Cover approval for every secret injection mode
+- **build**: Emit local image sets outside the checkouts even when the cache lives in one
+- **dev**: Bin/dev works from a lone mvm clone; README documents the setup
+
+### Other
+- Derive OCI guest proxy env from resolved launch source, not only `--image`
+- Fix pack-signing smoke image-set fixture drift
+- Add copilot-issue-task.sh for GitHub Copilot issue task prompts
+- Align SDK runtime docs with the shipped hostlib surface
+- Strengthen host-path mutation coverage for volume parsing
+- Stabilize documented-surface e2e runtime SDK hostlib resolution
+- Run-path grant issuance now happens after cold runtime prep; activation denials now explain expired grants
+- PS-03 follow-up: OAuth token-set resolution + endpoint-side token response capture
+
+### Testing
+- **security**: Cover mutation witness boundary cases
+- **agentd**: Account for bounded slow-sink output loss
+
 ## [0.18.3] — 2026-09-28
 
 ### Fixed

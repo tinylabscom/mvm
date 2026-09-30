@@ -810,19 +810,31 @@ fn validate_env(env: &BTreeMap<String, EnvValue>, base: &str, errors: &mut Vec<V
         // toward any host the egress endpoint reaches, so refuse the unbound one.
         // `auth_type` is a typed enum (always valid); `name` is required by the
         // decorator that produces it.
-        if let EnvValue::SecretRef { reference } = value
-            && reference.allowed_hosts.is_empty()
-        {
-            errors.push(ValidationError {
-                code: ErrorCode::SecretWithoutBinding,
-                path: format!("{base}.{key}"),
-                detail: format!(
-                    "secret {:?} declares no allowed_hosts — an unbound secret is a \
-                     claim-12 violation. Add hosts (e.g. [\"api.example.com\"] or \
-                     [\"*.example.com\"]).",
-                    reference.name
-                ),
-            });
+        if let EnvValue::SecretRef { reference } = value {
+            if reference.allowed_hosts.is_empty() {
+                errors.push(ValidationError {
+                    code: ErrorCode::SecretWithoutBinding,
+                    path: format!("{base}.{key}"),
+                    detail: format!(
+                        "secret {:?} declares no allowed_hosts — an unbound secret is a \
+                         claim-12 violation. Add hosts (e.g. [\"api.example.com\"] or \
+                         [\"*.example.com\"]).",
+                        reference.name
+                    ),
+                });
+            }
+            if !reference.inject.admits(reference.auth_type) {
+                errors.push(ValidationError {
+                    code: ErrorCode::SecretInjectionMode,
+                    path: format!("{base}.{key}"),
+                    detail: format!(
+                        "secret {:?} cannot use injection mode {} with authentication type {:?}",
+                        reference.name,
+                        reference.inject.label(),
+                        reference.auth_type
+                    ),
+                });
+            }
         }
     }
 }
@@ -861,5 +873,50 @@ fn version_error(e: VersionError) -> ValidationError {
                  `mvm.SCHEMA_VERSION` (Python) or `mv.SCHEMA_VERSION` (TS)."
             ),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{AuthType, InjectionMode, SecretMount, SecretRef};
+
+    fn secret(auth_type: AuthType, inject: InjectionMode) -> EnvValue {
+        EnvValue::SecretRef {
+            reference: SecretRef {
+                name: "api-key".into(),
+                mount: SecretMount::Env {
+                    var: "API_KEY".into(),
+                },
+                auth_type,
+                allowed_hosts: vec!["api.example.com".into()],
+                sigv4: None,
+                inject,
+            },
+        }
+    }
+
+    #[test]
+    fn rejects_an_injection_mode_incompatible_with_the_auth_type() {
+        let env = BTreeMap::from([(
+            "API_KEY".into(),
+            secret(AuthType::Hmac, InjectionMode::QueryParam),
+        )]);
+        let mut errors = Vec::new();
+        validate_env(&env, ".apps.web.env", &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code, ErrorCode::SecretInjectionMode);
+        assert_eq!(errors[0].path, ".apps.web.env.API_KEY");
+    }
+
+    #[test]
+    fn accepts_a_basic_credential_in_basic_auth_position() {
+        let env = BTreeMap::from([(
+            "API_KEY".into(),
+            secret(AuthType::Basic, InjectionMode::BasicAuth),
+        )]);
+        let mut errors = Vec::new();
+        validate_env(&env, ".apps.web.env", &mut errors);
+        assert!(errors.is_empty());
     }
 }
