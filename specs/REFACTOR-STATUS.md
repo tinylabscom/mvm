@@ -2404,8 +2404,12 @@ resume` takes a `current_head` and refuses when it differs from the
 - [~] **Plan 335 — merge-queue throughput.** Automatic architecture and kernel
       checks now share the main CI scope gate, required check names are
       preserved transitively, duplicate runner allocations are removed, and
-      trusted default-branch Rust/Nix cache warming is added. Repository and
-      host validation are green; landing, Linux CI, and verified live queue
+      trusted default-branch Rust/Nix cache warming is added. The 2026-09-29
+      follow-up measured 65-120 minute PR runs whose longest job executed for
+      only 20-24 minutes, then moved both pinned `cargo-zigbuild` installs after
+      the trusted binary-cache restore and removed a measured 4m14s unrelated
+      disk scrub from the focused eBPF lane. Repository and host validation are
+      green; landing, post-change timing, Linux CI, and verified live queue
       settings remain open.
 
 - [~] Plan 330 — Decision provenance layer

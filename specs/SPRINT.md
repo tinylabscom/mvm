@@ -4054,6 +4054,11 @@ Cross-sprint work tracked in `specs/plans/2026-08-15-merge-queue-throughput.md`.
 - [x] Preserve the required `Invariant` and per-architecture kernel check
       names while removing duplicate runner allocations and feature tests.
 - [x] Add trusted default-branch Rust workspace and Nix cache warming.
+- [x] Restore cached Cargo binaries before the two pinned `cargo-zigbuild`
+      installs and stop the focused eBPF lane from spending four minutes on a
+      full hosted-runner disk scrub. The 2026-09-29 baseline found 65-120 minute
+      PR wall times against only 20-24 minutes of actual critical-path work;
+      these changes remove about 18-22 runner-minutes without dropping a lane.
 - [x] Pass actionlint, shellcheck, formatting, workspace check, focused
       workflow tests, host all-target Clippy, and the affected crate's complete
       serial test suite.
