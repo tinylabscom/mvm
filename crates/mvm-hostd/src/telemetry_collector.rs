@@ -132,6 +132,16 @@ impl CollectorHandle {
         self.shed.load(Ordering::Relaxed)
     }
 
+    /// Shared views for the embedded status writer, which reports on its own
+    /// cadence without borrowing the handle across threads.
+    fn status_shared(&self) -> &Arc<Mutex<CoverageStatus>> {
+        &self.status
+    }
+
+    fn shed_shared(&self) -> &Arc<AtomicU64> {
+        &self.shed
+    }
+
     /// Ask the worker to stop and wait for it. Takes effect between attempts,
     /// between backoff polls, and at the next receive boundary of a live
     /// session (peer close or error); a session blocked in a read ends when
@@ -737,24 +747,73 @@ fn write_status(path: &std::path::Path, snapshot: &CollectorStatusSnapshot) {
     }
 }
 
-/// Run a collector process from its spawn-time configuration: dial the
-/// bridged telemetry socket, authenticate through the delegated signer, and
-/// persist a status snapshot on a fixed cadence until the process is killed.
-///
-/// The first snapshot is written before anything is dialed — the spawner
-/// reads its appearance as process readiness, so a slow or absent guest can
-/// never look like a failed spawn.
-pub fn run_from_config(
-    config: mvm_vmm::host::telemetry_collector_spawn::TelemetryCollectorProcessConfig,
-) -> anyhow::Result<()> {
+/// The embedded collector's inputs, carried inside the endpoint's stdin
+/// config. `deny_unknown_fields` so a section from a newer spawner fails
+/// closed rather than half-applying.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TelemetryEmbedConfig {
+    /// The VM's state dir: registration, status and records live here.
+    pub state_dir: std::path::PathBuf,
+    /// The per-VM host UDS the backend bridges to the guest telemetry port.
+    pub telemetry_sock: std::path::PathBuf,
+    /// The delegated signer's UDS (the audit-signer subprocess).
+    pub signer_sock: std::path::PathBuf,
+    /// The host-signer public key the receiver authenticates itself under.
+    pub host_anchor_path: std::path::PathBuf,
+    /// Byte cap for the records file; beyond it records are shed and counted.
+    pub records_byte_cap: u64,
+}
+
+/// The embedded collector: the worker plus its status writer, running as
+/// threads of the host process that owns the VM (the network endpoint).
+/// There is deliberately no `Drop` that joins — the collector dies with its
+/// process, which is the ownership contract; `stop` exists for tests.
+pub struct EmbeddedCollector {
+    handle: CollectorHandle,
+    status_stop: std::sync::Arc<AtomicBool>,
+    status_thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EmbeddedCollector {
+    /// The worker's current standing.
+    pub fn status(&self) -> CoverageStatus {
+        self.handle.status()
+    }
+
+    /// Stop both threads and wait for them. Test seam; production never
+    /// calls it — process death is the teardown.
+    pub fn stop(mut self) {
+        self.status_stop.store(true, Ordering::Release);
+        if let Some(thread) = self.status_thread.take() {
+            let _ = thread.join();
+        }
+        self.handle.stop();
+    }
+}
+
+/// Where the embedded collector persists its status snapshot.
+fn status_path(config: &TelemetryEmbedConfig) -> std::path::PathBuf {
+    config
+        .state_dir
+        .join(mvm_vmm::host::telemetry_provisioning::TELEMETRY_COLLECTOR_STATUS_FILE)
+}
+
+/// Start the embedded collector inside the current process: dial the bridged
+/// telemetry socket, authenticate through the delegated signer, persist
+/// records to the capped JSONL and a status snapshot on a fixed cadence.
+/// The first snapshot is written before anything is dialed, so a slow or
+/// absent guest never looks like a failed start.
+pub fn start_embedded(
+    vm_name: &str,
+    config: &TelemetryEmbedConfig,
+) -> anyhow::Result<EmbeddedCollector> {
     use anyhow::Context as _;
 
-    let status_path = config
-        .state_dir
-        .join(mvm_vmm::host::telemetry_collector_spawn::TELEMETRY_COLLECTOR_STATUS_FILE);
+    let status_file = status_path(config);
     write_status(
-        &status_path,
-        &status_snapshot(&config.vm_name, &CoverageStatus::Connecting, 0),
+        &status_file,
+        &status_snapshot(vm_name, &CoverageStatus::Connecting, 0),
     );
 
     let anchor_bytes: [u8; 32] = std::fs::read(&config.host_anchor_path)
@@ -766,7 +825,7 @@ pub fn run_from_config(
     let sink = CappedJsonlSink::create(
         &config
             .state_dir
-            .join(mvm_vmm::host::telemetry_collector_spawn::TELEMETRY_RECORDS_FILE),
+            .join(mvm_vmm::host::telemetry_provisioning::TELEMETRY_RECORDS_FILE),
         config.records_byte_cap,
     )
     .context("opening the records file")?;
@@ -805,7 +864,7 @@ pub fn run_from_config(
     let handle = spawn_collector(
         CollectorConfig::new(
             config.state_dir.clone(),
-            config.vm_name.clone(),
+            vm_name.to_string(),
             host_anchor,
             connector,
             signer,
@@ -813,13 +872,32 @@ pub fn run_from_config(
         sink,
     )?;
 
-    // The process lives until the runner reaps it with SIGTERM; until then,
-    // keep the snapshot fresh on a coarse cadence.
-    loop {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        write_status(
-            &status_path,
-            &status_snapshot(&config.vm_name, &handle.status(), handle.shed()),
-        );
-    }
+    let status_stop = std::sync::Arc::new(AtomicBool::new(false));
+    let status_thread = {
+        let stop = std::sync::Arc::clone(&status_stop);
+        let status = std::sync::Arc::clone(handle.status_shared());
+        let shed = std::sync::Arc::clone(handle.shed_shared());
+        let vm_name = vm_name.to_string();
+        std::thread::Builder::new()
+            .name(format!("mvm-telemetry-status-{vm_name}"))
+            .spawn(move || {
+                while !stop.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    let current = status
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone();
+                    write_status(
+                        &status_file,
+                        &status_snapshot(&vm_name, &current, shed.load(Ordering::Relaxed)),
+                    );
+                }
+            })?
+    };
+
+    Ok(EmbeddedCollector {
+        handle,
+        status_stop,
+        status_thread: Some(status_thread),
+    })
 }

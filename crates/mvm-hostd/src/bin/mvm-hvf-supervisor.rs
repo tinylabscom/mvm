@@ -536,6 +536,9 @@ fn spawn_owned_builder_endpoint(
     let policy = mvm_core::policy::network_policy::NetworkPolicy::trusted_build_egress();
     mvm_vmm::host::network_endpoint_spawn::spawn_network_endpoint(
         mvm_vmm::host::network_endpoint_spawn::SubstitutionSpawnParams {
+            // Same provisioning decision as a fresh boot: the restored
+            // endpoint embeds the collector iff this host collects.
+            telemetry: mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
             vm_name: &endpoint.vm_name,
             state_dir: &endpoint.state_dir,
             // This supervisor is the builder VM, so its own life is the VM's.

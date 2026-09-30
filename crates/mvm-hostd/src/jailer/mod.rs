@@ -232,6 +232,18 @@ impl ConfinementSpec {
         self
     }
 
+    /// Permit the embedded telemetry collector's I/O: the VM state dir
+    /// (records + status files, and the per-VM sockets bound inside it) and
+    /// the host keys dir the anchor is read from. Opt-in so an endpoint with
+    /// no embedded collector keeps the narrower grant.
+    #[must_use]
+    pub fn with_telemetry_state(mut self, state_dir: Option<&Path>) -> Self {
+        if let Some(state_dir) = state_dir {
+            self.read_write_paths.push(state_dir.to_path_buf());
+        }
+        self
+    }
+
     /// Permit the endpoint to connect to the operator's approval socket.
     /// The directory, not the socket: the broker binds the socket after the
     /// endpoint has confined itself, and Landlock cannot grant a path that
