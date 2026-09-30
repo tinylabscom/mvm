@@ -1140,7 +1140,7 @@ mod tests {
             session_id: current.session_id.clone(),
             generation: current.generation,
             journal_cursor: 5,
-            approval_head: ApprovalHead::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            approval_head: ApprovalHead::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
             replay_input_digest: Some(input.artifact_digest.clone()),
         }))
         .build();
