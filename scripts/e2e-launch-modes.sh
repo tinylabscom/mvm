@@ -19,6 +19,8 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO="$PWD"
+# shellcheck source=scripts/sdk-hostlib.sh
+source "$REPO/scripts/sdk-hostlib.sh"
 
 # Prefer an explicit `MVM_E2E_HOME`, then `MVM_HOME`, then the real home.
 #
@@ -201,6 +203,14 @@ cargo build --bin mvmctl --features user,embed-host-bins
 # VM that would rebuild them.
 echo "==> building the per-VM host helpers"
 just payload::supervisors
+
+# The language SDKs drive machines in-process through the host library and find
+# it beside the `mvmctl` on PATH. `cargo build --bin mvmctl` never builds it,
+# so without this the runtime-SDK scenarios fail with "the host library ... was
+# not found" before a machine is asked for. A cold `just e2e::launch` has no
+# earlier lane to have left the library behind. Export the exact path because
+# the runtime-SDK scenarios cross the `mvmctl run --mode live` boundary.
+build_sdk_hostlib "$MVMCTL"
 
 # ---------------------------------------------------------------------------
 # 2. Warm the shared artifact home.

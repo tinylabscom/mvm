@@ -20,6 +20,8 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 REPO="$PWD"
 # shellcheck source=scripts/e2e-phase-timings.sh
 source "$REPO/scripts/e2e-phase-timings.sh"
+# shellcheck source=scripts/sdk-hostlib.sh
+source "$REPO/scripts/sdk-hostlib.sh"
 
 # Prefer an explicit `MVM_E2E_HOME`, then `MVM_HOME`, then the real home.
 #
@@ -303,21 +305,9 @@ just payload::supervisors
 # it beside the `mvmctl` on PATH, which the live steps put first. `cargo build
 # --bin mvmctl` never builds it, so without this the runtime-SDK scenarios fail
 # with "the host library ... was not found" before a machine is asked for.
-echo "==> building the SDK host library beside mvmctl"
-cargo build -p mvm-hostlib
-hostlib_ext="so"
-if [[ "$(uname -s)" == "Darwin" ]]; then
-  hostlib_ext="dylib"
-fi
-hostlib_path="$(dirname "$MVMCTL")/libmvm_hostlib.${hostlib_ext}"
-if [[ ! -f "$hostlib_path" ]]; then
-  echo "!!! expected host library at $hostlib_path, but it was not built." >&2
-  exit 1
-fi
-# The runtime-SDK scenarios launch scripts through `mvmctl run --mode live`.
-# Export the exact library path so the in-repo SDK does not depend on PATH
-# propagation through that launch boundary.
-export MVM_HOSTLIB_PATH="$hostlib_path"
+# Export the exact path because the runtime-SDK scenarios cross the
+# `mvmctl run --mode live` boundary.
+build_sdk_hostlib "$MVMCTL"
 
 helpers_present() {
   local root="${CARGO_TARGET_DIR:-target}"
