@@ -120,6 +120,20 @@ scoped stable clippy `-D warnings`, `nix fmt` for staged `.nix` files, and
 `actionlint` for workflow changes — never the full test suite; heavy gates run
 in CI (`MVM_SKIP_CLIPPY=1` bypasses the clippy pass).
 
+## The DX rule: binary development is single-repo
+
+Developing the binaries that run inside a microVM — agent, egress client,
+protocol crates — happens entirely in this repository. A guest-binary-only
+change must never require an `mvm-images` checkout, edit, or release: the
+dev-tier build arms rebuild and boot the new binaries from this checkout, and
+image assembly consumes them without a recipe change. `mvm-images` is entered
+deliberately, only for image-definition work (packages, kernels, roles), and
+even then this repo stays the front door (`bin/dev build image-set`). The
+acceptance test is the one-clone bootstrap: a contributor who clones only
+`mvm` and follows the quickstart never needs to know the image repository
+exists. The repo split has a queue-wall tripwire: keep it under 20 minutes,
+or re-open the topology decision.
+
 ## Definition of Done
 
 No task is complete without all of:
