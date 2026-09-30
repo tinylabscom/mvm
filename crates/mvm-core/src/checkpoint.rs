@@ -434,6 +434,11 @@ pub struct CheckpointMeta {
     /// digest covers this field and the signed chain covers the digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<SessionBinding>,
+    /// Last fully committed machine-exec input at the instant this checkpoint
+    /// was captured. Replay uses this exact cursor instead of a wall clock, so
+    /// two operations in one second cannot be reordered or executed twice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_input_cursor: Option<u64>,
     /// Content-address of the load-bearing fields above. Required with no serde
     /// default: a record that carries no content-address cannot be
     /// lineage-verified, so a pre-lineage meta.json must fail closed rather than
@@ -462,6 +467,7 @@ impl CheckpointMeta {
             snapshot_id: None,
             grants: None,
             session: None,
+            machine_input_cursor: None,
             audit_ref: None,
         }
     }
@@ -486,6 +492,7 @@ impl CheckpointMeta {
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
             session: &self.session,
+            machine_input_cursor: &self.machine_input_cursor,
         }
         .digest()
     }
@@ -512,6 +519,27 @@ impl CheckpointMeta {
             .snapshot_id(Some(snapshot_id.into()))
             .grants(self.grants.clone())
             .session(self.session.clone())
+            .machine_input_cursor(self.machine_input_cursor)
+            .audit_ref(self.audit_ref.clone())
+            .build()
+    }
+
+    /// Return the same sealed record bound to an exact machine-input cursor.
+    /// Rebuilding recomputes the load-bearing digest before the record is
+    /// written or chain-bound.
+    pub fn with_machine_input_cursor(&self, cursor: u64) -> Self {
+        CheckpointMeta::builder(self.id.clone(), self.class, self.vm_name.clone())
+            .tag(self.tag.clone())
+            .parent(self.parent.clone())
+            .created_unix(self.created_unix)
+            .content(self.content.clone())
+            .key_domain(self.key_domain.clone())
+            .supervisor_config_digest(self.supervisor_config_digest.clone())
+            .runtime_overlay_version(self.runtime_overlay_version.clone())
+            .snapshot_id(self.snapshot_id.clone())
+            .grants(self.grants.clone())
+            .session(self.session.clone())
+            .machine_input_cursor(Some(cursor))
             .audit_ref(self.audit_ref.clone())
             .build()
     }
@@ -564,6 +592,8 @@ struct CheckpointDigestInput<'a> {
     /// verification reports drift on a record nobody edited.
     #[serde(skip_serializing_if = "Option::is_none")]
     session: &'a Option<SessionBinding>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    machine_input_cursor: &'a Option<u64>,
 }
 
 impl CheckpointDigestInput<'_> {
@@ -615,6 +645,7 @@ pub struct CheckpointMetaBuilder {
     snapshot_id: Option<String>,
     grants: Option<mvm_contract::grants::Grants>,
     session: Option<SessionBinding>,
+    machine_input_cursor: Option<u64>,
     audit_ref: Option<String>,
 }
 
@@ -663,6 +694,10 @@ impl CheckpointMetaBuilder {
         self.session = binding;
         self
     }
+    pub fn machine_input_cursor(mut self, cursor: Option<u64>) -> Self {
+        self.machine_input_cursor = cursor;
+        self
+    }
     pub fn audit_ref(mut self, r: Option<String>) -> Self {
         self.audit_ref = r;
         self
@@ -686,6 +721,7 @@ impl CheckpointMetaBuilder {
             snapshot_id: &self.snapshot_id,
             grants: &self.grants,
             session: &self.session,
+            machine_input_cursor: &self.machine_input_cursor,
         }
         .digest();
         CheckpointMeta {
@@ -702,6 +738,7 @@ impl CheckpointMetaBuilder {
             snapshot_id: self.snapshot_id,
             grants: self.grants,
             session: self.session,
+            machine_input_cursor: self.machine_input_cursor,
             meta_digest,
             audit_ref: self.audit_ref,
         }
@@ -1013,12 +1050,34 @@ mod tests {
             snapshot_id: &sessionless.snapshot_id,
             grants: &sessionless.grants,
             session: &None,
+            machine_input_cursor: &None,
         };
         let json = serde_json::to_string(&input).unwrap();
         assert!(
             !json.contains("session"),
             "an absent session must not appear in the digest input: {json}"
         );
+        assert!(
+            !json.contains("machine_input_cursor"),
+            "an absent machine input cursor must not appear in the digest input: {json}"
+        );
+    }
+
+    #[test]
+    fn machine_input_cursor_is_load_bearing_and_round_trips() {
+        let base = CheckpointMeta::builder(
+            CheckpointId::new("cursor-bound"),
+            CheckpointClass::VmFull,
+            "vm-1",
+        )
+        .build();
+        let bound = base.with_machine_input_cursor(7);
+        assert_eq!(bound.machine_input_cursor, Some(7));
+        assert_ne!(base.meta_digest, bound.meta_digest);
+        assert_eq!(bound.meta_digest, bound.compute_meta_digest());
+        let decoded: CheckpointMeta =
+            serde_json::from_slice(&serde_json::to_vec(&bound).unwrap()).unwrap();
+        assert_eq!(decoded, bound);
     }
 
     #[test]

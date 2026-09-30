@@ -176,8 +176,9 @@ pub(super) fn machine_start_receipt_input(
     spec: &MachineSpec,
     backend: &str,
 ) -> Result<MachineStartReceiptInput> {
-    let network_policy =
-        shared::resolve_run_network_policy(spec.net, &spec.allow_host)?.with_ai(spec.ai.clone());
+    let network_policy = shared::resolve_run_network_policy(spec.net, &spec.allow_host)?
+        .with_ai(spec.ai.clone())
+        .with_routes(spec.routes.clone());
     crate::exec::validate_image_egress_backend_name(
         backend,
         shared::launch_uses_oci_image(spec.image.as_deref(), spec.manifest.as_deref())?,

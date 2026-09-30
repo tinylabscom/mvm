@@ -63,6 +63,14 @@ impl<'a> Injector<'a> {
         self
     }
 
+    /// Remember an encoded representation that reached the wire after the raw
+    /// value was substituted, so the response scrubber catches that form too.
+    pub(crate) fn observe_wire_form(&self, secret: &SecretRef, placeholder: &str, wire: &str) {
+        if let Some(observer) = self.observer {
+            observer.substituted(secret, placeholder, wire);
+        }
+    }
+
     /// Substitute `placeholder` in `text` with the secret's resolved value,
     /// for an outbound request to `destination`. The result is a zeroizing
     /// buffer because it carries the raw credential. Refuses — without

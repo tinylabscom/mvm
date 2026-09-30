@@ -16,7 +16,8 @@
 
 mod checkpoint;
 mod create_policy;
-mod lifecycle;
+pub(crate) mod input_journal;
+pub(crate) mod lifecycle;
 mod list;
 mod manifest_source;
 mod portable;
@@ -39,6 +40,7 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mvm_contract::policy::routes::EgressRoute;
 use mvm_core::manifest::ManifestMachineWorkflow;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::{config, naming};
@@ -610,21 +612,15 @@ fn machine_run_spec(
         );
     };
     let workload_dir = persistent_workload_dir_for_run(args)?;
-    if !args.run.allow_endpoint.is_empty() || !args.run.policy_routes.is_empty() {
-        bail!(
-            "endpoint routes (--allow-endpoint, or [[network.routes]] in the policy) are not \
-             yet supported on a persistent machine: they would not be recorded beside the \
-             spec, so a restart would drop them. Use a transient `run`/`machine run` without \
-             --name, or --allow-host"
-        );
-    }
+    let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
+    let allow_host = routes.with_allow_host(&args.run.allow_host);
     let config = mvm_core::user_config::load(None);
     let ai = super::shared::resolve_ai_policy(args.run.ai_token_budget);
     let resolved = super::shared::resolve_policy_run_grants(
         super::shared::GrantInputs {
             cpu_limit_millicores: args.run.cpu_limit,
             timeout_secs: args.run.timeout,
-            allow_host: &args.run.allow_host,
+            allow_host: &allow_host,
             peer: &args.run.peer,
             net: args.run.net,
             network_preset: args.run.network_preset,
@@ -638,11 +634,8 @@ fn machine_run_spec(
         },
         args.run.applied_policy.as_ref(),
     )?;
-    let (net, allow_host) = super::shared::persisted_run_network(
-        args.run.net,
-        args.run.network_preset,
-        &args.run.allow_host,
-    );
+    let (net, allow_host) =
+        super::shared::persisted_run_network(args.run.net, args.run.network_preset, &allow_host);
     let _ = validate_machine_memory(&args.run.memory, None)?;
     let profile = run_profile_name(args.run.profile).to_string();
     Ok(MachineSpec {
@@ -656,6 +649,7 @@ fn machine_run_spec(
         net,
         allow_host,
         peer: Vec::new(),
+        routes: routes.routes,
         ai,
         ports: args.port.clone(),
         cpus: args.run.cpus,
@@ -1058,6 +1052,7 @@ struct MachineSpecInputs<'a> {
     net: bool,
     allow_host: &'a [String],
     peer: &'a [String],
+    routes: &'a [EgressRoute],
     /// `--gpu` (or the manifest's `gpu = true`): the GPU remoting plane.
     gpu: bool,
     /// Explicit CLI ordinal, or the manifest's `gpu_device` selection.
@@ -1119,6 +1114,8 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         memory_mib: u64::from(mvm_core::util::parse_human_size(&memory)?),
     })?;
     let allow_host = policy.allow_host;
+    let routes = mvm_client::admission::run_routes::resolve_run_routes(&[], inputs.routes)?;
+    let allow_host = routes.with_allow_host(&allow_host);
     let ai = inputs
         .ai
         .or(workflow.and_then(|workflow| workflow.ai.as_ref()));
@@ -1166,6 +1163,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         net,
         allow_host,
         peer: inputs.peer.to_vec(),
+        routes: routes.routes,
         ai: ai.cloned(),
         ports: Vec::new(),
         cpus,
@@ -1225,6 +1223,10 @@ impl MachineCreateArgs {
             net: self.net,
             allow_host: &self.allow_host,
             peer: &self.peer,
+            routes: manifest_source
+                .as_ref()
+                .map(|source| source.routes.as_slice())
+                .unwrap_or_default(),
             gpu: self.gpu,
             gpu_device: self.gpu_device,
             ai: None,
@@ -1431,7 +1433,14 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Rm(remove_args) => remove_machine(remove_args),
         MachineAction::Start(start_cmd) => run_start(start_cmd),
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
-        MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
+        MachineAction::Exec(exec_args) => {
+            let state_dir = config::machine_state_dir(&exec_args.name);
+            let _journal_lock = input_journal::lock(&state_dir)?;
+            let pending = input_journal::begin_exec(&state_dir, &exec_args.argv)?;
+            let outcome = exec_machine(cli, exec_args, cfg);
+            input_journal::finish_exec(&state_dir, pending, outcome.is_ok())?;
+            outcome
+        }
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
         MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),

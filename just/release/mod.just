@@ -58,14 +58,10 @@ _prep VERSION:
         echo "WARN: install.sh's offline fallback is unchanged — see the reason above." >&2
     fi
     cargo update -w
-    # The runtime overlay, SDK sidecar and initramfs take their VERSION from
-    # one pin (check-runtime-overlay-version fails closed on a mismatch), so
-    # bump it alongside Cargo.toml. The mvmctl and SDK cdylib nix packages
-    # read their version from Cargo.toml and need no edit.
-    sed -i.bak -E "s/^\"[^\"]*\"$/\"$V\"/" nix/images/version.nix
-    rm nix/images/version.nix.bak
-    grep -qxF "\"$V\"" nix/images/version.nix
-    git add nix/images/version.nix
+    # nix/images/ (and its version.nix pin) went with the W8 in-tree image
+    # build deletion; the runtime overlay's version now lives in mvm-images.
+    # The mvmctl and SDK cdylib nix packages read their version from
+    # Cargo.toml and need no edit.
     # The cargo-fuzz crates are separate workspaces with their own lockfiles,
     # each pinning the internal `mvm-*` crates by version. Re-resolve each lock
     # so the release PR's locked fuzz checks see the bumped package versions.

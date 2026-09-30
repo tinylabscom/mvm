@@ -210,6 +210,23 @@ fn resolve_boot_source(spec: &mp::MachineSpec, host: &dyn StartHost) -> Result<B
     )
 }
 
+fn persisted_network_policy(
+    spec: &mp::MachineSpec,
+) -> Result<mvm_core::network_policy::NetworkPolicy> {
+    // A granted allow-list is what the gate enforces; the legacy
+    // `net`/`allow_host` fields decide the policy only for a spec that granted
+    // no egress. Deriving it from the same spec the plan is admitted under is
+    // what keeps the enforced policy and the signed one from diverging.
+    Ok(crate::admission::run_grants::enforced_network_policy(
+        spec.grants.as_ref().and_then(|g| g.egress.as_ref()),
+        spec.net,
+        None,
+        &spec.allow_host,
+    )?
+    .with_ai(spec.ai.clone())
+    .with_routes(spec.routes.clone()))
+}
+
 /// Start the machine `spec` describes on `params.hypervisor`.
 ///
 /// The spec is not modified; once the machine is up and anything the caller
@@ -221,17 +238,7 @@ pub fn start_machine_spec(
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
-    // A granted allow-list is what the gate enforces; the legacy
-    // `net`/`allow_host` fields decide the policy only for a spec that granted
-    // no egress. Deriving it from the same spec the plan is admitted under is
-    // what keeps the enforced policy and the signed one from diverging.
-    let network_policy = crate::admission::run_grants::enforced_network_policy(
-        spec.grants.as_ref().and_then(|g| g.egress.as_ref()),
-        spec.net,
-        None,
-        &spec.allow_host,
-    )?
-    .with_ai(spec.ai.clone());
+    let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let boot = resolve_boot_source(spec, host)?;
@@ -450,6 +457,7 @@ mod tests {
             net: false,
             allow_host: Vec::new(),
             peer: Vec::new(),
+            routes: Vec::new(),
             ai: None,
             ports: Vec::new(),
             cpus: 1,
@@ -468,6 +476,30 @@ mod tests {
             gpu: false,
             gpu_device: None,
         }
+    }
+
+    #[test]
+    fn a_persisted_route_is_reapplied_to_the_start_policy() {
+        use mvm_contract::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+        let mut machine = spec("routed");
+        machine.allow_host = vec!["api.github.com:443".into()];
+        machine.routes = vec![EgressRoute {
+            id: "github".into(),
+            host: "api.github.com".into(),
+            port: 443,
+            rules: vec![EndpointRule {
+                id: None,
+                method: Some("GET".into()),
+                path: "/repos/**".into(),
+                outcome: RouteOutcome::Allow,
+            }],
+            otherwise: RouteOutcome::Deny,
+            intercept: true,
+        }];
+
+        let policy = persisted_network_policy(&machine).expect("network policy");
+        assert_eq!(policy.routes(), machine.routes);
     }
 
     /// A host that answers image resolution from a fixed record and refuses

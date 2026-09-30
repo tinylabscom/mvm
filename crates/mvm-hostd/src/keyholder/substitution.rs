@@ -145,6 +145,14 @@ impl<'a> NetworkEndpoint<'a> {
         self.registry.resolve(placeholder)
     }
 
+    /// Record an encoded wire representation of a substituted value for the
+    /// response reflection scrubber. Unknown placeholders record nothing.
+    pub fn observe_wire_form(&self, placeholder: &str, guest: &str, wire: &str) {
+        if let Some(secret) = self.resolve_ref(placeholder) {
+            self.injector.observe_wire_form(secret, guest, wire);
+        }
+    }
+
     /// Substitute `placeholder` in `request_text` with the real credential
     /// for `destination`. Returns the rewritten request `Zeroizing` (it now
     /// carries the raw credential). Refuses — without decrypting — when the

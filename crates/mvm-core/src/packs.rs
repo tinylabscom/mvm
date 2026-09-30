@@ -726,7 +726,7 @@ fn validate_file_paths(manifest: &PackManifest) -> Result<(), PackVerifyError> {
 /// non-empty, no backslash, not absolute, and no `..`/root/prefix components. The
 /// producer checks this before reading a file so bytes outside the pack root are
 /// never hashed or attested; the verifier checks it before trusting a manifest.
-fn pack_path_is_safe(path: &str) -> bool {
+pub(crate) fn pack_path_is_safe(path: &str) -> bool {
     if path.is_empty() || path.contains('\\') {
         return false;
     }
@@ -820,7 +820,7 @@ pub(crate) fn stream_sha256(path: &Path) -> std::io::Result<(String, u64)> {
     Ok((hex::encode(hasher.finalize()), total))
 }
 
-fn hash_file(path: &Path) -> Result<(Sha256Hex, u64), String> {
+pub(crate) fn hash_file(path: &Path) -> Result<(Sha256Hex, u64), String> {
     let (hex, size) = stream_sha256(path).map_err(|error| error.to_string())?;
     Ok((Sha256Hex(hex), size))
 }
@@ -1726,7 +1726,7 @@ mod tests {
             version: ExtensionVersion::parse("0.1.0").expect("version"),
             protocol: ExtensionProtocolRange {
                 min_mvm_version: ExtensionVersion::parse("0.18.0").expect("min"),
-                max_mvm_version: ExtensionVersion::parse("0.18.9").expect("max"),
+                max_mvm_version: ExtensionVersion::parse("0.19.9").expect("max"),
                 min_protocol: 1,
                 max_protocol: 1,
             },

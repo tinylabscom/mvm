@@ -100,7 +100,7 @@ pub fn merge_layers(layers: &[Layer]) -> Result<ResolvedPolicy, PolicyError> {
         acc.secrets(layer)?;
         acc.shares(layer)?;
         acc.env(layer)?;
-        acc.tools(layer);
+        acc.tools(layer)?;
         acc.resources(layer)?;
     }
     let mut resolved = acc.finish()?;
@@ -136,7 +136,12 @@ struct Accumulator {
     env_deny: Vec<Sourced<String>>,
     env_readmit: Vec<Sourced<String>>,
     tools_allow: Vec<Sourced<String>>,
+    tools_ask: Vec<Sourced<String>>,
     tools_deny: Vec<Sourced<String>>,
+    /// Per-tool merged detail; the value is the narrowed result so far and
+    /// `from` names the layer that first defined the tool's restrictions.
+    tools_detail:
+        std::collections::BTreeMap<String, Sourced<crate::policy_profiles::model::ToolDetail>>,
     cpu_millicores: Option<Sourced<u32>>,
     wall_clock_secs: Option<Sourced<u32>>,
     max_cpus: Option<Sourced<u32>>,
@@ -471,14 +476,42 @@ impl Accumulator {
         Ok(())
     }
 
-    fn tools(&mut self, layer: &Layer) {
-        let ToolsSection { allow, deny } = &layer.body.tools;
+    fn tools(&mut self, layer: &Layer) -> Result<(), PolicyError> {
+        let ToolsSection {
+            allow,
+            ask,
+            deny,
+            detail,
+        } = &layer.body.tools;
         for name in allow {
+            validate_tool_name(layer, "tools.allow", name)?;
             push_unique(&mut self.tools_allow, name.clone(), &layer.label);
         }
+        for name in ask {
+            validate_tool_name(layer, "tools.ask", name)?;
+            push_unique(&mut self.tools_ask, name.clone(), &layer.label);
+        }
         for name in deny {
+            validate_tool_name(layer, "tools.deny", name)?;
             push_unique(&mut self.tools_deny, name.clone(), &layer.label);
         }
+        for (name, incoming) in detail {
+            validate_tool_name(layer, "tools.detail", name)?;
+            validate_tool_detail(layer, name, incoming)?;
+            match self.tools_detail.get_mut(name) {
+                Some(existing) => narrow_tool_detail(layer, name, &mut existing.value, incoming)?,
+                None => {
+                    self.tools_detail.insert(
+                        name.clone(),
+                        Sourced {
+                            value: incoming.clone(),
+                            from: layer.label.clone(),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     fn resources(&mut self, layer: &Layer) -> Result<(), PolicyError> {
@@ -691,11 +724,27 @@ impl Accumulator {
         }
 
         let tools_deny: Vec<String> = self.tools_deny.iter().map(|d| d.value.clone()).collect();
+        // deny beats ask beats allow.
+        let tools_ask: Vec<String> = self
+            .tools_ask
+            .into_iter()
+            .map(|t| t.value)
+            .filter(|t| !tools_deny.contains(t))
+            .collect();
         let tools_allow: Vec<String> = self
             .tools_allow
             .into_iter()
             .map(|t| t.value)
-            .filter(|t| !tools_deny.contains(t))
+            .filter(|t| !tools_deny.contains(t) && !tools_ask.contains(t))
+            .collect();
+        let tools_detail: std::collections::BTreeMap<
+            String,
+            crate::policy_profiles::model::ToolDetail,
+        > = self
+            .tools_detail
+            .into_iter()
+            .filter(|(name, _)| !tools_deny.contains(name))
+            .map(|(name, sourced)| (name, sourced.value))
             .collect();
 
         for (key, bound) in [
@@ -733,7 +782,9 @@ impl Accumulator {
             },
             tools: ToolsSection {
                 allow: tools_allow,
+                ask: tools_ask,
                 deny: tools_deny,
+                detail: tools_detail,
             },
             resources: ResourcesSection {
                 cpu_millicores: self.cpu_millicores.map(|c| c.value),
@@ -755,3 +806,113 @@ impl Accumulator {
 #[cfg(test)]
 #[path = "merge_tests.rs"]
 mod tests;
+
+/// Tool names: the policy name alphabet plus `.` for host-mediated tools
+/// (`mvm.web_fetch`).
+fn is_valid_tool_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+        && name.bytes().next().is_some_and(|byte| byte != b'.')
+}
+
+fn validate_tool_name(layer: &Layer, key: &str, name: &str) -> Result<(), PolicyError> {
+    if !is_valid_tool_name(name) {
+        return Err(layer_error(
+            layer,
+            key,
+            format!(
+                "{name:?} is not a tool name (1-64 lowercase letters, digits, `-`, `_` or `.`, \
+                 not starting with a dot)"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// One argv glob: non-empty, single-line, bounded.
+fn validate_argv_pattern(layer: &Layer, key: &str, pattern: &str) -> Result<(), PolicyError> {
+    if pattern.is_empty() || pattern.len() > 256 || pattern.chars().any(char::is_control) {
+        return Err(layer_error(
+            layer,
+            key,
+            format!("{pattern:?} is not an argv pattern (1-256 visible characters)"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_tool_detail(
+    layer: &Layer,
+    tool: &str,
+    detail: &crate::policy_profiles::model::ToolDetail,
+) -> Result<(), PolicyError> {
+    let key = |field: &str| format!("tools.detail.{tool}.{field}");
+    for pattern in &detail.argv {
+        validate_argv_pattern(layer, &key("argv"), pattern)?;
+    }
+    for pattern in &detail.deny {
+        validate_argv_pattern(layer, &key("deny"), pattern)?;
+    }
+    for route in &detail.routes {
+        canonical_allow(route).map_err(|error| layer_error(layer, &key("routes"), error))?;
+    }
+    for secret in &detail.secrets {
+        validate_secret_name(layer, &key("secrets"), secret)?;
+    }
+    Ok(())
+}
+
+/// Composition narrows. A later layer may repeat or restrict what an earlier
+/// layer set for a tool; it may never extend it. `deny` argv patterns are the
+/// exception — refusing more only ever narrows — so they union. An empty
+/// incoming list means "this layer names nothing new", never "clear".
+fn narrow_tool_detail(
+    layer: &Layer,
+    tool: &str,
+    merged: &mut crate::policy_profiles::model::ToolDetail,
+    incoming: &crate::policy_profiles::model::ToolDetail,
+) -> Result<(), PolicyError> {
+    use crate::policy_profiles::model::ToolDetail;
+    let narrowed =
+        |field: &str, existing: &[String], new: &[String]| -> Result<Vec<String>, PolicyError> {
+            if new.is_empty() {
+                // This layer names nothing new; the constraint stands.
+                return Ok(existing.to_vec());
+            }
+            let key = format!("tools.detail.{tool}.{field}");
+            for value in new {
+                if !existing.is_empty() && !existing.contains(value) {
+                    return Err(layer_error(
+                        layer,
+                        &key,
+                        format!(
+                            "{value:?} is not one of the patterns this tool's grant already \
+                         allows; composition only narrows"
+                        ),
+                    ));
+                }
+            }
+            // The later layer's list is a subset (or the first definition): it
+            // is the narrower constraint and wins.
+            Ok(new.to_vec())
+        };
+    let argv = narrowed("argv", &merged.argv, &incoming.argv)?;
+    let routes = narrowed("routes", &merged.routes, &incoming.routes)?;
+    let secrets = narrowed("secrets", &merged.secrets, &incoming.secrets)?;
+    let mut deny_argv = merged.deny.clone();
+    for pattern in &incoming.deny {
+        if !deny_argv.contains(pattern) {
+            deny_argv.push(pattern.clone());
+        }
+    }
+    *merged = ToolDetail {
+        argv,
+        deny: deny_argv,
+        routes,
+        secrets,
+    };
+    Ok(())
+}

@@ -2472,7 +2472,7 @@ mod tests {
                 )
                 .expect("valid minimum extension version"),
                 max_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
-                    "0.18.9",
+                    "0.19.9",
                 )
                 .expect("valid maximum extension version"),
                 min_protocol: 1,
@@ -4988,7 +4988,7 @@ mod tests {
                 )
                 .expect("minimum version"),
                 max_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
-                    "0.18.9",
+                    "0.19.9",
                 )
                 .expect("maximum version"),
                 min_protocol: 1,

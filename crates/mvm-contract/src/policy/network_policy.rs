@@ -1440,20 +1440,17 @@ mod tests {
         }
     }
 
-    /// RFC1918 ranges are deliberately NOT in the default-deny
-    /// set — corporate VPNs, home labs, and k8s pod networks live
-    /// here and breaking them would be a UX regression. If a
-    /// future edit accidentally adds RFC1918 to the const, this
-    /// test fails loudly and the maintainer reads the comment
-    /// above MANDATORY_DENY_RANGES that says why.
+    /// RFC1918 ranges are default-denied by policy but are not absolute
+    /// refusals: a specific grant may re-admit a corporate VPN, home lab, or
+    /// pod network. This helper covers only the absolute-deny layer.
     #[test]
-    fn rfc1918_is_not_in_default_deny() {
+    fn rfc1918_is_not_in_the_absolute_deny_set() {
         let cases = ["10.0.0.1", "172.16.0.1", "192.168.1.1"];
         for addr in cases {
             let ip: std::net::IpAddr = addr.parse().unwrap();
             assert!(
                 !is_mandatory_deny(ip),
-                "{addr} is RFC1918 — must NOT be in default-deny (legitimate corp/VPN use)"
+                "{addr} is RFC1918 — a specific grant must be able to re-admit it"
             );
         }
     }

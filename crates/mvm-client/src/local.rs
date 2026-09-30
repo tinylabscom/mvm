@@ -2734,6 +2734,7 @@ mod tests {
             net: false,
             allow_host: vec![],
             peer: vec![],
+            routes: vec![],
             cpus: 2,
             memory: "512M".to_string(),
             mem_initial: None,

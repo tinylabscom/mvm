@@ -582,8 +582,10 @@ pub struct ManifestNetwork {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<AiPolicy>,
     /// Endpoint routes: what a request to a destination may do, by method and
-    /// path (`[[network.routes]]`). A route host is admitted as if
-    /// allow-listed. See `mvm_contract::policy::routes`.
+    /// path (`[[network.routes]]`). An exact route host is admitted as if
+    /// allow-listed. A wildcard route narrows matching hosts that another
+    /// network grant admits; it cannot be safely pre-resolved as an L4 grant.
+    /// See `mvm_contract::policy::routes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<mvm_contract::policy::routes::EgressRoute>,
 }

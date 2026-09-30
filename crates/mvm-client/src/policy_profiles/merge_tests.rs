@@ -484,3 +484,209 @@ fn the_published_schema_page_carries_the_generated_schema() {
         .expect("the page has a json block");
     assert_eq!(block, crate::policy_profiles::model::json_schema_pretty());
 }
+
+// ---- tools: whole-tool decisions and per-tool detail ----------------------
+
+#[test]
+fn tools_ask_unions_and_beats_allow() {
+    let resolved = merged(&[
+        user("a", "[tools]\nallow = [\"git\", \"bash\"]\n"),
+        user("b", "[tools]\nask = [\"git\"]\nallow = [\"make\"]\n"),
+    ]);
+    assert_eq!(resolved.policy.tools.allow, ["bash", "make"]);
+    assert_eq!(resolved.policy.tools.ask, ["git"]);
+}
+
+#[test]
+fn tools_deny_beats_ask_and_allow_and_drops_detail() {
+    let resolved = merged(&[
+        user(
+            "a",
+            "[tools]\nallow = [\"git\", \"bash\"]\nask = [\"git\"]\n\
+             [tools.detail.bash]\nargv = [\"ls *\"]\n",
+        ),
+        user("b", "[tools]\ndeny = [\"git\", \"bash\"]\n"),
+    ]);
+    assert!(resolved.policy.tools.allow.is_empty());
+    assert!(resolved.policy.tools.ask.is_empty());
+    let mut deny = resolved.policy.tools.deny.clone();
+    deny.sort();
+    assert_eq!(deny, ["bash", "git"]);
+    assert!(resolved.policy.tools.detail.is_empty());
+}
+
+#[test]
+fn tool_detail_unions_denies_and_narrows_the_rest() {
+    let resolved = merged(&[
+        user(
+            "a",
+            "[tools]\nallow = [\"bash\"]\n\
+             [tools.detail.bash]\nargv = [\"git *\", \"cargo *\"]\n\
+             deny = [\"rm *\"]\nroutes = [\"github.com:443\"]\nsecrets = [\"GITHUB_TOKEN\"]\n",
+        ),
+        user(
+            "b",
+            "[tools.detail.bash]\nargv = [\"git *\"]\ndeny = [\"sudo *\"]\n",
+        ),
+    ]);
+    let detail = resolved
+        .policy
+        .tools
+        .detail
+        .get("bash")
+        .expect("bash detail survives");
+    assert_eq!(detail.argv, ["git *"]);
+    assert_eq!(detail.deny, ["rm *", "sudo *"]);
+    assert_eq!(detail.routes, ["github.com:443"]);
+    assert_eq!(detail.secrets, ["GITHUB_TOKEN"]);
+}
+
+#[test]
+fn tool_detail_widening_is_refused_with_the_layer_and_key() {
+    let error = refused(&[
+        user(
+            "a",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nargv = [\"git *\"]\n",
+        ),
+        user("b", "[tools.detail.bash]\nargv = [\"npm *\"]\n"),
+    ]);
+    assert!(
+        error.message.contains("composition only narrows"),
+        "{error}"
+    );
+    assert!(
+        error
+            .key
+            .as_deref()
+            .is_some_and(|key| key.contains("tools.detail.bash.argv")),
+        "{error}"
+    );
+}
+
+#[test]
+fn tool_detail_routes_and_secrets_only_narrow() {
+    let error = refused(&[
+        user(
+            "a",
+            "[tools]\nallow = [\"bash\"]\n\
+             [tools.detail.bash]\nroutes = [\"github.com:443\"]\nsecrets = [\"GITHUB_TOKEN\"]\n",
+        ),
+        user(
+            "b",
+            "[tools.detail.bash]\nroutes = [\"evil.example:443\"]\n",
+        ),
+    ]);
+    assert!(
+        error.message.contains("composition only narrows"),
+        "{error}"
+    );
+
+    let error = refused(&[
+        user(
+            "a",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nsecrets = [\"GITHUB_TOKEN\"]\n",
+        ),
+        user("b", "[tools.detail.bash]\nsecrets = [\"OTHER\"]\n"),
+    ]);
+    assert!(
+        error.message.contains("composition only narrows"),
+        "{error}"
+    );
+}
+
+#[test]
+fn tool_detail_first_definition_wins_then_narrows() {
+    // A later layer may define a tool the earlier ones did not.
+    let resolved = merged(&[
+        user("a", "[tools]\nallow = [\"bash\"]\n"),
+        user("b", "[tools.detail.bash]\nargv = [\"git *\"]\n"),
+        user("c", "[tools.detail.bash]\nargv = [\"git *\"]\n"),
+    ]);
+    let detail = resolved
+        .policy
+        .tools
+        .detail
+        .get("bash")
+        .expect("bash detail survives");
+    assert_eq!(detail.argv, ["git *"]);
+}
+
+#[test]
+fn tool_detail_narrowing_to_a_pattern_outside_the_grant_is_refused() {
+    let error = refused(&[
+        user("a", "[tools]\nallow = [\"bash\"]\n"),
+        user("b", "[tools.detail.bash]\nargv = [\"git *\"]\n"),
+        user("c", "[tools.detail.bash]\nargv = [\"git status *\"]\n"),
+    ]);
+    assert!(
+        error.message.contains("composition only narrows"),
+        "{error}"
+    );
+}
+
+#[test]
+fn invalid_tool_names_are_refused() {
+    for (key, body) in [
+        ("tools.allow", "[tools]\nallow = [\"Bad Name\"]\n"),
+        ("tools.ask", "[tools]\nask = [\".hidden\"]\n"),
+        ("tools.deny", "[tools]\ndeny = [\"UPPER\"]\n"),
+        (
+            "tools.detail",
+            "[tools.detail.\"bad name\"]\nargv = [\"x\"]\n",
+        ),
+    ] {
+        let error = refused(&[user("a", body)]);
+        assert!(
+            error.key.as_deref().is_some_and(|at| at.starts_with(key)),
+            "{key}: {error}"
+        );
+    }
+}
+
+#[test]
+fn invalid_tool_detail_entries_are_refused() {
+    for (field, body) in [
+        (
+            "argv",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nargv = [\"\"]\n",
+        ),
+        (
+            "deny",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\ndeny = [\"line\\nbreak\"]\n",
+        ),
+        (
+            "routes",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nroutes = [\"https://evil.example/x\"]\n",
+        ),
+        (
+            "secrets",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nsecrets = [\"has space\"]\n",
+        ),
+    ] {
+        let error = refused(&[user("a", body)]);
+        assert!(
+            error.key.as_deref().is_some_and(|at| at.contains(field)),
+            "{field}: {error}"
+        );
+    }
+}
+
+#[test]
+fn tools_section_with_detail_round_trips_through_resolution() {
+    let text = "[tools]\nallow = [\"bash\"]\nask = [\"git\"]\n\
+                [tools.detail.bash]\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n";
+    let group: GroupFile = toml::from_str(text).expect("test body parses");
+    let reparsed: GroupFile =
+        toml::from_str(&toml::to_string_pretty(&group).expect("group serializes"))
+            .expect("group re-parses");
+    assert_eq!(group, reparsed);
+    let resolved = merged(&[user("a", text)]);
+    let detail = resolved
+        .policy
+        .tools
+        .detail
+        .get("bash")
+        .expect("bash detail survives");
+    assert_eq!(detail.argv, ["git *"]);
+    assert_eq!(resolved.policy.tools.ask, ["git"]);
+}

@@ -9,6 +9,8 @@
 //! - the **body** ([`PolicyBody`]) both of them carry, which is also what a
 //!   resolved policy is expressed in.
 
+use std::collections::BTreeMap;
+
 use mvm_contract::policy::routes::EgressRoute;
 use mvm_contract::protocol::vm_backend::BackendKind;
 use serde::{Deserialize, Serialize};
@@ -182,6 +184,12 @@ impl EnvSection {
 /// `[tools]` — per-tool privileges. Parsed, merged and shown so profiles can
 /// be written ahead of enforcement; nothing enforces it yet, and
 /// `mvmctl policy validate --strict` refuses a policy that relies on it.
+///
+/// Composition only narrows. Whole-tool lists union (`deny` beats `ask`
+/// beats `allow`); per-tool detail is first-defined-then-narrowed: a later
+/// layer may repeat or restrict the `argv`, `routes` and `secrets` an
+/// earlier layer set for a tool, never extend them, and `deny` argv
+/// patterns union.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -189,16 +197,51 @@ pub struct ToolsSection {
     /// Tool names allowed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allow: Vec<String>,
+    /// Tool names where every call asks the runtime approver first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ask: Vec<String>,
     /// Tool names refused whatever allows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
+    /// Per-tool argv, route and secret restrictions, keyed by tool name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub detail: BTreeMap<String, ToolDetail>,
 }
 
 impl ToolsSection {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.allow.is_empty() && self.deny.is_empty()
+        self.allow.is_empty()
+            && self.ask.is_empty()
+            && self.deny.is_empty()
+            && self.detail.is_empty()
     }
+}
+
+/// Per-tool detail under `[tools.detail.<name>]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct ToolDetail {
+    /// Argv patterns permitted for this tool, glob-style and matched against
+    /// the command line (`git *`). An empty list means any argv the tool is
+    /// invoked with. Composition narrows: a later layer may only name
+    /// patterns an earlier layer set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+    /// Argv patterns refused whatever `argv` allows. Unions across layers
+    /// and beats `argv` on conflict.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deny: Vec<String>,
+    /// Destinations (`HOST[:PORT]`) this tool may reach through the one host
+    /// egress gate. Composition narrows like secret destinations: a later
+    /// layer may list a subset, never a destination outside them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub routes: Vec<String>,
+    /// Secret names bound to this tool; the binding is enforced where the
+    /// secret is substituted. Composition narrows like `routes`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secrets: Vec<String>,
 }
 
 /// `[resources]` — bounds. Every value is a ceiling: across layers the
