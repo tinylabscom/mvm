@@ -1,7 +1,7 @@
 # Plan: Denial feedback completion (#3714)
 
 Backing: preview
-Validation: check-sprint-append
+Validation: check-doc-links
 
 ## Goal
 
