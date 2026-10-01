@@ -814,7 +814,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, guest-image-boot, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -856,7 +856,6 @@ jobs:
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           BOOT_RESULT: ${{ needs.boot-latency.result }}
-          GUEST_IMAGE_RESULT: ${{ needs.guest-image-boot.result }}
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
         run: |
           set -euo pipefail
@@ -864,7 +863,7 @@ jobs:
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" \
             "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" \
-            "$BDD_RESULT" "$BOOT_RESULT" "$GUEST_IMAGE_RESULT" "$NIX_RESULT"; do
+            "$BDD_RESULT" "$BOOT_RESULT" "$NIX_RESULT"; do
             if [ "$result" != skipped ]; then
               echo "Expensive test lane unexpectedly ran on a pull request: $result"
               exit 1
@@ -889,8 +888,6 @@ jobs:
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           BOOT_RESULT: ${{ needs.boot-latency.result }}
-          GUEST_IMAGE_SCOPE: ${{ needs.scope.outputs.guest_image }}
-          GUEST_IMAGE_RESULT: ${{ needs.guest-image-boot.result }}
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
         run: |
           set -euo pipefail
@@ -927,16 +924,6 @@ jobs:
           esac
           if [ "$NIX_RESULT" != "$nix_required" ]; then
             echo "Nix validation did not match event $EVENT_NAME: $NIX_RESULT"
-            exit 1
-          fi
-          # Guest-image builds are path-scoped on merge groups, unlike Nix eval.
-          case "$EVENT_NAME:$GUEST_IMAGE_SCOPE" in
-            merge_group:true|workflow_dispatch:true) guest_image_required=success ;;
-            pull_request:true|pull_request:false|merge_group:false) guest_image_required=skipped ;;
-            *) echo "Invalid guest-image scope: event=$EVENT_NAME guest_image=$GUEST_IMAGE_SCOPE"; exit 1 ;;
-          esac
-          if [ "$GUEST_IMAGE_RESULT" != "$guest_image_required" ]; then
-            echo "Tree-built guest validation did not match event/scope $EVENT_NAME/$GUEST_IMAGE_SCOPE: $GUEST_IMAGE_RESULT"
             exit 1
           fi
           case "$EVENT_NAME:$SCOPE_CODE" in
@@ -1436,24 +1423,12 @@ jobs:
           done
   guest-image-boot:
     name: Guest image boots (mvm-images)
-    # The image definitions live in tinylabscom/mvm-images; this witness
-    # builds the default tenant and the runtime overlay from that repository
-    # with the `mvm` input overridden to this checkout, so the merge queue
-    # boot-tests the PR's mvm changes against the external image source — the
-    # same pairing a contributor gets from a sibling checkout. Keep this
-    # witness parallel with Nix evaluation: a live queue measurement showed
-    # that serializing it behind the Nix footprint work extended the protected
-    # critical path by about seven minutes even though both jobs build
-    # overlapping store paths. `Test` owns both results, so parallelism does
-    # not weaken the merge gate.
+    # Canonical image builds, byte-for-byte rebuilds and boot probes belong to
+    # tinylabscom/mvm-images. Keep this source-override path as an operator
+    # diagnostic only; the merge queue consumes the locked published image in
+    # `boot-latency` instead of rebuilding the image factory for every entry.
     needs: [scope]
-    # Only changes that can alter the guest bytes (the fingerprint crates,
-    # the nix/ guest recipes, the workspace toolchain and lock) build here;
-    # host-only Rust, docs and workflow PRs skip the 31-minute pair build,
-    # the same path-scope contract the boot-latency lane already uses.
-    # workflow_dispatch always runs. The job stays a required check: a skip
-    # is a reported result, not an absent one.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'merge_group' && needs.scope.outputs.guest_image == 'true')
+    if: github.event_name == 'workflow_dispatch' && needs.scope.outputs.guest_image == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1476,10 +1451,10 @@ jobs:
           packages: lld
 
       # The commit that produced the image set images.lock pins, not
-      # mvm-images `main`: this job gates the merge queue, so it must not go
-      # red because the other repository moved. A change that needs newer image
-      # sources waits for them to be published in an image set and pinned; the
-      # pair's `main`s are compared by the non-blocking `image-pair.yml` canary.
+      # mvm-images `main`: a manual diagnostic must reproduce the locked pair,
+      # not silently test newer image definitions. A change that needs newer
+      # image sources waits for them to be published in an image set and pinned;
+      # the pair's `main`s are compared by the `image-pair.yml` canary.
       - name: Resolve the mvm-images commit images.lock pins
         if: needs.scope.outputs.nix == 'true'
         id: images-ref
@@ -1615,9 +1590,9 @@ jobs:
 
   nix-flake-check:
     name: Nix flake check (Linux eval)
-    # Nix eval/build is heavy; run it in the merge queue and on manual dispatch,
-    # not on every PR update. The live guest witness remains parallel because
-    # serial reuse made the measured protected path slower.
+    # This repository still owns the public mkGuest library and host-package
+    # flake, so keep its evaluation and lean-rootfs contracts in the merge
+    # queue. Canonical image builds and reproducibility belong to mvm-images.
     needs: [scope]
     if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
