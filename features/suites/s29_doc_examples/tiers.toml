@@ -596,6 +596,11 @@ path = "pack registry"
 tier = "exec"
 
 [[command]]
+path = "pack registry update"
+tier = "parse"
+reason = "re-pulls from a remote registry and must verify a publisher signature; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
+
+[[command]]
 path = "pack prune"
 tier = "parse"
 reason = "reaches a package index over the network, so the outcome tracks the index rather than mvm"

@@ -1528,10 +1528,10 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 /// deliberate act that should carry its reason in the commit, because the
 /// alternative is what happened before this existed: the count drifted up
 /// while everyone believed coverage was improving.
-// Workspace-apply forms need a live workspace fixture. Pack `pull` and
-// `search` need a reachable registry; their fail-closed paths are exercised
-// by tests/cli.rs against a file:// registry.
-const PARSE_TIER_PIN: usize = 76;
+// Workspace-apply forms need a live workspace fixture. Pack `pull`, `search`,
+// and `pack registry update` need a reachable registry; their fail-closed
+// paths are exercised by tests/cli.rs against a file:// registry.
+const PARSE_TIER_PIN: usize = 77;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {
