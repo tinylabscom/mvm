@@ -149,6 +149,11 @@ path = "init"
 tier = "exec"
 
 [[command]]
+path = "machine apply"
+tier = "parse"
+reason = "the bare documented form prompts on a terminal; --yes/--dry-run need a machine with a registered workspace volume — the s26 BDD scenarios exercise both hermetically, exec-tier fixtures are follow-on"
+
+[[command]]
 path = "machine boot-report"
 tier = "live"
 
@@ -254,12 +259,22 @@ path = "machine resume"
 tier = "live"
 
 [[command]]
+path = "machine redo"
+tier = "parse"
+reason = "needs a machine with an apply journal; the s26 BDD scenarios exercise the empty-history path hermetically, exec-tier fixtures are follow-on"
+
+[[command]]
 path = "machine rm"
 tier = "live"
 
 [[command]]
 path = "machine run"
 tier = "live"
+
+[[command]]
+path = "machine save"
+tier = "parse"
+reason = "captures a running VM's memory + disk, so it needs a live boot; the vm_full capture path is covered by the live e2e"
 
 [[command]]
 path = "machine sandbox gc"
@@ -286,6 +301,11 @@ tier = "live"
 [[command]]
 path = "machine stop"
 tier = "live"
+
+[[command]]
+path = "machine undo"
+tier = "parse"
+reason = "needs a machine with an apply journal; the s26 BDD scenarios exercise the empty-history path hermetically, exec-tier fixtures are follow-on"
 
 [[command]]
 path = "machine volume catalog"

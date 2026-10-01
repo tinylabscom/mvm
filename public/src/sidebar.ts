@@ -115,6 +115,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "Config & Secrets", slug: "guides/config-secrets" },
       { label: "Secrets and Credentials", slug: "guides/secrets-and-credentials" },
       { label: "Persistent Workspaces", slug: "guides/persistent-workspaces" },
+      { label: "Bring agent changes home", slug: "guides/workspace-apply" },
       { label: "Rewind and replay a sandbox", slug: "guides/lineage-recovery" },
       { label: "Audit and Receipts", slug: "guides/audit-and-receipts" },
       { label: "Workload provenance", slug: "guides/workload-provenance" },

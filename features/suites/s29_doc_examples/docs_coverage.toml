@@ -10,6 +10,11 @@
 # `uncovered` to `covered` is the point of the file.
 
 covered = [
+    "mvmctl machine apply coding-agent",
+    "mvmctl machine apply coding-agent --yes",
+    "mvmctl machine diff coding-agent",
+    "mvmctl machine undo coding-agent",
+
     "mvmctl agent-session ls",
     "mvmctl bootstrap",
     "mvmctl build compile - --out /tmp/agent-tool",
@@ -217,6 +222,14 @@ covered = [
     "mvmctl why --host api.github.com:443",
 ]
 uncovered = [
+    "mvmctl machine apply coding-agent --dry-run",
+    "mvmctl machine apply coding-agent --exclude '.git/**' --exclude 'target/**'",
+    "mvmctl machine diff coding-agent --stat",
+    "mvmctl machine redo coding-agent",
+    "mvmctl machine replay <checkpoint-id>",
+    "mvmctl machine replay <checkpoint-id> --dry-run",
+    "mvmctl machine save coding-agent --tag before-refactor",
+    "mvmctl machine volume mount coding-agent --volume work --host ~/src/app --guest /work --rw",
     "mvmctl machine apply <name>",
     "mvmctl machine apply <name> --dry-run",
     "mvmctl machine redo <name>",
