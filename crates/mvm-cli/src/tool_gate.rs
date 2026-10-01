@@ -140,7 +140,7 @@ fn resolve_project_policy(
         }
         None => None,
     };
-    let Some(selection) = PolicySelection::for_launch(None, project)? else {
+    let Some(selection) = PolicySelection::for_launch(&[], project)? else {
         return Ok(ResolvedPolicy::empty().policy);
     };
     let backend = mvm_client::backend_kind_for(&mvm_client::auto_selected_backend_name());
