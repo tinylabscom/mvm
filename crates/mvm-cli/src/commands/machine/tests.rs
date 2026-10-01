@@ -1495,7 +1495,7 @@ fn create_args_from_manifest(manifest: &Path, profile: Option<RunProfile>) -> Ma
         memory: None,
         mem_initial: None,
         profile,
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     }
@@ -2242,7 +2242,7 @@ fn create_persists_machine_spec_under_data_dir() {
         memory: Some("1G".to_string()),
         mem_initial: None,
         profile: Some(RunProfile::Dev),
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     };
@@ -2277,7 +2277,7 @@ fn create_auto_generates_a_name_when_omitted() {
         memory: None,
         mem_initial: None,
         profile: None,
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     }
@@ -2329,7 +2329,7 @@ volumes = ["./state.img:/data:1G:rw"]
         memory: None,
         mem_initial: None,
         profile: Some(RunProfile::Dev),
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     }
@@ -2376,7 +2376,7 @@ fn create_rejects_flake_backed_manifest_for_machine_specs() {
         memory: None,
         mem_initial: None,
         profile: None,
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     }
@@ -2412,7 +2412,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         memory: None,
         mem_initial: None,
         profile: None,
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     }
@@ -2436,7 +2436,7 @@ fn create_defaults_to_dev_profile_when_manifest_declares_dev_init() {
         memory: None,
         mem_initial: None,
         profile: Some(RunProfile::Standard),
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     }
@@ -2608,7 +2608,7 @@ fn create_rejects_unsafe_machine_name() {
         memory: Some("512M".to_string()),
         mem_initial: None,
         profile: Some(RunProfile::Standard),
-        policy: None,
+        policy: Vec::new(),
         force: false,
         json: false,
     };

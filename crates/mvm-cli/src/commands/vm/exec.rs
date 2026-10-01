@@ -324,9 +324,10 @@ pub(in crate::commands) struct RunArgs {
     /// Select the VMM (firecracker, hvf, libkrun, qemu, or web-linux).
     #[arg(long, value_name = "HYPERVISOR")]
     pub hypervisor: Option<String>,
-    /// Run under an authored policy profile (NAME or PATH).
+    /// Run under authored policy profiles (NAME or PATH; repeatable).
+    // Later entries compose over the earlier ones and take precedence.
     #[arg(long = "policy", value_name = "NAME|PATH", conflicts_with = "plan")]
-    pub policy: Option<String>,
+    pub policy: Vec<String>,
     /// Run under a resolved manifest from `mvmctl policy resolve`.
     #[arg(long = "plan", value_name = "FILE", conflicts_with_all = PLAN_EXCLUDES)]
     pub plan: Option<PathBuf>,
@@ -2133,7 +2134,7 @@ mod tests {
     fn sdk_modes_refuse_an_authored_policy_they_cannot_apply() {
         let _env = sdk_mode_free_env();
         let mut args = run_args(RunProfile::Standard);
-        args.policy = Some("offline".to_string());
+        args.policy = vec!["offline".to_string()];
         let error = resolve_run_mode(&sdk(Some(RunMode::Plan), false), &args)
             .expect_err("SDK mode must not skip policy");
         assert!(error.to_string().contains("--policy"));

@@ -2,8 +2,8 @@
 //!
 //! A reference names a profile or group one of three ways:
 //!
-//! - a **path** — starts with `/`, `./` or `../`, or ends in `.toml`; a
-//!   relative path resolves against the file that names it;
+//! - a **path** — starts with `/`, `./` or `../`, or ends in `.toml` or
+//!   `.json`; a relative path resolves against the file that names it;
 //! - a **name** — looked up in the user's policy directory
 //!   (`mvm_core::config::policy_profiles_dir` / `policy_groups_dir`) and then
 //!   among the built-ins;
@@ -16,6 +16,39 @@ use serde::Serialize;
 
 use super::builtin;
 use super::model::{GroupFile, ProfileFile};
+
+/// A policy document on disk: TOML (`.toml`, or any other extension) or
+/// JSON (`.json`). Both serialize the same types, so one loader serves both
+/// authoring formats; the extension, when it names one, picks the parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DocFormat {
+    Toml,
+    Json,
+}
+
+impl DocFormat {
+    pub(crate) fn for_path(path: &Path) -> Self {
+        if path.extension().is_some_and(|ext| ext == "json") {
+            Self::Json
+        } else {
+            Self::Toml
+        }
+    }
+
+    pub(crate) fn parse<T: serde::de::DeserializeOwned>(self, text: &str) -> Result<T, String> {
+        match self {
+            Self::Toml => toml::from_str(text).map_err(|error| error.message().to_string()),
+            Self::Json => serde_json::from_str(text).map_err(|error| error.to_string()),
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Toml => "TOML",
+            Self::Json => "JSON",
+        }
+    }
+}
 
 /// Who authored a layer. Escape hatches are honoured only in [`User`]
 /// layers.
@@ -144,7 +177,8 @@ impl PolicyRef {
         let looks_like_path = raw.starts_with('/')
             || raw.starts_with("./")
             || raw.starts_with("../")
-            || raw.ends_with(".toml");
+            || raw.ends_with(".toml")
+            || raw.ends_with(".json");
         if looks_like_path {
             return Ok(PolicyRef::Path(PathBuf::from(raw)));
         }
@@ -155,8 +189,8 @@ impl PolicyRef {
             };
             if !is_valid_name(namespace) || !is_valid_name(name) {
                 return Err(format!(
-                    "{raw:?} is neither a name, a path (start it with ./ or end it in .toml), \
-                     nor a pack reference (namespace/name[@version])"
+                    "{raw:?} is neither a name, a path (start it with ./ or end it in .toml or \
+                     .json), nor a pack reference (namespace/name[@version])"
                 ));
             }
             return Ok(PolicyRef::Pack {
@@ -168,7 +202,7 @@ impl PolicyRef {
         if !is_valid_name(raw) {
             return Err(format!(
                 "{raw:?} is not a valid name: use lowercase letters, digits, `-` and `_`, \
-                 or give a path (start it with ./ or end it in .toml)"
+                 or give a path (start it with ./ or end it in .toml or .json)"
             ));
         }
         Ok(PolicyRef::Name(raw.to_string()))
@@ -303,7 +337,7 @@ impl PolicyStore {
                     .unwrap_or_else(|_| path.clone())
                     .display()
                     .to_string();
-                let doc = read_toml(&path, kind, referrer)?;
+                let doc = read_doc(&path, kind, referrer)?;
                 Ok(Loaded {
                     doc,
                     label: format!("{} {}", kind.noun(), path.display()),
@@ -313,9 +347,12 @@ impl PolicyStore {
                 })
             }
             PolicyRef::Name(name) => {
-                let user_file = kind.dir(self).join(format!("{name}.toml"));
-                if user_file.is_file() {
-                    let doc = read_toml(&user_file, kind, referrer)?;
+                let user_file = ["toml", "json"]
+                    .iter()
+                    .map(|ext| kind.dir(self).join(format!("{name}.{ext}")))
+                    .find(|path| path.is_file());
+                if let Some(user_file) = user_file {
+                    let doc = read_doc(&user_file, kind, referrer)?;
                     return Ok(Loaded {
                         doc,
                         label: format!("{} `{name}`", kind.noun()),
@@ -372,31 +409,36 @@ impl Kind {
     }
 }
 
-fn read_toml<T: serde::de::DeserializeOwned>(
+/// Read and parse a policy document, TOML or JSON by extension.
+fn read_doc<T: serde::de::DeserializeOwned>(
     path: &Path,
     kind: Kind,
     referrer: &str,
 ) -> Result<T, PolicyError> {
+    let format = DocFormat::for_path(path);
     let text = std::fs::read_to_string(path).map_err(|error| {
         PolicyError::new(
             referrer,
             format!("reading {} {}: {error}", kind.noun(), path.display()),
         )
     })?;
-    toml::from_str(&text).map_err(|error| {
-        PolicyError::new(
-            format!("{} {}", kind.noun(), path.display()),
-            error.message(),
+    format.parse(&text).map_err(|message| {
+        let error = PolicyError::new(
+            format!("{} {} ({})", kind.noun(), path.display(), format.noun()),
+            message.clone(),
         )
-        .in_file(Some(path))
-        .at_key(error_key(&error))
+        .in_file(Some(path));
+        match format {
+            DocFormat::Toml => error.at_key(error_key(&message)),
+            DocFormat::Json => error,
+        }
     })
 }
 
-/// The key a TOML error points at, best effort: the parser reports a span,
-/// and the offending key is the identifier that span covers.
-fn error_key(error: &toml::de::Error) -> String {
-    let message = error.message();
+/// The key a parser error message names, best effort: serde's messages lead
+/// with markers like `unknown field`, and the offending key is the identifier
+/// that follows.
+fn error_key(message: &str) -> String {
     for marker in ["unknown field `", "missing field `", "unknown variant `"] {
         if let Some(rest) = message.split(marker).nth(1)
             && let Some(key) = rest.split('`').next()
@@ -424,6 +466,14 @@ mod tests {
         assert_eq!(
             PolicyRef::parse("policies/agent.toml"),
             Ok(PolicyRef::Path("policies/agent.toml".into()))
+        );
+        assert_eq!(
+            PolicyRef::parse("./agent.json"),
+            Ok(PolicyRef::Path("./agent.json".into()))
+        );
+        assert_eq!(
+            PolicyRef::parse("policies/group.json"),
+            Ok(PolicyRef::Path("policies/group.json".into()))
         );
         assert_eq!(
             PolicyRef::parse("/etc/p.toml"),
@@ -519,6 +569,89 @@ mod tests {
             rendered.contains("bad.toml") && rendered.contains("`allowed`"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn json_documents_parse_as_profiles_and_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let profile = dir.path().join("agent.json");
+        std::fs::write(
+            &profile,
+            r#"{
+                "description": "json profile",
+                "groups": { "include": ["llm-apis"] },
+                "overrides": { "network": { "allow": ["json.test"] } }
+            }"#,
+        )
+        .unwrap();
+        let store = PolicyStore::at(dir.path());
+        let loaded = store
+            .load_profile(
+                &PolicyRef::parse("./agent.json").unwrap(),
+                Some(dir.path()),
+                LayerOrigin::User,
+                "--policy",
+            )
+            .unwrap();
+        assert_eq!(loaded.doc.description.as_deref(), Some("json profile"));
+        assert_eq!(loaded.doc.groups.include, ["llm-apis"]);
+        assert_eq!(loaded.doc.overrides.network.allow, ["json.test"]);
+
+        let group = dir.path().join("registries.json");
+        std::fs::write(
+            &group,
+            r#"{ "description": "json group", "network": { "allow": ["g.test"] } }"#,
+        )
+        .unwrap();
+        let loaded = store
+            .load_group(
+                &PolicyRef::parse("./registries.json").unwrap(),
+                Some(dir.path()),
+                LayerOrigin::User,
+                "--policy",
+            )
+            .unwrap();
+        assert_eq!(loaded.doc.body().network.allow, ["g.test"]);
+    }
+
+    #[test]
+    fn a_name_resolves_a_json_document_from_the_user_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PolicyStore::at(dir.path());
+        std::fs::create_dir_all(store.profiles_dir()).unwrap();
+        std::fs::write(
+            store.profiles_dir().join("default.json"),
+            "{ \"description\": \"json default\" }",
+        )
+        .unwrap();
+        let loaded = store
+            .load_profile(
+                &PolicyRef::Name("default".into()),
+                None,
+                LayerOrigin::User,
+                "--policy",
+            )
+            .unwrap();
+        assert_eq!(loaded.origin, LayerOrigin::User);
+        assert_eq!(loaded.doc.description.as_deref(), Some("json default"));
+    }
+
+    #[test]
+    fn a_malformed_json_document_names_the_file_and_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("bad.json");
+        std::fs::write(&file, "{ \"network\": { \"allowed\": [] } }").unwrap();
+        let err = PolicyStore::at(dir.path())
+            .load_profile(
+                &PolicyRef::Path(file.clone()),
+                None,
+                LayerOrigin::User,
+                "--policy",
+            )
+            .unwrap_err();
+        assert_eq!(err.file.as_deref(), Some(file.as_path()));
+        assert!(err.to_string().contains("(JSON)"), "{err}");
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 
     #[test]

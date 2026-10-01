@@ -68,7 +68,7 @@ impl Default for RunArgs {
             stdin: Vec::new(),
             healthcheck: None,
             hypervisor: None,
-            policy: None,
+            policy: Vec::new(),
             plan: None,
             policy_routes: Vec::new(),
             applied_policy: None,

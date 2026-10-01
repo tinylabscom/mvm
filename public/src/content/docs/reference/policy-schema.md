@@ -4,7 +4,9 @@ description: The JSON Schema of authored policy profiles, groups, and the resolv
 ---
 
 The documents described in [Policy and profiles](/guides/policy-and-profiles/)
-are TOML (profiles and groups) and JSON (the resolved manifest). This schema is
+are profiles and groups — each authored in TOML (`.toml`) or JSON (`.json`),
+which serialize the same types — and the resolved manifest, which is always
+JSON. This schema is
 generated from the Rust types they are parsed into, so it cannot describe a key
 the parser refuses. The same text is committed at
 `schema/policy-profiles-v0.json`, and a test fails when this page, that file,
@@ -12,8 +14,8 @@ or the types drift apart.
 
 The root names three documents:
 
-- `profile`: a file under `config/policy/profiles/`, or one passed with
-  `--policy PATH`;
+- `profile`: a file under `config/policy/profiles/` (looked up as
+  `<name>.toml` and then `<name>.json`), or one passed with `--policy PATH`;
 - `group`: a file under `config/policy/groups/`;
 - `resolved_manifest`: what `mvmctl policy resolve` writes and
   `mvmctl run --plan` reads.

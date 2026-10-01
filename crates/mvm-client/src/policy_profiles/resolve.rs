@@ -17,7 +17,7 @@ use mvm_contract::protocol::vm_backend::BackendKind;
 
 use super::merge::{Layer, ResolvedPolicy, merge_layers};
 use super::model::{GroupFile, HostArch, HostOs, PolicyBody, ProfileFile, WhenBlock};
-use super::source::{LayerOrigin, Loaded, PolicyError, PolicyRef, PolicyStore};
+use super::source::{DocFormat, LayerOrigin, Loaded, PolicyError, PolicyRef, PolicyStore};
 
 /// The deepest `extends` chain accepted.
 pub const MAX_EXTENDS_DEPTH: usize = 10;
@@ -90,41 +90,46 @@ impl ProjectPolicy {
 /// Which policy a launch uses, before anything is loaded.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PolicySelection {
-    /// `--policy NAME|PATH`. When set, it replaces the project's `[policy]`
-    /// table; the project's `[network] allow_hosts` still applies.
-    pub profile: Option<PolicyRef>,
+    /// `--policy NAME|PATH`, lowest precedence first: each entry composes over
+    /// the ones before it, so the last one wins the conflicts the merge rules
+    /// adjudicate (its denies and bounds beat an earlier entry's allows).
+    /// When non-empty, the entries replace the project's `[policy]` table;
+    /// the project's `[network] allow_hosts` still applies.
+    pub profiles: Vec<PolicyRef>,
     /// The project the launch names, if any.
     pub project: Option<ProjectPolicy>,
 }
 
 impl PolicySelection {
-    /// A named profile and nothing else.
+    /// One named profile and nothing else.
     #[must_use]
     pub fn profile(reference: PolicyRef) -> Self {
         Self {
-            profile: Some(reference),
+            profiles: vec![reference],
             project: None,
         }
     }
 
-    /// The selection for a launch: `--policy` if given, the project's
-    /// contribution if it has one, or `None` when neither says anything.
+    /// The selection for a launch: `--policy` (one or many, in order) if
+    /// given, the project's contribution if it has one, or `None` when
+    /// neither says anything.
     ///
     /// # Errors
     ///
     /// A `--policy` value that is not a valid reference.
     pub fn for_launch(
-        cli: Option<&str>,
+        cli: &[String],
         project: Option<ProjectPolicy>,
     ) -> Result<Option<Self>, PolicyError> {
-        let profile = cli
+        let profiles = cli
+            .iter()
             .map(|raw| PolicyRef::parse(raw).map_err(|reason| PolicyError::new("--policy", reason)))
-            .transpose()?;
+            .collect::<Result<Vec<_>, _>>()?;
         let project = project.filter(|p| !p.is_empty());
-        if profile.is_none() && project.is_none() {
+        if profiles.is_empty() && project.is_none() {
             return Ok(None);
         }
-        Ok(Some(Self { profile, project }))
+        Ok(Some(Self { profiles, project }))
     }
 }
 
@@ -149,14 +154,14 @@ pub fn resolve(
         overrides: Vec::new(),
         backend_conditioned: false,
     };
-    if let Some(reference) = &selection.profile {
+    for reference in &selection.profiles {
         let root = store.load_profile(reference, None, LayerOrigin::User, "--policy")?;
         walker.walk(root, 0)?;
     }
     if let Some(project) = &selection.project {
         // An explicit --policy replaces the project's [policy] table; the
         // project's own network needs still apply.
-        let replaced = selection.profile.is_some();
+        let replaced = !selection.profiles.is_empty();
         let virtual_root = ProfileFile {
             extends: super::model::OneOrMany::Many(if replaced {
                 Vec::new()
@@ -214,7 +219,10 @@ pub fn resolve_file(
     let text = std::fs::read_to_string(path).map_err(|error| {
         PolicyError::new(path.display().to_string(), format!("reading: {error}"))
     })?;
-    if toml::from_str::<ProfileFile>(&text).is_ok() {
+    if DocFormat::for_path(path)
+        .parse::<ProfileFile>(&text)
+        .is_ok()
+    {
         return resolve(
             store,
             &PolicySelection::profile(PolicyRef::Path(path.to_path_buf())),
