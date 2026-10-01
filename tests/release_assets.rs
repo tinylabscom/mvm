@@ -1285,17 +1285,19 @@ fn the_cross_compile_installers_share_a_cortex_flag_compatible_zigbuild() {
         "cargo-zigbuild {version} forwards Rust's AArch64 cortex workaround to Zig, which rejects it"
     );
 
-    for path in [
-        ".github/actions/install-zigbuild/action.yml",
-        "scripts/local-aarch64-no-kvm-smoke.sh",
-    ] {
-        let installer = fs::read_to_string(path)
-            .unwrap_or_else(|error| panic!("failed to read {path}: {error}"));
-        assert!(
-            installer.contains(&format!("cargo-zigbuild --version {version}")),
-            "{path} must install the workspace cargo-zigbuild pin {version}"
-        );
-    }
+    let action_path = ".github/actions/install-zigbuild/action.yml";
+    let action = fs::read_to_string(action_path).expect("read install-zigbuild action");
+    assert!(
+        action.contains(&format!("VERSION={version}")),
+        "{action_path} must install the workspace cargo-zigbuild pin {version}"
+    );
+
+    let script_path = "scripts/local-aarch64-no-kvm-smoke.sh";
+    let script = fs::read_to_string(script_path).expect("read local aarch64 smoke script");
+    assert!(
+        script.contains(&format!("cargo-zigbuild --version {version}")),
+        "{script_path} must install the workspace cargo-zigbuild pin {version}"
+    );
 }
 
 /// Every workflow that can mint an identity a shipped binary trusts must be

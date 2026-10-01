@@ -814,7 +814,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -844,6 +844,11 @@ jobs:
       - name: Require expensive test lanes to stay out of pull requests
         if: github.event_name == 'pull_request'
         env:
+          CORE_RESULT: ${{ needs.lint-core.result }}
+          POLICY_RESULT: ${{ needs.lint-policy.result }}
+          FEATURES_RESULT: ${{ needs.lint-features.result }}
+          FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
+          FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
@@ -854,7 +859,9 @@ jobs:
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
         run: |
           set -euo pipefail
-          for result in "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" \
+          for result in "$CORE_RESULT" "$POLICY_RESULT" "$FEATURES_RESULT" \
+            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
+            "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" \
             "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" \
             "$BDD_RESULT" "$BOOT_RESULT" "$NIX_RESULT"; do
             if [ "$result" != skipped ]; then
@@ -869,6 +876,11 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
+          CORE_RESULT: ${{ needs.lint-core.result }}
+          POLICY_RESULT: ${{ needs.lint-policy.result }}
+          FEATURES_RESULT: ${{ needs.lint-features.result }}
+          FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
+          FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
@@ -888,11 +900,18 @@ jobs:
             false) required=skipped ;;
             *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
           esac
+          if [ "$POLICY_RESULT" != success ]; then
+            echo "Policy lint did not pass: $POLICY_RESULT"
+            exit 1
+          fi
           # BDD joins this loop rather than being matched separately: it became
           # the single owner of the Gherkin suite and took on the `code` scope
           # with it, so it now shares the arithmetic instead of keying off the
           # narrower `bdd` output.
-          for result in "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
+          for result in "$CORE_RESULT" "$FEATURES_RESULT" \
+            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
+            "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
+            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
