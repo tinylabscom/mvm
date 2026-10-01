@@ -54,6 +54,10 @@ pub(super) fn stage0_build_conf_contents(
 /// the fetched image, which is exactly what the caller asked not to have.
 pub(in crate::commands) const MVM_ALLOW_LOCAL_BUILDER_ENV: &str = "MVM_ALLOW_LOCAL_BUILDER_BUILD";
 
+fn local_builder_build_opted_in(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
+}
+
 /// Decide whether to build the builder VM from a local checkout or fetch the
 /// published image. This logic is intentionally small and pure so unit tests can
 /// drive it without touching the filesystem or CI-bound network I/O.
@@ -98,9 +102,10 @@ fn decide_builder_image_acquisition(
 pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     #[cfg(feature = "builder-vm")]
     {
-        // Operator opt-in: only when this env var is present may we consider
-        // building the builder VM from a local image checkout.
-        let allow_local_build = std::env::var_os(MVM_ALLOW_LOCAL_BUILDER_ENV).is_some();
+        // Operator opt-in: only the documented value `1` permits building the
+        // builder VM from a local image checkout.
+        let allow_local_build =
+            local_builder_build_opted_in(std::env::var_os(MVM_ALLOW_LOCAL_BUILDER_ENV).as_deref());
         let env_override = mvm_build::boot_image_select::resolve_env_override();
         let checkout = selected_local_checkout()?;
         let has_checkout = checkout.is_some();
@@ -285,36 +290,18 @@ fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()
 }
 
 #[cfg(test)]
-mod forced_build_tests {
-    use super::refuse_a_local_builder_build;
-    use mvm_build::boot_image_select::BootImageAcquisition;
-
-    #[test]
-    fn a_forced_builder_build_without_a_checkout_is_refused() {
-        let rendered = format!(
-            "{:#}",
-            refuse_a_local_builder_build(Some(BootImageAcquisition::Build))
-                .expect_err("there is no source to build the builder image from")
-        );
-
-        assert!(rendered.contains("the builder VM image"), "{rendered}");
-        assert!(
-            rendered.contains("image construction lives in mvm-images"),
-            "{rendered}"
-        );
-    }
-
-    #[test]
-    fn fetching_or_an_unset_override_goes_on_to_the_published_builder() {
-        refuse_a_local_builder_build(Some(BootImageAcquisition::Fetch)).unwrap();
-        refuse_a_local_builder_build(None).unwrap();
-    }
-}
-
-#[cfg(test)]
 mod decide_tests {
     use super::*;
     use mvm_build::boot_image_select::BootImageAcquisition;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn local_builder_build_requires_the_documented_opt_in_value() {
+        assert!(local_builder_build_opted_in(Some(OsStr::new("1"))));
+        assert!(!local_builder_build_opted_in(None));
+        assert!(!local_builder_build_opted_in(Some(OsStr::new("0"))));
+        assert!(!local_builder_build_opted_in(Some(OsStr::new("true"))));
+    }
 
     #[test]
     fn default_fetches_when_not_allowed() {

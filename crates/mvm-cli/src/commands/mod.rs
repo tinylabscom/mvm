@@ -612,29 +612,23 @@ fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::Dis
     }
 }
 
-fn apply_startup_env(cli: &Cli) {
-    // Default: do not auto-bootstrap the builder VM. Most commands do not need
-    // the builder VM to be running; only explicit build/bootstrap/persistent
-    // builder paths should allow it. Operators can override this with the
-    // existing MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP env var (set to any value)
-    // to force skipping regardless.
-    set_cli_env("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP", "1");
-
-    // Allowlist commands that are permitted to auto-bootstrap the builder VM.
-    let allow_bootstrap = match &cli.command {
+fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
+    match command {
         Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
         #[cfg(feature = "builder-vm")]
         Commands::PersistentBuilder(_) => true,
         Commands::Env(env_args) => matches!(env_args.action, env::group::EnvCmd::Bootstrap(_)),
         _ => false,
-    };
+    }
+}
 
-    if allow_bootstrap {
-        // Clear the skip marker so library call sites that auto-bootstrap
-        // proceed as before for explicit build/bootstrap commands.
-        unsafe {
-            std::env::remove_var("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP");
-        }
+fn apply_startup_env(cli: &Cli) {
+    // Most commands do not need the builder VM to be running. Explicit
+    // build/bootstrap/persistent-builder commands may start it, unless the
+    // operator already set the skip variable; this function never clears an
+    // operator-provided refusal.
+    if !command_allows_builder_auto_bootstrap(&cli.command) {
+        set_cli_env("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP", "1");
     }
 
     if let Some(ref version) = cli.fc_version {
@@ -948,6 +942,32 @@ mod image_source_gate_tests {
         .unwrap();
         refuse_local_image_source_in_release_build(DistributionChannel::Release, &cmd, None)
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod builder_bootstrap_policy_tests {
+    use super::{Cli, command_allows_builder_auto_bootstrap};
+    use clap::Parser;
+
+    fn command(args: &[&str]) -> super::Commands {
+        Cli::try_parse_from(std::iter::once("mvmctl").chain(args.iter().copied()))
+            .expect("the test argv parses")
+            .command
+    }
+
+    #[test]
+    fn only_builder_owning_commands_may_auto_bootstrap() {
+        assert!(command_allows_builder_auto_bootstrap(&command(&[
+            "build", "kernel", "build",
+        ])));
+        assert!(command_allows_builder_auto_bootstrap(&command(&[
+            "env",
+            "bootstrap",
+        ])));
+        assert!(!command_allows_builder_auto_bootstrap(&command(&[
+            "cache", "info",
+        ])));
     }
 }
 
