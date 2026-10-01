@@ -243,6 +243,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             tenant: "builder",
             secrets: &[],
             redaction: &RedactionPolicy::default(),
+            tools: None,
             transport: EndpointTransport::Uds {
                 path: transport.egress_socket.clone(),
             },

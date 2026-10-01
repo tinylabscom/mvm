@@ -28,3 +28,13 @@ pub(super) fn admitted_ingress(
     }
     Ok(plan.map_or_else(Vec::new, |plan| plan.ingress))
 }
+
+pub(super) fn admitted_tool_rules(
+    plan_json: Option<&str>,
+) -> Result<mvm_contract::policy::tool_rules::ToolRules> {
+    plan_json
+        .map(mvm_core::plan::plan_from_admitted_json)
+        .transpose()
+        .context("parse admitted plan tool rules")
+        .map(|plan| plan.map_or_else(Default::default, |plan| plan.tools))
+}

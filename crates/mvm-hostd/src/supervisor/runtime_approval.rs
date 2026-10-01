@@ -51,9 +51,7 @@ pub enum ApprovalVerdict {
 /// Answers `ask` decisions. Implementations must fail closed: an error, a
 /// timeout, or no one to ask is a [`ApprovalVerdict::Denied`].
 ///
-/// Tool calls: the supervisor's `ToolGate` has no live caller today, so no
-/// tool decision reaches this yet. When PS-13 wires tool rules, their `ask`
-/// passes an [`ApprovalSubject::ToolCall`] here and needs nothing else.
+/// Tool-call asks pass an [`ApprovalSubject::ToolCall`] through this seam.
 #[async_trait]
 pub trait RuntimeApprover: Send + Sync {
     async fn decide(&self, subject: &ApprovalSubject) -> ApprovalVerdict;
