@@ -96,6 +96,10 @@ libkrun:
 
 # ── Utilities ────────────────────────────────────────────────────────────
 
+# Generate a disposable issue → ADR/contract → Graft briefing
+task-context ISSUE:
+    python3 scripts/task-context.py {{ ISSUE }}
+
 # Clean build artifacts, the regenerable mvm cache, and the dev state root
 clean: clean-dev-state
     cargo clean

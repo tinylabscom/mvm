@@ -14,6 +14,9 @@ anything this file describes, update this file in the same change.
 - **No placeholders in shipped docs or guidance.** Do not land `TODO`,
   `TBD`, `placeholder`, `<...>`, or similar stand-ins where contributors need
   concrete instructions.
+- **Task context has one route.** Start from the GitHub issue, read only the
+  ADRs/contracts it links, then use Graft for implementation discovery. Never
+  recursively read `specs/` or treat a legacy plan as current work.
 - **Docs update with behavior changes.** If commands, flags, or behavior move,
   update the matching docs in the same change, including
   `public/src/content/docs/reference/cli-commands.md` when CLI surface changes.
@@ -147,10 +150,11 @@ No task is complete without all of:
    leave verification results in the PR. Do not create or update a shared
    sprint, refactor, delivery, or progress dashboard in `specs/`.
 6. **Update active technical documents only when their substance changes**:
-   plans explain how unusually complex work should be implemented; they do not
-   mirror issue status. When implementation changes a durable decision, update
-   or supersede the owning ADR. Legacy plan checklists and instructions to
-   update retired status files are historical and are not completion gates.
+   ADRs own durable decisions and contracts own stable interfaces. An
+   exceptional new plan is an immutable design attachment linked to one issue,
+   never a progress ledger. When implementation changes a durable decision,
+   update or supersede the owning ADR. Legacy plans are frozen historical
+   inputs and are not completion gates.
 
 ## Test expectations
 
