@@ -129,8 +129,16 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("sendmmsg", libc::SYS_sendmmsg),     // glibc DNS resolver
     ("getdents64", libc::SYS_getdents64), // read /etc/ssl/certs dir
     ("readlinkat", libc::SYS_readlinkat), // cert symlink resolution
-    ("fcntl", libc::SYS_fcntl),           // O_NONBLOCK on accepted sockets
-    ("shutdown", libc::SYS_shutdown),     // graceful socket close
+    // glibc's NSS hostname path (getaddrinfo → nscd/files fallback, then
+    // `_uname` for the canonical host name) calls `uname` on the FIRST egress
+    // the endpoint proxies. Without it the filter SIGSYS-kills the endpoint
+    // seconds after the FlowMux handshake — the guest only notices at its next
+    // use, and every reconnect then hits the stale socket. Found via live
+    // Firecracker strace on a KVM host: the allowlist had never been
+    // exercised on a real Linux egress CONNECT.
+    ("uname", libc::SYS_uname),
+    ("fcntl", libc::SYS_fcntl),       // O_NONBLOCK on accepted sockets
+    ("shutdown", libc::SYS_shutdown), // graceful socket close
     ("clock_nanosleep", libc::SYS_clock_nanosleep), // tokio timer
     // The audit signer create_dir_all's the audit dir on first open;
     // Rust std emits the legacy `mkdir` on x86_64.
@@ -245,6 +253,14 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     ("sendmmsg", libc::SYS_sendmmsg),
     ("getdents64", libc::SYS_getdents64),
     ("readlinkat", libc::SYS_readlinkat),
+    // glibc's NSS hostname path (getaddrinfo → nscd/files fallback, then
+    // `_uname` for the canonical host name) calls `uname` on the FIRST egress
+    // the endpoint proxies. Without it the filter SIGSYS-kills the endpoint
+    // seconds after the FlowMux handshake — the guest only notices at its next
+    // use, and every reconnect then hits the stale socket. Found via live
+    // Firecracker strace on a KVM host: the allowlist had never been
+    // exercised on a real Linux egress CONNECT.
+    ("uname", libc::SYS_uname),
     ("fcntl", libc::SYS_fcntl),
     ("shutdown", libc::SYS_shutdown),
     ("clock_nanosleep", libc::SYS_clock_nanosleep),
@@ -337,6 +353,11 @@ mod tests {
         // glibc resolver path — omitting it SIGSYS-killed the substitution
         // endpoint mid-egress on a live Firecracker host.
         assert!(syscall_name_to_nr("lseek").is_some());
+        // The NSS hostname path (`getaddrinfo` → `uname`) — omitting it
+        // SIGSYS-killed the endpoint seconds after the FlowMux handshake,
+        // which reads as a guest-egress transport failure minutes later
+        //. Pin it so the allowlist can never regress here again.
+        assert!(syscall_name_to_nr("uname").is_some());
     }
 
     #[test]
