@@ -524,6 +524,22 @@ pub fn registry_pack_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_cache_dir()).join("registry-packs")
 }
 
+/// Lockfile pinning one exact signed manifest per installed registry pack.
+/// Missing on a fresh home; created by the first `mvmctl pull`.
+pub fn pack_lockfile_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home())
+        .join("registry")
+        .join("packs.lock.toml")
+}
+
+/// Namespace-scoped publisher trust policy consulted before a registry pack
+/// is adopted or re-verified. Fail-closed: a missing file refuses every pack.
+pub fn registry_pack_publisher_policy_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home())
+        .join("registry")
+        .join("publishers.toml")
+}
+
 // ============================================================================
 // Per-VM host-side state paths
 // ============================================================================

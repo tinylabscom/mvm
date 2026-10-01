@@ -726,7 +726,7 @@ fn validate_file_paths(manifest: &PackManifest) -> Result<(), PackVerifyError> {
 /// non-empty, no backslash, not absolute, and no `..`/root/prefix components. The
 /// producer checks this before reading a file so bytes outside the pack root are
 /// never hashed or attested; the verifier checks it before trusting a manifest.
-pub(crate) fn pack_path_is_safe(path: &str) -> bool {
+pub fn pack_path_is_safe(path: &str) -> bool {
     if path.is_empty() || path.contains('\\') {
         return false;
     }

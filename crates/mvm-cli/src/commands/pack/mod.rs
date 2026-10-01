@@ -16,6 +16,7 @@ use super::Cli;
 mod download;
 mod list;
 mod prune;
+mod registry;
 mod rollback;
 mod update;
 
@@ -67,6 +68,8 @@ pub(in crate::commands) enum PackAction {
         /// Which pack class to update
         kind: PackKindArg,
     },
+    /// Manage signed registry packs (list/remove/update)
+    Registry(registry::Args),
 }
 
 /// `mvmctl pack <kind>` CLI selector, mapping onto [`PackKind`]. `dev-image`
@@ -112,5 +115,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         } => prune::run(keep_recent, dry_run, json),
         PackAction::Download { kind } => download::run(kind),
         PackAction::Update { kind } => update::run(kind),
+        PackAction::Registry(action) => registry::run(_cli, action, _cfg),
     }
 }

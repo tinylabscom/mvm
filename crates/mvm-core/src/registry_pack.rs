@@ -25,8 +25,8 @@ pub const REGISTRY_PACK_MANIFEST_SCHEMA_VERSION: u32 = 1;
 pub const REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION: u32 = 1;
 
 const REGISTRY_PAYLOAD_DIR_NAME: &str = "payload";
-const REGISTRY_MANIFEST_FILE_NAME: &str = "manifest.json";
-const REGISTRY_SIGNATURE_FILE_NAME: &str = "manifest.sigstore.json";
+pub(crate) const REGISTRY_MANIFEST_FILE_NAME: &str = "manifest.json";
+pub(crate) const REGISTRY_SIGNATURE_FILE_NAME: &str = "manifest.sigstore.json";
 
 /// Errors produced while parsing registry identities or enforcing a lockfile.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -145,7 +145,7 @@ impl PackReference {
         self.version.as_ref()
     }
 
-    fn coordinate_string(&self) -> String {
+    pub fn coordinate_string(&self) -> String {
         self.coordinate.to_string()
     }
 }
@@ -581,12 +581,26 @@ pub struct InstalledRegistryPack {
 }
 
 impl InstalledRegistryPack {
+    pub(crate) fn from_root(root: PathBuf) -> Self {
+        Self { root }
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     pub fn payload_root(&self) -> PathBuf {
         self.root.join(REGISTRY_PAYLOAD_DIR_NAME)
+    }
+
+    /// Exact signed manifest bytes recorded beside the payload.
+    pub fn manifest_path(&self) -> PathBuf {
+        self.root.join(REGISTRY_MANIFEST_FILE_NAME)
+    }
+
+    /// Sigstore bundle authenticating the manifest.
+    pub fn signature_path(&self) -> PathBuf {
+        self.root.join(REGISTRY_SIGNATURE_FILE_NAME)
     }
 }
 
@@ -669,10 +683,57 @@ pub fn verify_registry_pack(
     verify_registry_pack_with(request, check_registry_pack_signature)
 }
 
-type RegistryPackSignatureChecker =
+/// Verify a fetched pack for first adoption, before any pin exists.
+///
+/// The load path is lock-first: [`verify_registry_pack`] refuses drift between
+/// a pinned digest and fetched bytes. Adoption inverts the order because there
+/// is nothing to drift against yet: the namespace authority is consulted
+/// first, the signature is checked against it, and only then is the manifest
+/// parsed and its reference matched against the request. The caller derives a
+/// pin from the returned value and records it in the lockfile.
+pub fn adopt_registry_pack(
+    request: &PackAdoption<'_>,
+) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
+    adopt_registry_pack_with(request, check_registry_pack_signature)
+}
+
+/// A fetched pack awaiting first adoption: exact bytes, no pin yet.
+#[derive(Debug, Clone, Copy)]
+pub struct PackAdoption<'a> {
+    pub requested: &'a PackReference,
+    pub manifest_bytes: &'a [u8],
+    pub signature_bundle: &'a [u8],
+    pub publisher_policy: &'a RegistryPackPublisherPolicy,
+}
+
+pub(crate) type RegistryPackSignatureChecker =
     fn(&[u8], &[u8], &KeylessTrust) -> Result<(), RegistryPackVerificationError>;
 
-fn verify_registry_pack_with(
+/// The production signature checker (real cosign verification when the
+/// `manifest-verify` feature is built in, an unconditional refusal
+/// otherwise). Crate-internal so the store facade's public entry points can
+/// default to it.
+pub(crate) fn default_signature_checker() -> RegistryPackSignatureChecker {
+    check_registry_pack_signature
+}
+
+pub(crate) fn adopt_registry_pack_with(
+    request: &PackAdoption<'_>,
+    check_signature: RegistryPackSignatureChecker,
+) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
+    let trust = request
+        .publisher_policy
+        .trust_for_namespace(request.requested.namespace())?;
+    check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
+    finish_registry_pack_verification(
+        request.requested,
+        request.manifest_bytes,
+        request.signature_bundle,
+        None,
+    )
+}
+
+pub(crate) fn verify_registry_pack_with(
     request: &RegistryPackVerification<'_>,
     check_signature: RegistryPackSignatureChecker,
 ) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
@@ -683,8 +744,21 @@ fn verify_registry_pack_with(
         .publisher_policy
         .trust_for_namespace(pin.reference().namespace())?;
     check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
+    finish_registry_pack_verification(
+        request.requested,
+        request.manifest_bytes,
+        request.signature_bundle,
+        Some(pin),
+    )
+}
 
-    let manifest: RegistryPackManifest = serde_json::from_slice(request.manifest_bytes)
+fn finish_registry_pack_verification(
+    requested: &PackReference,
+    manifest_bytes: &[u8],
+    signature_bundle: &[u8],
+    pin: Option<&PackPin>,
+) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
+    let manifest: RegistryPackManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|error| RegistryPackVerificationError::ManifestParse(error.to_string()))?;
     if manifest.schema_version != REGISTRY_PACK_MANIFEST_SCHEMA_VERSION {
         return Err(RegistryPackVerificationError::UnsupportedManifestSchema {
@@ -692,18 +766,37 @@ fn verify_registry_pack_with(
             expected: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
         });
     }
-    if &manifest.reference != pin.reference() {
-        return Err(RegistryPackVerificationError::ManifestReferenceMismatch {
-            manifest: manifest.reference.to_string(),
-            locked: pin.reference().to_string(),
-        });
-    }
+    let manifest_sha256 = match pin {
+        Some(pin) => {
+            if &manifest.reference != pin.reference() {
+                return Err(RegistryPackVerificationError::ManifestReferenceMismatch {
+                    manifest: manifest.reference.to_string(),
+                    locked: pin.reference().to_string(),
+                });
+            }
+            pin.manifest_sha256().clone()
+        }
+        None => {
+            if manifest.reference.coordinate != requested.coordinate
+                || requested
+                    .version
+                    .as_ref()
+                    .is_some_and(|version| Some(version) != manifest.reference.version.as_ref())
+            {
+                return Err(RegistryPackVerificationError::ManifestReferenceMismatch {
+                    manifest: manifest.reference.to_string(),
+                    locked: requested.to_string(),
+                });
+            }
+            Sha256Hex::from_bytes(manifest_bytes)
+        }
+    };
     validate_registry_pack_manifest(&manifest)?;
     Ok(VerifiedRegistryPack {
         manifest,
-        manifest_sha256: pin.manifest_sha256().clone(),
-        manifest_bytes: request.manifest_bytes.to_vec(),
-        signature_bundle: request.signature_bundle.to_vec(),
+        manifest_sha256,
+        manifest_bytes: manifest_bytes.to_vec(),
+        signature_bundle: signature_bundle.to_vec(),
     })
 }
 
@@ -971,7 +1064,7 @@ fn relative_payload_path(root: &Path, path: &Path) -> String {
 }
 
 #[cfg(feature = "manifest-verify")]
-fn check_registry_pack_signature(
+pub(crate) fn check_registry_pack_signature(
     manifest_bytes: &[u8],
     signature_bundle: &[u8],
     trust: &KeylessTrust,
@@ -991,7 +1084,7 @@ fn check_registry_pack_signature(
 }
 
 #[cfg(not(feature = "manifest-verify"))]
-fn check_registry_pack_signature(
+pub(crate) fn check_registry_pack_signature(
     _manifest_bytes: &[u8],
     _signature_bundle: &[u8],
     _trust: &KeylessTrust,
