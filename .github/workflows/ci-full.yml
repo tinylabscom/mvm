@@ -843,13 +843,17 @@ jobs:
           if [ -e /dev/kvm ]; then
             sudo chmod 000 /dev/kvm
           fi
-          if [ -r /dev/kvm ] || [ -w /dev/kvm ]; then
+          if sudo -u "$USER" test -r /dev/kvm || sudo -u "$USER" test -w /dev/kvm; then
             echo "::error::the no-KVM witness can still access /dev/kvm" >&2
             exit 1
           fi
 
       - name: Use published builder VM bootstrap path
-        run: mv nix/images/builder-vm nix/images/builder-vm.hidden
+        run: |
+          if [ -d nix/images/builder-vm ]; then
+            mv nix/images/builder-vm nix/images/builder-vm.hidden
+            echo "MVM_CI_HID_BUILDER_FLAKE=1" >> "$GITHUB_ENV"
+          fi
 
       - name: Download published builder VM
         run: /tmp/mvmctl-release-helper --builder qemu __builder-vm-bootstrap -v
@@ -865,7 +869,10 @@ jobs:
       # Restore the source flake after proving the published-builder path;
       # source compilation deliberately refuses to run without that checkout.
       - name: Restore source builder VM flake
-        run: mv nix/images/builder-vm.hidden nix/images/builder-vm
+        run: |
+          if [ "${MVM_CI_HID_BUILDER_FLAKE:-0}" = 1 ]; then
+            mv nix/images/builder-vm.hidden nix/images/builder-vm
+          fi
 
       # Artifact compilation is not the no-KVM launch witness. Re-enable KVM
       # for the project builder VM; the independent smoke runner below denies
@@ -1124,7 +1131,7 @@ jobs:
           if [ -e /dev/kvm ]; then
             sudo chmod 000 /dev/kvm
           fi
-          if [ -r /dev/kvm ] || [ -w /dev/kvm ]; then
+          if sudo -u "$USER" test -r /dev/kvm || sudo -u "$USER" test -w /dev/kvm; then
             echo "::error::the no-KVM witness can still access /dev/kvm" >&2
             exit 1
           fi
