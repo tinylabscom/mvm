@@ -328,6 +328,17 @@ pub(in crate::commands) fn exec_machine(
     cfg: &MvmConfig,
 ) -> Result<()> {
     require_console_target(&args.name)?;
+    if let Some(tool) = args.tool {
+        anyhow::ensure!(
+            !args.tty && !args.interactive,
+            "declared tools require a non-interactive command"
+        );
+        anyhow::ensure!(
+            !args.argv.is_empty(),
+            "declared tools require a command after --"
+        );
+        return console::run_declared_command(&args.name, &tool, args.argv, args.force);
+    }
     let command = if args.argv.is_empty() {
         None
     } else {

@@ -101,6 +101,7 @@ pub(in crate::commands) fn run_replay(
             force: false,
             tty: false,
             interactive: false,
+            tool: None,
             argv: entry.argv.clone(),
         };
         lifecycle::exec_machine(cli, exec, cfg).with_context(|| {

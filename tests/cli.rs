@@ -290,6 +290,17 @@ fn why_help_lists_every_query_and_policy_source() {
 }
 
 #[test]
+fn machine_exec_help_lists_declared_tool_option() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "exec", "--help"])
+        .output()
+        .expect("machine exec help");
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(help.contains("--tool"), "machine exec help: {help}");
+}
+
+#[test]
 fn why_empty_project_answers_default_deny_as_json_without_booting() {
     let project = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

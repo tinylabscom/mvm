@@ -896,6 +896,10 @@ pub(in crate::commands) struct MachineExecArgs {
     /// Accepted as an alias for `-t` so `-it` parses.
     #[arg(short = 'i', long = "interactive")]
     pub interactive: bool,
+    /// Declared tool name to authorize through this VM's admitted rules.
+    /// Requires a non-interactive command after `--`.
+    #[arg(long, value_name = "NAME")]
+    pub tool: Option<String>,
     /// Argv to run inside the guest (use `--` to separate). Omit to drop into
     /// an interactive shell, like `machine shell`.
     #[arg(trailing_var_arg = true)]

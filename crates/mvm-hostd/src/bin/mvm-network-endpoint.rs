@@ -793,7 +793,9 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
                 .context("typed connector configured without a substitution service")?;
             let listener = tokio::net::UnixListener::from_std(std_listener)
                 .context("adopting typed connector listener into the tokio runtime")?;
-            Some(tokio::spawn(std::sync::Arc::clone(service).serve(listener)))
+            Some(tokio::spawn(
+                std::sync::Arc::clone(service).serve_connector(listener),
+            ))
         }
         None => None,
     };
