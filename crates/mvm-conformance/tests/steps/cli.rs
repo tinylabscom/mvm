@@ -913,10 +913,9 @@ pub(crate) fn collect_command_paths(
 
 // --- Template registry steps ---
 
-/// Create a local `file://` registry with a single "demo" template that
-/// includes an `app.py` SDK source file.
-#[given(expr = "a local template registry with a demo template")]
-fn local_template_registry_with_demo(world: &mut CliWorld) {
+/// A remote demo template with an optional `[policy]` table and the files it
+/// declares. `None` writes the policy-free template the other scenarios use.
+fn write_demo_registry(world: &mut CliWorld, policy: Option<(&str, &[(&str, &str)])>) {
     let tmp = tempfile::tempdir().expect("create temp registry dir");
     let tpl = tmp.path().join("templates/demo");
     std::fs::create_dir_all(&tpl).expect("create template dir");
@@ -932,15 +931,18 @@ fn local_template_registry_with_demo(world: &mut CliWorld) {
     });
     std::fs::write(tmp.path().join("index.json"), index.to_string()).expect("write index.json");
 
+    let policy_table = policy.map(|(table, _)| table).unwrap_or("");
     std::fs::write(
         tpl.join("template.toml"),
-        r#"name = "demo"
+        format!(
+            r#"name = "demo"
 description = "demo remote template"
 default_vcpus = 2
 default_memory_mib = 512
 tags = ["demo"]
 files = ["app.py"]
-"#,
+{policy_table}"#
+        ),
     )
     .expect("write template.toml");
 
@@ -949,7 +951,7 @@ files = ["app.py"]
         r#"{ pkgs }:
 {
   mkGuest = { ... }: {
-    entrypoint = "hello";
+    entrypoint = "hello",
   };
 }
 "#,
@@ -970,7 +972,58 @@ def main() -> str:
     )
     .expect("write app.py");
 
+    if let Some((_, files)) = policy {
+        for (rel, content) in files {
+            let path = tpl.join(rel);
+            std::fs::create_dir_all(path.parent().expect("policy file has a parent"))
+                .expect("create policy dir");
+            std::fs::write(path, content).expect("write policy file");
+        }
+    }
+
     world.template_registry_dir = Some(tmp);
+}
+
+/// Create a local `file://` registry with a single "demo" template that
+/// includes an `app.py` SDK source file.
+#[given(expr = "a local template registry with a demo template")]
+fn local_template_registry_with_demo(world: &mut CliWorld) {
+    write_demo_registry(world, None);
+}
+
+#[given(expr = "a local template registry with a demo template shipping policy")]
+fn local_template_registry_with_demo_policy(world: &mut CliWorld) {
+    write_demo_registry(
+        world,
+        Some((
+            r#"
+[policy]
+profile = "policy/base.toml"
+include = ["policy/apis.toml"]
+"#,
+            &[
+                (
+                    "policy/base.toml",
+                    "[overrides.network]\nallow = [\"a.test\"]\n",
+                ),
+                ("policy/apis.toml", "[network]\nallow = [\"b.test\"]\n"),
+            ],
+        )),
+    );
+}
+
+#[given(expr = "a local template registry with a demo template shipping broken policy")]
+fn local_template_registry_with_demo_broken_policy(world: &mut CliWorld) {
+    write_demo_registry(
+        world,
+        Some((
+            r#"
+[policy]
+profile = "policy/base.toml"
+"#,
+            &[("policy/base.toml", "[network]\nallowed = []\n")],
+        )),
+    );
 }
 
 /// Run mvmctl against the local registry created by the `Given` step.
@@ -1033,6 +1086,20 @@ fn generated_project_contains_file(world: &mut CliWorld, file: String) {
     assert!(
         path.is_file(),
         "expected generated project to contain {file:?} at {path:?}"
+    );
+}
+
+#[then(expr = "the generated project file {string} contains {string}")]
+fn generated_project_file_contains(world: &mut CliWorld, file: String, needle: String) {
+    let dir = world
+        .generated_project_dir
+        .as_ref()
+        .expect("a project must be generated first");
+    let text = std::fs::read_to_string(dir.join(&file))
+        .unwrap_or_else(|e| panic!("reading generated {file:?}: {e}"));
+    assert!(
+        text.contains(&needle),
+        "expected generated {file:?} to contain {needle:?}; got:\n{text}"
     );
 }
 

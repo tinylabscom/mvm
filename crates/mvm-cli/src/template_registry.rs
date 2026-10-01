@@ -11,7 +11,7 @@
 //!   2. Local remote cache (already fetched).
 //!   3. Remote registry index + download (network required).
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
@@ -24,7 +24,21 @@ pub struct TemplateEntry {
     pub default_cpus: u8,
     pub default_memory_mib: u32,
     pub tags: Vec<String>,
+    /// The policy the template ships, wired into the generated project's
+    /// `mvm.toml [policy]` table. Templates that declare none generate a
+    /// project whose policy is whatever the operator passes.
+    pub policy: Option<TemplatePolicy>,
     pub source: TemplateSource,
+}
+
+/// The policy a template ships: a profile file and/or extra group files,
+/// all relative to the template directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplatePolicy {
+    /// A profile file, relative to the template directory.
+    pub profile: Option<String>,
+    /// Extra group files, relative to the template directory.
+    pub include: Vec<String>,
 }
 
 /// Where the template's files come from.
@@ -63,6 +77,60 @@ struct RemoteTemplateMeta {
     /// Additional files to download from the template directory.
     #[serde(default)]
     files: Vec<String>,
+    /// The policy this template ships, copied into generated projects.
+    #[serde(default)]
+    policy: Option<RemotePolicyMeta>,
+}
+
+/// Parsed `[policy]` table of a remote `template.toml`.
+#[derive(Debug, Deserialize)]
+struct RemotePolicyMeta {
+    #[serde(default)]
+    profile: Option<String>,
+    #[serde(default)]
+    include: Vec<String>,
+}
+
+impl RemotePolicyMeta {
+    /// Validate every declared path and lift it into a [`TemplatePolicy`].
+    fn into_template_policy(self, template: &str) -> Result<TemplatePolicy> {
+        let profile = self
+            .profile
+            .map(|raw| validate_policy_path(template, &raw))
+            .transpose()?;
+        let include = self
+            .include
+            .iter()
+            .map(|raw| validate_policy_path(template, raw))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(TemplatePolicy { profile, include })
+    }
+}
+
+impl TemplatePolicy {
+    /// Every declared file, profile first then includes.
+    pub(crate) fn paths(&self) -> impl Iterator<Item = &String> {
+        self.profile.iter().chain(self.include.iter())
+    }
+}
+
+/// A policy path must stay inside the template directory: relative, no
+/// parent-dir components, no Windows separators, no absolutes.
+fn validate_policy_path(template: &str, raw: &str) -> Result<String> {
+    let path = Path::new(raw);
+    let escapes = path.is_absolute()
+        || raw.starts_with('/')
+        || raw.contains('\\')
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir));
+    if escapes || raw.is_empty() {
+        bail!(
+            "template {template:?} declares policy path {raw:?}: paths must be relative and \
+             stay inside the template directory"
+        );
+    }
+    Ok(raw.to_string())
 }
 
 /// Registry configuration.
@@ -101,6 +169,7 @@ pub fn bundled_templates() -> Vec<TemplateEntry> {
             default_cpus: entry.default_cpus,
             default_memory_mib: entry.default_memory_mib,
             tags: entry.tags,
+            policy: None,
             source: TemplateSource::Bundled {
                 preset: entry.profile,
             },
@@ -138,6 +207,7 @@ pub async fn search_remote(cfg: &RegistryConfig, query: &str) -> Result<Vec<Temp
                 default_cpus: 1,
                 default_memory_mib: 256,
                 tags: Vec::new(),
+                policy: None,
                 source: TemplateSource::Remote { cache_dir },
             });
         }
@@ -180,12 +250,17 @@ fn read_cached_remote_template(cache_dir: &Path) -> Result<TemplateEntry> {
         .with_context(|| format!("reading {}", meta_path.display()))?;
     let meta: RemoteTemplateMeta =
         toml::from_str(&text).with_context(|| format!("parsing {}", meta_path.display()))?;
+    let policy = meta
+        .policy
+        .map(|policy| policy.into_template_policy(&meta.name))
+        .transpose()?;
     Ok(TemplateEntry {
         name: meta.name,
         description: meta.description,
         default_cpus: meta.default_vcpus,
         default_memory_mib: meta.default_memory_mib,
         tags: meta.tags,
+        policy,
         source: TemplateSource::Remote {
             cache_dir: cache_dir.to_path_buf(),
         },
@@ -230,18 +305,26 @@ async fn fetch_and_cache_remote_template(
     download_text(&format!("{}/flake.nix", base), &cache_dir.join("flake.nix")).await?;
 
     // Download any extra files declared by the template (SDK sources, app/
-    // directories, etc.).
+    // directories, etc.), plus the policy files: a template ships its policy
+    // with everything else so offline scaffolds resolve the same way.
     let meta_text = std::fs::read_to_string(cache_dir.join("template.toml"))
         .with_context(|| format!("re-reading template.toml from {}", cache_dir.display()))?;
     let meta: RemoteTemplateMeta = toml::from_str(&meta_text)
         .with_context(|| format!("parsing template.toml from {}", cache_dir.display()))?;
-    for file in &meta.files {
-        let file_url = format!("{}/{}", base, file);
+    let mut downloads: Vec<String> = meta.files.clone();
+    if let Some(policy) = &meta.policy {
+        if let Some(profile) = &policy.profile {
+            downloads.push(profile.clone());
+        }
+        downloads.extend(policy.include.iter().cloned());
+    }
+    for file in &downloads {
         let dest = cache_dir.join(file);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating parent dir for {}", dest.display()))?;
         }
+        let file_url = format!("{}/{}", base, file);
         download_text(&file_url, &dest).await?;
     }
 
@@ -331,6 +414,59 @@ fn sanitize_cache_key(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_policy_table_parses_into_a_template_policy() {
+        let meta: RemoteTemplateMeta = toml::from_str(
+            r#"name = "agent"
+description = "an agent template"
+default_vcpus = 2
+default_memory_mib = 512
+
+[policy]
+profile = "policy/base.toml"
+include = ["policy/apis.toml", "policy/secrets.toml"]
+"#,
+        )
+        .unwrap();
+        let policy = meta
+            .policy
+            .expect("policy table parses")
+            .into_template_policy("agent")
+            .unwrap();
+        assert_eq!(policy.profile.as_deref(), Some("policy/base.toml"));
+        assert_eq!(policy.include, ["policy/apis.toml", "policy/secrets.toml"]);
+        assert_eq!(policy.paths().count(), 3);
+    }
+
+    #[test]
+    fn a_template_without_a_policy_table_has_none() {
+        let meta: RemoteTemplateMeta = toml::from_str(
+            "name = \"agent\"\ndescription = \"d\"\ndefault_vcpus = 2\n\
+             default_memory_mib = 512\n",
+        )
+        .unwrap();
+        assert!(meta.policy.is_none());
+    }
+
+    #[test]
+    fn policy_paths_cannot_escape_the_template_directory() {
+        for bad in [
+            "",
+            "/etc/passwd",
+            "../base.toml",
+            "policy/../../x.toml",
+            r"policy\base.toml",
+        ] {
+            assert!(
+                validate_policy_path("agent", bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        for ok in ["policy/base.toml", "base.json", "./policy/base.toml"] {
+            assert_eq!(validate_policy_path("agent", ok).unwrap(), ok);
+        }
+    }
 
     #[test]
     fn sanitize_cache_key_replaces_url_metacharacters() {

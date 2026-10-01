@@ -214,6 +214,31 @@ Flags are the last, most specific layer. They follow the same rules:
 - `--mount` cannot come from a denied source.
 - `--env` must name an allowed variable when the policy lists any.
 
+### Templates that ship their own policy
+
+A remote template can carry its own policy. Its `template.toml` declares
+the files, relative to the template directory:
+
+```toml
+[policy]
+profile = "policy/base.toml"    # a profile file shipped in the template
+include = ["policy/apis.toml"]  # extra groups
+```
+
+`mvmctl generate template <name> <dir>` downloads the declared files with
+the rest of the template, copies them into the project, and writes a
+`[policy]` table into the generated `mvm.toml` referencing them. Every
+launch of the project then composes the template's policy the way it
+composes any project policy, and an explicit `--policy` composes on top —
+so the operator's file still wins the conflicts. Declared paths must stay
+inside the template directory, and generation refuses — naming the template
+and the file — when a declared policy file is missing or does not resolve,
+so a broken template fails at generation time, not on the first run.
+
+The template's policy is project content: it can tighten, and it cannot
+use escape hatches. A group the template marks `required` cannot be
+excluded by anything composed above it.
+
 ## Where policy comes from
 
 The first match wins:
