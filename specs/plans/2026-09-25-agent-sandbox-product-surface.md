@@ -438,6 +438,7 @@ hints) were updated to the module-qualified names.
   - [x] lineage recovery: rewind and replay guide, with navigation and safety-boundary regression test
   - [x] workload provenance: signed-plan, receipt, audit, and export guide with a documentation regression test
   - [x] durable agent sessions: admission, boot, retention, retry, and audit limits with a documentation regression test
+  - [x] workspace apply: the reviewed bring-changes-home loop (diff, apply with prompt/--yes/--dry-run, exclusions, protected paths, undo/redo, replay) with the doc-example tier/ledger gates held
 - [ ] client guides for each agent pack
 - [ ] profile and pack authoring guides
 - [ ] schema reference generated from PS-05
