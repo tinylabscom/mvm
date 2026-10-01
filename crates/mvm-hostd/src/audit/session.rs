@@ -133,8 +133,14 @@ pub struct SessionSeal {
     /// From the session's last `plan.failed`, when there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_class: Option<String>,
-    /// Digest of the measured compute environment (image, kernel and verity
-    /// state) the signed plan recorded, when it recorded one.
+    /// Rootfs image digest copied from the admitted plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_sha256: Option<String>,
+    /// Pinned kernel digest copied from the admitted plan, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_sha256: Option<String>,
+    /// Legacy asset identity digest, currently the rootfs image digest. New
+    /// seals record the image and pinned kernel separately above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_environment: Option<String>,
     /// Merkle root of the session's ordered checkpoint-creation digests, when
@@ -164,6 +170,8 @@ impl SessionSeal {
         let optional = [
             ("exit_code", &self.exit_code),
             ("error_class", &self.error_class),
+            ("image_sha256", &self.image_sha256),
+            ("kernel_sha256", &self.kernel_sha256),
             ("compute_environment", &self.compute_environment),
             ("snapshot_root", &self.snapshot_root),
         ];
@@ -222,10 +230,23 @@ impl SessionSeal {
                 .ok_or_else(|| format!("{LABEL_PREFIX}reason {reason:?} is not a seal reason"))?,
             exit_code: optional("exit_code"),
             error_class: optional("error_class"),
+            image_sha256: optional_hash(labels, "image_sha256")?,
+            kernel_sha256: optional_hash(labels, "kernel_sha256")?,
             compute_environment: optional("compute_environment"),
             snapshot_root,
         })
     }
+}
+
+fn optional_hash(labels: &BTreeMap<String, String>, name: &str) -> Result<Option<String>, String> {
+    labels
+        .get(&format!("{LABEL_PREFIX}{name}"))
+        .map(|value| {
+            is_hex_hash(value)
+                .then(|| value.clone())
+                .ok_or_else(|| format!("{LABEL_PREFIX}{name} is not a SHA-256 hex digest"))
+        })
+        .transpose()
 }
 
 fn label(name: &str, value: String) -> (String, String) {
@@ -328,6 +349,8 @@ fn is_seal(leaf: &Leaf<'_>) -> bool {
 pub struct SealRequest<'a> {
     pub plan_id: &'a str,
     pub reason: SealReason,
+    pub image_sha256: Option<String>,
+    pub kernel_sha256: Option<String>,
     pub compute_environment: Option<String>,
 }
 
@@ -381,6 +404,8 @@ pub fn compute_seal(lines: &[String], request: &SealRequest<'_>) -> Result<Sessi
         reason: request.reason,
         exit_code: last_label("plan.exited", "exit_code"),
         error_class: last_label("plan.failed", "error_class"),
+        image_sha256: request.image_sha256.clone(),
+        kernel_sha256: request.kernel_sha256.clone(),
         compute_environment: request.compute_environment.clone(),
         snapshot_root,
     })
@@ -446,6 +471,8 @@ pub enum MismatchReason {
     SequenceMismatch,
     /// The Merkle root over the session's entries differs from the seal's.
     RootMismatch,
+    /// The image or pinned-kernel digest disagrees with signed admission.
+    EnvironmentMismatch,
     /// The root over ordered checkpoint-creation digests differs from the seal's.
     SnapshotRootMismatch,
     /// The seal's chain head is not a line before it.
@@ -663,6 +690,44 @@ fn check_seal(
             ),
         ));
     }
+    let has_new_identity = seal.image_sha256.is_some() || seal.kernel_sha256.is_some();
+    if has_new_identity || seal.compute_environment.is_some() {
+        let Some(admitted) = covered
+            .iter()
+            .find(|leaf| leaf.entry.event == SESSION_OPENED_EVENT)
+        else {
+            return Err((
+                MismatchReason::EnvironmentMismatch,
+                "identity-bearing seal has no admitted event".to_string(),
+            ));
+        };
+        if covered
+            .iter()
+            .filter(|leaf| leaf.entry.event == SESSION_OPENED_EVENT)
+            .any(|leaf| {
+                leaf.entry.image_sha256 != admitted.entry.image_sha256
+                    || admitted_kernel(leaf) != admitted_kernel(admitted)
+            })
+        {
+            return Err((
+                MismatchReason::EnvironmentMismatch,
+                "signed admission entries disagree on image or kernel identity".to_string(),
+            ));
+        }
+        if (has_new_identity
+            && (seal.image_sha256.as_deref() != Some(admitted.entry.image_sha256.as_str())
+                || seal.kernel_sha256.as_deref() != admitted_kernel(admitted)))
+            || seal
+                .compute_environment
+                .as_deref()
+                .is_some_and(|digest| digest != admitted.entry.image_sha256)
+        {
+            return Err((
+                MismatchReason::EnvironmentMismatch,
+                "sealed image or kernel identity disagrees with signed admission".to_string(),
+            ));
+        }
+    }
     if let Some(recorded) = seal.snapshot_root.as_deref() {
         let actual = checkpoint_root(&covered)
             .map_err(|error| (MismatchReason::SnapshotRootMismatch, error.to_string()))?;
@@ -693,6 +758,14 @@ fn check_seal(
         ));
     }
     Ok(())
+}
+
+fn admitted_kernel<'a>(leaf: &'a Leaf<'_>) -> Option<&'a str> {
+    leaf.entry
+        .labels
+        .get("kernel_sha256")
+        .map(String::as_str)
+        .filter(|digest| !digest.is_empty())
 }
 
 fn short(hash: &str) -> &str {
@@ -1029,6 +1102,11 @@ impl crate::audit::emitter::AuditEmitter {
             &SealRequest {
                 plan_id: &plan.plan_id.0,
                 reason,
+                image_sha256: Some(plan.image.sha256.to_ascii_lowercase()),
+                kernel_sha256: plan
+                    .environment
+                    .as_ref()
+                    .map(|value| value.kernel_sha256.clone()),
                 compute_environment: compute_environment_digest(plan),
             },
         )?;
