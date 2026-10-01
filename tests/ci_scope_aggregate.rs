@@ -19,17 +19,17 @@
 
 use std::process::{Command, Stdio};
 
-/// Lift the aggregate's `run:` body out of the workflow, dedented.
+/// Lift one aggregate step's `run:` body out of the workflow, dedented.
 ///
 /// Anchored on the step name rather than a line number so reordering the file
 /// does not silently start testing a different script.
-fn aggregate_script() -> String {
+fn step_script(step_name: &str, sentinel: &str) -> String {
     let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
         .expect("failed to read .github/workflows/ci.yml");
-    const STEP: &str = "- name: Require every merge-group test lane to pass";
+    let marker = format!("- name: {step_name}");
     let step = workflow
-        .find(STEP)
-        .expect("ci.yml must still have the test-aggregate step");
+        .find(&marker)
+        .unwrap_or_else(|| panic!("ci.yml must still have the {step_name} step"));
     let run = workflow[step..]
         .find("run: |")
         .map(|offset| step + offset)
@@ -55,10 +55,21 @@ fn aggregate_script() -> String {
         "the aggregate script must be driven purely by env, found an Actions expression:\n{script}"
     );
     assert!(
-        script.contains("NIX_RESULT"),
+        script.contains(sentinel),
         "extracted the wrong block:\n{script}"
     );
     script
+}
+
+fn aggregate_script() -> String {
+    step_script("Require every merge-group test lane to pass", "NIX_RESULT")
+}
+
+fn pr_aggregate_script() -> String {
+    step_script(
+        "Require PR preflight and skip queue-only lanes",
+        "PREFLIGHT_RESULT",
+    )
 }
 
 /// One `needs.*.result` / scope combination fed to the aggregate.
@@ -129,6 +140,7 @@ impl Verdict {
             .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
+            .env("PREFLIGHT_RESULT", "skipped")
             .env("CORE_RESULT", self.lanes)
             .env("POLICY_RESULT", "success")
             .env("FEATURES_RESULT", self.lanes)
@@ -150,6 +162,52 @@ impl Verdict {
             .spawn()
             .expect("failed to spawn bash");
         child.wait().expect("bash did not exit").success()
+    }
+}
+
+fn pr_accepts(code: &str, policy: &str, preflight: &str, queue_lane: &str) -> bool {
+    let mut child = Command::new("bash")
+        .arg("-c")
+        .arg(pr_aggregate_script())
+        .env("SCOPE_CODE", code)
+        .env("POLICY_RESULT", policy)
+        .env("PREFLIGHT_RESULT", preflight)
+        .env("CORE_RESULT", queue_lane)
+        .env("FEATURES_RESULT", queue_lane)
+        .env("FEATURES_SUPPORT_RESULT", queue_lane)
+        .env("FEATURES_EMBED_RESULT", queue_lane)
+        .env("WORKSPACE_RESULT", queue_lane)
+        .env("WORKSPACE_AARCH64_RESULT", queue_lane)
+        .env("LINUX_RESULT", queue_lane)
+        .env("RELEASE_WITNESS_RESULT", queue_lane)
+        .env("EBPF_RESULT", queue_lane)
+        .env("BDD_RESULT", queue_lane)
+        .env("BOOT_RESULT", queue_lane)
+        .env("NIX_RESULT", queue_lane)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn PR aggregate");
+    child.wait().expect("PR aggregate did not exit").success()
+}
+
+#[test]
+fn pr_preflight_admits_only_the_expected_scope_shape() {
+    assert!(pr_accepts("true", "success", "success", "skipped"));
+    assert!(pr_accepts("false", "success", "skipped", "skipped"));
+}
+
+#[test]
+fn pr_preflight_fails_closed_on_policy_preflight_or_queue_lane_drift() {
+    for policy in ["failure", "cancelled", "skipped"] {
+        assert!(!pr_accepts("true", policy, "success", "skipped"));
+    }
+    for preflight in ["failure", "cancelled", "skipped"] {
+        assert!(!pr_accepts("true", "success", preflight, "skipped"));
+    }
+    assert!(!pr_accepts("false", "success", "success", "skipped"));
+    for queue_lane in ["success", "failure", "cancelled"] {
+        assert!(!pr_accepts("true", "success", "success", queue_lane));
     }
 }
 

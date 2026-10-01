@@ -90,6 +90,10 @@ and then on the integrated merge-group commit.
       `Lint` aggregate runner; `Test` directly owns every lint result.
 - [x] Restore the trusted Nix store through the restore-only cache action on
       merge refs; only the trusted main warmer writes a reusable cache.
+- [x] Add a bounded PR preflight: run the real policy/invariant lane before
+      queue admission, ShellCheck changed scripts, and execute the embedded
+      helper recipe regression. The full cumulative matrix remains authoritative
+      in the merge queue.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
 - [ ] Land the workflow change through the merge queue. The live queue policy
