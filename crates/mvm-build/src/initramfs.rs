@@ -179,6 +179,7 @@ pub fn resolve_or_seed_from_default_cache(
         Ok(artifact) => Ok(artifact),
         Err(initial_error) => {
             if seed_from_default_cache(cache_root, version, arch)? {
+                record_built_source_fingerprint(cache_root, version, arch);
                 Ok(InitramfsResolver::new(cache_root, version).resolve(&arch_str)?)
             } else {
                 Err(initial_error.into())
@@ -276,7 +277,10 @@ pub fn resolve_or_build_local_initramfs(
         return Err(InitramfsBuildError::CargoBuildFailed { reason: message });
     }
     let build_err = match build_initramfs_with_cargo(cache_root, version, arch) {
-        Ok(artifact) => return Ok(artifact),
+        Ok(artifact) => {
+            record_built_source_fingerprint(cache_root, version, arch);
+            return Ok(artifact);
+        }
         Err(e) => e,
     };
     match resolve_or_download_image_set_initramfs(arch, cache_root) {
@@ -288,6 +292,22 @@ pub fn resolve_or_build_local_initramfs(
                  failed ({download_err})"
             ),
         }),
+    }
+}
+
+/// Record the checkout fingerprint beside a locally installed artifact so the
+/// boot-time freshness eviction recognizes it. The local cargo build and the
+/// cross-root seed both install without one, and the eviction treats a missing
+/// fingerprint as stale — so without this, every boot under a source checkout
+/// discarded a fresh artifact and rebuilt it.
+fn record_built_source_fingerprint(cache_root: &Path, version: &str, arch: GuestArch) {
+    let Some(workspace) = crate::guest_agent_build::detect_source_workspace() else {
+        return;
+    };
+    if let Ok(fingerprint) =
+        crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace)
+    {
+        let _ = record_source_fingerprint(cache_root, version, arch, &fingerprint);
     }
 }
 
@@ -929,6 +949,34 @@ mod tests {
         assert!(
             !dir.exists(),
             "the stale artifact must be gone, not merely ignored"
+        );
+    }
+
+    /// A local build (or a cross-root seed) used to install the artifact
+    /// without recording the fingerprint the boot-time eviction compares, and
+    /// the eviction reads a missing fingerprint as stale — so every boot under
+    /// a source checkout discarded a fresh artifact and paid the rebuild.
+    #[test]
+    fn a_local_build_records_the_fingerprint_the_boot_eviction_compares() {
+        let Some(workspace) = crate::guest_agent_build::detect_source_workspace() else {
+            eprintln!("test binary did not build from a source checkout; skipping");
+            return;
+        };
+        let cache = tempfile::tempdir().unwrap();
+        let version = "0.0.0-test";
+        let arch = GuestArch::host();
+        let dir = cache.path().join(version).join(arch.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("initramfs.cpio.gz"), b"fresh").unwrap();
+
+        record_built_source_fingerprint(cache.path(), version, arch);
+
+        let fingerprint =
+            crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace)
+                .expect("the checkout fingerprint computes");
+        assert!(
+            cached_artifact_matches_source(cache.path(), version, arch, &fingerprint),
+            "the freshly built artifact must survive the boot-time eviction"
         );
     }
 
