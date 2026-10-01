@@ -1,5 +1,8 @@
 # Cold-run builds are explicit; warm launches stay under the SLO
 
+Backing: shipped-source
+Validation: linked issues, pull requests, and repository history
+
 Issue: tinylabscom/mvm#3887 — `mvmctl machine run --image alpine -it -- ls /`
 cold-builds ~85 minutes of toolchain before launching a trivial guest,
 violating the sub-300ms warm-launch gate in
