@@ -1348,8 +1348,9 @@ pub struct BuilderExtraDisk {
 /// boundary but do not produce Nix build artifacts. The OCI image
 /// runner uses it to run `mkfs.ext4` and copy an OCI-unpacked rootfs
 /// into a writable virtio-blk image.
-/// The builder image cache layout this host reads; a builder image built for
-/// another layout is refused rather than booted.
+/// The minimum builder image cache contract this host reads. A newer contract
+/// remains compatible when it still declares every capability this host
+/// requires; only older contracts are refused.
 pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 5;
 
 /// Default vCPU count for a builder VM.

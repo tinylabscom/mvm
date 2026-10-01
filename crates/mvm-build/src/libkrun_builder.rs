@@ -4572,7 +4572,7 @@ mod tests {
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version=5"),
+            format!("{err}").contains("cache_contract_version>=5"),
             "got {err}"
         );
     }
@@ -4614,7 +4614,7 @@ mod tests {
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version=5"),
+            format!("{err}").contains("cache_contract_version>=5"),
             "got {err}"
         );
     }
