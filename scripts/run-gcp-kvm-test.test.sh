@@ -80,7 +80,10 @@ grep -Fq "PROGRAM is required after '--'" "$scratch/missing.out"
 grep -Fq -- '--run-name must be' "$scratch/name.out"
 
 runner="$repo_root/scripts/run-gcp-kvm-test.sh"
+# These are literal source fragments, not expressions for this test shell.
+# shellcheck disable=SC2016
 grep -Fq 'git -C "$repo_root" ls-files -z' "$runner"
+# shellcheck disable=SC2016
 grep -Fq -- '--from0 --files-from="$tracked_files"' "$runner"
 grep -Fq 'COPYFILE_DISABLE=1 tar' "$runner"
 remote_runner="$repo_root/scripts/run-gcp-kvm-test-remote.sh"

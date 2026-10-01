@@ -14,7 +14,9 @@ export MVM_GCP_KVM_RESULTS_DIR="$results"
 exec > >(tee -a "$results/bootstrap.log") 2>&1
 
 # Invoked indirectly by the EXIT trap installed below.
-# shellcheck disable=SC2329
+# ShellCheck renamed this diagnostic from SC2317 to SC2329; CI's distro
+# version and newer local versions must both understand the suppression.
+# shellcheck disable=SC2317,SC2329
 bundle_results() {
   status=$?
   trap - EXIT

@@ -176,7 +176,9 @@ instance_created=0
 local_stage="$(mktemp -d "${TMPDIR:-/tmp}/mvm-gcp-kvm.XXXXXX")"
 
 # Invoked indirectly by the EXIT/INT/TERM trap installed below.
-# shellcheck disable=SC2329
+# ShellCheck renamed this diagnostic from SC2317 to SC2329; CI's distro
+# version and newer local versions must both understand the suppression.
+# shellcheck disable=SC2317,SC2329
 cleanup() {
   status=$?
   trap - EXIT INT TERM
