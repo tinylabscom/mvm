@@ -251,6 +251,9 @@ pub enum GuestResponse {
     /// One event in the streaming response of a DevOnly `Exec` call.
     /// Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
+    /// A declared command is paused before spawn and needs a decision for
+    /// this exact invocation on the authenticated control session.
+    ToolCheckRequired(mvm_contract::protocol::network_flow::tool::ToolCheckRequest),
     /// Buffered outcomes of a DevOnly `ExecBatch` call, one per
     /// command in request order (truncated at the first non-zero exit).
     ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
@@ -388,7 +391,7 @@ name_enum! {
     pub enum Verb {
         ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
         IntegrationStatus,
-        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, MediatedExec, ExecBatch, RunEntrypoint,
         DriveOpen, DriveFile, RunExtension,
         CancelExtension,
         RunDetached,
@@ -409,7 +412,7 @@ name_enum! {
         ActivateEnvironmentAck, ActivateEnvironmentError, NotActivated,
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, ResourceUsageReport, Error, UnsupportedInProfile, VerbNotAuthorized, WorkloadPrivilegeRefused, IntegrationStatusReport,
-        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent,
+        CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, DriveEvent, DriveRefused, ExtensionCancellationAck, ExecEvent, ToolCheckRequired,
         ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult, FilesystemsSynced,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleAttached, ConsoleBusy,
@@ -446,6 +449,17 @@ pub enum ResponseKind {
     Stream,
 }
 
+/// Host answer to a paused declared-command invocation. This is read only
+/// while a `MediatedExec` is waiting; it is not a standalone guest verb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCheckReply {
+    /// The host gate admitted and audited this invocation.
+    Allow,
+    /// The host gate refused it, or could not obtain an audited decision.
+    Deny,
+}
+
 /// Whether a verb carries bounded orchestration metadata or user-controlled
 /// payload bytes. The distinction drives dispatch capacity and audit handling;
 /// it is independent of the prod/dev profile gate.
@@ -473,6 +487,7 @@ impl Verb {
         use TrafficPlane::{Control, Data};
         match self {
             Self::Exec
+            | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
             | Self::DriveOpen
@@ -541,6 +556,7 @@ impl Verb {
         match self {
             // Each of these ends in a process executing image or user code.
             Self::Exec
+            | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
             | Self::DriveOpen
@@ -635,6 +651,7 @@ impl Verb {
             Verb::ProbeStatus => unary(&[R::ProbeStatusReport]),
             Verb::PrimedStatus => unary(&[R::PrimedStatusReport]),
             Verb::Exec => stream(&[R::ExecEvent]),
+            Verb::MediatedExec => stream(&[R::ToolCheckRequired, R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
             Verb::DriveOpen => stream(&[R::DriveEvent, R::DriveRefused]),
@@ -710,6 +727,7 @@ impl GuestResponse {
             GuestResponse::DriveRefused { .. } => ResponseVariant::DriveRefused,
             GuestResponse::ExtensionCancellationAck => ResponseVariant::ExtensionCancellationAck,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
+            GuestResponse::ToolCheckRequired(_) => ResponseVariant::ToolCheckRequired,
             GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
             GuestResponse::DetachedStarted { .. } => ResponseVariant::DetachedStarted,
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
@@ -745,6 +763,7 @@ impl GuestResponse {
             GuestResponse::EntrypointEvent(e) => e.is_terminal(),
             GuestResponse::DriveEvent(e) => e.is_terminal(),
             GuestResponse::ExecEvent(e) => e.is_terminal(),
+            GuestResponse::ToolCheckRequired(_) => false,
             GuestResponse::ProcWaitEvent(e) => e.is_terminal(),
             _ => true,
         }
@@ -792,6 +811,8 @@ pub enum GuestCapability {
     RunExtension,
     FilesystemRpc,
     ProcessRpc,
+    /// Authenticated host decision required before a declared command spawn.
+    MediatedExec,
     Console,
     /// Unix-domain socket forwarding (`StartUnixSocketForward`). Not an SSH
     /// session capability — no SSH client/server or key material crosses the
@@ -836,6 +857,7 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::RunExtension,
         GuestCapability::FilesystemRpc,
         GuestCapability::ProcessRpc,
+        GuestCapability::MediatedExec,
         GuestCapability::Console,
         GuestCapability::UnixSocketForward,
         GuestCapability::VolumeMount,
@@ -1791,12 +1813,23 @@ mod tests {
             BTreeSet::from([
                 "DriveOpen",
                 "Exec",
+                "MediatedExec",
                 "ProcWait",
                 "RunCode",
                 "RunEntrypoint",
                 "RunExtension",
             ])
         );
+    }
+
+    #[test]
+    fn tool_check_reply_round_trips_and_rejects_unknown_decisions() {
+        for reply in [ToolCheckReply::Allow, ToolCheckReply::Deny] {
+            let json = serde_json::to_string(&reply).expect("serialize reply");
+            let decoded: ToolCheckReply = serde_json::from_str(&json).expect("parse reply");
+            assert_eq!(decoded, reply);
+        }
+        assert!(serde_json::from_str::<ToolCheckReply>("\"maybe\"").is_err());
     }
 
     #[test]

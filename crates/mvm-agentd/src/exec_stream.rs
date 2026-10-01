@@ -128,17 +128,53 @@ pub fn stream_exec<F: FnMut(ExecEvent)>(
     stream_exec_with_environment(command, stdin_data, timeout_secs, &environment, emit)
 }
 
+/// Run a declared argv vector directly, without shell parsing or expansion.
+/// The same streaming, output cap, timeout, and process-group teardown as
+/// `stream_exec` apply to the child.
+pub fn stream_exec_argv<F: FnMut(ExecEvent)>(
+    argv: &[String],
+    stdin_data: Option<&str>,
+    timeout_secs: Option<u64>,
+    mut emit: F,
+) -> ExecEvent {
+    let Some((program, args)) = argv.split_first() else {
+        emit(ExecEvent::Stderr {
+            chunk: b"empty declared command argv".to_vec(),
+        });
+        return ExecEvent::Exit { code: -1 };
+    };
+    if program.is_empty() {
+        emit(ExecEvent::Stderr {
+            chunk: b"empty declared command program".to_vec(),
+        });
+        return ExecEvent::Exit { code: -1 };
+    }
+    let environment = resolve_exec_environment();
+    let mut builder = Command::new(program);
+    builder.args(args);
+    stream_command_with_environment(builder, stdin_data, timeout_secs, &environment, emit)
+}
+
 fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
     command: &str,
     stdin_data: Option<&str>,
     timeout_secs: Option<u64>,
     environment: &crate::workload_env::WorkloadEnvironment,
-    mut emit: F,
+    emit: F,
 ) -> ExecEvent {
     let mut builder = Command::new("/bin/sh");
+    builder.arg("-c").arg(command);
+    stream_command_with_environment(builder, stdin_data, timeout_secs, environment, emit)
+}
+
+fn stream_command_with_environment<F: FnMut(ExecEvent)>(
+    mut builder: Command,
+    stdin_data: Option<&str>,
+    timeout_secs: Option<u64>,
+    environment: &crate::workload_env::WorkloadEnvironment,
+    mut emit: F,
+) -> ExecEvent {
     builder
-        .arg("-c")
-        .arg(command)
         .env_clear()
         .envs(environment.vars())
         .current_dir(environment.working_dir())
@@ -347,6 +383,29 @@ mod tests {
             .flatten()
             .collect();
         assert_eq!(out, b"hello");
+    }
+
+    #[test]
+    fn declared_argv_never_interprets_shell_metacharacters() {
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let marker = dir.path().join("injected");
+        let argument = format!("hello; touch {}", marker.display());
+        let mut events = Vec::new();
+        let terminal = stream_exec_argv(
+            &["/bin/echo".to_string(), argument.clone()],
+            None,
+            Some(5),
+            |event| events.push(event),
+        );
+        assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+        assert_eq!(stdout(&events), format!("{argument}\n").into_bytes());
+        assert!(!marker.exists(), "argv data was interpreted as shell code");
+    }
+
+    #[test]
+    fn declared_argv_rejects_an_empty_program() {
+        let terminal = stream_exec_argv(&[], None, Some(5), |_| {});
+        assert!(matches!(terminal, ExecEvent::Exit { code: -1 }));
     }
 
     #[cfg(target_os = "linux")]

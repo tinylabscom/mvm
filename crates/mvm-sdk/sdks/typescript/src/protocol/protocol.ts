@@ -34,6 +34,8 @@ stdin?: (string | null)
 timeout_secs?: (number | null)
 }
 } | {
+MediatedExec: MediatedExecCall
+} | {
 ExecBatch: {
 commands: string[][]
 stages: StageFile[]
@@ -320,7 +322,7 @@ export type VolumeConfigKind = ("virtio_fs" | "block")
 /**
  * Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.
  */
-export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "unix_socket_forward" | "readiness")
+export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "mediated_exec" | "unix_socket_forward" | "readiness")
 /**
  * Filesystem operations exposed by the grant-gated production drive surface. Deliberately excludes mkdir, remove, and move: the issue's authority is the smallest useful read/write/list/stat set, while the wider `Fs*` family remains DevOnly.
  */
@@ -454,6 +456,8 @@ reason: DriveRefusal
 }
 } | "ExtensionCancellationAck" | {
 ExecEvent: ExecEvent
+} | {
+ToolCheckRequired: ToolCheckRequest
 } | {
 ExecBatchResult: {
 outcomes: ExecOutcomeWire[]
@@ -1034,6 +1038,15 @@ read_only?: boolean
 tag: string
 }
 /**
+ * One declared command. The checked command line is derived from `argv` on both sides of the control channel; the guest executes these same arguments directly, never through a shell.
+ */
+export interface MediatedExecCall {
+argv: string[]
+stdin?: (string | null)
+timeout_secs?: (number | null)
+tool: string
+}
+/**
  * A file to stage into the guest before an [`GuestRequest::ExecBatch`] runs.
  */
 export interface StageFile {
@@ -1188,6 +1201,19 @@ name: string
 output?: {
 [k: string]: unknown
 }
+}
+/**
+ * One guest-reported invocation, sent before the command is spawned.
+ */
+export interface ToolCheckRequest {
+/**
+ * Exact command line to compare with the admitted argv patterns.
+ */
+argv: string
+/**
+ * Name in the admitted plan's tool rules.
+ */
+tool: string
 }
 /**
  * One command's buffered outcome from an [`GuestRequest::ExecBatch`]. Agent- measured: `duration_ms` is the in-guest wall-clock and `peak_rss_kib` the `getrusage` high-water mark when the guest can report it.

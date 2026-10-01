@@ -3,6 +3,7 @@
 //! audit projection. Profile classification lives in `request_policy`.
 
 use super::*;
+use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
 use mvm_contract::stream::input::{CloseInput, InputFrame};
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,10 @@ pub enum GuestRequest {
         stdin: Option<String>,
         timeout_secs: Option<u64>,
     },
+    /// Run a declared command only after the guest receives a host tool
+    /// decision over this authenticated control session. Unlike `Exec`, this
+    /// request cannot reach its spawn handler without that exchange.
+    MediatedExec(MediatedExecCall),
     /// Tier-2 batched exec (DevOnly): stage files, then run a sequence of
     /// argv commands in-guest in a single round-trip, returning one buffered
     /// outcome per command. The chain stops at the first non-zero exit. This is
@@ -520,6 +525,39 @@ pub enum GuestRequest {
     CloseStreamInput(CloseInput),
 }
 
+/// One declared command. The checked command line is derived from `argv` on
+/// both sides of the control channel; the guest executes these same arguments
+/// directly, never through a shell.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct MediatedExecCall {
+    pub tool: String,
+    pub argv: Vec<String>,
+    pub stdin: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+impl std::fmt::Debug for MediatedExecCall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("MediatedExecCall")
+            .field("tool", &"[redacted]")
+            .field("argv", &"[redacted]")
+            .field("stdin", &"[redacted]")
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+impl MediatedExecCall {
+    /// Reconstruct the exact policy question for the argv that will spawn.
+    #[must_use]
+    pub fn tool_check(&self) -> Option<ToolCheckRequest> {
+        ToolCheckRequest::from_argv(self.tool.clone(), &self.argv)
+    }
+}
+
 impl GuestRequest {
     /// Stable kebab-case verb name for this request — the value
     /// host-side audit emitters write into the
@@ -545,6 +583,7 @@ impl GuestRequest {
             Self::ProbeStatus => "probe-status",
             Self::PrimedStatus => "primed-status",
             Self::Exec { .. } => "exec",
+            Self::MediatedExec(_) => "mediated-exec",
             Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
             Self::DriveOpen { .. } => "drive-open",
@@ -676,6 +715,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mediated_call_derives_the_policy_question_from_spawn_argv() {
+        let call = MediatedExecCall {
+            tool: "git".to_string(),
+            argv: vec!["git".to_string(), "status; rm -rf /".to_string()],
+            stdin: None,
+            timeout_secs: Some(5),
+        };
+        let question = call.tool_check().expect("valid call");
+        assert_eq!(question.tool, "git");
+        assert_eq!(question.argv, "git 'status; rm -rf /'");
+        assert!(!format!("{call:?}").contains("rm -rf"));
+        let mut invalid = call;
+        invalid.argv.clear();
+        assert!(invalid.tool_check().is_none());
+    }
+
+    #[test]
     fn test_guest_request_roundtrip() {
         let variants: Vec<GuestRequest> = vec![
             GuestRequest::ProtocolHello {
@@ -701,6 +757,12 @@ mod tests {
                 stdin: Some("hello".to_string()),
                 timeout_secs: Some(10),
             },
+            GuestRequest::MediatedExec(MediatedExecCall {
+                tool: "shell".to_string(),
+                argv: vec!["echo".to_string(), "ok".to_string()],
+                stdin: None,
+                timeout_secs: Some(10),
+            }),
             GuestRequest::DriveOpen {
                 program_id: mvm_contract::grants::DriveProgramId::parse("agent").unwrap(),
                 cwd: "/workspace".to_string(),
@@ -1318,6 +1380,15 @@ mod tests {
                     timeout_secs: None,
                 },
                 "exec",
+            ),
+            (
+                GuestRequest::MediatedExec(MediatedExecCall {
+                    tool: "shell".to_string(),
+                    argv: vec!["echo".to_string(), "ok".to_string()],
+                    stdin: None,
+                    timeout_secs: None,
+                }),
+                "mediated-exec",
             ),
             (
                 GuestRequest::RunEntrypoint {
