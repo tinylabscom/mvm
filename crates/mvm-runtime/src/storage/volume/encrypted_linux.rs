@@ -101,8 +101,22 @@ impl StorageProvider for EncryptedStorage {
 
         // Sparse-allocate the backing image (LUKS writes blocks on demand).
         let size = spec.size_mib().unwrap_or(self.default_size_mib);
+        let requested_size_bytes = size * 1024 * 1024;
+        // Test-mode override: cap actual backing-file size under test env vars so
+        // unit tests don't allocate huge sparse files on CI or local runs.
+        let effective_size_bytes = if let Ok(min_str) = std::env::var("MVM_TEST_VOLUMES_MIN_BYTES") {
+            if let Ok(min_bytes) = min_str.parse::<u64>() {
+                std::cmp::min(requested_size_bytes, min_bytes)
+            } else {
+                requested_size_bytes
+            }
+        } else if std::env::var("MVM_TEST_FAST").is_ok() {
+            std::cmp::min(requested_size_bytes, 4 * 1024 * 1024)
+        } else {
+            requested_size_bytes
+        };
         let f = std::fs::File::create(&image)?;
-        f.set_len(size * 1024 * 1024)?;
+        f.set_len(effective_size_bytes)?;
         drop(f);
 
         // Roll back the half-made image if any format step fails, so a retry

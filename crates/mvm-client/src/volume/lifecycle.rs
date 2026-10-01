@@ -271,9 +271,26 @@ pub(crate) fn create_mvm_managed(
     if capacity_mib == 0 {
         bail!("volume size must be greater than zero");
     }
-    let size_bytes = u64::from(capacity_mib)
+    let requested_size_bytes = u64::from(capacity_mib)
         .checked_mul(1024 * 1024)
         .context("volume size overflow")?;
+
+    // Fast-test support: allow an environment variable to cap the actual on-disk
+    // image size used for mkfs and encryption work. Tests assert the
+    // recorded `capacity_mib` in metadata, so we keep that unchanged while
+    // creating a smaller image when requested by the test scaffold.
+    let size_bytes = if let Ok(min_bytes_str) = std::env::var("MVM_TEST_VOLUMES_MIN_BYTES") {
+        match min_bytes_str.parse::<u64>() {
+            Ok(min_bytes) if min_bytes > 0 => std::cmp::min(requested_size_bytes, min_bytes),
+            _ => requested_size_bytes,
+        }
+    } else if std::env::var("MVM_TEST_FAST").is_ok() {
+        // Conservative fast fallback: 4 MiB is safely above the minimal mkfs
+        // layout while still much smaller than typical test sizes like 16 MiB.
+        std::cmp::min(requested_size_bytes, 4 * 1024 * 1024)
+    } else {
+        requested_size_bytes
+    };
 
     let (mut wrapped_key, dek) = generate_wrapped_volume_key()?;
     let mut scratch = tempfile::NamedTempFile::new_in(&root)

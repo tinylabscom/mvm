@@ -126,6 +126,22 @@ fn sparse_ensure_image(
                 "image size {size_bytes} is too small for the libkrun block-device reserve"
             ))
         })?;
+
+    // Test-mode override: cap the actual sparse allocation when running the
+    // unit suite under a test-friendly env. Honor an explicit byte cap first,
+    // then the shorthand `MVM_TEST_FAST` which chooses a conservative default.
+    let effective_image_bytes = if let Ok(min_str) = std::env::var("MVM_TEST_VOLUMES_MIN_BYTES") {
+        if let Ok(min_bytes) = min_str.parse::<u64>() {
+            std::cmp::min(image_bytes, min_bytes)
+        } else {
+            image_bytes
+        }
+    } else if std::env::var("MVM_TEST_FAST").is_ok() {
+        std::cmp::min(image_bytes, 4 * 1024 * 1024)
+    } else {
+        image_bytes
+    };
+
     let len = file
         .metadata()
         .map_err(|e| BuilderVmError::ExtractionFailed(format!("metadata {}: {e}", path.display())))?
@@ -133,12 +149,13 @@ fn sparse_ensure_image(
     let should_resize =
         len == 0 || (existing_size == ExistingImageSize::GrowUndersized && len < image_bytes);
     if should_resize {
-        file.set_len(image_bytes).map_err(|e| {
+        file.set_len(effective_image_bytes).map_err(|e| {
             if !existed_before_open {
                 let _ = std::fs::remove_file(path);
             }
             BuilderVmError::ExtractionFailed(format!(
-                "set_len({image_bytes}) on {}: {e}",
+                "set_len({}) on {}: {e}",
+                effective_image_bytes,
                 path.display()
             ))
         })?;
