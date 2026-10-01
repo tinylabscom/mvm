@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use chrono::{Duration as ChronoDuration, Utc};
 use mvm_contract::ir::AuthType;
 use mvm_contract::substitution::SubstitutionDriver;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
@@ -20,7 +19,7 @@ use super::prepare::{
     UNPARSEABLE_DESTINATION, destination_host,
 };
 use super::reflection::{ScrubCounts, StreamingScrubber, body_is_readable, merge_counts};
-use crate::keyholder::resolver::{CapturedOAuthToken, OAuthSecretString};
+use crate::keyholder::resolver::CapturedOAuthToken;
 use crate::keyholder::{NetworkEndpoint, find_placeholder};
 use crate::supervisor::ai_meter;
 use crate::supervisor::redactor::{RedactionHits, SensitiveDetectionError, StreamingRedactor};
@@ -51,29 +50,10 @@ impl SubstitutionService {
         rule: &super::OAuthCaptureRule,
         json: &serde_json::Value,
     ) -> Option<CapturedOAuthToken> {
-        let access_token = json
-            .pointer(rule.response_access_token_pointer())
-            .and_then(serde_json::Value::as_str)?;
-        let refresh_token = json
-            .pointer("/refresh_token")
-            .and_then(serde_json::Value::as_str)
-            .map(|value| OAuthSecretString::from(value.to_owned()));
-        let expires_at = json
-            .pointer("/expires_at")
-            .and_then(serde_json::Value::as_str)
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-            .map(|value| value.with_timezone(&Utc))
-            .or_else(|| {
-                json.pointer("/expires_in")
-                    .and_then(serde_json::Value::as_i64)
-                    .and_then(ChronoDuration::try_seconds)
-                    .map(|ttl| Utc::now() + ttl)
-            });
-        Some(CapturedOAuthToken {
-            access_token: OAuthSecretString::from(access_token.to_owned()),
-            refresh_token,
-            expires_at,
-        })
+        crate::keyholder::oauth::parse_token_response(
+            Some(rule.response_access_token_pointer()),
+            json,
+        )
     }
 
     /// Capture OAuth tokens (access and refresh) returned in a JSON response
@@ -883,6 +863,8 @@ mod server_tests {
     use tempfile::tempdir;
     use zeroize::Zeroizing;
 
+    use crate::keyholder::resolver::OAuthSecretString;
+
     fn oauth_binding_meta(pointer: &str) -> SecretBindingMeta {
         SecretBindingMeta {
             auth_type: AuthType::Bearer,
@@ -905,6 +887,7 @@ mod server_tests {
         OAuthTokenSet {
             access_token: OAuthSecretString::from(access_token.to_owned()),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            client_secret: None,
             expires_at: Utc::now() + Duration::minutes(5),
         }
     }

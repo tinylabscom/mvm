@@ -364,15 +364,27 @@ pub fn assemble(
     cfg: &EndpointConfig,
 ) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
     let projection = EndpointNetworkProjection::from_config(cfg);
-    assemble_with_projection(cfg, &projection)
+    let (service, handed, _) = assemble_with_projection(cfg, &projection)?;
+    Ok((service, handed))
 }
 
 /// Assemble the substitution/connector service over the endpoint's already
 /// projected policy and audit objects.
+///
+/// Alongside the service and its handed placeholders, returns the
+/// [`OAuthRefreshDriver`] for the VM's OAuth-bound secrets when resolving
+/// locally: the caller (the endpoint's tokio runtime) starts it so the
+/// per-binding refresh loops live exactly as long as the VM. `None` under
+/// `ResolverBackend::Remote` — the fleet resolver refuses store writes, so
+/// there is nothing host-local to drive.
 pub fn assemble_with_projection(
     cfg: &EndpointConfig,
     projection: &EndpointNetworkProjection,
-) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
+) -> anyhow::Result<(
+    Arc<SubstitutionService>,
+    HandedPlaceholders,
+    Option<crate::keyholder::OAuthRefreshDriver>,
+)> {
     let bindings: Arc<dyn crate::keyholder::BindingStore> =
         Arc::new(match &cfg.binding_store_dir {
             Some(dir) => FileBindingStore::with_dir(dir),
@@ -406,6 +418,30 @@ pub fn assemble_with_projection(
             uds_path.clone(),
             Duration::from_secs(*timeout_secs),
         )),
+    };
+
+    // Discover the OAuth-bound secrets while the local resolver is still in
+    // hand, and build the proactive-refresh driver over the very same
+    // resolver the service will use. Discovery mirrors `bound_hosts`:
+    // `Keystore` sources only, a missing binding is an assembly error.
+    let oauth_refresh = match &cfg.resolver {
+        ResolverBackend::Local => {
+            let items = crate::keyholder::oauth::discover_oauth_bindings(
+                &cfg.secrets,
+                &cfg.tenant_id,
+                bindings.as_ref(),
+            )
+            .context("discovering oauth-bound secrets for proactive refresh")?;
+            if items.is_empty() {
+                None
+            } else {
+                Some(crate::keyholder::OAuthRefreshDriver::new(
+                    Arc::clone(&resolver),
+                    items,
+                ))
+            }
+        }
+        ResolverBackend::Remote { .. } => None,
     };
 
     // Reconstruct the per-VM intermediate minter from the delivered PEMs (the
@@ -465,7 +501,7 @@ pub fn assemble_with_projection(
     }
     service = service.with_approver(approval_supervisor(cfg, projection.recorder.clone())?);
 
-    Ok((Arc::new(service), handed))
+    Ok((Arc::new(service), handed, oauth_refresh))
 }
 
 /// The runtime approver for this endpoint: every `ask` recorded in the
@@ -674,7 +710,7 @@ mod tests {
             recorder: Some(Arc::clone(&recorder)),
         };
 
-        let (service, _) = assemble_with_projection(&cfg, &projection).unwrap();
+        let (service, _, _) = assemble_with_projection(&cfg, &projection).unwrap();
         assert_eq!(
             service.shared_projection_ids(),
             (

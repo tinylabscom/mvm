@@ -21,7 +21,10 @@ use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-const OAUTH_REFRESH_SKEW: Duration = Duration::seconds(60);
+/// How close to expiry a stored token set may be before resolution refuses
+/// it. The proactive refresher (`keyholder::oauth`) acts one lead-time
+/// earlier than this so a running VM never reaches the refusal.
+pub(crate) const OAUTH_REFRESH_SKEW: Duration = Duration::seconds(60);
 
 /// OAuth token set stored in the encrypted secret store for an OAuth binding.
 #[derive(Clone, Default)]
@@ -76,6 +79,14 @@ pub struct OAuthTokenSet {
     pub access_token: OAuthSecretString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<OAuthSecretString>,
+    /// The client secret for the machine client-credentials grant. It lives
+    /// in the same encrypted store entry as the token set, so it is bound to
+    /// the flow by the same (tenant, name) key the egress binding and the
+    /// resolver share. The host-side refresher reads it to mint the initial
+    /// and refreshed token sets; it never leaves the store in any other
+    /// direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<OAuthSecretString>,
     pub expires_at: chrono::DateTime<Utc>,
 }
 
@@ -86,6 +97,10 @@ impl std::fmt::Debug for OAuthTokenSet {
             .field(
                 "refresh_token",
                 &self.refresh_token.as_ref().map(|_| "REDACTED"),
+            )
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "REDACTED"),
             )
             .field("expires_at", &self.expires_at)
             .finish()
@@ -151,6 +166,14 @@ pub trait SecretResolver: Send + Sync {
         _token: CapturedOAuthToken,
     ) -> anyhow::Result<()> {
         anyhow::bail!("resolver does not support captured oauth token updates for `{name}`");
+    }
+
+    /// Read the stored [`OAuthTokenSet`] for an OAuth-bound secret. The
+    /// host-side refresher uses this to recover the bound client secret and
+    /// the current expiry; resolvers that cannot drive an exchange refuse
+    /// rather than hand back a partial view.
+    fn oauth_token_set(&self, name: &str) -> anyhow::Result<OAuthTokenSet> {
+        anyhow::bail!("resolver does not support oauth token set reads for `{name}`");
     }
 }
 
@@ -248,6 +271,7 @@ impl SecretResolver for LocalResolver {
         let updated = OAuthTokenSet {
             access_token: token.access_token,
             refresh_token: token.refresh_token.or(current.refresh_token),
+            client_secret: current.client_secret,
             expires_at: token.expires_at.unwrap_or(current.expires_at),
         };
         let serialized = serde_json::to_string(&updated)
@@ -256,6 +280,15 @@ impl SecretResolver for LocalResolver {
             .put(&self.tenant, name, &SecretBox::new(Box::new(serialized)))
             .with_context(|| format!("persisting updated oauth token set for `{name}`"))?;
         Ok(())
+    }
+
+    fn oauth_token_set(&self, name: &str) -> anyhow::Result<OAuthTokenSet> {
+        let stored = self
+            .store
+            .get(&self.tenant, name)
+            .with_context(|| format!("loading oauth token set for `{name}`"))?;
+        serde_json::from_str(stored.expose_secret())
+            .with_context(|| format!("parsing oauth token set for `{name}`"))
     }
 }
 
@@ -362,6 +395,7 @@ mod tests {
         let token_set = OAuthTokenSet {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            client_secret: None,
             expires_at: Utc::now() + Duration::minutes(5),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
@@ -383,6 +417,7 @@ mod tests {
         let token_set = OAuthTokenSet {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            client_secret: None,
             expires_at: Utc::now() + Duration::seconds(30),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
@@ -402,6 +437,7 @@ mod tests {
         let token_set = OAuthTokenSet {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            client_secret: None,
             expires_at: Utc::now() + Duration::minutes(5),
         };
         let rendered = format!("{token_set:?}");
@@ -418,6 +454,7 @@ mod tests {
         let token_set = OAuthTokenSet {
             access_token: OAuthSecretString::from(String::from("oauth-access-token")),
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
+            client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
             expires_at: original_expiry,
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
@@ -445,6 +482,63 @@ mod tests {
             updated.refresh_token.as_ref().unwrap().expose_secret(),
             "oauth-refresh-token"
         );
+        assert_eq!(
+            updated.client_secret.as_ref().unwrap().expose_secret(),
+            "oauth-client-secret"
+        );
         assert!(updated.expires_at > original_expiry);
+    }
+
+    #[test]
+    fn oauth_token_set_round_trips_through_the_store() {
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        let token_set = OAuthTokenSet {
+            access_token: OAuthSecretString::from(String::from("oauth-access-token")),
+            refresh_token: None,
+            client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
+            expires_at: Utc::now() + Duration::minutes(5),
+        };
+        store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
+        let resolver = LocalResolver::new("local", Arc::new(store));
+        let loaded = resolver.oauth_token_set("oauth-secret").unwrap();
+        assert_eq!(loaded, token_set);
+        let err = resolver.oauth_token_set("absent").unwrap_err();
+        assert!(format!("{err:#}").contains("absent"));
+    }
+
+    #[test]
+    fn oauth_token_set_written_before_client_secrets_still_parses() {
+        // Token sets written before client secrets were part of the shape
+        // must still parse, with the field defaulting to absent.
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path().join("secrets"));
+        store
+            .put(
+                "local",
+                "oauth-secret",
+                &SecretBox::new(Box::new(String::from(
+                    "{\"access_token\":\"at\",\"expires_at\":\"2999-01-01T00:00:00Z\"}",
+                ))),
+            )
+            .unwrap();
+        let resolver = LocalResolver::new("local", Arc::new(store));
+        let loaded = resolver.oauth_token_set("oauth-secret").unwrap();
+        assert_eq!(loaded.access_token.expose_secret(), "at");
+        assert!(loaded.client_secret.is_none());
+        assert!(loaded.refresh_token.is_none());
+    }
+
+    #[test]
+    fn oauth_token_set_debug_redacts_client_secret() {
+        let token_set = OAuthTokenSet {
+            access_token: OAuthSecretString::from(String::from("oauth-access-token")),
+            refresh_token: None,
+            client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
+            expires_at: Utc::now() + Duration::minutes(5),
+        };
+        let rendered = format!("{token_set:?}");
+        assert!(rendered.contains("REDACTED"));
+        assert!(!rendered.contains("oauth-client-secret"));
     }
 }
