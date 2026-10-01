@@ -44,9 +44,11 @@ contributor tier, while release binaries acquire the published overlay.
 
 Unit and integration tests cover QEMU arguments, retired builder modes,
 kernel-config rejection, cache reuse, published asset pins, and the image-lock
-reader. `check-single-network-path` protects the source invariant. A live
-Linux builder/workload boot is the separate runtime witness: confirm only
-loopback appears under `/sys/class/net`, no `/dev/net/tun` exists, and allowed
+reader. Snapshot restore refusal is exercised with a synthetic device model;
+the live snapshot timing harness never attaches a NIC or host TAP. The
+`check-single-network-path` gate protects that test path as well as production
+launches. A live Linux builder/workload boot is the separate runtime witness:
+confirm only loopback appears under `/sys/class/net`, no `/dev/net/tun` exists, and allowed
 and denied outbound attempts traverse the vsock endpoint. Run Linux-specific
 operations inside the project builder VM; host-only tests do not substitute
 for that witness. Issue #3888 owns acceptance and the current verification

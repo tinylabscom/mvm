@@ -1255,8 +1255,9 @@ mod tests {
     // Boots a real Firecracker VM against a real KVM host, snapshots it, and
     // times `guarded_load_resume` — the warm-restore path this module owns —
     // so the reported number measures the actual restore code instead of a
-    // full CLI boot chase. A second test proves the guard refuses a
-    // NIC-carrying restore end-to-end. Both are `#[ignore]`d and gated on
+    // full CLI boot chase. The restored-device-model refusal is covered by
+    // synthetic snapshot tests without attaching a network device. This
+    // harness is `#[ignore]`d and gated on
     // `MVM_LIVE_KERNEL`/`MVM_LIVE_ROOTFS` + `/dev/kvm`: unset or absent, the
     // test prints a skip note and returns — a clean no-op everywhere except a
     // KVM host with the env wired up (the controller runs these, not CI).
@@ -1290,22 +1291,15 @@ mod tests {
     }
 
     /// Boot the SOURCE Firecracker VM the live warm-restore tests snapshot:
-    /// the API sequence validated live (boot-source, drive, InstanceStart),
-    /// with an optional NIC inserted before InstanceStart so
-    /// `warm_restore_refuses_nic_live` can snapshot a genuinely NIC-carrying
-    /// VM. Sleeps ~1s after InstanceStart for the instance to come up.
+    /// the API sequence validated live (boot-source, drive, InstanceStart).
+    /// Sleeps ~1s after InstanceStart for the instance to come up.
     ///
     /// Deliberately no vsock device: a restored VMM must re-bind a vsock
     /// device's recorded host-side UDS path, and remapping that path is the
     /// production fork-restore path's job (a mount-namespace remap), not
     /// this timing/guard harness's — the memory-load/resume cost this test
     /// measures doesn't depend on vsock being present.
-    fn boot_live_source_vm(
-        images: &LiveImages,
-        src_dir: &Path,
-        rootfs_copy: &Path,
-        tap: Option<&str>,
-    ) -> Result<()> {
+    fn boot_live_source_vm(images: &LiveImages, src_dir: &Path, rootfs_copy: &Path) -> Result<()> {
         let src_sock = src_dir.join("fc.socket");
         crate::microvm::start_vm_firecracker(
             &src_dir.to_string_lossy(),
@@ -1334,13 +1328,6 @@ mod tests {
             }
             .body(),
         )?;
-        if let Some(tap) = tap {
-            crate::microvm::api_put_socket(
-                &sock,
-                "/network-interfaces/eth0",
-                &format!(r#"{{"iface_id":"eth0","host_dev_name":"{tap}"}}"#),
-            )?;
-        }
         crate::microvm::api_put_socket(&sock, "/actions", r#"{"action_type":"InstanceStart"}"#)?;
         std::thread::sleep(std::time::Duration::from_secs(1));
         Ok(())
@@ -1379,7 +1366,7 @@ mod tests {
         let rootfs_copy = src_dir.join("rootfs.ext4");
         std::fs::copy(&images.rootfs, &rootfs_copy).expect("copy rootfs into writable src dir");
 
-        boot_live_source_vm(&images, &src_dir, &rootfs_copy, None).expect("boot source FC VM");
+        boot_live_source_vm(&images, &src_dir, &rootfs_copy).expect("boot source FC VM");
 
         let src_sock = src_dir.join("fc.socket");
         FirecrackerIO::new(src_sock)
@@ -1402,51 +1389,6 @@ mod tests {
         guarded_load_resume(&dest_io, &snap_dir).expect("warm restore must resume");
         let ms = t.elapsed().as_millis();
         println!("WARM_RESTORE_MS={ms}");
-
-        kill_live_vm(&dest_dir);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    #[ignore = "live: needs /dev/kvm + MVM_LIVE_KERNEL/ROOTFS/TAP"]
-    fn warm_restore_refuses_nic_live() {
-        let Some(images) = live_images() else {
-            return;
-        };
-        let Ok(tap) = std::env::var("MVM_LIVE_TAP") else {
-            eprintln!("skip: MVM_LIVE_TAP not set — NIC-refusal live test is a no-op here");
-            return;
-        };
-
-        let base = std::env::temp_dir().join(format!("mvm-warmtest-nic-{}", std::process::id()));
-        let src_dir = base.join("src");
-        let dest_dir = base.join("dest");
-        let snap_dir = base.join("snap");
-        std::fs::create_dir_all(&src_dir).expect("create src dir");
-        std::fs::create_dir_all(&dest_dir).expect("create dest dir");
-        std::fs::create_dir_all(&snap_dir).expect("create snap dir");
-
-        let rootfs_copy = src_dir.join("rootfs.ext4");
-        std::fs::copy(&images.rootfs, &rootfs_copy).expect("copy rootfs into writable src dir");
-
-        boot_live_source_vm(&images, &src_dir, &rootfs_copy, Some(&tap))
-            .expect("boot NIC-carrying source FC VM");
-
-        let src_sock = src_dir.join("fc.socket");
-        FirecrackerIO::new(src_sock)
-            .create_snapshot(&snap_dir)
-            .expect("create_snapshot on NIC-carrying source VM");
-
-        kill_live_vm(&src_dir);
-
-        let dest_io = FirecrackerIO::new(dest_dir.join("fc.socket"));
-        let err =
-            guarded_load_resume(&dest_io, &snap_dir).expect_err("NIC restore must be refused");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("device-model guard") || msg.contains("network"),
-            "expected a device-model-guard refusal, got: {msg}"
-        );
 
         kill_live_vm(&dest_dir);
         let _ = std::fs::remove_dir_all(&base);
