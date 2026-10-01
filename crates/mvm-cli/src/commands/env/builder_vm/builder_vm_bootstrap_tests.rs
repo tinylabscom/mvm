@@ -94,11 +94,12 @@ fn incompatible_cached_kernel_is_fully_evicted_for_automatic_recovery() {
 /// asserts the contract between `builder_vm_artifact_names()`
 /// (the consumer side that constructs download URLs) and the
 /// `cp "$STORE_PATH/..." "staging/builder-vm-..."` lines in
-/// `.github/workflows/release.yml` (the producer side).
+/// `.github/workflows/build.yml` (the producer side).
 #[test]
 fn builder_vm_artifact_names_match_release_workflow() {
     let n = builder_vm_artifact_names("aarch64");
     assert_eq!(n.kernel, "builder-vm-vmlinux-aarch64");
+    assert_eq!(n.kernel_config, "builder-vm-aarch64.kernel.config");
     assert_eq!(n.rootfs, "builder-vm-rootfs-aarch64.ext4");
     assert_eq!(n.cmdline, "builder-vm-aarch64.cmdline.txt");
     assert_eq!(n.manifest, "builder-vm-aarch64.manifest.json");
@@ -106,6 +107,7 @@ fn builder_vm_artifact_names_match_release_workflow() {
 
     let n = builder_vm_artifact_names("x86_64");
     assert_eq!(n.kernel, "builder-vm-vmlinux-x86_64");
+    assert_eq!(n.kernel_config, "builder-vm-x86_64.kernel.config");
     assert_eq!(n.rootfs, "builder-vm-rootfs-x86_64.ext4");
     assert_eq!(n.cmdline, "builder-vm-x86_64.cmdline.txt");
     assert_eq!(n.manifest, "builder-vm-x86_64.manifest.json");
@@ -172,6 +174,11 @@ fn write_valid_builder_vm_artifacts(dir: &std::path::Path) {
     const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
     std::fs::create_dir_all(dir).expect("mkdir artifact dir");
     std::fs::write(dir.join("vmlinux"), vec![0x7f; 1024 * 1024 + 1]).expect("write kernel");
+    std::fs::write(
+        dir.join("kernel.config"),
+        b"# CONFIG_NETDEVICES is not set\nCONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n",
+    )
+    .expect("write kernel config");
     let mut rootfs = vec![0u8; 4 * 1024 * 1024 + 1];
     rootfs[EXT4_MAGIC_OFFSET] = 0x53;
     rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
@@ -183,7 +190,10 @@ fn write_valid_builder_vm_artifacts(dir: &std::path::Path) {
     .expect("write cmdline");
     std::fs::write(
         dir.join("manifest.json"),
-        br#"{"cache_contract_version":2,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+        format!(
+            "{{\"cache_contract_version\":{},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true,\"no_network_devices_ready\":true}}",
+            mvm_build::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION
+        ),
     )
     .expect("write manifest");
 }
@@ -626,6 +636,7 @@ fn builder_vm_stage0_promotion_rejects_invalid_artifacts_without_live_cache() {
     let staging = tmp.path().join(".aarch64.stage0-test");
     std::fs::create_dir_all(&staging).expect("mkdir staging");
     std::fs::write(staging.join("vmlinux"), b"stub").expect("write stub kernel");
+    std::fs::write(staging.join("kernel.config"), b"stub").expect("write stub config");
     std::fs::write(staging.join("rootfs.ext4"), b"stub").expect("write stub rootfs");
     std::fs::write(
         staging.join("cmdline.txt"),
@@ -720,6 +731,12 @@ fn builder_vm_source_cache_status_reports_safe_reason_codes() {
         "invalid_stage0_artifacts"
     );
 
+    write_valid_builder_vm_artifacts(&cache);
+    std::fs::write(cache.join("kernel.config"), b"CONFIG_TUN=y\n").expect("write unsafe config");
+    assert_eq!(
+        builder_vm_source_cache_status(&cache, "fingerprint").reason_code(),
+        "invalid_stage0_artifacts"
+    );
     write_valid_builder_vm_artifacts(&cache);
     assert_eq!(
         builder_vm_source_cache_status(&cache, "fingerprint").reason_code(),

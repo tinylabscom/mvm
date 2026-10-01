@@ -589,8 +589,6 @@ fn is_linux_native_host() -> bool {
 /// - Auto-detected **hvf** stays on HVF; an HVF failure never creates a hidden
 ///   dependency on optional libkrun packages.
 /// - Auto-detected **libkrun on Linux** no longer falls back to **qemu**.
-///   The qemu builder uses user-mode networking (`-netdev user`) and is not a
-///   valid substitute for the production vsock-only builder/runtime story.
 ///   Keep qemu as an explicit dev/test tier only (`--builder qemu` /
 ///   `MVM_BUILDER_BACKEND=qemu`), never a silent production escape hatch.
 pub fn builder_attempt_order(

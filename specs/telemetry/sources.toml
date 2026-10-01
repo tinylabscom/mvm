@@ -338,9 +338,9 @@ activation = "mediated"
 
 [[launch_edge]]
 producer = "mvm-agentd/mvm-builder-agent"
-launcher = "crates/mvm-build/src/pipeline/build.rs"
-anchor = "mvm-builder-agent.service"
-activation = "legacy"
+launcher = "crates/mvm-agentd/Cargo.toml"
+anchor = "mvm-builder-agent"
+activation = "unwired"
 
 [[launch_edge]]
 producer = "mvm-build/mvm-host-vm-init"

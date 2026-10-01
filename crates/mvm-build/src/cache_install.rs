@@ -77,8 +77,13 @@ pub const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
 /// `builder-vm`, while the bootstrap readiness check also compiles under a
 /// bare `test` cfg. One ungated list is the only way the two cannot disagree
 /// about what a complete cache dir contains.
-pub const BUILDER_VM_CACHE_ARTIFACTS: &[&str] =
-    &["vmlinux", "rootfs.ext4", "cmdline.txt", "manifest.json"];
+pub const BUILDER_VM_CACHE_ARTIFACTS: &[&str] = &[
+    "vmlinux",
+    "kernel.config",
+    "rootfs.ext4",
+    "cmdline.txt",
+    "manifest.json",
+];
 
 /// Integrity/provenance sidecars written next to the artifacts. Copied along
 /// with them so a seeded cache stays verifiable, and so the bootstrap

@@ -251,13 +251,21 @@ mod tests {
                 format: "ext4",
             },
             TestArtifact {
+                name: "kernel.config",
+                bytes: b"# CONFIG_NETDEVICES is not set\nCONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n".to_vec(),
+                format: "text",
+            },
+            TestArtifact {
                 name: "cmdline.txt",
                 bytes: b"console=hvc0\n".to_vec(),
                 format: "text",
             },
             TestArtifact {
                 name: "manifest.json",
-                bytes: b"{}\n".to_vec(),
+                bytes: format!(
+                    "{{\"cache_contract_version\":{},\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true,\"no_network_devices_ready\":true}}\n",
+                    mvm_build::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION
+                ).into_bytes(),
                 format: "json",
             },
         ]
@@ -396,11 +404,11 @@ mod tests {
     #[test]
     fn the_selector_routes_the_bootstrap_to_a_checkout_only_when_one_is_selected() {
         let mut env = TestEnv::new();
-        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
         assert!(
-            super::super::bootstrap::selected_local_checkout()
-                .expect("no selector resolves")
-                .is_none(),
+            super::super::bootstrap::selected_local_checkout_from(
+                mvm_build::image_source::ImageSource::Released
+            )
+            .is_none(),
             "without a selector the bootstrap stays on the tool builder"
         );
 

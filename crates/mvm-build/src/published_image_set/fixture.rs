@@ -38,6 +38,9 @@ impl ImageSetFixture {
     pub fn complete() -> Self {
         let train = mvm_core::image_set::image_train_lock();
         let lock = &train.image_set;
+        let mut compatibility = train.compatibility.clone();
+        compatibility.builder_cache_contract = crate::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION;
+        compatibility.builder_boot_abi = Some(crate::builder_boot::supported_image_abis().max());
         let manifest = ImageSetManifest {
             schema_version: mvm_core::image_set::IMAGE_SET_SCHEMA_VERSION,
             set_version: lock.release_tag.version().clone(),
@@ -49,7 +52,7 @@ impl ImageSetFixture {
                 source_commit: commit('a'),
             }),
             mvm_source_commit: commit('b'),
-            compatibility: train.compatibility.clone(),
+            compatibility,
             nix_inputs: NixInputs {
                 flake_locks: vec![FlakeLockIdentity {
                     reference: "nix/images/builder-vm".to_string(),
@@ -228,6 +231,7 @@ impl ImageSetFixture {
     /// source whose lock pins exactly this root.
     pub fn serve_from(&self, dir: &Path) -> ImageSetSource {
         let mut train: ImageTrainLock = mvm_core::image_set::image_train_lock().clone();
+        train.compatibility = self.manifest.compatibility.clone();
         let root = serde_json::to_vec(&self.manifest).unwrap();
         train.image_set.manifest_sha256 = Sha256Hex::from_bytes(&root);
         std::fs::create_dir_all(dir).unwrap();

@@ -133,6 +133,12 @@ pub enum LocalAuditKind {
     /// additions and pointer swaps. Detail carries `op=<verb>` plus the
     /// pack key and version affected.
     PackCacheChange,
+    /// The MCP tool policy gate refused a tool call, or asked and recorded
+    /// the answer. Emitted by the gate the `mvmctl ops mcp` server binds;
+    /// detail carries `tool=`, `outcome=denied|ask_granted|ask_denied`, and
+    /// the reason. Plain allows are not audited (the catalog is static and
+    /// the call then proceeds to the backend's own audit trail).
+    ToolGateDecision,
     /// `mvmctl cleanup` ran a host-side tier sweep
     /// (`--cache` / `--state` / `--nuclear`). The detail field carries
     /// the tier name, byte count freed, and number of top-level paths
@@ -1233,6 +1239,7 @@ mod tests {
             LocalAuditKind::SnapshotIntegrityFailed,
             LocalAuditKind::ImageVerifyFailed,
             // Registry / cache mutations.
+            LocalAuditKind::ToolGateDecision,
             LocalAuditKind::CachePrune,
             LocalAuditKind::SlotRemove,
             LocalAuditKind::SlotPrune,

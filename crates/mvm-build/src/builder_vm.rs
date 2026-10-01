@@ -1350,7 +1350,7 @@ pub struct BuilderExtraDisk {
 /// into a writable virtio-blk image.
 /// The builder image cache layout this host reads; a builder image built for
 /// another layout is refused rather than booted.
-pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 4;
+pub const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 5;
 
 /// Default vCPU count for a builder VM.
 pub const DEFAULT_VCPUS: u8 = 4;

@@ -24,6 +24,7 @@ pub mod shell_init;
 pub mod signal;
 pub mod template_cmd;
 pub mod template_registry;
+pub mod tool_gate;
 pub mod ts_runner;
 pub mod ui;
 pub mod update;

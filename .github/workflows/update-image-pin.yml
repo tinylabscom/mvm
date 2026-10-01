@@ -44,7 +44,7 @@ jobs:
             .producer.release_tag == $tag and
             .compatibility.guest_agent_protocol.min <= 2 and
             .compatibility.guest_agent_protocol.max >= 2 and
-            .compatibility.builder_cache_contract == 4
+            .compatibility.builder_cache_contract == 5
           ' --arg tag "$tag" candidate/image-set.json >/dev/null
           digest="$(sha256sum candidate/image-set.json | cut -d' ' -f1)"
           {

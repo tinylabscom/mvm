@@ -76,15 +76,21 @@ and then on the integrated merge-group commit.
       compile-free admission checks, and run the expensive matrix only against
       the integrated merge-group commit. Structural tests pin every expensive
       lane to that event boundary.
-- [x] Configure the live queue to batch at least two and at most five entries
-      with a five-minute bound. Limit speculative width to one full merge group:
-      its roughly 17 concurrent runner jobs fit the 20-job pool and leave room
-      for pull-request admission, instead of two groups requesting about 34.
+- [x] Keep two speculative entries building. A one-entry experiment reduced
+      runner admission delay but serialized a nine-PR backlog; GitHub validates
+      entries independently, so the minimum merge count does not amortize one
+      CI run across the batch.
+- [x] Move the documented live BDD lifecycle to nightly Extended CI after live
+      queue runs spent 27-40 minutes inside it. Keep hermetic BDD and the
+      bounded locked-image boot witness in the merge gate.
+- [x] Remove source image, runtime-overlay and reproducibility builds from the
+      merge gate. mvm-images owns those canonical builds; the source-override
+      path remains available as a manual diagnostic.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
 - [ ] Land the workflow change through the merge queue. The live queue policy
-      has been read back as `HEADGREEN`, one group building, two-to-five entries
-      per merge, and a five-minute minimum-entry wait.
+      has been read back as `HEADGREEN`, two entries building, two-to-five
+      entries per merge, and a five-minute minimum-entry wait.
 - [ ] Record post-change PR and merge-group timings after this ordering change
       lands; compare p50/p90 wall time, scope admission, and total
       runner-minutes against the 2026-09-29 sample above.

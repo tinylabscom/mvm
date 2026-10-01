@@ -11,9 +11,8 @@
 //! bridge — it carries no policy and never sees a `NetworkPolicy`.
 //!
 //! No NIC: the converged spec carries no networking (a guest's only path
-//! off the box is the gated vsock egress endpoint), so the slirp
-//! user-mode network the raw backend attaches is deliberately absent here —
-//! the same NIC-less posture the other runner drivers boot.
+//! off the box is the gated vsock egress endpoint). QEMU's default
+//! user-mode network is explicitly disabled, matching the other runners.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -104,7 +103,7 @@ fn bounded_qemu_command(
 
 /// Assemble the `qemu-system` argv for a spec boot (everything after the
 /// binary name). Pure so the whole spec→argv mapping is unit-testable
-/// without a hypervisor. No `-netdev`: the converged spec carries no NIC.
+/// without a hypervisor. Explicit `-nic none` disables QEMU's implicit NIC.
 fn qemu_boot_argv(
     spec: &VmmSpec,
     kernel: &Path,
@@ -123,9 +122,12 @@ fn qemu_boot_argv_for_arch(
     pid_file: &Path,
     arch: &str,
 ) -> Vec<String> {
-    let mut args: Vec<String> = Vec::new();
-    args.push("-m".into());
-    args.push(spec.memory_mib.to_string());
+    let mut args: Vec<String> = vec![
+        "-nic".into(),
+        "none".into(),
+        "-m".into(),
+        spec.memory_mib.to_string(),
+    ];
     // A floor that keeps an absurd `--cpus` from being fatal, deliberately not
     // a claim about how many vCPUs QEMU will start. This backend therefore
     // declares no `max_vcpus` in `capabilities()`, and the reporting clamp
@@ -873,6 +875,11 @@ mod tests {
             "argv: {argv:?}"
         );
         assert!(!argv.iter().any(|a| a == "-netdev"), "argv: {argv:?}");
+        assert!(
+            argv.windows(2)
+                .any(|pair| pair[0] == "-nic" && pair[1] == "none"),
+            "QEMU must not create its implicit user-network NIC: {argv:?}"
+        );
         assert!(
             !argv.iter().any(|a| a.contains("virtio-net")),
             "argv: {argv:?}"
