@@ -123,7 +123,6 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     bootstrap_tool_builder_vm_image()
 }
 
-
 /// The local image checkout the selector names, if that is the selected
 /// source. A configured path that does not resolve is an error here, never a
 /// quiet fall-through to the released set.

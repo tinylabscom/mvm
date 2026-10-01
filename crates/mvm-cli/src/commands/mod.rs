@@ -632,7 +632,9 @@ fn apply_startup_env(cli: &Cli) {
     if allow_bootstrap {
         // Clear the skip marker so library call sites that auto-bootstrap
         // proceed as before for explicit build/bootstrap commands.
-        unsafe { std::env::remove_var("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP"); }
+        unsafe {
+            std::env::remove_var("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP");
+        }
     }
 
     if let Some(ref version) = cli.fc_version {
@@ -656,7 +658,9 @@ fn apply_startup_env(cli: &Cli) {
             _ => false,
         },
         Commands::Env(env_args) => match &env_args.action {
-            env::group::EnvCmd::Bootstrap(bootstrap_args) => bootstrap_args.allow_local_builder_build,
+            env::group::EnvCmd::Bootstrap(bootstrap_args) => {
+                bootstrap_args.allow_local_builder_build
+            }
             _ => false,
         },
         _ => false,
