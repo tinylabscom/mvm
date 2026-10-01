@@ -134,7 +134,7 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // the endpoint proxies. Without it the filter SIGSYS-kills the endpoint
     // seconds after the FlowMux handshake — the guest only notices at its next
     // use, and every reconnect then hits the stale socket. Found via live
-    // Firecracker strace on a KVM host (#3881): the allowlist had never been
+    // Firecracker strace on a KVM host: the allowlist had never been
     // exercised on a real Linux egress CONNECT.
     ("uname", libc::SYS_uname),
     ("fcntl", libc::SYS_fcntl),       // O_NONBLOCK on accepted sockets
@@ -258,7 +258,7 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // the endpoint proxies. Without it the filter SIGSYS-kills the endpoint
     // seconds after the FlowMux handshake — the guest only notices at its next
     // use, and every reconnect then hits the stale socket. Found via live
-    // Firecracker strace on a KVM host (#3881): the allowlist had never been
+    // Firecracker strace on a KVM host: the allowlist had never been
     // exercised on a real Linux egress CONNECT.
     ("uname", libc::SYS_uname),
     ("fcntl", libc::SYS_fcntl),
@@ -356,7 +356,7 @@ mod tests {
         // The NSS hostname path (`getaddrinfo` → `uname`) — omitting it
         // SIGSYS-killed the endpoint seconds after the FlowMux handshake,
         // which reads as a guest-egress transport failure minutes later
-        // (#3881). Pin it so the allowlist can never regress here again.
+        //. Pin it so the allowlist can never regress here again.
         assert!(syscall_name_to_nr("uname").is_some());
     }
 
