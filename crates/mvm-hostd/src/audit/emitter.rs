@@ -505,18 +505,21 @@ impl AuditEmitter {
     /// removed. The mode is a word off the signed plan, so recording it costs
     /// nothing and settles the question from the chain alone.
     pub fn emit_admitted(&self, plan: &ExecutionPlan, signer_id: &str) -> Result<()> {
-        self.emit(
-            plan,
-            "plan.admitted",
-            [
-                ("signer_id".to_string(), signer_id.to_string()),
-                ("authorizer_principal".to_string(), signer_id.to_string()),
-                (
-                    stream_audit::LABEL_RETENTION.to_string(),
-                    plan.stream_retention.as_str().to_string(),
-                ),
-            ],
-        )
+        let mut labels = vec![
+            ("signer_id".to_string(), signer_id.to_string()),
+            ("authorizer_principal".to_string(), signer_id.to_string()),
+            (
+                stream_audit::LABEL_RETENTION.to_string(),
+                plan.stream_retention.as_str().to_string(),
+            ),
+        ];
+        labels.push((
+            "kernel_sha256".to_string(),
+            plan.environment
+                .as_ref()
+                .map_or_else(String::new, |environment| environment.kernel_sha256.clone()),
+        ));
+        self.emit(plan, "plan.admitted", labels)
     }
 
     /// Emit `plan.admission_refused` — fires when `admit_plan_for_run` refuses

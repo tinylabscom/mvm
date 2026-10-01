@@ -65,6 +65,8 @@ impl Home {
             &SealRequest {
                 plan_id: SEALED,
                 reason: SealReason::Exited,
+                image_sha256: None,
+                kernel_sha256: None,
                 compute_environment: None,
             },
         )
