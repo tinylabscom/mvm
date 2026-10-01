@@ -128,14 +128,31 @@ fn build_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) ->
 #[cfg(feature = "builder-vm")]
 fn try_fetch_unchanged_sidecars() -> Option<Result<()>> {
     use mvm_build::fetch_unchanged as fetch;
+    // Every bail names its reason at notice level, never silently: the
+    // documented-surface e2e records which arm ran, and an unannounced
+    // fall-through is indistinguishable from the knob doing nothing.
     let workspace = mvm_build::guest_agent_build::detect_source_workspace()?;
-    let fingerprint = fetch::tree_sdk_fingerprint(&workspace)
-        .map_err(|e| anyhow::anyhow!("fingerprint the tree's cdylib sources: {e}"))
-        .ok()?;
-    let set = mvm_build::published_image_set::PublishedImageSet::acquire().ok()?;
+    let fingerprint = match fetch::tree_sdk_fingerprint(&workspace) {
+        Ok(fingerprint) => fingerprint,
+        Err(e) => {
+            crate::ui::notice(&format!(
+                "fetch-when-unchanged: cannot fingerprint the tree's cdylib sources ({e}); pair-building"
+            ));
+            return None;
+        }
+    };
+    let set = match mvm_build::published_image_set::PublishedImageSet::acquire() {
+        Ok(set) => set,
+        Err(e) => {
+            crate::ui::notice(&format!(
+                "fetch-when-unchanged: cannot acquire the pinned image set ({e:#}); pair-building"
+            ));
+            return None;
+        }
+    };
     let arch = mvm_core::arch::GuestArch::host();
     if !fetch::set_sidecars_match_tree(&set, arch, &fingerprint) {
-        crate::ui::info(
+        crate::ui::notice(
             "fetch-when-unchanged: the pinned set's sidecars were built from              different sources; pair-building",
         );
         return None;
@@ -144,7 +161,7 @@ fn try_fetch_unchanged_sidecars() -> Option<Result<()>> {
     Some(
         fetch::fetch_sidecars_from_set(&set, arch, &cache_root)
             .map(|()| {
-                crate::ui::info(
+                crate::ui::notice(
                     "fetch-when-unchanged: adopted the pinned set's SDK sidecars                      (source fingerprint matched; no build run)",
                 );
             })
