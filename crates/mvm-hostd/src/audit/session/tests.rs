@@ -20,7 +20,6 @@ pub(super) fn request(plan_id: &str, reason: SealReason) -> SealRequest<'_> {
         plan_id,
         reason,
         compute_environment: None,
-        snapshot_root: None,
     }
 }
 
@@ -142,6 +141,70 @@ fn a_session_seal_commits_the_ordered_checkpoint_roots() {
         Some(hex(&merkle_root(&[first.as_str(), second.as_str()])))
     );
     assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
+}
+
+#[test]
+fn a_signed_seal_with_the_wrong_checkpoint_root_is_refused() {
+    let chain = Chain::new();
+    let p = plan("sha256:snapshot-mismatch");
+    let digest = format!("sha256:{}", "a".repeat(64));
+    chain.emitter.emit_admitted(&p, "host:test").unwrap();
+    chain
+        .emitter
+        .emit_checkpoint_created(&p, "step-1", "vm_full", &digest, "worker")
+        .unwrap();
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+    let mut seal =
+        compute_seal(&chain.lines(), &request(&p.plan_id.0, SealReason::Exited)).unwrap();
+    seal.snapshot_root = Some(GENESIS_SEAL.to_string());
+    chain.append_seal(&p, seal.to_labels());
+
+    let report = chain.verify(&p.plan_id.0);
+    assert_eq!(report.verdict, Verdict::Mismatch);
+    assert_eq!(report.reason, Some(MismatchReason::SnapshotRootMismatch));
+}
+
+#[test]
+fn a_legacy_seal_without_a_checkpoint_root_still_verifies() {
+    let chain = Chain::new();
+    let p = plan("sha256:legacy-snapshot");
+    let digest = format!("sha256:{}", "b".repeat(64));
+    chain.emitter.emit_admitted(&p, "host:test").unwrap();
+    chain
+        .emitter
+        .emit_checkpoint_created(&p, "step-1", "vm_full", &digest, "worker")
+        .unwrap();
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+    let mut seal =
+        compute_seal(&chain.lines(), &request(&p.plan_id.0, SealReason::Exited)).unwrap();
+    seal.snapshot_root = None;
+    chain.append_seal(&p, seal.to_labels());
+
+    assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
+}
+
+#[test]
+fn a_checkpoint_without_a_digest_cannot_be_sealed() {
+    let chain = Chain::new();
+    let p = plan("sha256:missing-checkpoint-digest");
+    chain.emitter.emit_admitted(&p, "host:test").unwrap();
+    chain
+        .emitter
+        .emit_entry_for_evidence(
+            &for_plan(
+                &p,
+                None,
+                crate::audit::emitter::checkpoint_audit::CREATED_EVENT,
+                vec![],
+            ),
+            crate::audit::evidence::EvidenceReceipt::Omitted,
+        )
+        .unwrap();
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+
+    let error = compute_seal(&chain.lines(), &request(&p.plan_id.0, SealReason::Exited))
+        .expect_err("missing checkpoint digest must prevent sealing");
+    assert!(error.to_string().contains("missing meta_digest"));
 }
 
 /// The durability policy for the records that bound a session and a segment.
@@ -501,6 +564,10 @@ fn seal_labels_round_trip_and_refuse_bad_values() {
     assert!(SessionSeal::from_labels(&bad).is_err());
     let mut bad = labels;
     bad.insert("seal.reason".to_string(), "vanished".to_string());
+    assert!(SessionSeal::from_labels(&bad).is_err());
+
+    let mut bad: BTreeMap<String, String> = seal.to_labels().into_iter().collect();
+    bad.insert("seal.snapshot_root".to_string(), "not-hex".to_string());
     assert!(SessionSeal::from_labels(&bad).is_err());
 }
 

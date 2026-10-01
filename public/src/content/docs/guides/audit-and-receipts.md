@@ -101,6 +101,8 @@ persistent machine — is stopped, the host appends a chain-signed
 - the position and hash of its first and last entries
 - the chain head it was computed against
 - an RFC 6962 Merkle root over exactly those entries
+- an ordered Merkle root of checkpoint-creation digests, if this session
+  created checkpoints
 - how the session ended (exit code, failure class, or stopped)
 - the measured compute-environment digest from the signed plan, when the plan
   recorded one
@@ -140,7 +142,7 @@ script can branch on it.
 | Verdict     | Exit | Meaning                                                                                                                                                                                                                                                                                                    |
 | ----------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VERIFIED`  | 0    | The whole chain verifies from genesis, and every seal of the session matches the chain it sits in.                                                                                                                                                                                                       |
-| `MISMATCH`  | 1    | Either the chain does not verify, or a seal disagrees with it. The reason is named: `chain_break`, `signature`, `malformed`, `truncated_tail`, `count_mismatch`, `sequence_mismatch`, `root_mismatch`, `head_mismatch`, `ledger_break`, `malformed_seal`, or `io`.                                          |
+| `MISMATCH`  | 1    | Either the chain does not verify, or a seal disagrees with it. The reason is named: `chain_break`, `signature`, `malformed`, `truncated_tail`, `count_mismatch`, `sequence_mismatch`, `root_mismatch`, `snapshot_root_mismatch`, `head_mismatch`, `ledger_break`, `malformed_seal`, or `io`.                                          |
 | `UNSEALED`  | 2    | The chain verifies but the session has no seal. It may still be running, it may have ended without a seal (a crash or power loss), or the log may have been truncated through the seal. Treat this verdict as "cannot vouch for completeness".                                                             |
 | `NOT_FOUND` | 3    | No such session in this chain.                                                                                                                                                                                                                                                                              |
 
@@ -148,6 +150,10 @@ A seal inside a broken chain vouches for nothing. That is why a chain that does
 not verify makes every session a `MISMATCH` with the chain's own reason. Entries
 the session gained after its last seal are reported as `late_entries`; they are
 not a mismatch, but the seal does not cover them.
+
+When a seal carries a checkpoint root, verification recomputes it from that
+session's ordered `checkpoint.created` records. Older seals without this field
+remain verifiable, but make no separate checkpoint-root claim.
 
 ### The session ledger
 
@@ -165,7 +171,8 @@ entry, so there is no second trust root to keep consistent with the first.
 - **An edited, removed, or reordered entry.** The chain already refuses these,
   and the session verdict carries the chain's reason.
 - **A seal that misdescribes its session.** A seal whose count, positions,
-  root, head, or ledger link do not match the chain is refused field by field.
+  session or checkpoint root, head, or ledger link do not match the chain is
+  refused field by field.
   Such a seal can come from a faulty writer or from anyone holding the host
   key.
 - **Truncation through a session's seal.** The session becomes `UNSEALED`,

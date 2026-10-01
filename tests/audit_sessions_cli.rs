@@ -66,7 +66,6 @@ impl Home {
                 plan_id: SEALED,
                 reason: SealReason::Exited,
                 compute_environment: None,
-                snapshot_root: None,
             },
         )
         .unwrap();

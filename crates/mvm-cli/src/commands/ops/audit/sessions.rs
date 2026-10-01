@@ -366,6 +366,7 @@ fn reason_name(reason: mvm_hostd::audit::session::MismatchReason) -> &'static st
         R::CountMismatch => "count mismatch",
         R::SequenceMismatch => "sequence mismatch",
         R::RootMismatch => "root mismatch",
+        R::SnapshotRootMismatch => "checkpoint root mismatch",
         R::HeadMismatch => "chain head mismatch",
         R::LedgerBreak => "ledger break",
         R::MalformedSeal => "malformed seal",
@@ -415,5 +416,13 @@ mod tests {
         let report = verify_session_absent("sha256:ab");
         assert_eq!(report.verdict, Verdict::NotFound);
         assert_eq!(report.verdict.exit_code(), 3);
+    }
+
+    #[test]
+    fn a_checkpoint_root_mismatch_has_a_distinct_operator_reason() {
+        assert_eq!(
+            reason_name(mvm_hostd::audit::session::MismatchReason::SnapshotRootMismatch),
+            "checkpoint root mismatch"
+        );
     }
 }
