@@ -12,8 +12,9 @@ it is about to copy into the guest before admitting it.
 
 **Status: Preview.** The gate and its audit entries are wired into admission
 and tested, but this is not one of the numbered security claims in the
-[claim ledger](/security/claim-ledger/). Read the [limits](#limits) before
-relying on it.
+[claim ledger](/security/claim-ledger/). Read the
+[persistent volume scan behavior](#persistent-volume-scans) before relying on
+it.
 
 ## Quick start
 
@@ -147,7 +148,8 @@ Admission scans every host path the boot copies into the guest:
 - each `--mount` source directory,
 - each `--asset` file or tree,
 - the workload's own source directory, when `--flake` or `--manifest` names a
-  local path — the project policy is read from there too.
+  local path — the project policy is read from there too,
+- the mounted ext4 snapshot of each persistent host-directory volume.
 
 Each instruction file gets a verdict — verified, unsigned, or refused for a
 named reason — and a chain-signed audit entry bound to the plan the boot was
@@ -196,20 +198,15 @@ signs under that branch's ref.
 `mvmctl trust instructions sign --dry-run DIR` prints the files the policy
 selects, one per line — the list the workflow signs.
 
-## Limits
+## Persistent volume scans
 
-These are the known gaps. None is silently papered over.
-
-- **Volumes attached as block devices are not scanned — including a persistent
-  machine's host-directory volume.** A disk-image volume, and a volume
-  registered with `mvmctl machine volume mount`, reach admission as a block
-  device rather than a host tree, so instruction files inside them are never
-  verified. That matters most for `mvmctl machine volume mount <vm> --host DIR`:
-  the directory is re-snapshotted at the machine's next start after a host
-  edit, so an instruction file rewritten on the host reaches the guest at the
-  next start without passing this gate. With `--rw`, a restart also reuses the
-  machine's private copy while `DIR` is unchanged, so an in-guest rewrite
-  survives restarts. Open.
+Before a persistent machine boots, admission scans the materialized ext4 image
+of each host-directory volume, including `machine volume mount --host DIR`.
+This checks the bytes the guest will mount, not the current contents of `DIR`.
+The check therefore also covers a `--rw` private copy reused across restarts
+and a snapshot refreshed after a host edit. An unreadable image fails admission.
+Managed block volumes, which are guest-owned rather than host-directory
+snapshots, are not scanned as host inputs.
 - **A `--mount` never changes under a running guest.** `--mount` is
   materialized into an ext4 image — a snapshot, handed to each launch as a
   private copy-on-write clone — not a live share, for transient runs and

@@ -266,19 +266,18 @@ pub fn start_persistent_oci_machine(
         |config| {
             let admission_ledger = InMemoryNonceLedger::new();
             let ingress = machine_port_ingress(ports)?;
-            let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
-                .iter()
-                .filter_map(|volume| {
-                    volume
-                        .materialized_image
-                        .as_deref()
-                        .map(std::path::PathBuf::from)
-                })
-                .collect();
+            let mut instruction_mount_images = prepared_volumes.instruction_images.clone();
+            instruction_mount_images.extend(volumes.iter().filter_map(|volume| {
+                volume
+                    .materialized_image
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+            }));
             admit_plan_for_boot_with_ingress(
                 AdmitPlanForBootParams {
                     instructions: crate::admission::InstructionSources::for_workload(workload_dir)
-                        .with_mount_roots(&instruction_mount_roots),
+                        .with_mount_roots(&[])
+                        .with_mount_images(&instruction_mount_images),
                     outputs: Vec::new(),
                     network_mode: preflight_network(),
                     tenant: "local",

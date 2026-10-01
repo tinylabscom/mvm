@@ -29,6 +29,8 @@ pub struct InstructionSources<'a> {
     /// caller has already materialized them. When absent, the scan falls back
     /// to the admitted directory-share host paths.
     pub mount_roots: Option<&'a [PathBuf]>,
+    /// Materialized host-directory images attached to the guest.
+    pub mount_images: Option<&'a [PathBuf]>,
     /// Override for the user policy path. `None` reads
     /// `mvm_core::config::instruction_trust_policy_path()`; tests inject a
     /// tempdir so they never read the real user's policy.
@@ -42,6 +44,7 @@ impl<'a> InstructionSources<'a> {
         Self {
             workload_dir,
             mount_roots: None,
+            mount_images: None,
             user_policy: None,
         }
     }
@@ -53,12 +56,19 @@ impl<'a> InstructionSources<'a> {
         self.mount_roots = Some(mount_roots);
         self
     }
+
+    /// Inspect the actual image contents attached for host-directory mounts.
+    #[must_use]
+    pub fn with_mount_images(mut self, images: &'a [PathBuf]) -> Self {
+        self.mount_images = Some(images);
+        self
+    }
 }
 
 /// The host paths this boot copies into the guest.
 ///
-/// Directory shares only: a disk-image volume is a block device the guest
-/// formats and owns, not a host tree this gate can read file by file.
+/// Directory shares and materialized host-directory images are scanned.
+/// Managed block volumes remain guest-owned and are not host inputs.
 fn boot_inputs(
     shares: &[HostShareGrant],
     assets: &[AssetSpec],
@@ -75,6 +85,9 @@ fn boot_inputs(
             },
             <[PathBuf]>::to_vec,
         ),
+        mount_images: sources
+            .mount_images
+            .map_or_else(Vec::new, <[PathBuf]>::to_vec),
         assets: assets
             .iter()
             .map(|asset| PathBuf::from(&asset.host_path))

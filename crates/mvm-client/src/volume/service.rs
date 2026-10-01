@@ -78,6 +78,9 @@ pub struct LaunchPreparation {
     /// The merged launch volume list: explicit volumes plus every resolved
     /// registered attachment, in admission order.
     pub volumes: Vec<RuntimeVolume>,
+    /// Registered host-directory snapshot images whose guest-visible contents
+    /// must pass the instruction gate before launch.
+    pub instruction_images: Vec<PathBuf>,
     lease: LaunchLease,
 }
 
@@ -411,6 +414,7 @@ impl VolumeService for LocalVolumeService {
             let lease = LaunchLease::acquire(&request.owner, intents)?;
             return Ok(LaunchPreparation {
                 volumes: request.explicit.clone(),
+                instruction_images: Vec::new(),
                 lease,
             });
         }
@@ -446,6 +450,7 @@ impl VolumeService for LocalVolumeService {
                 .map(|volume| volume.guest.clone())
                 .collect::<std::collections::BTreeSet<_>>();
             let mut volumes = request.explicit.clone();
+            let mut instruction_images = Vec::new();
             volumes.reserve(resolved.len());
             let mut intents = explicit_lease_intents(&request.owner, &request.explicit)?;
             let relock_by_name: BTreeMap<&str, ()> = jit_unlocked
@@ -475,6 +480,13 @@ impl VolumeService for LocalVolumeService {
                 }
                 let vm_volume = attachment.as_vm_volume();
                 let runtime_volume = RuntimeVolume::from(&vm_volume);
+                if registry
+                    .mounts
+                    .get(&guest)
+                    .is_some_and(|entry| entry.host_snapshot.is_some())
+                {
+                    instruction_images.push(attachment.host_path.clone());
+                }
                 if matches!(attachment.kind, LocalVolumeKind::BlockImage { .. }) {
                     intents.push(LeaseIntent {
                         key: lease::lease_key(&attachment.host_path)?,
@@ -494,7 +506,11 @@ impl VolumeService for LocalVolumeService {
             enforce_profile_access(&volumes, request.profile)?;
             lease::check_lease_conflicts(&intents)?;
             let lease = LaunchLease::acquire(&request.owner, intents)?;
-            Ok(LaunchPreparation { volumes, lease })
+            Ok(LaunchPreparation {
+                volumes,
+                instruction_images,
+                lease,
+            })
         })();
 
         match resolution {
