@@ -23,6 +23,9 @@ use crate::assurance_session::{
 };
 use crate::audit::emitter::write_atomic;
 use crate::plan_admission::AdmittedPlan;
+use mvm_runtime::agent_session::replay_input::{
+    ReplayInputBinding, ReplayInputRef, ReplayInputStore,
+};
 
 const MAX_DURABLE_HISTORY_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CANCELLATION_EVIDENCE_BYTES: u64 = 16 * 1024;
@@ -165,6 +168,8 @@ pub struct AssurancePromptAdapter {
     expected_cancellation_identity: CancellationBindingIdentity,
     history_path: PathBuf,
     cancellation_path: PathBuf,
+    replay_inputs: ReplayInputStore,
+    replay_session_id: AgentSessionId,
     durable: Mutex<AdapterDurableState>,
     cancel_gate: Mutex<()>,
 }
@@ -202,6 +207,11 @@ impl AssurancePromptAdapter {
         prepare_session_directory(directory, vm)?;
         let history_path = directory.join(format!("{session_id}.jsonl"));
         let cancellation_path = directory.join(format!("{session_id}.cancellation.json"));
+        let replay_session_id = session_id.clone();
+        let replay_inputs = ReplayInputStore::at(
+            directory.join("replay-inputs"),
+            mvm_core::config::mvm_keys_dir(),
+        );
 
         let (journal, persisted_sequence) = if history_path.exists() {
             let history = load_history(&history_path)?;
@@ -235,12 +245,43 @@ impl AssurancePromptAdapter {
             expected_cancellation_identity,
             history_path,
             cancellation_path,
+            replay_inputs,
+            replay_session_id,
             durable: Mutex::new(AdapterDurableState {
                 journal,
                 persisted_sequence,
             }),
             cancel_gate: Mutex::new(()),
         })
+    }
+
+    /// List encrypted request halves recorded for this admitted session.
+    pub fn replay_inputs(&self) -> Result<Vec<ReplayInputRef>> {
+        self.replay_inputs
+            .after(&self.replay_session_id, 0, 0)
+            .context("listing encrypted assurance prompt inputs")
+    }
+
+    /// Load and validate one recorded request half.
+    ///
+    /// The returned request must be admitted again before delivery; the old
+    /// effective authority and binding are never reused during replay.
+    pub fn load_replay_request(
+        &self,
+        reference: &ReplayInputRef,
+    ) -> Result<mvm_contract::assurance::AssuranceSessionRequest> {
+        if reference.binding.session_id != self.replay_session_id
+            || reference.binding.generation != 0
+        {
+            anyhow::bail!("assurance replay input is bound to another session");
+        }
+        let bytes = self
+            .replay_inputs
+            .load(reference)
+            .context("decrypting recorded assurance prompt request")?;
+        mvm_contract::assurance::AssuranceSessionRequest::parse_json(bytes.as_slice())
+            .map_err(|error| anyhow::anyhow!(error))
+            .context("validating recorded assurance prompt request")
     }
 
     /// Deliver the exact bound envelope through `AgentSessionCommand::Prompt`.
@@ -288,6 +329,24 @@ impl AssurancePromptAdapter {
         if !outcome.applied && outcome.state != AgentSessionState::Running {
             return Ok(PromptExecutionOutcome::DuplicateCompleted);
         }
+        let prompt_cursor = outcome
+            .last_sequence
+            .context("accepted assurance prompt has no durable cursor")?;
+        let replay_request = request
+            .input
+            .request()
+            .to_json()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        self.replay_inputs
+            .record(
+                ReplayInputBinding {
+                    session_id: self.replay_session_id.clone(),
+                    generation: 0,
+                    journal_cursor: prompt_cursor,
+                },
+                replay_request.as_bytes(),
+            )
+            .context("encrypting assurance prompt request for replay")?;
 
         let execution = executor.execute(ExtensionExecution {
             vm: &self.vm,
@@ -795,6 +854,12 @@ mod tests {
         assert!(history.contains("prompt_digest"), "{history}");
         assert!(!history.contains("attempt the declared process effect"));
         assert!(!history.contains("synthetic.invalid"));
+        let replay_inputs = adapter.replay_inputs().expect("replay inputs");
+        assert_eq!(replay_inputs.len(), 1);
+        let replay_request = adapter
+            .load_replay_request(&replay_inputs[0])
+            .expect("replay request");
+        assert_eq!(replay_request, input.request());
 
         assert!(matches!(
             adapter

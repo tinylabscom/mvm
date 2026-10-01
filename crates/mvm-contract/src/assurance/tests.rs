@@ -563,6 +563,21 @@ fn the_envelope_reports_effective_authority_and_a_real_deadline() {
 }
 
 #[test]
+fn the_envelope_can_recover_only_its_validated_request_half_for_replay() {
+    let original = request();
+    let envelope = AiSessionInput::bind(original.clone(), &binding(), &effective_for_envelope())
+        .expect("envelope");
+
+    assert_eq!(envelope.request(), original);
+    let encoded = envelope.request().to_json().expect("request encoding");
+    assert_eq!(
+        AssuranceSessionRequest::parse_json(encoded.as_bytes()).unwrap(),
+        original
+    );
+    assert!(!encoded.contains("mvm_binding"), "{encoded}");
+}
+
+#[test]
 fn the_envelope_carries_the_admitted_plan_and_no_synthetic_values() {
     let envelope =
         AiSessionInput::bind(request(), &binding(), &effective_for_envelope()).expect("envelope");

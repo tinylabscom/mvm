@@ -32,9 +32,18 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
                 .map(mvm_client::drive::LocalDrive::bind)
                 .transpose()?
                 .flatten();
+            // The tool policy gate resolves the project's `[tools]` section;
+            // a policy that exists but does not resolve refuses to start
+            // rather than serve ungated.
+            let gate = crate::tool_gate::McpToolGate::resolve(None)?;
+            let server = mvm_mcp::McpServer::new(client);
             let server = match drive {
-                Some(drive) => mvm_mcp::McpServer::new(client).with_drive(Arc::new(drive)),
-                None => mvm_mcp::McpServer::new(client),
+                Some(drive) => server.with_drive(Arc::new(drive)),
+                None => server,
+            };
+            let server = match gate {
+                Some(gate) => server.with_tool_gate(Arc::new(gate)),
+                None => server,
             };
             let stdin = io::stdin();
             let stdout = io::stdout();

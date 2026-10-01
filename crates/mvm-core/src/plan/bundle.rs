@@ -59,7 +59,7 @@
 //! buy little and add a transitive dep. A future `.mvmpkg.gz`
 //! wrapper can layer on if size becomes a real concern.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -71,9 +71,17 @@ use thiserror::Error;
 
 pub use mvm_contract::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
-    BundleResources, KeyId, MANIFEST_FILENAME, PlanArtifact, SIGNATURE_FILENAME, VerityInfo,
-    signature_from_base64, signature_to_base64,
+    BundleMember, BundleResources, KeyId, MANIFEST_FILENAME, PlanArtifact, SIGNATURE_FILENAME,
+    VerityInfo, signature_from_base64, signature_to_base64,
 };
+
+use crate::arch::GuestArch;
+use crate::image_set::{
+    BackendImageSupport, HostProtocolSupport, ImageSetError, ImageSetManifest, ImageSetRequirement,
+    ImageSetRole, WorkloadImageProfile, check_protocol_compatibility, require_complete,
+    select_member, select_workload_image, validate_structure,
+};
+use crate::packs::Sha256Hex;
 
 /// Derive the key_id from a verifying-key's bytes.
 ///
@@ -298,6 +306,30 @@ impl BundleRegistry {
         self.root.join(bundle_sha256)
     }
 
+    /// Content-addressed cache used by embedded image sets. A normal registry
+    /// rooted at `~/.mvm/bundles` stores these under `~/.mvm/image-sets`.
+    pub fn embedded_image_set_cache_root(&self) -> PathBuf {
+        self.root
+            .parent()
+            .unwrap_or(self.root.as_path())
+            .join("image-sets")
+    }
+
+    /// Publish only the embedded image-set members into their content-addressed
+    /// cache. Used by `bundle fetch`, which verifies a remote bundle without
+    /// installing the workload bundle itself.
+    pub fn cache_embedded_image_sets(
+        &self,
+        verified: &VerifiedBundle,
+        bundle_sha256: &str,
+    ) -> Result<(), BundleInstallError> {
+        install_embedded_image_set_cache(
+            verified,
+            &self.embedded_image_set_cache_root(),
+            bundle_sha256,
+        )
+    }
+
     /// Install a verified archive into the registry. Verifies the
     /// archive against `trust`, extracts every declared artifact
     /// atomically (stage to `<sha>.partial/`, rename to `<sha>/`),
@@ -318,20 +350,6 @@ impl BundleRegistry {
         let sha = bundle_sha256(archive_bytes);
 
         let install_dir = self.install_dir(&sha);
-        if install_dir.exists() {
-            if !force {
-                return Err(BundleInstallError::AlreadyInstalled {
-                    bundle_sha256: sha.clone(),
-                });
-            }
-            std::fs::remove_dir_all(&install_dir).map_err(|e| BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason: format!(
-                    "removing existing install at {}: {e}",
-                    install_dir.display()
-                ),
-            })?;
-        }
 
         // Ensure the registry root exists with tight perms — same
         // shape as the trust store directory.
@@ -347,6 +365,27 @@ impl BundleRegistry {
                 perms.set_mode(0o700);
                 let _ = std::fs::set_permissions(&self.root, perms);
             }
+        }
+
+        // Embedded image sets have their own CAS so multiple workload bundles
+        // carrying identical boot bytes converge on one verified cache entry.
+        // The bundle verification above covered every nested hash; an existing
+        // cache hit is re-hashed again before it is trusted.
+        self.cache_embedded_image_sets(&verified, &sha)?;
+
+        if install_dir.exists() {
+            if !force {
+                return Err(BundleInstallError::AlreadyInstalled {
+                    bundle_sha256: sha.clone(),
+                });
+            }
+            std::fs::remove_dir_all(&install_dir).map_err(|e| BundleInstallError::Io {
+                bundle_sha256: sha.clone(),
+                reason: format!(
+                    "removing existing install at {}: {e}",
+                    install_dir.display()
+                ),
+            })?;
         }
 
         // Stage extracts into <sha>.partial/. A previous crash
@@ -585,6 +624,140 @@ fn read_signature_from_archive(archive: &[u8]) -> Result<Vec<u8>, String> {
     Err(format!("{SIGNATURE_FILENAME} not present in archive"))
 }
 
+fn install_embedded_image_set_cache(
+    verified: &VerifiedBundle,
+    cache_root: &Path,
+    bundle_sha256: &str,
+) -> Result<(), BundleInstallError> {
+    if verified.embedded_image_sets.is_empty() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(cache_root).map_err(|error| BundleInstallError::Io {
+        bundle_sha256: bundle_sha256.to_string(),
+        reason: format!(
+            "creating embedded image-set cache {}: {error}",
+            cache_root.display()
+        ),
+    })?;
+
+    for embedded in &verified.embedded_image_sets {
+        let destination = cache_root.join(embedded.manifest_sha256.as_str());
+        if destination.exists() {
+            verify_cached_embedded_image_set(verified, embedded, &destination).map_err(
+                |reason| BundleInstallError::Io {
+                    bundle_sha256: bundle_sha256.to_string(),
+                    reason,
+                },
+            )?;
+            continue;
+        }
+
+        let staging = tempfile::Builder::new()
+            .prefix(".image-set-")
+            .tempdir_in(cache_root)
+            .map_err(|error| BundleInstallError::Io {
+                bundle_sha256: bundle_sha256.to_string(),
+                reason: format!("creating embedded image-set staging directory: {error}"),
+            })?;
+        write_embedded_image_set_cache(verified, embedded, staging.path()).map_err(|reason| {
+            BundleInstallError::Io {
+                bundle_sha256: bundle_sha256.to_string(),
+                reason,
+            }
+        })?;
+        match std::fs::rename(staging.path(), &destination) {
+            Ok(()) => {}
+            Err(_) if destination.exists() => {
+                verify_cached_embedded_image_set(verified, embedded, &destination).map_err(
+                    |reason| BundleInstallError::Io {
+                        bundle_sha256: bundle_sha256.to_string(),
+                        reason,
+                    },
+                )?;
+            }
+            Err(error) => {
+                return Err(BundleInstallError::Io {
+                    bundle_sha256: bundle_sha256.to_string(),
+                    reason: format!(
+                        "publishing embedded image-set cache {}: {error}",
+                        destination.display()
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_embedded_image_set_cache(
+    verified: &VerifiedBundle,
+    embedded: &VerifiedEmbeddedImageSet,
+    destination: &Path,
+) -> Result<(), String> {
+    let manifest_declaration = verified
+        .manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.name == embedded.manifest_artifact)
+        .ok_or_else(|| "verified embedded image-set declaration disappeared".to_string())?;
+    let manifest_bytes = verified
+        .artifacts
+        .get(&manifest_declaration.path)
+        .ok_or_else(|| "verified embedded image-set manifest bytes disappeared".to_string())?;
+    std::fs::write(destination.join("image-set.json"), manifest_bytes)
+        .map_err(|error| format!("writing embedded image-set manifest: {error}"))?;
+    let artifact_dir = destination.join("artifacts");
+    std::fs::create_dir_all(&artifact_dir)
+        .map_err(|error| format!("creating embedded image-set artifact directory: {error}"))?;
+    for (name, bundle_path) in &embedded.artifact_paths {
+        let bytes = verified.artifacts.get(bundle_path).ok_or_else(|| {
+            format!("verified embedded image-set artifact {name} bytes disappeared")
+        })?;
+        std::fs::write(artifact_dir.join(name), bytes)
+            .map_err(|error| format!("writing embedded image-set artifact {name}: {error}"))?;
+    }
+    Ok(())
+}
+
+fn verify_cached_embedded_image_set(
+    verified: &VerifiedBundle,
+    embedded: &VerifiedEmbeddedImageSet,
+    destination: &Path,
+) -> Result<(), String> {
+    let manifest_declaration = verified
+        .manifest
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.name == embedded.manifest_artifact)
+        .ok_or_else(|| "verified embedded image-set declaration disappeared".to_string())?;
+    let expected_manifest = verified
+        .artifacts
+        .get(&manifest_declaration.path)
+        .ok_or_else(|| "verified embedded image-set manifest bytes disappeared".to_string())?;
+    let cached_manifest = std::fs::read(destination.join("image-set.json"))
+        .map_err(|error| format!("reading cached embedded image-set manifest: {error}"))?;
+    if &cached_manifest != expected_manifest {
+        return Err(format!(
+            "cached embedded image set {} failed manifest re-verification",
+            embedded.manifest_sha256.as_str()
+        ));
+    }
+    for (name, bundle_path) in &embedded.artifact_paths {
+        let expected = verified.artifacts.get(bundle_path).ok_or_else(|| {
+            format!("verified embedded image-set artifact {name} bytes disappeared")
+        })?;
+        let cached = std::fs::read(destination.join("artifacts").join(name)).map_err(|error| {
+            format!("reading cached embedded image-set artifact {name}: {error}")
+        })?;
+        if &cached != expected {
+            return Err(format!(
+                "cached embedded image-set artifact {name} failed re-verification"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Verify a plan's pinned bundle at admit time.
 ///
 /// Runs the full [`read_and_verify_bundle`] rejection ladder against
@@ -764,6 +937,46 @@ pub enum BundleVerifyError {
 
     #[error("signature blob is the wrong size: expected 64 bytes, got {got}")]
     MalformedSignature { got: usize },
+
+    #[error("bundle member references image-set manifest artifact {name}, but it is not declared")]
+    ImageSetManifestArtifactMissing { name: String },
+
+    #[error("embedded image-set manifest {name} is not valid JSON: {reason}")]
+    ImageSetManifestParse { name: String, reason: String },
+
+    #[error("embedded image-set manifest {name} was refused: {reason}")]
+    ImageSetRefused {
+        name: String,
+        #[source]
+        reason: ImageSetError,
+    },
+
+    #[error("embedded image set names artifact {name}, but the bundle does not declare it")]
+    ImageSetArtifactMissing { name: String },
+
+    #[error(
+        "embedded image-set artifact {name} digest differs from its bundle artifact: image set {image_set}, bundle {bundle}"
+    )]
+    ImageSetArtifactDigestMismatch {
+        name: String,
+        image_set: String,
+        bundle: String,
+    },
+
+    #[error(
+        "embedded image-set artifact {name} size differs from its bundle artifact: image set {image_set}, bundle {bundle}"
+    )]
+    ImageSetArtifactSizeMismatch {
+        name: String,
+        image_set: u64,
+        bundle: u64,
+    },
+
+    #[error("bundle declares artifact name {name} more than once")]
+    DuplicateArtifactName { name: String },
+
+    #[error("bundle schema v{found} cannot declare typed members; members require schema v3")]
+    MembersRequireSchemaV3 { found: u32 },
 }
 
 /// Validate that an archive-relative path is safe to extract: no
@@ -938,6 +1151,43 @@ pub struct VerifiedBundle {
     pub manifest: BundleManifest,
     pub artifacts: BTreeMap<String, Vec<u8>>,
     pub key_id: KeyId,
+    /// Embedded image sets that passed the same structural, completeness, and
+    /// per-artifact validation as a standalone image set.
+    pub embedded_image_sets: Vec<VerifiedEmbeddedImageSet>,
+}
+
+/// One embedded image set whose manifest is bound to verified bundle bytes.
+#[derive(Debug, Clone)]
+pub struct VerifiedEmbeddedImageSet {
+    pub manifest_artifact: String,
+    pub manifest_sha256: Sha256Hex,
+    pub manifest: ImageSetManifest,
+    /// Image-set artifact name to archive-relative bundle path.
+    pub artifact_paths: BTreeMap<String, String>,
+}
+
+/// Refuse an embedded set before boot unless its protocol declaration and
+/// selected workload image are both satisfiable by the chosen backend.
+pub fn check_embedded_image_set_for_backend(
+    embedded: &VerifiedEmbeddedImageSet,
+    arch: GuestArch,
+    backend: &BackendImageSupport,
+    host_protocols: &HostProtocolSupport,
+) -> Result<(), ImageSetError> {
+    check_protocol_compatibility(&embedded.manifest, host_protocols)?;
+    select_workload_image(
+        &embedded.manifest,
+        WorkloadImageProfile::DefaultTenant,
+        arch,
+        backend,
+    )?;
+    select_member(
+        &embedded.manifest,
+        ImageSetRole::RuntimeOverlay,
+        arch,
+        backend,
+    )?;
+    Ok(())
 }
 
 /// Read a bundle archive, look the publisher up in the trust store,
@@ -1057,6 +1307,11 @@ pub fn read_and_verify_bundle(
     // proven authentic -----
     let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| BundleVerifyError::ManifestParse(e.to_string()))?;
+    if manifest.schema_version < 3 && !manifest.members.is_empty() {
+        return Err(BundleVerifyError::MembersRequireSchemaV3 {
+            found: manifest.schema_version,
+        });
+    }
 
     // ----- Step 6: per-artifact hash + size check -----
     let mut artifacts_out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -1086,10 +1341,113 @@ pub fn read_and_verify_bundle(
         artifacts_out.insert(art.path.clone(), bytes.clone());
     }
 
+    let embedded_image_sets = verify_embedded_image_sets(&manifest, &artifacts_out)?;
+
     Ok(VerifiedBundle {
         manifest,
         artifacts: artifacts_out,
         key_id: declared_key_id,
+        embedded_image_sets,
+    })
+}
+
+/// Bind each embedded image-set declaration to the already verified bundle
+/// artifacts. The image-set module owns structure, completeness and backend
+/// compatibility; this adapter owns only the cross-manifest name/hash binding.
+fn verify_embedded_image_sets(
+    bundle: &BundleManifest,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+) -> Result<Vec<VerifiedEmbeddedImageSet>, BundleVerifyError> {
+    let mut names = BTreeSet::new();
+    for artifact in &bundle.artifacts {
+        if !names.insert(artifact.name.as_str()) {
+            return Err(BundleVerifyError::DuplicateArtifactName {
+                name: artifact.name.clone(),
+            });
+        }
+    }
+
+    bundle
+        .members
+        .iter()
+        .map(|member| match member {
+            BundleMember::EmbeddedImageSet { manifest_artifact } => {
+                verify_embedded_image_set(bundle, artifacts, manifest_artifact)
+            }
+        })
+        .collect()
+}
+
+fn verify_embedded_image_set(
+    bundle: &BundleManifest,
+    artifacts: &BTreeMap<String, Vec<u8>>,
+    manifest_artifact: &str,
+) -> Result<VerifiedEmbeddedImageSet, BundleVerifyError> {
+    let declaration = bundle
+        .artifacts
+        .iter()
+        .find(|artifact| artifact.name == manifest_artifact)
+        .ok_or_else(|| BundleVerifyError::ImageSetManifestArtifactMissing {
+            name: manifest_artifact.to_string(),
+        })?;
+    let manifest_bytes = artifacts.get(&declaration.path).ok_or_else(|| {
+        BundleVerifyError::ImageSetManifestArtifactMissing {
+            name: manifest_artifact.to_string(),
+        }
+    })?;
+    let manifest: ImageSetManifest = serde_json::from_slice(manifest_bytes).map_err(|error| {
+        BundleVerifyError::ImageSetManifestParse {
+            name: manifest_artifact.to_string(),
+            reason: error.to_string(),
+        }
+    })?;
+    validate_structure(&manifest).map_err(|reason| BundleVerifyError::ImageSetRefused {
+        name: manifest_artifact.to_string(),
+        reason,
+    })?;
+    require_complete(&manifest, &ImageSetRequirement::current_train()).map_err(|reason| {
+        BundleVerifyError::ImageSetRefused {
+            name: manifest_artifact.to_string(),
+            reason,
+        }
+    })?;
+
+    let mut artifact_paths = BTreeMap::new();
+    for image_artifact in manifest
+        .members
+        .iter()
+        .flat_map(|member| member.artifacts.iter())
+    {
+        let name = image_artifact.name.as_str();
+        let bundle_artifact = bundle
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == name)
+            .ok_or_else(|| BundleVerifyError::ImageSetArtifactMissing {
+                name: name.to_string(),
+            })?;
+        if image_artifact.sha256.as_str() != bundle_artifact.sha256 {
+            return Err(BundleVerifyError::ImageSetArtifactDigestMismatch {
+                name: name.to_string(),
+                image_set: image_artifact.sha256.as_str().to_string(),
+                bundle: bundle_artifact.sha256.clone(),
+            });
+        }
+        if image_artifact.size != bundle_artifact.size_bytes {
+            return Err(BundleVerifyError::ImageSetArtifactSizeMismatch {
+                name: name.to_string(),
+                image_set: image_artifact.size,
+                bundle: bundle_artifact.size_bytes,
+            });
+        }
+        artifact_paths.insert(name.to_string(), bundle_artifact.path.clone());
+    }
+
+    Ok(VerifiedEmbeddedImageSet {
+        manifest_artifact: manifest_artifact.to_string(),
+        manifest_sha256: Sha256Hex::from_bytes(manifest_bytes),
+        manifest,
+        artifact_paths,
     })
 }
 
@@ -1105,9 +1463,19 @@ pub fn bundle_sha256(archive_bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use rand::Rng;
     use std::collections::HashMap;
+
+    use crate::image_set::{
+        ArtifactFormat, ArtifactName, BootProtocol, GitCommit, GuestDeviceRequirement,
+        ImageSetCompatibility, ImageSetMember, ImageSetProducer, ImageSetRole, ImageSetVersion,
+        MemberArtifact, MemberTarget, NixInputs, ProtocolRange, ReleaseProducer, ReleaseTag,
+        RepositorySlug, RevocationChannel, WorkflowPath,
+    };
+    use crate::kernel_format::KernelFormat;
+    use crate::packs::{FlakeLockIdentity, SbomReference, SourceRevisionIdentity};
 
     /// In-memory trust store for tests. Production uses
     /// [`FsTrustStore`]; the trait split keeps the verifier free of
@@ -1139,6 +1507,7 @@ mod tests {
             created_at: "2026-05-12T00:00:00Z".to_string(),
             labels: BTreeMap::new(),
             artifacts,
+            members: Vec::new(),
             verity: None,
             resources: None,
         }
@@ -1184,6 +1553,348 @@ mod tests {
         let key_id = key_id_from_pubkey(&sk.verifying_key());
         m.insert(key_id, sk.verifying_key());
         MapTrustStore(m)
+    }
+
+    fn image_member_artifact(name: &str, format: ArtifactFormat) -> (MemberArtifact, Vec<u8>) {
+        let bytes = format!("embedded bytes for {name}").into_bytes();
+        (
+            MemberArtifact {
+                name: ArtifactName::new(name).expect("artifact name"),
+                format,
+                sha256: Sha256Hex::from_bytes(&bytes),
+                size: bytes.len() as u64,
+            },
+            bytes,
+        )
+    }
+
+    fn image_member(
+        role: ImageSetRole,
+        target: MemberTarget,
+    ) -> (ImageSetMember, Vec<(String, Vec<u8>)>) {
+        use GuestDeviceRequirement::{DmVerity, VirtioBlk, VirtioVsock};
+        let suffix = match target {
+            MemberTarget::Arch(arch) => format!("-{arch}"),
+            MemberTarget::ArchIndependent => String::new(),
+        };
+        let kernel = match target {
+            MemberTarget::Arch(GuestArch::X86_64) => ArtifactFormat::Kernel(KernelFormat::Elf),
+            _ => ArtifactFormat::Kernel(KernelFormat::Image),
+        };
+        let (specs, boot_protocol, required_capabilities) = match role {
+            ImageSetRole::BuilderVm => (
+                vec![
+                    (format!("builder-vmlinux{suffix}"), kernel),
+                    (format!("builder-rootfs{suffix}.ext4"), ArtifactFormat::Ext4),
+                ],
+                Some(BootProtocol::LinuxDirect),
+                vec![VirtioVsock, VirtioBlk],
+            ),
+            ImageSetRole::WorkloadKernel(profile) => (
+                vec![(format!("{profile}-vmlinux{suffix}"), kernel)],
+                Some(BootProtocol::LinuxDirect),
+                vec![VirtioVsock],
+            ),
+            ImageSetRole::WorkloadRootfs(profile) => (
+                vec![
+                    (
+                        format!("{profile}-rootfs{suffix}.ext4"),
+                        ArtifactFormat::Ext4,
+                    ),
+                    (
+                        format!("{profile}-rootfs{suffix}.verity"),
+                        ArtifactFormat::VerityHashTree,
+                    ),
+                    (
+                        format!("{profile}-rootfs{suffix}.roothash"),
+                        ArtifactFormat::VerityRootHash,
+                    ),
+                ],
+                None,
+                vec![VirtioBlk, DmVerity],
+            ),
+            ImageSetRole::RuntimeOverlay => (
+                vec![(
+                    format!("runtime-overlay{suffix}.tar.gz"),
+                    ArtifactFormat::TarGz,
+                )],
+                None,
+                vec![],
+            ),
+            ImageSetRole::SdkSidecar(libc) => (
+                vec![(
+                    format!("sdk-sidecar{suffix}-{libc}.tar.gz"),
+                    ArtifactFormat::TarGz,
+                )],
+                None,
+                vec![],
+            ),
+            ImageSetRole::Stage0BootstrapKernel => (
+                vec![(format!("stage0-vmlinux{suffix}"), kernel)],
+                Some(BootProtocol::LinuxDirect),
+                vec![VirtioVsock],
+            ),
+            ImageSetRole::Initramfs => (
+                vec![(format!("initramfs{suffix}.tar.gz"), ArtifactFormat::TarGz)],
+                None,
+                vec![],
+            ),
+            ImageSetRole::QemuWasmSmokePack => (
+                vec![("qemu-wasm-smoke.tar.gz".to_string(), ArtifactFormat::TarGz)],
+                None,
+                vec![],
+            ),
+        };
+        let (artifacts, bytes): (Vec<_>, Vec<_>) = specs
+            .into_iter()
+            .map(|(name, format)| {
+                let (artifact, bytes) = image_member_artifact(&name, format);
+                (artifact, (name, bytes))
+            })
+            .unzip();
+        (
+            ImageSetMember {
+                role,
+                target,
+                build_mode: None,
+                source_fingerprint: None,
+                boot_protocol,
+                artifacts,
+                required_capabilities,
+                pack_hash: Some(Sha256Hex::from_bytes(
+                    format!("pack:{role}:{target}").as_bytes(),
+                )),
+                sbom: Some(SbomReference {
+                    uri: format!("https://example.test/{role}/{target}.cdx.json"),
+                    sha256: Sha256Hex::from_bytes(format!("sbom:{role}:{target}").as_bytes()),
+                }),
+            },
+            bytes,
+        )
+    }
+
+    fn complete_image_set() -> (ImageSetManifest, Vec<(String, Vec<u8>)>) {
+        let mut members = Vec::new();
+        let mut bytes = Vec::new();
+        for required in ImageSetRequirement::current_train().members() {
+            let (member, member_bytes) = image_member(required.role, required.target);
+            members.push(member);
+            bytes.extend(member_bytes);
+        }
+        (
+            ImageSetManifest {
+                schema_version: crate::image_set::IMAGE_SET_SCHEMA_VERSION,
+                set_version: ImageSetVersion::new("1.0.0").expect("version"),
+                issued_at: Utc.with_ymd_and_hms(2026, 9, 23, 0, 0, 0).unwrap(),
+                producer: ImageSetProducer::Release(ReleaseProducer {
+                    repository: RepositorySlug::new("tinylabscom/mvm-images").expect("repo"),
+                    workflow: WorkflowPath::new(".github/workflows/release.yml").expect("workflow"),
+                    release_tag: ReleaseTag::new("v1.0.0").expect("tag"),
+                    source_commit: GitCommit::new("a".repeat(40)).expect("commit"),
+                }),
+                mvm_source_commit: GitCommit::new("b".repeat(40)).expect("commit"),
+                compatibility: ImageSetCompatibility {
+                    guest_agent_protocol: ProtocolRange::new(2, 2).expect("protocol"),
+                    builder_cache_contract: 4,
+                    builder_boot_abi: None,
+                },
+                nix_inputs: NixInputs {
+                    flake_locks: vec![FlakeLockIdentity {
+                        reference: "nix/images".to_string(),
+                        lock_hash: Sha256Hex::from_bytes(b"lock"),
+                    }],
+                    source_revisions: vec![SourceRevisionIdentity {
+                        repository: "https://github.com/NixOS/nixpkgs".to_string(),
+                        revision: "c".repeat(40),
+                        tree_hash: Sha256Hex::from_bytes(b"tree"),
+                    }],
+                },
+                revocation_channel: Some(
+                    RevocationChannel::new("https://example.test/revocations.json")
+                        .expect("revocation channel"),
+                ),
+                supersedes: None,
+                members,
+            },
+            bytes,
+        )
+    }
+
+    fn embedded_bundle(
+        sk: &SigningKey,
+        image_set: &ImageSetManifest,
+        image_bytes: &[(String, Vec<u8>)],
+    ) -> Vec<u8> {
+        embedded_bundle_with_schema(sk, image_set, image_bytes, BUNDLE_SCHEMA_VERSION)
+    }
+
+    fn embedded_bundle_with_schema(
+        sk: &SigningKey,
+        image_set: &ImageSetManifest,
+        image_bytes: &[(String, Vec<u8>)],
+        schema_version: u32,
+    ) -> Vec<u8> {
+        let image_manifest = serde_json::to_vec(image_set).expect("image-set JSON");
+        let mut artifacts = vec![art(
+            "image-set.json",
+            ArtifactRole::Other,
+            "artifacts/image-set.json",
+            &image_manifest,
+        )];
+        let mut payload = vec![("artifacts/image-set.json".to_string(), image_manifest)];
+        for (name, bytes) in image_bytes {
+            let path = format!("artifacts/{name}");
+            artifacts.push(art(name, ArtifactRole::Other, &path, bytes));
+            payload.push((path, bytes.clone()));
+        }
+        let mut manifest = make_manifest(key_id_from_pubkey(&sk.verifying_key()), artifacts);
+        manifest.schema_version = schema_version;
+        manifest.members = vec![BundleMember::EmbeddedImageSet {
+            manifest_artifact: "image-set.json".to_string(),
+        }];
+        write_bundle(&manifest, sk, payload).expect("embedded bundle")
+    }
+
+    #[test]
+    fn typed_members_require_bundle_schema_v3() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let archive = embedded_bundle_with_schema(&sk, &image_set, &bytes, 2);
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::MembersRequireSchemaV3 { found: 2 })
+        ));
+    }
+
+    #[test]
+    fn complete_embedded_image_set_verifies_every_nested_artifact() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let archive = embedded_bundle(&sk, &image_set, &bytes);
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).expect("complete bundle");
+        assert_eq!(verified.embedded_image_sets.len(), 1);
+        assert_eq!(
+            verified.embedded_image_sets[0].artifact_paths.len(),
+            bytes.len()
+        );
+    }
+
+    #[test]
+    fn partial_embedded_image_set_is_refused_before_boot() {
+        let sk = fresh_key();
+        let (mut image_set, mut bytes) = complete_image_set();
+        let removed = image_set.members.pop().expect("complete set has members");
+        let removed_names: BTreeSet<String> = removed
+            .artifacts
+            .iter()
+            .map(|artifact| artifact.name.as_str().to_string())
+            .collect();
+        bytes.retain(|(name, _)| !removed_names.contains(name));
+        let archive = embedded_bundle(&sk, &image_set, &bytes);
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::ImageSetRefused {
+                reason: ImageSetError::Incomplete { .. },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn nested_image_digest_must_match_the_signed_bundle_declaration() {
+        let sk = fresh_key();
+        let (image_set, mut bytes) = complete_image_set();
+        bytes[0]
+            .1
+            .extend_from_slice(b"tampered before bundle signing");
+        let archive = embedded_bundle(&sk, &image_set, &bytes);
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::ImageSetArtifactDigestMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn backend_capability_refusal_names_the_missing_device() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let archive = embedded_bundle(&sk, &image_set, &bytes);
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).expect("complete bundle");
+        let backend = BackendImageSupport {
+            guest_arches: vec![GuestArch::X86_64],
+            boot_protocols: vec![BootProtocol::LinuxDirect],
+            artifact_formats: vec![
+                ArtifactFormat::Kernel(KernelFormat::Elf),
+                ArtifactFormat::Ext4,
+                ArtifactFormat::VerityHashTree,
+                ArtifactFormat::VerityRootHash,
+                ArtifactFormat::TarGz,
+            ],
+            device_capabilities: vec![
+                GuestDeviceRequirement::VirtioVsock,
+                GuestDeviceRequirement::VirtioBlk,
+            ],
+        };
+        let host = HostProtocolSupport {
+            guest_agent_protocol: ProtocolRange::new(2, 2).expect("protocol"),
+            builder_cache_contract: 4,
+            builder_boot_abi: crate::image_set::BuilderBootAbiRange::LEGACY_ONLY,
+        };
+        assert!(matches!(
+            check_embedded_image_set_for_backend(
+                &verified.embedded_image_sets[0],
+                GuestArch::X86_64,
+                &backend,
+                &host,
+            ),
+            Err(ImageSetError::MissingDeviceCapability {
+                capability: GuestDeviceRequirement::DmVerity,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn embedded_bundle_bytes_and_identity_are_host_independent() {
+        let sk = SigningKey::from_bytes(&[42; 32]);
+        let (image_set, bytes) = complete_image_set();
+        let first = embedded_bundle(&sk, &image_set, &bytes);
+        let second = embedded_bundle(&sk, &image_set, &bytes);
+        assert_eq!(first, second);
+        assert_eq!(bundle_sha256(&first), bundle_sha256(&second));
+    }
+
+    #[test]
+    fn install_populates_and_reverifies_the_image_set_cas() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let archive = embedded_bundle(&sk, &image_set, &bytes);
+        let temp = tempfile::tempdir().expect("tempdir");
+        let registry = BundleRegistry::new(temp.path().join("bundles"));
+        let installed = registry
+            .install(&archive, &trust(&sk), false)
+            .expect("install complete bundle");
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).expect("verify");
+        let cache = registry
+            .embedded_image_set_cache_root()
+            .join(verified.embedded_image_sets[0].manifest_sha256.as_str());
+        assert!(cache.join("image-set.json").is_file());
+
+        let first_name = verified.embedded_image_sets[0]
+            .artifact_paths
+            .keys()
+            .next()
+            .expect("artifact name");
+        std::fs::write(cache.join("artifacts").join(first_name), b"tampered")
+            .expect("tamper cache");
+        let error = registry
+            .install(&archive, &trust(&sk), true)
+            .expect_err("tampered cache must fail closed");
+        assert!(
+            error.to_string().contains("failed re-verification"),
+            "unexpected error: {error}"
+        );
+        assert!(registry.install_dir(&installed.sha256).exists());
     }
 
     #[test]

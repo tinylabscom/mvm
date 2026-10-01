@@ -158,12 +158,15 @@ pub(super) fn unique_builder_vm_stage0_staging_dir(
 /// actually contain the init binary" check is `verify_stage0_rootfs_has_init`,
 /// run once at build time (it needs to parse the full ext4 tree).
 pub(super) fn validate_builder_vm_stage0_artifacts(dir: &std::path::Path) -> Result<()> {
-    validate_dev_image_artifacts(dir.join("vmlinux"), dir.join("rootfs.ext4")).with_context(|| {
-        format!(
-            "validating Stage 0 builder VM artifacts in {}",
-            dir.display()
-        )
-    })
+    validate_dev_image_artifacts(dir.join("vmlinux"), dir.join("rootfs.ext4")).with_context(
+        || {
+            format!(
+                "validating Stage 0 builder VM artifacts in {}",
+                dir.display()
+            )
+        },
+    )?;
+    mvm_build::builder_vm_image::validate_builder_vm_image_cache(dir).map_err(anyhow::Error::from)
 }
 
 /// Whether a Stage 0 bootstrap is currently in flight on this host — i.e. the
@@ -843,6 +846,7 @@ fn stage_locked_builder_vm_image(
     let target = mvm_core::image_set::MemberTarget::Arch(arch);
     for (asset, cache_name) in [
         (format!("builder-vm-vmlinux-{arch}"), "vmlinux"),
+        (format!("builder-vm-{arch}.kernel.config"), "kernel.config"),
         (format!("builder-vm-rootfs-{arch}.ext4"), "rootfs.ext4"),
     ] {
         let artifact =
@@ -858,6 +862,7 @@ fn stage_locked_builder_vm_image(
         "cache_contract_version": mvm_build::builder_vm::BUILDER_VM_CACHE_CONTRACT_VERSION,
         "runtime_overlay_ready": true,
         "vsock_egress_ready": true,
+        "no_network_devices_ready": true,
     });
     std::fs::write(
         staging.join("manifest.json"),
@@ -1053,6 +1058,7 @@ fn fetched_builder_vm_provenance(
 struct PublishedBuilderVmManifest {
     system: String,
     vmlinux: PublishedArtifactPin,
+    kernel_config: PublishedArtifactPin,
     rootfs_ext4: PublishedArtifactPin,
 }
 
@@ -1093,6 +1099,12 @@ fn check_published_builder_vm_manifest(
     }
     for (field, pin, asset, cache_name) in [
         ("vmlinux", &manifest.vmlinux, &names.kernel, "vmlinux"),
+        (
+            "kernel_config",
+            &manifest.kernel_config,
+            &names.kernel_config,
+            "kernel.config",
+        ),
         (
             "rootfs_ext4",
             &manifest.rootfs_ext4,
@@ -1153,11 +1165,12 @@ fn promote_fetched_builder_vm_cache(
 /// Per-arch artifact filenames the release workflow's
 /// `builder-vm-image` job uploads. Pure function — no I/O, no
 /// network — so the unit test can verify naming matches the
-/// release.yml side without touching the network. Gated together
+/// build.yml side without touching the network. Gated together
 /// with [`download_builder_vm_image`].
 #[cfg(test)]
 pub(super) struct BuilderVmArtifactNames {
     pub(super) kernel: String,
+    pub(super) kernel_config: String,
     pub(super) rootfs: String,
     pub(super) cmdline: String,
     pub(super) manifest: String,
@@ -1169,6 +1182,7 @@ pub(super) fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
     let [kernel, rootfs, cmdline] = builder_vm_boot_assets(arch);
     BuilderVmArtifactNames {
         kernel,
+        kernel_config: format!("builder-vm-{arch}.kernel.config"),
         rootfs,
         cmdline,
         manifest: format!("builder-vm-{arch}.manifest.json"),
@@ -1191,12 +1205,17 @@ pub(super) fn builder_vm_boot_assets(arch: &str) -> [String; 3] {
 impl BuilderVmArtifactNames {
     /// Every asset the builder cache contract requires, in the order they are
     /// fetched, paired with the cache file it becomes.
-    pub(super) fn cache_files(&self) -> [BuilderVmCacheFile<'_>; 4] {
+    pub(super) fn cache_files(&self) -> [BuilderVmCacheFile<'_>; 5] {
         [
             BuilderVmCacheFile {
                 label: "kernel",
                 asset: &self.kernel,
                 cache_name: "vmlinux",
+            },
+            BuilderVmCacheFile {
+                label: "kernel config",
+                asset: &self.kernel_config,
+                cache_name: "kernel.config",
             },
             BuilderVmCacheFile {
                 label: "rootfs",

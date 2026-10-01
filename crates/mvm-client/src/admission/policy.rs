@@ -315,6 +315,7 @@ mod bundle_pin_tests {
                     size_bytes: rootfs.len() as u64,
                 },
             ],
+            members: Vec::new(),
             verity: None,
             resources: None,
         };

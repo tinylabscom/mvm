@@ -4,6 +4,22 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn machine_check_artifact_help_names_bundle_verification_controls() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "check-artifact", "--help"])
+        .output()
+        .expect("run machine check-artifact help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in [".mvmpkg", "--trust-store", "--backend"] {
+        assert!(
+            stdout.contains(expected),
+            "help missing {expected}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn ops_mcp_help_advertises_the_stdio_transport() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["ops", "mcp", "--help"])
@@ -1636,4 +1652,96 @@ fn machine_console_rejects_conflicting_session_flags() {
         );
         assert_eq!(out.status.code(), Some(2), "{args:?} is a usage error");
     }
+}
+
+/// `ops mcp stdio` binds the resolved `[tools]` policy as its tool gate: a
+/// denied tool is refused before any backend work, an allowed tool passes.
+#[test]
+fn ops_mcp_enforces_the_project_tool_policy() {
+    fn isolated(home: &std::path::Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+        command
+            .env("MVM_HOME", home)
+            .env("HOME", home)
+            .env("MVM_NO_AUTO_DEV", "1");
+        command
+    }
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    std::fs::write(
+        project.path().join("mvm.toml"),
+        "[policy]\ninclude = [\"agent-tools\"]\n",
+    )
+    .unwrap();
+    let groups = home.path().join("config/policy/groups");
+    std::fs::create_dir_all(&groups).unwrap();
+    std::fs::write(
+        groups.join("agent-tools.toml"),
+        "[tools]\nallow = [\"mvm.machine.list\"]\ndeny = [\"mvm.machine.stop\"]\n",
+    )
+    .unwrap();
+
+    let mut child = isolated(home.path())
+        .current_dir(project.path())
+        .args(["ops", "mcp", "stdio"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mvmctl ops mcp stdio");
+    let mut stdin = child.stdin.take().expect("stdin pipe");
+    let mut stdout = child.stdout.take().expect("stdout pipe");
+
+    let call = |id: u32, name: &str| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
+        )
+    };
+    use std::io::Write as _;
+    writeln!(stdin, "{}", call(1, "mvm.machine.stop")).expect("write denied call");
+    writeln!(stdin, "{}", call(2, "mvm.machine.list")).expect("write allowed call");
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":9,"method":"unknown/nope","params":{{}}}}"#
+    )
+    .expect("write terminator probe");
+    stdin.flush().expect("flush frames");
+
+    use std::io::BufRead as _;
+    let reader = std::io::BufReader::new(&mut stdout);
+    let mut denied_seen = false;
+    let mut allowed_seen = false;
+    for line in reader.lines() {
+        let line = line.expect("read a response line");
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let method = parsed["method"].as_str().unwrap_or("");
+        if method == "unknown/nope" || parsed["id"] == 9 {
+            break;
+        }
+        let is_error = parsed["result"]["isError"].as_bool().unwrap_or(false);
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        match parsed["id"].as_u64() {
+            Some(1) => {
+                assert!(is_error, "denied tool must refuse: {line}");
+                assert!(text.contains("policy denies"), "{text}");
+                denied_seen = true;
+            }
+            Some(2) => {
+                assert!(!is_error, "allowed tool must reach the backend: {line}");
+                allowed_seen = true;
+            }
+            _ => {}
+        }
+        if denied_seen && allowed_seen {
+            break;
+        }
+    }
+    assert!(denied_seen, "the denied call produced no refusal");
+    assert!(allowed_seen, "the allowed call produced no result");
+    let _ = child.kill();
+    let _ = child.wait();
 }

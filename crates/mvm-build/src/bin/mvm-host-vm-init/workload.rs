@@ -88,8 +88,7 @@ impl WorkloadVmm for FirecrackerVmm {
         let vsock_uds = state.vsock_path();
         let vsock_uds = vsock_uds.to_string_lossy();
 
-        // Hand-rolled to mirror `mvm_build::firecracker`'s
-        // `--config-file` shape: boot-source + a single root drive +
+        // Hand-rolled `--config-file` shape: boot-source + a single root drive +
         // machine-config + vsock. Field order is cosmetic (the
         // Firecracker config parser is order-insensitive).
         let mut out = String::with_capacity(512);

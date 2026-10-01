@@ -3455,6 +3455,16 @@ mod tests {
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    const VALID_BUILDER_MANIFEST: &str = r#"{"cache_contract_version":5,"runtime_overlay_ready":true,"vsock_egress_ready":true,"no_network_devices_ready":true}"#;
+
+    fn write_valid_builder_kernel_config(dir: &Path) {
+        std::fs::write(
+            dir.join("kernel.config"),
+            b"# CONFIG_NETDEVICES is not set\nCONFIG_VSOCKETS=y\nCONFIG_VIRTIO_VSOCKETS=y\n",
+        )
+        .expect("write builder kernel config");
+    }
+
     #[test]
     fn the_libkrun_supervisor_in_a_declared_host_binary_dir_wins() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -4516,6 +4526,7 @@ mod tests {
         std::fs::create_dir_all(&arch_dir).unwrap();
         std::fs::write(arch_dir.join("vmlinux"), b"kernel").unwrap();
         std::fs::write(arch_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        write_valid_builder_kernel_config(&arch_dir);
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
@@ -4547,6 +4558,7 @@ mod tests {
         std::fs::create_dir_all(&arch_dir).unwrap();
         std::fs::write(arch_dir.join("vmlinux"), b"kernel").unwrap();
         std::fs::write(arch_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        write_valid_builder_kernel_config(&arch_dir);
         std::fs::write(
             arch_dir.join("cmdline.txt"),
             "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
@@ -4554,13 +4566,13 @@ mod tests {
         .unwrap();
         std::fs::write(
             arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":4,"runtime_overlay_ready":false,"vsock_egress_ready":true}"#,
+            r#"{"cache_contract_version":5,"runtime_overlay_ready":false,"vsock_egress_ready":true,"no_network_devices_ready":true}"#,
         )
         .unwrap();
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version>="),
+            format!("{err}").contains("cache_contract_version>=5"),
             "got {err}"
         );
     }
@@ -4588,6 +4600,7 @@ mod tests {
         std::fs::create_dir_all(&arch_dir).unwrap();
         std::fs::write(arch_dir.join("vmlinux"), b"kernel").unwrap();
         std::fs::write(arch_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        write_valid_builder_kernel_config(&arch_dir);
         std::fs::write(
             arch_dir.join("cmdline.txt"),
             "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
@@ -4601,7 +4614,7 @@ mod tests {
 
         let err = ensure_builder_vm_image().unwrap_err();
         assert!(
-            format!("{err}").contains("cache_contract_version>="),
+            format!("{err}").contains("cache_contract_version>=5"),
             "got {err}"
         );
     }
@@ -4631,16 +4644,13 @@ mod tests {
         let rootfs = arch_dir.join("rootfs.ext4");
         std::fs::write(&kernel, b"kernel").unwrap();
         std::fs::write(&rootfs, b"rootfs").unwrap();
+        write_valid_builder_kernel_config(&arch_dir);
         std::fs::write(
             arch_dir.join("cmdline.txt"),
             "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
         )
         .unwrap();
-        std::fs::write(
-            arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
-        )
-        .unwrap();
+        std::fs::write(arch_dir.join("manifest.json"), VALID_BUILDER_MANIFEST).unwrap();
 
         let image = ensure_builder_vm_image().unwrap();
         match image {
@@ -4682,7 +4692,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' '# CONFIG_NETDEVICES is not set' 'CONFIG_VSOCKETS=y' 'CONFIG_VIRTIO_VSOCKETS=y' > \"$arch_dir/kernel.config\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":5,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true,\"no_network_devices_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -4730,6 +4740,7 @@ mod tests {
         let rootfs = source_arch_dir.join("rootfs.ext4");
         std::fs::write(&kernel, b"kernel").unwrap();
         std::fs::write(&rootfs, b"rootfs").unwrap();
+        write_valid_builder_kernel_config(&source_arch_dir);
         std::fs::write(
             source_arch_dir.join("cmdline.txt"),
             "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
@@ -4737,7 +4748,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             source_arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            VALID_BUILDER_MANIFEST,
         )
         .unwrap();
 
@@ -4768,12 +4779,13 @@ mod tests {
         }
     }
 
-    /// A shared-cache source dir as the real populators write it: the four
+    /// A shared-cache source dir as the real populators write it: the five
     /// artifacts plus the digest and provenance sidecars.
     fn write_shared_cache_source(source_arch_dir: &Path) {
         std::fs::create_dir_all(source_arch_dir).unwrap();
         std::fs::write(source_arch_dir.join("vmlinux"), b"kernel").unwrap();
         std::fs::write(source_arch_dir.join("rootfs.ext4"), b"rootfs").unwrap();
+        write_valid_builder_kernel_config(source_arch_dir);
         std::fs::write(
             source_arch_dir.join("cmdline.txt"),
             "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
@@ -4781,7 +4793,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             source_arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":4,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+            VALID_BUILDER_MANIFEST,
         )
         .unwrap();
         let sums = crate::cache_install::digest_manifest(
@@ -4905,7 +4917,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' '# CONFIG_NETDEVICES is not set' 'CONFIG_VSOCKETS=y' 'CONFIG_VIRTIO_VSOCKETS=y' > \"$arch_dir/kernel.config\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":5,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true,\"no_network_devices_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -4930,7 +4942,7 @@ mod tests {
             std::fs::read_to_string(target_arch_dir.join("manifest.json"))
                 .unwrap()
                 .trim(),
-            "{\"cache_contract_version\":4,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
+            VALID_BUILDER_MANIFEST
         );
         match image {
             BuilderVmImage::Rootfs {

@@ -103,10 +103,42 @@ pub enum ServerError {
     Io(#[from] io::Error),
 }
 
+/// Why a policy gate refused one tool call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolGateDenial {
+    /// A short refusal reason safe to show the caller, e.g.
+    /// `"policy denies this tool (tools.deny)"`.
+    pub reason: String,
+}
+
+impl ToolGateDenial {
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+}
+
+/// A policy gate consulted before every `tools/call`.
+///
+/// The server deliberately holds no policy: this crate owns JSON-RPC framing
+/// and DTO translation only. The embedding surface supplies a gate built
+/// from the resolved workload policy, and the gate resolves allow/deny/ask
+/// itself, failing closed. An unlisted tool the gate does not explicitly
+/// allow is the gate's denial to issue.
+pub trait ToolCallGate: Send + Sync {
+    /// Decide one call. Blocking: an `ask` implementation prompts on its own
+    /// thread and the server serializes calls, so one prompt is outstanding
+    /// at a time.
+    fn authorize(&self, tool: &str, arguments: &Map<String, Value>) -> Result<(), ToolGateDenial>;
+}
+
 /// Stateless request adapter with one process-lifetime capability snapshot.
 pub struct McpServer {
     client: Arc<dyn MvmClient>,
     drive: Option<Arc<dyn DriveTools>>,
+    tool_gate: Option<Arc<dyn ToolCallGate>>,
     capabilities: OnceLock<BackendCapabilityReport>,
     limits: ServerLimits,
 }
@@ -126,12 +158,21 @@ impl McpServer {
         self
     }
 
+    /// Bind the policy gate consulted before every `tools/call`. A server
+    /// never given one admits every tool the static catalog accepts.
+    #[must_use]
+    pub fn with_tool_gate(mut self, gate: Arc<dyn ToolCallGate>) -> Self {
+        self.tool_gate = Some(gate);
+        self
+    }
+
     /// Construct a server with explicit transport/output bounds.
     #[must_use]
     pub fn with_limits(client: Arc<dyn MvmClient>, limits: ServerLimits) -> Self {
         Self {
             client,
             drive: None,
+            tool_gate: None,
             capabilities: OnceLock::new(),
             limits,
         }
@@ -256,6 +297,11 @@ impl McpServer {
                 };
                 if !tool_enabled(&call.name, &report.operations, self.drive.is_some()) {
                     return response_error(id, -32602, "unknown or unavailable tool");
+                }
+                if let Some(gate) = &self.tool_gate {
+                    if let Err(denial) = gate.authorize(&call.name, &call.arguments) {
+                        return response_result(id, ToolFailure::Gate(denial).into_tool_result());
+                    }
                 }
                 match self.call_tool(&call.name, call.arguments, report).await {
                     Ok(value) => response_result(id, self.tool_success(value)),
@@ -1095,6 +1141,8 @@ const GENERIC_INPUT_ERROR_CODE: &str = "INVALID_INPUT";
 /// The tool server's own output pipeline failed (serialization) rather than
 /// the backend or the caller's request.
 const INTERNAL_ERROR_CODE: &str = "INTERNAL";
+/// `_meta.code` for a call the policy gate refused.
+const POLICY_GATE_ERROR_CODE: &str = "policy_gate_denied";
 /// A successful result exceeded the server's configured output-size limit.
 const OUTPUT_TOO_LARGE_ERROR_CODE: &str = "OUTPUT_TOO_LARGE";
 
@@ -1142,6 +1190,9 @@ enum ToolFailure {
     Internal(&'static str),
     /// The shared local drive controller refused or failed the operation.
     Drive(DriveError),
+    /// The policy gate refused the call before any client work. Distinct
+    /// from `Input`: the arguments were well-formed; the policy said no.
+    Gate(ToolGateDenial),
 }
 
 impl ToolFailure {
@@ -1168,6 +1219,7 @@ impl ToolFailure {
                 let message = format!("drive operation failed: {error}");
                 tool_error(&message, error.code(), error.retryable())
             }
+            Self::Gate(denial) => tool_error(&denial.reason, POLICY_GATE_ERROR_CODE, false),
         }
     }
 }
@@ -1594,5 +1646,97 @@ mod tests {
         assert_eq!(result["isError"], true);
         assert_eq!(result["_meta"]["code"], "INTERNAL");
         assert_eq!(result["_meta"]["retryable"], false);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use std::sync::Arc;
+
+    use mvm_client::mock::MockBackend;
+
+    use super::*;
+
+    /// A gate that refuses one named tool, for the wiring test.
+    struct RefuseList {
+        denied: &'static str,
+    }
+
+    impl ToolCallGate for RefuseList {
+        fn authorize(
+            &self,
+            tool: &str,
+            _arguments: &Map<String, Value>,
+        ) -> Result<(), ToolGateDenial> {
+            if tool == self.denied {
+                Err(ToolGateDenial::new("policy denies this tool"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn call_frame(name: &str) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{{"name":"{name}","arguments":{{}}}}}}"#
+        )
+    }
+
+    #[test]
+    fn a_bound_gate_refuses_before_any_backend_work() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let server =
+            McpServer::new(Arc::new(MockBackend::default())).with_tool_gate(Arc::new(RefuseList {
+                denied: "mvm.backend_capabilities",
+            }));
+        let response = runtime
+            .block_on(server.handle_json(&call_frame("mvm.backend_capabilities")))
+            .expect("a request gets a response");
+        let parsed: Value = serde_json::from_str(&response).expect("response is json");
+        assert!(parsed["result"]["isError"].as_bool().unwrap_or(false));
+        let text = parsed["result"]["content"][0]["text"]
+            .as_str()
+            .expect("error text");
+        assert!(text.contains("policy denies"), "{text}");
+    }
+
+    #[test]
+    fn an_admitted_call_reaches_the_backend() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let server =
+            McpServer::new(Arc::new(MockBackend::default())).with_tool_gate(Arc::new(RefuseList {
+                denied: "other.tool",
+            }));
+        let response = runtime
+            .block_on(server.handle_json(&call_frame("mvm.backend_capabilities")))
+            .expect("a request gets a response");
+        let parsed: Value = serde_json::from_str(&response).expect("response is json");
+        assert!(
+            !parsed["result"]["isError"].as_bool().unwrap_or(false),
+            "{response}"
+        );
+    }
+
+    #[test]
+    fn a_server_without_a_gate_unchanged() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let server = McpServer::new(Arc::new(MockBackend::default()));
+        let response = runtime
+            .block_on(server.handle_json(&call_frame("mvm.backend_capabilities")))
+            .expect("a request gets a response");
+        let parsed: Value = serde_json::from_str(&response).expect("response is json");
+        assert!(
+            !parsed["result"]["isError"].as_bool().unwrap_or(false),
+            "{response}"
+        );
     }
 }

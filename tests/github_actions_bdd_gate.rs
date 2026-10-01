@@ -64,13 +64,17 @@ fn canonical_bdd_workflow_runs_the_full_suite() {
 }
 
 #[test]
-fn canonical_bdd_workflow_runs_a_kvm_live_witness_in_the_merge_queue() {
-    let contents = workflow("bdd.yml");
-    let live = job_block(&contents, "bdd-live");
+fn live_bdd_witness_runs_in_extended_ci_not_the_merge_queue() {
+    let required = workflow("bdd.yml");
+    assert!(
+        !required.contains("bdd-live:") && !required.contains("just bdd::live-ci"),
+        "the potentially 45-minute live lifecycle must not serialize the merge queue"
+    );
+
+    let extended = workflow("ci-full.yml");
+    let live = job_block(&extended, "bdd-live-readme");
 
     for expected in [
-        "github.event_name == 'merge_group'",
-        "github.event_name == 'workflow_dispatch'",
         "runs-on: ubuntu-latest",
         "timeout-minutes: 45",
         "FC_VERSION: v1.17.0",
@@ -81,7 +85,7 @@ fn canonical_bdd_workflow_runs_a_kvm_live_witness_in_the_merge_queue() {
     ] {
         assert!(
             live.contains(expected),
-            "the merge-queue live BDD job must contain {expected:?}"
+            "the nightly live BDD job must contain {expected:?}"
         );
     }
 }

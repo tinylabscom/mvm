@@ -39,15 +39,28 @@ schema = ["pydantic>=2.0"]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.build.targets.wheel]
+# The wheel's platform tag is decided by hatch_build.py: when the
+# publish workflow has embedded the per-platform host library at
+# mvm/_native/, the wheel is platform-tagged so a platform's pip never
+# installs a wheel without its transport; a build without the library
+# (local development) stays universal and works everywhere the
+# beside-mvmctl fallback reaches. The sdist stays universal — it carries
+# no binary.
+[tool.hatch.build.hooks.custom]
 packages = ["mvm"]
 
 [tool.hatch.build.targets.sdist]
 include = [
     "mvm/**",
+    "hatch_build.py",
     "README.md",
     "LICENSE",
     "pyproject.toml",
+    # The sdist is source-only: the host library is built per platform at
+    # wheel time, never shipped in the source archive.
+]
+exclude = [
+    "mvm/_native",
 ]
 
 # Dev-tool versions are pinned for reproducible SDK builds.

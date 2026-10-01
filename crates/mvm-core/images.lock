@@ -34,28 +34,28 @@ repository = "tinylabscom/mvm-images"
 [image_set]
 schema_version = 1
 repository = "tinylabscom/mvm-images"
-release_tag = "image-set/v0.2.2"
+release_tag = "image-set/v0.2.3"
 manifest_asset = "image-set.json"
-manifest_sha256 = "cf4b996b9907f136807a38a28e1a98469c46aa9a4088303176eecd29e5358811"
+manifest_sha256 = "70664d150607c17bcbd3c863958c8dd040e451e3d48864e74d293abe897f5920"
 
 [image_set.signing_identity]
 workflow = ".github/workflows/release.yml"
-tag_ref = "refs/tags/image-set/v0.2.2"
+tag_ref = "refs/tags/image-set/v0.2.3"
 
 # Copied from that exact signed manifest. Consumers compare this declaration
 # with the host before fetching a member; the pin-update workflow proves the
 # copy agrees with the signed root.
 [compatibility]
 guest_agent_protocol = { min = 2, max = 2 }
-builder_cache_contract = 4
-builder_boot_abi = 0
+builder_cache_contract = 5
+builder_boot_abi = 1
 
 # The boot image release the CLI expects. The boot image ships on its own
 # counter so a rootfs or kernel fix does not have to wait for a CLI release.
 # The whole tag, not a bare version, because it is a path segment in
 # `https://github.com/<repository>/releases/download/<tag>/<asset>`.
 [boot_image]
-release_tag = "image-set/v0.2.2"
+release_tag = "image-set/v0.2.3"
 
 # The Stage 0 bootstrap kernel — the one kernel that can be neither built nor
 # resolved by the ordinary kernel policy, because Stage 0 is what makes local
@@ -66,7 +66,7 @@ release_tag = "image-set/v0.2.2"
 # ext4 from this kernel and nothing a newer release is likely to change, so the
 # two tags are pinned separately even when they currently name the same release.
 [stage0_kernel]
-release_tag = "image-set/v0.2.2"
+release_tag = "image-set/v0.2.3"
 
 [stage0_kernel.artifact.aarch64]
 name = "stage0-vmlinux-aarch64"

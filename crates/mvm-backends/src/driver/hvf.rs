@@ -1440,6 +1440,9 @@ mod tests {
 
     #[test]
     fn driver_agent_bind_path_equals_the_host_resolver_probe() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated VM home");
+        env.isolate_mvm_home(home.path());
         // The live regression this pins closed: the detached mvm-hvf-supervisor
         // binds the `agent_socket` the driver hands it, while the host reaches the
         // guest agent through DevConsoleTransport::for_vm / vm_hvf_agent_socket. If

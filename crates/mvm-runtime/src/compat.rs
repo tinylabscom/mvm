@@ -10,10 +10,8 @@
 //! - **Libkrun**: `crates/mvm-libkrun/src/sys.rs` FFI mapping;
 //!   `crates/mvm-runtime/src/libkrun.rs` `DEFAULT_CMDLINE`; macOS-only so
 //!   `console=hvc0`; no jailer or snapshots (host process == supervisor).
-//! - **Qemu**: the dev/test backend in `crates/mvm-runtime/src/qemu.rs` uses
-//!   QEMU's unprivileged user-mode virtio network (`-netdev user`), not a host
-//!   TAP device. It provides transparent guest TCP/UDP for the dev tier; it
-//!   is not part of the production claim boundary.
+//! - **Qemu**: the dev/test workload driver passes `-nic none`; guest egress
+//!   uses the vsock endpoint, as with the production drivers.
 //!
 //! `MicrovmBackend` has no `Hvf` variant yet (a removed backend's row
 //! was deleted rather than repurposed); the raw HVF backend
@@ -93,7 +91,7 @@ use RootfsFormat as R;
 
 // Firecracker: source — FC API docs + crates/mvm-runtime/src/backend.rs.
 // x86_64 boots ELF vmlinux; aarch64 boots uncompressed arm64 Image.
-// ext4 rootfs + initramfs-cpio-gz initrd. Jailer available. TAP networking.
+// ext4 rootfs + initramfs-cpio-gz initrd. Jailer available. No guest NIC.
 static FIRECRACKER: BackendCompat = BackendCompat {
     backend: MicrovmBackend::Firecracker,
     guest_arches: &[X86_64, Aarch64],
@@ -102,7 +100,7 @@ static FIRECRACKER: BackendCompat = BackendCompat {
     required_boot_args: &["console=ttyS0", "reboot=k", "panic=1"],
     supports_snapshots: true,
     supports_jailer: true,
-    networking: NetworkingModel::Tap,
+    networking: NetworkingModel::None,
 };
 
 // Libkrun: source — crates/mvm-libkrun/src/sys.rs to_krun_format() +
@@ -134,9 +132,7 @@ static LIBKRUN: BackendCompat = BackendCompat {
     networking: NetworkingModel::None,
 };
 
-// QEMU is the Linux dev/test substrate. Its user-mode virtio network gives the
-// guest an ordinary NIC without requiring a host TAP, bridge, or firewall
-// setup. It remains outside the production egress claim boundary.
+// QEMU is the Linux dev/test substrate. It has no guest NIC; egress uses vsock.
 static QEMU: BackendCompat = BackendCompat {
     backend: MicrovmBackend::Qemu,
     guest_arches: &[X86_64, Aarch64],
@@ -145,7 +141,7 @@ static QEMU: BackendCompat = BackendCompat {
     required_boot_args: &["console=ttyS0"],
     supports_snapshots: false,
     supports_jailer: false,
-    networking: NetworkingModel::UserModeVirtio,
+    networking: NetworkingModel::None,
 };
 
 // ── lookup ────────────────────────────────────────────────────────────────────
@@ -214,9 +210,13 @@ mod tests {
     }
 
     #[test]
-    fn qemu_uses_rootless_user_mode_virtio_networking() {
+    fn qemu_has_no_guest_nic() {
         let c = compat(MicrovmBackend::Qemu);
-        assert_eq!(c.networking, NetworkingModel::UserModeVirtio);
+        assert_eq!(c.networking, NetworkingModel::None);
+        assert_eq!(
+            compat(MicrovmBackend::Firecracker).networking,
+            NetworkingModel::None
+        );
         assert!(!c.supports_snapshots);
         assert!(!c.supports_jailer);
     }

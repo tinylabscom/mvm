@@ -36,6 +36,14 @@ zero-second Lint aggregate waited another five minutes for runner admission.
 A successful merge-group run consumed 204 runner-minutes across 15 substantive
 lanes. Fourteen open pull requests were competing for the same 20-job pool.
 
+On 2026-09-30, the latest 100 merged pull requests took 5h25m at the median and
+20h50m at p90 from creation to merge. Head validation itself took 62 minutes at
+the median even though its longest common job took 22 minutes. In 23 successful
+merge-group runs, jobs started 4.7 minutes after the workflow at the median and
+46.6 minutes at p90; the six-second required aggregates waited as long as
+80-87 minutes. The same expensive matrix ran first on the pull-request commit
+and then on the integrated merge-group commit.
+
 ## Work
 
 - [x] Add structural regression coverage for scope-first scheduling,
@@ -64,12 +72,25 @@ lanes. Fourteen open pull requests were competing for the same 20-job pool.
       every merge. It remains in `ci-full.yml` (nightly + manual dispatch) so
       the path is still exercised, and the structural tests assert it no longer
       blocks the `Test` aggregate.
+- [x] Make pull requests publish the stable `Lint` and `Test` contexts through
+      compile-free admission checks, and run the expensive matrix only against
+      the integrated merge-group commit. Structural tests pin every expensive
+      lane to that event boundary.
+- [x] Keep two speculative entries building. A one-entry experiment reduced
+      runner admission delay but serialized a nine-PR backlog; GitHub validates
+      entries independently, so the minimum merge count does not amortize one
+      CI run across the batch.
+- [x] Move the documented live BDD lifecycle to nightly Extended CI after live
+      queue runs spent 27-40 minutes inside it. Keep hermetic BDD and the
+      bounded locked-image boot witness in the merge gate.
+- [x] Remove source image, runtime-overlay and reproducibility builds from the
+      merge gate. mvm-images owns those canonical builds; the source-override
+      path remains available as a manual diagnostic.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
-- [ ] Land the workflow change through the merge queue, then update and read
-      back the live queue policy: use `HEADGREEN`, batch two validated entries
-      with a five-minute bound, and raise speculative width only to the level
-      supported by the measured post-consolidation runner demand.
+- [ ] Land the workflow change through the merge queue. The live queue policy
+      has been read back as `HEADGREEN`, two entries building, two-to-five
+      entries per merge, and a five-minute minimum-entry wait.
 - [ ] Record post-change PR and merge-group timings after this ordering change
       lands; compare p50/p90 wall time, scope admission, and total
       runner-minutes against the 2026-09-29 sample above.

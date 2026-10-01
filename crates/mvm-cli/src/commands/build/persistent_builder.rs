@@ -921,43 +921,7 @@ fn _force_read_use(r: HostVmResponseRead) -> HostVmResponseRead {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsString;
-    use std::sync::{LazyLock, Mutex, MutexGuard};
-
-    static ENV_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    struct MvmHomeGuard {
-        _lock: MutexGuard<'static, ()>,
-        previous: Option<OsString>,
-    }
-
-    impl MvmHomeGuard {
-        fn set(path: &Path) -> Self {
-            let lock = ENV_LOCK.lock().expect("lock MVM_HOME test guard");
-            let previous = std::env::var_os("MVM_HOME");
-            unsafe {
-                std::env::set_var("MVM_HOME", path);
-            }
-            Self {
-                _lock: lock,
-                previous,
-            }
-        }
-    }
-
-    impl Drop for MvmHomeGuard {
-        fn drop(&mut self) {
-            if let Some(previous) = &self.previous {
-                unsafe {
-                    std::env::set_var("MVM_HOME", previous);
-                }
-            } else {
-                unsafe {
-                    std::env::remove_var("MVM_HOME");
-                }
-            }
-        }
-    }
+    use mvm_core::util::test_env::TestEnv;
 
     fn session_record_fixture(boot_payload_digest: Option<&str>) -> SessionRecord {
         SessionRecord {
@@ -1275,7 +1239,8 @@ mod tests {
     #[test]
     fn checked_current_session_record_keeps_matching_payload() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let _guard = MvmHomeGuard::set(&scratch.path().join("mvm-home"));
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(scratch.path().join("mvm-home"));
         write_session_record(&session_record_fixture(Some("current-digest"))).expect("record");
 
         let record = checked_current_session_record_with_current(Some("current-digest"))
@@ -1286,7 +1251,8 @@ mod tests {
     #[test]
     fn checked_current_session_record_preserves_missing_record_error() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let _guard = MvmHomeGuard::set(&scratch.path().join("mvm-home"));
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(scratch.path().join("mvm-home"));
 
         let err = checked_current_session_record_with_current(Some("current-digest"))
             .expect_err("missing record must fail");
@@ -1301,7 +1267,8 @@ mod tests {
     fn checked_current_session_record_rejects_stale_payload_and_clears_record() {
         let scratch = tempfile::tempdir().expect("tempdir");
         let mvm_home = scratch.path().join("mvm-home");
-        let _guard = MvmHomeGuard::set(&mvm_home);
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(&mvm_home);
         write_session_record(&session_record_fixture(Some("stale-digest"))).expect("record");
 
         let err = checked_current_session_record_with_current(Some("current-digest"))

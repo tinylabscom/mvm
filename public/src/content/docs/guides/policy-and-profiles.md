@@ -276,8 +276,15 @@ missing one.
 
 ## Not yet
 
-- `[tools]` is parsed, merged, shown and answerable through `mvmctl why --tool`,
-  but nothing enforces it at runtime yet.
+- `[tools]` whole-tool decisions are enforced by the gate `mvmctl ops mcp`
+  binds: `deny` refuses before any backend work, `ask` puts every call to the
+  terminal approver (fail-closed with no terminal), `allow` admits, and
+  anything unlisted fails closed. Every non-allow decision is a
+  `ToolGateDecision` local audit entry. Per-tool `argv`/`routes`/`secrets`
+  detail is not enforced at the MCP seam (its arguments are tool-specific
+  JSON, not command lines or destinations) — that lands with the in-guest
+  mediation. `policy validate --strict` still refuses a policy that relies on
+  `[tools]` until that mediation ships.
 - Pack profiles (`namespace/name`) are refused.
 - Endpoint routes from a policy are refused on a persistent machine
   (`machine run --name`), the same as `--allow-endpoint`: they would not be

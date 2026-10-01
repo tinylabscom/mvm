@@ -26,7 +26,7 @@ use std::process::{Command, Stdio};
 fn aggregate_script() -> String {
     let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
         .expect("failed to read .github/workflows/ci.yml");
-    const STEP: &str = "- name: Require every test lane to pass";
+    const STEP: &str = "- name: Require every merge-group test lane to pass";
     let step = workflow
         .find(STEP)
         .expect("ci.yml must still have the test-aggregate step");
@@ -55,7 +55,7 @@ fn aggregate_script() -> String {
         "the aggregate script must be driven purely by env, found an Actions expression:\n{script}"
     );
     assert!(
-        script.contains("GUEST_IMAGE_RESULT"),
+        script.contains("NIX_RESULT"),
         "extracted the wrong block:\n{script}"
     );
     script
@@ -72,8 +72,6 @@ struct Verdict {
     bdd: &'static str,
     boot: &'static str,
     nix: &'static str,
-    guest_image_scope: &'static str,
-    guest_image: &'static str,
 }
 
 impl Verdict {
@@ -87,8 +85,6 @@ impl Verdict {
             bdd: "success",
             boot: "skipped",
             nix: "skipped",
-            guest_image_scope: "true",
-            guest_image: "skipped",
         }
     }
 
@@ -102,8 +98,6 @@ impl Verdict {
             bdd: "skipped",
             boot: "skipped",
             nix: "skipped",
-            guest_image_scope: "false",
-            guest_image: "skipped",
         }
     }
 
@@ -114,7 +108,6 @@ impl Verdict {
             event_name: "merge_group",
             boot: "success",
             nix: "success",
-            guest_image: "success",
             ..Self::in_scope()
         }
     }
@@ -128,18 +121,6 @@ impl Verdict {
         }
     }
 
-    /// Host-only code still runs the code matrix, but cannot change guest bytes.
-    fn queue_without_guest_image() -> Self {
-        Self {
-            event_name: "merge_group",
-            boot: "success",
-            nix: "success",
-            guest_image_scope: "false",
-            guest_image: "skipped",
-            ..Self::in_scope()
-        }
-    }
-
     /// `true` when the aggregate admits this combination.
     fn accepts(&self) -> bool {
         let mut child = Command::new("bash")
@@ -148,6 +129,11 @@ impl Verdict {
             .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
+            .env("CORE_RESULT", self.lanes)
+            .env("POLICY_RESULT", "success")
+            .env("FEATURES_RESULT", self.lanes)
+            .env("FEATURES_SUPPORT_RESULT", self.lanes)
+            .env("FEATURES_EMBED_RESULT", self.lanes)
             .env("WORKSPACE_RESULT", self.lanes)
             // The aarch64 workspace lane carries the same `code` scope as the
             // other four in the loop, so it moves with them rather than getting
@@ -159,8 +145,6 @@ impl Verdict {
             .env("BDD_RESULT", self.bdd)
             .env("BOOT_RESULT", self.boot)
             .env("NIX_RESULT", self.nix)
-            .env("GUEST_IMAGE_SCOPE", self.guest_image_scope)
-            .env("GUEST_IMAGE_RESULT", self.guest_image)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -187,14 +171,13 @@ fn a_fully_in_scope_green_run_is_admitted() {
     assert!(Verdict::in_scope().accepts());
     assert!(Verdict::queue_in_scope().accepts());
     assert!(Verdict::queue_out_of_scope().accepts());
-    assert!(Verdict::queue_without_guest_image().accepts());
 }
 
 /// The gate must not have been widened into a rubber stamp. Each of these is a
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 13] = [
+    let cases: [(&str, Verdict); 9] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -260,34 +243,6 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             Verdict {
                 nix: "skipped",
                 ..Verdict::queue_in_scope()
-            },
-        ),
-        (
-            "a failing tree-built guest witness",
-            Verdict {
-                guest_image: "failure",
-                ..Verdict::queue_in_scope()
-            },
-        ),
-        (
-            "a tree-built guest witness that skipped in the queue",
-            Verdict {
-                guest_image: "skipped",
-                ..Verdict::queue_in_scope()
-            },
-        ),
-        (
-            "a tree-built guest witness that ran while out of scope",
-            Verdict {
-                guest_image: "success",
-                ..Verdict::queue_without_guest_image()
-            },
-        ),
-        (
-            "an invalid guest-image scope",
-            Verdict {
-                guest_image_scope: "unexpected",
-                ..Verdict::queue_without_guest_image()
             },
         ),
     ];

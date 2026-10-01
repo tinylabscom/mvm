@@ -47,20 +47,55 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
+        VERSION=0.23.0
+        if command -v cargo-zigbuild >/dev/null 2>&1 \
+          && cargo-zigbuild --version | grep -q " ${VERSION}$"; then
+          echo "cargo-zigbuild $VERSION already installed at $(command -v cargo-zigbuild)"
+          exit 0
+        fi
 
-        # crates.io occasionally returns partial downloads on hosted runners.
-        # Retry the pinned install instead of failing CI before fmt/clippy run.
-        for attempt in 1 2 3; do
-          if CARGO_NET_RETRY=10 cargo install cargo-zigbuild --version 0.23.0 --locked; then
-            exit 0
-          fi
-
-          if [ "$attempt" -eq 3 ]; then
+        OS=$(uname -s)
+        ARCH=$(uname -m)
+        case "$OS:$ARCH" in
+          Linux:x86_64)
+            TARGET=x86_64-unknown-linux-gnu
+            SHA256=c636e4f72b6f40a40ddf0414c8c6056f78b87eea3be0edf01f08d65fa028a373
+            ;;
+          Linux:aarch64|Linux:arm64)
+            TARGET=aarch64-unknown-linux-gnu
+            SHA256=5917d5416884cba0f23c2653016f7f2df2ec04e74eb6b259598fecc066f8c429
+            ;;
+          Darwin:x86_64)
+            TARGET=x86_64-apple-darwin
+            SHA256=f8c746d12dfae79ac0704c5aa13631a05b24c3e4ee7216eb40f70943bd8ca7b1
+            ;;
+          Darwin:arm64|Darwin:aarch64)
+            TARGET=aarch64-apple-darwin
+            SHA256=3d8f1ad296d3f3e97122607f7c972393c6329801027acb71bb7d17a4e30ef092
+            ;;
+          *)
+            echo "::error::no pinned cargo-zigbuild binary for $OS/$ARCH" >&2
             exit 1
-          fi
+            ;;
+        esac
 
-          sleep "$((attempt * 10))"
-        done
+        ARCHIVE="cargo-zigbuild-${TARGET}.tar.xz"
+        URL="https://github.com/rust-cross/cargo-zigbuild/releases/download/v${VERSION}/${ARCHIVE}"
+        WORK=$(mktemp -d)
+        trap 'rm -rf "$WORK"' EXIT
+        curl -fL --retry 3 --retry-all-errors --retry-delay 2 \
+          -o "$WORK/$ARCHIVE" "$URL"
+        if [ "$OS" = Darwin ]; then
+          printf '%s  %s\n' "$SHA256" "$WORK/$ARCHIVE" | shasum -a 256 -c -
+        else
+          printf '%s  %s\n' "$SHA256" "$WORK/$ARCHIVE" | sha256sum -c -
+        fi
+        tar -xJf "$WORK/$ARCHIVE" -C "$WORK"
+        mkdir -p "${CARGO_HOME:-$HOME/.cargo}/bin"
+        install -m 0755 \
+          "$WORK/cargo-zigbuild-${TARGET}/cargo-zigbuild" \
+          "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-zigbuild"
+        cargo-zigbuild --version
 
     - name: Install embedded Rust toolchain and musl targets
       id: install_rust
