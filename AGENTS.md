@@ -99,7 +99,9 @@ acceptable. Remove the worktree after merge (`git worktree remove ...`).
 
 **Isolate mutable state** per worktree by overriding three env vars (or just
 `source scripts/dev-env.sh`, resolved relative to the worktree root; `bin/dev`
-wraps `cargo run` with the same env; `.envrc.example` covers direnv users):
+builds and runs this checkout's `mvmctl` via `just embed` on the `dev`
+contributor surface (so it can verify published image-set signatures),
+with pair-isolated state; `.envrc.example` covers direnv users):
 
 ```bash
 export MVM_HOME="$PWD/.mvm-test"
@@ -159,7 +161,7 @@ No task is complete without all of:
 ## Test expectations
 
 - Broad BDD coverage of user-visible workflows (`mvm-conformance`, `--features
-  bdd`); add/update scenarios when behavior changes, and keep focused unit and
+bdd`); add/update scenarios when behavior changes, and keep focused unit and
   integration tests for lower-level logic and failure paths.
 - New types: serde roundtrip tests, default-value tests where applicable.
 - New protocol/wire code: roundtrip through mock I/O (`UnixStream::pair()`),

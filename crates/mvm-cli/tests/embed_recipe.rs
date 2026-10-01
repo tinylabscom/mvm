@@ -65,7 +65,7 @@ fn embed_recipe_builds_native_vm_helpers_in_the_requested_profile() {
         .find("build -p mvm-hostd --bins {{ARGS}}")
         .expect("embed recipe builds native per-VM helpers");
     let mvmctl_build = recipe
-        .find("build --features embed-host-bins {{ARGS}}")
+        .find(r#""${CARGO[@]}" build --features "$FEATURES" {{ARGS}}"#)
         .expect("embed recipe builds embedded mvmctl");
     assert!(
         helper_build < mvmctl_build,

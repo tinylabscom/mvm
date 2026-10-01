@@ -5,18 +5,23 @@
 //! reads a known, derived part of the mvm tree, the key names a digest of
 //! exactly that part instead, and an edit elsewhere leaves it alone.
 //!
-//! The builder image is the one such role today. Its evaluation reads the Nix
-//! sources in [`BUILDER_FLAKE_NIX_INPUTS`], compiles `mvm-setpriv` from source,
-//! and, while the image checkout bakes them, installs host binaries compiled
-//! from the `mvm-build` package. Those three are its consumed inputs.
+//! Two role families have such a derived input set. The builder image's
+//! evaluation reads the Nix sources in [`BUILDER_FLAKE_NIX_INPUTS`], compiles
+//! `mvm-setpriv` from source, and, while the image checkout bakes them,
+//! installs host binaries compiled from the `mvm-build` package. Those three
+//! are its consumed inputs. The workload-image roles (`default-tenant`,
+//! `rootless-tenant`, `runtime-overlay`, `initramfs`) evaluate through
+//! `nix/lib/workspace-filter.nix`, which admits the workspace sources cargo
+//! can read while building any workspace target; the whole filtered workspace
+//! walk is their consumed input.
 //!
 //! A narrow key is only as good as its agreement with what the image really
 //! reads; one narrower than the reads serves a stale image. So the image
-//! checkout's own builder source is scanned at key time for every place it
-//! reads the mvm tree, and a read outside the known inputs — or no recognisable
-//! read at all, which means the scan has stopped seeing them — falls back to
-//! the whole-checkout identity. The fallback is always safe: it is the key
-//! every role had before.
+//! checkout's own image source is scanned at key time for every place it
+//! reads the mvm tree, and a read outside the known inputs — or no
+//! recognisable read at all, which means the scan has stopped seeing them —
+//! falls back to the whole-checkout identity. The fallback is always safe: it
+//! is the key every role had before.
 
 use std::fmt;
 use std::path::Path;
@@ -30,11 +35,23 @@ use super::key::{ImageBuildRole, ImageBuildTarget};
 use crate::builder_image_inputs::BUILDER_FLAKE_NIX_INPUTS;
 use crate::image_source::LocalImageCheckout;
 use crate::image_source::build::contract_for;
+use crate::pipeline::build_cache::mvm_workspace_source_digest;
 use crate::source_closure::{SETPRIV_PACKAGE, fold_package_source_identity};
 use crate::workspace_graph::{hash_file, hash_tree};
 
-/// Domain tag for the consumed-input digest, so it can equal no other digest.
+/// Domain tag for the builder image's consumed-input digest, so it can equal
+/// no other digest.
 const CONSUMED_DOMAIN: &[u8] = b"mvm consumed inputs v1\n";
+
+/// Domain tag for the workload-image roles' consumed-input digest, distinct
+/// from the builder's so the two can never collide.
+const IMAGE_ROLE_CONSUMED_DOMAIN: &[u8] = b"mvm image-role consumed inputs v1\n";
+
+/// The mvm-tree reads the workload-image checkouts' `image.nix` files make:
+/// the workspace manifest and everything under `nix/`. The workspace walk
+/// covers both, and a superset of anything `nix/lib/workspace-filter.nix`
+/// admits.
+const IMAGE_ROLE_LISTED_INPUTS: &[&str] = &["Cargo.toml", "nix"];
 
 /// The package the image checkout's `scripts/build-host-binaries.sh` compiles
 /// the builder's host binaries from.
@@ -97,40 +114,73 @@ fn consumed_inputs(
     mvm_root: &Path,
     target: &ImageBuildTarget,
 ) -> Result<Option<Sha256Hex>, String> {
-    let ImageBuildRole::BuilderVm = target.role else {
-        return Ok(None);
-    };
-    let Ok(contract) = contract_for(target) else {
-        return Ok(None);
-    };
+    match target.role {
+        ImageBuildRole::BuilderVm => {
+            let Ok(contract) = contract_for(target) else {
+                return Ok(None);
+            };
+            let image_source = images_root
+                .join("images")
+                .join(target.role.name())
+                .join("image.nix");
+            let text = std::fs::read_to_string(&image_source)
+                .map_err(|e| format!("reading {}: {e}", image_source.display()))?;
+            check_reads_are_listed(&mvm_source_reads(&text), BUILDER_FLAKE_NIX_INPUTS)
+                .map_err(|reason| format!("{}: {reason}", image_source.display()))?;
+
+            let mut hasher = Sha256::new();
+            hasher.update(CONSUMED_DOMAIN);
+            fold_nix_inputs(&mut hasher, mvm_root, BUILDER_FLAKE_NIX_INPUTS);
+            fold_package_source_identity(&mut hasher, mvm_root, SETPRIV_PACKAGE)
+                .map_err(|e| format!("{e:#}"))?;
+            // ABI 1+ builder images bake no host binaries — they arrive at boot in
+            // mvmctl's initramfs payload — so the host-binary sources cannot affect
+            // the built image and stay out of the key.
+            let boot_abi = crate::image_source::build::checkout_builder_boot_abi(images_root)
+                .map_err(|e| format!("reading the checkout's builder boot ABI: {e:#}"))?;
+            if contract.needs_host_binaries && boot_abi == BuilderBootAbi::LEGACY {
+                fold_package_source_identity(&mut hasher, mvm_root, HOST_BINARY_PACKAGE)
+                    .map_err(|e| format!("{e:#}"))?;
+                fold_listed(
+                    &mut hasher,
+                    CARGO_CONFIG,
+                    hash_file(&mvm_root.join(CARGO_CONFIG)),
+                );
+            }
+            Ok(Some(Sha256Hex::from_bytes(&hasher.finalize())))
+        }
+        ImageBuildRole::DefaultTenant
+        | ImageBuildRole::RootlessTenant
+        | ImageBuildRole::RuntimeOverlay
+        | ImageBuildRole::Initramfs => image_role_consumed_inputs(images_root, mvm_root, target),
+        ImageBuildRole::Kernel => Ok(None),
+    }
+}
+
+/// The workload-image roles' consumed input: the whole mvm workspace source
+/// tree `nix/lib/workspace-filter.nix` admits, walked by the same tested walk
+/// the build cache uses. The role's `image.nix` is scanned first; a read
+/// outside [`IMAGE_ROLE_LISTED_INPUTS`] — or none at all — means the scan no
+/// longer sees the real reads, and the caller falls back to the whole
+/// checkout.
+fn image_role_consumed_inputs(
+    images_root: &Path,
+    mvm_root: &Path,
+    target: &ImageBuildTarget,
+) -> Result<Option<Sha256Hex>, String> {
     let image_source = images_root
         .join("images")
         .join(target.role.name())
         .join("image.nix");
     let text = std::fs::read_to_string(&image_source)
         .map_err(|e| format!("reading {}: {e}", image_source.display()))?;
-    check_reads_are_listed(&mvm_source_reads(&text), BUILDER_FLAKE_NIX_INPUTS)
+    check_reads_are_listed(&mvm_source_reads(&text), IMAGE_ROLE_LISTED_INPUTS)
         .map_err(|reason| format!("{}: {reason}", image_source.display()))?;
 
+    let workspace_digest = mvm_workspace_source_digest(mvm_root).map_err(|e| format!("{e:#}"))?;
     let mut hasher = Sha256::new();
-    hasher.update(CONSUMED_DOMAIN);
-    fold_nix_inputs(&mut hasher, mvm_root, BUILDER_FLAKE_NIX_INPUTS);
-    fold_package_source_identity(&mut hasher, mvm_root, SETPRIV_PACKAGE)
-        .map_err(|e| format!("{e:#}"))?;
-    // ABI 1+ builder images bake no host binaries — they arrive at boot in
-    // mvmctl's initramfs payload — so the host-binary sources cannot affect
-    // the built image and stay out of the key.
-    let boot_abi = crate::image_source::build::checkout_builder_boot_abi(images_root)
-        .map_err(|e| format!("reading the checkout's builder boot ABI: {e:#}"))?;
-    if contract.needs_host_binaries && boot_abi == BuilderBootAbi::LEGACY {
-        fold_package_source_identity(&mut hasher, mvm_root, HOST_BINARY_PACKAGE)
-            .map_err(|e| format!("{e:#}"))?;
-        fold_listed(
-            &mut hasher,
-            CARGO_CONFIG,
-            hash_file(&mvm_root.join(CARGO_CONFIG)),
-        );
-    }
+    hasher.update(IMAGE_ROLE_CONSUMED_DOMAIN);
+    fold_listed(&mut hasher, "mvm-workspace", workspace_digest);
     Ok(Some(Sha256Hex::from_bytes(&hasher.finalize())))
 }
 
@@ -170,8 +220,8 @@ fn check_reads_are_listed(reads: &[String], listed: &[&str]) -> Result<(), Strin
             .any(|input| read.as_str() == *input || read.starts_with(&format!("{input}/")))
     }) {
         Some(unlisted) => Err(format!(
-            "reads `{unlisted}` from the mvm source, which is not among the builder image's \
-             listed inputs"
+            "reads `{unlisted}` from the mvm source, which is not among the image's listed \
+             inputs"
         )),
         None => Ok(()),
     }
@@ -204,6 +254,27 @@ fn fold_listed(hasher: &mut Sha256, path: &str, sha: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The read shapes the shipped workload-image checkouts' `image.nix`
+    /// files use: the workspace filter, the root flake, and the workspace
+    /// manifest.
+    const IMAGE_ROLE_FIXTURE_NIX: &str = r#"
+        filter = import (workspaceRoot + "/nix/lib/workspace-filter.nix");
+        mvm = (import (workspaceRoot + "/nix/flake.nix")).outputs { };
+        manifest = workspaceRoot + "/Cargo.toml";
+    "#;
+
+    /// A fixture target for `role` whose `image.nix` carries the real read
+    /// shapes, written into a tempdir image checkout.
+    fn fixture_target(role: ImageBuildRole, images: &Path) -> ImageBuildTarget {
+        let source = images.join("images").join(role.name()).join("image.nix");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, IMAGE_ROLE_FIXTURE_NIX).unwrap();
+        ImageBuildTarget {
+            role,
+            attr: crate::image_source::FlakeAttr::new("default").unwrap(),
+        }
+    }
 
     #[test]
     fn both_read_forms_are_found_and_other_paths_are_not() {
@@ -271,13 +342,95 @@ mod tests {
         assert!(matches!(digest, Ok(Some(_))), "{digest:?}");
     }
 
-    /// The builder evaluation reaches the mvm tree through `nix/flake.nix`, so
-    /// every path that file names relative to itself has to be a listed input
-    /// too. The shipped flake is scanned, not a copy of it. `nix/profiles` is
-    /// the one exception: it feeds only the flake's NixOS test configurations,
-    /// which no image evaluation forces.
+    /// The workload-image roles resolve to a consumed-input digest against
+    /// the shipped workspace, so a tenant or overlay image built against it
+    /// is keyed on the workspace sources rather than the whole checkout.
+    /// Asserted for the same reason as the builder test above.
     #[test]
-    fn every_path_the_shipped_nix_flake_names_is_a_listed_input() {
+    fn the_shipped_tree_resolves_image_roles_to_a_consumed_input_digest() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        let images = tempfile::tempdir().expect("tempdir");
+
+        for role in [
+            ImageBuildRole::DefaultTenant,
+            ImageBuildRole::RuntimeOverlay,
+        ] {
+            let target = fixture_target(role, images.path());
+            let digest = consumed_inputs(images.path(), &workspace, &target);
+            assert!(matches!(digest, Ok(Some(_))), "{role}: {digest:?}");
+        }
+    }
+
+    /// The real read shapes resolve narrowly for a workload-image role.
+    #[test]
+    fn an_image_role_with_real_read_shapes_resolves_to_a_digest() {
+        let mvm = tempfile::tempdir().expect("tempdir");
+        let images = tempfile::tempdir().expect("tempdir");
+        let target = fixture_target(ImageBuildRole::RuntimeOverlay, images.path());
+
+        let digest = consumed_inputs(images.path(), mvm.path(), &target);
+
+        assert!(matches!(digest, Ok(Some(_))), "{digest:?}");
+    }
+
+    /// A workload-image `image.nix` that reads outside `Cargo.toml`/`nix` can
+    /// no longer be proven to read only the listed inputs, so the role must
+    /// not resolve to a narrow digest; the caller keys on the whole checkout
+    /// instead, logging the reason exactly as it does for the builder.
+    #[test]
+    fn an_image_role_reading_outside_the_workspace_filter_falls_back() {
+        let mvm = tempfile::tempdir().expect("tempdir");
+        let images = tempfile::tempdir().expect("tempdir");
+        let target = fixture_target(ImageBuildRole::RuntimeOverlay, images.path());
+        let source = images
+            .path()
+            .join("images")
+            .join(target.role.name())
+            .join("image.nix");
+        std::fs::write(
+            &source,
+            r#"extra = workspaceRoot + "/crates/mvm-build/src/lib.rs";"#,
+        )
+        .unwrap();
+
+        let digest = consumed_inputs(images.path(), mvm.path(), &target);
+
+        assert!(
+            !matches!(digest, Ok(Some(_))),
+            "an unlisted read must fall back to the whole checkout: {digest:?}"
+        );
+    }
+
+    /// No recognisable read at all means the scan has drifted from the real
+    /// `image.nix`, which must fall back the same way.
+    #[test]
+    fn an_image_role_with_no_recognisable_read_falls_back() {
+        let mvm = tempfile::tempdir().expect("tempdir");
+        let images = tempfile::tempdir().expect("tempdir");
+        let target = fixture_target(ImageBuildRole::RuntimeOverlay, images.path());
+        let source = images
+            .path()
+            .join("images")
+            .join(target.role.name())
+            .join("image.nix");
+        std::fs::write(&source, "{ }: { }").unwrap();
+
+        let digest = consumed_inputs(images.path(), mvm.path(), &target);
+
+        assert!(
+            !matches!(digest, Ok(Some(_))),
+            "no recognisable read must fall back to the whole checkout: {digest:?}"
+        );
+    }
+
+    /// Every `./` path the shipped `nix/flake.nix` names, scanned once and
+    /// checked by both input-set tests. `nix/profiles` is the one exception:
+    /// it feeds only the flake's NixOS test configurations, which no image
+    /// evaluation forces.
+    fn paths_the_shipped_nix_flake_names() -> Vec<String> {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -297,6 +450,15 @@ mod tests {
             rest = &after[end..];
         }
         assert!(!named.is_empty(), "the scan found nothing to check");
+        named
+    }
+
+    /// The builder evaluation reaches the mvm tree through `nix/flake.nix`, so
+    /// every path that file names relative to itself has to be a listed input
+    /// too. The shipped flake is scanned, not a copy of it.
+    #[test]
+    fn every_path_the_shipped_nix_flake_names_is_a_listed_input() {
+        let named = paths_the_shipped_nix_flake_names();
         let unlisted: Vec<&String> = named
             .iter()
             .filter(|path| {
@@ -308,6 +470,26 @@ mod tests {
         assert!(
             unlisted.is_empty(),
             "nix/flake.nix names paths the builder image key does not hash: {unlisted:?}"
+        );
+    }
+
+    /// The workload-image roles reach the mvm tree through the same
+    /// `nix/flake.nix`, and their listed inputs (`Cargo.toml`, `nix`) have to
+    /// cover every path it names as well.
+    #[test]
+    fn every_path_the_shipped_nix_flake_names_is_an_image_role_input() {
+        let named = paths_the_shipped_nix_flake_names();
+        let unlisted: Vec<&String> = named
+            .iter()
+            .filter(|path| {
+                !path.starts_with("nix/profiles")
+                    && check_reads_are_listed(std::slice::from_ref(path), IMAGE_ROLE_LISTED_INPUTS)
+                        .is_err()
+            })
+            .collect();
+        assert!(
+            unlisted.is_empty(),
+            "nix/flake.nix names paths the image-role key does not hash: {unlisted:?}"
         );
     }
 }

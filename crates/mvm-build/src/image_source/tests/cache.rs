@@ -834,3 +834,63 @@ fn a_flake_attribute_is_one_plain_segment() {
     }
     assert!(serde_json::from_str::<FlakeAttr>("\"a/b\"").is_err());
 }
+
+/// The acceptance a seed has to earn: an entry seeded from another root
+/// verifies on lookup there — same key, same manifest digest, same bytes.
+#[test]
+fn a_seeded_cache_answers_the_lookup_the_donor_satisfied() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    fx.publish(&key);
+    let seeded = LocalImageCache::at(fx.tmp.path().join("seeded-cache"));
+
+    assert!(seeded.seed_from(fx.cache.root()).unwrap());
+
+    let entry = expect_hit(seeded.lookup(&key, &fx.ctx()).expect("seeded lookup"));
+    assert_eq!(entry.dir, seeded.entry_dir(&key));
+    assert_eq!(
+        std::fs::read(entry.dir.join(kernel_name(GuestArch::Aarch64))).unwrap(),
+        KERNEL,
+        "the seeded entry carries the donor's bytes"
+    );
+    assert!(
+        entry.dir.join(ENTRY_RECORD_NAME).is_file(),
+        "the entry record is seeded with the entry"
+    );
+    // A seeded cache is warm: seeding again declines.
+    assert!(!seeded.seed_from(fx.cache.root()).unwrap());
+}
+
+#[test]
+fn a_donor_with_no_entries_seeds_nothing() {
+    let fx = Fixture::new();
+    let absent = LocalImageCache::at(fx.tmp.path().join("absent-donor"));
+
+    assert!(!fx.cache.seed_from(absent.root()).unwrap());
+    assert!(matches!(fx.lookup(&fx.key()), CacheLookup::Miss));
+}
+
+#[test]
+fn a_cache_that_already_has_entries_keeps_them_and_ignores_the_donor() {
+    let fx = Fixture::new();
+    let mine = fx.key();
+    fx.publish(&mine);
+    let donor = LocalImageCache::at(fx.tmp.path().join("donor"));
+    let other_arch = fx.key_for(&kernel_target(), GuestArch::X86_64);
+    let staged = donor.stage(&other_arch).unwrap();
+    emit(
+        staged.dir(),
+        &fx.recorded(&other_arch),
+        other_arch.arch,
+        KERNEL,
+    );
+    donor.publish(staged, &fx.ctx()).unwrap();
+
+    assert!(!fx.cache.seed_from(donor.root()).unwrap());
+
+    expect_hit(fx.lookup(&mine));
+    assert!(
+        matches!(fx.lookup(&other_arch), CacheLookup::Miss),
+        "a warm cache is not reseeded with the donor's entries"
+    );
+}

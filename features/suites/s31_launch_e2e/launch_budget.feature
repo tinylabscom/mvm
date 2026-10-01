@@ -41,3 +41,15 @@ Feature: the launch budget stays observable on every run
     And the guest control plane came up
     And the dispatch window is recorded
     And the warm launch meets its hard dispatch ceiling
+
+  # A single warm claim is a weak guard: it lands on a parent prepared
+  # moments earlier, so per-run rebuild or cold-acquisition work can hide
+  # behind the first claim and only shows up on a later one, once every
+  # cache should already be hot. Repeating the claim is the regression
+  # guard: each of the three launches below must stay under the same hard
+  # ceiling, and a failure on the second or third names the per-run work a
+  # single claim would have missed.
+  @live @perf_budget
+  Scenario: repeated warm launches each meet the documented start budget
+    Given an Alpine warm parent is ready
+    Then each of 3 repeated launches of "machine run --image alpine -- true" with env "MVM_RESIDENCY" set to "warm" meets its hard dispatch ceiling

@@ -152,6 +152,45 @@ fn installed_overlay_pair_fingerprint(
         .filter(|text| !text.is_empty())
 }
 
+/// Install the pair's runtime overlay when the install the launch path checks
+/// does not carry the pair's current fingerprint. The one pair overlay
+/// install the launch arm and the bootstrap prewarm share, so both leave the
+/// same stamp in the same place.
+fn ensure_pair_overlay_installed(
+    pair: &mut PairArtifactSource<'_>,
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
+    let target = PairArtifactSource::target(
+        mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
+        "default",
+    );
+    let fingerprint = pair.fingerprint(&target)?;
+    if installed_overlay_pair_fingerprint(cache_root, version, &arch.to_string()).as_deref()
+        == Some(fingerprint.as_str())
+    {
+        return Ok(());
+    }
+    ui::info("Runtime overlay: building from the selected image checkout...");
+    let entry = (pair.build)(pair.checkout, target)?;
+    let (_staged, artifact) = crate::launch::pair_stage::staged_overlay_artifact(&entry, arch)?;
+    if artifact.version != version {
+        anyhow::bail!(
+            "the selected checkout's runtime overlay is version {}, but this mvmctl requires \
+             {version}; check out matching versions or unset MVM_IMAGES_DIR",
+            artifact.version,
+        );
+    }
+    mvm_build::runtime_overlay::install_overlay_into_cache(
+        &artifact,
+        cache_root,
+        &mvm_build::runtime_overlay::InstallOptions { overwrite: true },
+    )?;
+    record_overlay_pair_fingerprint(cache_root, version, &arch.to_string(), &fingerprint)?;
+    Ok(())
+}
+
 /// Record the pair fingerprint for the overlay installed at
 /// (`cache_root`, `version`, `arch`), so a later launch under the same pair
 /// trusts the install without rebuilding. `mvmctl build runtime-overlay
@@ -200,6 +239,37 @@ fn installed_sidecar_pair_fingerprint(
     .filter(|text| !text.is_empty())
 }
 
+/// Install the pair's `libc` SDK sidecar when the install the launch path
+/// checks does not carry the pair's current fingerprint. The one pair sidecar
+/// install the launch arm and the bootstrap prewarm share, so both leave the
+/// same stamp in the same place.
+fn ensure_pair_sidecar_installed(
+    pair: &mut PairArtifactSource<'_>,
+    target: &mvm_build::image_source::ImageBuildTarget,
+    fingerprint: &str,
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+    libc: mvm_contract::guest_libc::GuestLibc,
+) -> Result<()> {
+    if installed_sidecar_pair_fingerprint(cache_root, version, arch, libc).as_deref()
+        == Some(fingerprint)
+    {
+        return Ok(());
+    }
+    ui::info("SDK sidecar: building from the selected image checkout...");
+    let entry = (pair.build)(pair.checkout, target.clone())?;
+    crate::launch::pair_stage::install_pair_sidecar(
+        &entry,
+        fingerprint,
+        cache_root,
+        version,
+        arch,
+        libc,
+    )?;
+    Ok(())
+}
+
 /// Ordinary starts always re-resolve the overlay for the current host build.
 /// Callers that need same-version continuity across lifecycle state must use
 /// [`attach_runtime_overlay_if_cached_version`] with an explicit pin.
@@ -240,31 +310,7 @@ pub fn attach_runtime_overlay_if_cached_version(
     // once and reinstalls under the same stamp. Neither the in-tree build nor
     // the published download runs while a checkout is selected.
     if let Some(pair) = pair {
-        let target = PairArtifactSource::target(
-            mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
-            "default",
-        );
-        let fingerprint = pair.fingerprint(&target)?;
-        if installed_overlay_pair_fingerprint(&cache_root, version, &arch.to_string()).as_deref()
-            != Some(fingerprint.as_str())
-        {
-            ui::info("Runtime overlay: building from the selected image checkout...");
-            let entry = (pair.build)(pair.checkout, target)?;
-            let (_staged, artifact) =
-                crate::launch::pair_stage::staged_overlay_artifact(&entry, arch)?;
-            if artifact.version != version {
-                anyhow::bail!(
-                    "the selected checkout's runtime overlay is version {}, but this mvmctl requires {version}; check out matching versions or unset MVM_IMAGES_DIR",
-                    artifact.version,
-                );
-            }
-            mvm_build::runtime_overlay::install_overlay_into_cache(
-                &artifact,
-                &cache_root,
-                &mvm_build::runtime_overlay::InstallOptions { overwrite: true },
-            )?;
-            record_overlay_pair_fingerprint(&cache_root, version, &arch.to_string(), &fingerprint)?;
-        }
+        ensure_pair_overlay_installed(pair, &cache_root, version, arch)?;
         // The pair's install is the only source under a selected checkout:
         // resolve it from the cache and return. Falling through would run
         // the in-tree build arm (for a contributor build it rebuilds from
@@ -406,14 +452,10 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
         }
     }
     let pair_selected = pair_plan.is_some();
-    if let (Some(pair), Some((target, fingerprint))) = (pair, pair_plan)
-        && installed_sidecar_pair_fingerprint(&cache_root, version, arch, libc).as_deref()
-            != Some(fingerprint.as_str())
-    {
-        ui::info("SDK sidecar: building from the selected image checkout...");
-        let entry = (pair.build)(pair.checkout, target)?;
-        crate::launch::pair_stage::install_pair_sidecar(
-            &entry,
+    if let (Some(pair), Some((target, fingerprint))) = (pair, pair_plan) {
+        ensure_pair_sidecar_installed(
+            pair,
+            &target,
             &fingerprint,
             &cache_root,
             version,
@@ -482,6 +524,44 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
             )
         }
     }
+}
+
+/// Prewarm the pair-stamped artifacts a launch checks — the runtime overlay
+/// and both libc variants of the SDK sidecar — installing each through the
+/// same helpers the launch path uses, so a boot under this pair finds every
+/// stamp warm and never cold-builds. Idempotent: an install whose stamp
+/// already matches the pair on disk is skipped.
+pub fn prepare_pair_launch_artifacts(pair: &mut PairArtifactSource<'_>) -> Result<()> {
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    ensure_pair_overlay_installed(pair, &cache_root, version, arch)?;
+    for (libc, attr) in [
+        (
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+            "sdk-sidecar-image",
+        ),
+        (
+            mvm_contract::guest_libc::GuestLibc::Musl,
+            "sdk-sidecar-image-musl",
+        ),
+    ] {
+        let target = PairArtifactSource::target(
+            mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
+            attr,
+        );
+        let fingerprint = pair.fingerprint(&target)?;
+        ensure_pair_sidecar_installed(
+            pair,
+            &target,
+            &fingerprint,
+            &cache_root,
+            version,
+            arch,
+            libc,
+        )?;
+    }
+    Ok(())
 }
 
 /// The attachment for the `libc` sidecar installed from `set`, when one is

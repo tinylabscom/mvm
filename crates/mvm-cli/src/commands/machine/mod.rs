@@ -273,6 +273,9 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Recreate a named machine when its config changed.
     #[arg(long)]
     pub force: bool,
+    /// Allow cold source builds (default: refuse, see mvmctl bootstrap).
+    #[arg(long)]
+    pub build: bool,
     /// Boot the locally-built workload kernel from the mvm cache instead of the
     /// image's own kernel. Presence is the signal; the value is a label only.
     /// (Hidden — primarily threaded by `vm rekernel`.)
@@ -325,6 +328,7 @@ impl Default for MachineRunArgs {
             tty: false,
             interactive: false,
             force: false,
+            build: false,
             kernel_pin: None,
             entrypoint: false,
             fresh: false,

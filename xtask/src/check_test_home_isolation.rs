@@ -107,6 +107,7 @@ const SEED_ANCHORS: &[&str] = &[
     "resolve_cached_runtime_overlay",
     "attach_runtime_overlay",
     "attach_universal_initramfs",
+    "seed_from_default",
 ];
 
 /// Builders that resolve their own image through `ensure_builder_vm_image`

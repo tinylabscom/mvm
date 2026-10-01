@@ -137,7 +137,10 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
         .current_dir(workspace_root())
         .args(argv)
         .isolated_home(&home)
-        .env("MVM_PHASE_TIMING", "1");
+        .env("MVM_PHASE_TIMING", "1")
+        // Same escape hatch as `mvmctl_command`: BDD launches measure the
+        // launch path and must not stop at the cold-build refusal.
+        .env("MVM_COLD_BUILD", "auto");
     for (key, value) in extra_env {
         command.env(key, value);
     }
@@ -491,6 +494,55 @@ fn warm_launch_meets_hard_dispatch_ceiling(world: &mut CliWorld) {
         "dispatch window was {observed:.1}ms; the warm-claim contract is strictly under {:.0}ms",
         mvm_cli::launch_contract::WARM_START_MAX_MS,
     );
+}
+
+/// Repeat a warm claim and assert the dispatch ceiling on every iteration.
+///
+/// One warm claim is a weak guard: it lands on a parent prepared moments
+/// earlier, so per-run rebuild or cold-acquisition work can hide behind the
+/// first claim and only shows up once every cache should already be hot.
+/// Each iteration therefore tops the pool back up, claims, and asserts — a
+/// failure on iteration two or three names per-run work a single claim
+/// would have missed.
+///
+/// The top-up is not optional bookkeeping: a successful claim consumes the
+/// standby, and replenishing one is a full parent boot that finishes long
+/// after this loop needs it. Without the explicit top-up the later claims
+/// would fall back to a cold boot and fail the ceiling for the wrong
+/// reason. The pool command is synchronous (the `an Alpine warm parent is
+/// ready` given relies on that), so the claim that follows always finds an
+/// idle parent.
+#[then(
+    expr = "each of {int} repeated launches of {string} with env {string} set to {string} meets its hard dispatch ceiling"
+)]
+fn repeated_launches_meet_hard_dispatch_ceiling(
+    world: &mut CliWorld,
+    count: i64,
+    args: String,
+    key: String,
+    value: String,
+) {
+    assert!(
+        count > 0,
+        "repeated-launch count must be positive, got {count}"
+    );
+    for _ in 0..count {
+        // Re-arm the Alpine standby the previous claim consumed; the top-up
+        // targets the same image the given prepared, so the claim that
+        // follows always matches. (Replenishment after a claim is a full
+        // parent boot that lands too late for the next iteration, which is
+        // exactly why the loop tops up explicitly.)
+        let topped = run_in_e2e_home("pool warm 1 --image alpine", &[]);
+        assert_eq!(
+            topped.exit_code, 0,
+            "failed to top up the Alpine warm parent\nstdout:\n{}\nstderr:\n{}",
+            topped.stdout, topped.stderr
+        );
+        world.last_launch = Some(run_in_e2e_home(&args, &[(&key, &value)]));
+        launch_succeeds(world);
+        guest_control_plane_came_up(world);
+        warm_launch_meets_hard_dispatch_ceiling(world);
+    }
 }
 
 /// Record the budget without failing on it.

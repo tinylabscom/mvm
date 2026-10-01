@@ -55,6 +55,10 @@ fn default_runtime_overlay_mode(
 pub fn acquire_runtime_overlay(
     params: &RuntimeOverlayAcquireParams<'_>,
 ) -> Result<RuntimeOverlayArtifact> {
+    if let Some(message) = mvm_core::cold_build::refusal("the MVM guest runtime (runtime overlay)")
+    {
+        anyhow::bail!(message);
+    }
     if let Some(workspace_root) = params.source_checkout_root {
         return build_runtime_overlay_from_source_checkout(
             workspace_root,
@@ -101,6 +105,9 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
                 .is_some()
             {
                 return Ok(());
+            }
+            if let Some(message) = mvm_core::cold_build::refusal("the OCI guest runtime") {
+                anyhow::bail!(message);
             }
             // Status goes to stderr: stdout belongs to the workload's own output.
             mvm_runtime::ui::activity::println_above(&format!(

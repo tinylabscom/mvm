@@ -20,6 +20,7 @@ pub mod runtime_catalog;
 // by `mvm-client`, which adds the in-process `LocalBackend`.
 #[cfg(feature = "client")]
 pub mod client;
+pub mod cold_build;
 pub mod config;
 pub mod dev_network;
 pub mod did_key;

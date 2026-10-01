@@ -286,6 +286,60 @@ impl LocalImageCache {
         }
     }
 
+    /// Populate this cache from the default home's local-image cache when
+    /// this cache holds no entries yet and the default one holds some — a
+    /// worktree-isolated `MVM_HOME` inherits the host's pair builds instead of
+    /// re-running them. Seeding is opportunistic: the caller logs a failure
+    /// and lets the build proceed cold.
+    pub fn seed_from_default(&self) -> Result<bool, LocalImageCacheError> {
+        self.seed_from(&crate::cache_install::default_cache_root().join(LOCAL_IMAGE_CACHE_DIR))
+    }
+
+    /// Seed every entry from `default_root` into this cache when this cache
+    /// has no entries yet. Entry files hardlink; a link that crosses
+    /// filesystems falls back to a copy.
+    pub(crate) fn seed_from(&self, default_root: &Path) -> Result<bool, LocalImageCacheError> {
+        crate::cache_install::seed_on_miss(
+            &self.root,
+            default_root,
+            |root| {
+                if !seedable_entry_names(&self.root).is_empty() {
+                    return None;
+                }
+                let names = seedable_entry_names(root);
+                if names.is_empty() {
+                    None
+                } else {
+                    Some((root.to_path_buf(), names))
+                }
+            },
+            |(root, names)| self.install_seeded_entries(&root, &names),
+        )
+    }
+
+    /// Hardlink (or copy, across filesystems) every seeded entry directory
+    /// with all of its files — the manifest, the artifacts, and the entry
+    /// record — as-is.
+    fn install_seeded_entries(
+        &self,
+        default_root: &Path,
+        names: &BTreeSet<String>,
+    ) -> Result<(), LocalImageCacheError> {
+        let layout = self.layout_dir();
+        create_private_dir_all(&layout)?;
+        for name in names {
+            let from = default_root.join(LAYOUT).join(name);
+            let to = layout.join(name);
+            if to.symlink_metadata().is_ok() {
+                // Another seed raced this entry in; the first install stands.
+                continue;
+            }
+            create_private_dir(&to)?;
+            link_or_copy_entry(&from, &to)?;
+        }
+        Ok(())
+    }
+
     /// A fresh, empty staging directory for `key`, on the same filesystem as
     /// the entries so publishing it is one `rename`.
     pub fn stage(&self, key: &LocalImageCacheKey) -> Result<StagedEntry, LocalImageCacheError> {
@@ -684,5 +738,151 @@ fn clear_dir(dir: &Path) {
     };
     for entry in entries.flatten() {
         let _ = std::fs::remove_dir_all(entry.path());
+    }
+}
+
+/// The names of the entry directories under `root`'s layout directory —
+/// staging and eviction litter excluded, and anything that is not a directory
+/// ignored (a read evicts it on its own terms).
+fn seedable_entry_names(root: &Path) -> BTreeSet<String> {
+    let Ok(entries) = std::fs::read_dir(root.join(LAYOUT)) else {
+        return BTreeSet::new();
+    };
+    entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != STAGING_DIR && name != EVICTED_DIR)
+        .collect()
+}
+
+/// Hardlink every file of one entry into its seeded destination; a link that
+/// crosses filesystems falls back to a copy. The bytes can be large, so
+/// same-device entries stay links.
+fn link_or_copy_entry(from: &Path, to: &Path) -> Result<(), LocalImageCacheError> {
+    let entries = std::fs::read_dir(from).map_err(io_error("listing", from))?;
+    for entry in entries {
+        let entry = entry.map_err(io_error("listing", from))?;
+        let source = entry.path();
+        let dest = to.join(entry.file_name());
+        if std::fs::hard_link(&source, &dest).is_err() {
+            std::fs::copy(&source, &dest).map_err(io_error("copying", &source))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+
+    /// An entry directory as seeding sees it: opaque bytes copied as-is.
+    fn write_entry(root: &Path, name: &str, files: &[(&str, &[u8])]) {
+        let dir = root.join(LAYOUT).join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, bytes) in files {
+            std::fs::write(dir.join(file), bytes).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_empty_cache_seeds_every_entry_as_is() {
+        let tmp = tempfile::tempdir().unwrap();
+        let donor = LocalImageCache::at(tmp.path().join("donor"));
+        write_entry(
+            donor.root(),
+            "entry-a",
+            &[("image-set.json", b"{}\n"), ("cache-entry.json", b"{}\n")],
+        );
+        let target = LocalImageCache::at(tmp.path().join("target"));
+
+        assert!(target.seed_from(donor.root()).unwrap());
+
+        let seeded = target.root().join(LAYOUT).join("entry-a");
+        assert_eq!(
+            std::fs::read(seeded.join("image-set.json")).unwrap(),
+            b"{}\n"
+        );
+        assert!(
+            seeded.join("cache-entry.json").is_file(),
+            "the entry record is seeded with the entry"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // Same device: the seeded file is a hardlink, not a copy.
+            let links = std::fs::metadata(seeded.join("image-set.json"))
+                .unwrap()
+                .nlink();
+            assert_eq!(links, 2, "seeded entries hardlink on the same device");
+        }
+        // A seeded cache is not empty: a second seed declines.
+        assert!(!target.seed_from(donor.root()).unwrap());
+    }
+
+    #[test]
+    fn a_donor_without_entries_seeds_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let donor = LocalImageCache::at(tmp.path().join("absent-donor"));
+        let target = LocalImageCache::at(tmp.path().join("target"));
+
+        assert!(!target.seed_from(donor.root()).unwrap());
+        assert!(!target.root().join(LAYOUT).exists());
+    }
+
+    #[test]
+    fn seeding_the_default_root_into_itself_declines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = LocalImageCache::at(tmp.path().join("cache"));
+        write_entry(cache.root(), "entry-a", &[("image-set.json", b"{}\n")]);
+
+        assert!(!cache.seed_from(cache.root()).unwrap());
+    }
+
+    #[test]
+    fn a_failed_seed_reports_the_error_for_the_caller_to_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let donor = LocalImageCache::at(tmp.path().join("donor"));
+        write_entry(donor.root(), "entry-a", &[("image-set.json", b"{}\n")]);
+        let target = LocalImageCache::at(tmp.path().join("target"));
+        // A layout path that is a file, not a directory, refuses the install.
+        std::fs::create_dir_all(target.root()).unwrap();
+        std::fs::write(target.root().join(LAYOUT), b"not a directory").unwrap();
+
+        let err = target.seed_from(donor.root()).unwrap_err();
+
+        assert!(matches!(err, LocalImageCacheError::Io { .. }), "{err}");
+    }
+
+    /// The end-to-end seam an isolated `MVM_HOME` exercises: the default
+    /// home's entries land in the overridden home's cache.
+    #[test]
+    fn an_isolated_home_seeds_from_the_default_home() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let scratch = tempfile::tempdir().unwrap();
+        env.set("HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path().join("isolated"));
+
+        let default_root = crate::cache_install::default_cache_root().join(LOCAL_IMAGE_CACHE_DIR);
+        write_entry(
+            &default_root,
+            "entry-a",
+            &[("image-set.json", b"{}\n"), ("cache-entry.json", b"{}\n")],
+        );
+
+        let cache = LocalImageCache::open_default();
+        assert!(cache.seed_from_default().unwrap());
+        assert_eq!(
+            std::fs::read(
+                cache
+                    .root()
+                    .join(LAYOUT)
+                    .join("entry-a")
+                    .join("image-set.json")
+            )
+            .unwrap(),
+            b"{}\n"
+        );
+        assert!(!cache.seed_from_default().unwrap());
     }
 }

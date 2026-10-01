@@ -186,6 +186,16 @@ pub(crate) fn build_cache_dir() -> PathBuf {
     mvm_core::config::dev_dir().join("build-cache")
 }
 
+/// Digest of every workspace source `nix/lib/workspace-filter.nix` admits:
+/// the [`TreeScope::MvmWorkspace`] walk, whose allow-list and deny-list are
+/// bound to the real filter file by the tests below. The image roles whose
+/// evaluation reads the mvm tree through that filter key on this digest; the
+/// walk is a tested superset of what nix ingests, so a role keyed on it can
+/// never serve a stale image for a change nix would have seen.
+pub(crate) fn mvm_workspace_source_digest(root: &Path) -> Result<String> {
+    hash_source_tree(root, TreeScope::MvmWorkspace)
+}
+
 /// Look up the typed cache record a previous build wrote for
 /// `fingerprint`, or `None` if there is no record, it is unreadable,
 /// it fails to JSON-parse (including a legacy plaintext `<revision>\n`
