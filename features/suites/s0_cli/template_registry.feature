@@ -23,6 +23,7 @@ Feature: mvmctl template registry
     And the generated project contains file "mvm.toml"
     And the generated project contains file "app.py"
 
+  @template_policy
   Scenario: a template that ships its own policy wires it into the generated project
     Given a local template registry with a demo template shipping policy
     When I generate a project from template "demo"
@@ -30,9 +31,10 @@ Feature: mvmctl template registry
     And the generated project contains file "policy/base.toml"
     And the generated project contains file "policy/apis.toml"
     And the generated project file "mvm.toml" contains "[policy]"
-    And the generated project file "mvm.toml" contains "profile = \"policy/base.toml\""
-    And the generated project file "mvm.toml" contains "include = [\"policy/apis.toml\"]"
+    And the generated project file "mvm.toml" contains 'profile = "policy/base.toml"'
+    And the generated project file "mvm.toml" contains 'include = ["policy/apis.toml"]'
 
+  @template_policy
   Scenario: a template whose shipped policy does not resolve refuses to generate
     Given a local template registry with a demo template shipping broken policy
     When I generate a project from template "demo"
