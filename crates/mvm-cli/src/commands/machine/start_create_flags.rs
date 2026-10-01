@@ -48,9 +48,10 @@ pub(in crate::commands) struct MachineStartCreateFlags {
     /// Security profile for lifecycle starts.
     #[arg(long, value_enum)]
     pub profile: Option<RunProfile>,
-    /// Create under an authored policy profile (NAME or PATH).
+    /// Create under authored policy profiles (NAME or PATH; repeatable).
+    // Later entries compose over the earlier ones and take precedence.
     #[arg(long, value_name = "NAME|PATH")]
-    pub policy: Option<String>,
+    pub policy: Vec<String>,
     /// Overwrite an existing machine spec if the config changed.
     #[arg(long)]
     pub force: bool,

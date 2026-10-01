@@ -47,6 +47,11 @@ fn allow(resolved: &ResolvedPolicy) -> Vec<String> {
     resolved.policy.network.allow.clone()
 }
 
+/// `--policy` values as the CLI would pass them.
+fn cli(raw: &[&str]) -> Vec<String> {
+    raw.iter().map(ToString::to_string).collect()
+}
+
 // ---- built-ins ------------------------------------------------------------
 
 #[test]
@@ -368,31 +373,60 @@ fn project(profile: Option<&str>, include: &[&str], allow_hosts: &[&str]) -> Pro
 
 #[test]
 fn a_launch_selects_a_flag_the_project_or_nothing() {
-    let chosen = PolicySelection::for_launch(Some("offline"), Some(project(Some("x"), &[], &[])))
-        .unwrap()
-        .unwrap();
-    assert_eq!(chosen.profile, Some(PolicyRef::Name("offline".into())));
+    let chosen =
+        PolicySelection::for_launch(&cli(&["offline"]), Some(project(Some("x"), &[], &[])))
+            .unwrap()
+            .unwrap();
+    assert_eq!(chosen.profiles, vec![PolicyRef::Name("offline".into())]);
 
-    let chosen = PolicySelection::for_launch(None, Some(project(Some("x"), &[], &[])))
+    let chosen = PolicySelection::for_launch(&[], Some(project(Some("x"), &[], &[])))
         .unwrap()
         .unwrap();
-    assert_eq!(chosen.profile, None);
+    assert!(chosen.profiles.is_empty());
     assert!(chosen.project.is_some());
 
     assert_eq!(
-        PolicySelection::for_launch(None, Some(project(None, &[], &[]))).unwrap(),
+        PolicySelection::for_launch(&[], Some(project(None, &[], &[]))).unwrap(),
         None,
         "a project that says nothing selects nothing"
     );
-    assert_eq!(PolicySelection::for_launch(None, None).unwrap(), None);
-    assert!(PolicySelection::for_launch(Some("Bad Name"), None).is_err());
+    assert_eq!(PolicySelection::for_launch(&[], None).unwrap(), None);
+    assert!(PolicySelection::for_launch(&cli(&["Bad Name"]), None).is_err());
+}
+
+#[test]
+fn a_launch_selects_several_flags_in_order_and_the_last_wins_the_conflicts() {
+    let dir = Dir::new();
+    dir.profile("base", "[overrides.network]\nallow = [\"a.test\"]\n");
+    dir.profile(
+        "team",
+        "[overrides.network]\nallow = [\"b.test\"]\ndeny = [\"a.test\"]\n",
+    );
+    let selection = PolicySelection::for_launch(
+        &cli(&["base", "team"]),
+        Some(project(Some("ignored"), &[], &[])),
+    )
+    .unwrap()
+    .unwrap();
+    let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+    // Both allows apply; the later --policy's deny removes the earlier allow.
+    assert_eq!(allow(&resolved), ["b.test:443"]);
+    // The project's [policy] table is replaced, but its allow_hosts stay.
+    let selection = PolicySelection::for_launch(
+        &cli(&["base", "team"]),
+        Some(project(None, &[], &["project.test"])),
+    )
+    .unwrap()
+    .unwrap();
+    let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+    assert_eq!(allow(&resolved), ["b.test:443", "project.test:443"]);
 }
 
 #[test]
 fn an_explicit_policy_replaces_the_project_table_but_keeps_its_network() {
     let dir = Dir::new();
     let selection = PolicySelection::for_launch(
-        Some("agent-apis"),
+        &cli(&["agent-apis"]),
         Some(project(Some("dev-network"), &[], &["project.test"])),
     )
     .unwrap()
@@ -410,7 +444,7 @@ fn an_explicit_policy_replaces_the_project_table_but_keeps_its_network() {
 fn a_projects_network_allow_hosts_apply_with_no_policy_at_all() {
     let dir = Dir::new();
     let selection =
-        PolicySelection::for_launch(None, Some(project(None, &[], &["api.example.com"])))
+        PolicySelection::for_launch(&[], Some(project(None, &[], &["api.example.com"])))
             .unwrap()
             .unwrap();
     assert_eq!(
@@ -423,12 +457,33 @@ fn a_projects_network_allow_hosts_apply_with_no_policy_at_all() {
 fn a_blocked_profile_drops_the_projects_hosts() {
     let dir = Dir::new();
     let selection =
-        PolicySelection::for_launch(Some("offline"), Some(project(None, &[], &["a.test"])))
+        PolicySelection::for_launch(&cli(&["offline"]), Some(project(None, &[], &["a.test"])))
             .unwrap()
             .unwrap();
     let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
     assert!(allow(&resolved).is_empty());
     assert!(!resolved.notes.is_empty());
+}
+
+#[test]
+fn several_policies_compose_in_order_across_formats() {
+    let dir = Dir::new();
+    dir.profile("base", "[overrides.network]\nallow = [\"a.test\"]\n");
+    let dir_json = tempfile::tempdir().unwrap();
+    let team = dir_json.path().join("team.json");
+    std::fs::write(
+        &team,
+        r#"{"overrides":{"network":{"allow":["b.test"],"deny":["a.test"]}}}"#,
+    )
+    .unwrap();
+    let selection = PolicySelection::for_launch(&cli(&["base", team.to_str().unwrap()]), None)
+        .unwrap()
+        .unwrap();
+    let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+    assert_eq!(allow(&resolved), ["b.test:443"]);
+    let labels: Vec<&str> = resolved.layers.iter().map(|l| l.label.as_str()).collect();
+    assert!(labels.iter().any(|l| l.contains("base")), "{labels:?}");
+    assert!(labels.iter().any(|l| l.contains("team.json")), "{labels:?}");
 }
 
 #[test]
@@ -441,7 +496,7 @@ fn a_project_table_resolves_its_profile_and_groups_as_project_layers() {
     )
     .unwrap();
     let selection = PolicySelection {
-        profile: None,
+        profiles: Vec::new(),
         project: Some(ProjectPolicy {
             manifest: dir_project.path().join("mvm.toml"),
             profile: Some("dev-network".into()),
@@ -470,7 +525,7 @@ fn a_project_cannot_use_an_escape_hatch() {
     )
     .unwrap();
     let selection = PolicySelection {
-        profile: None,
+        profiles: Vec::new(),
         project: Some(ProjectPolicy {
             manifest: dir_project.path().join("mvm.toml"),
             profile: None,

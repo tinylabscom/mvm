@@ -484,6 +484,7 @@ uncovered = [
     "mvmctl run --manifest minimal -- /bin/true",
     "mvmctl run --manifest my-app --mount /tmp/my-config:/data/config:ro",
     'mvmctl run --plan agent.json -- claude -p "summarize the repo"',
+    "mvmctl run --policy ./org-base.toml --policy ./team.toml --policy ./mine.json -- make test",
     'mvmctl run --policy agent-apis -- claude -p "summarize the repo"',
     "mvmctl run --profile dev --mount .:/work:ro -- cargo test",
     "mvmctl run --profile permissive -- ./debug-script.sh",

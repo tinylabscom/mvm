@@ -3199,6 +3199,17 @@ fn policy_verbs_and_run_policy_flags_parse() {
             "firecracker",
         ],
         vec!["mvmctl", "policy", "validate", "./p.toml", "--strict"],
+        vec!["mvmctl", "policy", "validate", "./p.json", "--strict"],
+        vec![
+            "mvmctl",
+            "policy",
+            "resolve",
+            "base",
+            "./team.toml",
+            "./mine.json",
+            "-o",
+            "out.json",
+        ],
         vec!["mvmctl", "policy", "diff", "default", "offline", "--json"],
         vec!["mvmctl", "policy", "groups", "--json"],
         vec![
@@ -5616,7 +5627,7 @@ fn why_requires_exactly_one_subject_and_parses_policy_sources() {
         panic!("expected why command")
     };
     assert_eq!(args.host.as_deref(), Some("api.example.com:443"));
-    assert_eq!(args.profile.as_deref(), Some("agent-apis"));
+    assert_eq!(args.profile, ["agent-apis"]);
     assert!(args.json);
 
     assert!(Cli::try_parse_from(["mvmctl", "why"]).is_err());

@@ -726,9 +726,10 @@ pub(in crate::commands) struct MachineCreateArgs {
     /// Security profile for lifecycle starts.
     #[arg(long, value_enum)]
     pub profile: Option<RunProfile>,
-    /// Create under an authored policy profile (NAME or PATH).
+    /// Create under authored policy profiles (NAME or PATH; repeatable).
+    // Later entries compose over the earlier ones and take precedence.
     #[arg(long, value_name = "NAME|PATH")]
-    pub policy: Option<String>,
+    pub policy: Vec<String>,
     /// Overwrite an existing machine spec.
     #[arg(long)]
     pub force: bool,
@@ -1068,8 +1069,8 @@ struct MachineSpecInputs<'a> {
     workflow: Option<&'a ManifestMachineWorkflow>,
     volumes: &'a [String],
     init: &'a [String],
-    /// `--policy NAME|PATH`.
-    policy: Option<&'a str>,
+    /// `--policy NAME|PATH`, lowest precedence first.
+    policy: &'a [String],
     /// The manifest's contribution to the policy, when sourced from one.
     project: Option<&'a mvm_client::policy_profiles::ProjectPolicy>,
 }
@@ -1104,7 +1105,7 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
     // The manifest's `[network] allow_hosts` reaches the spec through the
     // policy, the same way it reaches `run` and `machine run`.
     let policy = create_policy::machine_policy(create_policy::MachinePolicyInputs {
-        policy: inputs.policy,
+        policies: inputs.policy,
         project: inputs.project,
         allow_host: inputs.allow_host,
         net,
@@ -1240,7 +1241,7 @@ impl MachineCreateArgs {
             workflow,
             volumes: &volumes,
             init: &init,
-            policy: self.policy.as_deref(),
+            policy: &self.policy,
             project: manifest_source.as_ref().map(|source| &source.project),
         })
     }

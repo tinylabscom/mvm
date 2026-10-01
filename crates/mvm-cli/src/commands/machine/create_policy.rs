@@ -17,8 +17,8 @@ use mvm_client::policy_profiles::{
 
 /// What `build_machine_spec` asks of the policy.
 pub(super) struct MachinePolicyInputs<'a> {
-    /// `--policy NAME|PATH`.
-    pub policy: Option<&'a str>,
+    /// `--policy NAME|PATH`, lowest precedence first.
+    pub policies: &'a [String],
     /// The manifest's contribution, when the machine is sourced from one.
     pub project: Option<&'a ProjectPolicy>,
     pub allow_host: &'a [String],
@@ -66,7 +66,7 @@ fn refuse_unrecordable(policy: &PolicyBody) -> Result<()> {
 /// A policy that does not resolve, a section a spec cannot record, or a flag
 /// the policy denies, blocks or bounds.
 pub(super) fn machine_policy(inputs: MachinePolicyInputs<'_>) -> Result<MachinePolicy> {
-    let selection = PolicySelection::for_launch(inputs.policy, inputs.project.cloned())?;
+    let selection = PolicySelection::for_launch(inputs.policies, inputs.project.cloned())?;
     let Some(selection) = selection else {
         return Ok(MachinePolicy {
             allow_host: inputs.allow_host.to_vec(),
@@ -127,12 +127,12 @@ mod tests {
     }
 
     fn inputs<'a>(
-        policy: Option<&'a str>,
+        policies: &'a [String],
         project: Option<&'a ProjectPolicy>,
         allow_host: &'a [String],
     ) -> MachinePolicyInputs<'a> {
         MachinePolicyInputs {
-            policy,
+            policies,
             project,
             allow_host,
             net: false,
@@ -146,7 +146,7 @@ mod tests {
     #[test]
     fn with_no_policy_and_no_project_the_flags_pass_through() {
         let hosts = vec!["a.test".to_string()];
-        let resolved = machine_policy(inputs(None, None, &hosts)).unwrap();
+        let resolved = machine_policy(inputs(&[], None, &hosts)).unwrap();
         assert_eq!(resolved.allow_host, hosts);
     }
 
@@ -157,7 +157,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
         let project = project(&["api.example.com"]);
         let hosts = vec!["b.test".to_string()];
-        let resolved = machine_policy(inputs(None, Some(&project), &hosts)).unwrap();
+        let resolved = machine_policy(inputs(&[], Some(&project), &hosts)).unwrap();
         assert_eq!(resolved.allow_host, ["api.example.com:443", "b.test:443"]);
     }
 
@@ -168,7 +168,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
         let err = machine_policy(MachinePolicyInputs {
             net: true,
-            ..inputs(Some("offline"), None, &[])
+            ..inputs(&["offline".to_string()], None, &[])
         })
         .unwrap_err();
         assert!(format!("{err:#}").contains("blocks the network"), "{err:#}");
@@ -185,7 +185,7 @@ mod tests {
             "[[when]]\nbackend = \"firecracker\"\n[when.overrides.network]\nblock = true\n",
         )
         .unwrap();
-        let error = machine_policy(inputs(Some(profile.to_str().unwrap()), None, &[]))
+        let error = machine_policy(inputs(&[profile.to_string_lossy().into_owned()], None, &[]))
             .expect_err("a later start could pick another backend");
         assert!(format!("{error:#}").contains("backend-conditioned"));
     }

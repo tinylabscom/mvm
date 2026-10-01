@@ -40,13 +40,15 @@ fn select(args: &RunArgs) -> Result<Option<Selected>> {
     }
     let project = super::run_routes::project_manifest(args)?
         .map(|(path, manifest)| ProjectPolicy::from_manifest(&path, &manifest));
-    let Some(selection) = PolicySelection::for_launch(args.policy.as_deref(), project)? else {
+    let Some(selection) = PolicySelection::for_launch(&args.policy, project)? else {
         return Ok(None);
     };
-    let label = match (&args.policy, &selection.project) {
-        (Some(name), _) => format!("policy {name}"),
-        (None, Some(project)) => format!("the project policy in {}", project.manifest.display()),
-        (None, None) => "policy".to_string(),
+    let label = if !args.policy.is_empty() {
+        format!("policy {}", args.policy.join(", "))
+    } else if let Some(project) = &selection.project {
+        format!("the project policy in {}", project.manifest.display())
+    } else {
+        "policy".to_string()
     };
     let resolved = resolve(&PolicyStore::from_config(), &selection, run_platform(args))?;
     Ok(Some(Selected {
@@ -202,7 +204,7 @@ mod tests {
     fn a_built_in_profile_becomes_the_equivalent_flags() {
         let (_env, _home) = isolated();
         let mut args = RunArgs {
-            policy: Some("agent-apis".into()),
+            policy: vec!["agent-apis".into()],
             allow_host: vec!["extra.test".into()],
             ..RunArgs::default()
         };
@@ -220,7 +222,7 @@ mod tests {
     fn a_blocked_policy_refuses_a_host_flag() {
         let (_env, _home) = isolated();
         let mut args = RunArgs {
-            policy: Some("offline".into()),
+            policy: vec!["offline".into()],
             allow_host: vec!["a.test".into()],
             ..RunArgs::default()
         };
@@ -229,10 +231,46 @@ mod tests {
     }
 
     #[test]
+    fn several_policies_compose_in_flag_order_and_the_last_wins() {
+        let (_env, home) = isolated();
+        let base = home.path().join("base.toml");
+        std::fs::write(&base, "[overrides.network]\nallow = [\"a.test\"]\n").unwrap();
+        let team = home.path().join("team.toml");
+        std::fs::write(
+            &team,
+            "[overrides.network]\nallow = [\"b.test\"]\ndeny = [\"a.test\"]\n",
+        )
+        .unwrap();
+        let mut args = RunArgs {
+            policy: vec![base.display().to_string(), team.display().to_string()],
+            ..RunArgs::default()
+        };
+        apply_run_policy(&mut args).unwrap();
+        assert_eq!(args.allow_host, ["b.test:443".to_string()]);
+
+        // JSON composes the same way, and a JSON profile file is a path.
+        let json = home.path().join("mine.json");
+        std::fs::write(&json, r#"{"overrides":{"network":{"allow":["c.test"]}}}"#).unwrap();
+        let mut args = RunArgs {
+            policy: vec![
+                base.display().to_string(),
+                team.display().to_string(),
+                json.display().to_string(),
+            ],
+            ..RunArgs::default()
+        };
+        apply_run_policy(&mut args).unwrap();
+        assert_eq!(
+            args.allow_host,
+            ["b.test:443".to_string(), "c.test:443".to_string()]
+        );
+    }
+
+    #[test]
     fn a_pack_reference_is_refused() {
         let (_env, _home) = isolated();
         let mut args = RunArgs {
-            policy: Some("acme/agent".into()),
+            policy: vec!["acme/agent".into()],
             ..RunArgs::default()
         };
         let err = apply_run_policy(&mut args).unwrap_err();
@@ -261,7 +299,7 @@ mod tests {
 
         let mut replaced = RunArgs {
             flake: Some(flake),
-            policy: Some("agent-apis".into()),
+            policy: vec!["agent-apis".into()],
             ..RunArgs::default()
         };
         apply_run_policy(&mut replaced).unwrap();
@@ -326,7 +364,7 @@ mod tests {
         let workload = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../examples/agent-workload/workload.json");
         let mut args = RunArgs {
-            policy: Some(profile.display().to_string()),
+            policy: vec![profile.display().to_string()],
             from_workload_ir: Some(workload),
             ..RunArgs::default()
         };
@@ -346,7 +384,7 @@ mod tests {
         )
         .unwrap();
         let mut args = RunArgs {
-            policy: Some(profile.display().to_string()),
+            policy: vec![profile.display().to_string()],
             launch_plan: Some(launch.display().to_string()),
             ..RunArgs::default()
         };

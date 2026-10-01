@@ -48,9 +48,11 @@ pub(in crate::commands) enum PolicyAction {
 /// Which policy a subcommand looks at.
 #[derive(ClapArgs, Debug, Clone, Default)]
 pub(in crate::commands) struct Target {
-    /// Profile NAME or PATH (default: the project's `[policy]` table)
+    /// Profile NAME or PATH (repeatable; later profiles compose over the
+    /// earlier ones and take precedence). Default: the project's `[policy]`
+    /// table
     #[arg(value_name = "PROFILE")]
-    pub profile: Option<String>,
+    pub profile: Vec<String>,
     /// Project directory whose mvm.toml `[policy]` applies (default: .)
     #[arg(long, value_name = "DIR")]
     pub project: Option<PathBuf>,
@@ -147,10 +149,10 @@ fn platform(backend: Option<BackendKind>) -> Platform {
 /// `[network] allow_hosts`) from `--project`, or from `.` when no profile is
 /// named.
 fn resolve_target(target: &Target) -> Result<ResolvedPolicy> {
-    let project_dir = match (&target.project, &target.profile) {
+    let project_dir = match (&target.project, target.profile.is_empty()) {
         (Some(dir), _) => Some(dir.clone()),
-        (None, None) => Some(PathBuf::from(".")),
-        (None, Some(_)) => None,
+        (None, true) => Some(PathBuf::from(".")),
+        (None, false) => None,
     };
     let project = match &project_dir {
         Some(dir) => match mvm_core::manifest::manifest_in_dir(dir)? {
@@ -158,7 +160,7 @@ fn resolve_target(target: &Target) -> Result<ResolvedPolicy> {
                 let manifest = mvm_core::manifest::Manifest::read_file(&path)?;
                 Some(ProjectPolicy::from_manifest(&path, &manifest))
             }
-            None if target.profile.is_none() => bail!(
+            None if target.profile.is_empty() => bail!(
                 "no profile named and no mvm.toml in {}; name a profile or pass --project",
                 dir.display()
             ),
@@ -166,7 +168,7 @@ fn resolve_target(target: &Target) -> Result<ResolvedPolicy> {
         },
         None => None,
     };
-    let selection = PolicySelection::for_launch(target.profile.as_deref(), project)?
+    let selection = PolicySelection::for_launch(&target.profile, project)?
         .context("the project's mvm.toml has no [policy] table and no [network] allow_hosts")?;
     Ok(resolve(
         &PolicyStore::from_config(),
@@ -218,16 +220,21 @@ fn show(args: ShowArgs) -> Result<()> {
     Ok(())
 }
 
-/// A path to a file that exists is validated as that file (a profile, or
-/// failing that a group); anything else as a profile reference.
+/// Every entry naming a file that exists is validated as that file (a
+/// profile, or failing that a group); anything else resolves the whole
+/// target the way a launch would.
 fn validate(args: ValidateArgs) -> Result<()> {
-    let resolved = match args.target.profile.as_deref().map(Path::new) {
-        Some(path) if path.is_file() => resolve_file(
+    let file: Option<&Path> = match args.target.profile.as_slice() {
+        [only] => Path::new(only).is_file().then(|| Path::new(only.as_str())),
+        _ => None,
+    };
+    let resolved = match file {
+        Some(path) => resolve_file(
             &PolicyStore::from_config(),
             path,
             platform(args.target.backend),
         )?,
-        _ => resolve_target(&args.target)?,
+        None => resolve_target(&args.target)?,
     };
     let mut problems: Vec<String> = resolved.notes.clone();
     if !resolved.policy.tools.is_empty() {
@@ -437,7 +444,7 @@ pub(in crate::commands) fn policy_diff(a: &PolicyBody, b: &PolicyBody) -> Vec<Di
 
 fn diff(args: DiffArgs) -> Result<()> {
     let target = |profile: &str| Target {
-        profile: Some(profile.to_string()),
+        profile: vec![profile.to_string()],
         project: None,
         backend: args.backend,
     };

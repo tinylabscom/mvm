@@ -21,7 +21,7 @@ pub(in crate::commands) fn resolve_run_mode(
 ) -> Result<Option<RunMode>> {
     let sdk_requested =
         std::env::var_os(mvm_sdk::env::MVM_SDK_MODE_ENV).is_some() || sdk.dev || sdk.mode.is_some();
-    if sdk_requested && (run.policy.is_some() || run.plan.is_some()) {
+    if sdk_requested && (!run.policy.is_empty() || run.plan.is_some()) {
         anyhow::bail!(
             "--policy and --plan are not supported by SDK run modes; unset the SDK mode or use \
              the ordinary sandbox runner so the authored policy cannot be skipped"

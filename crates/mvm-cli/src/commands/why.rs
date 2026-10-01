@@ -31,9 +31,10 @@ pub(in crate::commands) struct Args {
     /// Ask whether the authored policy binds this stored secret
     #[arg(long, value_name = "SECRET")]
     pub secret: Option<String>,
-    /// Resolve this profile instead of the project's `[policy]`
+    /// Resolve these profiles instead of the project's `[policy]` (repeatable;
+    /// later profiles compose over the earlier ones and take precedence)
     #[arg(long, value_name = "NAME|PATH", conflicts_with = "plan")]
-    pub profile: Option<String>,
+    pub profile: Vec<String>,
     /// Query a resolved manifest written by `mvmctl policy resolve`
     #[arg(long, value_name = "FILE", conflicts_with_all = ["profile", "project", "backend"])]
     pub plan: Option<PathBuf>,
@@ -96,7 +97,7 @@ fn resolve_policy(args: &Args) -> Result<ResolvedPolicy> {
     }
 
     let project = project_policy(args)?;
-    let Some(selection) = PolicySelection::for_launch(args.profile.as_deref(), project)? else {
+    let Some(selection) = PolicySelection::for_launch(&args.profile, project)? else {
         return Ok(ResolvedPolicy::empty());
     };
     let backend = args
@@ -110,7 +111,7 @@ fn resolve_policy(args: &Args) -> Result<ResolvedPolicy> {
 }
 
 fn project_policy(args: &Args) -> Result<Option<ProjectPolicy>> {
-    if args.profile.is_some() && args.project.is_none() {
+    if !args.profile.is_empty() && args.project.is_none() {
         return Ok(None);
     }
     let start = args.project.clone().unwrap_or_else(|| PathBuf::from("."));
@@ -151,7 +152,7 @@ mod tests {
             path: None,
             tool: None,
             secret: None,
-            profile: None,
+            profile: Vec::new(),
             plan: None,
             project: Some(dir.path().to_path_buf()),
             backend: Some(BackendKind::Firecracker),
@@ -176,7 +177,7 @@ mod tests {
             path: None,
             tool: None,
             secret: None,
-            profile: None,
+            profile: Vec::new(),
             plan: Some(path),
             project: None,
             backend: None,
