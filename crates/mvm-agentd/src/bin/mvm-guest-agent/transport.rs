@@ -203,7 +203,10 @@ mod tests {
 
     #[test]
     fn unix_listener_round_trips_a_byte_stream() {
-        let dir = tempfile::tempdir().unwrap();
+        // Create the temporary directory under /tmp to keep the socket path short
+        // and avoid exceeding the OS UNIX socket path length (SUN_LEN) when the
+        // workspace root is deeply nested (CI/worktree paths). See the CI note.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let sock = dir.path().join("nested").join("agent.sock");
         // bind_unix_listener creates the missing parent dir.
         let listener = bind_unix_listener(&sock).expect("bind unix listener");
@@ -239,7 +242,9 @@ mod tests {
     fn control_sockets_are_close_on_exec() {
         use std::os::fd::AsRawFd;
 
-        let dir = tempfile::tempdir().unwrap();
+        // Use /tmp to avoid long temp paths that can overflow UNIX socket path
+        // length limits on some test runners.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let sock = dir.path().join("agent.sock");
         let listener = bind_unix_listener(&sock).expect("bind unix listener");
         assert!(is_cloexec(listener.as_raw_fd()), "unix listener");
@@ -276,7 +281,8 @@ mod tests {
 
     #[test]
     fn bind_unix_listener_replaces_a_stale_socket_file() {
-        let dir = tempfile::tempdir().unwrap();
+        // Keep the temp path short to avoid SUN_LEN overflows during bind.
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let sock = dir.path().join("agent.sock");
         std::fs::write(&sock, b"stale").unwrap();
         let listener = bind_unix_listener(&sock);
