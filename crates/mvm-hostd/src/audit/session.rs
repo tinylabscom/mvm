@@ -137,8 +137,8 @@ pub struct SessionSeal {
     /// state) the signed plan recorded, when it recorded one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute_environment: Option<String>,
-    /// Content root of the session's snapshots. Reserved: no writer sets it
-    /// until snapshot lineage is recorded per session.
+    /// Merkle root of the session's ordered checkpoint-creation digests, when
+    /// the session created checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_root: Option<String>,
 }
@@ -197,6 +197,15 @@ impl SessionSeal {
         };
         let optional = |name: &str| labels.get(&format!("{LABEL_PREFIX}{name}")).cloned();
         let reason = get("reason")?;
+        let snapshot_root = optional("snapshot_root");
+        if snapshot_root
+            .as_deref()
+            .is_some_and(|root| !is_hex_hash(root))
+        {
+            return Err(format!(
+                "{LABEL_PREFIX}snapshot_root is not a SHA-256 hex digest"
+            ));
+        }
         Ok(Self {
             event_count: number("event_count")?,
             first_seq: number("first_seq")?,
@@ -214,7 +223,7 @@ impl SessionSeal {
             exit_code: optional("exit_code"),
             error_class: optional("error_class"),
             compute_environment: optional("compute_environment"),
-            snapshot_root: optional("snapshot_root"),
+            snapshot_root,
         })
     }
 }
@@ -320,7 +329,21 @@ pub struct SealRequest<'a> {
     pub plan_id: &'a str,
     pub reason: SealReason,
     pub compute_environment: Option<String>,
-    pub snapshot_root: Option<String>,
+}
+
+fn checkpoint_root(entries: &[&Leaf<'_>]) -> Result<Option<String>> {
+    let digests: Vec<&str> = entries
+        .iter()
+        .filter(|leaf| leaf.entry.event == crate::audit::emitter::checkpoint_audit::CREATED_EVENT)
+        .map(|leaf| {
+            leaf.entry
+                .labels
+                .get(crate::audit::emitter::checkpoint_audit::LABEL_META_DIGEST)
+                .map(String::as_str)
+                .ok_or_else(|| anyhow::anyhow!("checkpoint.created is missing meta_digest"))
+        })
+        .collect::<Result<_>>()?;
+    Ok((!digests.is_empty()).then(|| hex(&merkle_root(&digests))))
 }
 
 /// Compute the seal for `request.plan_id` over the verified chain `lines`.
@@ -342,20 +365,7 @@ pub fn compute_seal(lines: &[String], request: &SealRequest<'_>) -> Result<Sessi
             .and_then(|leaf| leaf.entry.labels.get(key).cloned())
     };
     let session_lines: Vec<&str> = session.iter().map(|leaf| leaf.line).collect();
-    let snapshot_digests: Vec<&str> = session
-        .iter()
-        .filter(|leaf| leaf.entry.event == crate::audit::emitter::checkpoint_audit::CREATED_EVENT)
-        .filter_map(|leaf| {
-            leaf.entry
-                .labels
-                .get(crate::audit::emitter::checkpoint_audit::LABEL_META_DIGEST)
-                .map(String::as_str)
-        })
-        .collect();
-    let snapshot_root = request
-        .snapshot_root
-        .clone()
-        .or_else(|| (!snapshot_digests.is_empty()).then(|| hex(&merkle_root(&snapshot_digests))));
+    let snapshot_root = checkpoint_root(&session)?;
     Ok(SessionSeal {
         event_count: session.len() as u64,
         first_seq: first.seq,
@@ -436,6 +446,8 @@ pub enum MismatchReason {
     SequenceMismatch,
     /// The Merkle root over the session's entries differs from the seal's.
     RootMismatch,
+    /// The root over ordered checkpoint-creation digests differs from the seal's.
+    SnapshotRootMismatch,
     /// The seal's chain head is not a line before it.
     HeadMismatch,
     /// The seal does not link to the previous seal.
@@ -597,7 +609,11 @@ fn check_seal(
         ));
     };
     let shift = i128::from(head.seq) - i128::from(seal.head_seq);
-    let covered: Vec<&&Leaf<'_>> = session.iter().filter(|leaf| leaf.seq <= head.seq).collect();
+    let covered: Vec<&Leaf<'_>> = session
+        .iter()
+        .copied()
+        .filter(|leaf| leaf.seq <= head.seq)
+        .collect();
     if covered.len() as u64 != seal.event_count {
         return Err((
             MismatchReason::CountMismatch,
@@ -646,6 +662,20 @@ fn check_seal(
                 short(&root)
             ),
         ));
+    }
+    if let Some(recorded) = seal.snapshot_root.as_deref() {
+        let actual = checkpoint_root(&covered)
+            .map_err(|error| (MismatchReason::SnapshotRootMismatch, error.to_string()))?;
+        if actual.as_deref() != Some(recorded) {
+            return Err((
+                MismatchReason::SnapshotRootMismatch,
+                format!(
+                    "it records checkpoint root {}, the session's checkpoint entries hash to {}",
+                    short(recorded),
+                    actual.as_deref().map_or("none", short)
+                ),
+            ));
+        }
     }
     let prev_seal = before
         .iter()
@@ -1000,7 +1030,6 @@ impl crate::audit::emitter::AuditEmitter {
                 plan_id: &plan.plan_id.0,
                 reason,
                 compute_environment: compute_environment_digest(plan),
-                snapshot_root: None,
             },
         )?;
         self.emit(plan, SESSION_SEALED_EVENT, seal.to_labels())?;
