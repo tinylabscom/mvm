@@ -104,7 +104,8 @@ impl StorageProvider for EncryptedStorage {
         let requested_size_bytes = size * 1024 * 1024;
         // Test-mode override: cap actual backing-file size under test env vars so
         // unit tests don't allocate huge sparse files on CI or local runs.
-        let effective_size_bytes = if let Ok(min_str) = std::env::var("MVM_TEST_VOLUMES_MIN_BYTES") {
+        let effective_size_bytes = if let Ok(min_str) = std::env::var("MVM_TEST_VOLUMES_MIN_BYTES")
+        {
             if let Ok(min_bytes) = min_str.parse::<u64>() {
                 std::cmp::min(requested_size_bytes, min_bytes)
             } else {
