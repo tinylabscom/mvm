@@ -22,6 +22,7 @@ const SPAWN_RS: &str = "crates/mvm-vmm/src/host/network_endpoint_spawn.rs";
 const ENDPOINT_BIN: &str = "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs";
 const SPEC_MAP_RS: &str = "crates/mvm-vmm/src/host/spec_map.rs";
 const RUNNER_RS: &str = "crates/mvm-runtime/src/workload_runner/runner.rs";
+const LIVE_SNAPSHOT_RS: &str = "crates/mvm-runtime/src/vm/instance_snapshot.rs";
 
 const RUNNERS: &[(&str, &str)] = &[
     ("FcRunner", "FcDriver"),
@@ -161,10 +162,29 @@ pub fn run(workspace: &Path) -> Result<()> {
     check_single_peer_resolver(workspace)?;
     check_flow_audit_labels(workspace)?;
     check_builder_egress(workspace)?;
+    check_live_snapshot_device_setup(workspace)?;
     eprintln!(
-        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path, one workload socket owner, one peer resolver, payload-free flow audit labels, and no builder egress but the vsock egress client"
+        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path or live snapshot device setup, one workload socket owner, one peer resolver, payload-free flow audit labels, and no builder egress but the vsock egress client"
     );
     Ok(())
+}
+
+fn check_live_snapshot_device_setup(workspace: &Path) -> Result<()> {
+    let violations = live_snapshot_device_violations(&read(workspace, LIVE_SNAPSHOT_RS)?);
+    if !violations.is_empty() {
+        bail!(
+            "check-single-network-path: live snapshot harness must not attach a network device: {}",
+            violations.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn live_snapshot_device_violations(source: &str) -> Vec<&'static str> {
+    ["MVM_LIVE_TAP", "/network-interfaces/"]
+        .into_iter()
+        .filter(|token| source.contains(token))
+        .collect()
 }
 
 fn read(workspace: &Path, rel: &str) -> Result<String> {
@@ -882,6 +902,15 @@ mod tests {
         );
         assert_eq!(hits.len(), 1);
         assert!(hits[0].contains("StartPortForward"));
+    }
+
+    #[test]
+    fn live_snapshot_harness_refuses_device_setup() {
+        assert!(live_snapshot_device_violations("boot_source();").is_empty());
+        let violations = live_snapshot_device_violations(
+            "let tap = std::env::var(\"MVM_LIVE_TAP\"); api_put(\"/network-interfaces/eth0\");",
+        );
+        assert_eq!(violations.len(), 2, "{violations:?}");
     }
 
     #[test]
