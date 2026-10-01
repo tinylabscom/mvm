@@ -524,7 +524,7 @@ mod tests {
     /// version and added attestations this host does not know) still provides
     /// everything this host requires, so it loads. Equality here would refuse
     /// every images-side bump — the exact drift that made v0.2.3's contract-5
-    /// builder unrecoverable for a v4 host (#3901).
+    /// builder unrecoverable for a v4 host.
     #[test]
     fn a_newer_cache_contract_still_loads() {
         let cache = tempfile::tempdir().expect("tempdir");
