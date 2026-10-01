@@ -1345,8 +1345,10 @@ mod tests {
         env.set("HOME", scratch.path());
         env.set("MVM_HOME", scratch.path().join("isolated"));
 
-        // The default home ($HOME/.mvm/cache) has an entry to offer...
-        let entry = scratch.path().join(".mvm/cache/local-images/v1/entry-a");
+        // The default home has an entry to offer...
+        let entry = crate::cache_install::default_cache_root()
+            .join(crate::image_source::cache::LOCAL_IMAGE_CACHE_DIR)
+            .join("v1/entry-a");
         std::fs::create_dir_all(&entry).unwrap();
         std::fs::write(entry.join("image-set.json"), b"{}\n").unwrap();
         // ...but the isolated cache's layout path is a file, so the install
