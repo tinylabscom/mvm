@@ -511,11 +511,14 @@ client, CLI left with args + rendering.
 
 ## Execution log and handoff
 
-Snapshot as of 2026-09-27, updated after the agents were stopped. This section is the pick-up point: it records what
-landed, what is in flight, the decisions taken while executing, and the known
-defects found along the way. The workstream checkboxes above remain the
-per-item source of truth; `specs/REFACTOR-STATUS.md` is the rollup; tracking
-issue #3731 carries the same status as a comment.
+Snapshot as of 2026-10-01, after the program's consolidation close-out. This
+section is now a **frozen historical record**: #3894 ("issue-owned work
+state") retired hand-maintained progress surfaces, so tracking issue #3731
+and its status comments own the live program state, and pull requests record
+what landed and how it was verified. Do not update this section; resume from
+#3731's latest status comment. The workstream text above is the design record
+of what each slice set out to do; its checkboxes are historical, not a live
+ledger.
 
 ### Landed
 
@@ -528,54 +531,68 @@ issue #3731 carries the same status as a comment.
 | #3748 | PS-02 | one restricted-address classifier; private-range default deny; NAT64/6to4/Teredo embedded-address closure; DNS pinned for the forward leg; five claim-10 witnesses |
 | #3749 | PS-02 | endpoint routes (method + path rules) decided at the gate; explicit interception grant; `ask` seam; `--allow-endpoint`, `[[network.routes]]`; `fuzz_egress_routes` |
 | #3754 | PS-01 | SDKs call `libmvm_hostlib` in-process (ABI 1.2); subprocess transport deleted; `check-no-cli-shellout` gate; `mvm-client` re-exports the embedder surface |
-| #3755 | PS-04 | egress refusals shown on the host live and at exit with per-reason remedies; `explain` gains denials; shared audit follow reader (fixes a tail-after-rotation skip) |
-| #3756 | PS-07 | `ask` held at the endpoint, answered by a tty / webhook / chain broker from the launching `mvmctl`; fail-closed; chain-signed `approval.*` entries |
+| #3755 | PS-04 | egress refusals shown on the host live and at exit with per-reason remedies; `explain` gains denials; shared audit follow reader |
+| #3756 | PS-07 | `ask` held at the endpoint, answered by a tty / webhook / chain broker from the launching `mvmctl`; fail-closed; chain-signed `approval.*` entries; SDK callback (ABI 1.4); per-machine broker for SDK launches |
 | #3759 | PS-01 | homepage SDK samples follow the in-process READMEs |
-| #3770 | PS-21 (#3730, closed) | snapshot, live-readiness and backend selection moved behind `mvm-client`; bypass inventory above |
+| #3770 | PS-21 (#3730, closed) | snapshot, live-readiness and backend selection moved behind `mvm-client`; bypass inventory recorded |
 | #3771 | PS-19 (#3728, closed) | never-enabled feature flags deleted; full inventory recorded |
+| #3767 | PS-20 (#3729, closed) | unreachable `up::Args` and stale references removed |
+| #3768 | PS-17 (#3726, closed) | task-runner surface reduced to 8 root recipes + 13 modules |
+| #3790 | plan | handoff docs; unfinished-work branches pushed and catalogued |
+| #3784 | PS-01 (#3711, closed) | command/env/template sources, BrowserSandbox presets, in-VM dispatch via `mvm_client::entrypoint`, `machine.logs.stream.*` (ABI 1.3); live-boot SDK scenario |
+| #3758 | PS-10 (#3720) | `session.sealed` entries, derived session ledger, `trust audit sessions` / `show` / `verify <session>`; two claim-8 witnesses |
+| #3751 | PS-09 (#3719) | console reattach with 1 MiB scrollback, `~d` detach, `--list`, `--force` take-over, `machine detach` |
+| #3753 | PS-11 (#3721) | instruction-file trust policy, sidecar signatures, pre-boot admission scan, `trust instructions *`, signing workflow |
+| #3814 | #3752 (closed) | run-verb grant expiry fixed |
+| #3816 | PS-04 (#3714) | no-network hint: one line naming `--allow-host` on nonzero exit |
+| #3817 | #3757 (closed) | `--manifest` OCI runs receive guest proxy/CA env |
+| #3820 | transient launch | `LocalBackend::launch` attaches overlay + universal initramfs together |
+| #3824 | PS-02 | durable injection modes: query_param / url_path / basic_auth |
+| #3827 | PS-08 | `vm diff` with content; `workspace.rs` apply seam |
+| #3798 | PS-05 (#3715, closed) | composable policy groups/profiles, resolved manifest, `mvmctl policy resolve|show|validate|diff`, `--policy`/`--plan`, generated JSON Schema |
+| #3843 | PS-08 | reviewed workspace apply: pre-apply content-addressed snapshot, journaled commit, crash recovery, `machine undo`/`redo`, operator exclusions persisted, protected-path gate |
+| #3862 | PS-08 (#3718, closed) | operator replay: exec input journal, `machine replay <checkpoint>` with per-step restore points through ordinary admission |
+| #3897 | PS-08 | admitted agent prompt inputs persisted — the recording seam the blocked agent-prompt replay orchestration needs |
+| #3911 | PS-05 | repeatable `--policy` composition and JSON policy documents (refs #3715) |
+| #3891 | PS-15 (#3724) | release tarball, PyPI wheels, and npm packages carry `libmvm_hostlib`; fail-closed packaging asserts |
+| #3912 | PS-18 (#3727) | `guides/workspace-apply.md` capability page; doc-example gates held |
+| #3922 | PS-11 (#3721) | mounted host-directory snapshots scanned for instruction files before admission — the last open box |
 
-### Open or queued (at snapshot time)
+### Closed known defects
 
-| PR | Workstream | State / next step |
-|---|---|---|
-| #3784 | PS-01 (closes #3711) | command/env/template sources, BrowserSandbox presets, in-VM dispatch via `mvm_client::entrypoint`, `machine.logs.stream.*` (ABI 1.3); armed for the merge queue |
-| #3751 | PS-09 | console reattach with 1 MiB scrollback, `~d` detach, `--list`, `--force` take-over, `machine detach`; CI red, being rebased and fixed |
-| #3753 | PS-11 | instruction-file trust policy, sidecar signatures, pre-boot admission scan, `trust instructions *`, signing workflow; conflicts with main, being rebased |
-| #3758 | PS-10 | `session.sealed` entries, derived session ledger, `trust audit sessions` / `show` / `verify <session>`; two claim-8 witnesses; CI being fixed |
-| #3767 | PS-20 | unreachable `up::Args` and stale references removed (opened by another session) |
-| #3768 | PS-17 | task-runner surface reduced (opened by another session) |
-| #3798 | PS-05 (#3715) | composable policy groups/profiles and resolved manifests; security audit fixes added; focused checks, Clippy, and host workspace tests validated (one parallel image-lock race passed on serial rerun); Linux and required-feature gates pending CI |
-| mvm-assurance#202 | PS-11 | mvm-scout `SCOUT-PROMPT-002` whole-file instruction-injection indicators; awaiting review |
+All three launch defects are closed: #3752 (#3814), #3757 (#3817), and the
+transient `LocalBackend::launch` initramfs panic (#3820). The CLAUDE.md
+claim-8 prose straggler is cleared in the consolidation PR that recorded this
+snapshot: truncation through a session seal is now detectable (the session
+goes `UNSEALED`), while truncation of whole sessions or never-sealed sessions
+stays undetectable without an off-host witnessed root — the ADR-001 claim-8
+row carries the precise statement. The #3753 open box closed with #3922,
+which scans mounted host-directory snapshots for instruction files before
+admission.
 
-### Resumed after the snapshot (2026-09-28)
+### In flight under parallel sessions (2026-10-01)
 
-| Branch | Workstream | State |
-|---|---|---|
-| `feat/issue-3712-egress-routes` | PS-02 (#3712) | Completed durable injection modes and persistent-machine endpoint routes; focused suites, host workspace split, workspace check/Clippy, gated-target compilation, and the single-network-path invariant are green |
-
-### Stopped mid-flight (2026-09-27)
-
-All program agents were stopped at the user's request on 2026-09-27. Their
-unfinished work is pushed as branches with no PR. Commits labelled `wip:` are
-formatted snapshots on which clippy and the test gates were **not** run;
-every branch needs a rebase onto main, the full gates, and a PR.
-
-| Branch | Workstream | State |
-|---|---|---|
-| `fix/verb-grant-expiry` | #3752 | 3 commits, complete per its agent |
-| `feat/no-network-hint` | PS-04 (#3714) | 1 commit, complete per its agent |
-| `feat/vm-diff-content` | PS-08 (#3718) | 1 commit + `wip:` (guest diff verb, `diff/`, `workspace.rs`) |
-| `feat/egress-injection-modes` | PS-02 (#3712) | WIP snapshot folded into `feat/issue-3712-egress-routes` and completed on 2026-09-28 |
-| `fix/oci-proxy-env-resolution` | #3757 | `wip:` only (`exec/oci_boot.rs`, delivery note drafted) |
-| `fix/transient-launch-initramfs` | transient `LocalBackend::launch` | `wip:` only (`universal_initramfs.rs`, `host_shell.rs`) |
-| `wip/instruction-provenance-ci-fix` | PS-11 (#3753) | `wip:` on top of `feat/instruction-provenance`: the unfinished CI fix; fold into #3753 |
+- **PS-06 packs** (#3716): registry pack verbs in #3857; signed-pack
+  manifests, lockfile foundation, payload verification, atomic install, and
+  publisher trust already landed on main.
+- **PS-13 tool privileges** (#3723): tool policy model, the `ops mcp` gate,
+  and resolved tool rules on the signed `ExecutionPlan` landed; command
+  mediation slices open.
+- **mvm-scout instruction-injection scan** (PS-11 tail): tinylabscom/mvm-assurance#202.
 
 ### Not started
 
-PS-06 packs (needs PS-05), PS-13 tool privileges (needs PS-05), PS-15
-packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
+PS-15 tail (deb/rpm, ordered and idempotent crates.io publish, per-artifact
+smoke tests), PS-16 (Nix DX; needs builder-VM Nix evals), PS-18 tail
+(per-agent client guides await PS-06; profile/pack authoring guides await
+PS-06; schema reference). The PS-06 split is fixed: packs live in
 `mvm-templates` and define their own images with their own `mvm.toml` /
 `flake.nix`; `mvm-images` builds only the images `mvmctl` itself requires.
+
+One observation from the defects list remains unfiled: a boot command
+override on a `prod` build slot is accepted, the same as `machine run -d --
+cmd`. It was recorded "for review" and no issue owns it; raise one from #3731
+if it should be tracked.
 
 ### Decisions taken during execution
 
@@ -601,36 +618,21 @@ packaging, PS-16 Nix DX, PS-18 docs. The PS-06 split is fixed: packs live in
   fsync: 4-5 ms on macOS, 44-49 ms on the rotational KVM host.
 - **Approvals on detached machines deny** until a per-machine broker exists;
   never approve silently.
-
-### Known defects found along the way
-
-- #3752: the run verb grant is minted before a cold guest-runtime build and
-  can expire before boot (`VerbNotAuthorized`).
-- #3757: a `--manifest` run naming an OCI image gets no guest proxy/CA env.
-- Transient `LocalBackend::launch` (`mvm_hostd::run::admit_and_boot_local`)
-  attached no universal initramfs and panicked at `/init` for Rust callers.
-  Fixed by the `fix/transient-launch-initramfs` PR: the attach decision
-  lives in `mvm_runtime::universal_initramfs` and hostd attaches overlay +
-  initramfs together on the in-process boot.
-- #3753 open box: host-directory volumes attached as block devices
-  (`machine volume mount --host DIR`) are never scanned for instruction files.
-- For review: a boot command override on a `prod` build slot is accepted, the
-  same as `machine run -d -- cmd`.
-- CLAUDE.md claim-8 prose still says tail truncation is undetectable; after
-  #3758, truncation through a session seal is detectable (the ADR-001 table
-  carries the precise statement).
+- **Work state lives in issues, not in specs** (#3894): plan checkboxes,
+  `specs/REFACTOR-STATUS.md`, sprint and delivery dashboards are retired;
+  #3731 status comments and PRs are the program's mutable record.
 
 ### How to resume
 
-1. Read this section, the brief below, and `specs/research/host-kernel-agent-sandbox-comparison.md`, then `gh issue view 3731` for the latest status comment.
-2. For each open PR and each branch in "Stopped mid-flight": check CI
-   (`gh pr checks N`), rebase onto main keeping both sides of any conflict,
-   fix root causes, run the full gates, open or update the PR, and enqueue
-   it through the merge queue.
-3. Branches are named in the tables; their worktrees live under
-   `.worktrees/` beside the repository and may be removed once merged.
-4. Next workstreams in priority order: PS-05 → PS-06 and PS-13 → PS-08 →
-   PS-15 → PS-16 → PS-18.
+1. Read the latest status comment on #3731. This section and the workstream
+   text above are frozen history.
+2. For each open PR: check CI (`gh pr checks N`), rebase onto
+   `origin/main`, fix root causes, run the full gates, and enqueue through
+   the merge queue.
+3. Branches live in worktrees under `.worktrees/` beside the repository and
+   may be removed once merged.
+4. Priority order for what remains: PS-06/PS-13 (parallel sessions) → PS-15
+   tail → PS-16 → PS-18 tail.
 
 ### Brief for whoever resumes
 
@@ -651,9 +653,9 @@ Rules this program follows beyond CLAUDE.md and AGENTS.md:
 - Commits and PRs carry no AI attribution and no co-author trailer.
 - Arm a green PR with `gh pr merge N --squash --auto` run twice (the second
   run shows it entered the queue), then check the merge queue.
-- Tick the plan's boxes, `specs/REFACTOR-STATUS.md`, and a delivery note
-  in `specs/sprint/delivery/` in the same PR; update this execution log and
-  post a status comment on #3731 when PRs land.
+- Program state goes in #3731 status comments and the PR record — not in
+  plan edits, `specs/REFACTOR-STATUS.md` revivals, or new delivery
+  dashboards (`check-spec-hygiene` enforces this).
 - Delete a worktree's `target/` once its PR is queued; disk is shared.
 - Agents may be stopped by an account rate limit. Before assuming work
   landed, check the worktree and the branch on origin.

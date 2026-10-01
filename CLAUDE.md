@@ -433,9 +433,15 @@ ADR-001 §"Appendix: Cardoso minimum-viable-policy checklist".
    the set is ordered and complete: a removed segment is reported by
    number rather than passing silently. `mvmctl doctor` checks the live
    segment plus the handoffs and says that is what it checked;
-   `mvmctl trust audit verify` walks every retired interior. Tail
-   truncation stays undetectable, exactly as it was before rotation
-   (Plan 319).
+   `mvmctl trust audit verify` walks every retired interior. A
+   session that reaches its end is closed by a chain-signed
+   `session.sealed` record (entry count, first/last entry, chain head,
+   RFC 6962 root over the session's entries, link to the previous
+   seal), and truncating through a seal turns the session `UNSEALED`,
+   which `trust audit verify <session>` reports field by field. Tail
+   truncation of whole sessions, or of a session that never sealed,
+   stays undetectable without an off-host witnessed root — exactly as
+   it was before rotation (Plan 319).
    Workspace `cargo test` exercises rejection paths on every PR
    (plan 64 W1–W4 — `synthesize_plan`, `host_signer::load_or_init_at`,
    `admit_for_run`, `AuditEmitter`; `xtask check-no-display-on-secret-types`
