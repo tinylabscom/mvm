@@ -2,6 +2,29 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.20.0] — 2026-10-01
+
+### Added
+- **bundle**: Verify embedded image sets
+- **mcp**: Enforce the resolved [tools] policy at the ops mcp gate (PS-13 slice B)
+- **replay**: Persist admitted agent prompt inputs
+- **release**: Ship libmvm_hostlib in the tarball, wheels, and npm packages
+- **plan**: Resolved tool rules ride the signed ExecutionPlan (PS-13 slice C, part 1)
+
+### Documentation
+- **guides**: Bring agent changes home — the reviewed workspace apply loop
+- **telemetry**: Studio data contract and frozen fixture streams
+
+### Fixed
+- **bdd**: Gate cached-kernel scenarios on no local images checkout being selected
+- **build**: Gate builder-vm host-binaries staging on the checkout's boot ABI
+- Enforce vsock-only guest devices
+- Isolate host-sensitive unit test inputs
+- **audit**: Verify session checkpoint roots against signed events
+
+### Testing
+- **docs**: Give the journey machine a workspace volume for machine diff
+
 ## [0.19.0] — 2026-09-30
 
 ### Added
