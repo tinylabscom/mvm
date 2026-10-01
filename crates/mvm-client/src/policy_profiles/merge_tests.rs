@@ -690,3 +690,35 @@ fn tools_section_with_detail_round_trips_through_resolution() {
     assert_eq!(detail.argv, ["git *"]);
     assert_eq!(resolved.policy.tools.ask, ["git"]);
 }
+
+#[test]
+fn fold_carries_the_resolved_tools_as_contract_rules() {
+    let text = "[tools]\nallow = [\"bash\"]\nask = [\"git\"]\ndeny = [\"curl\"]\n\
+                [tools.detail.bash]\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n\
+                secrets = [\"GITHUB_TOKEN\"]\n";
+    let resolved = merged(&[user("a", text)]);
+    let folded = crate::policy_profiles::fold(
+        &resolved.policy,
+        &crate::policy_profiles::LaunchFlags::default(),
+    )
+    .expect("folds");
+    let rules = folded.tools;
+    assert_eq!(rules.allow, ["bash"]);
+    assert_eq!(rules.ask, ["git"]);
+    assert_eq!(rules.deny, ["curl"]);
+    let detail = rules.detail.get("bash").expect("bash detail");
+    assert_eq!(detail.argv, ["git *"]);
+    assert_eq!(detail.routes, ["github.com:443"]);
+    assert_eq!(detail.secrets, ["GITHUB_TOKEN"]);
+}
+
+#[test]
+fn fold_without_tools_yields_empty_rules() {
+    let resolved = merged(&[user("a", "[network]\nallow = [\"a.test:443\"]\n")]);
+    let folded = crate::policy_profiles::fold(
+        &resolved.policy,
+        &crate::policy_profiles::LaunchFlags::default(),
+    )
+    .expect("folds");
+    assert!(folded.tools.is_empty());
+}

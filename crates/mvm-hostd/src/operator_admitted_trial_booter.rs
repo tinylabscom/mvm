@@ -448,6 +448,7 @@ impl OperatorConfiguredTrialBooter {
             assets: Vec::new(),
             redaction: Default::default(),
             reversible_replacement: Default::default(),
+            tools: Default::default(),
             caller_commitment: None,
             audit_labels,
             agent_verbs: Some(vec![

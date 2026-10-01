@@ -202,6 +202,7 @@ impl PlanFixture {
             redaction: Default::default(),
             reversible_replacement: Default::default(),
             tool_policy: PolicyRef("local-default".to_string()),
+            tools: Default::default(),
             artifact_policy: ArtifactPolicy {
                 capture_paths: Vec::new(),
                 retention_days: 0,

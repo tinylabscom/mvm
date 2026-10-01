@@ -474,6 +474,7 @@ mod tests {
             redaction: Default::default(),
             reversible_replacement: Default::default(),
             tool_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
+            tools: Default::default(),
             artifact_policy: ArtifactPolicy {
                 capture_paths: Vec::new(),
                 retention_days: 0,

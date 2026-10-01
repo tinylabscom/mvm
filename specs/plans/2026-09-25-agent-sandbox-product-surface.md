@@ -392,6 +392,9 @@ Security-bearing gaps first, then the foundations the UX needs:
         per non-allow; secrets-to-(tool, destination) binding waits for the
         in-guest mediation that carries tool identity to the endpoint
 - [ ] in-guest command mediation for declared tools, reported over vsock and audited
+  - [x] resolved tool rules ride the signed `ExecutionPlan` inline (`ToolRules`
+        in `mvm-contract`, carried through synthesis from the authored policy)
+        — the substrate every consumer reads
 
 ### PS-14 — Existing enforcement plans
 The protected-path gate and cumulative action ledger plans (2026-09-24) are

@@ -369,6 +369,7 @@ pub(crate) mod tests {
             redaction: Default::default(),
             reversible_replacement: Default::default(),
             tool_policy: PolicyRef("t".to_string()),
+            tools: Default::default(),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec![],
                 retention_days: 0,

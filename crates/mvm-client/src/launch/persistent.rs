@@ -305,6 +305,7 @@ pub fn start_persistent_oci_machine(
                     shares: shares_from_volume_cfg(volumes),
                     assets: Vec::new(),
                     redaction: mvm_core::policy::RedactionPolicy::default(),
+                    tools: Default::default(),
                     network_policy: network_policy.clone(),
                     agent_verb_override: agent_verb.to_vec(),
                     // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);

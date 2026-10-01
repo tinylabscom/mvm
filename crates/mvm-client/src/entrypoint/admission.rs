@@ -138,6 +138,7 @@ impl EntrypointAdmission {
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
             assets: assets.to_vec(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            tools: Default::default(),
             network_policy: self.network_policy.clone(),
             agent_verb_override: self.agent_verb_override.clone(),
             // The entrypoint is driven over agent RPC: no PTY, no ad-hoc argv,

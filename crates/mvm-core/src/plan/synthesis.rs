@@ -184,6 +184,9 @@ pub struct SynthesisInput<'a> {
     /// Per-destination reversible replacement. Default (disabled) preserves the
     /// current one-way-only behavior.
     pub reversible_replacement: crate::policy::ReversibleReplacementPolicy,
+    /// Resolved per-tool rules. Default (empty) keeps the tool dimension
+    /// unused: the endpoint admits every tool question.
+    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// Caller-supplied audit labels merged into the synthesized plan's
     /// `audit_labels`. They serialize inside the signed payload and are
     /// inherited by every chain-signed audit entry. The profile-derived keys
@@ -267,6 +270,7 @@ pub struct SynthesisInputBuilder<'a> {
     outputs: Option<Vec<crate::plan::OutputGrant>>,
     redaction: Option<crate::policy::RedactionPolicy>,
     reversible_replacement: Option<crate::policy::ReversibleReplacementPolicy>,
+    tools: Option<mvm_contract::policy::tool_rules::ToolRules>,
     audit_labels: Option<AuditLabels>,
     caller_commitment: Option<CallerCommitment>,
     agent_verbs: Option<Vec<crate::plan::VerbId>>,
@@ -313,6 +317,7 @@ impl<'a> SynthesisInputBuilder<'a> {
             outputs: None,
             redaction: None,
             reversible_replacement: None,
+            tools: None,
             audit_labels: None,
             caller_commitment: None,
             agent_verbs: None,
@@ -537,6 +542,13 @@ impl<'a> SynthesisInputBuilder<'a> {
         self
     }
 
+    /// Set the resolved per-tool rules carried inline in the plan.
+    #[must_use]
+    pub fn tools(mut self, tools: mvm_contract::policy::tool_rules::ToolRules) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
     /// Set `reversible_replacement`.
     #[must_use]
     pub fn reversible_replacement(
@@ -676,6 +688,7 @@ impl<'a> SynthesisInputBuilder<'a> {
                 "SynthesisInput",
                 "reversible_replacement",
             ))?,
+            tools: self.tools.unwrap_or_default(),
             audit_labels: self
                 .audit_labels
                 .ok_or(BuilderError::missing("SynthesisInput", "audit_labels"))?,
@@ -819,6 +832,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         redaction: input.redaction.clone(),
         reversible_replacement: input.reversible_replacement.clone(),
         tool_policy,
+        tools: input.tools.clone(),
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),
             retention_days: 0,
@@ -1124,6 +1138,7 @@ mod tests {
             assets: Vec::new(),
             redaction: crate::policy::RedactionPolicy::default(),
             reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
+            tools: Default::default(),
             caller_commitment: None,
             audit_labels: Default::default(),
             agent_verbs: None,

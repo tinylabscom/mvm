@@ -254,6 +254,7 @@ pub fn admit_and_boot_local(
         assets: Vec::new(),
         redaction: Default::default(),
         reversible_replacement: Default::default(),
+        tools: Default::default(),
         caller_commitment: None,
         audit_labels: Default::default(),
         agent_verbs: None,
