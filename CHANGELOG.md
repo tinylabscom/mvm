@@ -2,6 +2,19 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.21.0] — 2026-10-02
+
+### Added
+- **policy**: Compose multiple --policy files and accept JSON documents
+- **policy**: Add audited per-VM tool decision transport
+- **packs**: Search/pull/pack-registry verbs and policy pack references (PS-06)
+- **agent**: Mediate declared command exec over control session
+
+### Fixed
+- **audit**: Bind session seals to admitted image and kernel identity
+- **instructions**: Scan mounted host snapshots before admission
+- **build**: Report the fetch-when-unchanged arm at notice level
+
 ## [0.20.0] — 2026-10-01
 
 ### Added
