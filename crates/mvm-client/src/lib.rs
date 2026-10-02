@@ -46,6 +46,7 @@ pub mod admission;
 pub mod approval_broker;
 pub mod audit;
 pub mod boot;
+pub mod bundle;
 pub mod connect;
 pub mod drive;
 pub mod entrypoint;

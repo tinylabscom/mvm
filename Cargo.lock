@@ -3031,6 +3031,7 @@ dependencies = [
  "hex",
  "mvm-agentd",
  "mvm-build",
+ "mvm-bundler",
  "mvm-contract",
  "mvm-core",
  "mvm-fs",

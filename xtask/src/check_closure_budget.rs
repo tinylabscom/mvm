@@ -78,7 +78,10 @@ const BUDGETS: &[ClosureBudget] = &[
 ///
 /// 230 (was 229): the `mvm-setpriv` leaf crate, same reason as the Linux
 /// budget bump below.
-const MACOS_CLOSURE_BUDGET: usize = 230;
+///
+/// 231 (was 230): the `mvm-bundler` crate, same reason as the Linux budget
+/// bump below.
+const MACOS_CLOSURE_BUDGET: usize = 231;
 
 /// Max distinct crates allowed in `mvmctl`'s default no-dev closure on
 /// `x86_64-unknown-linux-gnu`. Baseline measured 2026-06-17 against the audited default
@@ -221,7 +224,13 @@ const MACOS_CLOSURE_BUDGET: usize = 230;
 /// 236 (was 235): `mvm-setpriv`, the guest privilege-drop helper, moves out of
 /// `mvm-agentd` into its own first-party leaf crate. Its only dependency,
 /// `libc`, was already present, so the one new node is the crate itself.
-pub(crate) const CLOSURE_BUDGET: usize = 236;
+///
+/// 237 (was 236): `mvm-bundler`, the bundle export that used to live inside
+/// `mvm-cli`, becomes its own first-party crate so `mvm-client` can offer it
+/// to a library caller. Everything it depends on (`mvm-core`, `ed25519-dalek`,
+/// `anyhow`, `chrono`, `serde`, `serde_json`) was already present, so the one
+/// new node is the crate itself.
+pub(crate) const CLOSURE_BUDGET: usize = 237;
 
 pub fn run(workspace: &Path) -> Result<()> {
     for budget in BUDGETS {
