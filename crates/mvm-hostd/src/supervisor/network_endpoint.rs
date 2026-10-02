@@ -726,7 +726,8 @@ mod tests {
             recorder: Some(Arc::clone(&recorder)),
         };
 
-        let (service, _, _) = assemble_with_projection(&cfg, &projection).unwrap();
+        let (service, _, oauth_refresh) = assemble_with_projection(&cfg, &projection).unwrap();
+        assert!(oauth_refresh.is_none());
         assert_eq!(
             service.shared_projection_ids(),
             (
@@ -753,7 +754,9 @@ mod tests {
             gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
             recorder: Some(recorder),
         };
-        let (service, _) = assemble_with_projection(&cfg, &projection).expect("assemble endpoint");
+        let (service, _, oauth_refresh) =
+            assemble_with_projection(&cfg, &projection).expect("assemble endpoint");
+        assert!(oauth_refresh.is_none());
         assert_eq!(
             service
                 .decide_tool("shell", "echo ok")
