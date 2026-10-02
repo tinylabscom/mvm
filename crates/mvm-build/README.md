@@ -19,6 +19,13 @@ the required kernel, rootfs, initramfs, runtime overlay, SDK sidecar, and guest
 agent. Content can be acquired from signed releases, OCI registries, local Nix
 outputs, or an isolated persistent/ephemeral builder.
 
+Builder VM images are treated as published artifacts by default: `mvmctl` will
+fetch and verify the pinned builder image from the signed image set. Building
+the builder VM from a local `mvm-images` checkout is supported for contributors
+but is opt-in only — set `MVM_IMAGES_DIR` and `MVM_ALLOW_LOCAL_BUILDER_BUILD=1`
+to enable a local build. This keeps ordinary developer and CI invocations fast
+and deterministic while preserving the contributor workflow for image work.
+
 Builder commands cross a versioned protocol rather than sharing arbitrary host
 shell state. Inputs and outputs are staged explicitly, egress readiness is
 checked before dependency installation, and artifacts are verified before

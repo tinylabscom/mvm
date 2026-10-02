@@ -133,10 +133,17 @@ Run `just site::qemu-pack` first to build the pack.
 
 ### Error: "Builder VM not found"
 
-Boot the builder VM:
+Boot the builder VM (downloads and verifies the published builder image by default):
 
 ```bash
-limactl start mvm-arm64
+mvmctl env bootstrap
+```
+
+To build the builder image from a local `mvm-images` checkout (contributor only):
+
+```bash
+MVM_IMAGES_DIR=../mvm-images MVM_ALLOW_LOCAL_BUILDER_BUILD=1 \
+  bin/dev build image-set builder-vm
 ```
 
 ### Error: "qemu-wasm-smoke-pack.tar.gz not found in release"

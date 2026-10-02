@@ -86,6 +86,14 @@ and then on the integrated merge-group commit.
 - [x] Remove source image, runtime-overlay and reproducibility builds from the
       merge gate. mvm-images owns those canonical builds; the source-override
       path remains available as a manual diagnostic.
+- [x] Make `Test` the single required Actions context and remove the redundant
+      `Lint` aggregate runner; `Test` directly owns every lint result.
+- [x] Restore the trusted Nix store through the restore-only cache action on
+      merge refs; only the trusted main warmer writes a reusable cache.
+- [x] Add a bounded PR preflight: run the real policy/invariant lane before
+      queue admission, ShellCheck changed scripts, and execute the embedded
+      helper recipe regression. The full cumulative matrix remains authoritative
+      in the merge queue.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
 - [ ] Land the workflow change through the merge queue. The live queue policy
@@ -99,8 +107,8 @@ and then on the integrated merge-group commit.
 
 - Pull-request and merge-group code never receives a cache credential or a
   writable default-branch cache scope.
-- Required behavior remains transitively owned by `Lint`, `Test`, `Invariant`,
-  the two kernel contexts, and the Nix check.
+- Required behavior remains transitively owned by the single `Test` context,
+  which validates lint, policy, architecture, test, boot and scoped Nix results.
 - Paid plan changes, organization runner creation, and billing changes are not
   repository operations and require an organization owner.
 - Speculative width is not increased to four on the current 20-job pool: the

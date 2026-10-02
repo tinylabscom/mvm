@@ -612,7 +612,25 @@ fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::Dis
     }
 }
 
+fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
+    match command {
+        Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
+        #[cfg(feature = "builder-vm")]
+        Commands::PersistentBuilder(_) => true,
+        Commands::Env(env_args) => matches!(env_args.action, env::group::EnvCmd::Bootstrap(_)),
+        _ => false,
+    }
+}
+
 fn apply_startup_env(cli: &Cli) {
+    // Most commands do not need the builder VM to be running. Explicit
+    // build/bootstrap/persistent-builder commands may start it, unless the
+    // operator already set the skip variable; this function never clears an
+    // operator-provided refusal.
+    if !command_allows_builder_auto_bootstrap(&cli.command) {
+        set_cli_env("MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP", "1");
+    }
+
     if let Some(ref version) = cli.fc_version {
         set_cli_env("MVM_FC_VERSION", version);
     }
@@ -621,6 +639,28 @@ fn apply_startup_env(cli: &Cli) {
     }
     if let Some(ref source) = cli.kernel_source {
         set_cli_env("MVM_KERNEL_SOURCE", source);
+    }
+
+    // Honor per-invocation opt-in for building the builder image from a local
+    // `mvm-images` checkout. This sets the same process env var the bootstrap
+    // path reads (`MVM_ALLOW_LOCAL_BUILDER_BUILD=1`) so callers that expect the
+    // env-var semantics continue to work.
+    let allow_local_builder = match &cli.command {
+        Commands::Build(group_args) => group_args.allow_local_builder_build,
+        Commands::Machine(m_args) => match &m_args.action {
+            crate::commands::machine::MachineAction::Build(b) => b.allow_local_builder_build,
+            _ => false,
+        },
+        Commands::Env(env_args) => match &env_args.action {
+            env::group::EnvCmd::Bootstrap(bootstrap_args) => {
+                bootstrap_args.allow_local_builder_build
+            }
+            _ => false,
+        },
+        _ => false,
+    };
+    if allow_local_builder {
+        set_cli_env("MVM_ALLOW_LOCAL_BUILDER_BUILD", "1");
     }
 }
 
@@ -902,6 +942,32 @@ mod image_source_gate_tests {
         .unwrap();
         refuse_local_image_source_in_release_build(DistributionChannel::Release, &cmd, None)
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod builder_bootstrap_policy_tests {
+    use super::{Cli, command_allows_builder_auto_bootstrap};
+    use clap::Parser;
+
+    fn command(args: &[&str]) -> super::Commands {
+        Cli::try_parse_from(std::iter::once("mvmctl").chain(args.iter().copied()))
+            .expect("the test argv parses")
+            .command
+    }
+
+    #[test]
+    fn only_builder_owning_commands_may_auto_bootstrap() {
+        assert!(command_allows_builder_auto_bootstrap(&command(&[
+            "build", "kernel", "build",
+        ])));
+        assert!(command_allows_builder_auto_bootstrap(&command(&[
+            "env",
+            "bootstrap",
+        ])));
+        assert!(!command_allows_builder_auto_bootstrap(&command(&[
+            "cache", "info",
+        ])));
     }
 }
 

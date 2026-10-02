@@ -91,7 +91,14 @@ jobs:
               fi
               HEAD="$MG_HEAD"
               ;;
-            pull_request) BASE="$PR_BASE"; HEAD="$PR_HEAD" ;;
+            pull_request)
+              if ! BASE=$(git merge-base "$PR_BASE" "$PR_HEAD"); then
+                set_all
+                echo "could not find the pull-request merge base — running every lane to stay safe"
+                exit 0
+              fi
+              HEAD="$PR_HEAD"
+              ;;
             *) echo "::error::unhandled event $EVENT" >&2; exit 1 ;;
           esac
 
@@ -118,7 +125,7 @@ jobs:
           # not exec, and a PR touching only mk-guest.nix used to resolve
           # code=false, so the one test that would have caught that change
           # never ran on it.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -215,6 +222,8 @@ jobs:
                      scripts/run-cve-2026-80521-gcp.sh \
                      scripts/run-cve-2026-80521-gcp-remote.sh \
                      scripts/run-cve-2026-80521-gcp.test.sh \
+                     scripts/check-hvf-oci-allow-host-smoke.sh \
+                     scripts/test-hvf-oci-allow-host-smoke.sh \
                      scripts/installer-compat/*.sh \
                      scripts/smoke-fresh-install.sh \
                      scripts/pin-installer-default.sh \
@@ -228,6 +237,8 @@ jobs:
         run: |
           bash scripts/run-gcp-kvm-test.test.sh
           bash scripts/run-cve-2026-80521-gcp.test.sh
+      - name: HVF OCI smoke harness tests
+        run: bash scripts/test-hvf-oci-allow-host-smoke.sh
 
       # The hook narrows clippy to the packages owning the staged files. When
       # it picked a package cargo cannot address with `-p`, it reported that as
@@ -257,7 +268,6 @@ jobs:
     # merge-group fan-out.
     name: Invariant
     needs: [scope]
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -719,93 +729,59 @@ jobs:
           echo "release feature set: $features"
           cargo check --locked -p mvmctl --bins --features "$features"
 
-  lint:
-    name: Lint (fmt + clippy + policy)
-    if: ${{ always() }}
-    needs:
-      [
-        scope,
-        lint-core,
-        lint-policy,
-        lint-features,
-        lint-features-test-support,
-        lint-features-embed,
-      ]
+  # Deterministic failures should never reach the queue and poison every
+  # cumulative commit behind them. Keep this bounded: policy/workflow checks
+  # run in `lint-policy`; this companion catches changed shell scripts and the
+  # embed-recipe regression that previously failed both workspace arches.
+  pr-regressions:
+    name: PR focused regressions
+    needs: [scope]
+    if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
-      - name: Require CI scope to pass
-        env:
-          SCOPE_RESULT: ${{ needs.scope.result }}
-        run: |
-          if [ "$SCOPE_RESULT" != success ]; then
-            echo "CI scope did not pass: $SCOPE_RESULT"
-            exit 1
-          fi
-
-      # Branch protection requires this context before a PR may enter the merge
-      # queue. Keep admission intentionally compile-free: the integrated
-      # merge-group commit below is the one and only place that pays for full
-      # lint and feature validation.
       - uses: actions/checkout@v6
-        if: github.event_name == 'pull_request'
-
-      - name: Install Rust toolchain for PR admission
-        if: github.event_name == 'pull_request'
-        uses: dtolnay/rust-toolchain@1.97.1
         with:
-          components: rustfmt
+          fetch-depth: 0
 
-      - name: PR admission lint
-        if: github.event_name == 'pull_request'
-        run: cargo fmt -- --check
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
 
-      - name: Require expensive lint lanes to stay out of pull requests
-        if: github.event_name == 'pull_request'
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: shellcheck
+
+      - name: ShellCheck added scripts
         env:
-          CORE_RESULT: ${{ needs.lint-core.result }}
-          POLICY_RESULT: ${{ needs.lint-policy.result }}
-          FEATURES_RESULT: ${{ needs.lint-features.result }}
-          FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
-          FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          for result in "$CORE_RESULT" "$POLICY_RESULT" "$FEATURES_RESULT" \
-            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT"; do
-            if [ "$result" != skipped ]; then
-              echo "Expensive lint lane unexpectedly ran on a pull request: $result"
-              exit 1
-            fi
-          done
-
-      - name: Require every merge-group lint lane to pass
-        if: github.event_name != 'pull_request'
-        env:
-          SCOPE_RESULT: ${{ needs.scope.result }}
-          SCOPE_CODE: ${{ needs.scope.outputs.code }}
-          CORE_RESULT: ${{ needs.lint-core.result }}
-          POLICY_RESULT: ${{ needs.lint-policy.result }}
-          FEATURES_RESULT: ${{ needs.lint-features.result }}
-          FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
-          FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
-        run: |
-          set -euo pipefail
-          if [ "$SCOPE_RESULT" != success ] || [ "$POLICY_RESULT" != success ]; then
-            echo "CI scope or policy did not pass: scope=$SCOPE_RESULT policy=$POLICY_RESULT"
+          changed=$(mktemp)
+          trap 'rm -f "$changed"' EXIT
+          if ! MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA"); then
+            echo "::error::could not resolve the pull-request merge base" >&2
             exit 1
           fi
-          case "$SCOPE_CODE" in
-            true) required=success ;;
-            false) required=skipped ;;
-            *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
-          esac
-          for result in "$CORE_RESULT" "$FEATURES_RESULT" \
-            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT"; do
-            if [ "$result" != "$required" ]; then
-              echo "A lint lane did not match scope $SCOPE_CODE: $result"
-              exit 1
-            fi
-          done
+          if ! git diff --name-only --diff-filter=A -z \
+            "$MERGE_BASE" "$HEAD_SHA" -- '*.sh' '.githooks/*' >"$changed"; then
+            echo "::error::could not classify added shell scripts" >&2
+            exit 1
+          fi
+          mapfile -d '' scripts <"$changed"
+          if [ "${#scripts[@]}" -gt 0 ]; then
+            printf 'shellcheck %s\n' "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+          else
+            echo "No added shell scripts."
+          fi
+
+      - name: Embedded helper recipe contract
+        run: |
+          rustc +1.97.1 --edition=2024 -D warnings --test \
+            crates/mvm-cli/tests/embed_recipe.rs \
+            -o "$RUNNER_TEMP/embed-recipe-test"
+          "$RUNNER_TEMP/embed-recipe-test"
 
   # The Gherkin scenarios previously ran only from release-tag workflows, so a
   # PR could break a scenario and merge green. Same reusable workflow the
@@ -825,7 +801,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -848,18 +824,21 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           set -euo pipefail
+          cargo fmt -- --check
           cargo metadata --locked --format-version 1 --no-deps >/dev/null
           bash scripts/cargo-target-dir-guard.test.sh
           bash scripts/dev-run-guard.test.sh
 
-      - name: Require expensive test lanes to stay out of pull requests
+      - name: Require PR preflight and skip queue-only lanes
         if: github.event_name == 'pull_request'
         env:
+          SCOPE_CODE: ${{ needs.scope.outputs.code }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
           FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
           FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
+          PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
@@ -870,7 +849,15 @@ jobs:
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
         run: |
           set -euo pipefail
-          for result in "$CORE_RESULT" "$POLICY_RESULT" "$FEATURES_RESULT" \
+          if [ "$POLICY_RESULT" != success ]; then
+            echo "PR policy preflight did not pass: $POLICY_RESULT"
+            exit 1
+          fi
+          case "$SCOPE_CODE:$PREFLIGHT_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "PR focused regressions did not match code scope $SCOPE_CODE: $PREFLIGHT_RESULT"; exit 1 ;;
+          esac
+          for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" \
             "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" \
@@ -887,6 +874,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
+          PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
@@ -915,10 +903,10 @@ jobs:
             echo "Policy lint did not pass: $POLICY_RESULT"
             exit 1
           fi
-          # BDD joins this loop rather than being matched separately: it became
-          # the single owner of the Gherkin suite and took on the `code` scope
-          # with it, so it now shares the arithmetic instead of keying off the
-          # narrower `bdd` output.
+          if [ "$PREFLIGHT_RESULT" != skipped ]; then
+            echo "PR-only focused regressions unexpectedly ran for $EVENT_NAME: $PREFLIGHT_RESULT"
+            exit 1
+          fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
@@ -1616,11 +1604,10 @@ jobs:
 
       - name: Restore Nix binary cache
         if: needs.scope.outputs.nix == 'true'
-        uses: DeterminateSystems/magic-nix-cache-action@v14
+        uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          use-gha-cache: true
-          use-flakehub: false
-          diagnostic-endpoint: ""
+          primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
+          restore-prefixes-first-match: nix-
 
       - name: Eval-check every flake
         if: needs.scope.outputs.nix == 'true'

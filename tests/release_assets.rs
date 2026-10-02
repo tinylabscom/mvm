@@ -1496,10 +1496,10 @@ fn pull_requests_compile_mvmctl_with_the_release_feature_set() {
         lane.contains("uses: ./.github/actions/install-zigbuild"),
         "`embed-host-bins` cross-compiles the host payload, which needs the pinned zig"
     );
-    let aggregate = job_block(&ci, "lint");
+    let aggregate = job_block(&ci, "test");
     assert!(
         aggregate.contains("lint-features-embed"),
-        "the lane must feed the required Lint aggregate"
+        "the lane must feed the required Test aggregate"
     );
 }
 

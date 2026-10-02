@@ -81,17 +81,17 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      - name: Restore and publish the trusted Nix binary cache
-        uses: DeterminateSystems/magic-nix-cache-action@v14
+      - name: Restore and publish the trusted Nix store cache
+        uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          use-gha-cache: true
-          use-flakehub: false
-          diagnostic-endpoint: ""
+          primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
+          restore-prefixes-first-match: nix-
+          gc-max-store-size: 2G
 
       - name: Build Nix outputs to populate the binary cache
         run: |
           set -euo pipefail
-          nix build --print-build-logs --no-link \
+          nix build --print-build-logs --out-link "$RUNNER_TEMP/nix-cache-warm" \
             ./nix#checks.x86_64-linux.guest-rootfs-no-glibc \
             ./nix#checks.x86_64-linux.guest-rootfs-package-budget
 
