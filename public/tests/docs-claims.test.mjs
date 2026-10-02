@@ -88,6 +88,21 @@ test("durable agent-session guide states admission and retention limits", () => 
   assert.match(guide, /verify the audit chain separately/i);
 });
 
+test("Claude Code client guide keeps the MCP and guest boundaries distinct", () => {
+  const guide = readFileSync(
+    path.join(repo, "public/src/content/docs/guides/claude-code-mcp.md"),
+    "utf8",
+  );
+  const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
+
+  assert.match(sidebar, /slug: "guides\/claude-code-mcp"/);
+  assert.match(guide, /mvmctl ops mcp stdio/);
+  assert.match(guide, /CLAUDE_PROJECT_DIR/);
+  assert.match(guide, /does \*\*not\*\* confine Claude Code's own/);
+  assert.match(guide, /Without any `\[tools\]`\s+section, the MCP adapter has no tool gate/);
+  assert.match(guide, /not a substitute for the chain-signed audit/);
+});
+
 test("every agent-sandbox capability links to a concrete feature page", () => {
   const index = readFileSync(
     path.join(repo, "public/src/content/docs/guides/index.md"),

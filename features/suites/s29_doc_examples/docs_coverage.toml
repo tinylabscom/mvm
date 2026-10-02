@@ -389,7 +389,6 @@ uncovered = [
     "mvmctl machine run --flake examples/python/hello-app-with-deps/ --prod --entrypoint",
     "mvmctl machine run --healthcheck 'curl -fsS localhost/health' --name svc --image ghcr.io/example/service:1.4",
     "mvmctl machine run --hypervisor qemu --image alpine --net -- sh -c 'wget -qO- https://example.com'",
-    "mvmctl machine run --hypervisor qemu --image python:3.12-alpine --allow-host example.com:443 -- python3 -c 'import urllib.request; print(urllib.request.urlopen(\"https://example.com\").status)'",
     "mvmctl machine run --image alpine --output ./results:/data/out:16M -- sh -c 'echo done > /data/out/status.txt'",
     "mvmctl machine run --manifest .",
     "mvmctl machine run --manifest . --name my-vm --port 8080:8080",
@@ -521,5 +520,7 @@ uncovered = [
     "mvmctl trust receipt verify /tmp/run-receipt.json",
     "mvmctl trust receipt verify /tmp/run-receipt.json --pubkey ./host-signer.pub",
     "mvmctl why --path ./src",
+    "mvmctl why --tool mvm.machine.list",
+    "mvmctl why --tool mvm.machine.stop",
     "mvmctl why --tool shell --profile agent-apis",
 ]

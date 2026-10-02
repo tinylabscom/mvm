@@ -5,6 +5,7 @@ description: Connect agents to mvm sandboxes with explicit policy and audit boun
 
 Agents should treat sandboxes as controlled tools, not ambient shell access.
 For a concrete model-facing request/response contract, see [Agent tool contract](/guides/agent-tool-contract/).
+For a host-side client setup, see [Claude Code with MVM tools](/guides/claude-code-mcp/).
 
 ## Recommended tool contract
 
