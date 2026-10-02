@@ -307,7 +307,11 @@ jobs:
 
           cd staging
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
-          tar tzf "${ARCHIVE_NAME}.tar.gz" | grep -q "libmvm_hostlib\.${HOSTLIB_EXT}$" || {
+          # No `grep -q` here: the step runs with pipefail, and grep -q exits
+          # on the first match, tar dies on SIGPIPE, and the pipeline reads
+          # as failure even though the library IS in the archive (this fired
+          # on the v0.21.0 run). Let grep consume the whole listing instead.
+          tar tzf "${ARCHIVE_NAME}.tar.gz" | grep "libmvm_hostlib\.${HOSTLIB_EXT}$" >/dev/null || {
             echo "::error::the release tarball is missing libmvm_hostlib.${HOSTLIB_EXT}" >&2
             exit 1
           }
