@@ -8,6 +8,7 @@
 
 pub mod admission;
 pub mod injector;
+pub mod oauth;
 pub mod remote_resolver;
 pub mod resolver;
 pub mod signer;
@@ -22,6 +23,7 @@ pub use injector::{InjectError, Injector, SubstitutionObserver};
 /// below this crate. Re-exported here because this is where a caller looks for
 /// it.
 pub use mvm_core::crypto::secret_binding::{BindingStore, FileBindingStore, SecretBindingMeta};
+pub use oauth::{OAuthRefreshBinding, OAuthRefreshDriver};
 pub use remote_resolver::RemoteResolver;
 pub use resolver::{LocalResolver, ResolveError, SecretResolver};
 pub use signer::{SigV4Input, SignError, Signature, Signer, SigningInput};

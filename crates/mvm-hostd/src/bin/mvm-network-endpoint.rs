@@ -88,10 +88,11 @@ fn main() -> Result<()> {
     // deciding at boot that it will not is the kind of guess that leaves a
     // placeholder with nothing to resolve it.
     let network_projection = EndpointNetworkProjection::from_config(&cfg);
-    let assembled = Some(
-        assemble_with_projection(&cfg, &network_projection)
-            .context("assembling substitution service")?,
-    );
+    let (assembled, oauth_refresh) = {
+        let (service, handed, oauth_refresh) = assemble_with_projection(&cfg, &network_projection)
+            .context("assembling substitution service")?;
+        (Some((service, handed)), oauth_refresh)
+    };
     mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
         &cfg,
         assembled.is_some(),
@@ -105,7 +106,6 @@ fn main() -> Result<()> {
                 .0,
         ),
     )?;
-
     // Ready handshake: report the minted (guest var → placeholder) pairs on
     // stdout so the backend can set them in the guest launch env, then boot.
     // Values are never reported — only opaque placeholders.
@@ -174,6 +174,7 @@ fn main() -> Result<()> {
                 .connector(connector)
                 .network_projection(network_projection)
                 .forward_timeout(forward_timeout)
+                .oauth_refresh(oauth_refresh)
                 .build()?,
         )
         .await
@@ -678,6 +679,7 @@ struct ServeParams<'a> {
     connector: Option<BoundConnector>,
     network_projection: EndpointNetworkProjection,
     forward_timeout: std::time::Duration,
+    oauth_refresh: Option<mvm_hostd::keyholder::OAuthRefreshDriver>,
 }
 
 struct ServeParamsBuilder<'a> {
@@ -690,6 +692,7 @@ struct ServeParamsBuilder<'a> {
     connector: Option<BoundConnector>,
     network_projection: Option<EndpointNetworkProjection>,
     forward_timeout: Option<std::time::Duration>,
+    oauth_refresh: Option<mvm_hostd::keyholder::OAuthRefreshDriver>,
 }
 
 impl<'a> ServeParams<'a> {
@@ -703,6 +706,7 @@ impl<'a> ServeParams<'a> {
             connector: None,
             network_projection: None,
             forward_timeout: None,
+            oauth_refresh: None,
         }
     }
 }
@@ -753,6 +757,11 @@ impl<'a> ServeParamsBuilder<'a> {
         self
     }
 
+    fn oauth_refresh(mut self, driver: Option<mvm_hostd::keyholder::OAuthRefreshDriver>) -> Self {
+        self.oauth_refresh = driver;
+        self
+    }
+
     fn build(self) -> Result<ServeParams<'a>> {
         Ok(ServeParams {
             cfg: self.cfg.context("ServeParams missing cfg")?,
@@ -767,6 +776,7 @@ impl<'a> ServeParamsBuilder<'a> {
             forward_timeout: self
                 .forward_timeout
                 .context("ServeParams missing forward_timeout")?,
+            oauth_refresh: self.oauth_refresh,
         })
     }
 }
@@ -781,8 +791,16 @@ async fn serve(params: ServeParams<'_>) -> Result<()> {
         connector,
         network_projection,
         forward_timeout,
+        oauth_refresh,
     } = params;
     let (session_ready_tx, session_ready_rx) = tokio::sync::watch::channel(false);
+    // Proactive OAuth refresh runs for the life of the VM: the loops are
+    // detached and die with the process, exactly like the accept loops below.
+    if let Some(driver) = oauth_refresh {
+        let secrets = driver.bindings().len();
+        driver.start();
+        info!(oauth_secrets = secrets, "oauth proactive refresh started");
+    }
     let readiness_task = session_readiness.map(|BoundSessionReadiness(std_listener)| {
         tokio::spawn(serve_session_readiness(std_listener, session_ready_rx))
     });
