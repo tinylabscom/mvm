@@ -52,8 +52,10 @@ pub(super) fn stage0_build_conf_contents(
 /// it is the builder image the image lock pins, fetched and verified. A local
 /// build asked for without a checkout is refused rather than answered with
 /// the fetched image, which is exactly what the caller asked not to have.
+#[cfg(feature = "builder-vm")]
 pub(in crate::commands) const MVM_ALLOW_LOCAL_BUILDER_ENV: &str = "MVM_ALLOW_LOCAL_BUILDER_BUILD";
 
+#[cfg(feature = "builder-vm")]
 fn local_builder_build_opted_in(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
@@ -61,6 +63,7 @@ fn local_builder_build_opted_in(value: Option<&std::ffi::OsStr>) -> bool {
 /// Decide whether to build the builder VM from a local checkout or fetch the
 /// published image. This logic is intentionally small and pure so unit tests can
 /// drive it without touching the filesystem or CI-bound network I/O.
+#[cfg(feature = "builder-vm")]
 fn decide_builder_image_acquisition(
     allow_local_build: bool,
     env_override: Option<mvm_build::boot_image_select::BootImageAcquisition>,
@@ -289,7 +292,7 @@ fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()
     download_builder_vm_image(arch, out_dir).context("downloading the builder VM image")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builder-vm"))]
 mod decide_tests {
     use super::*;
     use mvm_build::boot_image_select::BootImageAcquisition;
