@@ -34,6 +34,9 @@ pub const HANDOFF_GPU: u8 = 1 << 6;
 /// unterminated reply cannot hold a claim open.
 pub const HANDOFF_RESPONSE_MAX_BYTES: usize = 512;
 
+const REFUSAL_PREFIX: &str = "ERR ";
+const RETRY_PREFIX: &str = "RETRY ";
+
 /// The parent's reply to a handoff it refused: `ERR <reason>`, on one line.
 ///
 /// The reason is the whole point. The parent is a paused process nobody can
@@ -42,18 +45,58 @@ pub const HANDOFF_RESPONSE_MAX_BYTES: usize = 512;
 /// more. Control characters are flattened so the reason cannot end the line
 /// early, and it is cut on a character boundary to fit the bound.
 pub fn refusal_line(reason: &str) -> Vec<u8> {
-    const PREFIX: &str = "ERR ";
-    let budget = HANDOFF_RESPONSE_MAX_BYTES - PREFIX.len() - 1;
+    reply_line(REFUSAL_PREFIX, reason)
+}
+
+/// The parent's reply when no complete request reached it: `RETRY <reason>`.
+///
+/// A refusal is final — the parent judged a request and stops. This says the
+/// opposite: the parent judged nothing and changed nothing, so it is still
+/// paused and claimable and the host may ask again.
+pub fn retry_line(reason: &str) -> Vec<u8> {
+    reply_line(RETRY_PREFIX, reason)
+}
+
+fn reply_line(prefix: &str, reason: &str) -> Vec<u8> {
+    let budget = HANDOFF_RESPONSE_MAX_BYTES - prefix.len() - 1;
     let mut line = String::with_capacity(HANDOFF_RESPONSE_MAX_BYTES);
-    line.push_str(PREFIX);
+    line.push_str(prefix);
     for ch in reason.chars().map(|c| if c.is_control() { ' ' } else { c }) {
-        if line.len() - PREFIX.len() + ch.len_utf8() > budget {
+        if line.len() - prefix.len() + ch.len_utf8() > budget {
             break;
         }
         line.push(ch);
     }
     line.push('\n');
     line.into_bytes()
+}
+
+/// What the host makes of the parent's reply line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoffReply {
+    /// Exactly [`HANDOFF_ACCEPTED`]: the parent is now the child.
+    Accepted,
+    /// A complete [`retry_line`]: the parent is untouched and still claimable.
+    Retry(String),
+    /// Anything else, refusal or not, as the parent sent it.
+    Refused(String),
+}
+
+impl HandoffReply {
+    /// Classify one reply line read off the handoff socket.
+    pub fn parse(line: &[u8]) -> Self {
+        if line == HANDOFF_ACCEPTED {
+            return Self::Accepted;
+        }
+        let text = String::from_utf8_lossy(line);
+        match text
+            .strip_suffix('\n')
+            .and_then(|line| line.strip_prefix(RETRY_PREFIX))
+        {
+            Some(reason) => Self::Retry(reason.to_string()),
+            None => Self::Refused(text.trim().to_string()),
+        }
+    }
 }
 
 impl HvfHandoffRequest {
@@ -103,5 +146,49 @@ mod tests {
     fn a_refusal_is_never_mistaken_for_acceptance() {
         assert_ne!(refusal_line(""), HANDOFF_ACCEPTED);
         assert_ne!(refusal_line("OK"), HANDOFF_ACCEPTED);
+    }
+
+    #[test]
+    fn each_reply_line_parses_back_to_what_the_parent_meant() {
+        assert_eq!(
+            HandoffReply::parse(HANDOFF_ACCEPTED),
+            HandoffReply::Accepted
+        );
+        assert_eq!(
+            HandoffReply::parse(&retry_line("no request arrived")),
+            HandoffReply::Retry("no request arrived".to_string())
+        );
+        assert_eq!(
+            HandoffReply::parse(&refusal_line("handoff signature rejected")),
+            HandoffReply::Refused("ERR handoff signature rejected".to_string())
+        );
+    }
+
+    #[test]
+    fn a_retry_reason_is_flattened_and_bounded_like_a_refusal() {
+        let line = retry_line(&format!("a\nb{}", "é".repeat(HANDOFF_RESPONSE_MAX_BYTES)));
+        assert!(line.starts_with(b"RETRY a b"));
+        assert!(line.len() <= HANDOFF_RESPONSE_MAX_BYTES);
+        assert_eq!(line.iter().filter(|&&b| b == b'\n').count(), 1);
+    }
+
+    #[test]
+    fn only_a_complete_retry_line_permits_another_attempt() {
+        // A reply cut off before its newline, an acceptance missing its
+        // newline, and a refusal whose reason mentions retrying are not
+        // invitations to ask again.
+        for line in [
+            &b"RETRY no request arrived"[..],
+            b"OK",
+            b"",
+            b"ERR RETRY \n",
+            b"RETRY\n",
+        ] {
+            assert!(
+                matches!(HandoffReply::parse(line), HandoffReply::Refused(_)),
+                "{:?} must not parse as accepted or retryable",
+                String::from_utf8_lossy(line)
+            );
+        }
     }
 }

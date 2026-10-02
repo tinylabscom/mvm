@@ -194,6 +194,81 @@ fn validate_handoff_endpoint(path: &Path, root: &Path, socket_dir: &Path) -> std
     Ok(())
 }
 
+/// Check that every endpoint a claimed child will bind stays inside the
+/// trusted roots.
+///
+/// Each endpoint's directory is canonicalized here, before anything is bound,
+/// while the binders create their directories only on bind. The per-port
+/// console and telemetry sockets sit in the `vsock/` subdirectory, which
+/// nothing had created yet, so every claim that carried them was refused with
+/// `ENOENT`. Create the child's socket directories first; a planted symlink in
+/// their place is still caught by the confinement check.
+fn validate_child_endpoints(
+    child_dir: &Path,
+    bindings: &VsockHostBindings,
+    root: &Path,
+) -> std::io::Result<()> {
+    let socket_dir = mvm_core::config::vm_socket_dir_at(child_dir);
+    std::fs::create_dir_all(mvm_core::config::vm_hvf_vsock_dir_at(child_dir))?;
+    for path in bindings.paths() {
+        if let Err(error) = validate_handoff_endpoint(path, root, &socket_dir) {
+            if let Some(debug_path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
+                && let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(debug_path)
+            {
+                let _ = writeln!(
+                    file,
+                    "[handoff] endpoint={} root={} socket_dir={} error={error}",
+                    path.display(),
+                    root.display(),
+                    socket_dir.display()
+                );
+            }
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+/// How long the parent waits for the request line on a handoff connection it
+/// has accepted.
+const HANDOFF_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Read the host's one-line handoff request off a connection the handoff
+/// listener has just accepted.
+///
+/// The listener is nonblocking so the pause hold can poll it, and on Darwin an
+/// accepted socket inherits that flag. Left in place, the read returned
+/// `WouldBlock` whenever the parent accepted before the request had landed — a
+/// window the host loses whenever it is descheduled between `connect` and
+/// `write` — so a parent refused a claim it had not yet seen.
+fn read_handoff_request(
+    stream: &UnixStream,
+    timeout: std::time::Duration,
+) -> std::io::Result<Vec<u8>> {
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(timeout))?;
+    let mut line = Vec::new();
+    BufReader::new(stream)
+        .read_until(b'\n', &mut line)
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("no handoff request arrived within {timeout:?}"),
+            ),
+            _ => error,
+        })?;
+    if line.last() != Some(&b'\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the host hung up before its handoff request was complete",
+        ));
+    }
+    Ok(line)
+}
+
 fn handoff_debug(message: &str) {
     if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
         && let Ok(mut file) = std::fs::OpenOptions::new()
@@ -820,7 +895,20 @@ impl VirtioVsock {
                 return false;
             }
         };
-        let result = self.accept_handoff(&mut stream);
+        let request = match read_handoff_request(&stream, HANDOFF_REQUEST_TIMEOUT) {
+            Ok(request) => request,
+            Err(error) => {
+                // Nothing was judged and nothing changed, so this parent is
+                // still paused and claimable. Stopping it here turned one
+                // slow claim into a dead standby.
+                let _ = stream.write_all(&crate::hvf_handoff::retry_line(&error.to_string()));
+                handoff_debug(&format!(
+                    "handoff request not read, parent stays claimable: {error}"
+                ));
+                return false;
+            }
+        };
+        let result = self.accept_handoff(&request);
         match result {
             Ok(()) => {
                 let _ = stream.write_all(crate::hvf_handoff::HANDOFF_ACCEPTED);
@@ -835,11 +923,8 @@ impl VirtioVsock {
         }
     }
 
-    fn accept_handoff(&mut self, stream: &mut UnixStream) -> std::io::Result<()> {
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
-        let mut line = String::new();
-        BufReader::new(stream.try_clone()?).read_line(&mut line)?;
-        let request: HvfHandoffRequest = serde_json::from_str(line.trim_end()).map_err(|_| {
+    fn accept_handoff(&mut self, line: &[u8]) -> std::io::Result<()> {
+        let request: HvfHandoffRequest = serde_json::from_slice(line).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid handoff request")
         })?;
         if request.parent_pid != std::process::id() || !valid_handoff_name(&request.child_vm_name) {
@@ -895,27 +980,7 @@ impl VirtioVsock {
         }
         let bindings =
             canonical_child_bindings(&request.child_vm_name, &child_dir, request.channel_mask)?;
-        let socket_dir = mvm_core::config::vm_socket_dir_at(&child_dir);
-        std::fs::create_dir_all(&socket_dir)?;
-        for path in bindings.paths() {
-            if let Err(error) = validate_handoff_endpoint(path, root, &socket_dir) {
-                if let Some(debug_path) = std::env::var_os("MVM_HVF_AGENT_DEBUG")
-                    && let Ok(mut file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(debug_path)
-                {
-                    let _ = writeln!(
-                        file,
-                        "[handoff] endpoint={} root={} socket_dir={} error={error}",
-                        path.display(),
-                        root.display(),
-                        socket_dir.display()
-                    );
-                }
-                return Err(error);
-            }
-        }
+        validate_child_endpoints(&child_dir, &bindings, root)?;
         let irq_line = self.irq_line.clone().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::NotConnected,
@@ -2611,24 +2676,15 @@ mod tests {
     /// path calls it. It used to write a bare `ERR`.
     #[test]
     fn a_refused_handoff_tells_the_host_why() {
-        let dir = tempfile::Builder::new()
-            .prefix("vsk")
-            .tempdir_in("/tmp")
-            .unwrap();
-        let socket = dir.path().join("hvf-handoff.sock");
-        let verify_key = hex::encode(
-            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
-                .verifying_key()
-                .to_bytes(),
-        );
-        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
-        let mut device = virtio_dev();
-        if device
-            .set_handoff_control(Some(&socket), Some(dir.path()), Some(&verify_key), stop)
-            .is_err()
-        {
+        let Some(HandoffParent {
+            dir: _dir,
+            socket,
+            stop,
+            mut device,
+        }) = handoff_parent()
+        else {
             return;
-        }
+        };
 
         let client_socket = socket.clone();
         let host = std::thread::spawn(move || {
@@ -2650,6 +2706,210 @@ mod tests {
         }
 
         assert_eq!(host.join().unwrap(), "ERR invalid handoff request\n");
+    }
+
+    /// A paused parent listening for one handoff, as the supervisor arms it.
+    struct HandoffParent {
+        dir: tempfile::TempDir,
+        socket: PathBuf,
+        stop: &'static AtomicBool,
+        device: VirtioVsock,
+    }
+
+    fn handoff_parent() -> Option<HandoffParent> {
+        let dir = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket = dir.path().join("hvf-handoff.sock");
+        let verify_key = hex::encode(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let stop: &'static AtomicBool = Box::leak(Box::new(AtomicBool::new(false)));
+        let mut device = virtio_dev();
+        device
+            .set_handoff_control(Some(&socket), Some(dir.path()), Some(&verify_key), stop)
+            .ok()?;
+        Some(HandoffParent {
+            dir,
+            socket,
+            stop,
+            device,
+        })
+    }
+
+    fn read_reply(stream: UnixStream) -> String {
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).unwrap();
+        reply
+    }
+
+    /// The host connects, and is descheduled before it writes. The parent
+    /// accepts in between, so the request is not there yet when it reads.
+    /// On Darwin the accepted socket inherited the listener's nonblocking
+    /// flag, and the parent refused — and stopped — over `EAGAIN`.
+    #[test]
+    fn a_handoff_request_that_lands_after_the_accept_is_still_read() {
+        let Some(HandoffParent {
+            dir: _dir,
+            socket,
+            stop,
+            mut device,
+        }) = handoff_parent()
+        else {
+            return;
+        };
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        let host = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            stream.write_all(b"not a handoff request\n").unwrap();
+            read_reply(stream)
+        });
+
+        // The connection is already queued, so this one poll accepts it and
+        // reads before the request exists.
+        device.poll();
+
+        assert_eq!(
+            host.join().unwrap(),
+            "ERR invalid handoff request\n",
+            "the parent must judge the request it waited for, not refuse an empty read"
+        );
+        assert!(
+            stop.load(Ordering::Relaxed),
+            "a request that was read and refused still ends the parent"
+        );
+    }
+
+    /// A claim that never delivers its request must not cost the pool its
+    /// standby: the parent says so, stays paused, and serves the next claim.
+    #[test]
+    fn a_handoff_request_that_never_arrives_leaves_the_parent_claimable() {
+        let Some(HandoffParent {
+            dir: _dir,
+            socket,
+            stop,
+            mut device,
+        }) = handoff_parent()
+        else {
+            return;
+        };
+
+        // Half a request, then the host stops writing.
+        let mut cut_short = UnixStream::connect(&socket).unwrap();
+        cut_short.write_all(b"{\"child_vm_name\"").unwrap();
+        cut_short.shutdown(std::net::Shutdown::Write).unwrap();
+        device.poll();
+        let reply = read_reply(cut_short);
+        assert!(reply.starts_with("RETRY "), "{reply:?}");
+        assert_eq!(
+            crate::hvf_handoff::HandoffReply::parse(reply.as_bytes()),
+            crate::hvf_handoff::HandoffReply::Retry(
+                "the host hung up before its handoff request was complete".to_string()
+            )
+        );
+
+        // A host that hangs up having sent nothing at all.
+        drop(UnixStream::connect(&socket).unwrap());
+        device.poll();
+
+        assert!(!stop.load(Ordering::Relaxed), "the parent must not stop");
+        assert!(!device.handoff_used, "nothing was handed off");
+
+        // Still listening, and still judging the next claim on its merits.
+        let mut next = UnixStream::connect(&socket).unwrap();
+        next.write_all(b"not a handoff request\n").unwrap();
+        device.poll();
+        assert_eq!(read_reply(next), "ERR invalid handoff request\n");
+        assert!(stop.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_handoff_request_read_waits_out_an_inherited_nonblocking_flag() {
+        let (parent, mut host) = UnixStream::pair().unwrap();
+        // What `accept` on a nonblocking listener hands back on Darwin.
+        parent.set_nonblocking(true).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            host.write_all(b"{\"request\":1}\n").unwrap();
+            host
+        });
+
+        let line = read_handoff_request(&parent, std::time::Duration::from_secs(2))
+            .expect("the read must wait for the request, not fail with WouldBlock");
+        assert_eq!(line, b"{\"request\":1}\n");
+        drop(writer.join().unwrap());
+    }
+
+    #[test]
+    fn a_handoff_request_read_is_bounded_by_its_timeout() {
+        let (parent, _host) = UnixStream::pair().unwrap();
+        parent.set_nonblocking(true).unwrap();
+        let started = std::time::Instant::now();
+        let error = read_handoff_request(&parent, std::time::Duration::from_millis(50))
+            .expect_err("a host that sends nothing cannot hold the parent");
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("no handoff request arrived"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// The console and telemetry sockets live one level down, in `vsock/`,
+    /// which only the binder creates. Endpoints are validated before anything
+    /// is bound, so a child carrying them used to be refused with `ENOENT`.
+    #[test]
+    fn child_endpoints_in_the_vsock_subdir_validate_before_it_exists() {
+        let dir = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let child_dir = dir.path().join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        let vsock_dir = mvm_core::config::vm_hvf_vsock_dir_at(&child_dir);
+        assert!(!vsock_dir.exists());
+        let bindings = canonical_child_bindings(
+            "child",
+            &child_dir,
+            HANDOFF_CONSOLE | crate::hvf_handoff::HANDOFF_TELEMETRY,
+        )
+        .unwrap();
+        assert!(
+            bindings
+                .console_sockets
+                .iter()
+                .all(|(_, path)| path.parent() == Some(vsock_dir.as_path()))
+        );
+
+        validate_child_endpoints(&child_dir, &bindings, &root)
+            .expect("endpoints inside the child's socket dir are confined");
+        assert!(vsock_dir.is_dir());
+    }
+
+    #[test]
+    fn child_endpoints_still_refuse_a_vsock_subdir_that_escapes_the_root() {
+        let dir = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let outside = tempfile::Builder::new()
+            .prefix("vsk")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let child_dir = dir.path().join("child");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::os::unix::fs::symlink(
+            outside.path(),
+            mvm_core::config::vm_hvf_vsock_dir_at(&child_dir),
+        )
+        .unwrap();
+        let bindings = canonical_child_bindings("child", &child_dir, HANDOFF_CONSOLE).unwrap();
+
+        let error = validate_child_endpoints(&child_dir, &bindings, &root)
+            .expect_err("a vsock dir planted outside the root must still be refused");
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     }
 
     #[test]
