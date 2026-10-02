@@ -109,6 +109,13 @@ template does. Two things an image author needs to know:
 Neither behaviour has been exercised inside a guest; they were observed on a
 host against the live API.
 
+What was checked in a guest is the pack. A guest booted under it holds a
+placeholder in `OPENAI_API_KEY`; a request to `api.openai.com` carrying that
+placeholder leaves the host with the stored key in its place, recorded as
+`secret.substituted` in the audit chain; `api.github.com` and
+`registry.npmjs.org` answer; and every unlisted destination is refused at the
+tunnel, each with an `egress blocked` line on the host.
+
 Add a destination the pack does not name with `--allow-host`, or compose your
 own profile after the pack. Later entries take precedence, and a deny from any
 layer still wins:

@@ -188,10 +188,15 @@ mvmctl run --policy agent/goose -- goose run --no-session -t "summarize the repo
 
 The pack is policy only. It ships no image and installs nothing, so the image
 the run boots has to carry Goose already; no published image or template does.
-Goose has not been run inside a guest for this guide: the policy, the secret
-bindings and the refusal above are what was checked. A destination Goose needs
-beyond the four the pack admits is denied until `--allow-host` or a profile
-composed after the pack names it.
+
+A guest booted under this pack was checked directly. It holds placeholders in
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY`; a request to either provider carrying
+its placeholder leaves the host with the stored key in its place, recorded as
+`secret.substituted` in the audit chain; `api.github.com` answers; and every
+unlisted destination is refused at the tunnel, each with an `egress blocked`
+line on the host. Reach one of those with `--allow-host`, or with a profile
+composed after the pack. Goose itself has not been run inside a guest for
+this guide.
 
 ## Keep the pack current
 

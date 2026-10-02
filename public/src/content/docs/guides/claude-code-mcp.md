@@ -141,6 +141,11 @@ mvmctl run --policy agent/claude -- claude -p "summarize the repo"
 
 The pack is policy only. It ships no image and installs nothing, so the image
 the run boots has to carry Claude Code already; no published image or template
-does. [Agent sandbox](/guides/agent-sandbox/) describes the placeholder and the
+does. A guest booted under the pack was checked directly: it holds a
+placeholder in `ANTHROPIC_API_KEY`, a request to `api.anthropic.com` carrying
+it leaves the host with the stored key in its place, `api.github.com` and
+`pypi.org` answer, and every unlisted destination is refused at the tunnel.
+Claude Code itself has not been run inside a guest for this guide.
+[Agent sandbox](/guides/agent-sandbox/) describes the placeholder and the
 host-side substitution, and [Policy and profiles](/guides/policy-and-profiles/#pack-policy-signed-official-profiles-and-groups)
 describes how a pack is verified, pinned and composed.

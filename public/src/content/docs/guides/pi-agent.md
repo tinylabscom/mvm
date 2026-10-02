@@ -94,8 +94,14 @@ mvmctl run --policy agent/pi -- pi --provider anthropic -p "summarize the repo"
 
 The pack is policy only. It ships no image and installs nothing, so the image
 the run boots has to carry pi already; no published image or template does.
-pi has not been run inside a guest for this guide: the policy, the secret
-binding and the denials above are what was checked.
+
+A guest booted under this pack was checked directly. It holds a placeholder in
+`ANTHROPIC_API_KEY`; a request to `api.anthropic.com` carrying that placeholder
+leaves the host with the stored key in its place, recorded as
+`secret.substituted` in the audit chain; `api.github.com` answers; and
+`registry.npmjs.org`, the Google API host and every other unlisted destination
+are refused at the tunnel, each with an `egress blocked` line on the host. pi
+itself has not been run inside a guest for this guide.
 
 ## Add the npm registry
 
