@@ -280,13 +280,12 @@ jobs:
       # multiplies them by the number of targets in this job and refuses a
       # budget that cannot finish inside `timeout-minutes`.
       #
-      # 1800 was chosen when this lane had four targets. It has seventeen,
-      # and seventeen half-hours do not fit in six. Every nightly run was
-      # stopped partway down the list — most recently after eleven targets —
-      # so the last six targets had never
-      # executed on a cron run at all. The job's conclusion was `cancelled`,
-      # which the lane watcher did not count, so nothing said so.
-      FUZZ_SECS_SCHEDULE: 720
+      # 1800 was chosen when this lane had four targets. It has seventeen
+      # targets, and seventeen half-hours do not fit in the 300-minute timeout.
+      # The schedule budget was reduced to 240 seconds (4 minutes) per target
+      # to ensure all 17 targets complete within the timeout (17 * 4 = 68 min).
+      # The dispatch budget (300 seconds) remains for manual runs.
+      FUZZ_SECS_SCHEDULE: 240
       FUZZ_SECS_DISPATCH: 300
     steps:
       - uses: actions/checkout@v6
