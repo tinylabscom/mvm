@@ -852,6 +852,12 @@ or an in-tree bake to remove.
       and no Nix build is started, which the console log and `mvmctl doctor`'s
       builder line both show. Record the numbers in
       `specs/sprint/delivery/<issue>-builder-boot-payload.md`.
+      Landed on the Apple Silicon workstation (the KVM half still open): the
+      numbers and evidence are in the W12 section of
+      `specs/sprint/delivery/builder-boot-payload.md` — the builder path is a
+      verified fetch of `image-set/v0.2.3`, the run log has zero Stage-0 and
+      zero nix-build markers, doctor names the verified-release source, and a
+      warm `machine run` is 26 s.
 
 ## Test and witness plan
 
