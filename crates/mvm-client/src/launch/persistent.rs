@@ -369,6 +369,13 @@ pub fn start_persistent_oci_machine(
     // computed correctly and reported to nobody. A failure here has already
     // stopped the VM, so the volume leases are released rather than committed.
     super::grants_report::report_enforced_grants(&admission, &started)?;
+    // File what this boot committed against the host budget before the volume
+    // leases commit: every later admission's committed-total check sums these
+    // per-VM records, and a boot that never wrote one was invisible to it.
+    // Fatal, like the grants step above — the VM stops rather than stay up as
+    // a machine the host's accounting never saw, and the uncommitted leases
+    // release with the rollback.
+    super::budget_charge::record_boot_charge(&admission, name, &started)?;
     prepared_volumes.commit();
     emit_launched(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);

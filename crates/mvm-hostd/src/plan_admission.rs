@@ -1857,6 +1857,45 @@ pub fn apply_admitted_grants_or_undo_launch(
     })
 }
 
+/// Record what this boot committed against the host budget, rolling the
+/// launch back when the record cannot be written.
+///
+/// Every later admission measures the host's committed total from these
+/// per-VM records, so a machine running without one is invisible to the
+/// budget check — and an undercounted host is precisely the state the budget
+/// exists to prevent. This is therefore fatal and stops the VM exactly like
+/// an unapplied grant does, rather than leaving a run whose only record
+/// says it was bounded when the host's accounting never saw it.
+///
+/// `vm_name` is the name the charge is filed under; `vm_id` is the identity
+/// the backend started. They are the same string for every current backend,
+/// but the record is keyed by name while the stop is keyed by id, so the
+/// caller passes both.
+pub fn record_charge_or_undo_launch(
+    backend: &AnyBackend,
+    vm_id: &VmId,
+    vm_name: &str,
+    admitted: &AdmittedPlan,
+    emitter: Option<&crate::audit::emitter::AuditEmitter>,
+) -> Result<()> {
+    let undeclared = Grants::default();
+    let charge = crate::admission_budget::charge_for(
+        admitted.plan().resources.mem_mib,
+        admitted.plan().grants.as_ref().unwrap_or(&undeclared),
+    );
+    crate::admission_budget::record_charge(vm_name, charge).map_err(|err| {
+        undo_launch(UndoLaunch {
+            backend,
+            vm_id,
+            admitted,
+            emitter,
+            stage: "host-budget",
+            reason: "its admitted charge could not be recorded",
+            err,
+        })
+    })
+}
+
 /// The four post-admission gates between `plan.admitted` and the backend
 /// start, run in order. On refusal the failing stage's wire label is
 /// returned alongside the error so the caller can emit a terminal
@@ -2102,22 +2141,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
             // budget, and an undercounted host is precisely the state the
             // budget exists to prevent — so this is fatal, and rolls the
             // launch back the same way an unapplied grant does.
-            let undeclared = Grants::default();
-            let charge = crate::admission_budget::charge_for(
-                admitted.plan().resources.mem_mib,
-                admitted.plan().grants.as_ref().unwrap_or(&undeclared),
-            );
-            if let Err(err) = crate::admission_budget::record_charge(&vm_name, charge) {
-                return Err(undo_launch(UndoLaunch {
-                    backend,
-                    vm_id: &vm_id,
-                    admitted: &admitted,
-                    emitter: params.emitter,
-                    stage: "host-budget",
-                    reason: "its admitted charge could not be recorded",
-                    err,
-                }));
-            }
+            record_charge_or_undo_launch(backend, &vm_id, &vm_name, &admitted, params.emitter)?;
             if let Some(emitter) = params.emitter {
                 if let Err(e) = emitter.emit_launched(admitted.plan(), &backend_name) {
                     tracing::warn!(error = %e, "audit emit_launched failed (non-fatal)");
@@ -5277,6 +5301,115 @@ mod tests {
         // has no mechanism for.
         assert_eq!(started.enforced_grants, EnforcedGrants::all_declared());
         assert!(!started.enforced_grants.cpu.is_enforced());
+    }
+
+    /// The budget gate every later admission measures against sums these
+    /// per-VM records; a boot that never wrote one was invisible to it. The
+    /// charge is the plan's configured memory — the same figure the balloon
+    /// may not exceed — and a plan that declared no CPU bound commits none.
+    #[test]
+    fn an_admitted_boot_records_its_charge_for_the_host_budget() {
+        let (_env, home) = host_with_ceiling(Default::default());
+        let dir = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-charge".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+        admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-charge"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                extension_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: None,
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
+            },
+        )
+        .expect("admit + boot");
+
+        let record = mvm_core::config::vm_state_dir_at(home.path(), "vm-charge")
+            .join("admitted-charge.json");
+        let bytes = std::fs::read(&record).expect("the charge record is written");
+        let charge: mvm_contract::grants::budget::MachineCharge =
+            serde_json::from_slice(&bytes).expect("the charge record parses");
+        assert_eq!(
+            charge.memory_mib, 256,
+            "the fixture plan grants 256 MiB: {charge:?}"
+        );
+        assert_eq!(
+            charge.cpu_millicores, 0,
+            "the fixture declares no CPU bound: {charge:?}"
+        );
+    }
+
+    /// A boot whose charge cannot be recorded must not stay up: the host's
+    /// committed total would undercount by exactly the machine nobody can
+    /// see. The VM is stopped and the refusal lands on the chain at the
+    /// host-budget stage.
+    #[test]
+    fn a_boot_whose_charge_cannot_be_recorded_rolls_back() {
+        let (_env, home) = host_with_ceiling(Default::default());
+        // A regular file where the vms dir must be: create_dir_all for the
+        // charge record's state dir then fails with NotADirectory.
+        std::fs::write(home.path().join("vms"), b"not a directory").expect("blocker file");
+        let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let emitter = crate::audit::emitter::AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]),
+            audit.path(),
+        )
+        .expect("emitter");
+        let config = mvm_core::vm_backend::VmStartConfig {
+            name: "vm-charge-blocked".into(),
+            rootfs_path: "/store/rootfs.ext4".into(),
+            ..Default::default()
+        };
+
+        admit_and_start(
+            &backend,
+            AdmitAndStartParams {
+                synthesis: &fixture_input("vm-charge-blocked"),
+                config,
+                clock: &SystemClock,
+                ledger: &ledger,
+                host_signer_keys_dir: Some(dir.path()),
+                bundle_ctx: None,
+                extension_ctx: None,
+                variant: Variant::Dev,
+                policy_bundle: None,
+                emitter: Some(&emitter),
+                audit_durability: crate::audit::durability::AuditDurability::BestEffort,
+                assurance: None,
+            },
+        )
+        .expect_err("a boot whose charge cannot be recorded must not proceed");
+
+        // The whole point: no workload is left running behind the failure.
+        assert!(
+            !matches!(
+                backend.status(&mvm_core::vm_backend::VmId("vm-charge-blocked".into())),
+                Ok(mvm_core::vm_backend::VmStatus::Running)
+            ),
+            "the VM whose charge could not be recorded is stopped"
+        );
+        let chain =
+            std::fs::read_to_string(audit.path().join("local.jsonl")).expect("chain written");
+        assert!(
+            chain.contains("plan.failed") && chain.contains("host-budget"),
+            "the refusal is on the chain, naming the host-budget stage: {chain}"
+        );
     }
 
     /// The achieved tier reaches the chain-signed log, not just the return

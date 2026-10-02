@@ -279,9 +279,29 @@ pub fn boot_session_vm(
     }
 
     tracing::info!(vm = %vm_name, slot, "booting session VM");
-    backend
+    let vm_id = backend
         .start(&start_config)
         .with_context(|| format!("starting session microVM '{vm_name}'"))?;
+    // The budget gate this boot admitted under counts only what is recorded:
+    // a session boot that skipped the charge would be invisible to every
+    // later admission the way a CLI boot on the old tail was. Fatal, not
+    // logged — a VM running without its charge recorded is the undercount
+    // the budget exists to prevent, so the boot stops rather than stay up
+    // uncounted. Session plans declare no resource grants, so the charge is
+    // the configured memory and no CPU millicores.
+    let charge = mvm_hostd::admission_budget::charge_for(
+        u64::from(memory_mib),
+        &mvm_contract::grants::Grants::default(),
+    );
+    if let Err(err) = mvm_hostd::admission_budget::record_charge(&vm_name, charge) {
+        if let Err(stop_err) = backend.stop(&vm_id) {
+            tracing::warn!(
+                error = %stop_err,
+                "stopping a session VM whose admitted charge could not be recorded;                  it may still be running",
+            );
+        }
+        return Err(err).context("recording the session boot's admitted charge");
+    }
     Ok(SessionVm { vm_name })
 }
 
