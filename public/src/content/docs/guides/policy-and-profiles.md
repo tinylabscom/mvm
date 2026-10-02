@@ -23,8 +23,9 @@ mvmctl policy resolve agent-apis -o agent.json
 mvmctl run --plan agent.json -- claude -p "summarize the repo"
 ```
 
-`--policy` is repeatable, and the formats mix: each entry composes over the
-ones before it, so the last one takes precedence. This stacks a team template
+`--policy` is repeatable, and the formats mix: each entry is a profile or a
+group (runtime packs ship groups), composing over the ones before it, so the
+last one takes precedence. This stacks a team template
 under your own tightening without a wrapper profile:
 
 ```sh
@@ -281,7 +282,8 @@ A reference is read three ways:
 - A **path** starts with `/`, `./` or `../`, or ends in `.toml` or `.json`. A
   relative path resolves against the file that names it.
 - A **name** is looked up as `<name>.toml` and then `<name>.json` in
-  `$MVM_HOME/config/policy/profiles/` (or `groups/`), then among the built-ins.
+  `$MVM_HOME/config/policy/profiles/`, failing that in `groups/`, then among
+  the built-ins; a profile wins when both exist.
   Your file shadows a built-in of the same name.
 - A **pack reference** is `namespace/name[@version]`: an installed, verified
   pack, resolved by the pack registry. See

@@ -487,6 +487,36 @@ fn several_policies_compose_in_order_across_formats() {
 }
 
 #[test]
+fn a_root_reference_naming_a_group_composes_it_as_a_group_layer() {
+    let dir = Dir::new();
+    dir.group("solo", "[network]\nallow = [\"solo.test\"]\n");
+    let selection = PolicySelection::profile(PolicyRef::Name("solo".into()));
+    let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+    assert_eq!(allow(&resolved), ["solo.test:443"]);
+    assert!(
+        resolved
+            .layers
+            .iter()
+            .any(|l| l.label.contains("group `solo`")),
+        "{:?}",
+        resolved.layers
+    );
+}
+
+#[test]
+fn a_root_reference_that_is_neither_profile_nor_group_reports_the_profile_error() {
+    let dir = Dir::new();
+    let dir_project = tempfile::tempdir().unwrap();
+    let bad = dir_project.path().join("bad.toml");
+    std::fs::write(&bad, "bogus = 1\n").unwrap();
+    let selection = PolicySelection::profile(PolicyRef::Path(bad.clone()));
+    let err = resolve(&dir.store, &selection, Platform::default()).unwrap_err();
+    let rendered = err.to_string();
+    assert!(rendered.contains("profile"), "{rendered}");
+    assert!(err.file.as_deref() == Some(bad.as_path()), "{rendered}");
+}
+
+#[test]
 fn a_project_table_resolves_its_profile_and_groups_as_project_layers() {
     let dir = Dir::new();
     let dir_project = tempfile::tempdir().unwrap();
