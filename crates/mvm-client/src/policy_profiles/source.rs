@@ -844,4 +844,35 @@ mod tests {
             .unwrap();
         assert_eq!(builtin.origin, LayerOrigin::Builtin);
     }
+
+    #[test]
+    fn a_pack_group_include_cannot_import_local_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PolicyStore::at(dir.path());
+        std::fs::create_dir_all(store.groups_dir()).unwrap();
+        let file = store.groups_dir().join("outside.toml");
+        std::fs::write(&file, "description = \"outside\"\n").unwrap();
+
+        for reference in [PolicyRef::Path(file), PolicyRef::Name("outside".into())] {
+            let err = store
+                .load_group(
+                    &reference,
+                    Some(dir.path()),
+                    LayerOrigin::Pack,
+                    "pack group",
+                )
+                .unwrap_err();
+            assert!(err.message.contains("signed pack"), "{err}");
+        }
+
+        let builtin = store
+            .load_group(
+                &PolicyRef::Name("offline".into()),
+                None,
+                LayerOrigin::Pack,
+                "pack group",
+            )
+            .unwrap();
+        assert_eq!(builtin.origin, LayerOrigin::Builtin);
+    }
 }
