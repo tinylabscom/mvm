@@ -5,7 +5,23 @@ description: Connect agents to mvm sandboxes with explicit policy and audit boun
 
 Agents should treat sandboxes as controlled tools, not ambient shell access.
 For a concrete model-facing request/response contract, see [Agent tool contract](/guides/agent-tool-contract/).
-For a host-side client setup, see [Claude Code with MVM tools](/guides/claude-code-mcp/).
+
+## Client guides
+
+Each guide covers the signed policy pack published for that client and, where
+the client can connect, the host-side MCP setup.
+
+| Client | Guide | Signed pack | Host-side MCP tools |
+| --- | --- | --- | --- |
+| Claude Code | [Claude Code with MVM tools](/guides/claude-code-mcp/) | `agent/claude` | Connects |
+| Codex | [Codex with MVM](/guides/codex-agent/) | `agent/codex` | Refused: Codex opens with a protocol version the server does not answer |
+| pi | [pi with MVM](/guides/pi-agent/) | `agent/pi` | None: pi has no MCP client |
+| OpenCode | [OpenCode with MVM](/guides/opencode-agent/) | `agent/opencode` | Connects |
+| Goose | [Goose with MVM](/guides/goose-agent/) | `agent/goose` | Connects |
+
+A pack is policy only: none of them ships an image or installs its client in a
+guest. To write a pack, see
+[Author and publish a signed pack](/guides/pack-authoring/).
 
 ## Recommended tool contract
 

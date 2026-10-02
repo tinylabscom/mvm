@@ -19,7 +19,7 @@ In the project directory, add `policy/mcp-readonly.toml`:
 ```toml
 description = "Read-only machine discovery for the local MCP client"
 
-[tools]
+[overrides.tools]
 allow = ["mvm.machine.list"]
 ```
 
@@ -30,16 +30,27 @@ Reference that policy from the project's `mvm.toml`:
 profile = "./policy/mcp-readonly.toml"
 ```
 
+The file is a profile, so its own policy sits under `[overrides]`. A top-level
+`[tools]` table is the group form: a profile that carries one does not parse,
+and a project whose policy does not parse has no MCP server at all.
+
 An active `[tools]` section admits only listed tools. This example allows
-machine listing but refuses create, exec, stop, and unlisted tools. Inspect
-the resolved project policy before connecting the client, as described in
-[Policy and profiles](/guides/policy-and-profiles/). You can also query
-individual tools:
+machine listing but refuses create, exec, stop, and unlisted tools. From the
+project directory, check that the policy resolves and query individual tools
+before connecting the client:
 
 ```sh
+mvmctl policy validate
+mvmctl policy show
 mvmctl why --tool mvm.machine.list
 mvmctl why --tool mvm.machine.stop
 ```
+
+`policy validate` prints a note that `[tools]` is not enforced by the runtime.
+That note is about a workload in a VM; the MCP gate described here does
+enforce these whole-tool decisions.
+[Policy and profiles](/guides/policy-and-profiles/) covers the rest of the
+policy language.
 
 The MCP gate uses this project's resolved policy. A policy that exists but
 fails to resolve prevents the server from starting. Without any `[tools]`
@@ -76,3 +87,65 @@ silently approved. This MCP-local decision is recorded in the local tool-gate
 audit; it is not a substitute for the chain-signed audit of decisions inside
 an admitted VM. For VM-bound execution and its audit boundary, see
 [Agent tool contract](/guides/agent-tool-contract/).
+
+This setup was checked with Claude Code 2.1.278, which opens the session with
+MCP protocol version `2025-11-25`. The server answers that version and the
+stateless `2026-07-28` form, and refuses an `initialize` naming any other.
+
+## The signed agent pack
+
+The official registry publishes `agent/claude`, a signed policy profile for a
+Claude Code workload running in a microVM. It is separate from the MCP setup
+above: the pack governs what a guest may reach, not which MVM tools the host
+client may call. It composes the `runtime/python` group pack, and `pull`
+fetches exactly the pack it is given, so pull both:
+
+```sh
+mvmctl pull agent/claude
+mvmctl pull runtime/python
+mvmctl why --host api.anthropic.com:443 --profile agent/claude
+mvmctl why --secret anthropic --profile agent/claude
+```
+
+`mvmctl policy show agent/claude` prints the merged result:
+
+```toml
+# layer: group `llm-apis` (built-in) (built-in)
+# layer: group `github` (built-in) (built-in)
+# layer: group `runtime/python` (pack) (pack)
+# layer: profile `agent/claude` (pack) overrides (pack)
+[network]
+allow = [
+    "api.anthropic.com:443",
+    "api.openai.com:443",
+    "github.com:443",
+    "api.github.com:443",
+    "pypi.org:443",
+    "files.pythonhosted.org:443",
+    "objects.githubusercontent.com:443",
+]
+
+[[secrets.bind]]
+name = "anthropic"
+hosts = ["api.anthropic.com"]
+```
+
+The profile binds a stored secret named `anthropic`. Store it under that name
+before a run selects the pack; the guest receives a placeholder in
+`ANTHROPIC_API_KEY`, never the value:
+
+```sh
+mvmctl secret set anthropic --provider anthropic
+mvmctl run --policy agent/claude -- claude -p "summarize the repo"
+```
+
+The pack is policy only. It ships no image and installs nothing, so the image
+the run boots has to carry Claude Code already; no published image or template
+does. A guest booted under the pack was checked directly: it holds a
+placeholder in `ANTHROPIC_API_KEY`, a request to `api.anthropic.com` carrying
+it leaves the host with the stored key in its place, `api.github.com` and
+`pypi.org` answer, and every unlisted destination is refused at the tunnel.
+Claude Code itself has not been run inside a guest for this guide.
+[Agent sandbox](/guides/agent-sandbox/) describes the placeholder and the
+host-side substitution, and [Policy and profiles](/guides/policy-and-profiles/#pack-policy-signed-official-profiles-and-groups)
+describes how a pack is verified, pinned and composed.
