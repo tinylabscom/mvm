@@ -130,6 +130,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "Network Egress Policy", slug: "guides/network-egress-policy" },
       { label: "Runtime Approvals", slug: "guides/runtime-approvals" },
       { label: "AI Agent Integration", slug: "guides/ai-agent-integration" },
+      { label: "Claude Code with MVM tools", slug: "guides/claude-code-mcp" },
       { label: "Agent Tool Contract", slug: "guides/agent-tool-contract" },
       { label: "Agent Sandbox", slug: "guides/agent-sandbox" },
       { label: "Image Registry Configuration", slug: "guides/image-registry-configuration" },
