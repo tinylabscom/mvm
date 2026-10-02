@@ -2317,6 +2317,19 @@ fn test_security_verb_is_unrecognized() {
 }
 
 #[test]
+fn test_image_dev_ensure_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "image", "dev", "ensure"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Image(image::Args {
+            action: ImageAction::Dev {
+                action: image::dev::DevAction::Ensure,
+            },
+        })
+    ));
+}
+
+#[test]
 fn test_image_ls_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "image", "ls", "--registry", "docker.io", "--json"])
         .unwrap();

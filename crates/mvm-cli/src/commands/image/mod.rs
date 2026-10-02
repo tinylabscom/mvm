@@ -17,6 +17,7 @@ use super::Cli;
 mod base_image;
 pub(crate) mod boot;
 mod cache;
+pub(in crate::commands) mod dev;
 mod ingest;
 mod inspect;
 mod ls;
@@ -86,6 +87,11 @@ pub(in crate::commands) enum ImageAction {
         #[command(subcommand)]
         action: boot::BootAction,
     },
+    /// Ensure the writable dev default-tenant image is installed locally
+    Dev {
+        #[command(subcommand)]
+        action: dev::DevAction,
+    },
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -96,6 +102,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         ImageAction::Inspect { reference, json } => inspect::run(&cache_root, &reference, json),
         ImageAction::Rm { reference } => rm::run(&cache_root, &reference),
         ImageAction::Boot { action } => boot::run(action),
+        ImageAction::Dev { action } => dev::run(action),
     }
 }
 

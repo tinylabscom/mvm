@@ -145,6 +145,11 @@ tier = "parse"
 reason = "check queries live release state and update downloads a signed release before replacing the cache; focused tests cover comparison, verification, and fail-closed behavior"
 
 [[command]]
+path = "image dev ensure"
+tier = "parse"
+reason = "fetches the signed development image release and replaces the local cache; focused tests cover selection, verification, and fetch-when-unchanged behavior"
+
+[[command]]
 path = "init"
 tier = "exec"
 
