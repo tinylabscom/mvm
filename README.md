@@ -930,7 +930,8 @@ available:
 ```sh
 bin/dev machine run -- uname -a     # solo: released images, nothing else needed
 MVM_IMAGES_DIR=../mvm-images \
-  bin/dev build image-set builder-vm  # paired: build images from that checkout
+  MVM_ALLOW_LOCAL_BUILDER_BUILD=1 \
+  bin/dev build image-set builder-vm  # paired (explicit opt-in): build images from that checkout
 ```
 
 `bin/dev` picks the image source itself — an explicit `MVM_IMAGES_DIR` wins, a

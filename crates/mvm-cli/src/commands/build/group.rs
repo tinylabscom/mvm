@@ -13,6 +13,11 @@ use super::{address, compile, image_set, kernel, runtime_overlay, sdk_sidecar, v
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
+    /// Allow building the builder VM image from a local `mvm-images` checkout for this invocation.
+    /// This sets MVM_ALLOW_LOCAL_BUILDER_BUILD=1 for the process, enabling contributor-only local builder image builds.
+    #[arg(long)]
+    pub allow_local_builder_build: bool,
+
     #[command(subcommand)]
     pub action: BuildCmd,
 }
