@@ -67,22 +67,17 @@
 
           zig = if pkgs ? zig_0_13 then pkgs.zig_0_13 else pkgs.zig;
 
-          optionalZigbuild = pkgs.lib.optional (pkgs ? cargo-zigbuild) pkgs.cargo-zigbuild;
-          leanPackages =
-            (with pkgs; [
-              rust
-              curl
-              git
-              jq
-              just
-              pkg-config
-              protobuf
-              zig
-            ])
-            ++ optionalZigbuild;
+          leanPackages = with pkgs; [
+            rust
+            curl
+            git
+            jq
+            just
+            pkg-config
+            protobuf
+          ];
 
           buildInputs = with pkgs; [
-            llvmPackages.libclang
             openssl
           ];
         in
@@ -90,7 +85,6 @@
           default = pkgs.mkShell {
             packages = leanPackages;
             inherit buildInputs;
-            LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev ];
             shellHook = ''
               echo "mvm development shell (${rust.version})"
@@ -101,6 +95,7 @@
           full = pkgs.mkShell {
             packages =
               leanPackages
+              ++ [ zig ]
               ++ (with pkgs; [
                 rust-analyzer
                 cargo-audit
@@ -121,7 +116,7 @@
               ])
               ++ (pkgs.lib.optional (pkgs ? cargo-machete) pkgs.cargo-machete);
 
-            inherit buildInputs;
+            buildInputs = buildInputs ++ [ pkgs.llvmPackages.libclang ];
 
             LIBCLANG_PATH = "${pkgs.llvmPackages.libclang.lib}/lib";
             PKG_CONFIG_PATH = pkgs.lib.makeSearchPath "lib/pkgconfig" [ pkgs.openssl.dev ];
