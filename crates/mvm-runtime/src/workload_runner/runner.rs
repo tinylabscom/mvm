@@ -2363,6 +2363,7 @@ mod tests {
                 not_after,
                 verbs: vec![VerbId::new("run-entrypoint").unwrap()],
                 drive: None,
+                tool_mediation: None,
                 sig: vec![0u8; 64],
             },
         };
@@ -3389,6 +3390,7 @@ mod tests {
                 not_after,
                 verbs: vec![mvm_core::plan::VerbId::new(&"a".repeat(4000)).unwrap()],
                 drive: None,
+                tool_mediation: None,
                 sig: vec![0u8; 64],
             },
         };
@@ -4070,6 +4072,7 @@ mod tests {
                     not_after: plan.valid_until,
                     verbs,
                     drive,
+                    tool_mediation: None,
                     sig: vec![3u8; 64],
                 },
             }))

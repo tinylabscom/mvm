@@ -101,7 +101,7 @@ allow = ["APP_MODE", "RUST_LOG"]         # once any layer lists names, --env is 
 deny  = ["DEBUG"]
 # readmit = ["LD_PRELOAD"]               # escape hatch: user-authored profiles only
 
-[tools]                                  # enforcement depends on the tool path
+[tools]                                  # partial gates; strict validation still refuses this
 allow = ["git", "bash"]
 ask = ["git"]                            # every call asks the approver first
 deny = ["curl"]
@@ -327,9 +327,10 @@ missing one.
   JSON, not command lines or destinations). A declared, non-interactive
   `machine exec <name> --tool TOOL -- <cmd>...` checks the exact argv against
   the admitted per-VM rules and records the endpoint decision before the guest
-  spawns it. Other guest command paths are not tool-mediated yet, and
-  tool-scoped routes and secrets are not bound. `policy validate --strict`
-  therefore still refuses a policy that relies on `[tools]`.
+  spawns it. A signed tool-bearing plan also makes the guest refuse alternate
+  arbitrary-command RPCs. Declared invocations use the authenticated vsock
+  control session. Tool-scoped routes and secrets are not yet bound, so
+  `policy validate --strict` still refuses a policy that relies on `[tools]`.
 - Pack profiles (`namespace/name`) are refused.
 - Endpoint routes from a policy are refused on a persistent machine
   (`machine run --name`), the same as `--allow-endpoint`: they would not be

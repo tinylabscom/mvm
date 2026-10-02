@@ -78,5 +78,5 @@ pub use validity::{
     CheckedFreshness, Freshness, FreshnessClaims, NonceStore, PlanValidityError, check_window,
 };
 pub use verb::{VerbId, VerbIdError};
-pub use verb_grant::{VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};
+pub use verb_grant::{ToolMediationGrant, VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};
 pub use verb_trust::{GrantKeySource, VERB_TRUST_POLICY_VERSION, VerbTrustPolicy};

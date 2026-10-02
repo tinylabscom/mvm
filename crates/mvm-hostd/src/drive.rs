@@ -446,6 +446,7 @@ mod tests {
             plan.valid_until,
             Vec::new(),
             plan.grants.as_ref().and_then(|grants| grants.drive.clone()),
+            None,
         )
         .unwrap();
         let envelope = VerbGrantEnvelope {

@@ -414,6 +414,7 @@ mod tests {
                 not_after,
                 verbs: Vec::new(),
                 drive: None,
+                tool_mediation: None,
                 sig: vec![0u8; 64],
             },
         }
@@ -758,6 +759,7 @@ mod tests {
             not_after: chrono::Utc::now(),
             verbs: vec![mvm_core::plan::VerbId::new("ping").unwrap()],
             drive: None,
+            tool_mediation: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {
@@ -863,6 +865,7 @@ mod tests {
                 not_after: chrono::Utc::now() - chrono::Duration::seconds(1),
                 verbs: vec![mvm_core::plan::VerbId::new("activate-environment").unwrap()],
                 drive: None,
+                tool_mediation: None,
                 sig: vec![0u8; 64],
             },
         };

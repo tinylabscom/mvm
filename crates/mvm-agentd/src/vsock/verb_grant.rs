@@ -13,6 +13,12 @@ pub fn enforce_verb_grant(
 ) -> Option<GuestResponse> {
     match grant {
         None => None,
+        Some(g) if g.tool_mediation.is_some() && req.verb().bypasses_tool_mediation() => {
+            Some(GuestResponse::VerbNotAuthorized {
+                verb: req.kind_name().to_string(),
+            })
+        }
+        Some(g) if g.tool_mediation.as_ref().is_some_and(|m| m.class_gate_only) => None,
         Some(g) if g.permits(req.kind_name()) => None,
         Some(_) => Some(GuestResponse::VerbNotAuthorized {
             verb: req.kind_name().to_string(),
@@ -465,6 +471,7 @@ mod tests {
             not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
             verbs: Vec::new(),
             drive: Some(drive_grant()),
+            tool_mediation: None,
             sig: Vec::new(),
         }
     }
@@ -616,6 +623,7 @@ mod tests {
             not_after: now + chrono::Duration::minutes(1),
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         // listed => allowed
@@ -647,6 +655,7 @@ mod tests {
             not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
             verbs: vec![VerbId::new("readiness-status").unwrap()],
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         let request = GuestRequest::RunEntrypoint {
@@ -674,6 +683,125 @@ mod tests {
     }
 
     #[test]
+    fn signed_tool_mediation_refuses_alternate_command_paths() {
+        use mvm_core::plan::{Nonce, ToolMediationGrant, VerbGrant};
+
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            verbs: vec![],
+            drive: None,
+            tool_mediation: Some(ToolMediationGrant {
+                class_gate_only: true,
+            }),
+            sig: vec![],
+        };
+        let alternate = [
+            GuestRequest::Exec {
+                command: "echo bypass".into(),
+                stdin: None,
+                timeout_secs: None,
+            },
+            GuestRequest::ExecBatch {
+                stages: vec![],
+                commands: vec![vec!["echo".into(), "bypass".into()]],
+                timeout_secs: None,
+            },
+            GuestRequest::RunDetached {
+                argv: vec!["echo".into()],
+                env: vec![],
+            },
+            GuestRequest::RunCode {
+                code: "print(1)".into(),
+                timeout_secs: None,
+            },
+            GuestRequest::ProcStart {
+                argv: vec!["echo".into()],
+                env: Default::default(),
+                cwd: None,
+                stdin: vec![],
+                timeout_secs: None,
+            },
+            GuestRequest::ProcSendInput {
+                pid_token: "prior-shell".into(),
+                bytes: vec![b'!'],
+            },
+            GuestRequest::ConsoleOpen {
+                cols: 80,
+                rows: 24,
+                env: vec![],
+                argv: vec![],
+                detach_timeout_secs: None,
+            },
+            GuestRequest::ConsoleAttach {
+                session_id: 1,
+                cols: 80,
+                rows: 24,
+                take_over: false,
+            },
+        ];
+        for request in alternate {
+            assert!(matches!(
+                enforce_verb_grant(&request, Some(&grant)),
+                Some(GuestResponse::VerbNotAuthorized { .. })
+            ));
+            assert!(
+                enforce_verb_grant(&request, None).is_none(),
+                "legacy dev behavior remains unchanged"
+            );
+        }
+
+        let mediated = GuestRequest::MediatedExec(MediatedExecCall {
+            tool: "shell".into(),
+            argv: vec!["echo".into(), "allowed".into()],
+            stdin: None,
+            timeout_secs: None,
+        });
+        assert!(enforce_verb_grant(&mediated, Some(&grant)).is_none());
+        assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
+        assert!(
+            enforce_verb_grant(
+                &GuestRequest::RunEntrypoint {
+                    stdin: vec![],
+                    timeout_secs: 1,
+                    env: vec![],
+                    stream_input: false,
+                },
+                Some(&grant)
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn explicit_verb_list_still_narrows_a_tool_mediated_grant() {
+        use mvm_core::plan::{Nonce, ToolMediationGrant, VerbGrant, VerbId};
+
+        let grant = VerbGrant {
+            session_id: "s".into(),
+            plan_nonce: Nonce::from_bytes([0u8; 16]),
+            not_after: chrono::Utc::now() + chrono::Duration::minutes(1),
+            verbs: vec![VerbId::new("ping").expect("valid verb")],
+            drive: None,
+            tool_mediation: Some(ToolMediationGrant {
+                class_gate_only: false,
+            }),
+            sig: vec![],
+        };
+        let mediated = GuestRequest::MediatedExec(MediatedExecCall {
+            tool: "shell".into(),
+            argv: vec!["echo".into()],
+            stdin: None,
+            timeout_secs: None,
+        });
+        assert!(matches!(
+            enforce_verb_grant(&mediated, Some(&grant)),
+            Some(GuestResponse::VerbNotAuthorized { .. })
+        ));
+    }
+
+    #[test]
     fn prod_safe_grant_refuses_all_dev_only_requests() {
         use mvm_core::plan::{Nonce, VerbGrant, VerbId};
 
@@ -686,6 +814,7 @@ mod tests {
                 .map(|name| VerbId::new(name).expect("the prod-safe catalog contains valid verbs"))
                 .collect(),
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         let requests = [
@@ -867,6 +996,7 @@ mod tests {
             not_after: now + chrono::Duration::minutes(1),
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         good.sig = {
@@ -953,6 +1083,7 @@ mod tests {
             not_after: now + chrono::Duration::minutes(valid_minutes),
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         grant.sig = {
@@ -1011,6 +1142,7 @@ mod tests {
             not_after: now + chrono::Duration::minutes(10),
             verbs: vec![VerbId::new("ping").unwrap()],
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         grant.sig = {
@@ -1603,6 +1735,7 @@ mod tests {
             not_after,
             verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();

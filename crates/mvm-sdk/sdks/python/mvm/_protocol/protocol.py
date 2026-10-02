@@ -1553,6 +1553,11 @@ class ToolCheckRequest:
     tool: str
 
 
+@dataclass
+class ToolMediationGrant:
+    class_gate_only: bool
+
+
 VerbId = str
 
 
@@ -1902,6 +1907,7 @@ class VerbGrant:
     sig: str
     verbs: List[VerbId]
     drive: Optional[DriveGrant] = None
+    tool_mediation: Optional[ToolMediationGrant] = None
 
 
 @dataclass

@@ -5011,6 +5011,20 @@
       },
       "additionalProperties": false
     },
+    "ToolMediationGrant": {
+      "description": "How a tool-mediated guest preserves the prior verb-grant posture.",
+      "type": "object",
+      "required": [
+        "class_gate_only"
+      ],
+      "properties": {
+        "class_gate_only": {
+          "description": "A dev plan without an agent-verb list continues to use the profile class gate for non-command verbs. Command RPCs are still mediated.",
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "VerbGrant": {
       "description": "Host-signer-signed, session- and time-bound capability granting a workload a subset of agent control verbs. Signed by the admission authority, verified by the guest — deliberately a different key from the per-session frame-signing key.",
       "type": "object",
@@ -5046,6 +5060,17 @@
         "sig": {
           "description": "Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal numbers — roughly 230 characters against base64's 88 — and this grant rides the guest kernel cmdline, where the budget is finite and silently enforced. `sig` is excluded from `signing_bytes`, so how it is encoded cannot affect signature validity.",
           "type": "string"
+        },
+        "tool_mediation": {
+          "description": "Presence requires arbitrary guest command RPCs to use the mediated path. The host signer derives this from the admitted plan's tool rules.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ToolMediationGrant"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "verbs": {
           "type": "array",
