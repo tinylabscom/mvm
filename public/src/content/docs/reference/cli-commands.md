@@ -272,6 +272,8 @@ one. Keyless (`<file>.sigstore.json`) signatures are produced in CI by
 | `mvmctl secret set <name> --provider <provider>`          | Store a secret and bind it to a catalogued provider's destinations and auth type                                                  |
 | `mvmctl secret set <name> --host <host> --type <auth>`    | Store a secret and bind it to explicit destinations. Repeat `--host`; `*.` subdomain wildcards supported                          |
 | `mvmctl secret set <name> ... --inject <mode>`            | Restrict substitution to `header` (default), `query_param`, `url_path`, or `basic_auth`                                            |
+| `mvmctl secret set <name> ... --oauth-authorization-url <url> --oauth-token-url <url> --oauth-client-id <id>` | Bind the secret to an OAuth flow (bearer only); the three flags are required together                                             |
+| `mvmctl secret set <name> ... --oauth-client-secret <secret>` | Store the client secret as the initial token set; the host-side refresher exchanges it for a live token set (`-` reads stdin; `--oauth-client-secret-file <path>` reads a file) |
 | `mvmctl secret providers`                                 | List the built-in service providers `--provider` accepts                                                                          |
 | `mvmctl secret providers --search <query>`                | Filter providers by name, description, or tag                                                                                     |
 | `mvmctl secret get <name>`                                | Verify that a local secret exists without printing the value                                                                      |
@@ -300,6 +302,21 @@ binding. A later change to a catalog entry therefore cannot widen a binding that
 already exists. For a SigV4 provider the credential-scope service comes from the
 entry, while `--region` and `--aws-access-key-id` stay yours to supply — they
 belong to your account, not to the provider.
+
+An OAuth binding turns the stored value into a token set the host maintains:
+the per-VM network endpoint exchanges the client-credentials grant against the
+binding's `--oauth-token-url` and refreshes it before expiry, so the guest only
+ever receives a live access token through substitution. `--oauth-client-secret`
+writes the stored value as the *initial* token set — the client secret plus an
+already-expired timestamp — so the first exchange happens at endpoint boot;
+live token sets are written by the host flow and can never be imported with
+`--from`. `--oauth-scope` is repeatable, and
+`--oauth-response-access-token-pointer` names a non-standard access-token
+location in the token response (default `/access_token`). The OAuth endpoints
+must be absolute `https` URLs. The human/browser consent flow lands separately;
+until then the machine client-credentials grant is the supported flow.
+`mvmctl secret ls` shows the oauth client id and token URL alongside the
+binding; the client secret is never displayed.
 
 `secret providers` also names the environment variable each provider's own
 tooling reads (`env=ANTHROPIC_API_KEY`) and the header its API reads the

@@ -29,7 +29,9 @@ use mvm_core::crypto::secret_binding::{BindingStore, OAuthBindingMeta};
 use mvm_core::plan::{SecretBinding, SecretSource};
 use tracing::{info, warn};
 
-use super::resolver::{CapturedOAuthToken, OAUTH_REFRESH_SKEW, SecretResolver};
+use super::resolver::{
+    CapturedOAuthToken, OAUTH_REFRESH_SKEW, OAuthSecretString, OAuthTokenSet, SecretResolver,
+};
 
 /// JSON pointer of the access token in a token response when the binding does
 /// not name one.
@@ -53,6 +55,20 @@ const MAX_TOKEN_RESPONSE_BYTES: u64 = 64 * 1024;
 /// gone and resolution failing closed is the correct behavior.
 const RETRY_INTERVAL: StdDuration = StdDuration::from_secs(10);
 const MAX_CONSECUTIVE_FAILURES: u32 = 12;
+
+/// The stored value for an OAuth binding whose tokens have never been
+/// minted: it carries only the client secret the host-side refresher
+/// exchanges with. The expiry sits in the past so resolution refuses (and
+/// the refresher treats the set as due) until the first real exchange lands.
+#[must_use]
+pub fn initial_token_set(client_secret: &str) -> OAuthTokenSet {
+    OAuthTokenSet {
+        access_token: OAuthSecretString::from(String::new()),
+        refresh_token: None,
+        client_secret: Some(OAuthSecretString::from(client_secret.to_owned())),
+        expires_at: DateTime::UNIX_EPOCH,
+    }
+}
 
 /// Extract the token set a token endpoint (or any captured JSON response)
 /// carries, honouring the binding's access-token pointer. Shared by the
@@ -524,6 +540,20 @@ mod tests {
     }
 
     // -- pure logic ------------------------------------------------------
+
+    #[test]
+    fn initial_token_set_carries_only_the_client_secret() {
+        let set = initial_token_set("the-client-secret");
+        assert_eq!(
+            set.client_secret.unwrap().expose_secret(),
+            "the-client-secret"
+        );
+        assert!(set.access_token.expose_secret().is_empty());
+        assert!(set.refresh_token.is_none());
+        // An expiry in the past: resolution refuses, the refresher treats
+        // the set as due, and any captured merge only moves it forward.
+        assert!(set.expires_at < Utc::now());
+    }
 
     #[test]
     fn grant_body_carries_grant_type_and_scopes() {

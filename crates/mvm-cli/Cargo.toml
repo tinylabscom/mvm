@@ -88,6 +88,8 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# Secret-command tests read back a stored value through SecretStore::get.
+secrecy.workspace = true
 # The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
 # test that seeds a sidecar cache needs a real ELF object, not a stub.
 mvm-fs = { workspace = true, features = ["test-support"] }
