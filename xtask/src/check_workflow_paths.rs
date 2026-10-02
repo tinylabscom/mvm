@@ -926,6 +926,7 @@ mod tests {
             "nix=true",
             "architecture=true",
             "just/",
+            "third_party/",
             "\\.githooks/",
             "uninstall\\.sh",
         ] {
@@ -1522,6 +1523,7 @@ mod tests {
         ));
         assert!(warm.contains("primary-key: nix-${{ hashFiles("));
         assert!(warm.contains("'crates/**/*.rs'"));
+        assert!(warm.contains("'third_party/**'"));
         assert!(warm.contains("--out-link \"$RUNNER_TEMP/nix-cache-warm\""));
         assert!(warm.contains("Build Nix outputs to populate the binary cache"));
         assert!(warm.contains("save: \"true\""));

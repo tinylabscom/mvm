@@ -124,13 +124,13 @@ jobs:
           # not exec, and a PR touching only mk-guest.nix used to resolve
           # code=false, so the one test that would have caught that change
           # never ran on it.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|third_party/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|third_party/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "nix=true" >> "$GITHUB_OUTPUT"
           else
             echo "nix=false" >> "$GITHUB_OUTPUT"
@@ -142,7 +142,7 @@ jobs:
           # their build. Host-only Rust (CLI, hostd, client) changes nothing
           # the lane compiles, so it skips — the lane still runs for every
           # change that can alter the guest bytes.
-          if grep -zE '^(crates/(mvm-contract|mvm-core|mvm-agentd|mvm-host-services)/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|nix/|build\.rs$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/(mvm-contract|mvm-core|mvm-agentd|mvm-host-services)/|third_party/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|nix/|build\.rs$)' "$CHANGED_FILE" >/dev/null; then
             echo "guest_image=true" >> "$GITHUB_OUTPUT"
           else
             echo "guest_image=false" >> "$GITHUB_OUTPUT"
@@ -1569,7 +1569,7 @@ jobs:
         if: needs.scope.outputs.nix == 'true'
         uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
+          primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'third_party/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
           restore-prefixes-first-match: nix-
 
       - name: Eval-check every flake
