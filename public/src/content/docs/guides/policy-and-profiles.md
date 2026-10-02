@@ -308,12 +308,22 @@ installed content-addressed, and the exact manifest digest is pinned in a
 lockfile.
 
 An installed pack can carry its own policy documents — `pack/profile.toml`,
-`pack/group.toml`, or both — and you compose one exactly where its
+`pack/group.toml`, or both. A pack with a profile composes exactly where its
 reference sits in the `--policy` order:
 
 ```sh
-mvmctl run --policy runtime/python@1.2.3 --policy ./mine.toml -- make test
+mvmctl run --policy agent/claude@1.0.1 --policy ./mine.toml -- make test
 ```
+
+A pack with only a group, such as `runtime/python`, is not a profile and is
+refused by `--policy`. Include it where groups are included: a profile's
+`[groups] include = ["runtime/python"]`, or a project's `[policy] include`.
+`pull` fetches the one pack it is given, so a profile that includes other
+packs needs each of them pulled too; `agent/claude` includes `runtime/python`.
+[Author and publish a signed pack](/guides/pack-authoring/) covers writing
+one, and the client guides under
+[AI agent integration](/guides/ai-agent-integration/) cover the published
+agent packs.
 
 A pack layer is verified every time it loads: the signature is re-checked
 against the publisher policy and the manifest digest against the lockfile,
