@@ -144,6 +144,11 @@ fn tool_live_witness_checks_mediation_after_restart_and_audit_chain() {
             .expect("read the persistent-machine live feature");
 
     assert!(feature.contains("@live @firecracker @tool_live"));
+    assert!(
+        feature.contains(
+            "I run mvmctl in an isolated live home with \"machine create bdd-tool-command"
+        )
+    );
     for command in [
         "machine create bdd-tool-command --image alpine --policy",
         "machine exec bdd-tool-command --tool shell",
