@@ -170,12 +170,21 @@ jobs:
   # evidence, but live queue history showed it running for 27-40 minutes and
   # holding every merge behind its 45-minute timeout. The merge gate keeps the
   # hermetic BDD suite and the bounded published-image boot witness; this full
-  # CLI lifecycle runs nightly, where a regression opens the Extended CI issue
-  # without serializing unrelated pull requests.
+  # CLI lifecycle and tool-mediation witnesses run as separate nightly matrix
+  # jobs, where a regression opens the Extended CI issue without serializing
+  # unrelated pull requests.
   bdd-live-readme:
-    name: BDD live documented lifecycle (Linux, Firecracker)
+    name: BDD live ${{ matrix.witness }} (Linux, Firecracker)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - witness: ci_live
+            timeout: 45
+          - witness: tool_live
+            timeout: 60
+    timeout-minutes: ${{ matrix.timeout }}
     env:
       FC_VERSION: v1.17.0
       MVM_KERNEL_SOURCE: download
@@ -223,8 +232,8 @@ jobs:
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
 
-      - name: Run the live documented lifecycle
-        run: just bdd::live-ci
+      - name: Run the selected live witness
+        run: just bdd::live-ci ${{ matrix.witness }}
 
       - name: Dump VMM diagnostics on failure
         if: failure()

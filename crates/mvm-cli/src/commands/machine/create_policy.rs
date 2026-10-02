@@ -6,8 +6,8 @@
 //! manifest's `[policy]` table and `[network] allow_hosts`, then the flags on
 //! top, under the same fold. The spec then records the result.
 //!
-//! A spec records network and resource grants only. A policy that also binds
-//! secrets, shares, env or endpoint routes is refused rather than half
+//! A spec records network, resource, and tool decisions. A policy that also
+//! binds secrets, shares, env or endpoint routes is refused rather than half
 //! applied: a restart would lose what the spec cannot hold.
 
 use anyhow::{Context, Result, bail};
@@ -45,16 +45,26 @@ fn refuse_unrecordable(policy: &PolicyBody) -> Result<()> {
         ("secrets", !policy.secrets.is_empty()),
         ("shares", !policy.shares.is_empty()),
         ("env", !policy.env.is_empty()),
-        ("tools", !policy.tools.is_empty()),
         ("network.routes", !policy.network.routes.is_empty()),
     ] {
         if present {
             bail!(
                 "the policy's {section} cannot be recorded on a persistent machine's spec yet, \
-                 so a restart would drop them. Run it with `mvmctl run` or `machine run`, which \
-                 apply them per launch"
+                 so a restart would drop them. Use `mvmctl run` or a transient \
+                 `machine run -- echo hello`, which apply them per launch"
             );
         }
+    }
+    refuse_unmediated_tool_scope(policy)
+}
+
+/// Scope cannot be claimed until a host-verifiable invocation is attached to
+/// endpoint traffic. Preserve a refusal for both persistent entry points.
+pub(super) fn refuse_unmediated_tool_scope(policy: &PolicyBody) -> Result<()> {
+    if policy.tools.to_tool_rules().has_endpoint_scope() {
+        bail!(
+            "the policy's tools.detail.routes or tools.detail.secrets cannot be enforced on a persistent machine yet"
+        );
     }
     Ok(())
 }
@@ -151,6 +161,28 @@ mod tests {
     }
 
     #[test]
+    fn a_persistent_policy_retains_command_rules() {
+        let home = tempfile::tempdir().expect("isolated home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let profile = home.path().join("tools.toml");
+        std::fs::write(
+            &profile,
+            "[overrides.tools]\nallow = [\"git\"]\n[overrides.tools.detail.git]\nargv = [\"git status*\"]\n",
+        )
+        .expect("write tool policy");
+        let selected = machine_policy(inputs(&[profile.display().to_string()], None, &[]))
+            .expect("resolve command rules");
+        let tools = selected
+            .policy
+            .expect("resolved policy")
+            .tools
+            .to_tool_rules();
+        assert_eq!(tools.allow, ["git"]);
+        assert_eq!(tools.detail["git"].argv, ["git status*"]);
+    }
+
+    #[test]
     fn a_projects_hosts_and_a_flags_hosts_both_apply() {
         let home = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
@@ -203,8 +235,14 @@ mod tests {
             ("env", "[env]\nallow = [\"MODE\"]\n"),
             ("env", "[env]\ndeny = [\"DEBUG\"]\n"),
             ("env", "[env]\nreadmit = [\"LD_PRELOAD\"]\n"),
-            ("tools", "[tools]\nallow = [\"curl\"]\n"),
-            ("tools", "[tools]\ndeny = [\"ssh\"]\n"),
+            (
+                "tools.detail.routes or tools.detail.secrets",
+                "[tools.detail.curl]\nroutes = [\"example.com:443\"]\n",
+            ),
+            (
+                "tools.detail.routes or tools.detail.secrets",
+                "[tools.detail.curl]\nsecrets = [\"token\"]\n",
+            ),
             (
                 "network.routes",
                 "[[network.routes]]\nid = \"api\"\nhost = \"api.test\"\n",
@@ -215,5 +253,10 @@ mod tests {
             assert!(error.to_string().contains(section), "{error:#}");
         }
         assert!(refuse_unrecordable(&PolicyBody::default()).is_ok());
+        let tools: PolicyBody = toml::from_str(
+            "[tools]\nallow = [\"curl\"]\n[tools.detail.curl]\nargv = [\"curl *\"]\n",
+        )
+        .expect("tool policy parses");
+        assert!(refuse_unrecordable(&tools).is_ok());
     }
 }
