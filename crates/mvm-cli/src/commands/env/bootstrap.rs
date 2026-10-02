@@ -48,7 +48,11 @@ fn acquire_bootstrap_artifacts_with<B, A, R, P, K>(
 ) -> Result<String>
 where
     B: FnOnce() -> Result<()>,
-    A: FnOnce() -> Result<()>,
+    // Host-helper prewarm is best-effort by design (see
+    // `prewarm_host_aux_helpers_for`): a helper whose source build cannot
+    // succeed on this host must not abort bootstrap, so the step is not
+    // fallible at this seam.
+    A: FnOnce(),
     K: FnOnce() -> Result<String>,
     R: FnOnce() -> Result<()>,
     P: FnOnce() -> Result<()>,
@@ -58,7 +62,7 @@ where
     ui::success("Builder VM ready.");
 
     ui::info("Preparing host helper binaries...");
-    host_helpers().context("preparing host helper binaries")?;
+    host_helpers();
     ui::success("Host helper binaries ready.");
 
     ui::info("Preparing shared guest runtime...");
@@ -124,18 +128,18 @@ fn prepare_launch_runtime_artifacts() -> Result<()> {
 /// Resolve — building from this checkout when a helper is missing or older
 /// than its sources — every per-VM host helper the launch path probes at
 /// spawn, so a later `machine run` never cold-builds one.
-fn prewarm_host_aux_helpers() -> Result<()> {
+fn prewarm_host_aux_helpers() {
     prewarm_host_aux_helpers_for(&mvm_vmm::host::aux_bin::HostProcess::current())
 }
 
-fn prewarm_host_aux_helpers_for(host: &mvm_vmm::host::aux_bin::HostProcess) -> Result<()> {
+fn prewarm_host_aux_helpers_for(host: &mvm_vmm::host::aux_bin::HostProcess) {
     use mvm_vmm::host::aux_bin;
 
     // A release binary, a library embedder, or any process that did not
     // declare source helper builds ships or manages its own helpers: nothing
     // this process may build, so nothing to prewarm.
     if !host.builds_helpers_from_source() {
-        return Ok(());
+        return;
     }
     for spec in launch_helper_specs() {
         let bin = spec.bin;
@@ -146,10 +150,17 @@ fn prewarm_host_aux_helpers_for(host: &mvm_vmm::host::aux_bin::HostProcess) -> R
         if !aux_bin::available(&spec) {
             continue;
         }
-        aux_bin::resolve_verified_for(&spec, host)
-            .with_context(|| format!("bootstrap: prewarming the {bin} helper"))?;
+        // Prewarm is best-effort: a helper whose source build cannot succeed
+        // on this host (e.g. the libkrun supervisor without libkrun headers)
+        // must not abort bootstrap for launches that never spawn it. The
+        // launch that actually needs the helper surfaces the build error at
+        // spawn time, where the failure is on the path that required it.
+        if let Err(error) = aux_bin::resolve_verified_for(&spec, host) {
+            crate::ui::warn(&format!(
+                "prewarming the {bin} helper failed: {error:#} — it builds when a                  launch that needs it runs"
+            ));
+        }
     }
-    Ok(())
 }
 
 /// The per-VM host helper binaries a launch probes at spawn, limited to the
@@ -237,7 +248,6 @@ mod tests {
             },
             || {
                 calls.borrow_mut().push("helpers");
-                Ok(())
             },
             || {
                 calls.borrow_mut().push("runtime");
@@ -266,7 +276,7 @@ mod tests {
         let runtime_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || anyhow::bail!("builder failed"),
-            || Ok(()),
+            || {},
             || {
                 runtime_called.set(true);
                 Ok(())
@@ -283,7 +293,7 @@ mod tests {
     fn bootstrap_fails_when_workload_kernel_is_not_ready() {
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || Ok(()),
+            || {},
             || Ok(()),
             || Ok(()),
             || anyhow::bail!("kernel acquisition failed"),
@@ -298,7 +308,7 @@ mod tests {
         let workload_called = std::cell::Cell::new(false);
         let result = acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || Ok(()),
+            || {},
             || anyhow::bail!("overlay unavailable"),
             || Ok(()),
             || {
@@ -316,32 +326,34 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_fails_when_host_helpers_are_not_ready() {
+    fn bootstrap_continues_when_host_helper_prewarm_fails() {
+        // Prewarm is best-effort: a failing helper step must not abort
+        // bootstrap for launches that never spawn it, and the later steps
+        // still run.
         let runtime_called = std::cell::Cell::new(false);
-        let result = acquire_bootstrap_artifacts_with(
+        let helpers_called = std::cell::Cell::new(false);
+        acquire_bootstrap_artifacts_with(
             || Ok(()),
-            || anyhow::bail!("supervisor unavailable"),
+            || helpers_called.set(true),
             || {
                 runtime_called.set(true);
                 Ok(())
             },
             || Ok(()),
             || Ok("/cache/workload/vmlinux".to_string()),
-        );
+        )
+        .expect("a failing host-helper step must not fail bootstrap");
 
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("host helper binaries"),
-            "unexpected error: {err}"
-        );
-        assert!(!runtime_called.get());
+        assert!(helpers_called.get());
+        assert!(runtime_called.get());
     }
 
     #[test]
     fn helper_prewarm_is_a_no_op_for_a_process_that_may_not_build_helpers() {
         let host = mvm_vmm::host::aux_bin::HostProcess::undeclared();
         assert!(!host.builds_helpers_from_source());
-        prewarm_host_aux_helpers_for(&host).expect("the decline must be a quiet no-op");
+        // The decline must be a quiet no-op.
+        prewarm_host_aux_helpers_for(&host);
     }
 
     #[test]
@@ -379,7 +391,8 @@ mod tests {
 
         let host =
             mvm_vmm::host::aux_bin::HostProcess::undeclared().allowing_helper_builds_from_source();
-        prewarm_host_aux_helpers_for(&host).expect("installed helpers verify without a build");
+        // Installed helpers verify without a build.
+        prewarm_host_aux_helpers_for(&host);
     }
 
     /// The pair-stamped installs bootstrap leaves are exactly the ones a boot
