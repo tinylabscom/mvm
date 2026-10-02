@@ -3000,6 +3000,7 @@ dependencies = [
  "notify-debouncer-mini",
  "rand 0.10.2",
  "rustls",
+ "secrecy",
  "serde",
  "serde_json",
  "sha2 0.11.0",

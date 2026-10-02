@@ -44,6 +44,7 @@ use mvm_client::secret::{
 };
 use mvm_contract::ir::{AuthType, Sigv4Params};
 use mvm_contract::service_catalog;
+use mvm_core::crypto::secret_binding::OAuthBindingMeta;
 
 use mvm_core::user_config::MvmConfig;
 
@@ -138,6 +139,11 @@ pub(in crate::commands) enum SecretAction {
         /// Whether each run's first use of the secret needs an approval.
         #[arg(long, value_enum, default_value = "never")]
         approve: ApproveArg,
+        /// OAuth flow binding flags (see the `--oauth-*` entries). Boxed:
+        /// a group this size must not bloat the subcommand enum's largest
+        /// variant past the others.
+        #[command(flatten)]
+        oauth: Box<OAuthSetFlags>,
         /// Inline value. Pass `-` to read from stdin (preferred when
         /// scripting; avoids shell-history exposure).
         #[arg(long, conflicts_with = "value_file")]
@@ -255,6 +261,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
             region,
             service: aws_service,
             approve,
+            oauth,
             value,
             value_file,
             from,
@@ -271,6 +278,7 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
                 region,
                 service: aws_service,
                 approve: approve.into(),
+                oauth: OAuthArgs::from_flags(*oauth)?,
                 value: ValueSource {
                     value,
                     value_file,
@@ -317,7 +325,112 @@ struct SetArgs {
     region: Option<String>,
     service: Option<String>,
     approve: SecretApproval,
+    oauth: OAuthArgs,
     value: ValueSource,
+}
+
+/// The clap-facing `--oauth-*` flag group of `secret set`, flattened into
+/// the `Set` variant behind a `Box` so the subcommand enum stays balanced.
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct OAuthSetFlags {
+    /// OAuth authorization endpoint of the bound flow (absolute https
+    /// URL). Required together with `--oauth-token-url` and
+    /// `--oauth-client-id` when any `--oauth-*` flag is given; only
+    /// valid with `--type bearer`. The host performs the token exchange
+    /// and refresh — the guest never sees the consent or token flow.
+    #[arg(long = "oauth-authorization-url")]
+    authorization_url: Option<String>,
+    /// OAuth token endpoint the host exchanges and refreshes the token
+    /// set against (absolute https URL). Required with the other two
+    /// core `--oauth-*` flags.
+    #[arg(long = "oauth-token-url")]
+    token_url: Option<String>,
+    /// OAuth client id. Public flow metadata; the client secret is
+    /// stored separately and never shown. Required with the other two
+    /// core `--oauth-*` flags.
+    #[arg(long = "oauth-client-id")]
+    client_id: Option<String>,
+    /// OAuth scope to request; repeatable. Optional.
+    #[arg(long = "oauth-scope")]
+    scopes: Vec<String>,
+    /// JSON pointer to the access token in a non-standard token
+    /// response (default `/access_token`). Optional.
+    #[arg(long = "oauth-response-access-token-pointer")]
+    response_access_token_pointer: Option<String>,
+    /// Client secret for the machine client-credentials grant. Stored
+    /// as the secret's initial token set — the host-side refresher
+    /// exchanges it for a live token set before the VM's traffic needs
+    /// one. `-` reads from stdin (preferred when scripting). Conflicts
+    /// with every other value source.
+    #[arg(
+        long = "oauth-client-secret",
+        conflicts_with_all = ["value", "value_file", "from", "client_secret_file"]
+    )]
+    client_secret: Option<String>,
+    /// Read the OAuth client secret from a file on disk. Conflicts with
+    /// every other value source.
+    #[arg(
+        long = "oauth-client-secret-file",
+        conflicts_with_all = ["value", "value_file", "from", "client_secret"]
+    )]
+    client_secret_file: Option<PathBuf>,
+}
+
+/// The `--oauth-*` inputs of `secret set`, after clap parsing. The three
+/// core binding flags are all-or-nothing (`resolve_oauth_params`); the
+/// client secret selects what the stored value is (an initial token set,
+/// not an imported value).
+#[derive(Debug, Default)]
+struct OAuthArgs {
+    authorization_url: Option<String>,
+    token_url: Option<String>,
+    client_id: Option<String>,
+    scopes: Vec<String>,
+    response_access_token_pointer: Option<String>,
+    client_secret: Option<OAuthClientSecretSource>,
+}
+
+/// Where the OAuth client secret comes from. The inline form accepts `-`
+/// for stdin, matching `--value`.
+#[derive(Debug)]
+enum OAuthClientSecretSource {
+    Inline(String),
+    File(PathBuf),
+}
+
+impl OAuthArgs {
+    /// Map the parsed flag group to the resolution input, rejecting the
+    /// both-sources case Clap already conflicts (the runtime check exists
+    /// in case the API drifts, matching `resolve_value`).
+    fn from_flags(flags: OAuthSetFlags) -> Result<Self> {
+        let OAuthSetFlags {
+            authorization_url,
+            token_url,
+            client_id,
+            scopes,
+            response_access_token_pointer,
+            client_secret,
+            client_secret_file,
+        } = flags;
+        let client_secret = match (client_secret, client_secret_file) {
+            (Some(secret), None) => Some(OAuthClientSecretSource::Inline(secret)),
+            (None, Some(path)) => Some(OAuthClientSecretSource::File(path)),
+            (None, None) => None,
+            (Some(_), Some(_)) => {
+                anyhow::bail!(
+                    "--oauth-client-secret and --oauth-client-secret-file are mutually exclusive"
+                )
+            }
+        };
+        Ok(Self {
+            authorization_url,
+            token_url,
+            client_id,
+            scopes,
+            response_access_token_pointer,
+            client_secret,
+        })
+    }
 }
 
 /// `--approve`: whether a run's first use of the secret must be approved.
@@ -350,6 +463,7 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         region,
         service: aws_service,
         approve,
+        oauth: oauth_args,
         value,
     } = set;
     // Resolve the destination + auth shape BEFORE touching the store, so a
@@ -369,7 +483,27 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
             auth_type_label(resolved.auth_type)
         );
     }
-    let input = value.resolve(&name)?;
+    let oauth = resolve_oauth_params(resolved.auth_type, &oauth_args)?;
+    if oauth.is_some() && value.from.is_some() {
+        // Token sets are written by the host flows (the refresher's first
+        // exchange, the browser consent flow), never imported from another
+        // host location; a live token set's import path would be a leakage
+        // channel the rest of the design refuses to have.
+        anyhow::bail!("--from cannot be combined with the --oauth-* binding flags");
+    }
+    // A client secret writes its own value: the initial token set the
+    // host-side refresher exchanges from. Any other value source would be
+    // clobbered, so clap conflicts them at parse time; --value/--value-file
+    // remain meaningful for staging a pre-obtained token set by hand.
+    let input = match resolve_client_secret(&oauth_args)? {
+        Some(secret) => {
+            let token_set = mvm_hostd::keyholder::oauth::initial_token_set(&secret);
+            let json = serde_json::to_string(&token_set)
+                .context("serializing the initial oauth token set")?;
+            SecretValueInput::new(json)
+        }
+        None => value.resolve(&name)?,
+    };
     service.put(&tenant, &name, input)?;
     // Binding after value: the service refuses to bind a secret with no
     // stored value, so a failed value write never leaves a dangling binding.
@@ -383,11 +517,29 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
             inject,
             provider: resolved.provider,
             approve,
-            oauth: None,
+            oauth,
         },
     )?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
     Ok(())
+}
+
+/// Read the OAuth client secret the operator pointed at. A client secret
+/// without a resolved oauth binding (checked in `resolve_oauth_params`) is
+/// refused there. The inline `-` form reads stdin, matching `--value -`.
+fn resolve_client_secret(args: &OAuthArgs) -> Result<Option<String>> {
+    let Some(source) = &args.client_secret else {
+        return Ok(None);
+    };
+    match source {
+        OAuthClientSecretSource::Inline(secret) if secret == "-" => {
+            read_secret_from_stdin().map(Some)
+        }
+        OAuthClientSecretSource::Inline(secret) => Ok(Some(secret.clone())),
+        OAuthClientSecretSource::File(path) => std::fs::read_to_string(path)
+            .with_context(|| format!("reading oauth client secret from {}", path.display()))
+            .map(Some),
+    }
 }
 
 /// The destination-and-auth inputs to [`resolve_binding_shape`].
@@ -553,6 +705,66 @@ fn resolve_sigv4_params(
     }
 }
 
+/// Validate + assemble the OAuth flow metadata against the auth type. Pure
+/// so it is unit-testable without a store. The three core flags
+/// (`--oauth-authorization-url`, `--oauth-token-url`, `--oauth-client-id`)
+/// are all-or-nothing; scopes, the access-token pointer, and the client
+/// secret source are optional riders that require the core three. The URLs
+/// themselves are checked (absolute https) by the service's binding
+/// validation, the single enforcement point every author passes through.
+/// OAuth binds the stored value to a bearer credential, so any non-bearer
+/// auth type rejects the flags, mirroring the SigV4 shape.
+fn resolve_oauth_params(auth_type: AuthType, args: &OAuthArgs) -> Result<Option<OAuthBindingMeta>> {
+    let core = [
+        args.authorization_url.as_ref(),
+        args.token_url.as_ref(),
+        args.client_id.as_ref(),
+    ];
+    let riders_present = !args.scopes.is_empty()
+        || args.response_access_token_pointer.is_some()
+        || args.client_secret.is_some();
+    let present = core.iter().flatten().count();
+    if present == 0 {
+        if riders_present {
+            anyhow::bail!(
+                "the --oauth-scope/--oauth-response-access-token-pointer/--oauth-client-secret*                  flags require --oauth-authorization-url, --oauth-token-url and --oauth-client-id"
+            );
+        }
+        return Ok(None);
+    }
+    if present != 3 {
+        anyhow::bail!(
+            "--oauth-authorization-url, --oauth-token-url and --oauth-client-id must be given together"
+        );
+    }
+    if auth_type != AuthType::Bearer {
+        anyhow::bail!("the --oauth-* flags are only valid with --type bearer");
+    }
+    // `present == 3` guarantees all three; filter keeps the no-unwrap rule.
+    let authorization_url = args
+        .authorization_url
+        .clone()
+        .filter(|value| !value.is_empty())
+        .context("--oauth-authorization-url must not be empty")?;
+    let token_url = args
+        .token_url
+        .clone()
+        .filter(|value| !value.is_empty())
+        .context("--oauth-token-url must not be empty")?;
+    let client_id = args
+        .client_id
+        .clone()
+        .filter(|value| !value.is_empty())
+        .context("--oauth-client-id must not be empty")?;
+    Ok(Some(OAuthBindingMeta {
+        authorization_url,
+        token_url,
+        client_id,
+        scopes: args.scopes.clone(),
+        response_access_token_pointer: args.response_access_token_pointer.clone(),
+    }))
+}
+
 fn cmd_get(service: &SecretService, tenant: String, name: String) -> Result<()> {
     // Presence check only — the service has no reveal path, so the value is
     // never decrypted, let alone printed.
@@ -601,6 +813,14 @@ fn ls_line(name: &str, binding: Option<&SecretBindingMeta>) -> String {
                 line.push_str(&format!(
                     "\taccess_key_id={}\tregion={}\tservice={}",
                     s.access_key_id, s.region, s.service
+                ));
+            }
+            // OAuth flow identity is non-secret operator metadata (the
+            // client secret lives in the value store and is never shown).
+            if let Some(o) = &b.oauth {
+                line.push_str(&format!(
+                    "\toauth_client_id={}\toauth_token_url={}",
+                    o.client_id, o.token_url
                 ));
             }
             // Which catalog entry authored this, when one did. The hosts above
@@ -715,8 +935,9 @@ fn read_secret_from_stdin() -> Result<String> {
 mod tests {
     use super::*;
     use mvm_client::secret::{MachineSecretRef, SecretAudit};
-    use mvm_core::crypto::secret_store::FileSecretStore;
+    use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore as _};
     use mvm_hostd::keyholder::FileBindingStore;
+    use secrecy::ExposeSecret as _;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -733,6 +954,7 @@ mod tests {
         service: SecretService,
         audit_path: PathBuf,
         bindings_dir: PathBuf,
+        secrets_dir: PathBuf,
         machines_root: PathBuf,
     }
 
@@ -750,11 +972,13 @@ mod tests {
             .audit(SecretAudit::with_path(audit_path.clone()))
             .build()
             .unwrap();
+        let secrets_dir = tmp.path().join("secrets");
         Fixture {
             _tmp: tmp,
             service,
             audit_path,
             bindings_dir,
+            secrets_dir,
             machines_root,
         }
     }
@@ -783,6 +1007,7 @@ mod tests {
                 region: None,
                 service: None,
                 approve: SecretApproval::Never,
+                oauth: OAuthArgs::default(),
                 value: inline(value.into()),
             },
         )
@@ -805,6 +1030,7 @@ mod tests {
                 region: None,
                 service: None,
                 approve: SecretApproval::Ask,
+                oauth: OAuthArgs::default(),
                 value: inline("v2".into()),
             },
         )
@@ -838,6 +1064,7 @@ mod tests {
                 region: None,
                 service: None,
                 approve: SecretApproval::Never,
+                oauth: OAuthArgs::default(),
                 value: inline("secret-value".into()),
             },
         )
@@ -868,6 +1095,7 @@ mod tests {
                 region: None,
                 service: None,
                 approve: SecretApproval::Never,
+                oauth: OAuthArgs::default(),
                 value: inline("secret-value".into()),
             },
         )
@@ -1132,6 +1360,7 @@ mod tests {
                 region: None,
                 service: None,
                 approve: SecretApproval::Never,
+                oauth: OAuthArgs::default(),
                 value: inline("sk-live-zzz".into()),
             },
         )
@@ -1251,6 +1480,7 @@ mod tests {
                 region: Some("us-east-1".into()),
                 service: Some("s3".into()),
                 approve: SecretApproval::Never,
+                oauth: OAuthArgs::default(),
                 // The secret-access-key is the stored value.
                 value: inline("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into()),
             },
@@ -1441,6 +1671,212 @@ mod tests {
         let f = fixture();
         let err = cmd_get(&f.service, "acme".into(), "absent".into()).unwrap_err();
         assert!(err.to_string().contains("not set"), "got: {err}");
+    }
+
+    fn stored_token_set(f: &Fixture) -> mvm_hostd::keyholder::resolver::OAuthTokenSet {
+        let store = FileSecretStore::with_dir(&f.secrets_dir);
+        let stored = store.get("local", "oauth-secret").unwrap();
+        serde_json::from_str(stored.expose_secret()).unwrap()
+    }
+
+    fn oauth_args(client_secret: Option<OAuthClientSecretSource>) -> OAuthArgs {
+        OAuthArgs {
+            authorization_url: Some("https://auth.example.com/authorize".into()),
+            token_url: Some("https://auth.example.com/token".into()),
+            client_id: Some("public-client-id".into()),
+            scopes: vec!["scope-a".into()],
+            response_access_token_pointer: None,
+            client_secret,
+        }
+    }
+
+    fn set_oauth(f: &Fixture, name: &str, oauth: OAuthArgs) -> Result<()> {
+        cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: name.into(),
+                provider: None,
+                hosts: vec!["api.example.com".into()],
+                auth_type: Some(AuthType::Bearer),
+                inject: Default::default(),
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                approve: SecretApproval::Never,
+                oauth,
+                // Unused whenever a client secret selects the value; the
+                // empty source would prompt if it were ever resolved.
+                value: ValueSource {
+                    value: None,
+                    value_file: None,
+                    from: None,
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn resolve_oauth_params_is_all_or_nothing() {
+        // No flags at all: no oauth binding.
+        let none = resolve_oauth_params(AuthType::Bearer, &OAuthArgs::default()).unwrap();
+        assert!(none.is_none());
+        // A rider without the core three is refused.
+        let rider_only = OAuthArgs {
+            scopes: vec!["scope-a".into()],
+            ..Default::default()
+        };
+        let err = resolve_oauth_params(AuthType::Bearer, &rider_only).unwrap_err();
+        assert!(err.to_string().contains("require"), "got: {err}");
+        // Two of three core flags is refused.
+        let partial = OAuthArgs {
+            authorization_url: Some("https://auth.example.com/authorize".into()),
+            token_url: Some("https://auth.example.com/token".into()),
+            ..Default::default()
+        };
+        let err = resolve_oauth_params(AuthType::Bearer, &partial).unwrap_err();
+        assert!(err.to_string().contains("together"), "got: {err}");
+        // A client secret without a flow to bind it to is refused.
+        let secret_only = OAuthArgs {
+            client_secret: Some(OAuthClientSecretSource::Inline("s".into())),
+            ..Default::default()
+        };
+        let err = resolve_oauth_params(AuthType::Bearer, &secret_only).unwrap_err();
+        assert!(err.to_string().contains("require"), "got: {err}");
+    }
+
+    #[test]
+    fn resolve_oauth_params_builds_the_meta_and_rejects_non_bearer() {
+        let meta = resolve_oauth_params(AuthType::Bearer, &oauth_args(None))
+            .unwrap()
+            .expect("the full trio resolves to a binding");
+        assert_eq!(meta.client_id, "public-client-id");
+        assert_eq!(meta.scopes, vec!["scope-a".to_string()]);
+        assert_eq!(meta.token_url, "https://auth.example.com/token");
+
+        let err = resolve_oauth_params(AuthType::Sigv4, &oauth_args(None)).unwrap_err();
+        assert!(err.to_string().contains("bearer"), "got: {err}");
+
+        let empty = OAuthArgs {
+            token_url: Some(String::new()),
+            ..oauth_args(None)
+        };
+        let err = resolve_oauth_params(AuthType::Bearer, &empty).unwrap_err();
+        assert!(err.to_string().contains("empty"), "got: {err}");
+    }
+
+    #[test]
+    fn set_with_oauth_client_secret_stores_the_initial_token_set() {
+        let f = fixture();
+        set_oauth(
+            &f,
+            "oauth-secret",
+            oauth_args(Some(OAuthClientSecretSource::Inline(
+                "the-client-secret".into(),
+            ))),
+        )
+        .unwrap();
+
+        let binding = f
+            .service
+            .metadata("local", "oauth-secret")
+            .unwrap()
+            .unwrap()
+            .binding
+            .unwrap();
+        let oauth = binding.oauth.expect("oauth binding recorded");
+        assert_eq!(oauth.client_id, "public-client-id");
+        assert_eq!(oauth.scopes, vec!["scope-a".to_string()]);
+
+        // The stored value is an initial token set: the client secret plus a
+        // past expiry, ready for the host-side refresher's first exchange.
+        let stored = stored_token_set(&f);
+        assert_eq!(
+            stored.client_secret.unwrap().expose_secret(),
+            "the-client-secret"
+        );
+        assert!(stored.access_token.expose_secret().is_empty());
+        assert!(stored.expires_at < chrono::Utc::now());
+    }
+
+    #[test]
+    fn set_with_oauth_client_secret_file_reads_the_secret_from_disk() {
+        let f = fixture();
+        let path = f._tmp.path().join("client-secret.txt");
+        std::fs::write(&path, "file-client-secret").unwrap();
+        set_oauth(
+            &f,
+            "oauth-secret",
+            oauth_args(Some(OAuthClientSecretSource::File(path))),
+        )
+        .unwrap();
+        let stored = stored_token_set(&f);
+        assert_eq!(
+            stored.client_secret.unwrap().expose_secret(),
+            "file-client-secret"
+        );
+    }
+
+    #[test]
+    fn set_with_oauth_flags_rejects_from_import() {
+        let f = fixture();
+        let mut args = oauth_args(None);
+        args.client_secret = Some(OAuthClientSecretSource::Inline("s".into()));
+        // --from must not import a token set; hand the import path directly
+        // to cmd_set the way a parse-time escape would.
+        let err = cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: "oauth-secret".into(),
+                provider: None,
+                hosts: vec!["api.example.com".into()],
+                auth_type: Some(AuthType::Bearer),
+                inject: Default::default(),
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                approve: SecretApproval::Never,
+                oauth: args,
+                value: ValueSource {
+                    value: None,
+                    value_file: None,
+                    from: Some("env://TOKEN_SET".into()),
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--from"), "got: {err}");
+    }
+
+    #[test]
+    fn ls_line_shows_oauth_flow_identity_without_secrets() {
+        let mut meta = SecretBindingMeta {
+            auth_type: AuthType::Bearer,
+            allowed_hosts: vec!["api.example.com".into()],
+            sigv4: None,
+            inject: Default::default(),
+            provider: None,
+            approve: SecretApproval::Never,
+            oauth: Some(OAuthBindingMeta {
+                authorization_url: "https://auth.example.com/authorize".into(),
+                token_url: "https://auth.example.com/token".into(),
+                client_id: "public-client-id".into(),
+                scopes: vec![],
+                response_access_token_pointer: None,
+            }),
+        };
+        let line = ls_line("oauth-secret", Some(&meta));
+        assert!(
+            line.contains("oauth_client_id=public-client-id"),
+            "got: {line}"
+        );
+        assert!(
+            line.contains("oauth_token_url=https://auth.example.com/token"),
+            "got: {line}"
+        );
+        meta.oauth = None;
+        assert!(!ls_line("plain", Some(&meta)).contains("oauth_client_id"));
     }
 
     #[test]
