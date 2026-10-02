@@ -47,8 +47,9 @@ Linux users without `/dev/kvm` can opt into QEMU's dev/test backend. It is not
 a wider network path — the converged QEMU boot attaches no NIC either:
 
 ```bash
-mvmctl machine run --hypervisor qemu --image alpine --net -- \
-  sh -c 'wget -qO- https://example.com'
+mvmctl machine run --hypervisor qemu --image python:3.12-alpine \
+  --allow-host example.com:443 -- \
+  python3 -c 'import urllib.request; print(urllib.request.urlopen("https://example.com").status)'
 ```
 
 QEMU uses the same NIC-less FlowMux path as every production backend. The
@@ -168,8 +169,10 @@ sets standard proxy env vars to its loopback SOCKS listener automatically.
 That contract is provided by Firecracker and HVF, and by the optional libkrun
 integration when explicitly enabled. If no available
 backend can provide it, the start is refused up front instead of silently
-degrading to a guest NIC. This enables tools such as `curl` and `wget` through
-the loopback adapters. General raw ICMP remains unsupported; the injected
+degrading to a guest NIC. This enables proxy-aware clients through the
+loopback adapters. BusyBox `wget` in Alpine does not handle this proxy's HTTPS
+absolute-URI flow; use a client such as Python's `urllib.request` in a Python
+image instead. General raw ICMP remains unsupported; the injected
 mediated ping helper is the only ICMP-shaped surface.
 
 For a repeatable live proof on macOS Apple Silicon, run:
@@ -178,10 +181,11 @@ For a repeatable live proof on macOS Apple Silicon, run:
 just kernel::hvf-oci-smoke
 ```
 
-That wrapper packages both the exact CLI path
-`mvmctl machine run --hypervisor hvf --image alpine --allow-host google.com -- ps aux`
-and a second admit/deny relay proof that demonstrates allowed traffic is
-reachable while a non-admitted destination is refused, all without a guest NIC.
+The smoke boots `python:3.12-alpine` through the production FlowMux path,
+checks that only loopback is present and the guest egress client is running,
+then requests allowed `example.com:443` and verifies that unlisted
+`example.org:443` is denied. It writes evidence under `/tmp/` and fails if
+any check is missing.
 
 Policies are enforced by the host endpoint and the shared egress gate rather
 than guest firewall rules — there is no guest NIC for a firewall rule to act

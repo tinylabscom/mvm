@@ -181,8 +181,10 @@ impl EnvSection {
     }
 }
 
-/// `[tools]` — per-tool privileges. Parsed, merged and shown so profiles can
-/// be written ahead of enforcement; nothing enforces it yet, and
+/// `[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny`
+/// decisions are enforced at the seams the host controls (the MCP tool-call
+/// gate and declared `machine exec --tool` invocations); per-tool `argv` /
+/// `routes` / `secrets` detail is not fully enforced yet, so
 /// `mvmctl policy validate --strict` refuses a policy that relies on it.
 ///
 /// Composition only narrows. Whole-tool lists union (`deny` beats `ask`

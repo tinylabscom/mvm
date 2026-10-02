@@ -132,6 +132,7 @@ covered = [
     "mvmctl machine run --flake /tmp/secret-egress --entrypoint --from-workload-ir /tmp/secret-egress/workload.json --allow-host httpbin.org:80",
     "mvmctl machine run --flake /tmp/tool-build --name tool-dev",
     "mvmctl machine run --flake PATH --entrypoint --from-workload-ir PATH",
+    "mvmctl machine run --hypervisor qemu --image python:3.12-alpine --allow-host example.com:443 -- python3 -c 'import urllib.request; print(urllib.request.urlopen(\"https://example.com\").status)'",
     "mvmctl machine run --hypervisor wasm",
     "mvmctl machine run --image alpine -- echo hi",
     "mvmctl machine run --image alpine -- uname -a",

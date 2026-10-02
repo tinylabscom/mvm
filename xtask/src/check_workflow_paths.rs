@@ -682,63 +682,10 @@ mod tests {
     #[test]
     fn pull_request_ci_does_not_repeat_the_workspace_or_upload_target_caches() {
         let workflow = ci_workflow();
-        let lint = job_block(&workflow, "lint");
-        assert!(lint.contains("name: Lint (fmt + clippy + policy)"));
-        assert!(lint.contains("if: ${{ always() }}"));
         assert!(
-            lint.contains("name: Require CI scope to pass")
-                && lint.contains("CI scope did not pass: $SCOPE_RESULT"),
-            "the required lint context must fail closed when classification fails"
+            job_body(&workflow, "lint").is_none(),
+            "the redundant Lint aggregate must not allocate a second control runner"
         );
-        assert!(
-            lint.contains("name: PR admission lint")
-                && lint.contains("cargo fmt -- --check")
-                && lint.contains("Require expensive lint lanes to stay out of pull requests"),
-            "pull requests must publish the required lint context without compiling the workspace"
-        );
-        assert!(lint.contains(
-            "- name: Require every merge-group lint lane to pass\n        if: github.event_name != 'pull_request'"
-        ));
-        // A lane that runs but is not in the aggregate's `needs` cannot fail
-        // the merge, so pin every lane by name.
-        for lane in [
-            "scope,",
-            "lint-core,",
-            "lint-policy,",
-            "lint-features,",
-            "lint-features-test-support,",
-            "lint-features-embed,",
-        ] {
-            assert!(
-                lint.contains(lane),
-                "Lint aggregate must depend on {lane:?}"
-            );
-        }
-        // ...and each has to be read back in the loop that compares results
-        // against the scope decision. A lane in `needs` but not in the loop is
-        // gated on nothing but its own scheduling.
-        for expected in [
-            "\"$CORE_RESULT\"",
-            "\"$FEATURES_RESULT\"",
-            "\"$FEATURES_SUPPORT_RESULT\"",
-            "\"$FEATURES_EMBED_RESULT\"",
-        ] {
-            assert!(
-                lint.contains(expected),
-                "Lint aggregate must compare {expected} against the scope decision"
-            );
-        }
-
-        for unexpected in [
-            "cargo nextest run --workspace --features test-support",
-            "cargo nextest run -p xtask --features man",
-            "uses: actions/cache@v5",
-        ] {
-            assert!(
-                !lint.contains(unexpected),
-                "CI lint job must not contain {unexpected:?}"
-            );
-        }
 
         let lint_core = job_block(&workflow, "lint-core");
         assert!(
@@ -808,27 +755,41 @@ mod tests {
         );
         assert!(
             test.contains("name: PR admission smoke")
+                && test.contains("cargo fmt -- --check")
                 && test.contains("cargo metadata --locked --format-version 1 --no-deps")
-                && test.contains("Require expensive test lanes to stay out of pull requests"),
-            "pull requests must publish the required test context without running the full suite"
+                && test.contains("Require PR preflight and skip queue-only lanes"),
+            "pull requests must publish the required context after bounded preflight"
         );
         assert!(test.contains(
             "- name: Require every merge-group test lane to pass\n        if: github.event_name != 'pull_request'"
         ));
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
-             lint-features-test-support, lint-features-embed, test-workspace, \
-             test-workspace-aarch64, test-linux, test-release-witness, \
-             test-ebpf-telemetry, bdd-conformance, boot-latency, \
-             nix-flake-check]"
+             lint-features-test-support, lint-features-embed, pr-regressions, \
+             test-workspace, test-workspace-aarch64, test-linux, \
+             test-release-witness, test-ebpf-telemetry, bdd-conformance, \
+             boot-latency, nix-flake-check]"
         ));
+        let preflight = job_block(&workflow, "pr-regressions");
+        for expected in [
+            "github.event_name == 'pull_request'",
+            "shellcheck \"${scripts[@]}\"",
+            "rustc +1.97.1 --edition=2024 -D warnings --test",
+            "git merge-base \"$BASE_SHA\" \"$HEAD_SHA\"",
+            "git diff --name-only --diff-filter=A",
+            "could not classify added shell scripts",
+        ] {
+            assert!(
+                preflight.contains(expected),
+                "PR focused regressions must contain {expected:?}"
+            );
+        }
 
         // Full compilation and tests run once, against the integrated
         // merge-group commit. A missing event guard silently doubles the
         // repository's dominant CI cost on every pull-request update.
         for lane in [
             "lint-core",
-            "lint-policy",
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
@@ -939,14 +900,12 @@ mod tests {
             "bdd-conformance must still run the Gherkin suite"
         );
         // ...and it has to be reachable on every integrated code run the Linux
-        // lane covers, which is what taking the suite from that lane made it
-        // responsible for. `bdd` is a strict subset of `code`, so this is the
-        // wider gate. Pull requests deliberately stop at admission checks.
+        // lane covers. Pull requests deliberately stop at admission checks.
         assert!(
             job_block(&workflow, "bdd-conformance").contains(
                 "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
             ),
-            "bdd-conformance must carry the code scope it inherited with the suite"
+            "bdd-conformance must carry the broad code scope"
         );
     }
 
@@ -968,6 +927,9 @@ mod tests {
             "code=true",
             "nix=true",
             "architecture=true",
+            "just/",
+            "\\.githooks/",
+            "uninstall\\.sh",
         ] {
             assert!(
                 scope.contains(expected),
@@ -997,7 +959,6 @@ mod tests {
                 "{job} must skip expensive Rust work for non-code diffs"
             );
         }
-
         // `cargo install --locked` pins the installed crate's own dependencies
         // but not which version of that crate is installed, so an upstream
         // release retroactively changes this lane. Now that the lane gates the
@@ -1015,7 +976,10 @@ mod tests {
 
         let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
-        assert!(policy.contains("if: github.event_name != 'pull_request'"));
+        assert!(
+            !policy.contains("github.event_name != 'pull_request'"),
+            "policy invariants must fail deterministic PR defects before queue admission"
+        );
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
@@ -1052,17 +1016,15 @@ mod tests {
             "the non-required Website workflow must not consume every merge-group runner slot"
         );
 
-        for aggregate in ["lint", "test"] {
-            let block = job_block(&ci, aggregate);
-            assert!(block.contains("needs.scope.result"));
-            assert!(block.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
-            assert!(
-                block.contains("true) required=success")
-                    && block.contains("false) required=skipped")
-                    && block.contains(r#"if [ "$result" != "$required" ]"#),
-                "{aggregate} must require success or skip exactly as scope decided"
-            );
-        }
+        let aggregate = job_block(&ci, "test");
+        assert!(aggregate.contains("needs.scope.result"));
+        assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
+        assert!(
+            aggregate.contains("true) required=success")
+                && aggregate.contains("false) required=skipped")
+                && aggregate.contains(r#"if [ "$result" != "$required" ]"#),
+            "Test must require success or skip exactly as broad scope decided"
+        );
     }
 
     #[test]
@@ -1254,7 +1216,6 @@ mod tests {
         assert!(!ci.contains("cancel-in-progress: true"));
         assert!(ci.contains("permissions:\n  contents: read"));
         for required_name in [
-            "name: Lint (fmt + clippy + policy)",
             "name: Test",
             "name: Invariant",
             "name: Nix flake check (Linux eval)",
@@ -1560,7 +1521,12 @@ mod tests {
         assert!(cache_action.contains("save-if: ${{ inputs.save }}"));
 
         let warm = workflow("cache-warm.yml");
-        assert!(warm.contains("DeterminateSystems/magic-nix-cache-action@v14"));
+        assert!(warm.contains(
+            "uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569"
+        ));
+        assert!(warm.contains("primary-key: nix-${{ hashFiles("));
+        assert!(warm.contains("'crates/**/*.rs'"));
+        assert!(warm.contains("--out-link \"$RUNNER_TEMP/nix-cache-warm\""));
         assert!(warm.contains("Build Nix outputs to populate the binary cache"));
         assert!(warm.contains("save: \"true\""));
         assert!(warm.contains("key: test-support"));
@@ -1591,9 +1557,13 @@ mod tests {
             "embed-host-bins must restore cached cargo binaries before installing cargo-zigbuild"
         );
         let nix = job_block(&ci, "nix-flake-check");
-        assert!(nix.contains("DeterminateSystems/magic-nix-cache-action@v14"));
-        assert!(nix.contains("use-flakehub: false"));
-        assert!(nix.contains("diagnostic-endpoint: \"\""));
+        assert!(nix.contains(
+            "uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569"
+        ));
+        assert!(
+            !nix.contains("magic-nix-cache-action") && !nix.contains("gc-max-store-size"),
+            "merge refs must restore the trusted Nix cache without a post-job save"
+        );
     }
 
     #[test]

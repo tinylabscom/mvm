@@ -52,27 +52,83 @@ pub(super) fn stage0_build_conf_contents(
 /// it is the builder image the image lock pins, fetched and verified. A local
 /// build asked for without a checkout is refused rather than answered with
 /// the fetched image, which is exactly what the caller asked not to have.
-pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
-    #[cfg(feature = "builder-vm")]
-    if let Some(checkout) = selected_local_checkout()? {
-        return bootstrap_builder_vm_image_from_local_pair(&checkout);
-    }
-    refuse_a_local_builder_build(mvm_build::boot_image_select::resolve_env_override())?;
-    bootstrap_tool_builder_vm_image()
+#[cfg(feature = "builder-vm")]
+pub(in crate::commands) const MVM_ALLOW_LOCAL_BUILDER_ENV: &str = "MVM_ALLOW_LOCAL_BUILDER_BUILD";
+
+#[cfg(feature = "builder-vm")]
+fn local_builder_build_opted_in(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
 }
 
-/// Without a checkout there is nothing to build the builder image from, so a
-/// caller that forces a local build is refused rather than handed the fetched
-/// image it asked not to have.
-fn refuse_a_local_builder_build(
-    acquisition: Option<mvm_build::boot_image_select::BootImageAcquisition>,
-) -> Result<()> {
-    if acquisition == Some(mvm_build::boot_image_select::BootImageAcquisition::Build) {
-        return Err(
-            mvm_build::image_source::ImageConstructionRefused::new("the builder VM image").into(),
-        );
+/// Decide whether to build the builder VM from a local checkout or fetch the
+/// published image. This logic is intentionally small and pure so unit tests can
+/// drive it without touching the filesystem or CI-bound network I/O.
+#[cfg(feature = "builder-vm")]
+fn decide_builder_image_acquisition(
+    allow_local_build: bool,
+    env_override: Option<mvm_build::boot_image_select::BootImageAcquisition>,
+    has_local_checkout: bool,
+) -> Result<mvm_build::boot_image_select::BootImageAcquisition> {
+    use mvm_build::boot_image_select::BootImageAcquisition;
+    // Env override wins. `fetch` is always honoured. `build` must be explicitly
+    // allowed and backed by a local checkout; otherwise refuse rather than
+    // silently falling back.
+    if let Some(BootImageAcquisition::Fetch) = env_override {
+        return Ok(BootImageAcquisition::Fetch);
     }
-    Ok(())
+    if let Some(BootImageAcquisition::Build) = env_override {
+        if !allow_local_build {
+            return Err(mvm_build::image_source::ImageConstructionRefused::new(
+                "the builder VM image",
+            )
+            .into());
+        }
+        if !has_local_checkout {
+            return Err(mvm_build::image_source::ImageConstructionRefused::new(
+                "the builder VM image",
+            )
+            .into());
+        }
+        return Ok(BootImageAcquisition::Build);
+    }
+
+    // No explicit override: default to building only when the operator has
+    // opted in and a local checkout is present; otherwise fetch the published
+    // image.
+    if allow_local_build && has_local_checkout {
+        Ok(BootImageAcquisition::Build)
+    } else {
+        Ok(mvm_build::boot_image_select::BootImageAcquisition::Fetch)
+    }
+}
+
+pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
+    #[cfg(feature = "builder-vm")]
+    {
+        // Operator opt-in: only the documented value `1` permits building the
+        // builder VM from a local image checkout.
+        let allow_local_build =
+            local_builder_build_opted_in(std::env::var_os(MVM_ALLOW_LOCAL_BUILDER_ENV).as_deref());
+        let env_override = mvm_build::boot_image_select::resolve_env_override();
+        let checkout = selected_local_checkout()?;
+        let has_checkout = checkout.is_some();
+
+        match decide_builder_image_acquisition(allow_local_build, env_override, has_checkout) {
+            Ok(mvm_build::boot_image_select::BootImageAcquisition::Build) => {
+                // Safe to unwrap: the decision only returns Build when a
+                // checkout exists and was permitted.
+                bootstrap_builder_vm_image_from_local_pair(&checkout.expect("checkout present"))?;
+            }
+            Ok(mvm_build::boot_image_select::BootImageAcquisition::Fetch) => {
+                bootstrap_tool_builder_vm_image()?;
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "builder-vm"))]
+    bootstrap_tool_builder_vm_image()
 }
 
 /// The local image checkout the selector names, if that is the selected
@@ -236,29 +292,57 @@ fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()
     download_builder_vm_image(arch, out_dir).context("downloading the builder VM image")
 }
 
-#[cfg(test)]
-mod forced_build_tests {
-    use super::refuse_a_local_builder_build;
+#[cfg(all(test, feature = "builder-vm"))]
+mod decide_tests {
+    use super::*;
     use mvm_build::boot_image_select::BootImageAcquisition;
+    use std::ffi::OsStr;
 
     #[test]
-    fn a_forced_builder_build_without_a_checkout_is_refused() {
-        let rendered = format!(
-            "{:#}",
-            refuse_a_local_builder_build(Some(BootImageAcquisition::Build))
-                .expect_err("there is no source to build the builder image from")
-        );
-
-        assert!(rendered.contains("the builder VM image"), "{rendered}");
-        assert!(
-            rendered.contains("image construction lives in mvm-images"),
-            "{rendered}"
-        );
+    fn local_builder_build_requires_the_documented_opt_in_value() {
+        assert!(local_builder_build_opted_in(Some(OsStr::new("1"))));
+        assert!(!local_builder_build_opted_in(None));
+        assert!(!local_builder_build_opted_in(Some(OsStr::new("0"))));
+        assert!(!local_builder_build_opted_in(Some(OsStr::new("true"))));
     }
 
     #[test]
-    fn fetching_or_an_unset_override_goes_on_to_the_published_builder() {
-        refuse_a_local_builder_build(Some(BootImageAcquisition::Fetch)).unwrap();
-        refuse_a_local_builder_build(None).unwrap();
+    fn default_fetches_when_not_allowed() {
+        let got = decide_builder_image_acquisition(false, None, true).unwrap();
+        assert_eq!(got, BootImageAcquisition::Fetch);
+    }
+
+    #[test]
+    fn allows_build_when_opted_in_and_checkout_present() {
+        let got = decide_builder_image_acquisition(true, None, true).unwrap();
+        assert_eq!(got, BootImageAcquisition::Build);
+    }
+
+    #[test]
+    fn env_override_fetch_wins() {
+        let got = decide_builder_image_acquisition(false, Some(BootImageAcquisition::Fetch), true)
+            .unwrap();
+        assert_eq!(got, BootImageAcquisition::Fetch);
+        let got2 = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Fetch), true)
+            .unwrap();
+        assert_eq!(got2, BootImageAcquisition::Fetch);
+    }
+
+    #[test]
+    fn env_override_build_requires_allow_and_checkout() {
+        // Not allowed -> refused
+        let err = decide_builder_image_acquisition(false, Some(BootImageAcquisition::Build), true)
+            .unwrap_err();
+        assert!(err.to_string().contains("the builder VM image"));
+
+        // Allowed but no checkout -> refused
+        let err2 = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Build), false)
+            .unwrap_err();
+        assert!(err2.to_string().contains("the builder VM image"));
+
+        // Allowed and checkout present -> build
+        let ok = decide_builder_image_acquisition(true, Some(BootImageAcquisition::Build), true)
+            .unwrap();
+        assert_eq!(ok, BootImageAcquisition::Build);
     }
 }
