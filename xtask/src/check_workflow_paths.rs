@@ -757,26 +757,39 @@ mod tests {
             test.contains("name: PR admission smoke")
                 && test.contains("cargo fmt -- --check")
                 && test.contains("cargo metadata --locked --format-version 1 --no-deps")
-                && test.contains("Require expensive test lanes to stay out of pull requests"),
-            "pull requests must publish the required test context without running the full suite"
+                && test.contains("Require PR preflight and skip queue-only lanes"),
+            "pull requests must publish the required context after bounded preflight"
         );
         assert!(test.contains(
             "- name: Require every merge-group test lane to pass\n        if: github.event_name != 'pull_request'"
         ));
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
-             lint-features-test-support, lint-features-embed, test-workspace, \
-             test-workspace-aarch64, test-linux, test-release-witness, \
-             test-ebpf-telemetry, bdd-conformance, boot-latency, \
-             nix-flake-check]"
+             lint-features-test-support, lint-features-embed, pr-regressions, \
+             test-workspace, test-workspace-aarch64, test-linux, \
+             test-release-witness, test-ebpf-telemetry, bdd-conformance, \
+             boot-latency, nix-flake-check]"
         ));
+        let preflight = job_block(&workflow, "pr-regressions");
+        for expected in [
+            "github.event_name == 'pull_request'",
+            "shellcheck \"${scripts[@]}\"",
+            "rustc +1.97.1 --edition=2024 -D warnings --test",
+            "git merge-base \"$BASE_SHA\" \"$HEAD_SHA\"",
+            "git diff --name-only --diff-filter=A",
+            "could not classify added shell scripts",
+        ] {
+            assert!(
+                preflight.contains(expected),
+                "PR focused regressions must contain {expected:?}"
+            );
+        }
 
         // Full compilation and tests run once, against the integrated
         // merge-group commit. A missing event guard silently doubles the
         // repository's dominant CI cost on every pull-request update.
         for lane in [
             "lint-core",
-            "lint-policy",
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
@@ -914,6 +927,9 @@ mod tests {
             "code=true",
             "nix=true",
             "architecture=true",
+            "just/",
+            "\\.githooks/",
+            "uninstall\\.sh",
         ] {
             assert!(
                 scope.contains(expected),
@@ -960,7 +976,10 @@ mod tests {
 
         let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
-        assert!(policy.contains("if: github.event_name != 'pull_request'"));
+        assert!(
+            !policy.contains("github.event_name != 'pull_request'"),
+            "policy invariants must fail deterministic PR defects before queue admission"
+        );
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 

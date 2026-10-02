@@ -91,7 +91,14 @@ jobs:
               fi
               HEAD="$MG_HEAD"
               ;;
-            pull_request) BASE="$PR_BASE"; HEAD="$PR_HEAD" ;;
+            pull_request)
+              if ! BASE=$(git merge-base "$PR_BASE" "$PR_HEAD"); then
+                set_all
+                echo "could not find the pull-request merge base — running every lane to stay safe"
+                exit 0
+              fi
+              HEAD="$PR_HEAD"
+              ;;
             *) echo "::error::unhandled event $EVENT" >&2; exit 1 ;;
           esac
 
@@ -118,7 +125,7 @@ jobs:
           # not exec, and a PR touching only mk-guest.nix used to resolve
           # code=false, so the one test that would have caught that change
           # never ran on it.
-          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|\.cargo/|\.config/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/|src/|tests/|xtask/|scripts/|features/|schema/|model/|assets/|just/|\.cargo/|\.config/|\.githooks/|\.github/actions/|\.github/workflows/|nix/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|build\.rs$|install\.sh$|uninstall\.sh$|[Jj]ustfile$)' "$CHANGED_FILE" >/dev/null; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
@@ -261,7 +268,6 @@ jobs:
     # merge-group fan-out.
     name: Invariant
     needs: [scope]
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -723,6 +729,60 @@ jobs:
           echo "release feature set: $features"
           cargo check --locked -p mvmctl --bins --features "$features"
 
+  # Deterministic failures should never reach the queue and poison every
+  # cumulative commit behind them. Keep this bounded: policy/workflow checks
+  # run in `lint-policy`; this companion catches changed shell scripts and the
+  # embed-recipe regression that previously failed both workspace arches.
+  pr-regressions:
+    name: PR focused regressions
+    needs: [scope]
+    if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: shellcheck
+
+      - name: ShellCheck added scripts
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed=$(mktemp)
+          trap 'rm -f "$changed"' EXIT
+          if ! MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA"); then
+            echo "::error::could not resolve the pull-request merge base" >&2
+            exit 1
+          fi
+          if ! git diff --name-only --diff-filter=A -z \
+            "$MERGE_BASE" "$HEAD_SHA" -- '*.sh' '.githooks/*' >"$changed"; then
+            echo "::error::could not classify added shell scripts" >&2
+            exit 1
+          fi
+          mapfile -d '' scripts <"$changed"
+          if [ "${#scripts[@]}" -gt 0 ]; then
+            printf 'shellcheck %s\n' "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+          else
+            echo "No added shell scripts."
+          fi
+
+      - name: Embedded helper recipe contract
+        run: |
+          rustc +1.97.1 --edition=2024 -D warnings --test \
+            crates/mvm-cli/tests/embed_recipe.rs \
+            -o "$RUNNER_TEMP/embed-recipe-test"
+          "$RUNNER_TEMP/embed-recipe-test"
+
   # The Gherkin scenarios previously ran only from release-tag workflows, so a
   # PR could break a scenario and merge green. Same reusable workflow the
   # release path calls, gated on the narrower `bdd` scope.
@@ -741,7 +801,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -769,14 +829,16 @@ jobs:
           bash scripts/cargo-target-dir-guard.test.sh
           bash scripts/dev-run-guard.test.sh
 
-      - name: Require expensive test lanes to stay out of pull requests
+      - name: Require PR preflight and skip queue-only lanes
         if: github.event_name == 'pull_request'
         env:
+          SCOPE_CODE: ${{ needs.scope.outputs.code }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
           FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
           FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
+          PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
@@ -787,7 +849,15 @@ jobs:
           NIX_RESULT: ${{ needs.nix-flake-check.result }}
         run: |
           set -euo pipefail
-          for result in "$CORE_RESULT" "$POLICY_RESULT" "$FEATURES_RESULT" \
+          if [ "$POLICY_RESULT" != success ]; then
+            echo "PR policy preflight did not pass: $POLICY_RESULT"
+            exit 1
+          fi
+          case "$SCOPE_CODE:$PREFLIGHT_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "PR focused regressions did not match code scope $SCOPE_CODE: $PREFLIGHT_RESULT"; exit 1 ;;
+          esac
+          for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" \
             "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" \
@@ -804,6 +874,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
+          PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
@@ -830,6 +901,10 @@ jobs:
           esac
           if [ "$POLICY_RESULT" != success ]; then
             echo "Policy lint did not pass: $POLICY_RESULT"
+            exit 1
+          fi
+          if [ "$PREFLIGHT_RESULT" != skipped ]; then
+            echo "PR-only focused regressions unexpectedly ran for $EVENT_NAME: $PREFLIGHT_RESULT"
             exit 1
           fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
