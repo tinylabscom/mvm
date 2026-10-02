@@ -14,6 +14,10 @@ members = [
     "crates/mvm-vmm",
     "crates/mvm-backends",
     "crates/mvm-build",
+    # Seals built artifacts into a signed `.mvmpkg` under any Ed25519 signer.
+    # Depends on mvm-core alone, so the CLI and a library caller share one
+    # export without either linking a backend to get it.
+    "crates/mvm-bundler",
     "crates/mvm-agentd",
     # The guest's static privilege-drop helper. A leaf over `libc` alone: the
     # builder image compiles it from source, so its closure is part of that
@@ -383,7 +387,8 @@ tree-sitter-typescript = "0.23.2"
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-contract = { path = "crates/mvm-contract", version = "0.22.0", default-features = false, features = ["protocol"] }
 mvm-core = { path = "crates/mvm-core", version = "0.22.0" }
-mvm-client = { path = "crates/mvm-client", version = "0.22.0" }
+mvm-bundler = { path = "crates/mvm-bundler", version = "0.22.0" }
+mvm-client ={ path = "crates/mvm-client", version = "0.22.0" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.22.0" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.22.0" }
 mvm-setpriv = { path = "crates/mvm-setpriv", version = "0.22.0" }
