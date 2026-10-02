@@ -62,8 +62,8 @@ object_store = { version = "0.14", optional = true, default-features = false, fe
 # Optional + off by default (`wasm-backend` feature) so the default workspace
 # build carries no wasmtime — it is a large dependency tree, like
 # object_store behind the template-registry feature above.
-wasmtime = { version = "46", optional = true }
-wasmtime-wasi = { version = "46", optional = true }
+wasmtime = { version = "49", optional = true }
+wasmtime-wasi = { version = "49", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
