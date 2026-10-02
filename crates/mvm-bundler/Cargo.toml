@@ -1,0 +1,29 @@
+[package]
+name = "mvm-bundler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Seal built mvm artifacts into a signed .mvmpkg bundle under any Ed25519 signer"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The bundle format itself: manifest types, canonical signing, and the archive
+# writer. This crate decides what goes into a bundle; it does not define one.
+mvm-core = { workspace = true }
+# The signer hands over the key the archive writer signs the manifest under.
+ed25519-dalek = { workspace = true }
+anyhow = { workspace = true }
+# The manifest's `created_at` stamp.
+chrono = { workspace = true }
+# The optional debug summary written beside an exported bundle.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

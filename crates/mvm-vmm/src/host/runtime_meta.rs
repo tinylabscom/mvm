@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use mvm_core::guest_sidecar::SIDECAR_FILENAME;
 use mvm_core::vm_backend::{StartMode, VmStartConfig};
 use serde::{Deserialize, Serialize};
 
@@ -219,8 +220,6 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
         observability_target: None,
     }
 }
-
-const SIDECAR_FILENAME: &str = "mvm-meta.json";
 
 /// Minimal subset of the `mvm-meta.json` sidecar that runtime metadata
 /// needs. The full sidecar shape lives in `mvm-build`; this crate only

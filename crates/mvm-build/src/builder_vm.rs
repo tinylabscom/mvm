@@ -188,7 +188,7 @@ pub enum BuilderArtifacts {
 /// `nix eval`. Living next to the rootfs keeps the sidecar
 /// atomic with the artifact — a stale sidecar on the filesystem
 /// without a matching rootfs is impossible.
-pub const SIDECAR_FILENAME: &str = "mvm-meta.json";
+pub use mvm_core::guest_sidecar::SIDECAR_FILENAME;
 
 /// The `hypervisor` value a sidecar carries when its rootfs was materialized
 /// from an OCI image rather than built by `mkGuest`. See

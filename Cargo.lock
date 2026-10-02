@@ -2934,6 +2934,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-bundler"
+version = "0.22.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ed25519-dalek",
+ "mvm-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mvm-capture"
 version = "0.22.0"
 dependencies = [
