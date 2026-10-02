@@ -2,6 +2,20 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.22.0] — 2026-10-02
+
+### Added
+- **hostd**: Host-side OAuth client-credentials refresh driver
+- **agent**: Sign guest tool mediation into verb grants
+
+### Documentation
+- **program**: Consolidate the agent-sandbox plan handoff and refresh claim-8 prose
+
+### Fixed
+- **docs**: Classify new network example
+- **nix**: Keep default dev shell lean
+- **bootstrap**: Prewarm host helpers best-effort; fix the release tar check's pipefail false negative
+
 ## [0.21.0] — 2026-10-02
 
 ### Added
