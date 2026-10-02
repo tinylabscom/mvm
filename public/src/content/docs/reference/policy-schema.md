@@ -674,7 +674,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
       "additionalProperties": false
     },
     "ToolsSection": {
-      "description": "`[tools]` — per-tool privileges. Parsed, merged and shown so profiles can be written ahead of enforcement; nothing enforces it yet, and `mvmctl policy validate --strict` refuses a policy that relies on it.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union.",
+      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls (the MCP tool-call gate and declared `machine exec --tool` invocations); per-tool `argv` / `routes` / `secrets` detail is not fully enforced yet, so `mvmctl policy validate --strict` refuses a policy that relies on it.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union.",
       "type": "object",
       "properties": {
         "allow": {
