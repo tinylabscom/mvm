@@ -9,6 +9,7 @@
 //! as metadata-only sidecars before any boot.
 
 pub mod boot_order;
+pub mod budget_charge;
 pub mod detached;
 pub mod grants_report;
 pub mod machine_start;
