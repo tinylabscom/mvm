@@ -25,7 +25,7 @@ Feature: README persistent machine lifecycle works end to end
   @live @firecracker @tool_live
   Scenario: a persistent machine mediates declared commands across restart
     Given an isolated mvm home on encrypted backing storage
-    When I run mvmctl in the isolated mvm home with "machine create bdd-tool-command --image alpine --policy features/suites/s8_readme_contract/fixtures/tool-command.toml"
+    When I run mvmctl in an isolated live home with "machine create bdd-tool-command --image alpine --policy features/suites/s8_readme_contract/fixtures/tool-command.toml"
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-tool-command"
     Then the command exits with code 0
