@@ -20,6 +20,7 @@ Feature: Default-deny egress through the auditable vsock seam
       | hvf         |
       | libkrun     |
       | firecracker |
+      | qemu        |
 
   Scenario Outline: Every workload backend mediates admitted egress over the vsock seam, not a NIC
     When I run mvmctl with "machine run --image alpine --name bdd-egress-allow-<backend> -d --hypervisor <backend> --allow-host example.com --dry-run"
@@ -28,10 +29,11 @@ Feature: Default-deny egress through the auditable vsock seam
     And the output contains "enforced: <backend>:l4-host-port"
 
     Examples:
-      | backend |
-      | hvf     |
-      | libkrun |
+      | backend     |
+      | hvf         |
+      | libkrun     |
       | firecracker |
+      | qemu        |
 
   Scenario Outline: Agent egress and its AI token budget reach each production backend
     When I run mvmctl with "machine run --image alpine --name bdd-agent-policy-<backend> -d --hypervisor <backend> --network-preset agent --ai-token-budget 12000 --dry-run"
@@ -43,4 +45,5 @@ Feature: Default-deny egress through the auditable vsock seam
     Examples:
       | backend     |
       | hvf         |
+      | libkrun     |
       | firecracker |
