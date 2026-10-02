@@ -172,6 +172,7 @@ mod tests {
                 not_after: plan.valid_until,
                 verbs: plan.agent_verbs.clone().unwrap(),
                 drive: plan.grants.as_ref().and_then(|grants| grants.drive.clone()),
+                tool_mediation: None,
                 sig: vec![3u8; 64],
             },
         }

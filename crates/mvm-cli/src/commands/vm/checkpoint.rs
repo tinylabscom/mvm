@@ -2262,6 +2262,7 @@ mod tests {
             not_after: chrono::Utc::now() + chrono::Duration::hours(1),
             verbs: vec![],
             drive: None,
+            tool_mediation: None,
             sig: vec![0u8; 64],
         };
         let envelope = VerbGrantEnvelope {
@@ -2305,6 +2306,7 @@ mod tests {
                 not_after: chrono::Utc::now() + chrono::Duration::hours(1),
                 verbs: vec![],
                 drive: None,
+                tool_mediation: None,
                 sig: vec![0u8; 64],
             },
         };

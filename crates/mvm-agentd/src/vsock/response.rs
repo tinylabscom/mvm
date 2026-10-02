@@ -621,6 +621,24 @@ impl Verb {
         }
     }
 
+    /// Arbitrary command/control paths that must not run beside an admitted
+    /// tool policy without a host decision for the declared invocation.
+    /// Fixed image entrypoints, exact drive programs, and admitted extensions
+    /// have their own signed authority and are not arbitrary-command RPCs.
+    pub fn bypasses_tool_mediation(self) -> bool {
+        matches!(
+            self,
+            Self::Exec
+                | Self::ExecBatch
+                | Self::RunDetached
+                | Self::RunCode
+                | Self::ProcStart
+                | Self::ProcSendInput
+                | Self::ConsoleOpen
+                | Self::ConsoleAttach
+        )
+    }
+
     /// The declared host↔guest response contract for this verb — the
     /// machine-readable pairing previously implicit in the agent dispatch.
     pub fn response_contract(self) -> ResponseContract {
@@ -1902,6 +1920,23 @@ mod tests {
             assert_eq!(verb.traffic_plane(), TrafficPlane::Control);
             assert!(!verb.spawns_workload_process(), "{}", verb.name());
         }
+    }
+
+    #[test]
+    fn every_arbitrary_spawn_path_requires_tool_mediation() {
+        for verb in Verb::ALL {
+            if verb.spawns_workload_process()
+                && !matches!(
+                    verb,
+                    Verb::MediatedExec | Verb::RunEntrypoint | Verb::DriveOpen | Verb::RunExtension
+                )
+            {
+                assert!(verb.bypasses_tool_mediation(), "{}", verb.name());
+            }
+        }
+        assert!(Verb::ConsoleAttach.bypasses_tool_mediation());
+        assert!(Verb::ProcSendInput.bypasses_tool_mediation());
+        assert!(!Verb::MediatedExec.bypasses_tool_mediation());
     }
 
     #[test]

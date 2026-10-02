@@ -854,6 +854,7 @@ mod tests {
             not_after: now + Duration::minutes(5),
             verbs: vec![VerbId::new("run-entrypoint").unwrap()],
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();
@@ -885,6 +886,7 @@ mod tests {
                 VerbId::new("ping").unwrap(),
             ],
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         grant.sig = k.sign(&grant.signing_bytes()).to_bytes().to_vec();

@@ -589,6 +589,7 @@ mod tests {
                 not_after: mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap(),
                 verbs: vec![VerbId::new("run-entrypoint").unwrap()],
                 drive: None,
+                tool_mediation: None,
                 sig: vec![7u8; 64],
             },
         };

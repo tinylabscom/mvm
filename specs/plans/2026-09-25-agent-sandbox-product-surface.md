@@ -395,6 +395,12 @@ Security-bearing gaps first, then the foundations the UX needs:
   - [x] resolved tool rules ride the signed `ExecutionPlan` inline (`ToolRules`
         in `mvm-contract`, carried through synthesis from the authored policy)
         — the substrate every consumer reads
+  - The admitted plan's nonempty tool rules also mint a host-signed guest verb
+    grant. The guest refuses alternate arbitrary-command and interactive
+    control RPCs under that grant while retaining the plan's existing verb
+    restriction posture for other RPCs; the declared-command path still asks
+    the host over authenticated vsock before spawning. A tool label supplied
+    by workload code is not an endpoint authority for routes or secrets.
 
 ### PS-14 — Existing enforcement plans
 The protected-path gate and cumulative action ledger plans (2026-09-24) are

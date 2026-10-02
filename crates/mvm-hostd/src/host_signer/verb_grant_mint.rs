@@ -1,7 +1,7 @@
 use crate::host_signer::keystore::Keystore;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+use mvm_core::plan::{Nonce, ToolMediationGrant, VerbGrant, VerbId};
 
 /// Mint a session-bound verb grant signed by the host-signer authority.
 pub fn mint_verb_grant(
@@ -11,6 +11,7 @@ pub fn mint_verb_grant(
     not_after: DateTime<Utc>,
     verbs: Vec<VerbId>,
     drive: Option<mvm_contract::grants::DriveGrant>,
+    tool_mediation: Option<ToolMediationGrant>,
 ) -> Result<VerbGrant> {
     let mut grant = VerbGrant {
         session_id: session_id.to_string(),
@@ -18,6 +19,7 @@ pub fn mint_verb_grant(
         not_after,
         verbs,
         drive,
+        tool_mediation,
         sig: vec![],
     };
     let result = signer.sign(&grant.signing_bytes());
@@ -47,6 +49,7 @@ mod tests {
             &nonce,
             now + Duration::minutes(5),
             vec![VerbId::new("run-entrypoint").unwrap()],
+            None,
             None,
         )
         .unwrap();

@@ -2,7 +2,7 @@
 
 use super::write_secret_file;
 use anyhow::{Context, Result};
-use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, ToolMediationGrant};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use std::path::Path;
 
@@ -38,9 +38,10 @@ pub(super) fn mint_verb_grant_sidecar(
     // already dead guarantees the guest refuses activation, and the guest can
     // only say `VerbNotAuthorized`; refusing here says what actually expired.
     refuse_expired_plan(&plan, chrono::Utc::now())?;
+    let tool_mediation = tool_mediation_for(&plan);
     let verbs = plan.agent_verbs.unwrap_or_default();
     let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
-    if verbs.is_empty() && drive.is_none() {
+    if verbs.is_empty() && drive.is_none() && tool_mediation.is_none() {
         return Ok(None);
     }
 
@@ -56,6 +57,7 @@ pub(super) fn mint_verb_grant_sidecar(
         plan.valid_until,
         verbs,
         drive,
+        tool_mediation,
     )
     .context("mint verb grant")?;
 
@@ -73,6 +75,12 @@ pub(super) fn mint_verb_grant_sidecar(
     let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;
     write_secret_file(&sidecar_path, &envelope_json)?;
     Ok(Some(envelope))
+}
+
+fn tool_mediation_for(plan: &ExecutionPlan) -> Option<ToolMediationGrant> {
+    (!plan.tools.is_empty()).then_some(ToolMediationGrant {
+        class_gate_only: plan.agent_verbs.is_none(),
+    })
 }
 
 /// Refuse to mint a grant from a plan whose validity window has closed.
@@ -117,5 +125,75 @@ mod tests {
     #[test]
     fn a_plan_still_in_its_window_mints() {
         assert!(refuse_expired_plan(&plan_valid(5, 600), chrono::Utc::now()).is_ok());
+    }
+
+    #[test]
+    fn tool_rules_require_a_signed_guest_mediation_grant() {
+        let mut plan = plan_valid(5, 600);
+        assert!(tool_mediation_for(&plan).is_none());
+        plan.tools.allow.push("shell".to_string());
+        assert_eq!(
+            tool_mediation_for(&plan),
+            Some(ToolMediationGrant {
+                class_gate_only: true,
+            })
+        );
+        plan.agent_verbs = Some(Vec::new());
+        assert_eq!(
+            tool_mediation_for(&plan),
+            Some(ToolMediationGrant {
+                class_gate_only: false,
+            })
+        );
+    }
+
+    #[test]
+    fn tool_only_plan_mints_a_verifiable_guest_grant() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
+        let state_dir = home.path().join("tool-guest");
+        std::fs::create_dir_all(&state_dir).expect("state dir");
+        let mut plan = plan_valid(5, 600);
+        let signed = |plan: &ExecutionPlan| {
+            serde_json::to_string(&SignedExecutionPlan(
+                mvm_core::protocol::signing::SignedPayload {
+                    payload: serde_json::to_vec(plan).expect("plan payload"),
+                    signature: vec![],
+                    signer_id: "test".into(),
+                },
+            ))
+            .expect("signed plan envelope")
+        };
+        assert!(
+            mint_verb_grant_sidecar(&signed(&plan), "tool-guest", &state_dir)
+                .expect("no-tool plan")
+                .is_none()
+        );
+
+        plan.tools.allow.push("shell".into());
+        let envelope = mint_verb_grant_sidecar(&signed(&plan), "tool-guest", &state_dir)
+            .expect("tool plan")
+            .expect("tool policy requires a grant");
+        assert_eq!(
+            envelope.grant.tool_mediation,
+            Some(ToolMediationGrant {
+                class_gate_only: true,
+            })
+        );
+        let key = crate::audit::host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir())
+            .expect("host signer");
+        assert!(
+            envelope
+                .grant
+                .verify(
+                    &key.verifying,
+                    "tool-guest",
+                    &plan.nonce,
+                    chrono::Utc::now()
+                )
+                .is_ok()
+        );
+        assert!(state_dir.join("verb-grant.json").is_file());
     }
 }

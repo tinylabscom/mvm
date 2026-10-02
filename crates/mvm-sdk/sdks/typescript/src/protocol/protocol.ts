@@ -991,6 +991,10 @@ session_id: string
  * Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal numbers — roughly 230 characters against base64's 88 — and this grant rides the guest kernel cmdline, where the budget is finite and silently enforced. `sig` is excluded from `signing_bytes`, so how it is encoded cannot affect signature validity.
  */
 sig: string
+/**
+ * Presence requires arbitrary guest command RPCs to use the mediated path. The host signer derives this from the admitted plan's tool rules.
+ */
+tool_mediation?: (ToolMediationGrant | null)
 verbs: VerbId[]
 }
 /**
@@ -1005,6 +1009,15 @@ program_id: string
  */
 ttl: number
 workspace_roots: string[]
+}
+/**
+ * How a tool-mediated guest preserves the prior verb-grant posture.
+ */
+export interface ToolMediationGrant {
+/**
+ * A dev plan without an agent-verb list continues to use the profile class gate for non-command verbs. Command RPCs are still mediated.
+ */
+class_gate_only: boolean
 }
 /**
  * User volume to mount after rootfs activation.

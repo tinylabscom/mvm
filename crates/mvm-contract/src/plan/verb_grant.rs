@@ -35,6 +35,10 @@ pub struct VerbGrant {
     /// fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drive: Option<crate::grants::DriveGrant>,
+    /// Presence requires arbitrary guest command RPCs to use the mediated
+    /// path. The host signer derives this from the admitted plan's tool rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_mediation: Option<ToolMediationGrant>,
     /// Raw Ed25519 signature bytes (64) over signing_bytes(), serialized as
     /// base64. A `Vec<u8>` would otherwise render as a JSON array of 64 decimal
     /// numbers — roughly 230 characters against base64's 88 — and this grant
@@ -44,6 +48,16 @@ pub struct VerbGrant {
     #[serde(with = "sig_base64")]
     #[cfg_attr(feature = "schema", schemars(with = "String"))]
     pub sig: Vec<u8>,
+}
+
+/// How a tool-mediated guest preserves the prior verb-grant posture.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct ToolMediationGrant {
+    /// A dev plan without an agent-verb list continues to use the profile
+    /// class gate for non-command verbs. Command RPCs are still mediated.
+    pub class_gate_only: bool,
 }
 
 /// Serializes the raw signature bytes as a base64 string rather than a JSON
@@ -88,6 +102,8 @@ struct VerbGrantSigned<'a> {
     verbs: Vec<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     drive: Option<&'a crate::grants::DriveGrant>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_mediation: Option<&'a ToolMediationGrant>,
 }
 
 impl VerbGrant {
@@ -98,6 +114,7 @@ impl VerbGrant {
             not_after: self.not_after.to_rfc3339(),
             verbs: self.verbs.iter().map(VerbId::as_str).collect(),
             drive: self.drive.as_ref(),
+            tool_mediation: self.tool_mediation.as_ref(),
         };
         serde_json::to_vec(&body).expect("VerbGrantSigned serializes")
     }
@@ -159,6 +176,7 @@ mod tests {
             not_after: now + Duration::minutes(10),
             verbs: verbs.into_iter().map(|v| VerbId::new(v).unwrap()).collect(),
             drive: None,
+            tool_mediation: None,
             sig: vec![],
         };
         g.sig = k.sign(&g.signing_bytes()).to_bytes().to_vec();
@@ -171,6 +189,56 @@ mod tests {
         let (g, k) = signed(now, vec!["run-entrypoint"]);
         assert!(
             g.verify(&k.verifying_key(), "sess-A", &nonce(), now)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn tool_mediation_is_signed_and_round_trips() {
+        let now = Utc::now();
+        let (mut grant, signer) = signed(now, vec![]);
+        grant.tool_mediation = Some(ToolMediationGrant {
+            class_gate_only: true,
+        });
+        grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
+        let json = serde_json::to_string(&grant).expect("serialize mediated grant");
+        let round: VerbGrant = serde_json::from_str(&json).expect("deserialize mediated grant");
+        assert_eq!(round.tool_mediation, grant.tool_mediation);
+        assert!(
+            round
+                .verify(&signer.verifying_key(), "sess-A", &nonce(), now)
+                .is_ok()
+        );
+
+        let mut weakened = round.clone();
+        weakened.tool_mediation = None;
+        assert_eq!(
+            weakened.verify(&signer.verifying_key(), "sess-A", &nonce(), now),
+            Err(VerbGrantError::BadSignature)
+        );
+        let mut narrowed = round;
+        narrowed
+            .tool_mediation
+            .as_mut()
+            .expect("mediated grant")
+            .class_gate_only = false;
+        assert_eq!(
+            narrowed.verify(&signer.verifying_key(), "sess-A", &nonce(), now),
+            Err(VerbGrantError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn legacy_grant_omits_tool_mediation() {
+        let now = Utc::now();
+        let (grant, signer) = signed(now, vec!["run-entrypoint"]);
+        let json = serde_json::to_string(&grant).expect("serialize legacy grant");
+        assert!(!json.contains("tool_mediation"));
+        let round: VerbGrant = serde_json::from_str(&json).expect("deserialize legacy grant");
+        assert!(round.tool_mediation.is_none());
+        assert!(
+            round
+                .verify(&signer.verifying_key(), "sess-A", &nonce(), now)
                 .is_ok()
         );
     }
