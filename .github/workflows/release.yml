@@ -98,6 +98,15 @@ jobs:
         with:
           targets: ${{ matrix.build_target }}
 
+      # The SDK host library is built against this arch's gnu target even on
+      # the musl legs (cargo-zigbuild skips musl cdylibs; see the build step),
+      # so the gnu target must be installed there too.
+      - name: Install the gnu target for the SDK host library
+        if: endsWith(matrix.build_target, '-unknown-linux-musl')
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+        run: rustup target add "${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}"
+
       # ADR-065: mvm-cli's build.rs cross-compiles the embedded host-vm
       # binaries (mvm-host-vm-init, mvm-builderd) as static
       # aarch64-unknown-linux-musl via cargo-zigbuild — so zig +
@@ -159,7 +168,15 @@ jobs:
             # The in-process SDK host library: the language SDKs load it by
             # the platform file name, and the release ships it beside
             # mvmctl so a downloaded install needs nothing else.
-            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostlib
+            # cargo-zigbuild silently builds only the rlib for a musl
+            # cdylib (no .so), and a musl-linked .so would not dlopen into
+            # the glibc Python/Node hosts the SDKs run on anyway - so the
+            # library is built against this arch's gnu target and staged
+            # where the packaging step looks for it.
+            cargo zigbuild --release --target "${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}" -p mvm-hostlib
+            mkdir -p "target/${BUILD_TARGET}/release"
+            cp "target/${BUILD_TARGET/-unknown-linux-musl/-unknown-linux-gnu}/release/libmvm_hostlib.so" \
+              "target/${BUILD_TARGET}/release/libmvm_hostlib.so"
           else
             cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
               --bin mvm-host-agent \

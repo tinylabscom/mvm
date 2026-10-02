@@ -548,6 +548,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
             path: "/tmp/mvm-one-transport-bdd.sock".into(),
         },
         redaction: mvm_core::policy::RedactionPolicy::default(),
+        tools: Default::default(),
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         network_limits: mvm_core::plan::NetworkLimits::default(),
         ingress: Vec::new(),

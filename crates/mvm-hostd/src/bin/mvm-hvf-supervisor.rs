@@ -534,6 +534,7 @@ fn spawn_owned_builder_endpoint(
             tenant: "builder",
             secrets: &[],
             redaction: &mvm_core::policy::RedactionPolicy::default(),
+            tools: None,
             transport: mvm_vmm::host::network_endpoint_spawn::EndpointTransport::Uds {
                 path: endpoint.socket.clone(),
             },

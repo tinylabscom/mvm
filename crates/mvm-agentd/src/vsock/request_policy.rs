@@ -54,6 +54,7 @@ impl GuestRequest {
             GuestRequest::ProbeStatus => Verb::ProbeStatus,
             GuestRequest::PrimedStatus => Verb::PrimedStatus,
             GuestRequest::Exec { .. } => Verb::Exec,
+            GuestRequest::MediatedExec(_) => Verb::MediatedExec,
             GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
             GuestRequest::DriveOpen { .. } => Verb::DriveOpen,
@@ -149,6 +150,7 @@ impl GuestRequest {
             // mounted-volume contents, so the entire filesystem
             // RPC surface is DevOnly in v1.
             GuestRequest::Exec { .. }
+            | GuestRequest::MediatedExec(_)
             | GuestRequest::ExecBatch { .. }
             | GuestRequest::RunDetached { .. }
             | GuestRequest::FsDiff
@@ -281,6 +283,12 @@ mod tests {
                 stdin: None,
                 timeout_secs: None,
             },
+            GuestRequest::MediatedExec(MediatedExecCall {
+                tool: "shell".into(),
+                argv: vec!["echo".into(), "ok".into()],
+                stdin: None,
+                timeout_secs: None,
+            }),
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
                 timeout_secs: 1,
@@ -517,6 +525,12 @@ mod tests {
                 stdin: None,
                 timeout_secs: None,
             },
+            GuestRequest::MediatedExec(MediatedExecCall {
+                tool: "shell".into(),
+                argv: vec!["echo".into(), "ok".into()],
+                stdin: None,
+                timeout_secs: None,
+            }),
             GuestRequest::ConsoleOpen {
                 cols: 80,
                 rows: 24,

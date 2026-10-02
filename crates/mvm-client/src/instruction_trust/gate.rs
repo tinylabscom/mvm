@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use mvm_hostd::audit::emitter::InstructionTrustEvent;
 use serde::Serialize;
 
+use super::image_scan::scan_image;
 use super::policy::{EffectivePolicy, Enforcement, InstructionTrustPolicy, PolicyError};
 use super::scan::{ScanRoot, find_instruction_files};
 use super::verify::{FileReport, verify_file};
@@ -238,6 +239,8 @@ impl ScanReport {
 pub struct BootInputs {
     /// Directory shares (`--mount` sources).
     pub mounts: Vec<PathBuf>,
+    /// Materialized block images attached as host-directory snapshots.
+    pub mount_images: Vec<PathBuf>,
     /// Declared assets.
     pub assets: Vec<PathBuf>,
     /// The workload's source directory, when it has one on this host.
@@ -270,7 +273,10 @@ impl BootInputs {
     /// Whether there is anything to scan.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.mounts.is_empty() && self.assets.is_empty() && self.workload_dir.is_none()
+        self.mounts.is_empty()
+            && self.mount_images.is_empty()
+            && self.assets.is_empty()
+            && self.workload_dir.is_none()
     }
 }
 
@@ -291,7 +297,11 @@ pub fn evaluate_boot_inputs(
         project_root: inputs.workload_dir.clone(),
     };
     let policy = load_effective_policy(&locations, &default_trust_store()?)?;
-    Ok(Some(scan_roots(&inputs.roots(), &policy)?))
+    let mut report = scan_roots(&inputs.roots(), &policy)?;
+    for image in &inputs.mount_images {
+        report.files.extend(scan_image(image, &policy)?);
+    }
+    Ok(Some(report))
 }
 
 /// The directory a `--flake` or `--manifest` source names on this host, if

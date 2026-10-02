@@ -343,8 +343,23 @@ pub(crate) fn handle_exec(
     stdin: Option<String>,
     timeout_secs: Option<u64>,
 ) -> GuestResponse {
-    eprintln!("[audit] exec request: {:?}", command);
+    // Command text can contain user data or credentials; the host decision
+    // path records its digest, never the raw invocation.
+    eprintln!("[audit] exec request");
     do_exec_streaming(ctx.file, &command, stdin.as_deref(), timeout_secs)
+}
+
+pub(crate) fn handle_mediated_exec(
+    ctx: &mut HandlerCtx,
+    argv: &[String],
+    stdin: Option<&str>,
+    timeout_secs: Option<u64>,
+) -> GuestResponse {
+    eprintln!("[audit] mediated exec request");
+    let terminal = mvm_agentd::exec_stream::stream_exec_argv(argv, stdin, timeout_secs, |event| {
+        write_response(ctx.file, &GuestResponse::ExecEvent(event));
+    });
+    GuestResponse::ExecEvent(terminal)
 }
 
 pub(crate) fn handle_exec_batch(

@@ -72,6 +72,7 @@ fn admit(f: &Fixture) -> Result<AdmissionContext> {
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: None,
+            mount_images: None,
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)
@@ -219,6 +220,7 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: Some(&mount_roots),
+            mount_images: None,
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)
@@ -235,4 +237,53 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
         !message.contains(&live.display().to_string()),
         "the live source tree must not be what admission reports: {message}"
     );
+}
+
+#[test]
+fn deny_audits_and_refuses_an_unsigned_instruction_in_a_host_snapshot_image() {
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    let f = fixture(Some("deny"));
+    let live = f.mount.join("CLAUDE.md");
+    crate::instruction_trust::sign::sign_file(&live, &publisher_key()).unwrap();
+    let image = f._dir.path().join("host-snapshot.ext4");
+    std::fs::write(
+        &image,
+        build_image(
+            vec![Node::File {
+                path: "/CLAUDE.md".to_string(),
+                mode: 0o644,
+                data: b"guest-visible unsigned instructions\n".to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            }],
+            &Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let images = vec![image.clone()];
+    let mut disk_share = share(&f.mount);
+    disk_share.kind = mvm_core::plan::ShareKind::Disk;
+    let ledger = InMemoryNonceLedger::new();
+    let err = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![disk_share],
+        instructions: InstructionSources {
+            workload_dir: None,
+            mount_roots: Some(&[]),
+            mount_images: Some(&images),
+            user_policy: Some(&f.policy),
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("the image's unsigned file must refuse a deny boot");
+    assert!(format!("{err:#}").contains("unsigned"), "{err:#}");
+    let entries = chain(&f);
+    assert_eq!(
+        entry(&entries, "trust.instruction_unsigned")["root"],
+        image.display().to_string()
+    );
+    entry(&entries, "plan.admission_refused");
 }

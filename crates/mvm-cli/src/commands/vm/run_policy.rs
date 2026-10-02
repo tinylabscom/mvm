@@ -267,17 +267,25 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_reference_is_refused() {
-        let (_env, _home) = isolated();
+    fn a_pack_reference_without_an_installed_pack_points_at_pull() {
+        let (_env, home) = isolated();
+        // An empty-but-present trust policy keeps the refusal deterministic:
+        // the lookup reaches the lockfile rather than policy bootstrap.
+        let registry_state = home.path().join("registry");
+        std::fs::create_dir_all(&registry_state).unwrap();
+        std::fs::write(
+            registry_state.join("publishers.toml"),
+            b"schema_version = 1\npublishers = []\n",
+        )
+        .unwrap();
         let mut args = RunArgs {
             policy: vec!["acme/agent".into()],
             ..RunArgs::default()
         };
         let err = apply_run_policy(&mut args).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("packs are not yet supported"),
-            "{err:#}"
-        );
+        let shown = format!("{err:#}");
+        assert!(shown.contains("mvmctl pull"), "{shown}");
+        assert!(shown.contains("acme/agent"), "{shown}");
     }
 
     #[test]

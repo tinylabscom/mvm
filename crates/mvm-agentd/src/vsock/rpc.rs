@@ -5,6 +5,7 @@
 use std::os::unix::net::UnixStream;
 
 use anyhow::{Result, bail};
+use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
 use mvm_contract::stream::input::{CloseInput, InputFrame};
 use mvm_core::security::AgentProfile;
 
@@ -699,6 +700,47 @@ where
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &req)?;
     read_exec_stream_with_session(stream, &mut session, on_event)
+}
+
+/// Run a declared command only after the guest has paused before spawn and
+/// the caller's host gate has decided and audited the exact invocation.
+/// The decision travels back on the same authenticated control session.
+pub fn send_mediated_exec_streaming<D, F>(
+    stream: &mut UnixStream,
+    call: MediatedExecCall,
+    decide: D,
+    on_event: F,
+) -> Result<ExecEvent>
+where
+    D: FnOnce(&ToolCheckRequest) -> Result<bool>,
+    F: FnMut(&ExecEvent),
+{
+    let invocation = call
+        .tool_check()
+        .ok_or_else(|| anyhow::anyhow!("invalid declared tool invocation"))?;
+    require_capabilities(stream, &[GuestCapability::MediatedExec])?;
+    let req = GuestRequest::MediatedExec(call);
+    let mut session = RpcSession::open(stream)?;
+    session.write(stream, &req)?;
+    let question = check_response(&req, session.read(stream)?)?;
+    let GuestResponse::ToolCheckRequired(reported) = question else {
+        bail!("guest did not pause the declared command before spawn");
+    };
+    if reported != invocation {
+        session.write(stream, &ToolCheckReply::Deny)?;
+        bail!("guest reported a different declared tool invocation");
+    }
+    let decision = decide(&reported);
+    let reply = match &decision {
+        Ok(true) => ToolCheckReply::Allow,
+        Ok(false) | Err(_) => ToolCheckReply::Deny,
+    };
+    session.write(stream, &reply)?;
+    match decision {
+        Ok(true) => read_exec_stream_with_session(stream, &mut session, on_event),
+        Ok(false) => bail!("declared tool invocation denied"),
+        Err(error) => Err(error),
+    }
 }
 
 /// Send a `RunCode` request and stream its authenticated response.
@@ -1431,6 +1473,21 @@ mod tests {
         .unwrap();
     }
 
+    fn answer_mediated_protocol_hello(stream: &mut UnixStream) {
+        let req: GuestRequest = read_frame(stream).expect("protocol hello");
+        assert!(matches!(req, GuestRequest::ProtocolHello { .. }));
+        write_frame(
+            stream,
+            &GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                agent_version: "test-agent".to_string(),
+                capabilities: vec![GuestCapability::MediatedExec],
+            },
+        )
+        .expect("protocol hello answer");
+    }
+
     #[test]
     fn send_exec_streaming_collects_chunks_until_exit() {
         let (mut host, mut guest) = UnixStream::pair().unwrap();
@@ -1467,6 +1524,149 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], ExecEvent::Stdout { ref chunk } if chunk == b"hi\n"));
         assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+    }
+
+    fn test_tool_call() -> MediatedExecCall {
+        MediatedExecCall {
+            tool: "shell".to_string(),
+            argv: vec!["echo".to_string(), "ok".to_string()],
+            stdin: None,
+            timeout_secs: Some(5),
+        }
+    }
+
+    fn test_tool_invocation() -> ToolCheckRequest {
+        test_tool_call().tool_check().expect("valid tool call")
+    }
+
+    #[test]
+    fn mediated_exec_round_trip_waits_for_an_exact_allow() {
+        let (mut host, mut guest) = UnixStream::pair().expect("socket pair");
+        host.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("host timeout");
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("guest timeout");
+        let call = test_tool_call();
+        let expected = call.tool_check().expect("valid tool call");
+        let check = expected.clone();
+        let guest_handle = std::thread::spawn(move || {
+            answer_mediated_protocol_hello(&mut guest);
+            let req: GuestRequest = read_frame(&mut guest).expect("read request");
+            assert!(
+                matches!(req, GuestRequest::MediatedExec(call) if call.tool_check() == Some(check))
+            );
+            write_frame(&mut guest, &GuestResponse::ToolCheckRequired(expected))
+                .expect("write question");
+            let reply: ToolCheckReply = read_frame(&mut guest).expect("read reply");
+            assert_eq!(reply, ToolCheckReply::Allow);
+            write_frame(
+                &mut guest,
+                &GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
+            )
+            .expect("write exit");
+        });
+        let terminal = send_mediated_exec_streaming(&mut host, call, |_| Ok(true), |_| {})
+            .expect("mediated exec");
+        guest_handle.join().expect("guest thread");
+        assert!(matches!(terminal, ExecEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn mediated_exec_denial_never_sends_allow() {
+        let (mut host, mut guest) = UnixStream::pair().expect("socket pair");
+        host.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("host timeout");
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("guest timeout");
+        let call = test_tool_call();
+        let expected = call.tool_check().expect("valid tool call");
+        let guest_handle = std::thread::spawn(move || {
+            answer_mediated_protocol_hello(&mut guest);
+            let _: GuestRequest = read_frame(&mut guest).expect("read request");
+            write_frame(&mut guest, &GuestResponse::ToolCheckRequired(expected))
+                .expect("write question");
+            let reply: ToolCheckReply = read_frame(&mut guest).expect("read reply");
+            assert_eq!(reply, ToolCheckReply::Deny);
+        });
+        let error = send_mediated_exec_streaming(&mut host, call, |_| Ok(false), |_| {})
+            .expect_err("gate denial");
+        guest_handle.join().expect("guest thread");
+        assert!(error.to_string().contains("denied"));
+    }
+
+    #[test]
+    fn mediated_exec_gate_failure_sends_a_denial() {
+        let (mut host, mut guest) = UnixStream::pair().expect("socket pair");
+        host.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("host timeout");
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("guest timeout");
+        let call = test_tool_call();
+        let expected = call.tool_check().expect("valid tool call");
+        let guest_handle = std::thread::spawn(move || {
+            answer_mediated_protocol_hello(&mut guest);
+            let _: GuestRequest = read_frame(&mut guest).expect("read request");
+            write_frame(&mut guest, &GuestResponse::ToolCheckRequired(expected))
+                .expect("write question");
+            let reply: ToolCheckReply = read_frame(&mut guest).expect("read reply");
+            assert_eq!(reply, ToolCheckReply::Deny);
+        });
+        let error = send_mediated_exec_streaming(
+            &mut host,
+            call,
+            |_| Err(anyhow::anyhow!("audit unavailable")),
+            |_| {},
+        )
+        .expect_err("gate failure");
+        guest_handle.join().expect("guest thread");
+        assert!(error.to_string().contains("audit unavailable"));
+    }
+
+    #[test]
+    fn mediated_exec_rejects_invalid_invocations_before_connecting() {
+        let (mut host, _guest) = UnixStream::pair().expect("socket pair");
+        let mut call = test_tool_call();
+        call.argv.clear();
+        let error = send_mediated_exec_streaming(
+            &mut host,
+            call,
+            |_| panic!("invalid input must not reach the gate"),
+            |_| {},
+        )
+        .expect_err("invalid request");
+        assert!(error.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn mediated_exec_rejects_a_mismatched_guest_question() {
+        let (mut host, mut guest) = UnixStream::pair().expect("socket pair");
+        host.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("host timeout");
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("guest timeout");
+        let guest_handle = std::thread::spawn(move || {
+            answer_mediated_protocol_hello(&mut guest);
+            let _: GuestRequest = read_frame(&mut guest).expect("read request");
+            let mut changed = test_tool_invocation();
+            changed.argv = "echo different".to_string();
+            write_frame(&mut guest, &GuestResponse::ToolCheckRequired(changed))
+                .expect("write mismatched question");
+            let reply: ToolCheckReply = read_frame(&mut guest).expect("read reply");
+            assert_eq!(reply, ToolCheckReply::Deny);
+        });
+        let error = send_mediated_exec_streaming(
+            &mut host,
+            test_tool_call(),
+            |_| panic!("mismatched question must not reach the gate"),
+            |_| {},
+        )
+        .expect_err("mismatched question");
+        guest_handle.join().expect("guest thread");
+        assert!(error.to_string().contains("different"));
     }
 
     #[test]

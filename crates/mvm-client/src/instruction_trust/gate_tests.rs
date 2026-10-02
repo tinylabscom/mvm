@@ -275,6 +275,94 @@ fn a_mount_that_vanished_fails_the_scan() {
 }
 
 #[test]
+fn a_materialized_mount_scans_guest_visible_bytes_not_the_host_source() {
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("AGENTS.md"), b"safe source\n").unwrap();
+    sign_file(&source.join("AGENTS.md"), &key()).unwrap();
+    let image = dir.path().join("snapshot.ext4");
+    let bytes = build_image(
+        vec![Node::File {
+            path: "/AGENTS.md".to_string(),
+            mode: 0o644,
+            data: b"guest instructions\n".to_vec(),
+            xattrs: Vec::new(),
+            owner: Owner::ROOT,
+        }],
+        &Default::default(),
+    )
+    .unwrap();
+    std::fs::write(&image, bytes).unwrap();
+    let inputs = BootInputs {
+        mount_images: vec![image.clone()],
+        ..BootInputs::default()
+    };
+    let report = evaluate_boot_inputs(&inputs, Some(&user_policy(dir.path(), "deny")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.files.len(), 1);
+    assert_eq!(report.files[0].file.root, image);
+    assert_eq!(report.files[0].file.relative, "AGENTS.md");
+    assert_eq!(
+        report.files[0].sha256.as_deref(),
+        Some(mvm_core::plan::bundle::sha256_hex(b"guest instructions\n").as_str())
+    );
+    assert!(matches!(report.decision(), Decision::Refuse(_)));
+}
+
+#[test]
+fn a_materialized_mount_checks_the_sidecar_against_its_image_bytes() {
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    let dir = tempfile::tempdir().unwrap();
+    let instruction = dir.path().join("AGENTS.md");
+    std::fs::write(&instruction, b"signed instructions\n").unwrap();
+    sign_file(&instruction, &key()).unwrap();
+    let sidecar = std::fs::read(crate::instruction_trust::sidecar_path(
+        &instruction,
+        crate::instruction_trust::KEYED_SIDECAR_SUFFIX,
+    ))
+    .unwrap();
+    let file_node = |path: &str, data: &[u8]| Node::File {
+        path: path.to_string(),
+        mode: 0o644,
+        data: data.to_vec(),
+        xattrs: Vec::new(),
+        owner: Owner::ROOT,
+    };
+    let policy = user_policy(dir.path(), "deny");
+    for (name, content, admitted) in [
+        ("valid.ext4", b"signed instructions\n".as_slice(), true),
+        ("tampered.ext4", b"altered instructions\n".as_slice(), false),
+    ] {
+        let image = dir.path().join(name);
+        std::fs::write(
+            &image,
+            build_image(
+                vec![
+                    file_node("/AGENTS.md", content),
+                    file_node("/AGENTS.md.mvmsig.json", &sidecar),
+                ],
+                &Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let inputs = BootInputs {
+            mount_images: vec![image],
+            ..BootInputs::default()
+        };
+        let report = evaluate_boot_inputs(&inputs, Some(&policy))
+            .unwrap()
+            .unwrap();
+        assert_eq!(matches!(report.decision(), Decision::Admit), admitted);
+    }
+}
+
+#[test]
 fn local_workload_dirs_come_from_local_paths_only() {
     let dir = tempfile::tempdir().unwrap();
     let manifest = dir.path().join("mvm.toml");

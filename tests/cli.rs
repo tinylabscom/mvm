@@ -1745,3 +1745,190 @@ fn ops_mcp_enforces_the_project_tool_policy() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+// ---------------------------------------------------------------------------
+// Signed registry packs (PS-06): search / pull / pack registry
+// ---------------------------------------------------------------------------
+
+fn mvmctl_isolated(home: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+    command
+        .env("MVM_HOME", home)
+        .env("HOME", home)
+        .env("MVM_NO_AUTO_DEV", "1");
+    command
+}
+
+/// Stage a minimal pack registry on disk: an index and one pack whose
+/// manifest/signature/files live at the layout `pull` fetches.
+fn stage_pack_registry(root: &std::path::Path) {
+    let packs = root.join("packs");
+    std::fs::create_dir_all(&packs).unwrap();
+    std::fs::write(
+        packs.join("index.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "packs": [{
+                "namespace": "runtime",
+                "name": "python",
+                "description": "Python runtime pack",
+                "versions": ["1.2.3"],
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let pack = packs.join("runtime/python/1.2.3");
+    std::fs::create_dir_all(pack.join("files/pack")).unwrap();
+    std::fs::write(
+        pack.join("manifest.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "reference": "runtime/python@1.2.3",
+            "description": "Python runtime pack",
+            "files": [{
+                "path": "pack/profile.toml",
+                "sha256": "0".repeat(64),
+                "size": 0,
+            }],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(pack.join("manifest.sigstore.json"), b"test bundle").unwrap();
+    std::fs::write(
+        pack.join("files/pack/profile.toml"),
+        b"[tools]\nallow = [\"git\"]\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn pack_registry_verbs_parse_and_show_help() {
+    for args in [
+        vec!["pull", "--help"],
+        vec!["search", "--help"],
+        vec!["pack", "registry", "--help"],
+        vec!["pack", "registry", "ls", "--help"],
+        vec!["pack", "registry", "rm", "--help"],
+        vec!["pack", "registry", "update", "--help"],
+    ] {
+        let out = mvmctl_isolated(std::path::Path::new("/tmp"))
+            .args(&args)
+            .output()
+            .unwrap_or_else(|error| panic!("run mvmctl {args:?}: {error}"));
+        assert!(
+            out.status.success(),
+            "mvmctl {args:?} --help must succeed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn search_reads_a_file_registry_and_marks_installed_packs() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = tempfile::tempdir().unwrap();
+    stage_pack_registry(registry.path());
+    let out = mvmctl_isolated(home.path())
+        .env(
+            "MVM_PACK_REGISTRY",
+            format!("file://{}", registry.path().display()),
+        )
+        .args(["search", "--json"])
+        .output()
+        .expect("run mvmctl search --json");
+    assert!(
+        out.status.success(),
+        "search must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("search --json emits rows");
+    assert_eq!(rows[0]["pack"], "runtime/python");
+    assert_eq!(rows[0]["installed"], false);
+}
+
+#[test]
+fn pull_reaches_signature_verification_and_fails_closed() {
+    let home = tempfile::tempdir().unwrap();
+    let registry = tempfile::tempdir().unwrap();
+    stage_pack_registry(registry.path());
+    // An empty-but-present trust policy reaches signature verification, so
+    // the refusal below comes from the checker, not policy bootstrap.
+    let registry_state = home.path().join("registry");
+    std::fs::create_dir_all(&registry_state).unwrap();
+    std::fs::write(
+        registry_state.join("publishers.toml"),
+        br#"schema_version = 1
+
+[[publishers]]
+namespace = "runtime"
+issuer = "https://token.actions.githubusercontent.com"
+accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main"]
+"#,
+    )
+    .unwrap();
+    let out = mvmctl_isolated(home.path())
+        .env(
+            "MVM_PACK_REGISTRY",
+            format!("file://{}", registry.path().display()),
+        )
+        .args(["pull", "runtime/python"])
+        .output()
+        .expect("run mvmctl pull");
+    assert!(
+        !out.status.success(),
+        "pull must refuse: a default build cannot verify the signature"
+    );
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        shown.contains("manifest-verify") || shown.contains("signature"),
+        "the refusal must come from signature verification: {shown}"
+    );
+    assert!(
+        !home.path().join("registry/packs.lock.toml").exists(),
+        "no pin may be recorded for an unverified pack"
+    );
+    assert!(
+        !home.path().join("cache/registry-packs").exists(),
+        "nothing may be installed for an unverified pack"
+    );
+}
+
+#[test]
+fn pack_registry_ls_starts_empty_and_rm_unpinned_is_a_no_op() {
+    let home = tempfile::tempdir().unwrap();
+    let out = mvmctl_isolated(home.path())
+        .args(["pack", "registry", "ls", "--json"])
+        .output()
+        .expect("run mvmctl pack registry ls --json");
+    assert!(
+        out.status.success(),
+        "ls must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let rows: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("ls --json emits rows");
+    assert!(rows.as_array().expect("rows").is_empty());
+
+    let out = mvmctl_isolated(home.path())
+        .args(["pack", "registry", "rm", "runtime/python"])
+        .output()
+        .expect("run mvmctl pack registry rm");
+    assert!(
+        out.status.success(),
+        "rm of an unpinned pack exits zero: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let shown = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(shown.contains("not pinned"), "{shown}");
+}

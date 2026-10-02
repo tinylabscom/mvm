@@ -175,14 +175,14 @@ fn an_unknown_parent_names_the_referring_file_and_key() {
 }
 
 #[test]
-fn a_pack_parent_is_refused_as_not_yet_supported() {
+fn a_pack_parent_without_an_installed_pack_points_at_pull() {
     let dir = Dir::new();
     dir.profile("x", "extends = \"acme/agent\"\n");
+    let err = dir.resolve("x").unwrap_err();
+    assert!(err.message.contains("acme/agent"), "{err}");
     assert!(
-        dir.resolve("x")
-            .unwrap_err()
-            .message
-            .contains("packs are not yet supported")
+        err.message.contains("mvmctl pull") || err.message.contains("publisher trust policy"),
+        "{err}"
     );
 }
 

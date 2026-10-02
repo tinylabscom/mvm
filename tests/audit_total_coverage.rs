@@ -209,12 +209,19 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 // and emits `PackCacheChange`; `prune` removes bytes so it reuses
 // `CachePrune`. `download`/`update` refuse for every class — no pack is
 // published — so they change nothing and have nothing to record.
+const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
+    ("ls", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::Emits("RegistryPackRemove")),
+    ("update", AuditPosture::ReadOnly),
+];
+
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
     ("download", AuditPosture::ReadOnly),
     ("update", AuditPosture::ReadOnly),
+    ("registry", AuditPosture::DelegatesToSub(PACK_REGISTRY_SUB)),
 ];
 
 /// `deployments` is a read-only inventory of the local deploy store.
@@ -663,6 +670,10 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // listing only read policy files. `resolve -o` writes the caller's own
     // output file, not host state.
     ("policy", AuditPosture::ReadOnly),
+    // Signed registry packs: `pull` records a lockfile pin after verified
+    // install; `search` only reads the registry index and the lockfile.
+    ("pull", AuditPosture::Emits("RegistryPackPin")),
+    ("search", AuditPosture::ReadOnly),
     (
         "agent-session",
         AuditPosture::DelegatesToSub(AGENT_SESSION_SUB),
@@ -898,6 +909,10 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "cmd.deploy",
         // Image time-travel restore marker.
         "image.reverted",
+        // Signed registry packs: a pull records (or replaces) a lockfile
+        // pin; `pack registry rm` records the pin and entry it dropped.
+        "RegistryPackPin",
+        "RegistryPackRemove",
     ];
 
     let mut failures: Vec<(String, &'static str)> = Vec::new();

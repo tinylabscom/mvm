@@ -797,6 +797,10 @@ mod tests {
         let prepared = svc.acquire_launch_lease(&dev_launch("vm-1")).unwrap();
         assert_eq!(prepared.volumes.len(), 1);
         assert_eq!(
+            prepared.instruction_images,
+            vec![fs::canonicalize(&image).unwrap()]
+        );
+        assert_eq!(
             PathBuf::from(&prepared.volumes[0].host),
             fs::canonicalize(&image).unwrap()
         );

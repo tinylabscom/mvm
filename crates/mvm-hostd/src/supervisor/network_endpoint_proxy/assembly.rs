@@ -143,6 +143,7 @@ impl SubstitutionService {
             instance_metrics: None,
             admitted: Arc::default(),
             approver: Arc::new(crate::supervisor::runtime_approval::NoApprovalBackend),
+            tool_gate: None,
             approval_required: std::collections::BTreeSet::new(),
             reflection: super::reflection::ReflectionGuard::default(),
             oauth_capture_by_secret: std::collections::BTreeMap::new(),
@@ -164,6 +165,30 @@ impl SubstitutionService {
     ) -> Self {
         self.approver = approver;
         self
+    }
+
+    /// Attach the admitted per-tool gate to this VM's endpoint.
+    #[must_use]
+    pub fn with_tool_gate(
+        mut self,
+        gate: Arc<crate::supervisor::tool_decision::ToolDecisionGate>,
+    ) -> Self {
+        self.tool_gate = Some(gate);
+        self
+    }
+
+    /// Decide one declared guest invocation through this VM's admitted gate.
+    /// An absent gate or failed audit refuses the call.
+    pub async fn decide_tool(
+        &self,
+        tool: &str,
+        argv: &str,
+    ) -> anyhow::Result<crate::supervisor::tool_decision::ToolVerdict> {
+        let gate = self
+            .tool_gate
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
+        Ok(gate.decide(tool, argv).await?)
     }
 
     /// Share `admitted` with the forward leg built over it.

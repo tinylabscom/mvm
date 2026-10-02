@@ -104,8 +104,9 @@ persistent machine — is stopped, the host appends a chain-signed
 - an ordered Merkle root of checkpoint-creation digests, if this session
   created checkpoints
 - how the session ended (exit code, failure class, or stopped)
-- the measured compute-environment digest from the signed plan, when the plan
-  recorded one
+- the admitted rootfs image digest and pinned kernel digest, when the plan
+  records a kernel pin; verification checks both against the signed admission
+  entry
 
 List sessions, newest last:
 
@@ -142,7 +143,7 @@ script can branch on it.
 | Verdict     | Exit | Meaning                                                                                                                                                                                                                                                                                                    |
 | ----------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `VERIFIED`  | 0    | The whole chain verifies from genesis, and every seal of the session matches the chain it sits in.                                                                                                                                                                                                       |
-| `MISMATCH`  | 1    | Either the chain does not verify, or a seal disagrees with it. The reason is named: `chain_break`, `signature`, `malformed`, `truncated_tail`, `count_mismatch`, `sequence_mismatch`, `root_mismatch`, `snapshot_root_mismatch`, `head_mismatch`, `ledger_break`, `malformed_seal`, or `io`.                                          |
+| `MISMATCH`  | 1    | Either the chain does not verify, or a seal disagrees with it. The reason is named: `chain_break`, `signature`, `malformed`, `truncated_tail`, `count_mismatch`, `sequence_mismatch`, `root_mismatch`, `environment_mismatch`, `snapshot_root_mismatch`, `head_mismatch`, `ledger_break`, `malformed_seal`, or `io`.                                          |
 | `UNSEALED`  | 2    | The chain verifies but the session has no seal. It may still be running, it may have ended without a seal (a crash or power loss), or the log may have been truncated through the seal. Treat this verdict as "cannot vouch for completeness".                                                             |
 | `NOT_FOUND` | 3    | No such session in this chain.                                                                                                                                                                                                                                                                              |
 
@@ -154,6 +155,11 @@ not a mismatch, but the seal does not cover them.
 When a seal carries a checkpoint root, verification recomputes it from that
 session's ordered `checkpoint.created` records. Older seals without this field
 remain verifiable, but make no separate checkpoint-root claim.
+New seals also carry the rootfs image digest and, for kernel-pinned plans, the
+kernel digest. Both are checked against `plan.admitted`; older seals without
+these fields remain verifiable but do not make a separate identity claim. The
+older `compute_environment` asset digest identifies the rootfs image alone,
+not the kernel.
 
 ### The session ledger
 

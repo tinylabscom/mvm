@@ -31,12 +31,14 @@ use std::time::Duration;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::dns::{MAX_DNS_MESSAGE, decode_query, encode_response};
 use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
+use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
 use mvm_contract::protocol::network_flow::{
     Direction, FrameError, HEADER_LEN, IngressFlowKind, LENGTH_PREFIX_LEN, Opcode,
     SessionValidator, UDP_ADDR_PREFIX_LEN, decode,
 };
 use mvm_core::net::session::Session;
 use mvm_vmm::vsock_egress_bridge::egress_gate::{DnsVerdict, EgressGate, EgressVerdict};
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 pub use self::ingress::FlowMuxIngressHandle;
@@ -584,6 +586,9 @@ impl FlowMuxSession {
                         self.remove_stream(stream_id);
                     }
                 }
+                Opcode::ToolCheck => {
+                    self.handle_tool_check(payload_len)?;
+                }
                 Opcode::OpenHttp => {
                     if let Err(e) = self.handle_open_http(stream_id) {
                         warn!(error = %e, stream_id, "FlowMux HTTP open failed");
@@ -614,6 +619,62 @@ impl FlowMuxSession {
                     return Ok(());
                 }
             }
+        }
+    }
+
+    fn handle_tool_check(&self, payload_len: u32) -> Result<(), FlowMuxError> {
+        let request = serde_json::from_slice::<ToolCheckRequest>(self.frame_payload(payload_len))
+            .ok()
+            .filter(ToolCheckRequest::is_valid);
+        let Some(request) = request else {
+            self.record_tool_protocol_refusal(
+                "invalid_invocation",
+                self.frame_payload(payload_len),
+            );
+            return self.write_frame(Opcode::ToolDenied, 0, b"invalid tool invocation");
+        };
+        let verdict = self
+            .runtime_handle
+            .as_ref()
+            .zip(self.substitution.as_ref())
+            .and_then(|(runtime, service)| {
+                runtime
+                    .block_on(service.decide_tool(&request.tool, &request.argv))
+                    .ok()
+            });
+        match verdict {
+            Some(crate::supervisor::tool_decision::ToolVerdict::Allow) => {
+                self.write_frame(Opcode::ToolAllowed, 0, &[])
+            }
+            Some(crate::supervisor::tool_decision::ToolVerdict::Deny(reason)) => {
+                self.write_frame(Opcode::ToolDenied, 0, reason.as_bytes())
+            }
+            None => {
+                self.record_tool_protocol_refusal(
+                    "mediation_unavailable",
+                    self.frame_payload(payload_len),
+                );
+                self.write_frame(Opcode::ToolDenied, 0, b"tool mediation unavailable")
+            }
+        }
+    }
+
+    fn record_tool_protocol_refusal(&self, reason: &str, payload: &[u8]) {
+        let (Some(recorder), Some(runtime)) = (&self.recorder, &self.runtime_handle) else {
+            return;
+        };
+        if let Err(error) = runtime.block_on(recorder.record_unbound(
+            EventCategory::Host,
+            "host.tool.protocol_refused",
+            [
+                ("reason".to_string(), reason.to_string()),
+                (
+                    "payload_sha256".to_string(),
+                    hex::encode(Sha256::digest(payload)),
+                ),
+            ],
+        )) {
+            warn!(%error, "tool refusal audit failed");
         }
     }
 
@@ -2321,6 +2382,73 @@ mod tests {
 
         drop(guest);
         host.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn authenticated_tool_checks_use_the_admitted_gate_and_audit_each_decision() {
+        use crate::supervisor::audit::CapturingAuditSigner;
+        use crate::supervisor::network_endpoint_proxy::test_support::service_with_tool_gate;
+        use crate::supervisor::runtime_approval::NoApprovalBackend;
+        use crate::supervisor::tool_decision::ToolDecisionGate;
+        use mvm_contract::policy::tool_rules::ToolRules;
+        use mvm_core::plan::TenantId;
+
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".into())));
+        let tool_gate = Arc::new(ToolDecisionGate::new(
+            ToolRules {
+                allow: vec!["read".into()],
+                deny: vec!["write".into()],
+                ..ToolRules::default()
+            },
+            Arc::new(NoApprovalBackend),
+            Arc::clone(&recorder),
+        ));
+        let (service, _dir) = service_with_tool_gate(tool_gate);
+        let (mut guest, mut session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, EgressGate::default_deny())
+                    .with_recorder(Some(recorder))
+                    .with_substitution(Some(service))
+            });
+
+        for (tool, expected) in [("read", Opcode::ToolAllowed), ("write", Opcode::ToolDenied)] {
+            let payload = serde_json::to_vec(&ToolCheckRequest {
+                tool: tool.into(),
+                argv: format!("{tool} data"),
+            })
+            .expect("encode invocation");
+            write_frame(&mut guest, &mut session, Opcode::ToolCheck, 0, &payload);
+            let (opcode, stream_id, _) = read_flowmux_frame(&mut guest, &mut session);
+            assert_eq!(opcode, expected);
+            assert_eq!(stream_id, 0);
+        }
+        write_frame(&mut guest, &mut session, Opcode::ToolCheck, 0, b"{{{{");
+        let (opcode, _, _) = read_flowmux_frame(&mut guest, &mut session);
+        assert_eq!(opcode, Opcode::ToolDenied);
+        drop(guest);
+        host.join().expect("host thread").expect("session");
+        let entries = signer.entries();
+        assert_eq!(entries.len(), 3);
+        let audit = serde_json::to_string(&entries).expect("serialize audit");
+        assert!(!audit.contains("read data"));
+        assert!(!audit.contains("write data"));
+    }
+
+    #[test]
+    fn tool_check_without_a_gate_is_refused() {
+        let (mut guest, mut session, host) = run_session(EgressGate::default_deny());
+        let payload = serde_json::to_vec(&ToolCheckRequest {
+            tool: "read".into(),
+            argv: "read data".into(),
+        })
+        .expect("encode invocation");
+        write_frame(&mut guest, &mut session, Opcode::ToolCheck, 0, &payload);
+        let (opcode, stream_id, _) = read_flowmux_frame(&mut guest, &mut session);
+        assert_eq!(opcode, Opcode::ToolDenied);
+        assert_eq!(stream_id, 0);
+        drop(guest);
+        host.join().expect("host thread").expect("session");
     }
 
     /// A guest echo request reaches the shared decision and comes back as a

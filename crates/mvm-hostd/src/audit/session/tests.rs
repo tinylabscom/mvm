@@ -19,6 +19,8 @@ pub(super) fn request(plan_id: &str, reason: SealReason) -> SealRequest<'_> {
     SealRequest {
         plan_id,
         reason,
+        image_sha256: None,
+        kernel_sha256: None,
         compute_environment: None,
     }
 }
@@ -109,6 +111,8 @@ fn a_sealed_session_verifies_and_the_seal_describes_it() {
         "admitted, launched and exited at least"
     );
     assert_eq!(seal.prev_seal, GENESIS_SEAL);
+    assert_eq!(seal.image_sha256.as_deref(), Some(p.image.sha256.as_str()));
+    assert_eq!(seal.kernel_sha256, None);
 
     let report = chain.verify(&p.plan_id.0);
     assert_eq!(report.verdict, Verdict::Verified, "{report:?}");
@@ -116,6 +120,116 @@ fn a_sealed_session_verifies_and_the_seal_describes_it() {
     assert_eq!(report.seals.len(), 1);
     assert_eq!(report.seals[0].seal, seal);
     assert_eq!(report.late_entries, 0);
+}
+
+#[test]
+fn a_pinned_kernel_is_bound_to_signed_admission_and_the_seal() {
+    let chain = Chain::new();
+    let mut p = plan("sha256:kernel-bound");
+    p.environment = Some(mvm_core::plan::EnvironmentRef {
+        kernel_sha256: "b".repeat(64),
+    });
+    let seal = chain.run_and_seal(&p, 0);
+    assert_eq!(seal.kernel_sha256.as_deref(), Some("b".repeat(64).as_str()));
+    assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
+
+    let admitted: SignedEnvelope = serde_json::from_str(&chain.lines()[0]).unwrap();
+    assert_eq!(
+        admitted.entry.labels.get("kernel_sha256"),
+        seal.kernel_sha256.as_ref()
+    );
+}
+
+#[test]
+fn a_signed_seal_with_false_image_or_kernel_identity_is_refused() {
+    for field in ["image", "kernel", "missing_kernel", "compute_environment"] {
+        let chain = Chain::new();
+        let mut p = plan(&format!("sha256:false-{field}"));
+        p.environment = Some(mvm_core::plan::EnvironmentRef {
+            kernel_sha256: "b".repeat(64),
+        });
+        chain.emitter.emit_admitted(&p, "host:test").unwrap();
+        chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+        let mut claim = request(&p.plan_id.0, SealReason::Exited);
+        claim.image_sha256 = Some(p.image.sha256.clone());
+        claim.kernel_sha256 = Some("b".repeat(64));
+        let mut seal = compute_seal(&chain.lines(), &claim).unwrap();
+        if field == "image" {
+            seal.image_sha256 = Some("c".repeat(64));
+        } else if field == "kernel" {
+            seal.kernel_sha256 = Some("c".repeat(64));
+        } else if field == "missing_kernel" {
+            seal.kernel_sha256 = None;
+        } else {
+            seal.compute_environment = Some("c".repeat(64));
+        }
+        chain.append_seal(&p, seal.to_labels());
+        assert_eq!(
+            chain.verify(&p.plan_id.0).reason,
+            Some(MismatchReason::EnvironmentMismatch),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn plan_audit_labels_cannot_spoof_the_admitted_kernel() {
+    let chain = Chain::new();
+    let p = PlanFixture::new()
+        .tenant(TENANT)
+        .plan_id("sha256:spoofed-kernel")
+        .audit_labels(BTreeMap::from([(
+            "kernel_sha256".to_string(),
+            "c".repeat(64),
+        )]))
+        .build();
+    let seal = chain.run_and_seal(&p, 0);
+    let admitted: SignedEnvelope = serde_json::from_str(&chain.lines()[0]).unwrap();
+    assert_eq!(
+        admitted
+            .entry
+            .labels
+            .get("kernel_sha256")
+            .map(String::as_str),
+        Some("")
+    );
+    assert_eq!(seal.kernel_sha256, None);
+    assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
+}
+
+#[test]
+fn conflicting_signed_admissions_for_one_session_are_refused() {
+    let chain = Chain::new();
+    let p = plan("sha256:conflicting-admission");
+    chain.emitter.emit_admitted(&p, "host:test").unwrap();
+    let mut conflicting = p.clone();
+    conflicting.image.sha256 = "d".repeat(64);
+    chain
+        .emitter
+        .emit_admitted(&conflicting, "host:test")
+        .unwrap();
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+    let seal = chain.emitter.seal_session(&p, SealReason::Exited).unwrap();
+    assert_eq!(seal.image_sha256.as_deref(), Some(p.image.sha256.as_str()));
+    assert_eq!(
+        chain.verify(&p.plan_id.0).reason,
+        Some(MismatchReason::EnvironmentMismatch)
+    );
+}
+
+#[test]
+fn an_identity_bearing_seal_without_admission_is_refused() {
+    let chain = Chain::new();
+    let p = plan("sha256:no-admission");
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+    let mut claim = request(&p.plan_id.0, SealReason::Exited);
+    claim.image_sha256 = Some(p.image.sha256.clone());
+    let seal = compute_seal(&chain.lines(), &claim).unwrap();
+    chain.append_seal(&p, seal.to_labels());
+    assert_eq!(
+        chain.verify(&p.plan_id.0).reason,
+        Some(MismatchReason::EnvironmentMismatch)
+    );
 }
 
 #[test]
@@ -180,6 +294,22 @@ fn a_legacy_seal_without_a_checkpoint_root_still_verifies() {
     seal.snapshot_root = None;
     chain.append_seal(&p, seal.to_labels());
 
+    assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
+}
+
+#[test]
+fn a_legacy_image_asset_seal_does_not_claim_a_kernel_identity() {
+    let chain = Chain::new();
+    let mut p = plan("sha256:legacy-image-asset");
+    p.environment = Some(mvm_core::plan::EnvironmentRef {
+        kernel_sha256: "b".repeat(64),
+    });
+    chain.emitter.emit_admitted(&p, "host:test").unwrap();
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+    let mut claim = request(&p.plan_id.0, SealReason::Exited);
+    claim.compute_environment = Some(p.image.sha256.clone());
+    let seal = compute_seal(&chain.lines(), &claim).unwrap();
+    chain.append_seal(&p, seal.to_labels());
     assert_eq!(chain.verify(&p.plan_id.0).verdict, Verdict::Verified);
 }
 
@@ -569,6 +699,11 @@ fn seal_labels_round_trip_and_refuse_bad_values() {
     let mut bad: BTreeMap<String, String> = seal.to_labels().into_iter().collect();
     bad.insert("seal.snapshot_root".to_string(), "not-hex".to_string());
     assert!(SessionSeal::from_labels(&bad).is_err());
+    for field in ["image_sha256", "kernel_sha256"] {
+        let mut bad: BTreeMap<String, String> = seal.to_labels().into_iter().collect();
+        bad.insert(format!("seal.{field}"), "not-hex".to_string());
+        assert!(SessionSeal::from_labels(&bad).is_err(), "{field}");
+    }
 }
 
 #[test]

@@ -278,6 +278,8 @@ impl Commands {
             // verbs, publisher add/list/remove keep `trust`.
             Commands::Trust(a) => a.action.verb_name(),
             Commands::Policy(_) => "policy",
+            Commands::Pull(_) => "pull",
+            Commands::Search(_) => "search",
             Commands::AgentSession(_) => "agent-session",
             Commands::Deps(_) => "deps",
             Commands::Capture(a) => a.action.verb_name(),

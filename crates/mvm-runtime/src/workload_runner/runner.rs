@@ -64,7 +64,7 @@ mod sockets;
 mod spawner;
 mod warm_claim;
 
-use admission::{admitted_ingress, admitted_network_limits};
+use admission::{admitted_ingress, admitted_network_limits, admitted_tool_rules};
 pub use broker::RealBrokerRegistrar;
 use claim_lease::WarmClaimLease;
 use refusal::{map_lineage_refusal, refuse, require_fresh_child_identity};
@@ -398,6 +398,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
         let network_limits = admitted_network_limits(inputs.config.plan_json.as_deref())?;
         let ingress = admitted_ingress(inputs.config.plan_json.as_deref())?;
+        let tools = admitted_tool_rules(inputs.config.plan_json.as_deref())?;
 
         // Spawn the per-child substitution endpoint through the shared
         // `ClaimGuards`, so a warm claim stands up the identical guarded endpoint
@@ -411,6 +412,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                 tenant: inputs.tenant,
                 secrets: inputs.secrets,
                 redaction: inputs.redaction,
+                tools: &tools,
                 network_policy: inputs.network_policy,
                 network_limits,
                 ingress: &ingress,
@@ -714,6 +716,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
                     tenant: claim.tenant_id.as_str(),
                     secrets: &secrets,
                     redaction: &redaction,
+                    tools: &plan.tools,
                     network_policy: &claim.network_policy,
                     network_limits,
                     ingress: &ingress,
@@ -4025,6 +4028,20 @@ mod tests {
             admitted_network_limits(None).unwrap(),
             mvm_core::plan::NetworkLimits::default()
         );
+    }
+
+    #[test]
+    fn admitted_tool_rules_are_projected_from_the_signed_plan() {
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.tools.allow.push("shell".into());
+        let expected = plan.tools.clone();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let json =
+            serde_json::to_string(&mvm_core::plan::sign_plan(&plan, &key, "host:test")).unwrap();
+
+        assert_eq!(admitted_tool_rules(Some(&json)).unwrap(), expected);
+        assert!(admitted_tool_rules(None).unwrap().is_empty());
+        assert!(admitted_tool_rules(Some("not json")).is_err());
     }
 
     #[derive(Default)]

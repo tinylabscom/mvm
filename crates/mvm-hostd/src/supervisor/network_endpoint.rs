@@ -190,6 +190,9 @@ pub struct EndpointConfig {
     /// baseline; a profile opts a destination into entropy/name redaction.
     #[serde(default)]
     pub redaction: mvm_core::policy::RedactionPolicy,
+    /// Resolved per-tool rules projected from the admitted signed plan.
+    #[serde(default)]
+    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// Per-destination reversible replacement policy, carried from the signed
     /// `ExecutionPlan.reversible_replacement`. Default (disabled) preserves the
     /// current one-way-only behavior.
@@ -499,7 +502,20 @@ pub fn assemble_with_projection(
     if let Some(recorder) = projection.recorder.as_ref() {
         service = service.with_shared_recorder(Arc::clone(recorder));
     }
-    service = service.with_approver(approval_supervisor(cfg, projection.recorder.clone())?);
+    let approver = approval_supervisor(cfg, projection.recorder.clone())?;
+    if !cfg.tools.is_empty() {
+        let recorder = projection
+            .recorder()
+            .context("tool rules require the endpoint audit recorder")?;
+        service = service.with_tool_gate(Arc::new(
+            crate::supervisor::tool_decision::ToolDecisionGate::new(
+                cfg.tools.clone(),
+                Arc::clone(&approver),
+                recorder,
+            ),
+        ));
+    }
+    service = service.with_approver(approver);
 
     Ok((Arc::new(service), handed, oauth_refresh))
 }
@@ -720,6 +736,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn admitted_tool_rules_decide_through_the_endpoints_recorder() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        std::fs::create_dir_all(dir.path().join("bindings")).unwrap();
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.tools.allow.push("shell".into());
+
+        let signer = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
+        let recorder = Arc::new(crate::supervisor::audit_recorder::Recorder::new(
+            signer.clone(),
+            mvm_core::plan::TenantId("local".into()),
+        ));
+        let projection = EndpointNetworkProjection {
+            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
+            recorder: Some(recorder),
+        };
+        let (service, _) = assemble_with_projection(&cfg, &projection).expect("assemble endpoint");
+        assert_eq!(
+            service
+                .decide_tool("shell", "echo ok")
+                .await
+                .expect("audit allow"),
+            crate::supervisor::tool_decision::ToolVerdict::Allow
+        );
+        assert!(matches!(
+            service
+                .decide_tool("other", "other")
+                .await
+                .expect("audit deny"),
+            crate::supervisor::tool_decision::ToolVerdict::Deny(_)
+        ));
+        let entries = signer.entries();
+        assert_eq!(entries.len(), 2);
+        let recorded = serde_json::to_string(&entries).expect("serialize entries");
+        assert!(!recorded.contains("echo ok"));
+    }
+
+    #[test]
+    fn tool_rules_refuse_to_assemble_without_chain_audit() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("secrets")).unwrap();
+        std::fs::create_dir_all(dir.path().join("bindings")).unwrap();
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.tools.allow.push("shell".into());
+        let projection = EndpointNetworkProjection {
+            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
+            recorder: None,
+        };
+        assert!(assemble_with_projection(&cfg, &projection).is_err());
+    }
+
     /// No admitted policy means nothing is admitted, in either egress mode.
     /// Wire mode is the serde default, and a Wire config without a policy used
     /// to project no gate at all, leaving its substitution service to forward
@@ -751,6 +819,7 @@ mod tests {
             secrets,
             transport: EndpointTransport::Vsock { port: 5253 },
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            tools: Default::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
             proxy_https: None,
@@ -1021,6 +1090,15 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(!dbg.contains("SUPERSECRET"), "key leaked via Debug: {dbg}");
         assert!(dbg.contains("<redacted>"));
+    }
+
+    #[test]
+    fn admitted_tool_rules_round_trip_through_endpoint_config() {
+        let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
+        cfg.tools.allow.push("shell".into());
+        let bytes = serde_json::to_vec(&cfg).expect("encode endpoint config");
+        let round = parse(&bytes).expect("decode endpoint config");
+        assert_eq!(round.tools, cfg.tools);
     }
 
     #[test]

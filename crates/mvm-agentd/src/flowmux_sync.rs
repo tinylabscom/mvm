@@ -28,6 +28,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use mvm_contract::protocol::network_flow::hello::{Handshake, agree};
+use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
 use mvm_contract::protocol::network_flow::{
     MAX_FRAME_LEN, MAX_PAYLOAD_LEN, Opcode, decode, encode_into,
 };
@@ -45,6 +46,8 @@ const RUN_MVM_DIR: &str = "/run/mvm";
 
 /// How long to wait for the host endpoint to accept a connection.
 const CONNECT_TIMEOUT_SECS: u64 = 10;
+/// Longer than the host's bounded approval window, including audit overhead.
+const TOOL_CHECK_TIMEOUT_SECS: u64 = 130;
 
 /// Environment variable naming the host endpoint's Unix socket on the
 /// shared-kernel container tier: the endpoint lives on a host-owned directory
@@ -84,7 +87,41 @@ pub enum HttpFlowOpen {
     Refused(WireResponse),
 }
 
+/// Host decision for one invocation reported before spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolCheckOutcome {
+    /// The admitted rules and audit write allowed it.
+    Allowed,
+    /// The host refused it for a fixed safe reason.
+    Denied(String),
+}
+
 impl SyncFlowMux {
+    /// Ask the authenticated host endpoint to decide one command invocation.
+    /// A missing, malformed, or unexpected answer is an error, never allow.
+    pub fn check_tool(&mut self, request: &ToolCheckRequest) -> Result<ToolCheckOutcome> {
+        if !request.is_valid() {
+            bail!("invalid tool invocation");
+        }
+        let timeout = std::time::Duration::from_secs(TOOL_CHECK_TIMEOUT_SECS);
+        self.set_read_timeout(timeout)?;
+        self.stream
+            .set_write_timeout(Some(timeout))
+            .context("setting the tool check write timeout")?;
+        let payload = serde_json::to_vec(request).context("encoding tool invocation")?;
+        self.send(Opcode::ToolCheck, 0, &payload)?;
+        match self.recv()? {
+            (Opcode::ToolAllowed, 0, payload) if payload.is_empty() => {
+                Ok(ToolCheckOutcome::Allowed)
+            }
+            (Opcode::ToolDenied, 0, payload) => Ok(ToolCheckOutcome::Denied(refusal_message(
+                &payload,
+                "the host refused the tool invocation",
+            ))),
+            (opcode, id, _) => bail!("unexpected tool decision {opcode:?} on stream {id}"),
+        }
+    }
+
     /// Dial the host endpoint and complete the handshake, loading this boot's
     /// identity from `/run/mvm`.
     ///
@@ -427,6 +464,66 @@ mod tests {
         std::fs::write(dir.path().join(GUEST_SIGNING_KEY_FILE), bytes).unwrap();
         let loaded = load_guest_signing_key(dir.path()).unwrap();
         assert_eq!(loaded.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn tool_check_roundtrip_accepts_only_the_host_decision() {
+        let (guest_side, host_side) = UnixStream::pair().unwrap();
+        let guest_key = SigningKey::from_bytes(&[3u8; 32]);
+        let host_key = SigningKey::from_bytes(&[9u8; 32]);
+        let host_anchor = host_key.verifying_key();
+        let host = std::thread::spawn(move || {
+            let mut stream = host_side;
+            let (mut session, _) = Session::host(&mut stream, "tool-test", host_key).unwrap();
+            let receive = |session: &mut Session, stream: &mut UnixStream| {
+                let sealed = read_sealed_frame(stream, MAX_FRAME_LEN + 512).unwrap();
+                let plain = session.open(&sealed).unwrap();
+                let parsed = decode(&plain).unwrap();
+                (parsed.header.opcode, parsed.payload.to_vec())
+            };
+            let send = |session: &mut Session, stream: &mut UnixStream, opcode: Opcode| {
+                let mut wire = Vec::new();
+                encode_into(&mut wire, opcode, 0, &[]).unwrap();
+                let sealed = session.seal(&wire).unwrap();
+                write_sealed_frame(stream, &sealed).unwrap();
+            };
+            assert_eq!(receive(&mut session, &mut stream).0, Opcode::Hello);
+            let mut wire = Vec::new();
+            encode_into(
+                &mut wire,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("tool-test-host").encode(),
+            )
+            .unwrap();
+            let sealed = session.seal(&wire).unwrap();
+            write_sealed_frame(&mut stream, &sealed).unwrap();
+            let (opcode, payload) = receive(&mut session, &mut stream);
+            assert_eq!(opcode, Opcode::ToolCheck);
+            let request: ToolCheckRequest = serde_json::from_slice(&payload).unwrap();
+            assert_eq!(request.tool, "read");
+            assert_eq!(request.argv, "read data");
+            send(&mut session, &mut stream, Opcode::ToolAllowed);
+        });
+        let mut client = SyncFlowMux::handshake(guest_side, guest_key, &host_anchor).unwrap();
+        assert_eq!(
+            client
+                .check_tool(&ToolCheckRequest {
+                    tool: "read".into(),
+                    argv: "read data".into(),
+                })
+                .expect("tool answer"),
+            ToolCheckOutcome::Allowed
+        );
+        host.join().unwrap();
+        assert!(
+            client
+                .check_tool(&ToolCheckRequest {
+                    tool: String::new(),
+                    argv: "read data".into(),
+                })
+                .is_err()
+        );
     }
 
     /// Drive one real authenticated exchange end to end: the guest sends a

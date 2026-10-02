@@ -366,6 +366,7 @@ fn reason_name(reason: mvm_hostd::audit::session::MismatchReason) -> &'static st
         R::CountMismatch => "count mismatch",
         R::SequenceMismatch => "sequence mismatch",
         R::RootMismatch => "root mismatch",
+        R::EnvironmentMismatch => "environment identity mismatch",
         R::SnapshotRootMismatch => "checkpoint root mismatch",
         R::HeadMismatch => "chain head mismatch",
         R::LedgerBreak => "ledger break",
@@ -423,6 +424,14 @@ mod tests {
         assert_eq!(
             reason_name(mvm_hostd::audit::session::MismatchReason::SnapshotRootMismatch),
             "checkpoint root mismatch"
+        );
+    }
+
+    #[test]
+    fn an_environment_mismatch_has_a_distinct_operator_reason() {
+        assert_eq!(
+            reason_name(mvm_hostd::audit::session::MismatchReason::EnvironmentMismatch),
+            "environment identity mismatch"
         );
     }
 }

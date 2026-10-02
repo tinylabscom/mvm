@@ -138,7 +138,18 @@ pub struct FileReport {
 /// Verify one instruction file under `policy`.
 #[must_use]
 pub fn verify_file(file: InstructionFile, policy: &EffectivePolicy) -> FileReport {
-    let content = match read_content(&file) {
+    let content = read_content(&file);
+    verify_bytes(file, content, policy, read_sidecar)
+}
+
+/// Verify bytes from a mounted image without copying them to a host path.
+pub(crate) fn verify_bytes(
+    file: InstructionFile,
+    content: Result<Vec<u8>, String>,
+    policy: &EffectivePolicy,
+    sidecar: impl Fn(&Path) -> Option<Result<Vec<u8>, Failure>>,
+) -> FileReport {
+    let content = match content {
         Ok(content) => content,
         Err(detail) => {
             return FileReport {
@@ -149,7 +160,7 @@ pub fn verify_file(file: InstructionFile, policy: &EffectivePolicy) -> FileRepor
         }
     };
     let sha256 = mvm_core::plan::bundle::sha256_hex(&content);
-    let verdict = verdict_for(&file.path, &content, &sha256, policy);
+    let verdict = verdict_for(&file.path, &content, &sha256, policy, sidecar);
     FileReport {
         file,
         sha256: Some(sha256),
@@ -157,14 +168,20 @@ pub fn verify_file(file: InstructionFile, policy: &EffectivePolicy) -> FileRepor
     }
 }
 
-fn verdict_for(path: &Path, content: &[u8], sha256: &str, policy: &EffectivePolicy) -> Verdict {
+fn verdict_for(
+    path: &Path,
+    content: &[u8],
+    sha256: &str,
+    policy: &EffectivePolicy,
+    sidecar: impl Fn(&Path) -> Option<Result<Vec<u8>, Failure>>,
+) -> Verdict {
     if let Some(note) = policy.blocked(sha256) {
         return Verdict::Failed(Failure::DigestBlocked {
             note: note.map(str::to_string),
         });
     }
-    let keyless = read_sidecar(&sidecar_path(path, KEYLESS_SIDECAR_SUFFIX));
-    let keyed = read_sidecar(&sidecar_path(path, KEYED_SIDECAR_SUFFIX));
+    let keyless = sidecar(&sidecar_path(path, KEYLESS_SIDECAR_SUFFIX));
+    let keyed = sidecar(&sidecar_path(path, KEYED_SIDECAR_SUFFIX));
     if keyless.is_none() && keyed.is_none() {
         return Verdict::Unsigned;
     }
