@@ -896,17 +896,20 @@ gh pr merge --auto --squash
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
 just maint::hooks        # pre-commit hook: auto-runs cargo fmt --all
 
-# Recommended: enter the pinned contributor environment.
+# Recommended: enter the pinned edit/check environment.
 nix develop
 
-# Or install the source-checkout tools manually:
-brew install zig          # or your distro's zig
-cargo install cargo-zigbuild cargo-nextest
+# For payload and release work, use the full shell and install the
+# exact cross-compilation toolchain pinned by this checkout.
+nix develop .#full
+just payload::toolchain
 ```
 
 The root [`flake.nix`](flake.nix) provides a lean `nix develop` shell with the
-pinned Rust toolchain, Zig, and the tools needed for the normal edit and build
-loop. `nix develop .#full` adds release, lint, and documentation tools. The
+pinned Rust toolchain and tools needed for the normal edit, check, and test
+loop. `nix develop .#full` adds Zig, libclang, release, lint, and documentation
+tools. Run `just payload::toolchain` before payload or release builds to install
+the exact cross-compilation pins, including cargo-zigbuild. The
 root flake also offers `#prebuilt`, a hash-pinned host CLI release. Host Nix is
 optional for running `mvmctl`. Distributed image construction and publication
 belong to [mvm-images](https://github.com/tinylabscom/mvm-images); `mvm` consumes

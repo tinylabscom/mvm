@@ -39,9 +39,12 @@ development prerequisites explicitly.
 ### Getting started
 
 If you use Nix for contributor tools, `nix develop` opens the lean shell with
-the Rust toolchain pinned by `rust-toolchain.toml`, Zig, and build tools.
-`nix develop .#full` adds release, lint, and documentation tools. These shells
-do not build or publish images; that work belongs to `mvm-images`.
+the Rust toolchain pinned by `rust-toolchain.toml` and the tools for normal
+editing, checking, and testing. `nix develop .#full` adds Zig, libclang, release,
+lint, and documentation tools. Run `just payload::toolchain` in the full shell
+before payload or release builds; it installs the exact Zig and cargo-zigbuild
+pins used by this checkout. These shells do not build or publish images; that
+work belongs to `mvm-images`.
 
 ```bash
 git clone https://github.com/tinylabscom/mvm.git
