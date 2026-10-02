@@ -21,7 +21,7 @@
 //! console gate consults it; if the file is missing the gate defaults
 //! to allow (`accessible: true`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use mvm_core::vm_backend::{StartMode, VmStartConfig};
@@ -122,6 +122,10 @@ fn meta_path(name: &str) -> Result<PathBuf> {
     Ok(mvm_core::config::vm_state_dir(name).join("mode.json"))
 }
 
+fn meta_path_at(home: &Path, name: &str) -> PathBuf {
+    mvm_core::config::vm_state_dir_at(home, name).join("mode.json")
+}
+
 /// Write the metadata file.
 ///
 /// Return contract — split deliberately so callers know what each
@@ -183,7 +187,17 @@ pub fn update_observability_target(name: &str, target: &VmObservabilityTarget) -
 /// best-effort failure). Errors only on malformed JSON that has
 /// neither the new nor the legacy shape.
 pub fn read(name: &str) -> Result<Option<VmRuntimeMeta>> {
-    let path = meta_path(name)?;
+    read_path(meta_path(name)?)
+}
+
+/// Read runtime metadata from an explicit MVM home rather than the ambient
+/// `MVM_HOME`. This is for callers that already own a scoped home path and
+/// must not accidentally cross into another test or tenant's state.
+pub fn read_at(home: &Path, name: &str) -> Result<Option<VmRuntimeMeta>> {
+    read_path(meta_path_at(home, name))
+}
+
+fn read_path(path: PathBuf) -> Result<Option<VmRuntimeMeta>> {
     let body = match std::fs::read_to_string(&path) {
         Ok(b) => b,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -396,6 +410,32 @@ mod tests {
     fn missing_file_returns_none() {
         with_home_temp(|_home| {
             assert!(read("never-started").expect("ok").is_none());
+        });
+    }
+
+    #[test]
+    fn explicit_home_read_ignores_ambient_mvm_home() {
+        with_home_temp(|ambient_home| {
+            let explicit_home = tempfile::tempdir().expect("explicit home");
+            let explicit_dir = explicit_home.path().join("vms").join("scoped");
+            std::fs::create_dir_all(&explicit_dir).expect("create explicit VM state");
+            std::fs::write(
+                explicit_dir.join("mode.json"),
+                "{\"mode\":\"detached\",\"accessible\":false}\n",
+            )
+            .expect("write explicit runtime metadata");
+
+            assert!(
+                read("scoped").expect("ambient read").is_none(),
+                "ambient home {} must not see explicit home {}",
+                ambient_home.display(),
+                explicit_home.path().display()
+            );
+            let meta = read_at(explicit_home.path(), "scoped")
+                .expect("explicit read")
+                .expect("explicit metadata present");
+            assert_eq!(meta.mode, StartModeKind::Detached);
+            assert!(!meta.accessible);
         });
     }
 

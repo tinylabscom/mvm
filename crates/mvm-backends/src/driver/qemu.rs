@@ -39,11 +39,21 @@ use mvm_vmm::qemu_arch::{machine_for_arch, serial_console_for_arch};
 /// the vsock bridge; the claim-10 gate and substitution live in the
 /// endpoint behind those channels, not here.
 #[derive(Clone)]
-pub struct QemuDriver;
+pub struct QemuDriver {
+    machine_type: Option<&'static str>,
+}
 
 impl QemuDriver {
     pub fn new() -> Self {
-        Self
+        Self { machine_type: None }
+    }
+
+    /// Select an explicit QEMU machine type for a target-specific dev/test
+    /// boot. Ordinary workload boots retain QEMU's architecture default.
+    #[must_use]
+    pub fn with_machine_type(mut self, machine_type: &'static str) -> Self {
+        self.machine_type = Some(machine_type);
+        self
     }
 }
 
@@ -110,8 +120,17 @@ fn qemu_boot_argv(
     cid: u32,
     kvm: bool,
     pid_file: &Path,
+    machine_type: Option<&str>,
 ) -> Vec<String> {
-    qemu_boot_argv_for_arch(spec, kernel, cid, kvm, pid_file, std::env::consts::ARCH)
+    qemu_boot_argv_for_arch(
+        spec,
+        kernel,
+        cid,
+        kvm,
+        pid_file,
+        std::env::consts::ARCH,
+        machine_type,
+    )
 }
 
 fn qemu_boot_argv_for_arch(
@@ -121,6 +140,7 @@ fn qemu_boot_argv_for_arch(
     kvm: bool,
     pid_file: &Path,
     arch: &str,
+    machine_type: Option<&str>,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec![
         "-nic".into(),
@@ -157,7 +177,7 @@ fn qemu_boot_argv_for_arch(
     let vcpus = spec.vcpus.clamp(1, u32::from(u8::MAX));
     args.push("-smp".into());
     args.push(vcpus.to_string());
-    if let Some(machine) = machine_for_arch(arch) {
+    if let Some(machine) = machine_type.or_else(|| machine_for_arch(arch)) {
         args.push("-machine".into());
         args.push(machine.into());
     }
@@ -220,10 +240,13 @@ fn qemu_boot_argv_for_arch(
     // + `-numa` pair went with them, since it existed only because
     // vhost-user-fs requires a shared memory backend whose size equals `-m`.
 
-    // virtio-vsock on the per-VM guest CID. The host reaches the guest's
-    // listeners through the AF_VSOCK↔UNIX bridge spawned after the boot.
-    args.push("-device".into());
-    args.push(format!("vhost-vsock-pci,guest-cid={cid}"));
+    // Attach virtio-vsock only when the physical recipe declares a channel.
+    // Guests with an empty channel list are intentionally unable to reach the
+    // host through vsock and must not require the host vhost-vsock device.
+    if !spec.vsock.is_empty() {
+        args.push("-device".into());
+        args.push(format!("vhost-vsock-pci,guest-cid={cid}"));
+    }
 
     args.push("-display".into());
     args.push("none".into());
@@ -444,7 +467,7 @@ impl VmmDriver for QemuDriver {
         let pid_file = state_dir.join(QEMU_PID_FILE);
         let _ = std::fs::remove_file(&pid_file);
 
-        let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file);
+        let argv = qemu_boot_argv(spec, &kernel, cid, kvm, &pid_file, self.machine_type);
         tracing::debug!(qemu_bin = %qemu_bin, argv = ?argv, "launching qemu-system");
         let status = bounded_qemu_command(&qemu_bin, &argv, spec, &state_dir)
             .status()
@@ -730,6 +753,7 @@ mod tests {
             7,
             true,
             Path::new("/state/w/qemu.pid"),
+            None,
         );
 
         assert_eq!(argvalue(&argv, "-object"), None);
@@ -819,7 +843,10 @@ mod tests {
     fn argv_maps_the_spec_verbatim_and_carries_no_nic() {
         let spec = spec_with(
             KernelImage::Path("/img/vmlinux".into()),
-            vec![],
+            vec![host_dials(
+                GuestService::MachineControl,
+                "/state/w/agent.sock",
+            )],
             vec![
                 // Out of slot order, mixed read-only policy — proves sorting
                 // and per-disk flags land in device-letter order.
@@ -838,6 +865,7 @@ mod tests {
             7,
             true,
             Path::new("/state/w/qemu.pid"),
+            None,
         );
 
         assert_eq!(argvalue(&argv, "-kernel"), Some("/img/vmlinux"));
@@ -896,6 +924,37 @@ mod tests {
     }
 
     #[test]
+    fn argv_honors_an_explicit_x86_machine_type() {
+        let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
+        let argv = qemu_boot_argv_for_arch(
+            &spec,
+            Path::new("/img/vmlinux"),
+            7,
+            true,
+            Path::new("/state/w/qemu.pid"),
+            "x86_64",
+            Some("q35"),
+        );
+
+        assert_eq!(argvalue(&argv, "-machine"), Some("q35"));
+    }
+
+    #[test]
+    fn argv_omits_vsock_device_when_spec_declares_no_channels() {
+        let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
+        let argv = qemu_boot_argv(
+            &spec,
+            Path::new("/img/vmlinux"),
+            7,
+            true,
+            Path::new("/state/w/qemu.pid"),
+            None,
+        );
+
+        assert!(!argv.iter().any(|arg| arg.contains("vhost-vsock-pci")));
+    }
+
+    #[test]
     fn argv_defaults_the_cmdline_base_by_boot_shape_and_uses_tcg_without_kvm() {
         // Empty cmdline + an initramfs (no disk root) ⇒ console-only base.
         let spec = spec_with(KernelImage::Path("/img/vmlinux".into()), vec![], vec![]);
@@ -906,6 +965,7 @@ mod tests {
             false,
             Path::new("/state/w/qemu.pid"),
             "x86_64",
+            None,
         );
         let append = argvalue(&argv, "-append").expect("append");
         assert!(append.contains("console=ttyS0"), "got: {append}");
@@ -928,6 +988,7 @@ mod tests {
             true,
             Path::new("/state/w/qemu.pid"),
             "x86_64",
+            None,
         );
         let append = argvalue(&argv, "-append").expect("append");
         assert!(append.contains("root=/dev/vda"), "got: {append}");
@@ -945,6 +1006,7 @@ mod tests {
             false,
             Path::new("/state/w/qemu.pid"),
             "aarch64",
+            None,
         );
 
         assert_eq!(argvalue(&argv, "-machine"), Some("virt"));
@@ -995,6 +1057,7 @@ mod tests {
                 true,
                 Path::new("/state/w/qemu.pid"),
                 "x86_64",
+                None,
             );
             assert_eq!(
                 argvalue(&argv, "-smp"),

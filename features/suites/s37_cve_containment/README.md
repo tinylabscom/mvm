@@ -15,69 +15,127 @@ throwaway lab host you can discard.** It never runs in CI: it is gated behind
 The guest may be compromised; the host must not be. The assertions are all
 host-side:
 
-- no outbound connection was admitted from the victim guest (audit refusals,
-  no admitted egress) — MVM-SEC-10;
+- no outbound connection was admitted from the victim guest — MVM-SEC-10;
 - the watched host files, host processes, and host listeners are unchanged —
   MVM-SEC-01;
 - a bystander sibling guest's rootfs content digest is unchanged;
 - the chain-signed audit log verifies intact (`mvmctl trust audit verify`).
 
-The guest's own compromise report is a *candidate observation*, per the
-assurance contract: the verdict comes from host evidence.
+Which evidence each assertion rests on depends on the boot mode; see below.
+
+## Boot modes (selected by the kernel pin)
+
+The public PoC is **target-specific to Ubuntu 26.04, kernel
+`7.0.0-31-generic`** — it carries offsets and symbol assumptions for that exact
+build. `pins.toml` `kernel.vmlinux_sha256` selects how the victim boots:
+
+**Pin empty — the admitted path.** The victim boots through
+`mvmctl machine run` on MVM's own workload kernel, the exploit riding in the
+admitted image. The admitted CLI has no flag to boot an arbitrary distro
+vmlinux, so the PoC runs on a kernel it does not target. The guest canary is a
+*candidate observation*: its absence says nothing about containment. The
+egress assertion rests on the audit chain (the broker records refusals; any
+`egress.admitted` line is a failure).
+
+**Pin set — the target kernel, low-level boot.** The victim boots the pinned,
+digest-verified kernel through a low-level driver (the same `VmmDriver` seam
+the warm-restore harness uses), from a staged initramfs that runs the exploit
+and reports over the serial console. The backend is selected by
+`MVM_BDD_CVE_HYPERVISOR`: `fc` (default) boots the extracted vmlinux through
+`FcDriver::boot`; `qemu` boots the distro bzImage through `QemuDriver::boot`
+(`q35`, `-cpu host`, KVM — the PoC's reference environment) and verifies it
+against the `kernel.vmlinuz_sha256` pin. Use `qemu` when the PoC was proven
+under QEMU and its timing oracles misbehave under Firecracker's CPU model.
+Either way the boot is NIC-less, agentless, and **deliberately outside admission** —
+the admitted path cannot boot an arbitrary kernel, and fencing that is what
+the destructive-lab ceiling exists for. In this mode:
+
+- **Egress evidence is the device model.** The driver attaches no NIC and the
+  boot wires no vsock egress channel, so the guest has no path off the host at
+  all — there is no broker to record a refusal because there is nothing to
+  broker. The audit classification still runs: an `egress.admitted` line
+  during the detonation is a failure regardless of boot mode.
+- **The audit-chain assertion covers chain integrity, not admission.** The
+  victim's boot writes no admission record; `trust audit verify` proves the
+  host's audit chain itself survived the detonation intact.
+- **Host-surface, sibling-digest, and teardown assertions are unchanged.**
+  They are host-side observations and bind both modes identically.
+- **The guest canary becomes load-bearing.** The initramfs prints the booted
+  kernel's `uname -r` (checked against the pinned target), runs the binary as
+  `/payload` (the pathname its reviewed usermode helper searches), and prints
+  its exit code. The initramfs supplies only the BusyBox applets that helper
+  needs. A compromise is accepted only from the pinned PoC's complete native
+  `CONTAINER_ESCAPE_SUCCESS uid=0 host=... docker=yes|no` line. Booting the
+  exact target kernel without that report **fails the scenario** — a witnessed
+  non-compromise on the vulnerable kernel means the delivery broke or the
+  wrong kernel was staged, and the containment assertions measured nothing.
 
 ## Pins
 
 `pins.toml` records the exploit source (by commit + tarball sha256), the
-proof-of-concept subdirectory, the target kernel identity, and the digests of
-the two staged artifacts (the built exploit binary and the bootable vmlinux).
-Nothing is vendored; the staging script fetches by digest at scenario time.
+proof-of-concept subdirectory, the target kernel package URL and sha256, and
+the digests of every boot input: the built exploit binary, both kernel boot
+formats, and the detonation initramfs. Nothing is vendored; the staging script
+fetches by digest at scenario time. The initramfs is load-bearing evidence
+machinery because it controls PID 1 and the serial console, so the scenario
+verifies its digest before accepting any guest report.
 
 ## Staging the lab
 
+For the repeatable disposable-cloud path, the following command creates an
+Intel `c3-standard-4` Spot VM with nested KVM, uploads the current checkout,
+stages and runs this scenario, downloads an evidence bundle under `/tmp`, and
+deletes the outer VM even when the witness fails:
+
+```sh
+just lab::cve-3655-gcp
+```
+
+It uses the active `gcloud` account and project. `--project`, `--zone`,
+`--machine-type`, `--evidence-dir`, `--dry-run`, and the diagnostic-only
+`--keep-instance` override are available after the recipe name. Cloud
+credentials never enter the repository or instance: the VM has no Google
+service account or OAuth scopes and blocks project-wide SSH keys. A kept
+instance remains billable; ordinary runs always delete it.
+
+For a manually supplied KVM host, stage the artifacts directly:
+
 ```sh
 # Fetches the pinned exploit source, verifies its tarball digest, and builds
-# the guest-delivered artifact. Prints the artifact sha256 to record in
-# pins.toml `exploit.artifact_sha256`, and the paths to export below.
+# the guest-delivered artifact. Then fetches the target kernel's linux-image
+# .deb from the reviewed URL in pins.toml (verified against its independently
+# pinned sha256), extracts a bootable vmlinux with
+# scripts/extract-vmlinux, and packs the detonation initramfs. Prints the
+# digests to record in pins.toml and the paths to export below.
 scripts/stage-cve-2026-80521-lab.sh
 ```
 
 Then run only this scenario:
 
 ```sh
+lab_dir="${MVM_CVE_LAB_DIR:-${TMPDIR:-/tmp}/mvm-cve-2026-80521-lab}"
 MVM_BDD_LIVE=1 \
 MVM_BDD_DESTRUCTIVE_LAB=1 \
-MVM_BDD_CVE_EXPLOIT=/path/to/staged/exploit-image \
+MVM_BDD_CVE_EXPLOIT="$lab_dir/src/pocs/CVE-2026-80521/poc" \
+MVM_BDD_CVE_KERNEL="$lab_dir/vmlinux" \
+MVM_BDD_CVE_INITRAMFS="$lab_dir/detonation-initramfs.cpio.gz" \
 MVM_BDD_ONLY_TAG=destructive_lab_only \
-just bdd
+just bdd::run
 ```
 
 `MVM_BDD_CVE_EXPLOIT` names the admitted image (OCI reference or local image
 path) carrying the pinned exploit; it is re-verified against `pins.toml`
 `exploit.artifact_sha256` before delivery, and the scenario fails fast with the
 staging instructions when it is unset rather than running a half-set-up
-detonation. `MVM_BDD_CVE_KERNEL` is optional transcript context (which kernel
-the operator intended) — see the limit below.
+detonation.
 
-## Known limit (2026-09-24)
+`MVM_BDD_CVE_KERNEL` and `MVM_BDD_CVE_INITRAMFS` are required exactly when
+`kernel.vmlinux_sha256` is pinned: both files are digest-verified against their
+reviewed pins before boot, and either variable missing fails fast with the
+staging instructions. With the kernel pin empty they are ignored.
 
-The public PoC is **target-specific to Ubuntu 26.04, kernel
-`7.0.0-31-generic`** — it carries offsets and symbol assumptions for that exact
-build. Two facts limit a *successful* in-guest pop here:
+## Staging script environment
 
-1. The admitted `mvmctl machine run` path boots MVM's own workload kernel (or a
-   registered `--kernel-pin` PIN); it has no flag to boot an arbitrary distro
-   `vmlinux`. Booting the exact target kernel is only reachable through the
-   low-level runtime path (`MVM_LIVE_KERNEL`, as the warm-restore harness uses),
-   not through admission.
-2. MVM's Firecracker path boots an uncompressed `vmlinux`, not a distro
-   `vmlinuz`, so producing a bootable copy of the target kernel is itself an
-   operator step this suite gates behind `kernel.vmlinux_sha256`.
-
-Until the target kernel is staged and booted through the low-level path, the
-scenario witnesses containment against the exploit as delivered and executed
-in-guest on MVM's kernel (a candidate "did not escalate on this kernel"
-observation) while the host-boundary assertions hold; it does not yet witness a
-*successful* in-guest kernel compromise. Adapting the PoC's offsets to a
-different kernel is exploit development and is deliberately out of scope for
-this harness. See the PR and `specs/sprint/delivery/3655-*.md` for the live
-evidence and the exact state.
+- `MVM_CVE_LAB_DIR` — staging workdir (default `$TMPDIR/mvm-cve-2026-80521-lab`).
+The exact kernel package URL and digest are reviewable fields in `pins.toml`;
+the staging environment cannot override them.

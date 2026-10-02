@@ -232,6 +232,10 @@ pub struct CliWorld {
     /// The victim launch's captured output — the guest-side compromise canary
     /// (a candidate observation) plus the CLI's diagnostics.
     pub cve_victim_launch: Option<LaunchRecord>,
+    /// How the victim guest booted (admitted path vs. pinned target kernel on
+    /// the low-level driver), so the assertion steps know which evidence basis
+    /// and witness contract apply.
+    pub cve_victim_boot: Option<mvm_conformance::containment::VictimBoot>,
     /// Hermetic command search path whose encryption probes report that the
     /// scenario-local mount cache is backed by encrypted storage.
     pub encrypted_volume_probe_path: Option<std::ffi::OsString>,

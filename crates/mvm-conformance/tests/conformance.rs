@@ -52,6 +52,18 @@ async fn main() {
     // the report.
     let writer = CliWorld::cucumber()
         .max_concurrent_scenarios(1)
+        .after(|_, _, scenario, _, world| {
+            Box::pin(async move {
+                if scenario
+                    .tags
+                    .iter()
+                    .any(|tag| tag == "destructive_lab_only")
+                    && let Some(world) = world
+                {
+                    steps::cve_containment::cleanup_after_scenario(world);
+                }
+            })
+        })
         .filter_run(features_dir(), should_run)
         .await;
 

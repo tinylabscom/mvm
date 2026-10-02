@@ -21,6 +21,7 @@ mod site 'just/site/mod.just'
 mod maint 'just/maint/mod.just'
 mod audit 'just/audit/mod.just'
 mod mem 'just/mem/mod.just'
+mod lab 'just/lab/mod.just'
 
 # Default recipe - show help
 default:
