@@ -7,8 +7,8 @@
 //! - a **name** — looked up in the user's policy directory
 //!   (`mvm_core::config::policy_profiles_dir` / `policy_groups_dir`) and then
 //!   among the built-ins;
-//! - a **pack** — `namespace/name[@version]`, reserved for signed packs and
-//!   refused until they exist.
+//! - a **pack** — `namespace/name[@version]`, resolved from an installed,
+//!   pinned, publisher-verified signed pack.
 
 use std::path::{Path, PathBuf};
 
@@ -65,7 +65,7 @@ pub enum LayerOrigin {
     /// Reached from a project's `mvm.toml` `[policy]` table: repository
     /// content, not the operator's own authoring.
     Project,
-    /// A signed pack profile. Reserved: pack references are refused today.
+    /// A signed pack profile.
     Pack,
 }
 
@@ -269,7 +269,7 @@ impl PolicyStore {
     ///
     /// # Errors
     ///
-    /// A pack reference, an unknown name, or a file that does not parse.
+    /// An unverified pack, an unknown name, or a file that does not parse.
     pub fn load_profile(
         &self,
         reference: &PolicyRef,
@@ -291,7 +291,7 @@ impl PolicyStore {
     ///
     /// # Errors
     ///
-    /// A pack reference, an unknown name, or a file that does not parse.
+    /// An unverified pack, an unknown name, or a file that does not parse.
     pub fn load_group(
         &self,
         reference: &PolicyRef,
@@ -401,6 +401,12 @@ impl PolicyStore {
                 })
             }
             PolicyRef::Path(path) => {
+                if path_origin == LayerOrigin::Pack {
+                    return Err(PolicyError::new(
+                        referrer,
+                        "a signed pack cannot follow a filesystem policy path; use a built-in or an explicit signed pack reference",
+                    ));
+                }
                 let path = match base {
                     Some(base) if path.is_relative() => base.join(path),
                     _ => path.clone(),
@@ -424,6 +430,14 @@ impl PolicyStore {
                     .map(|ext| kind.dir(self).join(format!("{name}.{ext}")))
                     .find(|path| path.is_file());
                 if let Some(user_file) = user_file {
+                    if path_origin == LayerOrigin::Pack {
+                        return Err(PolicyError::new(
+                            referrer,
+                            format!(
+                                "a signed pack cannot load user policy `{name}`; use a built-in or an explicit signed pack reference"
+                            ),
+                        ));
+                    }
                     let doc = read_doc(&user_file, kind, referrer)?;
                     return Ok(Loaded {
                         doc,
@@ -773,5 +787,61 @@ mod tests {
             .unwrap();
         assert_eq!(loaded.origin, LayerOrigin::Project);
         assert_eq!(loaded.doc.description.as_deref(), Some("base"));
+    }
+
+    #[test]
+    fn a_pack_cannot_follow_a_relative_or_absolute_policy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("outside.toml");
+        std::fs::write(&file, "description = \"outside\"\n").unwrap();
+        let store = PolicyStore::at(dir.path());
+        for reference in [
+            PolicyRef::Path(PathBuf::from("./outside.toml")),
+            PolicyRef::Path(file.clone()),
+        ] {
+            let err = store
+                .load_profile(
+                    &reference,
+                    Some(dir.path()),
+                    LayerOrigin::Pack,
+                    "pack profile",
+                )
+                .unwrap_err();
+            assert!(err.message.contains("signed pack"), "{err}");
+        }
+        let loaded = store
+            .load_profile(&PolicyRef::Path(file), None, LayerOrigin::User, "--policy")
+            .unwrap();
+        assert_eq!(loaded.doc.description.as_deref(), Some("outside"));
+    }
+
+    #[test]
+    fn a_pack_cannot_resolve_a_user_policy_name_but_can_use_a_builtin() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PolicyStore::at(dir.path());
+        std::fs::create_dir_all(store.profiles_dir()).unwrap();
+        std::fs::write(
+            store.profiles_dir().join("outside.toml"),
+            "description = \"outside\"\n",
+        )
+        .unwrap();
+        let err = store
+            .load_profile(
+                &PolicyRef::Name("outside".into()),
+                None,
+                LayerOrigin::Pack,
+                "pack profile",
+            )
+            .unwrap_err();
+        assert!(err.message.contains("signed pack"), "{err}");
+        let builtin = store
+            .load_profile(
+                &PolicyRef::Name("default".into()),
+                None,
+                LayerOrigin::Pack,
+                "pack profile",
+            )
+            .unwrap();
+        assert_eq!(builtin.origin, LayerOrigin::Builtin);
     }
 }
