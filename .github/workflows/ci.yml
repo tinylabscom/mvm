@@ -215,6 +215,8 @@ jobs:
                      scripts/run-cve-2026-80521-gcp.sh \
                      scripts/run-cve-2026-80521-gcp-remote.sh \
                      scripts/run-cve-2026-80521-gcp.test.sh \
+                     scripts/check-hvf-oci-allow-host-smoke.sh \
+                     scripts/test-hvf-oci-allow-host-smoke.sh \
                      scripts/installer-compat/*.sh \
                      scripts/smoke-fresh-install.sh \
                      scripts/pin-installer-default.sh \
@@ -228,6 +230,8 @@ jobs:
         run: |
           bash scripts/run-gcp-kvm-test.test.sh
           bash scripts/run-cve-2026-80521-gcp.test.sh
+      - name: HVF OCI smoke harness tests
+        run: bash scripts/test-hvf-oci-allow-host-smoke.sh
 
       # The hook narrows clippy to the packages owning the staged files. When
       # it picked a package cargo cannot address with `-p`, it reported that as

@@ -7,10 +7,8 @@ set working-directory := "../.."
 workload:
     cargo run -- kernel build --which workload
 
-# Live macOS Apple-Silicon HVF proof for OCI --allow-host:
-#  1. exact `machine run --image ... --allow-host ... -- ps aux` path
-
-# 2. admit/deny relay proof over the host-vsock egress endpoint
+# Live Apple-Silicon HVF proof of NIC-less guest runtime and production
+# FlowMux HTTPS admit/deny behavior for OCI --allow-host.
 hvf-oci-smoke:
     bash scripts/check-hvf-oci-allow-host-smoke.sh
 

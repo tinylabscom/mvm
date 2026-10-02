@@ -316,8 +316,13 @@ When the helper path is available and you want a live runtime proof, run:
 just kernel::hvf-oci-smoke
 ```
 
-The script captures both the exact `machine run --image ... --allow-host ...`
-command and a second admit/deny relay proof under `/tmp/`.
+The script runs one Python OCI workload through the production FlowMux path,
+checks that it has no NIC or TUN device and that the guest egress client is
+running, then tests allowed and denied HTTPS destinations. Evidence is
+written under `/tmp/`; the script reuses `MVM_HOME` and honors
+`CARGO_TARGET_DIR` from `scripts/dev-env.sh`. A cold source checkout must compile the verifier-enabled
+CLI and host helpers before the short VM boot, so the first run can take much
+longer than later cached runs.
 
 ### `machine run --image X -- /bin/sh` exits immediately with no shell
 
