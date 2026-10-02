@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_ci_does_not_repeat_the_workspace_or_upload_target_caches() {
+    fn pull_request_ci_runs_the_required_matrix_without_redundant_caches() {
         let workflow = ci_workflow();
         assert!(
             job_body(&workflow, "lint").is_none(),
@@ -757,12 +757,9 @@ mod tests {
             test.contains("name: PR admission smoke")
                 && test.contains("cargo fmt -- --check")
                 && test.contains("cargo metadata --locked --format-version 1 --no-deps")
-                && test.contains("Require PR preflight and skip queue-only lanes"),
-            "pull requests must publish the required context after bounded preflight"
+                && test.contains("name: Require every validation lane to pass"),
+            "pull requests must publish the required context after the full validation matrix"
         );
-        assert!(test.contains(
-            "- name: Require every merge-group test lane to pass\n        if: github.event_name != 'pull_request'"
-        ));
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
              lint-features-test-support, lint-features-embed, pr-regressions, \
@@ -785,9 +782,9 @@ mod tests {
             );
         }
 
-        // Full compilation and tests run once, against the integrated
-        // merge-group commit. A missing event guard silently doubles the
-        // repository's dominant CI cost on every pull-request update.
+        // Deterministic failures must be exposed before queue admission. The
+        // merge group repeats these lanes against the exact integration commit;
+        // Nix and published-image boot remain integration-only below.
         for lane in [
             "lint-core",
             "lint-features",
@@ -800,9 +797,11 @@ mod tests {
             "test-linux",
             "test-ebpf-telemetry",
         ] {
+            let block = job_block(&workflow, lane);
             assert!(
-                job_block(&workflow, lane).contains("github.event_name != 'pull_request'"),
-                "{lane} must not repeat expensive validation on the pull-request commit"
+                block.contains("if: needs.scope.outputs.code == 'true'")
+                    && !block.contains("github.event_name != 'pull_request'"),
+                "{lane} must validate code pull requests before queue admission"
             );
         }
 
@@ -899,12 +898,11 @@ mod tests {
             bdd_workflow.contains("just bdd"),
             "bdd-conformance must still run the Gherkin suite"
         );
-        // ...and it has to be reachable on every integrated code run the Linux
-        // lane covers. Pull requests deliberately stop at admission checks.
+        // ...and it has to be reachable on every code run the Linux lane
+        // covers, including pull requests before queue admission.
         assert!(
-            job_block(&workflow, "bdd-conformance").contains(
-                "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
-            ),
+            job_block(&workflow, "bdd-conformance")
+                .contains("if: needs.scope.outputs.code == 'true'"),
             "bdd-conformance must carry the broad code scope"
         );
     }
@@ -928,6 +926,7 @@ mod tests {
             "nix=true",
             "architecture=true",
             "just/",
+            "third_party/",
             "\\.githooks/",
             "uninstall\\.sh",
         ] {
@@ -953,10 +952,8 @@ mod tests {
                 "{job} must depend on CI scope"
             );
             assert!(
-                block.contains(
-                    "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
-                ),
-                "{job} must skip expensive Rust work for non-code diffs"
+                block.contains("if: needs.scope.outputs.code == 'true'"),
+                "{job} must run for code changes and skip non-code diffs on every event"
             );
         }
         // `cargo install --locked` pins the installed crate's own dependencies
@@ -1526,6 +1523,7 @@ mod tests {
         ));
         assert!(warm.contains("primary-key: nix-${{ hashFiles("));
         assert!(warm.contains("'crates/**/*.rs'"));
+        assert!(warm.contains("'third_party/**'"));
         assert!(warm.contains("--out-link \"$RUNNER_TEMP/nix-cache-warm\""));
         assert!(warm.contains("Build Nix outputs to populate the binary cache"));
         assert!(warm.contains("save: \"true\""));

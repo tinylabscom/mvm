@@ -72,14 +72,15 @@ and then on the integrated merge-group commit.
       every merge. It remains in `ci-full.yml` (nightly + manual dispatch) so
       the path is still exercised, and the structural tests assert it no longer
       blocks the `Test` aggregate.
-- [x] Make pull requests publish the stable `Lint` and `Test` contexts through
-      compile-free admission checks, and run the expensive matrix only against
-      the integrated merge-group commit. Structural tests pin every expensive
-      lane to that event boundary.
-- [x] Keep two speculative entries building. A one-entry experiment reduced
-      runner admission delay but serialized a nine-PR backlog; GitHub validates
-      entries independently, so the minimum merge count does not amortize one
-      CI run across the batch.
+- [x] Trial compile-free pull-request admission with the expensive matrix only
+      on the integrated merge-group commit. Reverted after deterministic policy
+      and BDD failures repeatedly reached the queue and contaminated entries
+      behind them; code PRs now run the complete deterministic matrix before
+      admission and the merge group remains the final integration witness.
+- [x] Trial two speculative entries building. Returned to one during reliability
+      stabilization: GitHub may build later entries on cumulative speculative
+      heads, so a failure in front can still make unrelated entries appear red.
+      Reconsider width only from measured clean-queue rebuild and wait data.
 - [x] Move the documented live BDD lifecycle to nightly Extended CI after live
       queue runs spent 27-40 minutes inside it. Keep hermetic BDD and the
       bounded locked-image boot witness in the merge gate.
@@ -92,13 +93,18 @@ and then on the integrated merge-group commit.
       merge refs; only the trusted main warmer writes a reusable cache.
 - [x] Add a bounded PR preflight: run the real policy/invariant lane before
       queue admission, ShellCheck changed scripts, and execute the embedded
-      helper recipe regression. The full cumulative matrix remains authoritative
-      in the merge queue.
+      helper recipe regression. The focused checks remain alongside the restored
+      full PR matrix, and the merge-group matrix remains authoritative for the
+      exact integration commit.
+- [x] Require the stable `Test` context against current `main`, build one queue
+      entry at a time, and merge one PR per group while the queue is stabilized.
+      Keep all required and recommended verification; optimize lane internals,
+      cache reuse, and runner admission rather than deleting coverage.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
-- [ ] Land the workflow change through the merge queue. The live queue policy
-      has been read back as `HEADGREEN`, two entries building, two-to-five
-      entries per merge, and a five-minute minimum-entry wait.
+- [ ] Land the workflow change through the merge queue. The live stabilization
+      policy has been read back as `HEADGREEN`, one entry building, one entry
+      per merge, no minimum-entry wait, and strict required checks.
 - [ ] Record post-change PR and merge-group timings after this ordering change
       lands; compare p50/p90 wall time, scope admission, and total
       runner-minutes against the 2026-09-29 sample above.

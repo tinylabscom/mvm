@@ -84,7 +84,7 @@ jobs:
       - name: Restore and publish the trusted Nix store cache
         uses: nix-community/cache-nix-action@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
-          primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
+          primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'third_party/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
           restore-prefixes-first-match: nix-
           gc-max-store-size: 2G
 

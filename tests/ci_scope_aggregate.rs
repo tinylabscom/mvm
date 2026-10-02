@@ -2,10 +2,9 @@
 //!
 //! CI is scope-reduced: the `scope` job classifies changed paths, lanes skip
 //! when out of scope, and this aggregate asserts each lane's result *matches*
-//! its scope. That arithmetic has a blind spot the lane itself cannot see —
-//! a PR only exercises the one scope combination its own changed paths
-//! produce. A change that breaks the gate for out-of-scope PRs therefore
-//! passes on the PR that makes it, and fails on everyone else's.
+//! its scope. Pull requests and merge groups share the deterministic matrix;
+//! only integration checks such as Nix and published-image boot differ by
+//! event.
 //!
 //! That is not hypothetical. A lane that lost its job-level `if:` once
 //! reported `success` on every run, while the aggregate still required
@@ -62,14 +61,7 @@ fn step_script(step_name: &str, sentinel: &str) -> String {
 }
 
 fn aggregate_script() -> String {
-    step_script("Require every merge-group test lane to pass", "NIX_RESULT")
-}
-
-fn pr_aggregate_script() -> String {
-    step_script(
-        "Require PR preflight and skip queue-only lanes",
-        "PREFLIGHT_RESULT",
-    )
+    step_script("Require every validation lane to pass", "NIX_RESULT")
 }
 
 /// One `needs.*.result` / scope combination fed to the aggregate.
@@ -77,6 +69,8 @@ struct Verdict {
     event_name: &'static str,
     scope_result: &'static str,
     code: &'static str,
+    policy: &'static str,
+    preflight: &'static str,
     lanes: &'static str,
     /// Kept separate from `lanes` even though it now shares their scope, so
     /// "the BDD lane skipped while in scope" stays expressible on its own.
@@ -92,6 +86,8 @@ impl Verdict {
             event_name: "pull_request",
             scope_result: "success",
             code: "true",
+            policy: "success",
+            preflight: "success",
             lanes: "success",
             bdd: "success",
             boot: "skipped",
@@ -105,6 +101,8 @@ impl Verdict {
             event_name: "pull_request",
             scope_result: "success",
             code: "false",
+            policy: "success",
+            preflight: "skipped",
             lanes: "skipped",
             bdd: "skipped",
             boot: "skipped",
@@ -117,6 +115,7 @@ impl Verdict {
     fn queue_in_scope() -> Self {
         Self {
             event_name: "merge_group",
+            preflight: "skipped",
             boot: "success",
             nix: "success",
             ..Self::in_scope()
@@ -127,6 +126,7 @@ impl Verdict {
     fn queue_out_of_scope() -> Self {
         Self {
             event_name: "merge_group",
+            preflight: "skipped",
             nix: "success",
             ..Self::out_of_scope()
         }
@@ -140,9 +140,9 @@ impl Verdict {
             .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
-            .env("PREFLIGHT_RESULT", "skipped")
+            .env("PREFLIGHT_RESULT", self.preflight)
             .env("CORE_RESULT", self.lanes)
-            .env("POLICY_RESULT", "success")
+            .env("POLICY_RESULT", self.policy)
             .env("FEATURES_RESULT", self.lanes)
             .env("FEATURES_SUPPORT_RESULT", self.lanes)
             .env("FEATURES_EMBED_RESULT", self.lanes)
@@ -162,52 +162,6 @@ impl Verdict {
             .spawn()
             .expect("failed to spawn bash");
         child.wait().expect("bash did not exit").success()
-    }
-}
-
-fn pr_accepts(code: &str, policy: &str, preflight: &str, queue_lane: &str) -> bool {
-    let mut child = Command::new("bash")
-        .arg("-c")
-        .arg(pr_aggregate_script())
-        .env("SCOPE_CODE", code)
-        .env("POLICY_RESULT", policy)
-        .env("PREFLIGHT_RESULT", preflight)
-        .env("CORE_RESULT", queue_lane)
-        .env("FEATURES_RESULT", queue_lane)
-        .env("FEATURES_SUPPORT_RESULT", queue_lane)
-        .env("FEATURES_EMBED_RESULT", queue_lane)
-        .env("WORKSPACE_RESULT", queue_lane)
-        .env("WORKSPACE_AARCH64_RESULT", queue_lane)
-        .env("LINUX_RESULT", queue_lane)
-        .env("RELEASE_WITNESS_RESULT", queue_lane)
-        .env("EBPF_RESULT", queue_lane)
-        .env("BDD_RESULT", queue_lane)
-        .env("BOOT_RESULT", queue_lane)
-        .env("NIX_RESULT", queue_lane)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("failed to spawn PR aggregate");
-    child.wait().expect("PR aggregate did not exit").success()
-}
-
-#[test]
-fn pr_preflight_admits_only_the_expected_scope_shape() {
-    assert!(pr_accepts("true", "success", "success", "skipped"));
-    assert!(pr_accepts("false", "success", "skipped", "skipped"));
-}
-
-#[test]
-fn pr_preflight_fails_closed_on_policy_preflight_or_queue_lane_drift() {
-    for policy in ["failure", "cancelled", "skipped"] {
-        assert!(!pr_accepts("true", policy, "success", "skipped"));
-    }
-    for preflight in ["failure", "cancelled", "skipped"] {
-        assert!(!pr_accepts("true", "success", preflight, "skipped"));
-    }
-    assert!(!pr_accepts("false", "success", "success", "skipped"));
-    for queue_lane in ["success", "failure", "cancelled"] {
-        assert!(!pr_accepts("true", "success", "success", queue_lane));
     }
 }
 
@@ -235,7 +189,7 @@ fn a_fully_in_scope_green_run_is_admitted() {
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 9] = [
+    let cases: [(&str, Verdict); 11] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -272,6 +226,20 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             "the scope job itself failing",
             Verdict {
                 scope_result: "failure",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a failing policy lane",
+            Verdict {
+                policy: "failure",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a failing PR preflight",
+            Verdict {
+                preflight: "failure",
                 ..Verdict::in_scope()
             },
         ),
