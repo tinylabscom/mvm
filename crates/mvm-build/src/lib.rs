@@ -28,6 +28,9 @@ mod builder_host_binaries;
 /// The mvm sources a builder image's evaluation reads, shared by the Stage 0
 /// fingerprint and the local image cache key.
 pub mod builder_image_inputs;
+/// One flake build through a builder VM, as a request and a result, for a
+/// caller that wants the artifacts where it asked for them.
+pub mod builder_orchestrator;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
 /// attested-builder-pack path whose verify/materialize half lives in
