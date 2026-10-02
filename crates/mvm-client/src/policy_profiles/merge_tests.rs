@@ -315,15 +315,25 @@ fn a_denylisted_variable_needs_a_user_authored_readmit() {
 }
 
 #[test]
-fn an_escape_hatch_is_refused_outside_user_authored_layers() {
+fn an_escape_hatch_outside_user_authored_layers_is_stripped_with_a_note() {
     for origin in [
         LayerOrigin::Project,
         LayerOrigin::Pack,
         LayerOrigin::Builtin,
     ] {
-        let err = refused(&[layer("x", origin, "[env]\nreadmit = [\"LD_PRELOAD\"]\n")]);
-        assert_eq!(err.key.as_deref(), Some("env.readmit"));
-        assert!(err.message.contains("escape hatch"), "{origin:?}: {err}");
+        let resolved = merged(&[layer("x", origin, "[env]\nreadmit = [\"LD_PRELOAD\"]\n")]);
+        assert!(
+            resolved.policy.env.readmit.is_empty(),
+            "{origin:?}: the hatch must not take effect"
+        );
+        assert!(
+            resolved
+                .notes
+                .iter()
+                .any(|note| note.contains("env.readmit") && note.contains("escape hatch")),
+            "{origin:?}: the strip is recorded: {:?}",
+            resolved.notes
+        );
     }
 }
 

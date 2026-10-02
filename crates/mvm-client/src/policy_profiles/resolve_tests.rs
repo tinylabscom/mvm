@@ -516,7 +516,7 @@ fn a_project_table_resolves_its_profile_and_groups_as_project_layers() {
 }
 
 #[test]
-fn a_project_cannot_use_an_escape_hatch() {
+fn a_project_escape_hatch_is_stripped_not_honoured() {
     let dir = Dir::new();
     let dir_project = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -533,8 +533,19 @@ fn a_project_cannot_use_an_escape_hatch() {
             allow_hosts: Vec::new(),
         }),
     };
-    let err = resolve(&dir.store, &selection, Platform::default()).unwrap_err();
-    assert_eq!(err.key.as_deref(), Some("env.readmit"));
+    let resolved = resolve(&dir.store, &selection, Platform::default()).unwrap();
+    assert!(
+        resolved.policy.env.readmit.is_empty(),
+        "the project layer cannot re-admit a denied variable"
+    );
+    assert!(
+        resolved
+            .notes
+            .iter()
+            .any(|note| note.contains("env.readmit")),
+        "the strip is recorded: {:?}",
+        resolved.notes
+    );
 }
 
 #[test]
