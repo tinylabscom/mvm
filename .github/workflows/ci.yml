@@ -209,17 +209,14 @@ jobs:
                      scripts/dev-run-guard.test.sh \
                      scripts/cargo-target-dir-guard.sh \
                      scripts/cargo-target-dir-guard.test.sh \
-<<<<<<< HEAD
                      scripts/run-gcp-kvm-test.sh \
                      scripts/run-gcp-kvm-test-remote.sh \
                      scripts/run-gcp-kvm-test.test.sh \
                      scripts/run-cve-2026-80521-gcp.sh \
                      scripts/run-cve-2026-80521-gcp-remote.sh \
                      scripts/run-cve-2026-80521-gcp.test.sh \
-=======
                      scripts/check-hvf-oci-allow-host-smoke.sh \
                      scripts/test-hvf-oci-allow-host-smoke.sh \
->>>>>>> a6dde381b0 (fix(hvf): restore OCI vsock egress smoke)
                      scripts/installer-compat/*.sh \
                      scripts/smoke-fresh-install.sh \
                      scripts/pin-installer-default.sh \
