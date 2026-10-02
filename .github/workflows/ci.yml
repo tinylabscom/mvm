@@ -1,9 +1,10 @@
 name: CI
 
 on:
-  # Pull requests run compile-free admission checks under the stable aggregate
-  # contexts required by branch protection. The merge queue runs the expensive
-  # lint/test matrix once, against the integrated commit, plus Nix evaluation.
+  # Pull requests run the same deterministic lint/test matrix that the merge
+  # queue runs. A PR must expose its own failures before admission; deferring
+  # them to the queue makes one bad entry poison every cumulative commit behind
+  # it. The queue adds integration-only Nix and published-image checks.
   # Expensive platform, live-VM, OCI ratification, security, Windows, and
   # release artifact jobs live in release/manual workflows.
   pull_request:
@@ -28,10 +29,8 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  # Classify each pull request, or the cumulative merge-group head against its
-  # target branch, once. Pull requests use the result for a cheap admission
-  # gate; expensive compilation and tests run only for the integrated
-  # merge-group commit. Keeping classification in one fail-closed job prevents
+  # Classify each pull request, or the merge-group head against its target
+  # branch, once. Keeping classification in one fail-closed job prevents
   # lane-specific path filters drifting.
   scope:
     name: CI scope
@@ -179,7 +178,7 @@ jobs:
   lint-core:
     name: Lint core (fmt + clippy)
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -501,7 +500,7 @@ jobs:
   lint-features:
     name: Lint feature coverage
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -610,7 +609,7 @@ jobs:
   lint-features-test-support:
     name: Lint feature coverage (test-support)
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -672,7 +671,7 @@ jobs:
   lint-features-embed:
     name: Lint feature coverage (embed-host-bins)
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -795,7 +794,7 @@ jobs:
   bdd-conformance:
     name: BDD conformance
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     uses: ./.github/workflows/bdd.yml
 
   test:
@@ -817,9 +816,8 @@ jobs:
       - uses: actions/checkout@v6
         if: github.event_name == 'pull_request'
 
-      # This catches a broken workspace manifest and lockfile without compiling
-      # the workspace a second time. Full tests run against the merge-group
-      # commit, which is the commit GitHub will actually merge.
+      # Keep these cheap admission checks explicit even though the full matrix
+      # below also runs on pull requests.
       - name: PR admission smoke
         if: github.event_name == 'pull_request'
         run: |
@@ -829,47 +827,7 @@ jobs:
           bash scripts/cargo-target-dir-guard.test.sh
           bash scripts/dev-run-guard.test.sh
 
-      - name: Require PR preflight and skip queue-only lanes
-        if: github.event_name == 'pull_request'
-        env:
-          SCOPE_CODE: ${{ needs.scope.outputs.code }}
-          CORE_RESULT: ${{ needs.lint-core.result }}
-          POLICY_RESULT: ${{ needs.lint-policy.result }}
-          FEATURES_RESULT: ${{ needs.lint-features.result }}
-          FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
-          FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
-          PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
-          WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
-          WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
-          LINUX_RESULT: ${{ needs.test-linux.result }}
-          RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
-          EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
-          BDD_RESULT: ${{ needs.bdd-conformance.result }}
-          BOOT_RESULT: ${{ needs.boot-latency.result }}
-          NIX_RESULT: ${{ needs.nix-flake-check.result }}
-        run: |
-          set -euo pipefail
-          if [ "$POLICY_RESULT" != success ]; then
-            echo "PR policy preflight did not pass: $POLICY_RESULT"
-            exit 1
-          fi
-          case "$SCOPE_CODE:$PREFLIGHT_RESULT" in
-            true:success|false:skipped) ;;
-            *) echo "PR focused regressions did not match code scope $SCOPE_CODE: $PREFLIGHT_RESULT"; exit 1 ;;
-          esac
-          for result in "$CORE_RESULT" "$FEATURES_RESULT" \
-            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
-            "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" \
-            "$LINUX_RESULT" "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" \
-            "$BDD_RESULT" "$BOOT_RESULT" "$NIX_RESULT"; do
-            if [ "$result" != skipped ]; then
-              echo "Expensive test lane unexpectedly ran on a pull request: $result"
-              exit 1
-            fi
-          done
-
-      - name: Require every merge-group test lane to pass
-        if: github.event_name != 'pull_request'
+      - name: Require every validation lane to pass
         env:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
@@ -903,8 +861,13 @@ jobs:
             echo "Policy lint did not pass: $POLICY_RESULT"
             exit 1
           fi
-          if [ "$PREFLIGHT_RESULT" != skipped ]; then
-            echo "PR-only focused regressions unexpectedly ran for $EVENT_NAME: $PREFLIGHT_RESULT"
+          case "$EVENT_NAME:$SCOPE_CODE" in
+            pull_request:true) preflight_required=success ;;
+            pull_request:false|merge_group:*|workflow_dispatch:*) preflight_required=skipped ;;
+            *) echo "Invalid preflight scope: event=$EVENT_NAME code=$SCOPE_CODE"; exit 1 ;;
+          esac
+          if [ "$PREFLIGHT_RESULT" != "$preflight_required" ]; then
+            echo "PR focused regressions did not match event/scope $EVENT_NAME/$SCOPE_CODE: $PREFLIGHT_RESULT"
             exit 1
           fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
@@ -938,7 +901,7 @@ jobs:
   test-workspace:
     name: Test workspace
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1010,7 +973,7 @@ jobs:
   test-workspace-aarch64:
     name: Test workspace (aarch64)
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     # The only lane that executes mvm's aarch64 code paths. Everything else in
     # this workflow runs on x86_64, so arch-gated code compiles here for the
     # first time and its tests run for the first time. The sharpest example is
@@ -1092,7 +1055,7 @@ jobs:
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1138,7 +1101,7 @@ jobs:
   test-linux:
     name: Test Linux and conformance
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1174,7 +1137,7 @@ jobs:
   test-ebpf-telemetry:
     name: Test eBPF telemetry load/attach
     needs: [scope]
-    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
