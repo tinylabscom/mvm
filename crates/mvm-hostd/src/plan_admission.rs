@@ -1860,17 +1860,9 @@ pub fn apply_admitted_grants_or_undo_launch(
 /// Record what this boot committed against the host budget, rolling the
 /// launch back when the record cannot be written.
 ///
-/// Every later admission measures the host's committed total from these
-/// per-VM records, so a machine running without one is invisible to the
-/// budget check — and an undercounted host is precisely the state the budget
-/// exists to prevent. This is therefore fatal and stops the VM exactly like
-/// an unapplied grant does, rather than leaving a run whose only record
-/// says it was bounded when the host's accounting never saw it.
-///
-/// `vm_name` is the name the charge is filed under; `vm_id` is the identity
-/// the backend started. They are the same string for every current backend,
-/// but the record is keyed by name while the stop is keyed by id, so the
-/// caller passes both.
+/// A missing per-VM record makes a running machine invisible to later budget
+/// admissions, so recording failure is fatal. `vm_name` keys the charge while
+/// `vm_id` identifies the machine to stop; callers must provide both.
 pub fn record_charge_or_undo_launch(
     backend: &AnyBackend,
     vm_id: &VmId,
