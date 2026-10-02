@@ -12,6 +12,12 @@ Feature: Admitted egress completes end-to-end over the vsock seam
     And the output contains "Example Domain"
 
   @live @tls_tunnel_client
+  Scenario: The documented QEMU Python allow-list example reaches its admitted host
+    When I run mvmctl with "machine run --hypervisor qemu --image python:3.12-alpine --allow-host example.com:443 -- python3 -c 'import urllib.request; print(urllib.request.urlopen(bytes([104,116,116,112,115,58,47,47,101,120,97,109,112,108,101,46,99,111,109]).decode()).status)'" with a 120 second timeout
+    Then the command exits with code 0
+    And the output contains "200"
+
+  @live @tls_tunnel_client
   Scenario: An admitted IPv6 literal falls back to its pinned IPv4 sibling
     When I run mvmctl with "machine run --image curlimages/curl:8.21.0 --allow-host one.one.one.one -- curl -kfsSL -H Host:one.one.one.one https://[2606:4700:4700::1111]/cdn-cgi/trace" with a 120 second timeout
     Then the command exits with code 0
