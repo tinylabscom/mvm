@@ -3036,6 +3036,34 @@ fn top_level_cli_routes_machine_exec() {
             MachineAction::Exec(exec) => {
                 assert_eq!(exec.name, "web");
                 assert_eq!(exec.argv, vec!["echo", "hi"]);
+                assert_eq!(exec.tool, None);
+            }
+            other => panic!("expected exec action, got {other:?}"),
+        },
+        other => panic!("expected Commands::Machine, got {other:?}"),
+    }
+}
+
+#[test]
+fn top_level_cli_routes_declared_machine_tool_without_running_it() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "exec",
+        "web",
+        "--tool",
+        "read",
+        "--",
+        "/bin/echo",
+        "hi",
+    ])
+    .expect("top-level parse");
+    match cli.command {
+        Commands::Machine(args) => match args.action {
+            MachineAction::Exec(exec) => {
+                assert_eq!(exec.tool.as_deref(), Some("read"));
+                assert_eq!(exec.argv, vec!["/bin/echo", "hi"]);
+                assert!(!exec.tty);
             }
             other => panic!("expected exec action, got {other:?}"),
         },

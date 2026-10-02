@@ -65,6 +65,7 @@ pub mod snapshot;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
+pub mod tool_mediation;
 pub mod volume;
 
 /// The workload authoring surface: builders, constructors, IR emission.

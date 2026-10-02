@@ -96,9 +96,31 @@ pub struct ToolCheckDenial {
     pub reason: String,
 }
 
+/// Host-local reply after the per-VM endpoint has audited a tool decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolDecisionReply {
+    /// The admitted rules and audit write allowed the invocation.
+    Allow,
+    /// The invocation was denied or its decision could not be audited.
+    Deny,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_local_reply_roundtrips_and_rejects_unknown_values() {
+        for reply in [ToolDecisionReply::Allow, ToolDecisionReply::Deny] {
+            let json = serde_json::to_string(&reply).expect("serialize decision");
+            assert_eq!(
+                serde_json::from_str::<ToolDecisionReply>(&json).expect("parse decision"),
+                reply
+            );
+        }
+        assert!(serde_json::from_str::<ToolDecisionReply>("\"maybe\"").is_err());
+    }
 
     #[test]
     fn request_roundtrips_and_rejects_unknown_fields() {

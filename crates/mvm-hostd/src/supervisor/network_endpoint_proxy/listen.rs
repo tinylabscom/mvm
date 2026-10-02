@@ -3,7 +3,9 @@
 
 use std::sync::Arc;
 
+use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
 use mvm_core::substitution_wire::WireRequest;
+use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(target_os = "linux")]
@@ -18,11 +20,36 @@ use crate::supervisor::accept_loop::{
 // `mvm_core::substitution_wire` so the in-guest client and this server share
 // one contract (imported at the top of this file).
 
+#[derive(Clone, Copy)]
+enum ListenerMode {
+    GuestWire,
+    HostConnector,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConnectorRequest {
+    Tool(ToolCheckRequest),
+    Http(WireRequest),
+}
+
 impl SubstitutionService {
     /// Accept loop: one routed request per connection, framed JSON, a task per
     /// connection. Runs until the listener fails in a way it cannot recover from;
     /// transient accept errors are retried.
     pub async fn serve(self: Arc<Self>, listener: UnixListener) {
+        self.serve_with_mode(listener, ListenerMode::GuestWire)
+            .await;
+    }
+
+    /// Serve host-local HTTP requests and declared-tool questions on the
+    /// endpoint's mode-0600 connector socket.
+    pub async fn serve_connector(self: Arc<Self>, listener: UnixListener) {
+        self.serve_with_mode(listener, ListenerMode::HostConnector)
+            .await;
+    }
+
+    async fn serve_with_mode(self: Arc<Self>, listener: UnixListener, mode: ListenerMode) {
         let mut transient = 0u32;
         loop {
             match listener.accept().await {
@@ -30,7 +57,16 @@ impl SubstitutionService {
                     transient = 0;
                     let me = Arc::clone(&self);
                     tokio::spawn(async move {
-                        if let Err(e) = me.handle_connection(stream).await {
+                        let result = match mode {
+                            ListenerMode::GuestWire => me
+                                .handle_connection(stream)
+                                .await
+                                .map_err(anyhow::Error::from),
+                            ListenerMode::HostConnector => {
+                                me.handle_connector_connection(stream).await
+                            }
+                        };
+                        if let Err(e) = result {
                             tracing::warn!(error = %e, "substitution endpoint connection failed");
                         }
                     });
@@ -119,6 +155,30 @@ impl SubstitutionService {
         write_json_frame(&mut stream, &resp).await
     }
 
+    async fn handle_connector_connection(&self, mut stream: UnixStream) -> anyhow::Result<()> {
+        let request: ConnectorRequest = read_json_frame(&mut stream, MAX_FRAME_BYTES).await?;
+        match request {
+            ConnectorRequest::Http(wire) => {
+                let response = self.process(wire).await;
+                write_json_frame(&mut stream, &response).await?;
+            }
+            ConnectorRequest::Tool(request) => {
+                anyhow::ensure!(request.is_valid(), "invalid tool invocation");
+                let decision = self.decide_tool(&request.tool, &request.argv).await;
+                let response = if matches!(
+                    decision,
+                    Ok(crate::supervisor::tool_decision::ToolVerdict::Allow)
+                ) {
+                    ToolDecisionReply::Allow
+                } else {
+                    ToolDecisionReply::Deny
+                };
+                write_json_frame(&mut stream, &response).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Handle one vsock connection: the raw socket I/O is blocking, so the
     /// frame read/write run on `spawn_blocking` threads, while `process` (the
     /// substitution + forward leg — the prod forward needs the tokio reactor)
@@ -154,6 +214,98 @@ mod server_tests {
     use mvm_core::substitution_wire::{WireRequest, WireResponse};
     use std::sync::Arc;
     use tokio::net::{UnixListener, UnixStream};
+
+    #[tokio::test]
+    async fn connector_tool_decisions_use_the_vm_gate_and_chain_recorder() {
+        use crate::supervisor::audit::CapturingAuditSigner;
+        use crate::supervisor::audit_recorder::Recorder;
+        use crate::supervisor::runtime_approval::NoApprovalBackend;
+        use crate::supervisor::tool_decision::ToolDecisionGate;
+        use mvm_contract::policy::tool_rules::ToolRules;
+        use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+        use mvm_core::plan::TenantId;
+
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".into())));
+        let gate = Arc::new(ToolDecisionGate::new(
+            ToolRules {
+                allow: vec!["read".into()],
+                deny: vec!["write".into()],
+                ..ToolRules::default()
+            },
+            Arc::new(NoApprovalBackend),
+            recorder,
+        ));
+        let (service, _dir) = super::super::test_support::service_with_tool_gate(gate);
+        for (tool, expected) in [
+            ("read", ToolDecisionReply::Allow),
+            ("write", ToolDecisionReply::Deny),
+            ("unlisted", ToolDecisionReply::Deny),
+        ] {
+            let (mut client, server) = UnixStream::pair().expect("socket pair");
+            let service = Arc::clone(&service);
+            let handler =
+                tokio::spawn(async move { service.handle_connector_connection(server).await });
+            let request = ToolCheckRequest {
+                tool: tool.into(),
+                argv: format!("{tool} data"),
+            };
+            write_json_frame(&mut client, &request)
+                .await
+                .expect("send question");
+            let reply: ToolDecisionReply = read_json_frame(&mut client, MAX_FRAME_BYTES)
+                .await
+                .expect("read decision");
+            assert_eq!(reply, expected);
+            handler
+                .await
+                .expect("handler join")
+                .expect("serve question");
+        }
+        assert_eq!(signer.entries().len(), 3);
+        let recorded = serde_json::to_string(&signer.entries()).expect("serialize audit");
+        assert!(!recorded.contains("read data"));
+        assert!(!recorded.contains("write data"));
+    }
+
+    #[tokio::test]
+    async fn connector_keeps_http_and_refuses_invalid_tool_questions() {
+        use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
+
+        let (service, placeholder, forwarder, _dir) =
+            service_with("secret-value", &["api.example.com"]);
+        let (mut client, server) = UnixStream::pair().expect("socket pair");
+        let service_for_http = Arc::clone(&service);
+        let handler =
+            tokio::spawn(async move { service_for_http.handle_connector_connection(server).await });
+        let request = WireRequest {
+            method: "GET".into(),
+            url: "https://api.example.com/data".into(),
+            headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+            body_b64: String::new(),
+        };
+        write_json_frame(&mut client, &request)
+            .await
+            .expect("send HTTP request");
+        let response: WireResponse = read_json_frame(&mut client, MAX_FRAME_BYTES)
+            .await
+            .expect("read HTTP response");
+        assert!(matches!(response, WireResponse::Ok { .. }));
+        handler.await.expect("handler join").expect("serve HTTP");
+        assert!(forwarder.seen.lock().expect("seen lock").is_some());
+
+        let (mut client, server) = UnixStream::pair().expect("socket pair");
+        let handler =
+            tokio::spawn(async move { service.handle_connector_connection(server).await });
+        let invalid = ToolCheckRequest {
+            tool: String::new(),
+            argv: "echo hello".into(),
+        };
+        write_json_frame(&mut client, &invalid)
+            .await
+            .expect("send invalid question");
+        assert!(handler.await.expect("handler join").is_err());
+    }
 
     /// End-to-end over a **real AF_VSOCK** connection (Linux vsock loopback,
     /// `VMADDR_CID_LOCAL`) — proving `serve_vsock` + the framed substitution

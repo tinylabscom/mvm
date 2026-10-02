@@ -1,6 +1,7 @@
 //! `mvmctl console` — interactive console (PTY-over-vsock) and one-shot exec
 //! via the guest agent.
 
+use std::io::Write as _;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -235,37 +236,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             },
         );
         // send_exec_streaming does the protocol hello internally.
-        use std::io::Write as _;
         let command = command_with_env(cmd, &args.env);
-        let terminal =
-            mvm_agentd::vsock::send_exec_streaming(&mut stream, &command, None, None, |event| {
-                match event {
-                    mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
-                        let mut so = std::io::stdout();
-                        let _ = so.write_all(chunk);
-                        let _ = so.flush();
-                    }
-                    mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
-                        let mut se = std::io::stderr();
-                        let _ = se.write_all(chunk);
-                        let _ = se.flush();
-                    }
-                    _ => {}
-                }
-            })?;
-        match terminal {
-            mvm_agentd::vsock::ExecEvent::Exit { code } => {
-                if code != 0 {
-                    mvm_observability::exit(code);
-                }
-                Ok(())
-            }
-            mvm_agentd::vsock::ExecEvent::TimedOut => {
-                eprintln!("{}", crate::exec::timeout_exit_message(None));
-                mvm_observability::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
-            }
-            other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
-        }
+        let terminal = mvm_agentd::vsock::send_exec_streaming(
+            &mut stream,
+            &command,
+            None,
+            None,
+            emit_exec_event,
+        )?;
+        finish_exec_terminal(terminal)
     } else {
         // Interactive PTY session
         let options = ConsoleSessionOptions::builder()
@@ -279,6 +258,74 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             mvm_observability::exit(exit_code);
         }
         Ok(())
+    }
+}
+
+/// Run a declared argv command only after the authenticated guest control
+/// session and this VM's admitted endpoint agree on the exact invocation.
+pub(in crate::commands) fn run_declared_command(
+    name: &str,
+    tool: &str,
+    argv: Vec<String>,
+    force: bool,
+) -> Result<()> {
+    validate_vm_name(name).context("invalid VM name for declared tool")?;
+    enforce_accessible_gate(name, force)?;
+    let call = mvm_agentd::vsock::MediatedExecCall {
+        tool: tool.to_string(),
+        argv,
+        stdin: None,
+        timeout_secs: None,
+    };
+    anyhow::ensure!(
+        call.tool_check().is_some(),
+        "invalid declared tool invocation"
+    );
+    touch_activity(name);
+    let transport = pick_console_transport(name)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    super::shared::emit_vsock_rpc_audit(
+        name,
+        &mvm_agentd::vsock::GuestRequest::MediatedExec(call.clone()),
+    );
+    let terminal = mvm_agentd::vsock::send_mediated_exec_streaming(
+        &mut stream,
+        call,
+        |question| mvm_client::tool_mediation::decide_declared_tool(name, question),
+        emit_exec_event,
+    )?;
+    finish_exec_terminal(terminal)
+}
+
+fn emit_exec_event(event: &mvm_agentd::vsock::ExecEvent) {
+    match event {
+        mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
+            let mut stdout = std::io::stdout();
+            let _ = stdout.write_all(chunk);
+            let _ = stdout.flush();
+        }
+        mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
+            let mut stderr = std::io::stderr();
+            let _ = stderr.write_all(chunk);
+            let _ = stderr.flush();
+        }
+        _ => {}
+    }
+}
+
+fn finish_exec_terminal(terminal: mvm_agentd::vsock::ExecEvent) -> Result<()> {
+    match terminal {
+        mvm_agentd::vsock::ExecEvent::Exit { code } => {
+            if code != 0 {
+                mvm_observability::exit(code);
+            }
+            Ok(())
+        }
+        mvm_agentd::vsock::ExecEvent::TimedOut => {
+            eprintln!("{}", crate::exec::timeout_exit_message(None));
+            mvm_observability::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
+        }
+        other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
     }
 }
 
