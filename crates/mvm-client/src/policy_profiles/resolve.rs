@@ -155,8 +155,28 @@ pub fn resolve(
         backend_conditioned: false,
     };
     for reference in &selection.profiles {
-        let root = store.load_profile(reference, None, LayerOrigin::User, "--policy")?;
-        walker.walk(root, 0)?;
+        match store.load_profile(reference, None, LayerOrigin::User, "--policy") {
+            Ok(root) => walker.walk(root, 0)?,
+            // A root reference may name a group rather than a profile —
+            // runtime packs ship only pack/group.toml, and a group's name or
+            // path composes as one group layer. When both shapes fail, the
+            // profile error is the more specific report.
+            Err(profile_error) => {
+                match store.load_group(reference, None, LayerOrigin::User, "--policy") {
+                    Ok(group) => {
+                        if !walker.groups.iter().any(|g| g.identity == group.identity) {
+                            walker.groups.push(SelectedGroup {
+                                identity: group.identity.clone(),
+                                required: group.doc.required,
+                                label: group.label.clone(),
+                                layer: group_layer(&group),
+                            });
+                        }
+                    }
+                    Err(_) => return Err(profile_error),
+                }
+            }
+        }
     }
     if let Some(project) = &selection.project {
         // An explicit --policy replaces the project's [policy] table; the
