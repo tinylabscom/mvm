@@ -345,17 +345,19 @@ impl PolicyStore {
                         format!("{noun} `{spelling}` could not read the pack lockfile: {error}"),
                     )
                 })?;
-                let publisher_policy = mvm_core::registry_pack_store::load_publisher_policy(
-                    &mvm_core::config::registry_pack_publisher_policy_path(),
-                )
-                .map_err(|error| {
-                    PolicyError::new(
-                        referrer,
-                        format!(
-                            "{noun} `{spelling}` has no usable publisher trust policy: {error}"
-                        ),
+                let publisher_policy =
+                    mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+                        &mvm_core::config::registry_pack_publisher_policy_path(),
                     )
-                })?;
+                    .map_err(|error| {
+                        PolicyError::new(
+                            referrer,
+                            format!(
+                                "{noun} `{spelling}` has no usable publisher trust policy: {error}"
+                            ),
+                        )
+                    })?
+                    .policy;
                 let (installed, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
                     &mvm_core::config::registry_pack_cache_dir(),
                     &lock,

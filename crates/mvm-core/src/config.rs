@@ -533,7 +533,8 @@ pub fn pack_lockfile_path() -> std::path::PathBuf {
 }
 
 /// Namespace-scoped publisher trust policy consulted before a registry pack
-/// is adopted or re-verified. Fail-closed: a missing file refuses every pack.
+/// is adopted or re-verified. A missing file falls back to the built-in
+/// official-registry policy; a malformed file fails closed.
 pub fn registry_pack_publisher_policy_path() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_home())
         .join("registry")

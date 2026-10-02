@@ -383,17 +383,24 @@ pub struct RegistryPackPublisher {
 
 impl RegistryPackPublisher {
     /// Construct a publisher authority, refusing malformed or ambiguous input.
+    ///
+    /// The namespace `"*"` is the wildcard: it applies to every namespace
+    /// that has no exact publisher entry. Operators choose it explicitly; the
+    /// built-in official policy uses it so new official namespaces need no
+    /// client release.
     pub fn new(
         namespace: impl Into<String>,
         issuer: impl Into<String>,
         accepted_identities: Vec<String>,
     ) -> Result<Self, RegistryPackVerificationError> {
         let namespace = namespace.into();
-        PackCoordinate::parse(&format!("{namespace}/pack")).map_err(|error| {
-            RegistryPackVerificationError::InvalidPublisherPolicy {
-                reason: error.to_string(),
-            }
-        })?;
+        if namespace != "*" {
+            PackCoordinate::parse(&format!("{namespace}/pack")).map_err(|error| {
+                RegistryPackVerificationError::InvalidPublisherPolicy {
+                    reason: error.to_string(),
+                }
+            })?;
+        }
         let issuer = issuer.into();
         if issuer.trim().is_empty() {
             return Err(RegistryPackVerificationError::InvalidPublisherPolicy {
@@ -480,6 +487,8 @@ impl RegistryPackPublisherPolicy {
         &self.publishers
     }
 
+    /// The trust for `namespace`: the exact publisher entry when one exists,
+    /// otherwise the `"*"` wildcard publisher when the policy declares one.
     pub fn trust_for_namespace(
         &self,
         namespace: &str,
@@ -487,11 +496,43 @@ impl RegistryPackPublisherPolicy {
         self.publishers
             .iter()
             .find(|publisher| publisher.namespace == namespace)
+            .or_else(|| {
+                self.publishers
+                    .iter()
+                    .find(|publisher| publisher.namespace == "*")
+            })
             .map(RegistryPackPublisher::keyless_trust)
             .ok_or_else(|| RegistryPackVerificationError::UntrustedNamespace {
                 namespace: namespace.to_string(),
             })
     }
+}
+
+/// Keyless signing identity of the official pack registry's publish workflow.
+///
+/// Packs published from `tinylabscom/mvm-templates` are signed keyless in
+/// `.github/workflows/publish.yml` on the main branch; every trust decision
+/// on an official pack checks this identity under the GitHub OIDC issuer.
+pub const OFFICIAL_PACK_SIGNING_IDENTITY: &str =
+    "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main";
+
+/// OIDC issuer that vouches for [`OFFICIAL_PACK_SIGNING_IDENTITY`].
+pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubusercontent.com";
+
+/// The publisher trust policy that applies when the operator has made no
+/// trust decision of their own: one wildcard publisher accepting only the
+/// official registry's signing identity. It trusts packs the official
+/// workflow signed, in any namespace, and nothing else; an operator policy
+/// file replaces it wholesale.
+pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
+    let publisher = RegistryPackPublisher::new(
+        "*",
+        OFFICIAL_PACK_SIGNING_ISSUER,
+        vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+    )
+    .expect("the official publisher policy is built from constants and always validates");
+    RegistryPackPublisherPolicy::new(vec![publisher])
+        .expect("the official publisher policy has one publisher and no duplicates")
 }
 
 impl<'de> Deserialize<'de> for RegistryPackPublisherPolicy {
@@ -1209,6 +1250,41 @@ mod tests {
         Err(RegistryPackVerificationError::SignatureInvalid(
             "test refusal".to_string(),
         ))
+    }
+
+    #[test]
+    fn a_wildcard_publisher_trusts_every_namespace_an_exact_entry_does_not() {
+        let policy = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new("runtime", "issuer-a", vec!["identity-a".to_string()])
+                .unwrap(),
+            RegistryPackPublisher::new("*", "issuer-b", vec!["identity-b".to_string()]).unwrap(),
+        ])
+        .unwrap();
+        assert_eq!(
+            policy.trust_for_namespace("runtime").unwrap().issuer,
+            "issuer-a"
+        );
+        assert_eq!(
+            policy.trust_for_namespace("agent").unwrap().issuer,
+            "issuer-b"
+        );
+        assert!(
+            RegistryPackPublisherPolicy::new(vec![
+                RegistryPackPublisher::new("*", "issuer-a", vec!["identity-a".to_string()])
+                    .unwrap(),
+                RegistryPackPublisher::new("*", "issuer-b", vec!["identity-b".to_string()])
+                    .unwrap(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_official_default_policy_matches_its_constants() {
+        let policy = official_publisher_policy();
+        let trust = policy.trust_for_namespace("any-future-namespace").unwrap();
+        assert_eq!(trust.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
+        assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
     }
 
     #[test]

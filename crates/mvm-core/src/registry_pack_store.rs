@@ -156,6 +156,56 @@ pub fn save_publisher_policy(
     Ok(())
 }
 
+/// Where a publisher policy came from: the operator's file, or the built-in
+/// official-registry default because no file exists yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PublisherPolicySource {
+    /// The operator's policy file at the configured path.
+    OperatorFile,
+    /// No policy file exists; the built-in official policy applies.
+    OfficialDefault,
+}
+
+/// A loaded publisher policy together with where it came from.
+#[derive(Debug, Clone)]
+pub struct LoadedPublisherPolicy {
+    pub policy: RegistryPackPublisherPolicy,
+    pub source: PublisherPolicySource,
+}
+
+impl LoadedPublisherPolicy {
+    /// Whether the built-in official default is in effect. Callers announce
+    /// this so an operator who wants a different trust decision knows the
+    /// file to write.
+    #[must_use]
+    pub fn is_official_default(&self) -> bool {
+        self.source == PublisherPolicySource::OfficialDefault
+    }
+}
+
+/// Load the operator publisher policy, falling back to the official
+/// registry's built-in trust when no policy file exists.
+///
+/// A missing file means the operator has not made a trust decision yet, so
+/// the official policy applies. A malformed file fails closed: a broken
+/// operator policy is an error, never a silent widening to the official
+/// default.
+pub fn load_publisher_policy_or_official_default(
+    path: &Path,
+) -> Result<LoadedPublisherPolicy, RegistryPackStoreError> {
+    match load_publisher_policy(path) {
+        Ok(policy) => Ok(LoadedPublisherPolicy {
+            policy,
+            source: PublisherPolicySource::OperatorFile,
+        }),
+        Err(RegistryPackStoreError::MissingPublisherPolicy { .. }) => Ok(LoadedPublisherPolicy {
+            policy: crate::registry_pack::official_publisher_policy(),
+            source: PublisherPolicySource::OfficialDefault,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
 /// Adopt a freshly fetched pack: signature-first verification, content
 /// verification, atomic installation, and a recorded pin.
 ///
@@ -417,6 +467,45 @@ mod tests {
         )
         .unwrap()])
         .unwrap()
+    }
+
+    #[test]
+    fn a_missing_policy_file_falls_back_to_the_official_default() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = home.path().join("config/policy/publishers.toml");
+        let loaded = load_publisher_policy_or_official_default(&path).unwrap();
+        assert!(loaded.is_official_default());
+        let trust = loaded
+            .policy
+            .trust_for_namespace("anything")
+            .expect("the wildcard default trusts official namespaces");
+        assert_eq!(
+            trust.issuer,
+            crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
+        );
+        assert_eq!(
+            trust.accepted_identities,
+            [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()]
+        );
+    }
+
+    #[test]
+    fn an_operator_policy_file_replaces_the_default() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = home.path().join("publishers.toml");
+        save_publisher_policy(&path, &publisher_policy()).unwrap();
+        let loaded = load_publisher_policy_or_official_default(&path).unwrap();
+        assert!(!loaded.is_official_default());
+        assert!(loaded.policy.trust_for_namespace("runtime").is_ok());
+        assert!(loaded.policy.trust_for_namespace("agent").is_err());
+    }
+
+    #[test]
+    fn a_malformed_operator_policy_fails_closed() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = home.path().join("publishers.toml");
+        std::fs::write(&path, "not = [valid toml\n").unwrap();
+        assert!(load_publisher_policy_or_official_default(&path).is_err());
     }
 
     fn manifest_bytes(reference: &str) -> Vec<u8> {

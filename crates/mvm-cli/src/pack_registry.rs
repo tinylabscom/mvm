@@ -19,7 +19,7 @@ use mvm_core::registry_pack::{
     adopt_registry_pack, verify_registry_pack,
 };
 use mvm_core::registry_pack_store::{
-    adopt_install_and_pin, load_pack_lockfile, load_publisher_policy,
+    adopt_install_and_pin, load_pack_lockfile, load_publisher_policy_or_official_default,
 };
 
 /// Environment override for the pack registry base URL.
@@ -271,7 +271,17 @@ pub fn pull(reference_arg: &str) -> Result<PullSummary> {
     let fetched = download_pack(&config, &reference)?;
 
     let policy_path = mvm_core::config::registry_pack_publisher_policy_path();
-    let policy = load_publisher_policy(&policy_path)?;
+    let loaded = load_publisher_policy_or_official_default(&policy_path)?;
+    if loaded.is_official_default() {
+        crate::ui::info(&format!(
+            "no publisher policy at {}; using the built-in official registry policy \
+             (signed by {} in mvm-templates). Write that file to make your own trust \
+             decision.",
+            policy_path.display(),
+            mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+        ));
+    }
+    let policy = loaded.policy;
     let lock_path = mvm_core::config::pack_lockfile_path();
     let lock = load_pack_lockfile(&lock_path)?;
     // Lock-first verification applies only when the resolved version is the

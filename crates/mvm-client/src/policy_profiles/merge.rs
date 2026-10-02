@@ -451,16 +451,20 @@ impl Accumulator {
             validate_env_name(layer, "env.deny", name)?;
             push_unique(&mut self.env_deny, name.clone(), &layer.label);
         }
+        // Escape hatches in a layer the user did not author (a project file
+        // or a signed pack) are stripped, not honoured and not fatal: a pack
+        // can never widen policy through them, and one bad field must not
+        // break the whole composition. The note says what was dropped.
         if !readmit.is_empty() && layer.origin != LayerOrigin::User {
-            return Err(layer_error(
-                layer,
-                "env.readmit",
-                format!(
-                    "re-admitting a denied variable is an escape hatch, honoured only in a \
-                     user-authored profile; this is a {} layer",
-                    layer.origin.as_str()
-                ),
+            let names = readmit.join(", ");
+            self.notes.push(format!(
+                "{}: env.readmit [{}] ignored: re-admitting a denied variable is an escape \
+                 hatch, honoured only in a user-authored layer (this is a {} layer)",
+                layer.label,
+                names,
+                layer.origin.as_str()
             ));
+            return Ok(());
         }
         for name in readmit {
             validate_env_name(layer, "env.readmit", name)?;
