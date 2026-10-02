@@ -764,9 +764,15 @@ or an in-tree bake to remove.
       unembedded `BootstrapPreflight` path included) and the Stage 0
       builder-image build — so none of those is W8's any more, and the
       fingerprint layer tests they needed are gone with them:
-      - [ ] Pin the first image set whose builder declares
+      - [x] Pin the first image set whose builder declares
         `builder_boot_abi = 1`, and move the cache contract 4 → 5 in the same
         change (see *Migration*).
+        Landed: `crates/mvm-core/images.lock` pins `image-set/v0.2.3`, the
+        first published ABI-1 set (its signed manifest declares
+        `builder_boot_abi: 1`, `builder_cache_contract: 5`), and the lock's
+        compatibility copy matches. `image-set/v0.2.3` was cut from a tree
+        past the mvm-images ABI-1 flip (#37 there); the pinned consumer is
+        mvm v0.22.0, the first payload-capable release.
       - [ ] Remove `nix/lib/mvm-host-binaries.nix`, the `hostBinaries` export
         and `xtask check-mvm-host-binaries-sync` once the paired builder no
         longer reads them; W7 is what stops it.
