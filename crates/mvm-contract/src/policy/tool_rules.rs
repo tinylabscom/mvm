@@ -53,6 +53,15 @@ pub struct ToolRules {
 }
 
 impl ToolRules {
+    /// Whether any rule claims endpoint authority that needs a trusted
+    /// invocation binding, beyond the whole-tool and argv command gate.
+    #[must_use]
+    pub fn has_endpoint_scope(&self) -> bool {
+        self.detail
+            .values()
+            .any(|detail| !detail.routes.is_empty() || !detail.secrets.is_empty())
+    }
+
     /// Whether the section names no tool at all — the dimension is unused.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -150,6 +159,7 @@ mod tests {
     fn empty_rules_are_empty_and_serialize_away() {
         let rules = ToolRules::default();
         assert!(rules.is_empty());
+        assert!(!rules.has_endpoint_scope());
         let json = serde_json::to_string(&rules).expect("serialize");
         assert_eq!(json, "{}");
     }
@@ -176,12 +186,26 @@ mod tests {
         let json = serde_json::to_string(&rules).expect("serialize");
         let back: ToolRules = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(rules, back);
+        assert!(back.has_endpoint_scope());
     }
 
     #[test]
     fn unknown_fields_are_refused() {
         let json = r#"{"allow":[],"unexpected":true}"#;
         assert!(serde_json::from_str::<ToolRules>(json).is_err());
+    }
+
+    #[test]
+    fn secret_only_detail_also_requires_endpoint_binding() {
+        let mut rules = ToolRules::default();
+        rules.detail.insert(
+            "fetch".to_string(),
+            ToolRuleDetail {
+                secrets: vec!["api_token".to_string()],
+                ..Default::default()
+            },
+        );
+        assert!(rules.has_endpoint_scope());
     }
 }
 

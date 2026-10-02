@@ -2748,6 +2748,7 @@ mod tests {
             health_check: None,
             deployment: None,
             grants: None,
+            tools: Default::default(),
             gpu: false,
             gpu_device: None,
             ports: vec![],

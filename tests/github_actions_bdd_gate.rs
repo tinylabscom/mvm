@@ -76,12 +76,16 @@ fn live_bdd_witness_runs_in_extended_ci_not_the_merge_queue() {
 
     for expected in [
         "runs-on: ubuntu-latest",
-        "timeout-minutes: 45",
+        "witness: ci_live",
+        "witness: tool_live",
+        "timeout: 45",
+        "timeout: 60",
+        "timeout-minutes: ${{ matrix.timeout }}",
         "FC_VERSION: v1.17.0",
         "MVM_KERNEL_SOURCE: download",
         "packages: libcap-ng-dev lld qemu-system-x86 qemu-utils",
         "sudo chmod 666 /dev/kvm",
-        "run: just bdd::live-ci",
+        "run: just bdd::live-ci ${{ matrix.witness }}",
     ] {
         assert!(
             live.contains(expected),
@@ -91,10 +95,10 @@ fn live_bdd_witness_runs_in_extended_ci_not_the_merge_queue() {
 }
 
 #[test]
-fn live_bdd_recipe_opts_in_and_selects_only_the_fast_ci_witness() {
+fn live_bdd_recipe_opts_in_and_selects_one_strict_witness() {
     let bdd_mod = fs::read_to_string("just/bdd/mod.just").expect("read bdd module");
     let recipe = bdd_mod
-        .split("\nlive-ci:\n")
+        .split("\nlive-ci TAG=\"ci_live\":\n")
         .nth(1)
         .expect("bdd module must define live-ci")
         .split("\n\n")
@@ -102,7 +106,9 @@ fn live_bdd_recipe_opts_in_and_selects_only_the_fast_ci_witness() {
         .expect("live-ci recipe has a body");
 
     assert!(recipe.contains("MVM_BDD_LIVE=1"));
-    assert!(recipe.contains("MVM_BDD_ONLY_TAG=ci_live"));
+    assert!(recipe.contains("MVM_BDD_ONLY_TAG={{ TAG }}"));
+    assert!(recipe.contains("MVM_BDD_STRICT_SKIPS=1"));
+    assert!(recipe.contains("MVM_BDD_ALLOWED_SKIPS=outside-selected-tag"));
     assert!(recipe.contains("cargo build --bin mvmctl --features user"));
     assert!(recipe.contains("CARGO_BIN_EXE_mvmctl=\"${CARGO_TARGET_DIR:-target}/debug/mvmctl\""));
     assert!(!recipe.contains("--tags"));
@@ -127,6 +133,28 @@ fn fast_live_witness_executes_the_readme_persistent_machine_path() {
         assert!(
             feature.contains(command),
             "the live README witness must execute {command:?}"
+        );
+    }
+}
+
+#[test]
+fn tool_live_witness_checks_mediation_after_restart_and_audit_chain() {
+    let feature =
+        fs::read_to_string("features/suites/s8_readme_contract/persistent_machine_live.feature")
+            .expect("read the persistent-machine live feature");
+
+    assert!(feature.contains("@live @firecracker @tool_live"));
+    for command in [
+        "machine create bdd-tool-command --image alpine --policy",
+        "machine exec bdd-tool-command --tool shell",
+        "machine restart bdd-tool-command",
+        "machine exec bdd-tool-command --tool unlisted",
+        "trust audit tail --chain",
+        "trust audit verify",
+    ] {
+        assert!(
+            feature.contains(command),
+            "the live tool witness must execute {command:?}"
         );
     }
 }

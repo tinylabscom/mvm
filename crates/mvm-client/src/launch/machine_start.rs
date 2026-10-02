@@ -237,6 +237,11 @@ pub fn start_machine_spec(
     host: &dyn StartHost,
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
+    if spec.tools.has_endpoint_scope() {
+        bail!(
+            "persistent machine tool-scoped routes and secrets require a trusted endpoint invocation binding"
+        );
+    }
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
@@ -272,6 +277,7 @@ pub fn start_machine_spec(
         caller_commitment: spec.caller_commitment.clone(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
+        tools: spec.tools.clone(),
         gpu: spec.gpu,
         gpu_device: spec.gpu_device,
         workload_dir: workload_dir.as_deref(),
@@ -473,6 +479,7 @@ mod tests {
             last_started_at: None,
             health_check: None,
             grants: None,
+            tools: Default::default(),
             gpu: false,
             gpu_device: None,
         }
@@ -531,6 +538,30 @@ mod tests {
         ImageOnlyHost {
             asked: std::cell::RefCell::new(Vec::new()),
         }
+    }
+
+    #[test]
+    fn a_persisted_unmediated_tool_scope_is_refused_before_host_work() {
+        let host = image_host();
+        let mut machine = spec("toolbox");
+        machine.tools.detail.insert(
+            "git".to_string(),
+            mvm_contract::policy::tool_rules::ToolRuleDetail {
+                routes: vec!["example.com:443".to_string()],
+                ..Default::default()
+            },
+        );
+        let error = start_machine_spec(
+            &machine,
+            &host,
+            MachineStartParams {
+                hypervisor: "firecracker",
+                has_ad_hoc_argv: false,
+            },
+        )
+        .expect_err("unbound tool route must not reach admission");
+        assert!(error.to_string().contains("trusted endpoint invocation"));
+        assert!(host.asked.borrow().is_empty());
     }
 
     /// An image-backed spec boots what the host resolved for its reference,

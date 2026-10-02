@@ -594,6 +594,7 @@ mod tests {
             last_started_at: None,
             health_check,
             grants: None,
+            tools: Default::default(),
             gpu: false,
             gpu_device: None,
         }

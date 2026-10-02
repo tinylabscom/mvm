@@ -590,6 +590,9 @@ fn machine_run_spec(
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
     validate_machine_name(&name)?;
+    if let Some(policy) = args.run.applied_policy.as_ref() {
+        create_policy::refuse_unmediated_tool_scope(policy)?;
+    }
     let (image, manifest, deployment) = if let Some(path) = &args.run.deployment {
         let deployment = resolve_local_deployment(path)?;
         (None, None, Some(deployment.directory.display().to_string()))
@@ -675,6 +678,12 @@ fn machine_run_spec(
             args.health_start_period,
         ),
         grants: resolved.plan_grants,
+        tools: args
+            .run
+            .applied_policy
+            .as_ref()
+            .map(|policy| policy.tools.to_tool_rules())
+            .unwrap_or_default(),
         gpu: args.run.gpu || args.run.gpu_device.is_some(),
         gpu_device: args.run.gpu_device,
     })
@@ -1188,6 +1197,11 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         last_started_at: None,
         health_check: None,
         grants: resolved.plan_grants,
+        tools: policy
+            .policy
+            .as_ref()
+            .map(|policy| policy.tools.to_tool_rules())
+            .unwrap_or_default(),
         gpu,
         gpu_device,
     })

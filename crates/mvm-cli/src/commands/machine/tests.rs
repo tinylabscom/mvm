@@ -1049,6 +1049,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     }
@@ -1093,6 +1094,31 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
         Some("ab".repeat(32))
     );
     assert!(spec.workload_dir.is_none());
+}
+
+#[test]
+fn run_spec_records_tool_rules_but_refuses_unmediated_scope() {
+    let mut args =
+        parse_run(&["run", "--image", "alpine:3.20", "--name", "toolbox"]).expect("parse");
+    args.run.applied_policy = Some(
+        toml::from_str(
+            "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nargv = [\"git status*\"]\n",
+        )
+        .expect("tool policy parses"),
+    );
+    let spec = machine_run_spec(&args, "toolbox".to_string(), None).expect("spec");
+    assert_eq!(spec.tools.allow, ["git"]);
+    assert_eq!(spec.tools.detail["git"].argv, ["git status*"]);
+
+    args.run.applied_policy = Some(
+        toml::from_str(
+            "[tools]\nallow = [\"git\"]\n[tools.detail.git]\nroutes = [\"example.com:443\"]\n",
+        )
+        .expect("scoped route parses"),
+    );
+    let error = machine_run_spec(&args, "toolbox".to_string(), None)
+        .expect_err("unmediated tool route must be refused");
+    assert!(error.to_string().contains("tools.detail.routes"));
 }
 
 #[test]
@@ -2215,6 +2241,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     };
@@ -2477,6 +2504,7 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     };
@@ -2574,6 +2602,7 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     };
@@ -2646,6 +2675,7 @@ fn create_refuses_overwrite_without_force() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     };
@@ -2685,6 +2715,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     };
@@ -2726,6 +2757,7 @@ fn seed_machine_spec(name: &str) {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     };
@@ -3330,6 +3362,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
     }

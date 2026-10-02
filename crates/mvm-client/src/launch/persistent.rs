@@ -89,6 +89,8 @@ pub struct PersistentImageStartParams<'a> {
     /// [`network_policy`](Self::network_policy), which the caller derived from
     /// the same spec.
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Tool decisions persisted with the machine and signed into each boot.
+    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// GPU remoting plane from the persisted spec (`--gpu` at create/start).
     pub gpu: bool,
     /// Optional host GPU ordinal persisted with the machine.
@@ -199,6 +201,7 @@ pub fn start_persistent_oci_machine(
         caller_commitment,
         has_ad_hoc_argv,
         grants,
+        tools,
         gpu,
         gpu_device,
         workload_dir,
@@ -304,7 +307,7 @@ pub fn start_persistent_oci_machine(
                     shares: shares_from_volume_cfg(volumes),
                     assets: Vec::new(),
                     redaction: mvm_core::policy::RedactionPolicy::default(),
-                    tools: Default::default(),
+                    tools,
                     network_policy: network_policy.clone(),
                     agent_verb_override: agent_verb.to_vec(),
                     // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);

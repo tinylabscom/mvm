@@ -13,6 +13,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use mvm_contract::policy::routes::EgressRoute;
+use mvm_contract::policy::tool_rules::ToolRules;
 use mvm_core::network_policy::AiPolicy;
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,10 @@ pub struct MachineSpec {
     /// hence `#[serde(default)]`, without which those specs stop loading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Resolved tool decisions, re-admitted on every start. Older specs have
+    /// no tool dimension and retain their previous behavior.
+    #[serde(default, skip_serializing_if = "ToolRules::is_empty")]
+    pub tools: ToolRules,
     /// GPU remoting plane (`run --gpu`): guest CUDA/NVML shims plus the host
     /// endpoint on the GPU vsock channel. Persisted like `net` so a
     /// stop/start answers the same question the operator asked.
@@ -281,6 +286,7 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.init == b.init
         && a.agent_verb == b.agent_verb
         && a.grants == b.grants
+        && a.tools == b.tools
         && a.gpu == b.gpu
         && a.gpu_device == b.gpu_device
         && a.workload_dir == b.workload_dir
@@ -342,6 +348,9 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     // running under bounds nobody asked for any more.
     if current.grants != desired.grants {
         changed.push("grants");
+    }
+    if current.tools != desired.tools {
+        changed.push("tools");
     }
     changed.join(", ")
 }
@@ -508,6 +517,7 @@ mod tests {
             last_started_at: None,
             health_check: None,
             grants: None,
+            tools: Default::default(),
             gpu: false,
             gpu_device: None,
         }
@@ -533,6 +543,7 @@ mod tests {
             serde_json::from_str(&legacy).expect("a pre-grants spec still loads");
         assert_eq!(spec.caller_commitment, None);
         assert_eq!(spec.grants, None);
+        assert!(spec.tools.is_empty());
         // And a spec that granted nothing must not start emitting the key, so
         // rewriting an old spec does not gratuitously change its bytes.
         assert!(!serde_json::to_string(&spec).unwrap().contains("grants"));
@@ -566,6 +577,25 @@ mod tests {
         });
         assert!(!machine_config_matches(&current, &desired));
         assert!(machine_config_diff(&current, &desired).contains("grants"));
+    }
+
+    #[test]
+    fn tool_rules_survive_persistence_and_change_reconciliation() {
+        let current = spec_fixture("web");
+        let mut desired = current.clone();
+        desired.tools.allow.push("git".to_string());
+        let encoded = serde_json::to_vec(&desired).expect("serialize tool-bearing spec");
+        let decoded: MachineSpec =
+            serde_json::from_slice(&encoded).expect("deserialize tool-bearing spec");
+        assert_eq!(decoded.tools, desired.tools);
+        assert!(!machine_config_matches(&current, &decoded));
+        assert_eq!(machine_config_diff(&current, &decoded), "tools");
+        assert!(
+            !serde_json::to_string(&current)
+                .expect("serialize legacy-shaped spec")
+                .contains("\"tools\""),
+            "an empty tool dimension stays absent from existing specs"
+        );
     }
 
     #[test]
@@ -827,6 +857,7 @@ mod tests {
             last_started_at: None,
             health_check: None,
             grants: None,
+            tools: Default::default(),
             gpu: false,
             gpu_device: None,
         }
