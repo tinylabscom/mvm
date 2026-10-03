@@ -139,7 +139,6 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install "$TARBALL" >/dev/null
           node --input-type=module - <<'EOF'
-          import { createRequire } from "node:module";
           import { existsSync } from "node:fs";
           import { fileURLToPath } from "node:url";
           import path from "node:path";
@@ -148,8 +147,10 @@ jobs:
             throw new Error("packed SDK did not expose Sandbox.create");
           }
           // The packed package must carry this platform's host library.
-          const require = createRequire(import.meta.url);
-          const pkgRoot = path.dirname(path.dirname(require.resolve("@runmvm/mvm/package.json")));
+          // `exports` publishes only the entry point, so the package root is
+          // found from it (dist/index.js) rather than from package.json.
+          const entry = fileURLToPath(import.meta.resolve("@runmvm/mvm"));
+          const pkgRoot = path.dirname(path.dirname(entry));
           const libName = process.platform === "darwin" ? "libmvm_hostlib.dylib" : "libmvm_hostlib.so";
           const libPath = path.join(pkgRoot, "native", libName);
           if (!existsSync(libPath)) {
