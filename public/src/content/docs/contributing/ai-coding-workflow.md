@@ -239,13 +239,13 @@ until the whole ladder is green.
 
 | Rung | Command | What it proves | Cost |
 |------|---------|----------------|------|
-| 1 | `cargo fmt --all` (or `just fmt`) | Formatting matches rustfmt across the workspace | seconds |
-| 2 | `cargo check -p <crate>` (optional first: `just check-fast-cargo`) | The touched crate compiles (`check-fast-cargo` only validates pinned toolchain/config wiring) | seconds–a minute |
-| 3 | `just test-crate <crate>` (or `cargo test -p <crate> <filter>`) | New/changed behavior passes, including the failure path | a minute |
-| 4 | `just clippy` | Zero warnings (`-D warnings`) across the workspace | a few minutes cold |
+| 1 | `cargo fmt --all` (or `just lints::fmt`) | Formatting matches rustfmt across the workspace | seconds |
+| 2 | `cargo check -p <crate>` (optional first: `just check::fast-cargo`) | The touched crate compiles (`check::fast-cargo` only validates pinned toolchain/config wiring) | seconds–a minute |
+| 3 | `just tests::crate <crate>` (or `cargo test -p <crate> <filter>`) | New/changed behavior passes, including the failure path | a minute |
+| 4 | `just lints::clippy` | Zero warnings (`-D warnings`) across the workspace | a few minutes cold |
 | 5 | `cargo test --workspace` | Nothing else regressed | longer |
-| 6 | `just check-gated` | Linux-gated `cfg(target_os = "linux")` files compile (macOS `--all-targets` silently skips them) | minutes |
-| 7 | `just ci` (`lint test test-doc bdd`) | The local approximation of the full CI gate | longest |
+| 6 | `just check::gated` | Linux-gated `cfg(target_os = "linux")` files compile (macOS `--all-targets` silently skips them) | minutes |
+| 7 | `just ci` (`lint test tests::doc bdd::run`) | The local approximation of the full CI gate | longest |
 
 Two notes from experience:
 

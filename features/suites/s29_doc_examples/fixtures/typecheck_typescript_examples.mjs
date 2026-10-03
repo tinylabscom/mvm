@@ -7,7 +7,7 @@
 // `src/index.ts` — so the examples are checked against the SDK in this tree,
 // not against whatever version is published.
 //
-// Requires the SDK's dev toolchain (`just sdk-ts-install`). When it is absent
+// Requires the SDK's dev toolchain (`just sdk::install-typescript`). When it is absent
 // the caller is told so and skips, rather than failing for a reason that has
 // nothing to do with the docs.
 //

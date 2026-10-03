@@ -2,12 +2,13 @@ set working-directory := "../.."
 
 # ── Agent memory (.agent-memory/notes) ───────────────────────────────────
 
-# Recall local findings. Lexical, because at a few hundred terse,
-# keyword-dense notes a substring match beats anything with a model in it.
+# Lexical, because at a few hundred terse, keyword-dense notes a substring match beats anything with a model in it.
 # Terms are OR-ed: `just mem::recall teardown ram` finds notes mentioning either.
 #
 # `.agent-memory/` is gitignored, so a fresh clone has none of this and the
 # recipes say so rather than erroring.
+
+# Recall local findings whose text matches any of TERMS
 recall +TERMS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -22,7 +23,7 @@ recall +TERMS:
     "$(sed -n 's/^title: //p' "$path")"
     done
 
-# List every note, newest first.
+# List every note, newest first
 notes:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -48,7 +49,8 @@ remember SLUG:
     printf -- '---\ntitle: \ndate: %s\ntags: []\n---\n\n' "$(date +%F)" > "$path"
     echo "created $path"
 
-# Local findings parse, are dated, and link to notes that exist. Not in
-# `check-all`: CI has no .agent-memory/ to check.
+# Not in `check-all`: CI has no .agent-memory/ to check.
+
+# Check local findings parse, are dated, and link to notes that exist
 check:
     cargo run -p xtask -- check-agent-notes
