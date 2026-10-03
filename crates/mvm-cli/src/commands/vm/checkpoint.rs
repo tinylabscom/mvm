@@ -832,6 +832,7 @@ pub(in crate::commands) fn parse_declared_secrets(
                     address: address.to_string(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             })
         })
         .collect()
@@ -855,22 +856,29 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
     // restore through the vm_full fork arm (which auto-boots the child); fs_quick
     // is a rootfs-only clone that the operator can optionally boot with `--boot`.
     let parent = store.read_meta(&checkpoint)?;
+    let bound_secrets =
+        if declared_secrets.is_empty() || (parent.class == CheckpointClass::FsQuick && !boot) {
+            declared_secrets.to_vec()
+        } else {
+            let tenant = super::tenant_resolution::resolve_tenant(None);
+            mvm_client::admission::secrets::ResolvedPlanSecrets::from_bindings(
+                declared_secrets.to_vec(),
+            )
+            .bind_approval(&mvm_client::secret::SecretService::local()?, &tenant)?
+            .secrets
+        };
     match parent.class {
-        CheckpointClass::VmFull => {
-            fork_vm_full_arm(fork_vm_full::ForkVmFullArmParams {
-                store: &store,
-                checkpoint: &checkpoint,
-                new_id,
-                cpus_override: cpus,
-                memory_override: memory,
-                json,
-                // No CLI surface declares bindings yet, so a fork declares
-                // none — exactly the prior behaviour.
-                declared_secrets,
-                allow_secret_drop,
-            })
-            .map(|_| ())
-        }
+        CheckpointClass::VmFull => fork_vm_full_arm(fork_vm_full::ForkVmFullArmParams {
+            store: &store,
+            checkpoint: &checkpoint,
+            new_id,
+            cpus_override: cpus,
+            memory_override: memory,
+            json,
+            declared_secrets: &bound_secrets,
+            allow_secret_drop,
+        })
+        .map(|_| ()),
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
             store: &store,
             checkpoint: &checkpoint,
@@ -879,7 +887,7 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
             hypervisor,
             cpus_override: cpus,
             memory_override: memory,
-            declared_secrets,
+            declared_secrets: &bound_secrets,
             allow_secret_drop,
             json,
         }),
@@ -1461,6 +1469,7 @@ mod tests {
                 address: address.into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }
     }
 
@@ -1646,6 +1655,7 @@ mod tests {
                     address: "kv/stripe".to_string(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             },
             SecretBinding {
                 name: "DB_PASSWORD".to_string(),
@@ -1654,6 +1664,7 @@ mod tests {
                     path: "secret/db".to_string(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             },
         ];
         mvm_hostd::audit::plan_persist::write_plan("secretful-parent", &plan).unwrap();
@@ -1696,6 +1707,7 @@ mod tests {
                 path: "secret/very/specific/path".to_string(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
         mvm_hostd::audit::plan_persist::write_plan("p-vm", &plan).unwrap();
 

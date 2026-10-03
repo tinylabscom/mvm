@@ -2040,6 +2040,7 @@ mod tests {
                 address: "addr".to_string(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         };
         let admitted = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("acme")

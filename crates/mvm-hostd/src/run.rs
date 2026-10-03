@@ -431,6 +431,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             secret_release: SecretReleasePolicy::PlanBound,
             signed_plan: None,

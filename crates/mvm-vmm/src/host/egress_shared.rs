@@ -209,6 +209,7 @@ pub fn plan_json_with_one_bound_secret() -> String {
                 address: "test-key".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }])
         .build();
     serde_json::to_string(&plan).expect("serialize admitted plan fixture")
@@ -377,6 +378,7 @@ mod phase_a_tests {
                     address: "test-key".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }])
             .build();
         plan.ingress.push(

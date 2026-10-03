@@ -860,6 +860,19 @@ impl LocalBackend {
             })
             .collect();
 
+        let secret_refs = if transient {
+            request.secret_refs.clone()
+        } else {
+            crate::admission::secrets::load_machine_secret_refs(name)
+                .map_err(crate::local::backend_err)?
+        };
+        let secrets = if secret_refs.is_empty() {
+            crate::admission::secrets::ResolvedPlanSecrets::default()
+        } else {
+            crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(&secret_refs)
+                .bind_approval(self.secrets()?.as_ref(), LOCAL_TENANT)
+                .map_err(crate::local::backend_err)?
+        };
         let started = self
             .boot_admitted(BootParams {
                 name: name.to_string(),
@@ -882,15 +895,7 @@ impl LocalBackend {
                 grants: request.grants.clone(),
                 signed_plan: request.signed_plan.clone(),
                 assurance_campaign: request.assurance_campaign.clone(),
-                secrets: if transient {
-                    crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(
-                        &request.secret_refs,
-                    )
-                } else {
-                    let references = crate::admission::secrets::load_machine_secret_refs(name)
-                        .map_err(crate::local::backend_err)?;
-                    crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(&references)
-                },
+                secrets,
             })
             .await?;
         preparation.commit();

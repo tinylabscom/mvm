@@ -125,6 +125,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
             address: "openai".into(),
         },
         destinations: Vec::new(),
+        approval_required: false,
     }];
     let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
         plan_secrets: &plan,

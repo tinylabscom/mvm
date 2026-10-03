@@ -878,6 +878,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             std::path::Path::new("/tmp/x"),
         );
@@ -983,6 +984,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             dir.path(),
         );
@@ -1142,6 +1144,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             dir.path(),
         );
@@ -1195,6 +1198,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             dir.path(),
         );
@@ -1234,6 +1238,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             dir.path(),
         );

@@ -1396,6 +1396,7 @@ mod tests {
                 address: "api-key".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
         let plan = synthesize_plan(&inp).unwrap();
         assert_eq!(plan.secrets, inp.secrets);

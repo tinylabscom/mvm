@@ -980,6 +980,47 @@ pub struct SecretBinding {
     /// part of what was signed rather than read from host state afterwards.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub destinations: Vec<String>,
+    /// Whether every use of this binding must pass the host approval
+    /// supervisor. The signed plan captures this decision at admission;
+    /// mutable local binding metadata may further restrict it but cannot
+    /// silently remove an approval requirement after signing.
+    #[serde(default, skip_serializing_if = "secret_approval_not_required")]
+    pub approval_required: bool,
+}
+
+fn secret_approval_not_required(required: &bool) -> bool {
+    !required
+}
+
+#[cfg(test)]
+mod secret_binding_approval_tests {
+    use super::*;
+
+    #[test]
+    fn old_secret_binding_stays_canonical_and_defaults_to_no_approval() {
+        let old = r#"{"name":"TOKEN","source":{"kind":"keystore","address":"token"}}"#;
+        let binding: SecretBinding = serde_json::from_str(old).unwrap();
+        assert!(!binding.approval_required);
+        assert_eq!(serde_json::to_string(&binding).unwrap(), old);
+    }
+
+    #[test]
+    fn required_approval_round_trips_inside_the_signed_binding() {
+        let binding = SecretBinding {
+            name: "TOKEN".into(),
+            source: SecretSource::Keystore {
+                address: "token".into(),
+            },
+            destinations: Vec::new(),
+            approval_required: true,
+        };
+        let json = serde_json::to_string(&binding).unwrap();
+        assert!(json.contains("\"approval_required\":true"));
+        assert_eq!(
+            serde_json::from_str::<SecretBinding>(&json).unwrap(),
+            binding
+        );
+    }
 }
 
 /// Where a secret comes from. Pluggable providers (Vault, AWS SM,
@@ -1968,6 +2009,7 @@ mod ingress_mapping_tests {
                 path: "ingress/tls".to_string(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         };
         assert_eq!(
             validate_ingress_material(std::slice::from_ref(&mapping), &[external]),
@@ -1980,6 +2022,7 @@ mod ingress_mapping_tests {
                 address: "ingress/tls".to_string(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         };
         validate_ingress_material(&[mapping], &[keystore]).unwrap();
     }
