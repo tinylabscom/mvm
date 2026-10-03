@@ -47,6 +47,10 @@ if [[ -n "${MVM_BOOT_IMAGE:-}" && "${MVM_BOOT_IMAGE}" != "build" ]]; then
   exit 2
 fi
 export MVM_BOOT_IMAGE=build
+# A local builder-image build is opt-in, and `build` without the opt-in is
+# refused rather than answered with the published image. Building it locally
+# is the one thing this witness exists to prove.
+export MVM_ALLOW_LOCAL_BUILDER_BUILD=1
 
 if [[ -d "$HOME_DIR" ]] && [[ -n "$(ls -A "$HOME_DIR" 2>/dev/null)" ]]; then
   echo "!!! $HOME_DIR is not empty; a cold source bootstrap needs a cold home" >&2

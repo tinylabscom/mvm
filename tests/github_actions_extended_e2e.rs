@@ -762,6 +762,13 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
         script.contains("set -euo pipefail"),
         "every step must be fatal"
     );
+    let opt_in = script
+        .find("export MVM_ALLOW_LOCAL_BUILDER_BUILD=1")
+        .expect("the witness must opt into a local builder-image build, or `build` is refused");
+    assert!(
+        opt_in < script.find("\"$MVMCTL\" bootstrap").unwrap_or(0),
+        "the opt-in must be exported before the builder image is bootstrapped"
+    );
     assert!(
         !script.contains("|| true") && !script.contains("if ! "),
         "the source witness must not tolerate a failed step"
