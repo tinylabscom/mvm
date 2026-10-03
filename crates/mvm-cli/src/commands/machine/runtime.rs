@@ -485,9 +485,10 @@ fn resolve_entrypoint_stdin_with(
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
     // Settle the cold-build policy before any launch phase runs: `machine
-    // run` refuses silent minute-scale source builds unless the caller asked
-    // for them (`--build`) or exported `MVM_COLD_BUILD=auto`.
-    mvm_core::cold_build::set_policy(mvm_core::cold_build::launch_policy(args.build));
+    // run` builds what a cold cache lacks and announces the first such build,
+    // unless the caller opted into failing fast (`--no-build`,
+    // `MVM_COLD_BUILD=refuse`).
+    mvm_core::cold_build::set_policy(mvm_core::cold_build::launch_policy(args.cold_build_flag()));
     // Read from `machine run`'s own full command, not `RunArgs` alone, so a
     // flag that only exists on this verb (`--name`, `-d`/`--detach`, …) is
     // still caught when placed right after `--`.

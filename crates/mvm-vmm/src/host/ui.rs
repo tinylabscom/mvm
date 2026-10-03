@@ -194,6 +194,33 @@ pub fn notice(msg: &str) {
     }
 }
 
+/// Gate one cold source or pair build on the process's cold-build policy.
+/// The first-run notice, when due, goes to stderr above any live status line:
+/// stdout belongs to the workload. The refusal comes back as the error.
+pub fn admit_cold_build(artifact: &str) -> Result<(), String> {
+    admit_cold_build_with(
+        mvm_core::cold_build::admit,
+        artifact,
+        activity::println_above,
+    )
+}
+
+fn admit_cold_build_with(
+    admit: impl FnOnce(&str) -> mvm_core::cold_build::ColdBuildAdmission,
+    artifact: &str,
+    emit: impl FnOnce(&str),
+) -> Result<(), String> {
+    use mvm_core::cold_build::ColdBuildAdmission;
+    match admit(artifact) {
+        ColdBuildAdmission::Build => Ok(()),
+        ColdBuildAdmission::Announce(notice) => {
+            emit(&format!("[mvm] {notice}"));
+            Ok(())
+        }
+        ColdBuildAdmission::Refuse(message) => Err(message),
+    }
+}
+
 /// Print a numbered step: `[mvm]` Step n/total: message. Opt-in chatter —
 /// suppressed unless `--verbose`/`--debug` or `RUST_LOG` is set.
 pub fn step(n: u32, total: u32, msg: &str) {
@@ -538,5 +565,53 @@ mod tests {
         assert_eq!(format_elapsed(Duration::from_secs(9)), "9s");
         assert_eq!(format_elapsed(Duration::from_secs(252)), "4m12s");
         assert_eq!(format_elapsed(Duration::from_secs(3720)), "1h02m");
+    }
+
+    #[test]
+    fn the_cold_build_notice_prints_once_with_the_status_prefix() {
+        use mvm_core::cold_build::{ColdBuildGate, ColdBuildPolicy};
+        let gate = ColdBuildGate::new();
+        gate.set_policy(ColdBuildPolicy::Announce);
+        let mut printed = Vec::new();
+        for artifact in ["the OCI guest runtime", "the universal initramfs"] {
+            let admitted = admit_cold_build_with(
+                |artifact| gate.admit(artifact),
+                artifact,
+                |line| printed.push(line.to_string()),
+            );
+            assert_eq!(admitted, Ok(()));
+        }
+        assert_eq!(printed.len(), 1, "one notice per process: {printed:?}");
+        assert!(printed[0].starts_with("[mvm] First run from this checkout"));
+        assert!(printed[0].contains("the OCI guest runtime"));
+    }
+
+    #[test]
+    fn a_refused_cold_build_prints_nothing_and_returns_the_message() {
+        use mvm_core::cold_build::{ColdBuildGate, ColdBuildPolicy, RefusalSource};
+        let gate = ColdBuildGate::new();
+        gate.set_policy(ColdBuildPolicy::Refuse(RefusalSource::NoBuildFlag));
+        let mut printed = Vec::new();
+        let refused = admit_cold_build_with(
+            |artifact| gate.admit(artifact),
+            "the OCI guest runtime",
+            |line| printed.push(line.to_string()),
+        )
+        .expect_err("Refuse must refuse");
+        assert!(refused.contains("`--no-build`"));
+        assert!(printed.is_empty());
+    }
+
+    #[test]
+    fn an_allowed_cold_build_prints_nothing() {
+        let gate = mvm_core::cold_build::ColdBuildGate::new();
+        let mut printed = Vec::new();
+        let admitted = admit_cold_build_with(
+            |artifact| gate.admit(artifact),
+            "the OCI guest runtime",
+            |line| printed.push(line.to_string()),
+        );
+        assert_eq!(admitted, Ok(()));
+        assert!(printed.is_empty());
     }
 }

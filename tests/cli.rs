@@ -1320,6 +1320,47 @@ fn allow_env_is_documented_on_run_and_proc_start() {
 }
 
 #[test]
+fn machine_run_help_documents_both_cold_build_flags() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "run", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("--no-build") && help.contains("Fail instead of building"),
+        "help must offer the fail-fast opt-in:\n{help}"
+    );
+    assert!(
+        help.contains("--build") && help.contains("Skip the first-run notice"),
+        "help must say `--build` only skips the notice:\n{help}"
+    );
+}
+
+#[test]
+fn machine_run_rejects_build_with_no_build() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args([
+            "machine",
+            "run",
+            "--image",
+            "alpine",
+            "--build",
+            "--no-build",
+        ])
+        .args(["--", "true"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot be used with"), "stderr: {stderr}");
+}
+
+#[test]
 fn machine_run_refuses_persistent_environment_before_boot() {
     let tmp = tempfile::tempdir().unwrap();
     #[allow(deprecated)]

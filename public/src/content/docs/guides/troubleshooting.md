@@ -17,6 +17,27 @@ This is `mvmctl doctor` telling you a check was skipped because the builder VM i
 
 **Fix**: `mvmctl bootstrap` (idempotent — pre-fetches or builds the builder VM image, no-ops if it's already warm).
 
+### The first `machine run` says it is building
+
+```
+[mvm] First run from this checkout (or its sources changed): building the OCI guest runtime locally. ...
+```
+
+A `mvmctl` built from source builds the guest runtime, host helpers and
+initramfs from that checkout — and, when an mvm-images checkout is selected,
+the images too — the first time a run needs them. On a cold cache that can
+take tens of minutes; the phase lines that follow show what is running, and
+later runs reuse the results. Nothing needs fixing. To pay that cost at a time
+of your choosing, run `mvmctl bootstrap` beforehand.
+
+### "cold caches: … refuses cold builds"
+
+The run opted into failing instead of building, with `machine run --no-build`
+or `MVM_COLD_BUILD=refuse`, and something it needs is not cached. The message
+names the artifact and how the run opted in. Drop the flag, or unset the
+variable (or set it to `auto`), to let the run build; or run `mvmctl bootstrap`
+first and keep the fail-fast setting.
+
 ### Builder VM store is stuck or degraded
 
 ```bash

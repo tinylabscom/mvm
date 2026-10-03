@@ -138,8 +138,8 @@ fn run_argv_in_e2e_home(argv: &[String], extra_env: &[(&str, &str)]) -> LaunchRe
         .args(argv)
         .isolated_home(&home)
         .env("MVM_PHASE_TIMING", "1")
-        // Same escape hatch as `mvmctl_command`: BDD launches measure the
-        // launch path and must not stop at the cold-build refusal.
+        // Same setting as `mvmctl_command`, restated because an `extra_env`
+        // entry below may override it.
         .env("MVM_COLD_BUILD", "auto");
     for (key, value) in extra_env {
         command.env(key, value);
@@ -538,7 +538,13 @@ fn repeated_launches_meet_hard_dispatch_ceiling(
             "failed to top up the Alpine warm parent\nstdout:\n{}\nstderr:\n{}",
             topped.stdout, topped.stderr
         );
-        world.last_launch = Some(run_in_e2e_home(&args, &[(&key, &value)]));
+        // A warm claim must not build anything. Refusing cold builds turns
+        // per-run rebuild work into a failure that names the artifact, rather
+        // than a dispatch time that merely comes in over the ceiling.
+        world.last_launch = Some(run_in_e2e_home(
+            &args,
+            &[(&key, &value), ("MVM_COLD_BUILD", "refuse")],
+        ));
         launch_succeeds(world);
         guest_control_plane_came_up(world);
         warm_launch_meets_hard_dispatch_ceiling(world);
