@@ -449,9 +449,14 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         session: None,
         r#fn: None,
         attach: args.attach,
+        show_denials: show_entrypoint_denials(&args),
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
     })
+}
+
+fn show_entrypoint_denials(args: &MachineRunArgs) -> bool {
+    !args.run.json
 }
 
 /// Resolve the VM identity for a fresh entrypoint boot.
@@ -662,6 +667,19 @@ mod entrypoint_stdin_tests {
             resolve_entrypoint_machine_name(&args).expect("valid machine name"),
             Some("named-agent".to_string())
         );
+    }
+
+    #[test]
+    fn entrypoint_denial_notices_do_not_interrupt_machine_readable_output() {
+        assert!(show_entrypoint_denials(&MachineRunArgs::default()));
+        let json = MachineRunArgs {
+            run: RunArgs {
+                json: true,
+                ..RunArgs::default()
+            },
+            ..MachineRunArgs::default()
+        };
+        assert!(!show_entrypoint_denials(&json));
     }
 
     /// Name the variant the flag resolved to. A payload and a stream are

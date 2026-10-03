@@ -174,7 +174,18 @@ pub fn run_entrypoint_call(
     let streams_stdin = stdin.is_streaming();
     vm.admission = vm.admission.with_stream_stdin(streams_stdin);
     let slot = vm.slot;
-    let booted = boot_entrypoint_vm(vm, pair)?;
+    let named = vm.vm_name.resolve();
+    observer.vm_named(&named);
+    let booted = boot_entrypoint_vm(
+        EntrypointVm {
+            slot: vm.slot,
+            vm_name: SessionVmName::Exact(&named),
+            cpus: vm.cpus,
+            memory_mib: vm.memory_mib,
+            admission: vm.admission,
+        },
+        pair,
+    )?;
     let vm_name = booted.vm.vm_name.clone();
 
     let mode = match lifecycle {
@@ -294,6 +305,22 @@ mod tests {
     use super::*;
     use mvm_core::session::SessionState;
     use mvm_core::util::test_env::TestEnv;
+    use mvm_hostd::stream::ShownChunk;
+
+    #[derive(Default)]
+    struct NamingObserver {
+        named: Vec<String>,
+    }
+
+    impl CallObserver for NamingObserver {
+        fn vm_named(&mut self, vm_name: &str) {
+            self.named.push(vm_name.to_string());
+        }
+
+        fn output(&mut self, _chunk: &ShownChunk) {}
+
+        fn control(&mut self, _header: &str, _payload_len: usize) {}
+    }
 
     fn isolated() -> (TestEnv, tempfile::TempDir) {
         let mut env = TestEnv::new();
@@ -355,7 +382,7 @@ mod tests {
         let admission = EntrypointAdmission::builder("mock")
             .build()
             .expect("admission");
-        let mut observer = super::super::dispatch::CapturedOutput::default();
+        let mut observer = NamingObserver::default();
         let error = run_entrypoint_call(
             EntrypointCall {
                 vm: EntrypointVm {
@@ -376,6 +403,11 @@ mod tests {
         assert!(
             format!("{error:#}").contains("Loading template"),
             "{error:#}"
+        );
+        assert_eq!(observer.named.len(), 1);
+        assert!(
+            observer.named[0].starts_with("invoke-"),
+            "the final generated name must be known before boot fails"
         );
         assert!(
             mvm_core::session::list_sessions().expect("list").is_empty(),

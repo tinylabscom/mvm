@@ -215,6 +215,12 @@ often it was refused, then the exact flags that admit the ones a grant can
 admit. The metadata service is listed and never offered; the private address is
 kept out of the allow command and named apart.
 
+`machine run --entrypoint` also watches the named machine before its admitted
+boot starts, so a baked entrypoint's refusals appear while it runs and in the
+summary before its exit status is returned. An `--attach` entrypoint call
+watches the running machine for that call. `--json` keeps these notices off
+stderr for callers consuming machine-readable output.
+
 A run with no outbound route at all — the default: no `--net`, no `--allow-host`,
 no `--allow-endpoint`, no `--peer`, and no `--secret` — starts no network endpoint. The guest has no
 channel to ask for a destination on and the host decides nothing, so there is
