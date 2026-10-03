@@ -1,0 +1,40 @@
+name: Guest bins
+
+# Builds the mvm-guest-bins artifact (every static guest executable for
+# aarch64 and x86_64, plus the manifest pinning them) from the dispatched ref,
+# and uploads it as a workflow artifact. This is the dev copy mvm-images can be
+# pointed at before a CLI release carries one. Nothing here publishes or signs.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: guest-bins-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guest-bins:
+    runs-on: ubuntu-latest
+    # A cold debug build of mvmctl plus two musl guest cross-compiles.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      # The guest binaries are cross-compiled with cargo-zigbuild under the
+      # pinned toolchain, for both musl targets; this action installs all three.
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Build the guest-bins artifact
+        run: cargo run --locked -p mvmctl -- build guest-bins --out dist
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: mvm-guest-bins
+          path: dist/
+          if-no-files-found: error

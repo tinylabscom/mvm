@@ -121,6 +121,27 @@ pub struct RuntimeOverlayGuestBinaries {
     pub ping: PathBuf,
 }
 
+impl RuntimeOverlayGuestBinaries {
+    /// Every binary in the set, named by the Cargo `[[bin]]` that produced it.
+    ///
+    /// The overlay itself stages these under short names (`agent`,
+    /// `netinit`, …); a consumer that builds images from the binaries knows
+    /// them by their Cargo names, so that is the name an exported set uses.
+    pub fn artifacts(&self) -> [(&'static str, &Path); 9] {
+        [
+            ("mvm-guest-agent", self.agent.as_path()),
+            ("mvm-guest-netinit", self.netinit.as_path()),
+            ("mvm-seccomp-apply", self.seccomp_apply.as_path()),
+            ("mvm-display-bridge", self.display_bridge.as_path()),
+            ("mvm-runner", self.runner.as_path()),
+            ("mvm-egress-client", self.egress_client.as_path()),
+            ("mvm-addon-dns", self.addon_dns.as_path()),
+            ("mvm-exit-report", self.exit_report.as_path()),
+            ("mvm-ping", self.ping.as_path()),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOverlayGuestLayout {
     pub dir: PathBuf,
