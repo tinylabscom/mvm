@@ -8,6 +8,10 @@ and writes its own ext4 image, and nothing it does reaches your tree by
 itself. That boundary is what makes an agent safe to point at real code — and
 this guide is the one reviewed path back across it.
 
+`mvmctl machine --help` lists `apply`, `undo`, and `redo`. These commands
+operate on named machines with workspace volumes, not transient `run --mount`
+copies.
+
 Everything here is journaled and reversible. An apply snapshots every host
 byte it will replace before touching anything, the snapshot's Merkle root
 lands in the audit chain, and undo/redo walk the same journal. The agent

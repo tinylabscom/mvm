@@ -3283,7 +3283,7 @@ fn vm_noun_removed() {
 }
 
 #[test]
-fn machine_help_hides_advanced() {
+fn machine_help_hides_snapshot_subcommand() {
     // `machine --help` must NOT list `snapshot`, but `machine snapshot <name>` must parse.
     let help = {
         let mut cmd = Cli::command();
@@ -3291,7 +3291,9 @@ fn machine_help_hides_advanced() {
         format!("{}", machine_sub.render_help())
     };
     assert!(
-        !help.contains("snapshot"),
+        !help
+            .lines()
+            .any(|line| line.split_whitespace().next() == Some("snapshot")),
         "`snapshot` must be hidden from `machine --help` output. Help text:\n{help}"
     );
     // But it still parses.

@@ -4,6 +4,24 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn machine_workspace_apply_verbs_are_discoverable() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "--help"])
+        .output()
+        .expect("run machine help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for verb in ["apply", "undo", "redo"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(verb)),
+            "machine help missing {verb}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn machine_check_artifact_help_names_bundle_verification_controls() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "check-artifact", "--help"])
