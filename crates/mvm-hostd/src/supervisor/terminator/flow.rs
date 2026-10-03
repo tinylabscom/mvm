@@ -47,6 +47,12 @@ const NOT_IMPLEMENTED: u16 = 501;
 const REASON_AUTHORITY_MISMATCH: &str = "authority_mismatch";
 const REASON_UNFRAMEABLE_REQUEST: &str = "unframeable_request";
 const REASON_PIPELINED: &str = "pipelined_request";
+/// The guest went away part-way through a request, so there was nothing whole
+/// to forward or to refuse.
+const REASON_TRUNCATED_REQUEST: &str = "truncated_request";
+/// The flow's socket failed under a request for a reason other than the guest
+/// leaving.
+const REASON_READ_FAILED: &str = "read_failed";
 
 /// How long a terminated flow waits on a silent guest before giving up.
 ///
@@ -284,7 +290,10 @@ impl TerminatedFlow {
         loop {
             let read = match read_http_request(io) {
                 Ok(read) => read,
-                // The guest finished with the connection. Not an error.
+                // The guest finished with the connection — including by
+                // hanging up without a `close_notify` after its last response,
+                // which is how many clients end a TLS connection. Nothing was
+                // refused, so nothing is recorded.
                 Err(ReadError::Closed) => return Ok(()),
                 // Nothing was parsed, so the method is unknown and the
                 // refusal has to be empty.
@@ -351,16 +360,24 @@ impl TerminatedFlow {
     /// Answering rather than closing because the causes are all things a
     /// client can correct — a transfer-coded body, a pipelined follow-up, a
     /// request over the size bound — and a bare close reads to the client as a
-    /// network fault. A truncated request gets no answer, because by
-    /// definition the peer is already gone.
+    /// network fault. A truncated request and a failed read get no answer:
+    /// the first because the peer is already gone, the second because the
+    /// socket the answer would go out on is the one that failed. Both are
+    /// still recorded, under labels of their own, because a request on a
+    /// credentialed flow ended unforwarded.
     fn refuse_unreadable<T: Write>(
         &self,
         io: &mut T,
         error: ReadError,
         method: Option<&str>,
     ) -> Result<(), FlowError> {
-        self.audit(refusal_reason(&error));
-        if !matches!(error, ReadError::Truncated | ReadError::Io(_)) {
+        if let Some(reason) = refusal_reason(&error) {
+            self.audit(reason);
+        }
+        if !matches!(
+            error,
+            ReadError::Closed | ReadError::Truncated | ReadError::Io(_)
+        ) {
             write_refusal(io, NOT_IMPLEMENTED, &error.to_string(), method)?;
         }
         Err(FlowError::Read(error))
@@ -470,16 +487,24 @@ fn carries_a_body(method: &str, status: u16) -> bool {
     !method.eq_ignore_ascii_case("HEAD") && !matches!(status, 100..=199 | 204 | 304)
 }
 
-/// The fixed audit label for a request that could not be read.
+/// The fixed audit label for a request that could not be read, or `None` when
+/// there was no request: a guest that closed between requests left nothing to
+/// record.
 ///
-/// Pipelining gets its own word: it is a different thing from a transfer-coded
-/// body, and recording both as one would make a chain reader unable to tell an
-/// attempt to smuggle an uninspected second request from a client that simply
-/// used chunked encoding.
-fn refusal_reason(error: &ReadError) -> &'static str {
+/// Each cause that reaches the chain gets a word that is true about it.
+/// Pipelining is a different thing from a transfer-coded body, and recording
+/// both as one would make a chain reader unable to tell an attempt to smuggle
+/// an uninspected second request from a client that simply used chunked
+/// encoding. A request the guest abandoned, or one lost to a socket failure,
+/// was never judged at all; calling either unframeable reports a refusal of a
+/// request the host never saw whole.
+fn refusal_reason(error: &ReadError) -> Option<&'static str> {
     match error {
-        ReadError::Pipelined => REASON_PIPELINED,
-        _ => REASON_UNFRAMEABLE_REQUEST,
+        ReadError::Closed => None,
+        ReadError::Pipelined => Some(REASON_PIPELINED),
+        ReadError::Truncated => Some(REASON_TRUNCATED_REQUEST),
+        ReadError::Io(_) => Some(REASON_READ_FAILED),
+        ReadError::TooLarge | ReadError::TransferCoded => Some(REASON_UNFRAMEABLE_REQUEST),
     }
 }
 
@@ -1015,29 +1040,10 @@ mod tests {
         trusted_pem: &str,
         request: &[u8],
     ) -> Result<Vec<u8>, String> {
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("build test runtime");
-        let flow = TerminatedFlow::builder()
-            .service(Arc::clone(&harness.service))
-            .runtime(runtime.handle().clone())
-            .leaves(Arc::new(LeafCache::default()))
-            .authority(host, 443)
-            .mode(TerminationMode::Tls)
-            .build()
-            .expect("build terminated flow");
-
+        let (_runtime, flow) = tls_flow_to(harness, host);
         let (endpoint_side, guest_side) = UnixStream::pair().expect("socket pair");
         let served = std::thread::spawn(move || flow.serve(endpoint_side));
-
-        let server_name = rustls::pki_types::ServerName::try_from(host)
-            .expect("the flow's host is a server name")
-            .to_owned();
-        let connection =
-            rustls::ClientConnection::new(Arc::new(guest_client_config(trusted_pem)), server_name)
-                .expect("guest tls client");
-        let mut tls = rustls::StreamOwned::new(connection, guest_side);
+        let mut tls = guest_tls(host, trusted_pem, guest_side);
 
         let wrote = tls.write_all(request).and_then(|()| tls.flush());
         let response = wrote.as_ref().ok().map(|()| read_response(&mut tls));
@@ -1059,6 +1065,78 @@ mod tests {
                 served.err()
             )),
         }
+    }
+
+    /// A TLS-terminated flow to `host:443` over `harness`'s service, and the
+    /// runtime it drives the pipeline on, which must outlive it.
+    fn tls_flow_to(harness: &Assembled, host: &str) -> (tokio::runtime::Runtime, TerminatedFlow) {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build test runtime");
+        let flow = TerminatedFlow::builder()
+            .service(Arc::clone(&harness.service))
+            .runtime(runtime.handle().clone())
+            .leaves(Arc::new(LeafCache::default()))
+            .authority(host, 443)
+            .mode(TerminationMode::Tls)
+            .build()
+            .expect("build terminated flow");
+        (runtime, flow)
+    }
+
+    /// The guest's TLS client on `socket`, connecting to `host` and trusting
+    /// exactly `trusted_pem`.
+    fn guest_tls(
+        host: &str,
+        trusted_pem: &str,
+        socket: UnixStream,
+    ) -> rustls::StreamOwned<rustls::ClientConnection, UnixStream> {
+        let server_name = rustls::pki_types::ServerName::try_from(host)
+            .expect("the flow's host is a server name")
+            .to_owned();
+        let connection =
+            rustls::ClientConnection::new(Arc::new(guest_client_config(trusted_pem)), server_name)
+                .expect("guest tls client");
+        rustls::StreamOwned::new(connection, socket)
+    }
+
+    /// When the guest hangs up in [`hang_up_without_close_notify`].
+    #[derive(Clone, Copy)]
+    enum Hangup {
+        /// Once the response has been read in full.
+        AfterResponse,
+        /// With the request still incomplete and nothing read back.
+        MidRequest,
+    }
+
+    /// Send `request` over a terminated TLS flow, then drop the socket without
+    /// a `close_notify` at the point `hangup` names — what Python's `urllib`
+    /// and many other clients do once they have their response.
+    ///
+    /// Returns what the guest read and how the flow ended.
+    fn hang_up_without_close_notify(
+        harness: &Assembled,
+        request: &[u8],
+        hangup: Hangup,
+    ) -> (Vec<u8>, Result<(), FlowError>) {
+        let (_runtime, flow) = tls_flow_to(harness, BOUND_HOST);
+        let (endpoint_side, guest_side) = UnixStream::pair().expect("socket pair");
+        let served = std::thread::spawn(move || flow.serve(endpoint_side));
+        let mut tls = guest_tls(BOUND_HOST, &harness.intermediate_pem, guest_side);
+
+        tls.write_all(request)
+            .expect("the guest writes its request");
+        tls.flush().expect("the guest flushes its request");
+        let response = match hangup {
+            Hangup::AfterResponse => read_response(&mut tls),
+            Hangup::MidRequest => Vec::new(),
+        };
+        tls.sock
+            .shutdown(std::net::Shutdown::Both)
+            .expect("the guest drops its socket");
+        let served = served.join().expect("terminated flow thread");
+        (response, served)
     }
 
     /// The guest's loopback proxy, reduced to what a client configured from the
@@ -1599,6 +1677,66 @@ mod tests {
         assert!(!chain.contains("upstream_failed"), "{chain}");
     }
 
+    /// A client that hangs up without a `close_notify` after its response has
+    /// been served is done with the connection, not sending a request the host
+    /// could not read. Recording it as a refusal reported a block of a request
+    /// that was in fact forwarded and answered.
+    #[test]
+    fn a_hang_up_without_close_notify_after_a_served_request_is_not_a_refusal() {
+        let harness = harness(BOUND_HOST, b"{\"ok\":true}");
+        let (response, served) = hang_up_without_close_notify(
+            &harness,
+            &request_with_placeholder(&harness.placeholder, BOUND_HOST),
+            Hangup::AfterResponse,
+        );
+        assert!(
+            status_line(&response).starts_with("HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        assert!(served.is_ok(), "the flow ended cleanly: {served:?}");
+
+        let chain = harness.audit_chain();
+        assert!(chain.contains("secret.forward_outcome"), "{chain}");
+        assert!(
+            !chain.contains("secret.flow_refused"),
+            "a served request followed by a hang-up records no refusal: {chain}"
+        );
+    }
+
+    /// A guest that hangs up part-way through a request is recorded as having
+    /// done that, not as having sent something unframeable — and the partial
+    /// request never reaches the forward leg.
+    #[test]
+    fn a_hang_up_part_way_through_a_request_is_recorded_as_truncated() {
+        let harness = harness(BOUND_HOST, b"never sent");
+        let request = request_with_placeholder(&harness.placeholder, BOUND_HOST);
+        let headers_only =
+            super::super::find_subslice(&request, b"\r\n\r\n").expect("the request has a head");
+        let (response, served) =
+            hang_up_without_close_notify(&harness, &request[..headers_only], Hangup::MidRequest);
+        assert!(response.is_empty());
+        assert!(
+            matches!(served, Err(FlowError::Read(ReadError::Truncated))),
+            "{served:?}"
+        );
+        assert!(
+            harness
+                .forwarder
+                .seen
+                .lock()
+                .expect("forwarder record lock")
+                .is_none(),
+            "a partial request is never forwarded"
+        );
+
+        let chain = harness.audit_chain();
+        assert!(chain.contains("secret.flow_refused"), "{chain}");
+        assert!(chain.contains(REASON_TRUNCATED_REQUEST), "{chain}");
+        assert!(!chain.contains(REASON_UNFRAMEABLE_REQUEST), "{chain}");
+        assert!(!chain.contains(REAL_SECRET), "no credential in the chain");
+    }
+
     /// The 502 a policy refusal produces on a terminated flow is recorded in
     /// the chain, naming the refused `host:port` and a fixed reason, and none
     /// of the request: not its path, its placeholder, or its body.
@@ -1832,15 +1970,29 @@ mod tests {
 
     #[test]
     fn a_refusal_reason_names_the_cause_it_was_given() {
-        assert_eq!(refusal_reason(&ReadError::Pipelined), REASON_PIPELINED);
+        assert_eq!(
+            refusal_reason(&ReadError::Pipelined),
+            Some(REASON_PIPELINED)
+        );
         assert_eq!(
             refusal_reason(&ReadError::TransferCoded),
-            REASON_UNFRAMEABLE_REQUEST
+            Some(REASON_UNFRAMEABLE_REQUEST)
         );
         assert_eq!(
             refusal_reason(&ReadError::TooLarge),
-            REASON_UNFRAMEABLE_REQUEST
+            Some(REASON_UNFRAMEABLE_REQUEST)
         );
+        assert_eq!(
+            refusal_reason(&ReadError::Truncated),
+            Some(REASON_TRUNCATED_REQUEST)
+        );
+        assert_eq!(
+            refusal_reason(&ReadError::Io(std::io::Error::from(
+                std::io::ErrorKind::PermissionDenied
+            ))),
+            Some(REASON_READ_FAILED)
+        );
+        assert_eq!(refusal_reason(&ReadError::Closed), None);
     }
 
     #[test]
