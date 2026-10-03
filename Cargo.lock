@@ -3498,6 +3498,7 @@ dependencies = [
  "mvm-agentd",
  "mvm-build",
  "mvm-cli",
+ "mvm-client",
  "mvm-contract",
  "mvm-core",
  "mvm-fs",
