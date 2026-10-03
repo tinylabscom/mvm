@@ -182,6 +182,11 @@ remedy for that reason. Here a run allowed only `api.github.com` also reaches
 for `example.com` twice, for the cloud metadata service, and for an address on
 a private network:
 
+The same live notices and exit summary apply when `machine run --name NAME
+-- COMMAND` runs a command after starting a persistent machine. The summary
+prints before the CLI returns the command's exit status, including a nonzero
+status. Detached and JSON-output starts do not print live notices.
+
 ```sh
 mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/; curl -sS http://10.0.0.5:8080/'
 ```
