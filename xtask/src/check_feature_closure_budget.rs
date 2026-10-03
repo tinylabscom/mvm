@@ -7,9 +7,11 @@
 //! The gap between them is where an off-by-default feature hides. `wasm-backend`
 //! is the standing example: it is not in the default binary, so the closure
 //! budget never sees its ~62-crate `wasmtime`/`cranelift` family — but those
-//! crates are resolved, compiled by `--all-features` CI lanes, and scanned by
-//! `cargo deny` and `cargo audit`. Without this gate, a feature could grow an
-//! arbitrarily large tree and nothing would notice.
+//! crates are resolved and scanned by `cargo deny` and `cargo audit`, and the
+//! feature lanes that turn them on compile them. No CI lane builds with
+//! `--all-features`; a feature is compiled only where a lane names it. Without
+//! this gate, a feature could grow an arbitrarily large tree and nothing would
+//! notice.
 //!
 //! ## Why not just count `Cargo.lock`
 //!
@@ -102,7 +104,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             "check-feature-closure-budget: the workspace's all-features {BUDGET_TARGET} closure \
              is {count} crates, over the budget of {FEATURE_CLOSURE_BUDGET} — an optional \
              feature grew its dependency tree. These crates do not ship in a default mvmctl, \
-             but they are compiled by --all-features lanes and scanned by cargo-deny and \
+             but they are compiled by the CI feature lanes and scanned by cargo-deny and \
              cargo-audit. Drop the dependency, or, if it is genuinely required, bump \
              FEATURE_CLOSURE_BUDGET in xtask/src/check_feature_closure_budget.rs with a \
              one-line justification in the PR."

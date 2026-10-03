@@ -224,6 +224,7 @@ fn build_service(
             address: SECRET_ADDRESS.to_string(),
         },
         destinations: Vec::new(),
+        approval_required: false,
     }];
     let (registry, handed) =
         assemble_registry(&plan_secrets, TENANT, &bindings).expect("assemble registry");

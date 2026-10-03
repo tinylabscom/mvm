@@ -751,7 +751,7 @@ mod engine {
         Caller, Engine, Extern, FuncType, Linker, Memory, Module, Store, StoreLimits, Val, ValType,
     };
     use wasmtime_wasi::p1::{self, WasiP1Ctx};
-    use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
+    use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
     pub fn is_compiled_in() -> bool {
         true
@@ -1267,6 +1267,19 @@ mod engine {
         _ticker: Option<EpochTicker>,
     }
 
+    /// The wasmtime-wasi permission a preopen is granted. A read-only
+    /// preopen may read and stat what it reaches and nothing else: no file
+    /// opened for writing, no create, rename, link, unlink, truncate or
+    /// timestamp change. Only a preopen the plan marks writable gets
+    /// mutation.
+    fn preopen_perms(read_only: bool) -> FsPerms {
+        if read_only {
+            FsPerms::ReadOnly
+        } else {
+            FsPerms::ReadWrite
+        }
+    }
+
     /// Build a fresh engine + linker wired with WASI Preview 1 and the
     /// `mvm:egress` host-import, and a `Store` carrying `egress_endpoint`
     /// as host state. The instance's filesystem and environment come
@@ -1309,20 +1322,11 @@ mod engine {
         wasi_builder.inherit_stdio();
         if let Some(plan) = activation {
             for preopen in &plan.preopens {
-                let (dir_perms, file_perms) = if preopen.read_only {
-                    (DirPerms::READ, FilePerms::READ)
-                } else {
-                    (
-                        DirPerms::READ | DirPerms::MUTATE,
-                        FilePerms::READ | FilePerms::WRITE,
-                    )
-                };
                 wasi_builder
                     .preopened_dir(
                         &preopen.host_dir,
                         &preopen.guest_path,
-                        dir_perms,
-                        file_perms,
+                        preopen_perms(preopen.read_only),
                     )
                     .map_err(|e| WasmBackendError::ModuleLoadFailed {
                         path: String::new(),
@@ -2674,6 +2678,107 @@ mod tests {
                 .call(&mut store, ())
                 .unwrap();
             assert_eq!(env_count, 1);
+        }
+
+        /// A read-only preopen cannot be written through. The module opens
+        /// an existing file for writing, creates a file, creates a
+        /// directory and unlinks a file under the read-only preopen, and
+        /// every one is refused while the host directory stays byte-for-byte
+        /// as it was. The same create under a writable preopen succeeds, and
+        /// a plain read under the read-only one succeeds, so the refusals
+        /// come from the read-only marking and not from a dead preopen or a
+        /// malformed call.
+        #[test]
+        fn read_only_preopen_refuses_every_write_through_it() {
+            use crate::wasm_activation::{WasmPreopen, WasmPreopenPlan};
+
+            let ro_dir = tempfile::tempdir().unwrap();
+            std::fs::write(ro_dir.path().join("existing"), b"original").unwrap();
+            let rw_dir = tempfile::tempdir().unwrap();
+
+            let plan = WasmPreopenPlan {
+                preopens: vec![
+                    WasmPreopen {
+                        host_dir: ro_dir.path().to_path_buf(),
+                        guest_path: "/ro".into(),
+                        read_only: true,
+                    },
+                    WasmPreopen {
+                        host_dir: rw_dir.path().to_path_buf(),
+                        guest_path: "/rw".into(),
+                        read_only: false,
+                    },
+                ],
+                env: vec![],
+            };
+
+            // dirfd 3 = /ro, dirfd 4 = /rw. path_open's oflags 1 is
+            // O_CREAT; rights 2 is FD_READ and 64 is FD_WRITE. Every export
+            // returns the WASI errno (0 = success).
+            let wat = r#"(module
+  (import "wasi_snapshot_preview1" "path_open" (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_create_directory" (func $mkdir (param i32 i32 i32) (result i32)))
+  (import "wasi_snapshot_preview1" "path_unlink_file" (func $unlink (param i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 100) "existing")
+  (data (i32.const 200) "created")
+  (data (i32.const 300) "subdir")
+  (func (export "ro_read_existing") (result i32)
+    (call $path_open (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 8) (i32.const 0) (i64.const 2) (i64.const 0) (i32.const 0) (i32.const 500)))
+  (func (export "ro_write_existing") (result i32)
+    (call $path_open (i32.const 3) (i32.const 0) (i32.const 100) (i32.const 8) (i32.const 0) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 500)))
+  (func (export "ro_create") (result i32)
+    (call $path_open (i32.const 3) (i32.const 0) (i32.const 200) (i32.const 7) (i32.const 1) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 500)))
+  (func (export "ro_mkdir") (result i32)
+    (call $mkdir (i32.const 3) (i32.const 300) (i32.const 6)))
+  (func (export "ro_unlink") (result i32)
+    (call $unlink (i32.const 3) (i32.const 100) (i32.const 8)))
+  (func (export "rw_create") (result i32)
+    (call $path_open (i32.const 4) (i32.const 0) (i32.const 200) (i32.const 7) (i32.const 1) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 500)))
+  (func (export "_start")))
+"#;
+            let module = wat_module(wat);
+            let engine::InstantiatedForTest {
+                mut store,
+                instance,
+                ..
+            } = engine::instantiate_for_test(
+                module.path().to_str().unwrap(),
+                None,
+                Some(&plan),
+                WasmBounds::unbounded(),
+            )
+            .expect("module with WASI imports must instantiate");
+
+            let errno = |name: &str, store: &mut wasmtime::Store<engine::WasmHostState>| {
+                instance
+                    .get_typed_func::<(), i32>(&mut *store, name)
+                    .unwrap_or_else(|_| panic!("fixture must export {name}"))
+                    .call(store, ())
+                    .unwrap_or_else(|_| panic!("{name} must not trap"))
+            };
+
+            assert_eq!(errno("ro_read_existing", &mut store), 0);
+            for refused in ["ro_write_existing", "ro_create", "ro_mkdir", "ro_unlink"] {
+                assert_ne!(
+                    errno(refused, &mut store),
+                    0,
+                    "{refused} must be refused under a read-only preopen"
+                );
+            }
+            assert_eq!(errno("rw_create", &mut store), 0);
+
+            let mut ro_entries: Vec<_> = std::fs::read_dir(ro_dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .collect();
+            ro_entries.sort();
+            assert_eq!(ro_entries, vec![std::ffi::OsString::from("existing")]);
+            assert_eq!(
+                std::fs::read(ro_dir.path().join("existing")).unwrap(),
+                b"original"
+            );
+            assert!(rw_dir.path().join("created").is_file());
         }
 
         mod mvm_egress_import_tests {
