@@ -95,7 +95,14 @@ system needs a portable artifact for a specific command result.
 A session is one admitted run: every chain entry carrying the plan id that a
 `plan.admitted` entry introduced. When the run exits, fails to boot, or — for a
 persistent machine — is stopped, the host appends a chain-signed
-`session.sealed` entry. The seal records:
+`session.sealed` entry.
+
+For a transient `machine run`, the host records `plan.exited` with the guest's
+reported code and seals the session after VM stop, before removing its state
+directory. If dispatch fails without a reported code, the exit record says
+`captured=false` rather than claiming success.
+
+The seal records:
 
 - how many entries the session had
 - the position and hash of its first and last entries
