@@ -1267,19 +1267,6 @@ mod engine {
         _ticker: Option<EpochTicker>,
     }
 
-    /// The wasmtime-wasi permission a preopen is granted. A read-only
-    /// preopen may read and stat what it reaches and nothing else: no file
-    /// opened for writing, no create, rename, link, unlink, truncate or
-    /// timestamp change. Only a preopen the plan marks writable gets
-    /// mutation.
-    fn preopen_perms(read_only: bool) -> FsPerms {
-        if read_only {
-            FsPerms::ReadOnly
-        } else {
-            FsPerms::ReadWrite
-        }
-    }
-
     /// Build a fresh engine + linker wired with WASI Preview 1 and the
     /// `mvm:egress` host-import, and a `Store` carrying `egress_endpoint`
     /// as host state. The instance's filesystem and environment come
@@ -1322,12 +1309,14 @@ mod engine {
         wasi_builder.inherit_stdio();
         if let Some(plan) = activation {
             for preopen in &plan.preopens {
+                // Read-only reaches read and stat only; writing needs the plan's marking.
+                let perms = if preopen.read_only {
+                    FsPerms::ReadOnly
+                } else {
+                    FsPerms::ReadWrite
+                };
                 wasi_builder
-                    .preopened_dir(
-                        &preopen.host_dir,
-                        &preopen.guest_path,
-                        preopen_perms(preopen.read_only),
-                    )
+                    .preopened_dir(&preopen.host_dir, &preopen.guest_path, perms)
                     .map_err(|e| WasmBackendError::ModuleLoadFailed {
                         path: String::new(),
                         reason: format!(
