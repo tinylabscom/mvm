@@ -1,13 +1,14 @@
 ---
 title: Codex with MVM
-description: Use the signed agent/codex policy pack for a Codex workload, and know why the Codex CLI cannot connect to MVM's local MCP server yet.
+description: Use the signed agent/codex policy pack for a Codex workload in a microVM, and connect the Codex CLI to MVM's local MCP server under a narrow tool policy.
 ---
 
 MVM has two places it can meet Codex: the signed `agent/codex` policy pack,
 which decides what a Codex workload in a microVM may reach, and the local MCP
-server, which would give a Codex session on the host a set of MVM tools. The
-pack is published and works. The MCP connection does not work with current
-Codex releases, for the reason [below](#the-mcp-server-refuses-codexs-handshake).
+server, which gives a Codex session on the host a set of MVM tools
+([below](#connect-codex-to-the-mcp-server)). The two are independent: the pack
+governs a guest's network and secrets, and the MCP tool gate governs which MVM
+tools the host client may call.
 
 Neither one confines Codex's own shell and file tools when Codex runs on the
 host. To put the agent itself behind the microVM boundary, it has to run in the
@@ -136,18 +137,79 @@ the pinned one when there is not. A reference may pin a version,
 `agent/codex@1.0.0`; a version other than the one in the lockfile is refused
 until it is pulled.
 
-## The MCP server refuses Codex's handshake
+## Connect Codex to the MCP server
 
-`codex mcp add mvm -- mvmctl ops mcp stdio` registers the server, and Codex
-starts it from the directory the session runs in. The session then fails to
-initialize it. Codex 0.147.0 and 0.160.0 open with MCP protocol version
-`2025-06-18`; `mvmctl ops mcp stdio` accepts an `initialize` only for
-`2025-11-25`, plus the stateless `2026-07-28` form, and answers any other
-version with an error instead of negotiating. No MVM tool is listed in a Codex
-session.
+Run the host integration on a host where `mvmctl` can manage machines.
 
-Until the server negotiates the version, drive MVM from Codex through the
-`mvmctl` CLI itself, as [Agent tool contract](/guides/agent-tool-contract/)
-describes. The clients that do connect are covered in
-[Claude Code](/guides/claude-code-mcp/), [OpenCode](/guides/opencode-agent/)
-and [Goose](/guides/goose-agent/).
+### Set a narrow tool policy
+
+In the project directory, add `policy/mcp-readonly.toml`:
+
+```toml
+description = "Read-only machine discovery for the local MCP client"
+
+[overrides.tools]
+allow = ["mvm.machine.list"]
+```
+
+Reference that policy from the project's `mvm.toml`:
+
+```toml
+[policy]
+profile = "./policy/mcp-readonly.toml"
+```
+
+An active `[tools]` section admits only listed tools: this one allows machine
+listing and refuses create, stop, and every unlisted tool. Check it from the
+project directory before connecting Codex:
+
+```sh
+mvmctl policy validate
+mvmctl why --tool mvm.machine.list
+mvmctl why --tool mvm.machine.stop
+```
+
+Without any `[tools]` section the MCP adapter has no tool gate, so do not treat
+a missing policy as a read-only configuration. See
+[Policy and profiles](/guides/policy-and-profiles/) for what the gate does and
+does not enforce.
+
+### Register the server
+
+```sh
+codex mcp add mvm -- mvmctl ops mcp stdio
+codex mcp list
+```
+
+`codex mcp add` writes the server into Codex's own configuration,
+`~/.codex/config.toml`, so the registration applies to every Codex session,
+not one project:
+
+```toml
+[mcp_servers.mvm]
+command = "mvmctl"
+args = ["ops", "mcp", "stdio"]
+```
+
+Codex starts the server in the directory the session runs in, and that is how
+MVM finds the `mvm.toml` whose policy gates the tools. A session started in a
+directory with no `[tools]` policy gets an ungated server. The server speaks
+over local stdin/stdout, not a network listener.
+
+Codex 0.147.0 opens the session with MCP protocol version `2025-06-18`. The
+server answers an `initialize` with the version the client asked for when it
+implements that version, `2025-11-25` or `2025-06-18`, and with `2025-11-25`
+otherwise, leaving the client to decide whether to continue. In a Codex 0.147.0
+session the MVM tools are listed under the `mcp__mvm` namespace, each dot in a
+tool name replaced by an underscore: `mvm.machine.list` appears as
+`mvm_machine_list`. The listing shows every tool the server offers; the policy
+is applied when a tool is called, and a refused tool returns a policy denial.
+
+That handshake and listing were checked against Codex 0.147.0. A tool call made
+by Codex itself has not been exercised. Keep Codex's own approval settings
+separate: MVM cannot stop an agent from using its native shell tool on the host.
+
+If a tool rule says `ask`, `mvmctl ops mcp stdio` prompts on its controlling
+terminal. A Codex session with no answering terminal is denied rather than
+silently approved. For VM-bound execution and its audit boundary, see
+[Agent tool contract](/guides/agent-tool-contract/).
