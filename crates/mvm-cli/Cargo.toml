@@ -9,6 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 mvm-core = { workspace = true, features = ["client-remote", "provenance"] }
 mvm-agentd.workspace = true
 mvm-runtime = { workspace = true, default-features = false }

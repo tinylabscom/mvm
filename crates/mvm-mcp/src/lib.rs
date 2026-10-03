@@ -127,11 +127,15 @@ impl ToolGateDenial {
 /// from the resolved workload policy, and the gate resolves allow/deny/ask
 /// itself, failing closed. An unlisted tool the gate does not explicitly
 /// allow is the gate's denial to issue.
+#[async_trait::async_trait]
 pub trait ToolCallGate: Send + Sync {
-    /// Decide one call. Blocking: an `ask` implementation prompts on its own
-    /// thread and the server serializes calls, so one prompt is outstanding
-    /// at a time.
-    fn authorize(&self, tool: &str, arguments: &Map<String, Value>) -> Result<(), ToolGateDenial>;
+    /// Decide one call before backend work. The server serializes calls, so
+    /// one approval question and its audit writes are outstanding at a time.
+    async fn authorize(
+        &self,
+        tool: &str,
+        arguments: &Map<String, Value>,
+    ) -> Result<(), ToolGateDenial>;
 }
 
 /// Stateless request adapter with one process-lifetime capability snapshot.
@@ -299,7 +303,7 @@ impl McpServer {
                     return response_error(id, -32602, "unknown or unavailable tool");
                 }
                 if let Some(gate) = &self.tool_gate {
-                    if let Err(denial) = gate.authorize(&call.name, &call.arguments) {
+                    if let Err(denial) = gate.authorize(&call.name, &call.arguments).await {
                         return response_result(id, ToolFailure::Gate(denial).into_tool_result());
                     }
                 }
@@ -1662,8 +1666,9 @@ mod gate_tests {
         denied: &'static str,
     }
 
+    #[async_trait::async_trait]
     impl ToolCallGate for RefuseList {
-        fn authorize(
+        async fn authorize(
             &self,
             tool: &str,
             _arguments: &Map<String, Value>,
