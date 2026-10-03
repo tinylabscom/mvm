@@ -5643,6 +5643,27 @@ fn why_requires_exactly_one_subject_and_parses_policy_sources() {
     assert_eq!(args.profile, ["agent-apis"]);
     assert!(args.json);
 
+    let routed = Cli::try_parse_from([
+        "mvmctl",
+        "why",
+        "--host",
+        "api.example.com",
+        "--method",
+        "GET",
+        "--request-path",
+        "/public/status",
+    ])
+    .expect("routed host query must parse");
+    let Commands::Why(args) = routed.command else {
+        panic!("expected why command")
+    };
+    assert_eq!(args.method.as_deref(), Some("GET"));
+    assert_eq!(args.request_path.as_deref(), Some("/public/status"));
+    assert!(Cli::try_parse_from(["mvmctl", "why", "--host", "a.test", "--method", "GET"]).is_err());
+    assert!(
+        Cli::try_parse_from(["mvmctl", "why", "--tool", "read", "--request-path", "/x"]).is_err()
+    );
+
     assert!(Cli::try_parse_from(["mvmctl", "why"]).is_err());
     assert!(
         Cli::try_parse_from(["mvmctl", "why", "--host", "a.test", "--secret", "TOKEN"]).is_err()

@@ -277,6 +277,8 @@ fn why_help_lists_every_query_and_policy_source() {
     let help = String::from_utf8_lossy(&out.stdout);
     for flag in [
         "--host",
+        "--method",
+        "--request-path",
         "--path",
         "--tool",
         "--secret",
@@ -359,6 +361,41 @@ fn why_discovers_the_project_policy_from_a_nested_directory() {
     let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(answer["allowed"], true);
     assert_eq!(answer["matched"], "network.allow = \"api.example.com:443\"");
+}
+
+#[test]
+fn why_routed_host_requires_request_context_and_reports_the_matching_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("resolved.json");
+    std::fs::write(
+        &plan,
+        r#"{"policy":{"network":{"allow":["api.example.com:443"],"routes":[{"id":"api","host":"api.example.com","rules":[{"id":"read","method":"GET","path":"/public/**","outcome":"allow"}],"otherwise":"deny","intercept":true}]}}}"#,
+    )
+    .unwrap();
+    let query = |extra: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+        command
+            .env("MVM_HOME", dir.path())
+            .env("HOME", dir.path())
+            .args(["why", "--host", "api.example.com", "--plan"])
+            .arg(&plan);
+        command.args(extra).arg("--json");
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(query(&[])["allowed"], false);
+    let allowed = query(&["--method", "GET", "--request-path", "/public/x"]);
+    assert_eq!(allowed["allowed"], true);
+    assert_eq!(allowed["matched"], "network.routes.api.read");
+    assert_eq!(
+        query(&["--method", "POST", "--request-path", "/public/x"])["allowed"],
+        false
+    );
 }
 
 /// `pack --help` advertises all five lifecycle subcommands.

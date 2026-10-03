@@ -22,6 +22,12 @@ pub(in crate::commands) struct Args {
     /// Ask whether HOST[:PORT] is reachable (port defaults to 443)
     #[arg(long, value_name = "HOST[:PORT]")]
     pub host: Option<String>,
+    /// HTTP method for a routed host query; requires --request-path
+    #[arg(long, value_name = "METHOD", requires_all = ["host", "request_path"])]
+    pub method: Option<String>,
+    /// HTTP path for a routed host query; requires --method
+    #[arg(long, value_name = "PATH", requires_all = ["host", "method"])]
+    pub request_path: Option<String>,
     /// Ask whether this host path is shared with the workload
     #[arg(long, value_name = "PATH")]
     pub path: Option<PathBuf>,
@@ -68,6 +74,13 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
 
 fn selected_query(args: &Args) -> Result<PolicyQuery> {
     if let Some(host) = &args.host {
+        if let (Some(method), Some(path)) = (&args.method, &args.request_path) {
+            return Ok(PolicyQuery::Http {
+                host: host.clone(),
+                method: method.clone(),
+                path: path.clone(),
+            });
+        }
         return Ok(PolicyQuery::Host(host.clone()));
     }
     if let Some(path) = &args.path {
@@ -97,20 +110,28 @@ fn resolve_policy(args: &Args) -> Result<ResolvedPolicy> {
     }
 
     let project = project_policy(args)?;
-    let Some(selection) = PolicySelection::for_launch(&args.profile, project)? else {
-        return Ok(ResolvedPolicy::empty());
-    };
+    let selection = PolicySelection::for_launch(
+        &args.profile,
+        project.as_ref().map(|(policy, _)| policy.clone()),
+    )?;
     let backend = args
         .backend
         .unwrap_or_else(|| mvm_client::backend_kind_for(&mvm_client::auto_selected_backend_name()));
-    Ok(resolve(
-        &PolicyStore::from_config(),
-        &selection,
-        Platform::current(Some(backend)),
-    )?)
+    let mut resolved = match selection {
+        Some(selection) => resolve(
+            &PolicyStore::from_config(),
+            &selection,
+            Platform::current(Some(backend)),
+        )?,
+        None => ResolvedPolicy::empty(),
+    };
+    if let Some((_, manifest)) = project {
+        add_project_launch_bindings(&mut resolved, &manifest)?;
+    }
+    Ok(resolved)
 }
 
-fn project_policy(args: &Args) -> Result<Option<ProjectPolicy>> {
+fn project_policy(args: &Args) -> Result<Option<(ProjectPolicy, mvm_core::manifest::Manifest)>> {
     if !args.profile.is_empty() && args.project.is_none() {
         return Ok(None);
     }
@@ -119,9 +140,36 @@ fn project_policy(args: &Args) -> Result<Option<ProjectPolicy>> {
     path.map(|path| {
         let manifest = mvm_core::manifest::Manifest::read_file(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        Ok(ProjectPolicy::from_manifest(&path, &manifest))
+        Ok((ProjectPolicy::from_manifest(&path, &manifest), manifest))
     })
     .transpose()
+}
+
+fn add_project_launch_bindings(
+    resolved: &mut ResolvedPolicy,
+    manifest: &mvm_core::manifest::Manifest,
+) -> Result<()> {
+    use mvm_client::policy_profiles::model::SecretGrant;
+
+    let mut routes = manifest.network.routes.clone();
+    routes.extend(resolved.policy.network.routes.iter().cloned());
+    resolved.policy.network.routes =
+        mvm_client::admission::run_routes::resolve_run_routes(&[], &routes)?.routes;
+    for (name, spec) in &manifest.secrets {
+        if !resolved
+            .policy
+            .secrets
+            .bind
+            .iter()
+            .any(|grant| grant.name == *name)
+        {
+            resolved.policy.secrets.bind.push(SecretGrant {
+                name: name.clone(),
+                hosts: spec.hosts.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn print_answer(answer: &PolicyAnswer) {
@@ -149,6 +197,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = Args {
             host: Some("api.example.com".into()),
+            method: None,
+            request_path: None,
             path: None,
             tool: None,
             secret: None,
@@ -174,6 +224,8 @@ mod tests {
         .unwrap();
         let args = Args {
             host: Some("api.example.com".into()),
+            method: None,
+            request_path: None,
             path: None,
             tool: None,
             secret: None,
@@ -189,5 +241,63 @@ mod tests {
                 .unwrap()
                 .allowed
         );
+    }
+
+    #[test]
+    fn a_project_manifest_contributes_secret_bindings_and_endpoint_routes() {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project.path().join("mvm.toml"),
+            "flake = \".\"\n[secrets]\napi = { hosts = [\"api.example.com\"] }\n[[network.routes]]\nid = \"api\"\nhost = \"api.example.com\"\nintercept = true\nrules = [{ method = \"GET\", path = \"/public/**\", outcome = \"allow\" }]\n",
+        )
+        .unwrap();
+        let mut args = Args {
+            host: None,
+            method: None,
+            request_path: None,
+            path: None,
+            tool: None,
+            secret: Some("api".into()),
+            profile: Vec::new(),
+            plan: None,
+            project: Some(project.path().to_path_buf()),
+            backend: Some(BackendKind::Firecracker),
+            json: true,
+        };
+        let resolved = resolve_policy(&args).unwrap();
+        assert!(
+            answer(&resolved, selected_query(&args).unwrap())
+                .unwrap()
+                .allowed
+        );
+        args.secret = None;
+        args.host = Some("api.example.com".into());
+        args.method = Some("GET".into());
+        args.request_path = Some("/public/x".into());
+        assert!(
+            answer(&resolved, selected_query(&args).unwrap())
+                .unwrap()
+                .allowed
+        );
+        args.method = Some("POST".into());
+        assert!(
+            !answer(&resolved, selected_query(&args).unwrap())
+                .unwrap()
+                .allowed
+        );
+    }
+
+    #[test]
+    fn project_secret_cannot_override_an_authored_deny() {
+        let manifest = mvm_core::manifest::Manifest::from_toml_str(
+            "flake = \".\"\n[secrets]\napi = { hosts = [\"api.example.com\"] }\n",
+        )
+        .unwrap();
+        let mut resolved = ResolvedPolicy::empty();
+        resolved.policy.secrets.deny.push("api".into());
+        add_project_launch_bindings(&mut resolved, &manifest).unwrap();
+        let result = answer(&resolved, PolicyQuery::Secret("api".into())).unwrap();
+        assert!(!result.allowed);
+        assert_eq!(result.matched.as_deref(), Some("secrets.deny = \"api\""));
     }
 }

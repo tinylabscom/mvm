@@ -132,7 +132,7 @@ covered = [
     "mvmctl machine run --flake /tmp/secret-egress --entrypoint --from-workload-ir /tmp/secret-egress/workload.json --allow-host httpbin.org:80",
     "mvmctl machine run --flake /tmp/tool-build --name tool-dev",
     "mvmctl machine run --flake PATH --entrypoint --from-workload-ir PATH",
-    "mvmctl machine run --hypervisor qemu --image python:3.12-alpine --allow-host example.com:443 -- python3 -c 'import urllib.request; print(urllib.request.urlopen(\"https://example.com\").status)'",
+    """mvmctl machine run --hypervisor qemu --image python:3.12-alpine --allow-host example.com:443 -- python3 -c 'import urllib.request; print(urllib.request.urlopen("https://example.com").status)'""",
     "mvmctl machine run --hypervisor wasm",
     "mvmctl machine run --image alpine -- echo hi",
     "mvmctl machine run --image alpine -- uname -a",
@@ -220,6 +220,7 @@ covered = [
     "mvmctl trust instructions sign ./my-agent",
     "mvmctl trust instructions verify ./my-agent",
     "mvmctl why --host api.github.com:443",
+    "mvmctl why --host api.github.com:443 --method GET --request-path /repos/org/project",
 ]
 uncovered = [
     "mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true",
@@ -389,7 +390,6 @@ uncovered = [
     "mvmctl machine run --flake ./worker --name worker -d",
     "mvmctl machine run --flake examples/python/hello-app-with-deps/ --prod --entrypoint",
     "mvmctl machine run --healthcheck 'curl -fsS localhost/health' --name svc --image ghcr.io/example/service:1.4",
-    "mvmctl machine run --hypervisor qemu --image alpine --net -- sh -c 'wget -qO- https://example.com'",
     "mvmctl machine run --image alpine --output ./results:/data/out:16M -- sh -c 'echo done > /data/out/status.txt'",
     "mvmctl machine run --manifest .",
     "mvmctl machine run --manifest . --name my-vm --port 8080:8080",
