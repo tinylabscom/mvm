@@ -143,14 +143,35 @@ decomposed:
 | BDD live witness / BDD conformance | 18.5 / 17.7 min | parallel |
 | Test workspace (aarch64) | 17 min | parallel |
 
-- [ ] **Path-scope the guest-image-boot lane's heavy step.** It already
+- [x] **Path-scope the guest-image-boot lane's heavy step.** It already
       `needs: [scope]`; gate the build/boot step on `scope.nix` the way the
       boot-latency lane skips docs-only PRs, so Rust-only merges stop paying
       a 31-minute image build. The lane still runs on every image-relevant
       change and on dispatch.
-- [ ] **Shard `Test workspace`.** Split the nextest suite across two runners
+      *Ticked 2026-10-03:* mvm#3841 added a `guest_image` scope output
+      keyed to the same four crates the SDK sidecar fingerprint hashes, plus
+      the guest recipes, workspace manifests, toolchain and `build.rs`. Merge-group
+      runs 37084235500, 37088464972, 37093028421 and 37095353724 (all
+      host-only) report the lane as `skipped`, and it no longer appears among
+      the longest jobs.
+- [x] **Shard `Test workspace`.** Split the nextest suite across two runners
       (~23.5 min -> ~12 min) if the queue remains the bottleneck after the
       image lane is scoped.
+      *Ticked 2026-10-03 as landed; the expected saving did not appear:*
+      mvm#3875 runs the suite as two shards. In the merge-group runs above,
+      each shard still takes 19.4–21.4 min, not ~12, because each shard
+      compiles the whole test workspace on its own runner, and the compile
+      dominates. `Test workspace` remains the merge-group critical path, with
+      `Lint feature coverage` (~17.5 min) and BDD conformance (~19.8 min)
+      close behind.
+
+**Merge-group wall after both levers (2026-10-03).** Over the 20 most recent
+green `merge_group` runs of `ci.yml` (2026-10-02 15:24Z → 2026-10-03 04:05Z,
+all first attempts, `run_started_at` → `updated_at`): median 21.7 min, 3 of
+20 under 20 min, range 12.7–38.0 min. The guest-bins plan's queue-wall
+tripwire (below 20 min over at least ten runs) is therefore **not met** on
+this evidence. The next lever is the shard compile, not more shards: a
+third shard pays the same compile a third time.
 
 ## Separately tracked (not this plan)
 
