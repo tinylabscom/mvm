@@ -23,6 +23,25 @@ use crate::ui;
 
 const MIB: u64 = 1024 * 1024;
 
+/// What a completed transient run reports as the workload's exit status, so
+/// [`PreparedOutputs::close_run`] can record it whichever shape the run
+/// returned.
+pub(super) trait RunExit {
+    fn exit_code(&self) -> i32;
+}
+
+impl RunExit for i32 {
+    fn exit_code(&self) -> i32 {
+        *self
+    }
+}
+
+impl RunExit for crate::exec::ExecOutput {
+    fn exit_code(&self) -> i32 {
+        self.exit_code
+    }
+}
+
 /// Disk capacity for an output whose byte bound is `max_bytes`, in MiB.
 ///
 /// ext4 spends part of any image on its own metadata, so a disk sized exactly
@@ -161,13 +180,17 @@ impl PreparedOutputs {
     }
 
     /// Close a transient run: record how it ended against its admitted plan,
-    /// collect its outputs, and surface the run's own failure ahead of a
-    /// collection refusal.
+    /// collect its outputs, seal its session, and surface the run's own
+    /// failure ahead of a collection refusal.
     ///
     /// Outputs are collected whatever the workload's exit code — a failing
     /// job's partial results and logs are often exactly what the caller needs
     /// back. Only a run that did not complete is left uncollected.
-    pub(super) fn close_run<T>(
+    ///
+    /// The session is sealed last, after the output entries, so the seal
+    /// covers everything the run wrote. This is the one place a transient run
+    /// is sealed: every way `run_inner` returns comes back through here.
+    pub(super) fn close_run<T: RunExit>(
         &self,
         admitted: &std::cell::RefCell<Option<AdmissionContext>>,
         backend: &str,
@@ -175,8 +198,16 @@ impl PreparedOutputs {
         result: Result<T>,
     ) -> Result<T> {
         let admitted = admitted.borrow_mut().take();
-        super::up::record_transient_outcome(admitted.as_ref(), backend, strategy, &result);
+        if result.is_ok() {
+            super::up::record_transient_launch(admitted.as_ref(), backend, strategy);
+        }
         let collected = self.collect(admitted.as_ref(), result.is_ok());
+        super::up::close_transient_session(
+            admitted.as_ref(),
+            backend,
+            result.as_ref().map(RunExit::exit_code),
+            "launch",
+        );
         let value = result?;
         collected?;
         Ok(value)
@@ -331,5 +362,148 @@ mod tests {
             error.to_string().contains("overlaps the --mount"),
             "{error}"
         );
+    }
+
+    /// Admit a real plan whose signer and chain live in the given directories.
+    fn admitted_into(
+        keys_dir: &Path,
+        audit_dir: &Path,
+        rootfs_dir: &Path,
+        vm_name: &str,
+    ) -> AdmissionContext {
+        let rootfs = rootfs_dir.join("rootfs.ext4");
+        std::fs::write(&rootfs, vm_name.as_bytes()).expect("write rootfs");
+        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+        super::super::up::admit_plan_for_boot(super::super::up::AdmitPlanForBootParams {
+            instructions: Default::default(),
+            outputs: Vec::new(),
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            tenant: "local",
+            vm_name,
+            backend_name: "firecracker",
+            configured_images_dir: None,
+            rootfs_path: &rootfs,
+            kernel_path: None,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 1,
+            mem_mib: 128,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            caller_commitment: None,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir),
+            audit_dir: Some(audit_dir),
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            tools: Default::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            grants: None,
+            backend_kind: None,
+            entrypoint: crate::commands::vm::entrypoint_resolve::ResolvedEntrypoint::unresolved(
+                "this test does not resolve one",
+            ),
+            assets: Vec::new(),
+        })
+        .expect("admission")
+    }
+
+    fn verify(
+        audit_dir: &Path,
+        plan_id: &str,
+        vk: &ed25519_dalek::VerifyingKey,
+    ) -> mvm_hostd::audit::session::SessionVerification {
+        mvm_hostd::audit::session::verify_session(audit_dir, "local", plan_id, vk)
+    }
+
+    /// The transient-run close is where `mvmctl run` ends its session: a run
+    /// that exited leaves a sealed session `trust audit verify` reports
+    /// `VERIFIED`, carrying the workload's exit code, and the run's own
+    /// result is passed through untouched.
+    #[test]
+    fn closing_a_run_that_exited_seals_its_session() {
+        let keys = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let rootfs = tempfile::tempdir().unwrap();
+        let ctx = admitted_into(keys.path(), audit.path(), rootfs.path(), "vm-close-exited");
+        let plan_id = ctx.admitted.plan().plan_id.0.clone();
+        let vk = ctx.emitter.verifying_key();
+        let cell = std::cell::RefCell::new(Some(ctx));
+        let prepared = PreparedOutputs::prepare(&[], &[]).unwrap();
+
+        let output = crate::exec::ExecOutput {
+            exit_code: 2,
+            stdout: String::new(),
+            stderr: String::new(),
+            phase_timing: None,
+        };
+        let closed = prepared
+            .close_run(
+                &cell,
+                "firecracker",
+                mvm_build::run_image::RootStrategy::BlockExt4,
+                Ok(output),
+            )
+            .expect("an exited run closes cleanly");
+        assert_eq!(closed.exit_code, 2);
+        assert!(cell.borrow().is_none(), "the admission is consumed");
+
+        let report = verify(audit.path(), &plan_id, &vk);
+        assert_eq!(
+            report.verdict,
+            mvm_hostd::audit::session::Verdict::Verified,
+            "{report:?}"
+        );
+        assert_eq!(report.late_entries, 0);
+        let [check] = report.seals.as_slice() else {
+            panic!("exactly one seal: {:?}", report.seals);
+        };
+        assert_eq!(
+            check.seal.reason,
+            mvm_hostd::audit::session::SealReason::Exited
+        );
+        assert_eq!(check.seal.exit_code.as_deref(), Some("2"));
+    }
+
+    /// A run that never completed seals as failed, not exited, and its error
+    /// still reaches the caller.
+    #[test]
+    fn closing_a_run_that_failed_seals_it_as_failed() {
+        let keys = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
+        let rootfs = tempfile::tempdir().unwrap();
+        let ctx = admitted_into(keys.path(), audit.path(), rootfs.path(), "vm-close-failed");
+        let plan_id = ctx.admitted.plan().plan_id.0.clone();
+        let vk = ctx.emitter.verifying_key();
+        let cell = std::cell::RefCell::new(Some(ctx));
+        let prepared = PreparedOutputs::prepare(&[], &[]).unwrap();
+
+        let error = prepared
+            .close_run::<i32>(
+                &cell,
+                "firecracker",
+                mvm_build::run_image::RootStrategy::BlockExt4,
+                Err(anyhow::anyhow!("guest agent did not become reachable")),
+            )
+            .expect_err("the run's failure is surfaced");
+        assert!(error.to_string().contains("guest agent"), "{error:#}");
+
+        let report = verify(audit.path(), &plan_id, &vk);
+        assert_eq!(report.verdict, mvm_hostd::audit::session::Verdict::Verified);
+        let [check] = report.seals.as_slice() else {
+            panic!("exactly one seal: {:?}", report.seals);
+        };
+        assert_eq!(
+            check.seal.reason,
+            mvm_hostd::audit::session::SealReason::Failed
+        );
+        assert_eq!(check.seal.exit_code, None);
     }
 }

@@ -152,6 +152,44 @@ pub(crate) fn seal_stopped_session(plan: &mvm_core::plan::ExecutionPlan, machine
     }
 }
 
+/// Record the end of a run that exited: the chain-signed `plan.exited` entry,
+/// the session seal (reason `exited`), and the closing published root.
+///
+/// Every step is best-effort, as at stop: the workload has already run, and
+/// failing its exit over an audit write would report a run that happened as
+/// one that did not. A seal that could not be written is not hidden —
+/// `trust audit verify` reports the session `UNSEALED`.
+pub(crate) fn record_session_exit(
+    emitter: &AuditEmitter,
+    plan: &mvm_core::plan::ExecutionPlan,
+    record: ExitRecord<'_>,
+    machine: &str,
+) {
+    if let Err(e) = emitter.emit_exited_with_capture(plan, record) {
+        tracing::warn!(error = %e, machine, "audit emit_exited failed (non-fatal)");
+    }
+    // Seal before the closing root, so the root covers the seal.
+    if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Exited) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            machine,
+            "could not seal the session at exit; `trust audit verify` will report it unsealed"
+        );
+    }
+    // The closing bracket of the run. Admission published the opening one, so
+    // a verifier can prove the log only grew across the whole execution rather
+    // than changing underneath it.
+    match emitter.publish_root(&plan.tenant.0) {
+        Ok(_) => mvm_hostd::audit::witness::flush_configured(emitter.audit_dir(), &plan.tenant.0),
+        Err(e) => tracing::warn!(
+            error = %format!("{e:#}"),
+            machine,
+            "could not publish an audit root at exit; the log stays intact but a later \
+             consistency check has one fewer point to verify against"
+        ),
+    }
+}
+
 impl LocalBackend {
     /// The secret lifecycle service to validate/record references through:
     /// the injected one, else the production-wired local service.
@@ -1184,43 +1222,16 @@ impl LocalBackend {
                     "audit emit_memory_limit_exceeded failed (non-fatal)"
                 );
             }
-            if let Err(e) = emitter.emit_exited_with_capture(
+            record_session_exit(
+                &emitter,
                 &outcome.plan,
                 ExitRecord {
                     exit_code,
                     backend: &outcome.machine.backend,
                     usage,
                 },
-            ) {
-                tracing::warn!(error = %e, machine = name, "audit emit_exited failed (non-fatal)");
-            }
-            // Seal before the closing root, so the root covers the seal.
-            if let Err(e) =
-                emitter.seal_session(&outcome.plan, mvm_hostd::audit::session::SealReason::Exited)
-            {
-                tracing::warn!(
-                    error = %format!("{e:#}"),
-                    machine = name,
-                    "could not seal the session at exit; `trust audit verify` will report it unsealed"
-                );
-            }
-            // The closing bracket of the run. Admission published the opening
-            // one, so a verifier can prove the log only grew across the whole
-            // execution rather than changing underneath it. Best-effort for
-            // the same reason as at admission: a workload that already ran
-            // must not fail its exit report over a weakened later check.
-            match emitter.publish_root(&outcome.plan.tenant.0) {
-                Ok(_) => mvm_hostd::audit::witness::flush_configured(
-                    emitter.audit_dir(),
-                    &outcome.plan.tenant.0,
-                ),
-                Err(e) => tracing::warn!(
-                    error = %format!("{e:#}"),
-                    machine = name,
-                    "could not publish an audit root at exit; the log stays intact but a later \
-                     consistency check has one fewer point to verify against"
-                ),
-            }
+                name,
+            );
         }
         if outcome.mode == LifecycleMode::Transient {
             self.cleanup_transient(name)?;

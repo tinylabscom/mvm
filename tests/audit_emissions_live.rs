@@ -70,7 +70,7 @@
 //!   (test pre-creates `~/.mvm/instances/<name>/snapshot/` so the
 //!   bail-when-missing branch doesn't short-circuit the emit)
 //! - `mvmctl machine snapshot ls` → **no** audit entry
-//! - `mvmctl audit tail` / `audit verify` / `audit show <id>` →
+//! - `mvmctl trust audit tail` / `audit verify` / `audit show <id>` →
 //!   **no** audit entry (the `AUDIT` leaves are all ReadOnly)
 //! - `mvmctl attest status` / `attest export` → **no** audit
 //!   entry (the `ATTEST` leaves are all ReadOnly)
