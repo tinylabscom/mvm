@@ -24,7 +24,7 @@ use crate::ui;
 ///
 /// Security-relevant outcomes (everything except `network`, which is
 /// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
-/// so `mvmctl audit tail` shows the rejection. The counter is the
+/// so `mvmctl trust audit tail` shows the rejection. The counter is the
 /// alerting channel; the audit line is the forensics channel.
 #[cfg(test)]
 pub(super) fn bump_verify_outcome(outcome: &str) {

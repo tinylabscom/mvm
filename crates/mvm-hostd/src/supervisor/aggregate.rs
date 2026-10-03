@@ -707,7 +707,7 @@ impl Supervisor {
     /// extra labels alongside the `reason` field. Used to pin the
     /// deps-volume `volume_hash` +
     /// `manifest_sha256` into every `plan.admitted` / `plan.running`
-    /// entry for a deps-bound workload, so `mvmctl audit verify`
+    /// entry for a deps-bound workload, so `mvmctl trust audit verify`
     /// detects drift if either hash changes between runs.
     async fn emit_admission_audit_with_extras(
         &self,
@@ -888,7 +888,7 @@ impl Supervisor {
 
 /// Build the `(key, value)` extras the supervisor stamps onto every
 /// admission audit entry (`plan.admitted` / `plan.running`) for a
-/// deps-bound workload. `mvmctl audit verify`
+/// deps-bound workload. `mvmctl trust audit verify`
 /// reads these back to detect drift if either hash changes between
 /// the plan signing and the on-disk volume.
 ///
