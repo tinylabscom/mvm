@@ -20,7 +20,7 @@ pub const RUNTIME_OVERLAY_ACQUIRE_MODE_ENV: &str = "MVM_RUNTIME_OVERLAY_ACQUIRE_
 
 const COLD_SOURCE_RUNTIME_NOTICE: &str = "Preparing the MVM guest runtime from local sources (not the OCI base image): \
      cold-building guest agent, network, sandbox, and egress helpers for this checkout; \
-     cached afterward. Run `mvmctl bootstrap` to prewarm; use -v for Cargo output…";
+     cached afterward. Use -v for Cargo output…";
 
 pub fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
     mvm_build::image_source::guest_runtime_source_checkout()
@@ -55,11 +55,9 @@ fn default_runtime_overlay_mode(
 pub fn acquire_runtime_overlay(
     params: &RuntimeOverlayAcquireParams<'_>,
 ) -> Result<RuntimeOverlayArtifact> {
-    if let Some(message) = mvm_core::cold_build::refusal("the MVM guest runtime (runtime overlay)")
-    {
-        anyhow::bail!(message);
-    }
     if let Some(workspace_root) = params.source_checkout_root {
+        mvm_runtime::ui::admit_cold_build("the MVM guest runtime (runtime overlay)")
+            .map_err(anyhow::Error::msg)?;
         return build_runtime_overlay_from_source_checkout(
             workspace_root,
             params.cache_root,
@@ -106,9 +104,8 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
             {
                 return Ok(());
             }
-            if let Some(message) = mvm_core::cold_build::refusal("the OCI guest runtime") {
-                anyhow::bail!(message);
-            }
+            mvm_runtime::ui::admit_cold_build("the OCI guest runtime")
+                .map_err(anyhow::Error::msg)?;
             // Status goes to stderr: stdout belongs to the workload's own output.
             mvm_runtime::ui::activity::println_above(&format!(
                 "[mvm] {COLD_SOURCE_RUNTIME_NOTICE}"
@@ -197,10 +194,12 @@ mod acquisition_policy_tests {
     }
 
     #[test]
-    fn cold_source_runtime_notice_names_the_artifacts_and_prewarm_path() {
+    fn cold_source_runtime_notice_names_the_artifacts_and_caching() {
         assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("not the OCI base image"));
         assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("guest agent, network, sandbox, and egress"));
-        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("`mvmctl bootstrap`"));
         assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("cached afterward"));
+        // The prewarm pointer belongs to the one first-run notice the cold
+        // build gate prints before this line; repeating it here is noise.
+        assert!(!COLD_SOURCE_RUNTIME_NOTICE.contains("bootstrap"));
     }
 }

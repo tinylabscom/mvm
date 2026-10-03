@@ -271,10 +271,9 @@ pub fn resolve_or_build_local_initramfs(
     // fails whenever the locked image set carries no initramfs for this arch,
     // and on its own that reads as "unavailable" rather than "your checkout did
     // not build".
-    if crate::guest_agent_build::detect_source_workspace().is_some()
-        && let Some(message) = mvm_core::cold_build::refusal("the universal initramfs")
-    {
-        return Err(InitramfsBuildError::CargoBuildFailed { reason: message });
+    if crate::guest_agent_build::detect_source_workspace().is_some() {
+        mvm_vmm::host::ui::admit_cold_build("the universal initramfs")
+            .map_err(|reason| InitramfsBuildError::CargoBuildFailed { reason })?;
     }
     let build_err = match build_initramfs_with_cargo(cache_root, version, arch) {
         Ok(artifact) => {

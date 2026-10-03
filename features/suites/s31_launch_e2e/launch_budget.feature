@@ -48,7 +48,9 @@ Feature: the launch budget stays observable on every run
   # cache should already be hot. Repeating the claim is the regression
   # guard: each of the three launches below must stay under the same hard
   # ceiling, and a failure on the second or third names the per-run work a
-  # single claim would have missed.
+  # single claim would have missed. Each claim also runs with
+  # `MVM_COLD_BUILD=refuse`, so a claim that would rebuild something fails
+  # naming the artifact instead of only coming in slow.
   @live @perf_budget
   Scenario: repeated warm launches each meet the documented start budget
     Given an Alpine warm parent is ready

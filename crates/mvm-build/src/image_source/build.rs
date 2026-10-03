@@ -815,12 +815,12 @@ pub fn build_target_for_pair(
         CacheLookup::Evicted { .. } | CacheLookup::Miss => {}
     }
 
-    if let Some(message) = mvm_core::cold_build::refusal(&format!("the {target} image")) {
-        return Err(LocalImageBuildError::Tool {
+    mvm_vmm::host::ui::admit_cold_build(&format!("the {target} image")).map_err(|detail| {
+        LocalImageBuildError::Tool {
             what: "cold local-image cache".to_string(),
-            detail: message,
-        });
-    }
+            detail,
+        }
+    })?;
 
     prepare_builder().map_err(|detail| LocalImageBuildError::Tool {
         what: "preparing the builder VM image".to_string(),

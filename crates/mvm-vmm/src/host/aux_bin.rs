@@ -152,10 +152,8 @@ fn build_if_needed(spec: &AuxBin, lookup: &Lookup, env: &VerifyEnv) -> Result<Op
     let Some(reason) = build.needed() else {
         return Ok(None);
     };
-    if let Some(message) = mvm_core::cold_build::refusal(&format!("the `{}` host helper", spec.bin))
-    {
-        anyhow::bail!(message);
-    }
+    crate::host::ui::admit_cold_build(&format!("the `{}` host helper", spec.bin))
+        .map_err(anyhow::Error::msg)?;
     build.run(spec, env, reason).map(Some)
 }
 

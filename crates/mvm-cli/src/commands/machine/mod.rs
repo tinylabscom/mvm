@@ -273,9 +273,12 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Recreate a named machine when its config changed.
     #[arg(long)]
     pub force: bool,
-    /// Allow cold source builds (default: refuse, see mvmctl bootstrap).
-    #[arg(long)]
+    /// Skip the first-run notice (cold builds are the default).
+    #[arg(long, conflicts_with = "no_build")]
     pub build: bool,
+    /// Fail instead of building when a cache is cold (CI, scripts).
+    #[arg(long = "no-build")]
+    pub no_build: bool,
     /// Boot the locally-built workload kernel from the mvm cache instead of the
     /// image's own kernel. Presence is the signal; the value is a label only.
     /// (Hidden — primarily threaded by `vm rekernel`.)
@@ -329,6 +332,7 @@ impl Default for MachineRunArgs {
             interactive: false,
             force: false,
             build: false,
+            no_build: false,
             kernel_pin: None,
             entrypoint: false,
             fresh: false,
@@ -340,6 +344,16 @@ impl Default for MachineRunArgs {
 }
 
 impl MachineRunArgs {
+    /// The cold-build flag this run was given; clap keeps the two exclusive.
+    pub(super) fn cold_build_flag(&self) -> mvm_core::cold_build::BuildFlag {
+        use mvm_core::cold_build::BuildFlag;
+        match (self.build, self.no_build) {
+            (true, _) => BuildFlag::Build,
+            (false, true) => BuildFlag::NoBuild,
+            (false, false) => BuildFlag::Unset,
+        }
+    }
+
     /// Translate into the canonical transient-run argument shape. The SDK
     /// launch-plan surface is pinned off because it is not part of the
     /// beginner contract; production policy is shared and validated before
