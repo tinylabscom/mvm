@@ -65,7 +65,7 @@ fn run_persistent(
 
     // Watch for egress refusals from before the boot, so one the workload
     // hits while it starts is not lost to the moment before the attach.
-    let denials = (args.run.argv.is_empty() && post_start_action(&args) == PostStart::Attach)
+    let denials = should_watch_denials(&args)
         .then(|| {
             super::super::vm::egress_denials::watch_machine(
                 &name,
@@ -98,6 +98,12 @@ fn run_persistent(
     }
 
     run_persistent_post_start(cli, cfg, &args, &name, denials)
+}
+
+fn should_watch_denials(args: &MachineRunArgs) -> bool {
+    !args.run.json
+        && !args.up_json
+        && (!args.run.argv.is_empty() || post_start_action(args) == PostStart::Attach)
 }
 
 /// The secret references a persistent machine records beside its spec: those
@@ -138,22 +144,31 @@ fn run_persistent_post_start(
     denials: Option<super::super::vm::egress_denials::DenialWatch>,
 ) -> Result<()> {
     if !args.run.argv.is_empty() {
-        if !shared::wait_for_guest_agent(name, 30) {
-            anyhow::bail!("guest agent for {name:?} not reachable to run the command");
+        let outcome = if shared::wait_for_guest_agent(name, 30) {
+            console::run_for_exit(
+                cli,
+                console::Args {
+                    name: name.to_string(),
+                    command: Some(machine_exec_command(&args.run.argv)),
+                    force: false,
+                    list: false,
+                    detach_timeout: None,
+                    env: Vec::new(),
+                    pty_argv: Vec::new(),
+                },
+                cfg,
+            )
+        } else {
+            Err(anyhow::anyhow!(
+                "guest agent for {name:?} not reachable to run the command"
+            ))
+        };
+        super::super::vm::egress_denials::finish_and_summarize(denials);
+        let code = outcome?;
+        if code != 0 {
+            mvm_observability::exit(code);
         }
-        return console::run(
-            cli,
-            console::Args {
-                name: name.to_string(),
-                command: Some(machine_exec_command(&args.run.argv)),
-                force: false,
-                list: false,
-                detach_timeout: None,
-                env: Vec::new(),
-                pty_argv: Vec::new(),
-            },
-            cfg,
-        );
+        return Ok(());
     }
     match post_start_action(args) {
         PostStart::Envelope => {
@@ -744,6 +759,42 @@ mod entrypoint_stdin_tests {
             format!("{error:#}").contains("exceeds the limit"),
             "{error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod command_denial_tests {
+    use super::*;
+
+    #[test]
+    fn command_and_attached_runs_watch_before_boot() {
+        let command = MachineRunArgs {
+            run: RunArgs {
+                argv: vec!["curl".to_string(), "example.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(should_watch_denials(&command));
+        assert!(should_watch_denials(&MachineRunArgs::default()));
+    }
+
+    #[test]
+    fn detached_and_machine_readable_runs_do_not_emit_denial_notices() {
+        let detached = MachineRunArgs {
+            detach: true,
+            ..Default::default()
+        };
+        assert!(!should_watch_denials(&detached));
+        let json_command = MachineRunArgs {
+            run: RunArgs {
+                argv: vec!["false".to_string()],
+                json: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!should_watch_denials(&json_command));
     }
 }
 
