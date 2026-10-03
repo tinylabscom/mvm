@@ -676,10 +676,106 @@ fn a_session_resolves_from_a_unique_prefix_and_refuses_ambiguity() {
         resolve_session(&lines, "sha256:aaaa1111ffff").unwrap(),
         "sha256:aaaa1111ffff"
     );
+    assert_eq!(
+        resolve_session(&lines, "aaaa1111ffff").unwrap(),
+        "sha256:aaaa1111ffff",
+        "the id without its sha256: prefix"
+    );
+    assert_eq!(
+        resolve_session(&lines, "sha256:aaaa1111f").unwrap(),
+        "sha256:aaaa1111ffff",
+        "a prefixed selector longer than the minimum"
+    );
     let ambiguous = resolve_session(&lines, "aaaa1111").unwrap_err().to_string();
     assert!(ambiguous.contains("matches 2 sessions"), "{ambiguous}");
     assert!(resolve_session(&lines, "abc").is_err(), "too short");
+    // Unique, but one character under the minimum: the length rule refuses it
+    // before any matching, so a short selector never resolves by luck.
+    let short = resolve_session(&lines, "bbbb222").unwrap_err().to_string();
+    assert!(short.contains("too short"), "{short}");
     assert!(resolve_session(&lines, "99999999").is_err());
+}
+
+#[test]
+fn the_listing_counts_every_event_of_a_session_except_its_seal() {
+    let chain = Chain::new();
+    let p = plan("sha256:aaaa1111");
+    let seal = chain.run_and_seal(&p, 0);
+    chain.run_and_seal(&plan("sha256:bbbb2222"), 0);
+
+    let (sessions, _) = list_sessions(&chain.lines(), TimeRange::default()).unwrap();
+    let summary = sessions
+        .iter()
+        .find(|s| s.plan_id == p.plan_id.0)
+        .expect("listed");
+    assert!(summary.sealed);
+    assert!(summary.event_count >= 3, "admitted, launched and exited");
+    assert_eq!(summary.event_count, seal.event_count);
+}
+
+/// Seal positions are read relative to the chain head, so a recorded prune —
+/// which shifts every index the seal names by the same amount — still
+/// verifies. Here the seal is signed with every position offset by five, as
+/// if five older lines had since been pruned away.
+#[test]
+fn a_seal_whose_positions_are_uniformly_shifted_still_verifies() {
+    const PRUNED: u64 = 5;
+    let chain = Chain::new();
+    let p = plan("sha256:aaaa1111");
+    chain.emitter.emit_admitted(&p, "host:test").unwrap();
+    chain.emitter.emit_launched(&p, "mock").unwrap();
+    chain.emitter.emit_exited(&p, 0, "mock").unwrap();
+    let mut seal =
+        compute_seal(&chain.lines(), &request(&p.plan_id.0, SealReason::Exited)).unwrap();
+    seal.first_seq += PRUNED;
+    seal.last_seq += PRUNED;
+    seal.head_seq += PRUNED;
+    chain.append_seal(&p, seal.to_labels());
+
+    let report = chain.verify(&p.plan_id.0);
+    assert_eq!(report.verdict, Verdict::Verified, "{report:?}");
+
+    // Shifting one position alone is a change within the session, not a prune.
+    let q = plan("sha256:bbbb2222");
+    chain.emitter.emit_admitted(&q, "host:test").unwrap();
+    chain.emitter.emit_exited(&q, 0, "mock").unwrap();
+    let mut seal =
+        compute_seal(&chain.lines(), &request(&q.plan_id.0, SealReason::Exited)).unwrap();
+    seal.first_seq += PRUNED;
+    chain.append_seal(&q, seal.to_labels());
+    assert_eq!(chain.verify(&q.plan_id.0).verdict, Verdict::Mismatch);
+}
+
+/// A seal's digests are exactly 64 hex characters: the right length is not
+/// enough, and neither is the right alphabet.
+#[test]
+fn seal_digests_need_both_the_length_and_the_alphabet_of_sha256_hex() {
+    let chain = Chain::new();
+    let seal = chain.run_and_seal(&plan("sha256:aaaa1111"), 0);
+    for (field, value) in [
+        ("session_root", "g".repeat(64)),
+        ("session_root", "a".repeat(63)),
+        ("snapshot_root", "g".repeat(64)),
+        ("snapshot_root", "a".repeat(63)),
+        ("image_sha256", "g".repeat(64)),
+        ("image_sha256", "a".repeat(63)),
+    ] {
+        let mut labels: BTreeMap<String, String> = seal.to_labels().into_iter().collect();
+        labels.insert(format!("seal.{field}"), value.clone());
+        assert!(
+            SessionSeal::from_labels(&labels).is_err(),
+            "{field} = {value:?} must be refused"
+        );
+    }
+}
+
+#[test]
+fn a_tenant_without_a_chain_is_an_io_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let (reason, detail) = read_lines_from_genesis(dir.path(), TENANT, &key(7).verifying_key())
+        .expect_err("there is no chain to read");
+    assert_eq!(reason, MismatchReason::Io);
+    assert!(detail.contains("no audit chain"), "{detail}");
 }
 
 #[test]
