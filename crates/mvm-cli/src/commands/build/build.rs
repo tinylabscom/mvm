@@ -771,6 +771,16 @@ pub(in crate::commands) fn build_flake_to_slot(
     }
 
     let resolved = resolve_flake_ref(flake_ref)?;
+    // A flake slot may contain a sealed rootfs but no kernel of its own.
+    // Populate the verified workload-kernel cache before slot installation so
+    // it cannot fall back to the builder kernel, which lacks device-mapper.
+    if std::env::var("MVM_BUILD_STUB_OUTDIR")
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        crate::commands::env::builder_vm::ensure_workload_kernel()
+            .context("resolving the dm-verity-capable workload kernel for flake slot")?;
+    }
     let backend = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();
