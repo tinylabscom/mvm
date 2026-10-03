@@ -587,6 +587,17 @@ jobs:
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
 
+      # `wasm-backend` is off by default so the shipped closure carries no
+      # wasmtime. Nothing else in CI turns it on, so a wasmtime bump that
+      # changed the WASI preopen API merged green and broke the build of the
+      # whole wasm tier — including the read-only preopen grants and the
+      # egress witness that drives a real WasmBackend through the hostd
+      # substitution seam.
+      - name: wasm-backend feature tests (wasmtime tier)
+        run: |
+          cargo nextest run -p mvm-runtime --features wasm-backend -E 'test(/wasm/)'
+          cargo nextest run -p mvm-hostd --features wasm-backend --test wasm_egress_witness
+
       # End-user release builds enable an acquisition policy that contributor
       # builds deliberately omit: checkout proximity must never select a local
       # compiler. Compile the CLI and execute the policy boundary tests on every
