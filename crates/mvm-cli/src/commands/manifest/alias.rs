@@ -2,7 +2,7 @@
 //! `alias → revision_hash` pointers on a built template. W1 / A6
 //! of the filesystem-volumes plan.
 //!
-//! Aliases let `mvmctl up --manifest <template>@<alias>` resolve
+//! Aliases let `mvmctl machine run --manifest <template>@<alias>` resolve
 //! to the revision the alias currently points at. `set` is
 //! force-shaped (overwrites silently), mirroring `git tag -f`.
 //!

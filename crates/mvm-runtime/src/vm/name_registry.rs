@@ -55,7 +55,7 @@ pub struct VmRegistration {
     /// while `paused` describes the sealed-snapshot lifecycle.
     #[serde(default)]
     pub paused: bool,
-    /// Finer-grained host-observed readiness. Updated by `mvmctl up`
+    /// Finer-grained host-observed readiness. Updated by `mvmctl machine run`
     /// as each launch milestone is
     /// reached (`LaunchAccepted` → `AgentConnecting` → `AgentReady`,
     /// with the rest of the taxonomy wiring in subsequent PRs).
@@ -163,7 +163,7 @@ impl VmNameRegistry {
     }
 
     /// Fill or replace the concrete runtime directory for an existing
-    /// reservation. `mvmctl up` reserves a name before it has materialized the
+    /// reservation. `mvmctl machine run` reserves a name before it has materialized the
     /// backend state dir; reconcile must see the real dir before launch can be
     /// reported as successful.
     pub fn set_vm_dir(&mut self, name: &str, vm_dir: impl Into<String>) -> Result<bool> {

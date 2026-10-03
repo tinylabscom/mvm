@@ -1,8 +1,9 @@
 //! Host-side plan-admission pipeline (claim 8).
 //!
 //! Lives in `mvm-hostd` beside the host signing key it uses, so every driver
-//! reaches one admission contract: `mvmctl up`/`run` today, and the
-//! `mvm-client` local backend once the boot seam wires local `run`.
+//! reaches one admission contract: `mvmctl run` and `mvmctl machine run`
+//! today, and the `mvm-client` local backend once the boot seam wires local
+//! `run`.
 //!
 //! Threads `synthesize_plan` + the host keypair into the
 //! supervisor-equivalent admission flow:
@@ -93,7 +94,7 @@ use verb_grant_sidecar::mint_verb_grant_sidecar;
 pub use mvm_core::time::{Clock, SystemClock};
 
 /// Production nonce ledger. Holds a `NonceStore` behind a mutex so
-/// it's `Send + Sync`. In v0 we instantiate one per `mvmctl up` —
+/// it's `Send + Sync`. In v0 we instantiate one per boot —
 /// later when the supervisor is in-process, the ledger spans every
 /// up call for the lifetime of the supervisor.
 pub struct InMemoryNonceLedger {
@@ -271,7 +272,7 @@ impl<'a> ExtensionAdmissionContext<'a> {
     }
 }
 
-/// Run the full admission pipeline for an `mvmctl up` invocation.
+/// Run the full admission pipeline for one boot.
 ///
 /// On success, the caller proceeds to `backend.start()` knowing the
 /// plan was signed under the host signer, verified with the host's
@@ -1239,7 +1240,7 @@ pub fn stash_plan_and_mint_verb_grant(
 /// named in the verified `ExecutionPlan.shares`, with matching
 /// host path, guest path, kind, ro/rw, and encryption.
 ///
-/// On the local `mvmctl up`/`dev` path the CLI builds both the signed
+/// On the local `mvmctl machine run` path the CLI builds both the signed
 /// plan and the launch config from one source, so this is self-consistent
 /// by construction — but it **fails closed** if they ever diverge (a CLI
 /// bug, or a future caller that hands a config the plan didn't authorize).
@@ -2189,7 +2190,7 @@ pub fn start_admitted(params: StartAdmittedParams<'_>) -> Result<StartedMachine>
 }
 
 /// The single admitted-boot entrypoint every driver shares — the CLI's
-/// `mvmctl up`/`run` and the `mvm-client` local backend both reach it, so a
+/// `mvmctl run` / `mvmctl machine run` and the `mvm-client` local backend both reach it, so a
 /// workload can never boot on a path that skipped admission.
 ///
 /// Order matters and is fail-closed: synthesize + sign + verify + validity +
@@ -4150,7 +4151,7 @@ mod tests {
     #[test]
     fn admit_with_pin_but_no_context_refuses() {
         // Publisher misconfiguration: plan carries a pin but the
-        // mvmctl up path didn't wire a BundleAdmissionContext. The
+        // boot path didn't wire a BundleAdmissionContext. The
         // admit path refuses rather than silently skipping the
         // re-verify step (fail closed, not fail open).
         let (_env, _home) = host_with_ceiling(Default::default());

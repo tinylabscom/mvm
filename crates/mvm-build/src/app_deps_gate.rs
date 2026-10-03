@@ -8,7 +8,7 @@
 //!   any CVE finding whose `severity` parses to `high` / `critical`.
 //! - **`GateLevel::Dev`** — every prod-rejection condition becomes a
 //!   `tracing::warn!` line; the install still succeeds and the
-//!   surrounding `mvmctl up` flow continues to admit the workload.
+//!   surrounding boot flow continues to admit the workload.
 //!
 //! This module is the host-side enforcer. The matching
 //! builder-VM-side fallbacks emit:
@@ -47,7 +47,7 @@ use crate::app_deps::{GateLevel, InstallResult};
 
 /// Typed gate failure surfaced under [`GateLevel::Prod`]. Each variant
 /// maps 1:1 to a lifecycle-gate rejection condition; the
-/// caller (`mvmctl up`) bubbles these to the user with the underlying
+/// caller bubbles these to the user with the underlying
 /// path so an operator can debug without reading mvm internals.
 #[derive(Debug, Error)]
 pub enum GateError {

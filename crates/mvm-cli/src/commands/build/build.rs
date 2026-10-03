@@ -91,7 +91,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // volume only. We invalidate the cache index entries pointing at
     // the project's lockfile and short-circuit before the rootfs
     // build. The next install-pipeline run (`mvmctl build` without
-    // `--deps`, or `mvmctl up`) rebuilds the volume from scratch.
+    // `--deps`) rebuilds the volume from scratch.
     if args.deps {
         return invalidate_deps_cache(&args);
     }
@@ -596,7 +596,7 @@ fn audit_build_error(mode: &str, source: &str, err: &anyhow::Error) {
 /// next install-pipeline run rebuilds the volume from scratch. We
 /// deliberately do NOT spawn the builder VM here — that's the
 /// install pipeline's job, kicked off by the
-/// orchestrator on the next `mvmctl build` / `mvmctl up`.
+/// orchestrator on the next `mvmctl build`.
 ///
 /// Invalidation strategy: walk `<deps_volumes_dir>/index/`, read
 /// each `<lockfile_hash>` pointer's volume hash, and delete both

@@ -175,7 +175,7 @@ pub use mock::MockBackend;
 pub use warm_service::{PrewarmFn, WarmLaunchService};
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 
-/// The per-VM egress-TLS cert/key split helper. `mvmctl up`
+/// The per-VM egress-TLS cert/key split helper. `mvmctl machine run`
 /// (mvm-cli) calls this while assembling the guest secrets drive: the cert is
 /// pushed onto the drive, the key is persisted host-side for the terminator
 /// Per-VM egress-substitution spawn helpers. Re-exported from `mvm-vmm::host`.

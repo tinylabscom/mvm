@@ -7,7 +7,7 @@
 //! On-disk layout: `~/.mvm/vms/<vm_name>/plan.json`, mode 0600.
 //! Same directory the backend's `<backend>.pid` lives in, so the
 //! file is cleaned up alongside the VM when `mvmctl down` removes
-//! the directory. The file is overwritten on every `mvmctl up` so
+//! the directory. The file is overwritten on every boot so
 //! a re-launch under the same `vm_name` rebinds to the new plan.
 //!
 //! The file is **best-effort** at write time: a failure to persist

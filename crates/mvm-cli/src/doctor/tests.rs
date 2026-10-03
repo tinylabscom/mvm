@@ -83,7 +83,7 @@ fn workflow_cli_run_includes_all_categories() {
 #[test]
 fn workflow_python_and_typescript_sdk_match_cli_run() {
     // The SDK flows share the host requirements with `cli-run` —
-    // both ultimately call `mvmctl up` / `mvmctl build` under the
+    // both ultimately call `mvmctl machine run` / `mvmctl build` under the
     // hood. If this assertion ever drifts, that's a deliberate
     // workflow-specific check change that needs review.
     assert_eq!(

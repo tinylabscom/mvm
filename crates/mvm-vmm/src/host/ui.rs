@@ -28,7 +28,7 @@ pub fn is_verbose() -> bool {
 /// When set, `info` / `success` / `warn` / `step` / `progress` route
 /// to stderr instead of stdout. Errors already go to stderr
 /// unconditionally. The toggle exists so verbs that emit a final
-/// structured-JSON envelope on stdout (`mvmctl up --up-json`,
+/// structured-JSON envelope on stdout (`mvmctl machine run --up-json`,
 /// Followup H-live) can suppress chrome from the parsed channel
 /// without rewriting every call site.
 static CHROME_TO_STDERR: AtomicBool = AtomicBool::new(false);

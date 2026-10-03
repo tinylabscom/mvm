@@ -41,7 +41,7 @@ use mvm_agentd::netinit::{Report, parse_report_from_console};
 /// **Best-effort semantics.** A missing report is not an error
 /// — older templates that boot without netinit are still valid
 /// in the transition period. The caller (typically the
-/// `mvmctl up` start flow) logs the no-marker case at info level
+/// `mvmctl machine run` start flow) logs the no-marker case at info level
 /// and proceeds.
 pub fn parse_and_emit_netinit_audit(
     console_log_path: &Path,
@@ -56,7 +56,7 @@ pub fn parse_and_emit_netinit_audit(
 }
 
 /// Resolve `console.log` for a named VM and emit netinit audit.
-/// Convenience wrapper that the `mvmctl up` start flow calls
+/// Convenience wrapper that the `mvmctl machine run` start flow calls
 /// once `wait_for_guest_agent` succeeds — by then the kernel
 /// console has captured netinit's output line.
 ///

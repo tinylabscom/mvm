@@ -1,6 +1,6 @@
 //! Host-side chain-signed audit emitter.
 //!
-//! Wraps `mvm_hostd::supervisor::FileAuditSigner` so `mvmctl up` can emit
+//! Wraps `mvm_hostd::supervisor::FileAuditSigner` so a boot can emit
 //! tamper-evident `plan.admitted` / `plan.launched` / `plan.failed`
 //! entries bound to the `AdmittedPlan`. The chain is signed under the
 //! host signer's keypair (the same Ed25519 key used for plan
@@ -18,10 +18,10 @@
 //! ## Async bridge
 //!
 //! `FileAuditSigner::sign_and_emit` is async because the trait is
-//! shared with the in-process supervisor path, but `mvmctl up` is
+//! shared with the in-process supervisor path, but the boot path is
 //! synchronous. We build a single-threaded tokio
 //! runtime per emit (mirrors `mvm-backend::libkrun::block_on`).
-//! Audit emission is rare (3 entries per `mvmctl up` invocation), so
+//! Audit emission is rare (3 entries per boot), so
 //! the runtime-construction overhead is negligible compared to the VM
 //! boot itself.
 //!

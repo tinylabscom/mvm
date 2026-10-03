@@ -1,4 +1,4 @@
-//! Runtime-overlay attachment + status resolution for `mvmctl up` boots —
+//! Runtime-overlay attachment + status resolution for workload boots —
 //! the verity-sealed guest-binary overlay every workload backend consumes,
 //! and the audit label describing which source strategy actually landed.
 //!

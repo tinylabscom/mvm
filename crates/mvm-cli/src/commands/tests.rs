@@ -5508,9 +5508,8 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "machine", "ls", "--all", "--json"
     ]));
-    // `mvmctl up` is retired; `run` survives hidden as the SDK transport and
-    // keeps its `--json` reservation. The user-facing machine-readable channel
-    // is `machine run --json`.
+    // `mvmctl up` is retired; `run` carries the SDK transport and keeps its
+    // `--json` reservation, as does `machine run --json`.
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "run", "--json", "--", "true"
     ]));
