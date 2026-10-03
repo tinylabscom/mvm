@@ -12,6 +12,7 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use ed25519_dalek::Signer;
 
 use mvm_client::admission::InstructionSources;
+use mvm_client::admission::instructions::materialized_mount_images;
 use mvm_client::instruction_trust::gate::local_workload_dir;
 use mvm_core::plan::bundle::sha256_hex;
 use mvm_core::user_config::MvmConfig;
@@ -684,18 +685,11 @@ pub(in crate::commands) fn run_secure_with_source(
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
-        let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
-            .iter()
-            .filter_map(|volume| {
-                volume
-                    .materialized_image
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
-            })
-            .collect();
+        let instruction_mount_images = materialized_mount_images(volumes);
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
-                .with_mount_roots(&instruction_mount_roots),
+                .with_mount_roots(&[])
+                .with_mount_images(&instruction_mount_images),
             outputs: admit_outputs.clone(),
             network_mode: admit_network_mode,
             tenant: "local",
