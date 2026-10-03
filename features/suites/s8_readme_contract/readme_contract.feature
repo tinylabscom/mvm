@@ -63,6 +63,13 @@ Feature: README CLI contract
     And the help output lists the "ls" verb
     And the help output lists the "inspect" verb
 
+  Scenario: reviewed workspace apply and rollback are discoverable
+    When I run mvmctl with "machine --help"
+    Then the command exits with code 0
+    And the help output lists the "apply" verb
+    And the help output lists the "undo" verb
+    And the help output lists the "redo" verb
+
   Scenario: the `machine run` flags the README's examples use exist
     When I run mvmctl with "machine run --help"
     Then the command exits with code 0
