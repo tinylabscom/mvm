@@ -2970,6 +2970,7 @@ version = "0.22.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "async-trait",
  "base64 0.22.1",
  "blake3",
  "chrono",

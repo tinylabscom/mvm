@@ -370,8 +370,9 @@ missing one.
 - `[tools]` whole-tool decisions are enforced by the gate `mvmctl ops mcp`
   binds: `deny` refuses before any backend work, `ask` puts every call to the
   terminal approver (fail-closed with no terminal), `allow` admits, and
-  anything unlisted fails closed. Every non-allow decision is a
-  `ToolGateDecision` local audit entry. Per-tool `argv`/`routes`/`secrets`
+  anything unlisted fails closed. Every decision is chain-signed to the host
+  audit before backend work; if that audit is unavailable, the gate refuses
+  the call. Per-tool `argv`/`routes`/`secrets`
   detail is not enforced at the MCP seam (its arguments are tool-specific
   JSON, not command lines or destinations). A declared, non-interactive
   `machine exec <name> --tool TOOL -- <cmd>...` checks the exact argv against

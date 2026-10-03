@@ -218,5 +218,7 @@ be changed from the guest:
   broker, so its questions are denied. `machine run --entrypoint -d` answers
   during the call and denies after it, while the machine keeps running. SDK
   embedders retain their per-machine callback brokers as described above.
-- Tool calls have an approval subject (`tool_call`) and the same supervisor,
-  but PS-13's live tool gate does not ask it yet.
+- Declared in-guest tool calls use the per-VM supervisor and its `tool_call`
+  approval subject. The local MCP tool gate asks the controlling terminal for
+  project-policy `ask` rules and chain-signs each decision; it refuses a call
+  when the audit chain is unavailable.
