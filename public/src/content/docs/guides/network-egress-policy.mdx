@@ -115,6 +115,9 @@ sets it, because writing the flag is the grant — and the per-VM egress
 certificate then covers that host. A route with rules but no interception
 grant is never relayed opaquely with its rules unchecked: the connection is
 refused and recorded as `endpoint_rules_unenforceable`.
+Its `host.flow.denied` audit entry names the endpoint route and records
+`rule = not_evaluated`, since an opaque flow exposes no method or path from
+which to select a rule.
 
 A path the host cannot read unambiguously is refused, not matched: a `.` or
 `..` segment, an empty segment, a backslash, or a percent-encoded `/`, `\` or
@@ -131,6 +134,9 @@ Every decision — allow, deny or ask — is a `host.route.decided` entry in the
 chain-signed audit log, carrying the route id, the rule that decided (its `id`,
 `rule-N` by position, `otherwise` or `ambiguous_path`), the outcome, the
 destination and the method. The path is never recorded.
+An endpoint with routes refuses to start without its chain-signed audit
+recorder. If a decision cannot be written, the request is refused before it
+reaches the forward leg, including when its rule would otherwise allow it.
 
 ## Internal addresses
 

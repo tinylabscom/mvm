@@ -388,6 +388,14 @@ pub fn assemble_with_projection(
     HandedPlaceholders,
     Option<crate::keyholder::OAuthRefreshDriver>,
 )> {
+    if cfg
+        .network_policy
+        .as_ref()
+        .is_some_and(|policy| !policy.routes().is_empty())
+        && projection.recorder.is_none()
+    {
+        anyhow::bail!("route rules require the endpoint audit recorder");
+    }
     let bindings: Arc<dyn crate::keyholder::BindingStore> =
         Arc::new(match &cfg.binding_store_dir {
             Some(dir) => FileBindingStore::with_dir(dir),
@@ -632,8 +640,8 @@ fn oauth_refresh_driver(
 
 /// Build a chain-signed audit [`Recorder`] from the standard host paths
 /// (`<keys>/host-signer.ed25519` + `<audit>/`), or `None` if the signer key
-/// isn't present (the endpoint then serves un-audited, matching the prior
-/// optional-recorder posture). The audit dir + the key are inside the
+/// isn't present. A route or tool policy refuses assembly without it; other
+/// configurations retain the optional-recorder posture. The audit dir + key are inside the
 /// endpoint's Landlock grants (see `ConfinementSpec::network_endpoint`).
 pub fn build_audit_recorder(tenant: &str) -> Option<crate::supervisor::audit_recorder::Recorder> {
     use crate::supervisor::audit_file::FileAuditSigner;
@@ -1002,6 +1010,41 @@ mod tests {
         };
         assert!(err.contains("oauth-secret"), "{err}");
         assert!(err.contains("https"), "{err}");
+    }
+
+    #[test]
+    fn endpoint_routes_refuse_to_assemble_without_chain_audit() {
+        use mvm_contract::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+        let dir = tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("secrets")).expect("secrets dir");
+        std::fs::create_dir_all(dir.path().join("bindings")).expect("bindings dir");
+        let mut cfg = vsock_cfg(vec![], dir.path());
+        cfg.network_policy = Some(
+            mvm_core::policy::network_policy::NetworkPolicy::deny_all().with_routes(vec![
+                EgressRoute {
+                    id: "api".into(),
+                    host: "api.example.com".into(),
+                    port: 443,
+                    rules: vec![EndpointRule {
+                        id: Some("read".into()),
+                        method: Some("GET".into()),
+                        path: "/v1/**".into(),
+                        outcome: RouteOutcome::Allow,
+                    }],
+                    otherwise: RouteOutcome::Deny,
+                    intercept: true,
+                },
+            ]),
+        );
+        let projection = EndpointNetworkProjection {
+            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
+            recorder: None,
+        };
+        let error = assemble_with_projection(&cfg, &projection)
+            .err()
+            .expect("route policy without audit is refused");
+        assert!(error.to_string().contains("route rules require"));
     }
 
     /// No admitted policy means nothing is admitted, in either egress mode.
