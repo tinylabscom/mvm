@@ -167,11 +167,10 @@ echo "    home:  $E2E_HOME"
 # The staleness this gate actually hits is the supervisor, handled below.
 echo "==> building mvmctl + host helpers"
 # The workload-kernel download below is admitted only after its checksum
-# manifest's Sigstore bundle verifies. `user` carries that verifier; omitting it
-# turns a secure download into a fail-closed runtime error and must never be
-# papered over with MVM_SKIP_COSIGN_VERIFY. Use standard cargo for this build:
-# the nightly fast-codegen wrapper leaves the verifier's native aws-lc symbols
-# unresolved on macOS.
+# manifest's Sigstore bundle verifies. The default build and `user` both carry
+# that verifier; a build without it turns a secure download into a fail-closed
+# runtime error, which must never be papered over with MVM_SKIP_COSIGN_VERIFY.
+# `user` matches the released binary and builds with standard cargo.
 cargo build --bin mvmctl --features user,embed-host-bins
 ./scripts/cargo-fast.sh build -p xtask
 

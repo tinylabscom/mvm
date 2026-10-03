@@ -72,8 +72,9 @@ The keyless bundle is a standard Sigstore bundle, verified offline by the same
 in-process verifier `mvmctl` uses for [its own release
 artifacts](/guides/verify-release/) against the embedded Sigstore trust root and
 the bundle's own transparency-log inclusion proof. That verifier ships in
-release builds and in builds with `--features user`; a build without it reports
-a keyless signature as `verifier_unavailable`, which fails under `deny`.
+release builds and in a default source build; only a build with
+`--no-default-features` and without `--features user` lacks it, and that build
+reports a keyless signature as `verifier_unavailable`, which fails under `deny`.
 
 A keyed signature is a small JSON envelope — `key_id`, the file's SHA-256, and an
 Ed25519 signature over a domain-separated digest — not a Sigstore bundle, because
@@ -223,7 +224,8 @@ snapshots, are not scanned as host inputs.
   flake fetched from a remote reference, are not; a local `--flake`/`--manifest`
   directory is.
 - **Keyless verification needs the Sigstore verifier in the build** (release
-  builds, `--features user`).
+  and default builds carry it; `--no-default-features` drops it unless
+  `--features user` puts it back).
 - **GitHub Actions is the only keyless identity understood**: a publisher's
   certificate identity must be `https://github.com/<repo>/<workflow>@<ref>`.
 

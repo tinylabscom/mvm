@@ -171,10 +171,14 @@ release-artifact-bootstrap = []
 release-channel = ["mvm-build/release-channel", "mvm-client/release-channel", "manifest-verify"]
 custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
+# mvm-build is named so its tests agree with the verifier mvm-core compiles in;
+# without it a workspace build unifies the verifier into mvm-core while
+# mvm-build's tests still expect the refusal of a build that has none.
 manifest-verify = [
     "mvm-runtime/manifest-verify",
     "mvm-core/manifest-verify",
     "mvm-client/manifest-verify",
+    "mvm-build/manifest-verify",
 ]
 template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 # Forwards to `mvm-runtime/test-support` + `mvm-client/test-support`: the

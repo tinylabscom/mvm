@@ -107,12 +107,12 @@ embed *ARGS:
     # executable lookup always finds the helper matching the selected mvmctl.
     ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
     ./scripts/cargo-fast.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
-    # The default embeds the host binaries alone. bin/dev overrides this to
+    # The default embeds the host binaries into the default surface, which
+    # carries the image-set signature verifier. bin/dev overrides this to
     # "embed-host-bins,dev" so the binary it runs carries the contributor
-    # surface (manifest-verify included) and can verify published image-set
-    # signatures during bootstrap. Any surface carrying manifest-verify must
-    # build with plain cargo: the fast-codegen config wrapper leaves the
-    # verifier's native aws-lc symbols unresolved on macOS.
+    # surface. The default surface links on the fast-codegen wrapper because
+    # .cargo/fast.toml compiles the aws-lc callers with LLVM; `dev` and `user`
+    # keep plain cargo, the path they were validated on.
     FEATURES="${MVM_EMBED_FEATURES:-embed-host-bins}"
     case ",$FEATURES," in
       *,dev,*|*,user,*) CARGO=(cargo) ;;
