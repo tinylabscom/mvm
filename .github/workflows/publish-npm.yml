@@ -98,11 +98,14 @@ jobs:
           )
           PY
 
+      # An action's `path` resolves against the workspace root, not the
+      # job's default working directory, so it names the package directory
+      # the run steps below read from.
       - name: Download the platform libraries
         uses: actions/download-artifact@v8
         with:
           pattern: hostlib-*
-          path: native-downloads
+          path: crates/mvm-sdk/sdks/typescript/native-downloads
           merge-multiple: true
 
       - name: Place the libraries in native/ and verify both platforms
