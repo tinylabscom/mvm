@@ -106,16 +106,16 @@ impl FlowMuxSession {
             None
         };
         let Some(mode) = termination else {
-            if let Some(reason) = self
+            if let Some(refusal) = self
                 .substitution
                 .as_ref()
-                .and_then(|service| service.route_refusal_reason(&flow.host, flow.port))
+                .and_then(|service| service.route_refusal(&flow.host, flow.port))
             {
                 self.send_refused(
                     stream_id,
                     "destination has endpoint rules; the plan must grant interception to enforce them",
                 )?;
-                self.deny_flow(stream_id, &flow, reason);
+                self.deny_route_flow(stream_id, &flow, &refusal.route_id, refusal.reason);
                 return Ok(());
             }
             if let Some(reason) = self
@@ -370,14 +370,29 @@ impl FlowMuxSession {
         self.emit_audit(
             EventCategory::Host,
             "host.flow.denied",
-            BTreeMap::from([
-                ("stream_id".to_string(), stream_id.to_string()),
-                ("class".to_string(), "tcp".to_string()),
-                ("route".to_string(), flow.route_label()),
-                ("target".to_string(), flow.target.clone()),
-                ("reason".to_string(), reason.to_string()),
-            ]),
+            Self::flow_denial_labels(stream_id, flow, reason),
         );
+    }
+
+    fn deny_route_flow(&self, stream_id: u32, flow: &AdmittedFlow, route_id: &str, reason: &str) {
+        let mut labels = Self::flow_denial_labels(stream_id, flow, reason);
+        labels.insert("endpoint_route".into(), route_id.into());
+        labels.insert("rule".into(), "not_evaluated".into());
+        self.emit_audit(EventCategory::Host, "host.flow.denied", labels);
+    }
+
+    fn flow_denial_labels(
+        stream_id: u32,
+        flow: &AdmittedFlow,
+        reason: &str,
+    ) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("stream_id".to_string(), stream_id.to_string()),
+            ("class".to_string(), "tcp".to_string()),
+            ("route".to_string(), flow.route_label()),
+            ("target".to_string(), flow.target.clone()),
+            ("reason".to_string(), reason.to_string()),
+        ])
     }
 
     /// Audit a refusal of a flow to `target` that carries no route: taken
@@ -1083,6 +1098,8 @@ mod tests {
             .expect("audit chain verifies");
         let chain = std::fs::read_to_string(&audit_path).expect("read audit chain");
         assert!(chain.contains("endpoint_rules_unenforceable"), "{chain}");
+        assert!(chain.contains("\"endpoint_route\":\"local\""), "{chain}");
+        assert!(chain.contains("\"rule\":\"not_evaluated\""), "{chain}");
         assert!(!chain.contains("host.flow.allowed"), "{chain}");
     }
 

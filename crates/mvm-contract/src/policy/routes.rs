@@ -58,7 +58,7 @@ pub enum RouteOutcome {
     /// Refuse it.
     #[default]
     Deny,
-    /// Ask an approval backend. Until one is wired, an `ask` is refused.
+    /// Ask the host approval supervisor. Without a live broker, it is refused.
     Ask,
 }
 

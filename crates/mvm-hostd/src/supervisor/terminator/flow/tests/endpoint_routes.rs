@@ -248,14 +248,14 @@ fn an_unbound_host_is_terminated_for_its_rules_only_when_the_route_grants_interc
     );
     assert_eq!(ungranted.service.terminable(OTHER_HOST, 443), None);
     assert_eq!(
-        ungranted.service.route_refusal_reason(OTHER_HOST, 443),
-        Some("endpoint_rules_unenforceable")
+        ungranted
+            .service
+            .route_refusal(OTHER_HOST, 443)
+            .map(|refusal| (refusal.route_id, refusal.reason)),
+        Some(("model-api".to_string(), "endpoint_rules_unenforceable"))
     );
     // A host with no route is neither terminated nor refused.
-    assert_eq!(
-        ungranted.service.route_refusal_reason("unrouted.test", 443),
-        None
-    );
+    assert_eq!(ungranted.service.route_refusal("unrouted.test", 443), None);
 }
 
 /// Answers every question with a fixed verdict and remembers the last one.

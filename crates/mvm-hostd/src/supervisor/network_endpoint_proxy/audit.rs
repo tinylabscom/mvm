@@ -178,10 +178,12 @@ impl SubstitutionService {
         destination: &str,
         method: &'static str,
         refused: Option<&'static str>,
-    ) {
-        let Some(recorder) = &self.recorder else {
-            return;
-        };
+    ) -> Result<(), crate::supervisor::audit_recorder::RecorderError> {
+        let recorder = self.recorder.as_ref().ok_or(
+            crate::supervisor::audit_recorder::RecorderError::Signer(
+                crate::supervisor::audit::AuditError::NotWired,
+            ),
+        )?;
         let mut labels = vec![
             ("route".to_string(), decision.route_id.clone()),
             ("rule".to_string(), decision.decided_by.label()),
@@ -201,16 +203,13 @@ impl SubstitutionService {
         if let Some(reason) = refused {
             labels.push(("reason".to_string(), reason.to_string()));
         }
-        if let Err(e) = recorder
+        recorder
             .record_unbound(
                 crate::supervisor::audit_recorder::EventCategory::Host,
                 "host.route.decided",
                 labels,
             )
             .await
-        {
-            tracing::warn!(error = %e, "host.route.decided audit emit failed");
-        }
     }
 
     /// Emit one `secret.reflection_scrubbed` per binding whose value a

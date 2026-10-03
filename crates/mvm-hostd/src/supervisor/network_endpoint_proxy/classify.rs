@@ -34,6 +34,13 @@ pub(crate) enum TerminationMode {
 /// Why an opaque flow to a destination with endpoint rules is refused.
 pub(crate) const REASON_ENDPOINT_RULES_UNENFORCEABLE: &str = "endpoint_rules_unenforceable";
 
+/// An opaque flow cannot expose the method and path needed to choose a rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EndpointRouteRefusal {
+    pub route_id: String,
+    pub reason: &'static str,
+}
+
 impl SubstitutionService {
     /// Explain why an opaque flow to `destination` cannot honestly satisfy the
     /// admitted transformation policy.
@@ -50,10 +57,13 @@ impl SubstitutionService {
     /// only reaches this when it was not terminated, so a route asking for
     /// inspection without an interception grant — or on an endpoint with no
     /// egress certificate — is refused rather than relayed unchecked.
-    pub(crate) fn route_refusal_reason(&self, host: &str, port: u16) -> Option<&'static str> {
+    pub(crate) fn route_refusal(&self, host: &str, port: u16) -> Option<EndpointRouteRefusal> {
         self.egress_gate
-            .requires_inspection(host, port)
-            .then_some(REASON_ENDPOINT_RULES_UNENFORCEABLE)
+            .inspection_route_id(host, port)
+            .map(|route_id| EndpointRouteRefusal {
+                route_id: route_id.to_string(),
+                reason: REASON_ENDPOINT_RULES_UNENFORCEABLE,
+            })
     }
 
     pub(crate) fn opaque_refusal_reason(&self, destination: &str) -> Option<&'static str> {
