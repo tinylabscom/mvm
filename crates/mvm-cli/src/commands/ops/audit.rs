@@ -1,4 +1,4 @@
-//! `mvmctl audit` subcommand handlers.
+//! `mvmctl trust audit` subcommand handlers.
 
 mod inspect;
 mod sessions;
@@ -78,7 +78,7 @@ pub(in crate::commands) enum AuditAction {
     Sessions(sessions::SessionsArgs),
     /// Asset content identities: recompute the canonical digest of a file
     /// or directory tree so it can be compared against the identities
-    /// recorded in a run's signed plan or audit chain — `mvmctl audit
+    /// recorded in a run's signed plan or audit chain — `mvmctl trust audit
     /// tail --chain` shows them; comparing digests is the whole check.
     Asset {
         #[command(subcommand)]
@@ -239,7 +239,7 @@ pub(in crate::commands) enum AuditAction {
     },
 }
 
-/// Subcommands under `mvmctl audit provenance`.
+/// Subcommands under `mvmctl trust audit provenance`.
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum ProvenanceAction {
     /// Export audit events as W3C PROV-O Turtle for compliance reporting.

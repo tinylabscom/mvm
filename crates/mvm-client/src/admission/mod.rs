@@ -1113,30 +1113,56 @@ pub fn enforce_kernel(ctx: &AdmissionContext, kernel_path: Option<&std::path::Pa
         .context("admission kernel check")
 }
 
-/// Close a transient run's audit narrative against the plan it booted under:
-/// `plan.launched` and the boot posture when the run succeeded, `plan.failed`
-/// when it did not.
+/// Record that a transient run booted and ran: `plan.launched` and the boot
+/// posture, against the plan it booted under. Called only for a run that
+/// completed; a run that did not is recorded by [`close_transient_session`]
+/// as `plan.failed`.
 ///
 /// `admitted` is `None` only when the run failed before admission was reached —
-/// resolving the image, say. There is no plan to bind that failure to, so
-/// nothing is recorded. It is never `None` for a run that booted: admission is
+/// resolving the image, say. There is no plan to bind anything to, so nothing
+/// is recorded. It is never `None` for a run that booted: admission is
 /// unconditional, and the admit closure fills this before the backend starts.
-///
-/// Both transient paths close the same way, so they share this rather than each
-/// carrying its own copy of the two branches.
-pub fn record_transient_outcome<T>(
+pub fn record_transient_launch(
     admitted: Option<&AdmissionContext>,
     backend: &str,
     strategy: mvm_build::run_image::RootStrategy,
-    outcome: &Result<T>,
+) {
+    let Some(ctx) = admitted else { return };
+    emit_launched(ctx, backend, false);
+    emit_boot_posture(ctx, strategy);
+}
+
+/// End a transient run's session, once, after everything the run records has
+/// been written: `plan.exited` with the workload's exit code and a seal with
+/// reason `exited` when the run completed, `plan.failed` under `failure_class`
+/// and a seal with reason `failed` when it did not.
+///
+/// A non-zero exit code is a completed run — the VM booted and the workload
+/// ran — so it seals as `exited` and carries the code. Audit writes are
+/// best-effort, as at stop: a missing seal surfaces as `UNSEALED` in
+/// `trust audit verify` rather than failing a run that already happened.
+pub fn close_transient_session(
+    admitted: Option<&AdmissionContext>,
+    backend: &str,
+    outcome: std::result::Result<i32, &anyhow::Error>,
+    failure_class: &str,
 ) {
     let Some(ctx) = admitted else { return };
     match outcome {
-        Ok(_) => {
-            emit_launched(ctx, backend, false);
-            emit_boot_posture(ctx, strategy);
+        Ok(exit_code) => {
+            let plan = ctx.admitted.plan();
+            crate::launch::record_session_exit(
+                &ctx.emitter,
+                plan,
+                mvm_hostd::audit::emitter::ExitRecord {
+                    exit_code: Some(exit_code),
+                    backend,
+                    usage: mvm_core::usage_capture::UsageCapture::default(),
+                },
+                &plan.workload.0,
+            );
         }
-        Err(e) => emit_failed(ctx, "launch", e),
+        Err(e) => emit_failed(ctx, failure_class, e),
     }
 }
 
@@ -1911,43 +1937,134 @@ mod admit_plan_tests {
         );
     }
 
-    /// A transient run that booted records `plan.launched` and its posture, and
-    /// nothing that reads as a failure — the two outcomes share one helper, so
-    /// each branch is pinned to the entries it alone writes.
+    /// The session verdict `trust audit verify <session>` would print for
+    /// `ctx`'s plan, from the chain in `audit_dir`.
+    fn session_verdict(
+        ctx: &AdmissionContext,
+        audit_dir: &std::path::Path,
+    ) -> mvm_hostd::audit::session::SessionVerification {
+        mvm_hostd::audit::session::verify_session(
+            audit_dir,
+            "local",
+            &ctx.admitted.plan().plan_id.0,
+            &ctx.emitter.verifying_key(),
+        )
+    }
+
+    /// The authenticated entries of the chain in `audit_dir` for `ctx`'s plan,
+    /// in chain order. Fails the test if any line's signature or link is bad.
+    fn signed_events(
+        ctx: &AdmissionContext,
+        audit_dir: &std::path::Path,
+    ) -> Vec<mvm_hostd::supervisor::PlanAuditEntry> {
+        mvm_hostd::supervisor::verify_audit_chain_entries(
+            &audit_dir.join("local.jsonl"),
+            &ctx.emitter.verifying_key(),
+        )
+        .expect("the chain verifies under the host key")
+        .into_iter()
+        .filter(|entry| entry.plan_id == ctx.admitted.plan().plan_id)
+        .collect()
+    }
+
+    /// A transient run that booted and exited records `plan.launched`, its
+    /// posture and a chain-signed `plan.exited` carrying the exit code, then
+    /// seals the session as `exited` — so `trust audit verify` reports it
+    /// `VERIFIED`, not `UNSEALED`.
     #[test]
-    fn a_transient_run_that_booted_records_launched_and_posture() {
+    fn a_transient_run_that_exits_ends_in_a_verified_exited_seal() {
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-ok");
 
-        let outcome: Result<()> = Ok(());
-        record_transient_outcome(
+        record_transient_launch(
             Some(&ctx),
             "firecracker",
             mvm_build::run_image::RootStrategy::BlockExt4,
-            &outcome,
+        );
+        close_transient_session(Some(&ctx), "firecracker", Ok(3), "launch");
+
+        let events: Vec<String> = signed_events(&ctx, audit_dir.path())
+            .iter()
+            .map(|entry| entry.event.clone())
+            .collect();
+        let position = |name: &str| {
+            events
+                .iter()
+                .position(|event| event == name)
+                .unwrap_or_else(|| panic!("no {name} in {events:?}"))
+        };
+        assert!(position("plan.launched") < position("plan.exited"));
+        assert!(position("plan.exited") < position("session.sealed"));
+        assert!(!events.iter().any(|event| event == "plan.failed"));
+        let exited = signed_events(&ctx, audit_dir.path())
+            .into_iter()
+            .find(|entry| entry.event == "plan.exited")
+            .expect("plan.exited is a signed chain entry");
+        assert_eq!(
+            exited.labels.get("exit_code").map(String::as_str),
+            Some("3")
+        );
+        assert_eq!(
+            exited.labels.get("backend").map(String::as_str),
+            Some("firecracker")
         );
 
-        let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
-            .expect("audit file exists");
-        assert!(content.contains("plan.launched"), "{content}");
-        assert!(content.contains("plan.boot_posture"), "{content}");
-        assert!(!content.contains("plan.failed"), "{content}");
+        let report = session_verdict(&ctx, audit_dir.path());
+        assert_eq!(
+            report.verdict,
+            mvm_hostd::audit::session::Verdict::Verified,
+            "{report:?}"
+        );
+        assert_eq!(report.late_entries, 0, "the seal covers the whole run");
+        let [seal] = report.seals.as_slice() else {
+            panic!("exactly one seal: {:?}", report.seals);
+        };
+        assert_eq!(
+            seal.seal.reason,
+            mvm_hostd::audit::session::SealReason::Exited
+        );
+        assert_eq!(seal.seal.exit_code.as_deref(), Some("3"));
     }
 
+    /// A non-zero exit is still a run that happened: it seals as `exited` and
+    /// carries its code, rather than reading as a failed boot.
     #[test]
-    fn a_transient_run_that_failed_records_failed_and_not_launched() {
+    fn a_failing_workload_seals_as_exited_with_its_code() {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-nonzero");
+
+        record_transient_launch(
+            Some(&ctx),
+            "firecracker",
+            mvm_build::run_image::RootStrategy::BlockExt4,
+        );
+        close_transient_session(Some(&ctx), "firecracker", Ok(124), "launch");
+
+        let report = session_verdict(&ctx, audit_dir.path());
+        assert_eq!(report.verdict, mvm_hostd::audit::session::Verdict::Verified);
+        let [seal] = report.seals.as_slice() else {
+            panic!("exactly one seal: {:?}", report.seals);
+        };
+        assert_eq!(
+            seal.seal.reason,
+            mvm_hostd::audit::session::SealReason::Exited
+        );
+        assert_eq!(seal.seal.exit_code.as_deref(), Some("124"));
+    }
+
+    /// A run that did not complete records `plan.failed` under the caller's
+    /// class and seals the session as `failed`, with no `plan.launched` or
+    /// `plan.exited` that would read as a workload that ran.
+    #[test]
+    fn a_transient_run_that_failed_seals_as_failed_and_not_exited() {
         let keys_dir = tempfile::tempdir().expect("keys dir");
         let audit_dir = tempfile::tempdir().expect("audit dir");
         let ctx = admitted_into(keys_dir.path(), audit_dir.path(), "vm-transient-err");
 
-        let outcome: Result<()> = Err(anyhow::anyhow!("the guest never came up"));
-        record_transient_outcome(
-            Some(&ctx),
-            "firecracker",
-            mvm_build::run_image::RootStrategy::BlockExt4,
-            &outcome,
-        );
+        let error = anyhow::anyhow!("the guest never came up");
+        close_transient_session(Some(&ctx), "firecracker", Err(&error), "launch");
 
         let content = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
             .expect("audit file exists");
@@ -1955,6 +2072,17 @@ mod admit_plan_tests {
         assert!(content.contains("the guest never came up"), "{content}");
         assert!(!content.contains("plan.launched"), "{content}");
         assert!(!content.contains("plan.boot_posture"), "{content}");
+        assert!(!content.contains("plan.exited"), "{content}");
+
+        let report = session_verdict(&ctx, audit_dir.path());
+        assert_eq!(report.verdict, mvm_hostd::audit::session::Verdict::Verified);
+        let [seal] = report.seals.as_slice() else {
+            panic!("exactly one seal: {:?}", report.seals);
+        };
+        assert_eq!(
+            seal.seal.reason,
+            mvm_hostd::audit::session::SealReason::Failed
+        );
     }
 
     // ──────────────────────────────────────────────────────────────

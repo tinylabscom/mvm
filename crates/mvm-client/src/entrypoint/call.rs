@@ -21,7 +21,7 @@ use super::boot::{
 use super::dispatch::{
     CallObserver, CallOutcome, CallStdin, EntrypointDispatch, authorize_stdin, dispatch,
 };
-use crate::admission::{AdmissionContext, emit_failed, emit_launched};
+use crate::admission::{AdmissionContext, close_transient_session, emit_failed, emit_launched};
 use crate::launch::runtime_source::PairArtifactSource;
 
 /// How long a freshly booted VM's agent has to answer.
@@ -153,7 +153,9 @@ pub struct EntrypointCall<'a> {
 ///
 /// A session record is registered for the call's lifetime so `session ls`
 /// sees it, and a transport drop coincident with a `session kill` is reported
-/// as the kill. A kept-alive call keeps the record, writes a `SessionStart`
+/// as the kill. A transient call ends its audit session when its VM is torn
+/// down: `plan.exited` with the call's exit status and a seal, or `plan.failed`
+/// when the dispatch itself failed. A kept-alive call keeps the record, writes a `SessionStart`
 /// audit entry, and tells the observer which VM and session it left running —
 /// even when the call itself failed, because the VM is still there.
 ///
@@ -174,6 +176,7 @@ pub fn run_entrypoint_call(
     let streams_stdin = stdin.is_streaming();
     vm.admission = vm.admission.with_stream_stdin(streams_stdin);
     let slot = vm.slot;
+    let backend_name = vm.admission.backend_name().to_string();
     let booted = boot_entrypoint_vm(vm, pair)?;
     let vm_name = booted.vm.vm_name.clone();
 
@@ -196,6 +199,7 @@ pub fn run_entrypoint_call(
         Err(refusal) => {
             tear_down_session_vm(booted.vm.clone());
             deregister_call_session(session_id.as_ref());
+            emit_failed(&booted.admission, "stdin", &refusal);
             return Err(refusal);
         }
     };
@@ -226,6 +230,15 @@ pub fn run_entrypoint_call(
         CallLifecycle::Transient => {
             tear_down_session_vm(booted.vm);
             deregister_call_session(session_id.as_ref());
+            // The VM is gone, so this run's session is over: record its exit
+            // and seal it. A kept-alive VM is still running and its session
+            // stays open.
+            close_transient_session(
+                Some(&booted.admission),
+                &backend_name,
+                result.as_ref().map(CallOutcome::exit_code),
+                "dispatch",
+            );
         }
     }
     result
