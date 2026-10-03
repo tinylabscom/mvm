@@ -13,16 +13,24 @@ pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 ///
 /// The causes are separated because the caller reacts to each differently: a
 /// peer that closed between requests is an ordinary keep-alive end, a peer that
-/// closed part-way through is a truncated request worth logging, an oversized
+/// closed part-way through is a truncated request worth recording, an oversized
 /// request is an attempt worth logging, and a transfer-coded body is something
 /// to answer rather than to close on. Collapsing them made a 16 MiB header
 /// overflow indistinguishable from a client hanging up politely.
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
-    /// The peer closed with nothing buffered — it is done sending requests.
+    /// The connection ended with nothing buffered: the peer is done sending
+    /// requests.
+    ///
+    /// That covers more than a clean end of stream. A TLS client that hangs up
+    /// without a `close_notify` — common after a complete response, and what
+    /// Python's `urllib` does — surfaces from rustls as `UnexpectedEof`; a
+    /// peer that tears the socket down surfaces as a reset; and the read
+    /// deadline expiring is how an idle keep-alive ends. None of them leaves a
+    /// request unanswered.
     #[error("peer closed between requests")]
     Closed,
-    /// The peer closed part-way through a request.
+    /// The peer went away part-way through a request.
     #[error("connection closed before the request completed")]
     Truncated,
     /// The request exceeded [`MAX_REQUEST_BYTES`].
@@ -45,7 +53,8 @@ pub enum ReadError {
     /// and one place to answer from.
     #[error("pipelined requests are not supported on this connection")]
     Pipelined,
-    /// The socket failed.
+    /// The socket failed part-way through a request, other than by the peer
+    /// going away.
     #[error("request read failed: {0}")]
     Io(#[source] std::io::Error),
 }
@@ -83,7 +92,9 @@ pub fn read_http_request<R: Read>(stream: &mut R) -> Result<HttpRequest, ReadErr
         if buf.len() > MAX_REQUEST_BYTES {
             return Err(ReadError::TooLarge);
         }
-        let n = stream.read(&mut chunk).map_err(ReadError::Io)?;
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|error| read_failure(error, !buf.is_empty()))?;
         if n == 0 {
             return Err(if buf.is_empty() {
                 ReadError::Closed
@@ -105,7 +116,9 @@ pub fn read_http_request<R: Read>(stream: &mut R) -> Result<HttpRequest, ReadErr
         return Err(ReadError::TooLarge);
     }
     while buf.len() < end {
-        let n = stream.read(&mut chunk).map_err(ReadError::Io)?;
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|error| read_failure(error, true))?;
         if n == 0 {
             return Err(ReadError::Truncated);
         }
@@ -119,6 +132,44 @@ pub fn read_http_request<R: Read>(stream: &mut R) -> Result<HttpRequest, ReadErr
         request: buf,
         residue,
     })
+}
+
+/// Classify a failed read by what it means for the request in progress.
+///
+/// `buffered` is whether any byte of a request has been read. With none, the
+/// peer going away or the idle deadline expiring is the end of the
+/// connection, not a failure of a request. With some, the peer going away is a
+/// truncation, and anything else is the socket failing under a request.
+fn read_failure(error: std::io::Error, buffered: bool) -> ReadError {
+    let kind = error.kind();
+    if !buffered && (is_peer_gone(kind) || is_idle_deadline(kind)) {
+        ReadError::Closed
+    } else if is_peer_gone(kind) {
+        ReadError::Truncated
+    } else {
+        ReadError::Io(error)
+    }
+}
+
+/// Error kinds that mean the peer is no longer there to send anything.
+fn is_peer_gone(kind: std::io::ErrorKind) -> bool {
+    use std::io::ErrorKind;
+    matches!(
+        kind,
+        ErrorKind::UnexpectedEof
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            | ErrorKind::BrokenPipe
+    )
+}
+
+/// Error kinds a blocking read reports when its deadline expires: `WouldBlock`
+/// on the Unix sockets this reader is handed, `TimedOut` on some platforms.
+fn is_idle_deadline(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
 }
 
 /// Whether an already-read header block declares a `Transfer-Encoding`.
@@ -265,6 +316,94 @@ mod tests {
         assert!(matches!(
             read_http_request(&mut stream),
             Err(ReadError::TooLarge)
+        ));
+    }
+
+    /// A reader that hands out `data` and then fails with `kind`, the way a
+    /// rustls stream reports a peer that hung up without a `close_notify`.
+    struct FailsAfter {
+        data: std::io::Cursor<Vec<u8>>,
+        kind: std::io::ErrorKind,
+    }
+
+    impl FailsAfter {
+        fn new(data: &[u8], kind: std::io::ErrorKind) -> Self {
+            Self {
+                data: std::io::Cursor::new(data.to_vec()),
+                kind,
+            }
+        }
+    }
+
+    impl Read for FailsAfter {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            match self.data.read(out)? {
+                0 => Err(std::io::Error::from(self.kind)),
+                n => Ok(n),
+            }
+        }
+    }
+
+    /// Hanging up between requests is the end of the connection however the
+    /// peer does it, and so is the idle deadline expiring.
+    #[test]
+    fn a_peer_gone_or_idle_with_nothing_buffered_is_a_close() {
+        use std::io::ErrorKind;
+        for kind in [
+            ErrorKind::UnexpectedEof,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::BrokenPipe,
+            ErrorKind::WouldBlock,
+            ErrorKind::TimedOut,
+        ] {
+            let got = read_http_request(&mut FailsAfter::new(b"", kind));
+            assert!(matches!(got, Err(ReadError::Closed)), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_peer_gone_part_way_through_the_headers_is_a_truncation() {
+        use std::io::ErrorKind;
+        for kind in [ErrorKind::UnexpectedEof, ErrorKind::ConnectionReset] {
+            let mut stream = FailsAfter::new(b"GET /v1 HTTP/1.1\r\nhost: x", kind);
+            let got = read_http_request(&mut stream);
+            assert!(matches!(got, Err(ReadError::Truncated)), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_peer_gone_part_way_through_the_body_is_a_truncation() {
+        let mut stream = FailsAfter::new(
+            b"POST /y HTTP/1.1\r\ncontent-length: 8\r\n\r\nshort",
+            std::io::ErrorKind::UnexpectedEof,
+        );
+        assert!(matches!(
+            read_http_request(&mut stream),
+            Err(ReadError::Truncated)
+        ));
+    }
+
+    /// A deadline that expires under a half-read request is neither the peer
+    /// leaving nor an idle keep-alive ending: it stays a read failure.
+    #[test]
+    fn a_deadline_under_a_half_read_request_is_a_read_failure() {
+        let mut stream = FailsAfter::new(
+            b"GET /v1 HTTP/1.1\r\nhost: x",
+            std::io::ErrorKind::WouldBlock,
+        );
+        assert!(matches!(
+            read_http_request(&mut stream),
+            Err(ReadError::Io(_))
+        ));
+    }
+
+    #[test]
+    fn any_other_socket_failure_is_a_read_failure_even_between_requests() {
+        let mut stream = FailsAfter::new(b"", std::io::ErrorKind::PermissionDenied);
+        assert!(matches!(
+            read_http_request(&mut stream),
+            Err(ReadError::Io(_))
         ));
     }
 

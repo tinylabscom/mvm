@@ -348,6 +348,23 @@ pub(in crate::commands::vm) mod tests {
         }
     }
 
+    /// A terminated request that ended before the host had it whole is in the
+    /// chain under `secret.flow_refused`, but nothing blocked it.
+    #[test]
+    fn an_unfinished_terminated_request_is_not_a_denial() {
+        for reason in ["truncated_request", "read_failed"] {
+            let e = entry(
+                "secret.flow_refused",
+                &[
+                    ("vm_name", "vm-a"),
+                    ("destination", "api.example.com:443"),
+                    ("reason", reason),
+                ],
+            );
+            assert!(EgressDenial::from_entry(&e, "vm-a").is_none(), "{reason}");
+        }
+    }
+
     #[test]
     fn secret_path_refusals_are_read_from_their_destination() {
         let d = denial(
