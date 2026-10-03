@@ -87,6 +87,8 @@ pub(in crate::commands) struct EntrypointCall {
     /// is the running VM's name. Its substitution endpoint + boot-minted
     /// placeholders are reused; the VM is left running (no teardown).
     pub attach: bool,
+    /// Whether this terminal invocation may print host denial notices.
+    pub show_denials: bool,
     /// Resolved egress policy for the transient entrypoint boot (from `--net` /
     /// `--allow-host`). Threaded onto the admitted plan and shared vsock
     /// endpoint so a baked entrypoint enforces egress identically to the
@@ -173,12 +175,23 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
             "entrypoint: dispatching into running workload '{}'",
             call.source
         ));
-        let exit_code = dispatch(EntrypointDispatch {
+        let denials = call
+            .show_denials
+            .then(|| {
+                super::egress_denials::watch_machine(
+                    &call.source,
+                    super::egress_denials::Live::Notices,
+                )
+            })
+            .flatten();
+        let outcome = dispatch(EntrypointDispatch {
             vm_name: &call.source,
             stdin: DispatchStdin::OneShot(call.stdin.prologue()),
             timeout_secs: call.timeout,
             session_id: None,
-        })?;
+        });
+        super::egress_denials::finish_and_summarize(denials);
+        let exit_code = outcome?;
         if exit_code != 0 {
             mvm_observability::exit(exit_code);
         }
@@ -230,6 +243,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         .map_or(SessionVmName::Prefixed("invoke"), SessionVmName::Exact);
 
     let mut out = CallOutput::inherited();
+    out.watch_denials = call.show_denials;
     let outcome = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
         mvm_client::entrypoint::run_entrypoint_call(
             mvm_client::entrypoint::EntrypointCall {
@@ -247,7 +261,9 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
             pair,
             &mut out,
         )
-    })?;
+    });
+    out.finish_denials();
+    let outcome = outcome?;
     flush_inherited();
     let exit_code = outcome.exit_code();
     if exit_code != 0 {
@@ -530,6 +546,8 @@ struct CallOutput<'a> {
     /// Answers the endpoint's `ask` decisions while the call runs. A machine
     /// kept alive past the call has no one to ask, and its asks deny.
     approvals: Option<mvm_client::approval_broker::ApprovalServer>,
+    watch_denials: bool,
+    denials: Option<super::egress_denials::DenialWatch>,
 }
 
 impl CallOutput<'static> {
@@ -538,11 +556,17 @@ impl CallOutput<'static> {
             sinks: EventSinks::inherited(),
             divergence: RecordedDivergence::default(),
             approvals: None,
+            watch_denials: false,
+            denials: None,
         }
     }
 }
 
 impl CallOutput<'_> {
+    fn finish_denials(&mut self) {
+        super::egress_denials::finish_and_summarize(self.denials.take());
+    }
+
     /// Tell the caller, on stderr, how what an operator can read back differs
     /// from what this call printed.
     ///
@@ -568,6 +592,13 @@ impl CallOutput<'_> {
 }
 
 impl CallObserver for CallOutput<'_> {
+    fn vm_named(&mut self, vm_name: &str) {
+        if self.watch_denials {
+            self.denials =
+                super::egress_denials::watch_machine(vm_name, super::egress_denials::Live::Notices);
+        }
+    }
+
     fn output(&mut self, chunk: &ShownChunk) {
         self.sinks.output(chunk);
     }
@@ -619,6 +650,29 @@ impl CallObserver for CallOutput<'_> {
             )
         );
         let _ = self.sinks.err.flush();
+    }
+}
+
+#[cfg(test)]
+mod denial_observation_tests {
+    use super::*;
+    use mvm_core::util::test_env::TestEnv;
+
+    #[test]
+    fn entrypoint_name_arms_a_watch_only_for_human_output() {
+        let mut quiet = CallOutput::inherited();
+        quiet.vm_named("entrypoint-quiet");
+        assert!(quiet.denials.is_none());
+
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
+        let mut human = CallOutput::inherited();
+        human.watch_denials = true;
+        human.vm_named("entrypoint-human");
+        assert!(human.denials.is_some());
+        human.finish_denials();
+        assert!(human.denials.is_none());
     }
 }
 
@@ -796,6 +850,8 @@ mod streaming_tests {
             },
             divergence: RecordedDivergence::default(),
             approvals: None,
+            watch_denials: false,
+            denials: None,
         }
     }
 
@@ -922,6 +978,8 @@ mod streaming_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
+                watch_denials: false,
+                denials: None,
             };
             for chunk in [&b"first"[..], &b"second"[..]] {
                 write_entrypoint_event(
@@ -960,6 +1018,8 @@ mod streaming_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
+                watch_denials: false,
+                denials: None,
             };
             let mut capture = uncaptured();
             write_entrypoint_event(&EntrypointEvent::Exit { code: 0 }, &mut capture, &mut sinks);
@@ -1070,6 +1130,8 @@ mod captured_tests {
                     },
                     divergence: RecordedDivergence::default(),
                     approvals: None,
+                    watch_denials: false,
+                    denials: None,
                 };
                 for event in events {
                     write_entrypoint_event(event, &mut capture, &mut sinks);
@@ -1278,6 +1340,8 @@ mod captured_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
+                watch_denials: false,
+                denials: None,
             };
             write_entrypoint_event(&stdout(b"before"), &mut capture, &mut sinks);
             plane.release(vm); // a teardown racing this call
@@ -1746,6 +1810,7 @@ mod streamed_stdin_tests {
             session: None,
             r#fn: None,
             attach: true,
+            show_denials: true,
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             hypervisor: None,
         }
@@ -1773,6 +1838,8 @@ mod streamed_stdin_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
+                watch_denials: false,
+                denials: None,
             };
             report_streamed_stdin("call-vm", &mut sinks, report);
         }
