@@ -9,11 +9,11 @@ The bundle format is not defined here. Manifest types, canonical signing, and
 the archive writer live in `mvm_core::plan::bundle`; this crate turns files on
 disk into a manifest and hands both to that writer.
 
-## Who it is for
+## Who uses it
 
-Any caller holding built artifacts and a key to sign with. It exists so that
-`mvmctl bundle export` and a library consumer produce a bundle the same way,
-without the library having to link the CLI to get there.
+`mvm-cli` uses it for `mvmctl bundle export`, signing under the host key.
+`mvm-client` re-exports it so a library consumer can produce the same bundle
+without linking the CLI.
 
 ## How it works
 
