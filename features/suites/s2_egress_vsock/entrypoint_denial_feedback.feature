@@ -4,7 +4,7 @@ Feature: Entrypoint egress denial feedback
   dispatches. The host reports denials from its signed audit chain before
   returning the entrypoint status.
 
-  @live @firecracker @tls_tunnel_client @ci_live
+  @live @firecracker @ci_live
   Scenario: a baked entrypoint reports blocked egress before its nonzero exit
     When I run mvmctl in an isolated live home with "machine run --flake examples/entrypoint-denial --entrypoint --allow-host example.com --timeout 180"
     Then the command exits with code 22
