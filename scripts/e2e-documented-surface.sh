@@ -251,21 +251,18 @@ e2e_phase build
 echo "==> refreshing embedded aux helpers"
 just payload::refresh
 
-# `user` carries manifest-verify, which the verified-fetch path needs to accept
-# the published builder VM image. Its sigstore/aws-lc dependency must use the
-# standard compiler/linker path: the nightly fast-codegen wrapper leaves the
-# native aws-lc symbols unresolved. The featureless local path can retain the
-# faster wrapper because it does not link that stack.
+# Every surface, the default included, carries manifest-verify, which the
+# verified-fetch path needs to accept the published builder VM image. The
+# `user` build keeps the standard compiler/linker path; the featureless local
+# path uses the faster wrapper, which links aws-lc through the LLVM overrides in
+# .cargo/fast.toml.
 # Preserve a feature-off binary first. Its SDK-sidecar warm is the regression
 # for the contributor path: that command must re-exec the isolated embedded
 # helper for the complete HVF/Nix build, not resume in this payload-free parent.
 # The main suite binary is then rebuilt with the payload because later workload
 # launches consume the extracted host helpers directly.
-# `user` by default, because it carries `manifest-verify` — and without it this
-# lane cannot exercise a documented command that fetches a published artifact.
-# `build kernel build --source download` refuses outright: "manifest-verify
-# feature is disabled in this build". Released binaries are built with `user`
-# (see MVMCTL_RELEASE_FEATURES in release.yml), so a lane without it attests the
+# `user` by default: released binaries are built with it (see
+# MVMCTL_RELEASE_FEATURES in release.yml), so a lane without it attests the
 # documented surface using a binary less capable than the one users get.
 #
 # Deliberately *not* the full release feature set: `release-channel` flips

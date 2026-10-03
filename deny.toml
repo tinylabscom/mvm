@@ -147,6 +147,26 @@ skip = [
     # declares bitflags ^1.0 with no feature selecting 2.x. It costs exactly one
     # crate.
     "bitflags",
+
+    # The image-set signature verifier, which the default `mvmctl` build
+    # carries because a first run cannot get past the signed image set without
+    # it. sigstore-verify 0.11, the latest release, is still on the RustCrypto
+    # 0.10 generation (digest 0.10, sha2 0.10, signature 2, const-oid 0.9) while
+    # the workspace is on 0.11, and it brings an older rand/rand_core, ryu-js
+    # via its JSON canonicalizer, and the untrusted 0.7 that aws-lc-rs needs.
+    # Nothing in the workspace asks for these majors directly; they collapse
+    # when sigstore-crypto ships a digest-0.11 release.
+    "block-buffer",
+    "const-oid",
+    "cpufeatures",
+    "crypto-common",
+    "digest",
+    "rand",
+    "rand_core",
+    "ryu-js",
+    "sha2",
+    "signature",
+    "untrusted",
 ]
 skip-tree = []
 

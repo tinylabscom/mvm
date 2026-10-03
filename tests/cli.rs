@@ -1860,8 +1860,12 @@ fn search_reads_a_file_registry_and_marks_installed_packs() {
     assert_eq!(rows[0]["installed"], false);
 }
 
+/// The staged bundle is not a Sigstore bundle, so the default build's verifier
+/// rejects it. The refusal must come from that check, not from a build with no
+/// verifier compiled in: a default build that cannot verify cannot get past
+/// the signed image set either.
 #[test]
-fn pull_reaches_signature_verification_and_fails_closed() {
+fn pull_refuses_a_pack_whose_signature_does_not_verify_and_installs_nothing() {
     let home = tempfile::tempdir().unwrap();
     let registry = tempfile::tempdir().unwrap();
     stage_pack_registry(registry.path());
@@ -1890,7 +1894,7 @@ accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/wor
         .expect("run mvmctl pull");
     assert!(
         !out.status.success(),
-        "pull must refuse: a default build cannot verify the signature"
+        "pull must refuse a pack whose signature does not verify"
     );
     let shown = format!(
         "{}{}",
@@ -1898,8 +1902,12 @@ accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/wor
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        shown.contains("manifest-verify") || shown.contains("signature"),
+        shown.contains("signature is invalid"),
         "the refusal must come from signature verification: {shown}"
+    );
+    assert!(
+        !shown.contains("manifest-verify feature disabled"),
+        "a default build must carry the verifier: {shown}"
     );
     assert!(
         !home.path().join("registry/packs.lock.toml").exists(),

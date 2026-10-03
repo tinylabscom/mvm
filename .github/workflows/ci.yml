@@ -538,14 +538,24 @@ jobs:
           cargo nextest run -p mvm-sdk --features schema
           cargo check -p mvm-sdk --features schema --bins
 
-      # The release signature verifier only exists under `manifest-verify`,
-      # which the default lane never enables, so without this step the tests
-      # that parse a real Sigstore bundle compile to nothing and pass. The
-      # claim 20 ledger cites them; this is the lane that runs them.
+      # The release signature verifier only exists under `manifest-verify`.
+      # The workspace lane gets it through the root default, but that is
+      # feature unification, not something these crates ask for, so this step
+      # runs the tests that parse a real Sigstore bundle with the feature named.
+      # The claim 20 ledger cites them; this is the lane that runs them.
       - name: release signature tests (manifest-verify)
         run: |
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
+
+      # The other half: a build without the verifier must refuse every signature
+      # and say why. The workspace lane unifies the verifier in, so those tests
+      # compile out there; mvmd links mvm-core without it, so the refusal is a
+      # shipped path. Run per crate with no features.
+      - name: verifier-absent refusal tests (no manifest-verify)
+        run: |
+          cargo nextest run -p mvm-core -p mvm-build -p mvm-client \
+            -E 'test(/without_the_verifier|cannot_verify|without_manifest_verify|no_feature_build/)'
 
       # The authored-policy schema is generated from the Rust types and
       # published twice (schema/ and the docs reference page); the drift tests
@@ -555,8 +565,9 @@ jobs:
           cargo nextest run -p mvm-client --features schema -E 'test(/policy_profiles::/)'
       # Instruction-file provenance: the keyless half verifies a real Sigstore
       # bundle only under `manifest-verify`, and the committed policy schema is
-      # checked against the Rust types only under `schema`. Neither feature is
-      # on in the default lane, so without this step both compile to nothing.
+      # checked against the Rust types only under `schema`. `schema` is off in
+      # the default lane, and this step names `manifest-verify` rather than
+      # relying on the root default to unify it in.
       - name: instruction provenance tests (manifest-verify + schema)
         run: |
           cargo nextest run -p mvm-client --features manifest-verify,schema -E 'test(/instruction/)'

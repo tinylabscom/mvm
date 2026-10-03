@@ -42,10 +42,19 @@ if grep -Fq 'rustChannel' flake.nix; then
 fi
 require_text .cargo/fast.toml 'rustflags = ["-Z", "threads=8"]'
 require_text .cargo/fast.toml 'codegen-backend = "cranelift"'
-if [[ "$(grep -Fc 'codegen-backend = "llvm"' .cargo/fast.toml)" -ne 2 ]]; then
-  echo "check-fast-cargo: test and release profiles must explicitly retain LLVM" >&2
-  exit 1
-fi
+# The codegen backend a table in .cargo/fast.toml selects, or nothing.
+fast_profile_backend() {
+  awk -v table="[$1]" '
+    /^\[/ { inside = ($0 == table) }
+    inside && /^codegen-backend = / { gsub(/"/, "", $3); print $3 }
+  ' .cargo/fast.toml
+}
+for profile in profile.test profile.release; do
+  if [[ "$(fast_profile_backend "${profile}")" != "llvm" ]]; then
+    echo "check-fast-cargo: test and release profiles must explicitly retain LLVM" >&2
+    exit 1
+  fi
+done
 require_text scripts/cargo-fast.sh '.cargo/fast.toml'
 require_text scripts/cargo-fast.sh "RUSTUP_TOOLCHAIN=\"\${fast_toolchain}\""
 require_text scripts/cargo-fast.sh "PATH=\"\${toolchain_bin}:\${PATH}\""
