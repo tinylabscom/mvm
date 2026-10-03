@@ -1223,7 +1223,7 @@ fn documented_typescript_examples_typecheck(_world: &mut CliWorld) {
         // coverage is reduced here, not absent.
         eprintln!(
             "[bdd] SKIPPED: TypeScript typecheck — no SDK toolchain at {}.\n\
-             [bdd]   Run `just sdk-ts-install` to enable it. Name resolution \
+             [bdd]   Run `just sdk::install-typescript` to enable it. Name resolution \
              still ran; argument shapes did not.",
             sdk.display()
         );

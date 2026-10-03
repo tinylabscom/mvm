@@ -41,8 +41,9 @@ demo:
 weblinux:
     ./web/weblinux-demo/build.sh
 
-# Stage the browser WASM demo unless every generated asset class is present.
 # WebLinux is staged separately from its verified release pack by workers.yml.
+
+# Stage the browser WASM demo unless every generated asset class is present
 demo-assets:
     test -s public/public/demo/demo.js \
       && test -s public/public/demo/worker.js \
@@ -54,20 +55,20 @@ demo-assets:
       && test -s public/public/demo/fixtures/unbound.opt.wasm \
       || just site::demo
 
-# Download the qemu-wasm-smoke-pack from GitHub releases.
 # This is faster than building from scratch (seconds vs 10-30 minutes).
 # Usage: just site::qemu-pack [output-dir] [tag]
 #   output-dir: Where to place the unpacked pack (default: ./qemu-wasm-smoke-pack)
+#   tag:        The boot-image tag to download from (default: latest)
 
-# tag:        The boot-image tag to download from (default: latest)
+# Download the qemu-wasm-smoke-pack from GitHub releases
 qemu-pack *ARGS:
     ./scripts/download-qemu-wasm-smoke-pack.sh {{ ARGS }}
 
-# Build all demo assets (wasm + weblinux); requires Linux for weblinux
 # Usage: just site::demo-all [qemu-wasm-pack-path]
 #   qemu-wasm-pack-path: Path to the built pack (default: ./qemu-wasm-smoke-pack)
+#   If not provided, downloads it first via just site::qemu-pack
 
-# If not provided, downloads it first via just site::qemu-pack
+# Build all demo assets (wasm + weblinux); requires Linux for weblinux
 demo-all *PACK_DIR:
     #!/usr/bin/env bash
     set -euo pipefail
