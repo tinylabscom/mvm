@@ -39,14 +39,16 @@ Ask one question of the resolved policy without booting anything:
 
 ```sh
 mvmctl why --host api.github.com:443
+mvmctl why --host api.github.com:443 --method GET --request-path /repos/org/project
 mvmctl why --path ./src
 mvmctl why --tool shell --profile agent-apis
 ```
 
 Without `--profile` or `--plan`, `why` discovers the current project's
-`mvm.toml`. Host, path and secret answers reflect enforced policy. Tool policy
-is authored ahead of its runtime mediation, so tool answers explicitly say
-that the rule is not enforced yet.
+`mvm.toml`. A routed host with method/path rules is not a blanket allow:
+pass both `--method` and `--request-path` to check one HTTP request. A tool
+marked `ask` needs runtime approval and is not pre-authorized; per-tool argv
+restrictions are evaluated when a call supplies argv, not by a name-only query.
 
 Not to be confused with `--profile restrictive|standard|dev|permissive`, the
 run's [security tier](/guides/policy-profiles/). That flag already existed, so
@@ -352,7 +354,7 @@ accept a signing identity for every namespace, and an exact
 | `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check the profiles a launch would compose, or a single profile or group file. `--strict` turns every note into an error, refuses the unenforced `[tools]` section, and checks each bound secret against the store. |
 | `mvmctl policy diff A B [--json]` | What each side allows or denies that the other does not. |
 | `mvmctl policy groups [--json]` | Built-in and user groups and profiles. |
-| `mvmctl why --host H[:P] \| --path P \| --tool T \| --secret S [--profile PROFILE... \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. Several profiles compose in order, the last taking precedence. |
+| `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --tool T \| --secret S [--profile PROFILE... \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. For routed hosts, include method and path to check the endpoint rule. Several profiles compose in order, the last taking precedence. |
 
 `--backend KIND` on `show`, `resolve`, `validate` and `diff` matches `[[when]]`
 blocks against a backend other than the host's default.

@@ -220,6 +220,7 @@ covered = [
     "mvmctl trust instructions sign ./my-agent",
     "mvmctl trust instructions verify ./my-agent",
     "mvmctl why --host api.github.com:443",
+    "mvmctl why --host api.github.com:443 --method GET --request-path /repos/org/project",
 ]
 uncovered = [
     "mvmctl bench --lane prepared-cold -- machine run --image alpine -- /bin/true",
