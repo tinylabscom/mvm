@@ -381,6 +381,10 @@ missing one.
   arbitrary-command RPCs. Declared invocations use the authenticated vsock
   control session. Tool-scoped routes and secrets are not yet bound, so
   `policy validate --strict` still refuses a policy that relies on `[tools]`.
+  Persistent `machine create --policy` and `machine run -d --policy` now record
+  whole-tool and argv rules in the machine spec and re-admit them on every
+  start. They refuse a profile with tool-scoped routes or secrets until the
+  endpoint can enforce those bindings.
 - Pack profiles require an installed, pinned, publisher-verified signed pack;
   use `mvmctl pull namespace/name` before selecting one.
 - Endpoint routes from a policy are refused on a persistent machine

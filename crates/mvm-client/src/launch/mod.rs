@@ -505,6 +505,7 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         // The permission set the launch was admitted under, so a later
         // `start` by name re-admits under the same bounds.
         grants: request.grants.clone(),
+        tools: Default::default(),
     }
 }
 

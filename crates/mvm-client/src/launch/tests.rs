@@ -642,6 +642,7 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         last_started_at: None,
         health_check: None,
         grants: None,
+        tools: Default::default(),
         gpu: false,
         gpu_device: None,
         ports: vec![],
