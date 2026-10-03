@@ -5,8 +5,8 @@ Feature: Entrypoint egress denial feedback
   returning the entrypoint status.
 
   @live @firecracker @ci_live
-  Scenario: a baked entrypoint reports blocked egress before its nonzero exit
+  Scenario: a baked entrypoint reports blocked DNS before its nonzero exit
     When I run mvmctl in an isolated live home with "machine run --flake examples/entrypoint-denial --entrypoint --allow-host example.com --timeout 180"
-    Then the command exits with code 22
-    And the error output contains "egress blocked: blocked.example:443"
-    And the error output contains "egress denied: 1 destinations"
+    Then the command exits with code 28
+    And the error output contains "egress blocked: DNS lookup of blocked.example"
+    And the error output contains "egress denied: 1 destination"
