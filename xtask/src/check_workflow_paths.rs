@@ -1080,7 +1080,7 @@ mod tests {
         assert!(
             build.contains(r#"image_tag="$(./scripts/locked-image-tag.sh)""#)
                 && build.contains(r#"image boot update --tag "$image_tag" --force"#)
-                && bootstrap.contains("Use published builder VM bootstrap path")
+                && bootstrap.contains("Download published builder VM")
                 && bootstrap.contains("--builder qemu __builder-vm-bootstrap -v")
                 && bootstrap.contains("MVM_KERNEL_SOURCE: auto")
                 && bootstrap.contains("--builder qemu bootstrap --production -v")
@@ -1110,16 +1110,16 @@ mod tests {
              the only shape the guest agent's sealed-marker policy accepts"
         );
         // The published builder boots first; source compilation only starts
-        // after restoring the source flake and host boot inputs.
+        // after the mvm-images checkout and host boot inputs are in place.
         let published_builder = bootstrap
-            .find("Use published builder VM bootstrap path")
+            .find("Download published builder VM")
             .expect("the published builder must bootstrap first");
         let source_bootstrap = bootstrap
             .find("Bootstrap source-matched launch artifacts")
             .expect("the source-matched bootstrap must run");
-        let restore_source_flake = bootstrap
-            .find("Restore source builder VM flake")
-            .expect("source compilation needs the restored builder flake");
+        let images_checkout = bootstrap
+            .find("Check out mvm-images for the source workload kernel")
+            .expect("source compilation needs the mvm-images kernel recipe");
         let source_kernel_build = bootstrap
             .find("kernel build --which workload --source compile -v")
             .expect("the source QEMU kernel must be built");
@@ -1131,11 +1131,11 @@ mod tests {
             .expect("source artifact compilation must make the host boot inputs readable");
         assert!(
             published_builder < source_bootstrap
-                && source_bootstrap < restore_source_flake
-                && restore_source_flake < restore_kvm
+                && source_bootstrap < images_checkout
+                && images_checkout < restore_kvm
                 && restore_kvm < grant_boot_read
                 && grant_boot_read < source_kernel_build,
-            "published bootstrap, restored source flake, KVM acceleration, and readable boot inputs must precede source kernel compilation"
+            "published bootstrap, the mvm-images checkout, KVM acceleration, and readable boot inputs must precede source kernel compilation"
         );
         let deny_kvm_position = smoke
             .find(deny_kvm)
