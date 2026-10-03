@@ -78,7 +78,7 @@ pub(in crate::commands) enum AuditAction {
     Sessions(sessions::SessionsArgs),
     /// Asset content identities: recompute the canonical digest of a file
     /// or directory tree so it can be compared against the identities
-    /// recorded in a run's signed plan or audit chain — `mvmctl audit
+    /// recorded in a run's signed plan or audit chain — `mvmctl trust audit
     /// tail --chain` shows them; comparing digests is the whole check.
     Asset {
         #[command(subcommand)]
