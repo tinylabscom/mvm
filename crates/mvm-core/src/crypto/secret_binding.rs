@@ -374,6 +374,7 @@ mod tests {
                 address: address.into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }
     }
 
@@ -388,6 +389,7 @@ mod tests {
                 path: "kv/token".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         };
         assert!(
             bound_hosts(&[external], "local", &store)

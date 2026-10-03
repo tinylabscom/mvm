@@ -641,6 +641,7 @@ mod tests {
                 address: "oauth-secret".into(),
             },
             destinations: vec![],
+            approval_required: false,
         };
         let plain_plan = SecretBinding {
             name: "PLAIN".into(),
@@ -648,6 +649,7 @@ mod tests {
                 address: "plain-secret".into(),
             },
             destinations: vec![],
+            approval_required: false,
         };
         let external_plan = SecretBinding {
             name: "EXT".into(),
@@ -656,6 +658,7 @@ mod tests {
                 path: "secret/x".into(),
             },
             destinations: vec![],
+            approval_required: false,
         };
 
         let found =
@@ -676,6 +679,7 @@ mod tests {
                 address: "absent".into(),
             },
             destinations: vec![],
+            approval_required: false,
         };
         let err = discover_oauth_bindings(&[plan], "local", &bindings).unwrap_err();
         assert!(format!("{err:#}").contains("absent"));

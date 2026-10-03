@@ -711,12 +711,17 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     } else {
         SessionMode::Prod
     };
+    let declared_secrets =
+        mvm_client::admission::secrets::resolve_workload_secrets(args.from_workload_ir.as_deref())?;
+    let bound_secrets = if declared_secrets.secrets.is_empty() {
+        declared_secrets
+    } else {
+        declared_secrets.bind_approval(&mvm_client::secret::SecretService::local()?, "local")?
+    };
     let admission = EntrypointAdmission::builder(mvm_client::entrypoint::backend_name_for(None)?)
         .cpus(args.cpus)
         .mem_mib(u64::from(args.memory_mib))
-        .secrets(mvm_client::admission::secrets::resolve_workload_secrets(
-            args.from_workload_ir.as_deref(),
-        )?)
+        .secrets(bound_secrets)
         .agent_verb_override(args.agent_verb.clone())
         .dev(args.dev)
         .build()?;

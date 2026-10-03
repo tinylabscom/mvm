@@ -367,6 +367,7 @@ mod tests {
                 address: "openai".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
         let (sk, _vk) = fresh_key();
         let signed = sign_plan(&plan, &sk, "test-signer");
@@ -389,6 +390,7 @@ mod tests {
                 address: "echo-key".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
         let json = serde_json::to_string(&plan).unwrap();
         let decoded = plan_from_admitted_json(&json).unwrap();
@@ -404,6 +406,7 @@ mod tests {
                 address: "echo-key".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
         // Content-address after the last body edit so the decoded plan matches.
         plan.plan_id = crate::plan::compute_plan_id(&plan);
@@ -503,6 +506,35 @@ mod tests {
             Err(PlanVerifyError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn secret_approval_requirement_is_signature_bound() {
+        let mut plan = sample_plan();
+        plan.secrets = vec![SecretBinding {
+            name: "TOKEN".into(),
+            source: SecretSource::Keystore {
+                address: "token".into(),
+            },
+            destinations: Vec::new(),
+            approval_required: true,
+        }];
+        let (sk, vk) = fresh_key();
+        let mut signed = sign_plan(&plan, &sk, "test-signer");
+        assert!(
+            verify_plan(&signed, &[("test-signer", &vk)])
+                .unwrap()
+                .secrets[0]
+                .approval_required
+        );
+
+        let mut payload: serde_json::Value = serde_json::from_slice(&signed.0.payload).unwrap();
+        payload["secrets"][0]["approval_required"] = serde_json::json!(false);
+        signed.0.payload = serde_json::to_vec(&payload).unwrap();
+        assert!(matches!(
+            verify_plan(&signed, &[("test-signer", &vk)]),
+            Err(PlanVerifyError::SignatureInvalid(_))
+        ));
     }
 
     #[test]

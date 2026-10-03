@@ -402,6 +402,7 @@ fn tls_binding() -> mvm_core::plan::SecretBinding {
             address: "ingress/tls".to_string(),
         },
         destinations: Vec::new(),
+        approval_required: false,
     }
 }
 
@@ -543,6 +544,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
                 address: "openai".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }],
         transport: EndpointTransport::Uds {
             path: "/tmp/mvm-one-transport-bdd.sock".into(),

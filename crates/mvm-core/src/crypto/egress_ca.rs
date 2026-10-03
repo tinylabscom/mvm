@@ -370,6 +370,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             },
             SecretBinding {
                 name: "ANTHROPIC_API_KEY".into(),
@@ -377,6 +378,7 @@ mod tests {
                     address: "anthropic".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             },
             SecretBinding {
                 name: "SEARCH_API_KEY".into(),
@@ -384,6 +386,7 @@ mod tests {
                     address: "search".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             },
             // Resolved elsewhere, so it contributes no destination here.
             SecretBinding {
@@ -393,6 +396,7 @@ mod tests {
                     path: "kv/token".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             },
         ];
 

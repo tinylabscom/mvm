@@ -171,6 +171,11 @@ still holds only a placeholder; the value is substituted after the approval,
 exactly as for any bound secret. `mvmctl secret ls` shows `approve=ask` on the
 binding.
 
+Admission captures `approve=ask` in the signed execution plan before launch.
+Changing local binding metadata after admission cannot remove that requirement:
+the endpoint refuses an unsigned new `ask` and still asks when the signed plan
+requires approval. A missing secret or binding refuses admission.
+
 Approval covers every supported injection position: a request header, a
 decoded Basic credential, a query-parameter value, or a URL-path segment. The
 endpoint locates the placeholder first, checks that its position matches the

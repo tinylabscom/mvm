@@ -1643,6 +1643,7 @@ mod tests {
                 address: "ingress/tls".to_string(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         });
         cfg.ingress = vec![
             IngressMapping::builder()
@@ -1704,6 +1705,7 @@ mod tests {
                 address: "openai".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         });
         let err = mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(
             &cfg, false,
@@ -1725,6 +1727,7 @@ mod tests {
                 address: "openai".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         });
         assert!(
             mvm_hostd::supervisor::network_endpoint::refuse_secrets_without_substitution(

@@ -728,6 +728,7 @@ mod tests {
                 address: "stripe".to_string(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
         let got = admitted_child_secrets(&declared, "child-declared");
         assert_eq!(got, declared);
