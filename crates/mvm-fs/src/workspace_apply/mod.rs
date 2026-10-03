@@ -354,6 +354,25 @@ pub(crate) fn manifest_merkle_root(ops: &[ManifestOp]) -> String {
     hex::encode(mvm_contract::merkle::merkle_root(&leaves))
 }
 
+/// The root of the host pre-images captured before an apply, independent of
+/// the guest post-images. An absent host path has a distinct empty image.
+pub(crate) fn snapshot_merkle_root(ops: &[ManifestOp]) -> String {
+    let mut ordered: Vec<&ManifestOp> = ops.iter().collect();
+    ordered.sort_by(|a, b| a.path.cmp(&b.path));
+    let leaves: Vec<String> = ordered
+        .iter()
+        .map(|op| {
+            format!(
+                "workspace-preimage-v1\0{}\0{}\0{}",
+                op.path,
+                op.pre.sha256.as_deref().unwrap_or("-"),
+                op.pre.size
+            )
+        })
+        .collect();
+    hex::encode(mvm_contract::merkle::merkle_root(&leaves))
+}
+
 /// On-disk manifest: the persisted, self-describing record of one apply.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {

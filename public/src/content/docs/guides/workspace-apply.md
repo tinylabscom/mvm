@@ -64,7 +64,10 @@ mvmctl machine apply coding-agent --yes
 Before anything is written, every host file the apply would overwrite or
 delete is copied into a content-addressed snapshot under the machine's state
 dir, the manifest records a Merkle root over the plan, and the journal gains
-a begin entry. Writes then land through temp files and atomic renames. A
+a begin entry. Before any host write, a separate root over the captured host
+pre-images is recorded as a chain-signed `workspace.snapshot` entry, linked
+to the later `workspace.applied` entry by apply ID and manifest root. Writes
+then land through temp files and atomic renames. A
 crash mid-apply recovers on the next command: begun-without-finished rolls
 back from the snapshot; finished-without-recorded completes the entry.
 

@@ -25,7 +25,9 @@ use mvm_core::user_config::MvmConfig;
 use mvm_fs::tree_diff::Ext4Tree;
 use mvm_fs::workspace_apply::store::ApplyStore;
 use mvm_fs::workspace_apply::{ApplyPlan, PlanParams};
-use mvm_hostd::audit::emitter::{AuditEmitter, WorkspaceMutationAudit, workspace_audit};
+use mvm_hostd::audit::emitter::{
+    AuditEmitter, WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit,
+};
 
 use super::workspace::Workspace;
 use super::{diff, workspace};
@@ -160,13 +162,38 @@ pub(in crate::commands) fn run_apply(
 
     let emitter = workspace_audit_emitter()?;
     let staged = store.stage(plan, &selected.source_dir, &live_image, None)?;
+    let snapshot_root = staged.snapshot_merkle_root();
+    let snapshot_plan = workspace_audit_plan(
+        &args.name,
+        &selected.volume,
+        "workspace:snapshot",
+        &snapshot_root,
+    )?;
     let audit_plan = workspace_audit_plan(
         &args.name,
         &selected.volume,
         "workspace:apply",
         staged.merkle_root(),
     )?;
-    store.commit(&staged, &selected.source_dir)?;
+    record_snapshot_then_commit(
+        || {
+            emitter.emit_workspace_snapshot(
+                &snapshot_plan,
+                WorkspaceSnapshotAudit {
+                    vm_name: &args.name,
+                    volume: &selected.volume,
+                    apply_id: staged.id(),
+                    snapshot_root: &snapshot_root,
+                    manifest_root: staged.merkle_root(),
+                },
+            )
+        },
+        || {
+            store
+                .commit(&staged, &selected.source_dir)
+                .map_err(Into::into)
+        },
+    )?;
     emitter
         .emit_workspace_mutation(
             &audit_plan,
@@ -189,11 +216,22 @@ pub(in crate::commands) fn run_apply(
         staged.merkle_root()
     );
     crate::ui::success(&format!(
-        "applied {} change(s); snapshot merkle root {}",
+        "applied {} change(s); snapshot merkle root {}; apply manifest root {}",
         staged.manifest().ops.len(),
+        snapshot_root,
         staged.merkle_root()
     ));
     Ok(())
+}
+
+/// The staged pre-images must reach the signed chain before any host write.
+/// A refused audit append leaves the host tree untouched for recovery.
+fn record_snapshot_then_commit(
+    record_snapshot: impl FnOnce() -> Result<()>,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    record_snapshot().context("recording the host pre-apply snapshot in the signed audit chain")?;
+    commit()
 }
 
 pub(in crate::commands) fn run_undo(
@@ -405,7 +443,9 @@ fn op_summary(op: &mvm_fs::workspace_apply::FileOp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_apply_authorized;
+    use super::{ensure_apply_authorized, record_snapshot_then_commit};
+    use anyhow::anyhow;
+    use std::cell::RefCell;
 
     #[test]
     fn yes_authorizes_without_a_terminal() {
@@ -421,5 +461,52 @@ mod tests {
     fn no_terminal_and_no_yes_refuses() {
         let err = ensure_apply_authorized(false, false).expect_err("must refuse");
         assert!(err.to_string().contains("--yes"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_audit_precedes_host_commit() {
+        let order = RefCell::new(Vec::new());
+        record_snapshot_then_commit(
+            || {
+                order.borrow_mut().push("snapshot");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("commit");
+                Ok(())
+            },
+        )
+        .expect("both steps succeed");
+        assert_eq!(*order.borrow(), ["snapshot", "commit"]);
+    }
+
+    #[test]
+    fn snapshot_audit_failure_prevents_host_commit() {
+        let committed = std::cell::Cell::new(false);
+        let error = record_snapshot_then_commit(
+            || Err(anyhow!("audit unavailable")),
+            || {
+                committed.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("audit refusal must stop commit");
+        assert!(!committed.get());
+        assert!(error.to_string().contains("pre-apply snapshot"));
+    }
+
+    #[test]
+    fn a_commit_failure_is_reported_after_the_snapshot() {
+        let recorded = std::cell::Cell::new(false);
+        let error = record_snapshot_then_commit(
+            || {
+                recorded.set(true);
+                Ok(())
+            },
+            || Err(anyhow!("host write refused")),
+        )
+        .expect_err("commit error must propagate");
+        assert!(recorded.get());
+        assert!(error.to_string().contains("host write refused"));
     }
 }
