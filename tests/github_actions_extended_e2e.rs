@@ -768,24 +768,68 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
     );
 }
 
+/// The image recipes the witness builds from live in mvm-images, so the job
+/// has to hand it a checkout — at the commit that produced the pinned set.
+/// Without one, the first image the witness asks for is refused after the
+/// whole workspace has compiled.
+#[test]
+fn the_source_bootstrap_job_builds_from_the_pinned_images_checkout() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+    let checkout_path = ".source-bootstrap-mvm-images";
+
+    assert_eq!(
+        field_after(job, "MVM_IMAGES_DIR:").as_deref(),
+        Some(format!("${{{{ github.workspace }}}}/{checkout_path}").as_str()),
+        "the witness must name the mvm-images checkout it builds from"
+    );
+    let resolve = job
+        .find("cargo run -q -p xtask -- image-source-ref")
+        .expect("the checkout ref must come from the image lock");
+    let checkout = job
+        .find("repository: tinylabscom/mvm-images")
+        .expect("the job must check out mvm-images");
+    let bootstrap = job
+        .find("run: just e2e::source-bootstrap")
+        .expect("the job must run the witness");
+    assert!(
+        job.contains("ref: ${{ steps.images-ref.outputs.ref }}")
+            && job.contains(&format!("path: {checkout_path}")),
+        "mvm-images must be checked out at the pinned commit, at the path MVM_IMAGES_DIR names"
+    );
+    assert!(
+        resolve < checkout && checkout < bootstrap,
+        "the pinned checkout must be in place before the witness runs"
+    );
+}
+
 /// A witness that is told to fetch, or handed a warm home, would pass on an
-/// image it did not build. Both refusals happen before anything is compiled.
+/// image it did not build; one with no image checkout cannot build at all.
+/// Every refusal happens before anything is compiled.
 #[cfg(unix)]
 #[test]
 fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
     let warm = tempfile::tempdir().expect("create warm home fixture");
     fs::write(warm.path().join("leftover"), b"x").expect("seed warm home");
     let cold = tempfile::tempdir().expect("create cold home fixture");
+    let missing_images = cold.path().join("no-mvm-images-here");
 
     let cases = [
-        ("a warm home", warm.path().to_path_buf(), None),
+        ("a warm home", warm.path().to_path_buf(), None, None),
         (
             "MVM_BOOT_IMAGE=fetch",
             cold.path().join("home"),
             Some("fetch"),
+            None,
+        ),
+        (
+            "no mvm-images checkout",
+            cold.path().join("home"),
+            None,
+            Some(missing_images.as_path()),
         ),
     ];
-    for (case, home, boot_image) in cases {
+    for (case, home, boot_image, images_dir) in cases {
         let mut command = Command::new("bash");
         command
             .arg("scripts/e2e-source-bootstrap.sh")
@@ -794,6 +838,9 @@ fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
         if let Some(value) = boot_image {
             command.env("MVM_BOOT_IMAGE", value);
         }
+        if let Some(dir) = images_dir {
+            command.env("MVM_IMAGES_DIR", dir);
+        }
         let output = command.output().expect("run the source bootstrap witness");
         assert_eq!(
             output.status.code(),
@@ -801,6 +848,12 @@ fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
             "{case} must be refused before any build: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if images_dir.is_some() {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("no mvm-images checkout"),
+                "{case} must be refused for the missing checkout, not another reason"
+            );
+        }
     }
 }
 
