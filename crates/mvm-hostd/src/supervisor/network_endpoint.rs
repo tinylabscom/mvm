@@ -893,6 +893,7 @@ mod tests {
                     address: "oauth-secret".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             dir,
         );
@@ -987,6 +988,7 @@ mod tests {
                     address: "oauth-secret".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             dir.path(),
         );

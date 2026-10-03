@@ -313,7 +313,12 @@ live token sets are written by the host flow and can never be imported with
 `--from`. `--oauth-scope` is repeatable, and
 `--oauth-response-access-token-pointer` names a non-standard access-token
 location in the token response (default `/access_token`). The OAuth endpoints
-must be absolute `https` URLs. The human/browser consent flow lands separately;
+must be absolute `https` URLs, and the workload's network policy must admit
+the token endpoint's host: the refresher sends the client secret only where
+that policy allows, and records every attempt as a `secret.oauth_refresh`
+audit entry. The token response must carry an expiry (`expires_in` or
+`expires_at`) far enough out to refresh ahead of; a token without one is
+refused rather than stored. The human/browser consent flow lands separately;
 until then the machine client-credentials grant is the supported flow.
 `mvmctl secret ls` shows the oauth client id and token URL alongside the
 binding; the client secret is never displayed.

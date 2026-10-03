@@ -304,9 +304,9 @@ pub enum OAuthRefreshOutcome {
     Failed,
     /// The network policy refused the token endpoint; nothing was sent.
     PolicyDenied,
-    /// The loop gave up: retries exhausted, the token expired first, the
-    /// stored set has no client secret, the store stayed unreadable, or the
-    /// policy refused the endpoint.
+    /// The loop gave up: retries exhausted, the stored set has no client
+    /// secret, the store stayed unreadable, or the policy refused the
+    /// endpoint.
     Stopped,
 }
 
@@ -399,9 +399,32 @@ pub async fn refresh_once(
         anyhow::anyhow!("stored oauth token set for `{name}` has no client secret; the client-credentials grant cannot be driven")
     })?;
     let captured = exchange_client_credentials(client, meta, client_secret.expose_secret()).await?;
+    require_schedulable_expiry(captured.expires_at, Utc::now())?;
     resolver
         .store_captured_oauth_token(name, captured)
         .with_context(|| format!("persisting refreshed oauth token set for `{name}`"))
+}
+
+/// Refuse an exchanged token whose next refresh would already be due.
+///
+/// Without an expiry the store keeps the previous one, and a lifetime inside
+/// the refusal skew plus the refresh lead leaves no time to refresh ahead of
+/// it. Either way resolution would go on refusing the stored set while the
+/// loop exchanged again at once, so the token is not stored.
+fn require_schedulable_expiry(
+    expires_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let Some(expires_at) = expires_at else {
+        anyhow::bail!("token endpoint response carried no expiry (`expires_in` or `expires_at`)");
+    };
+    if refresh_in(expires_at, now) <= Duration::zero() {
+        anyhow::bail!(
+            "token endpoint issued a token whose expiry {expires_at} leaves no time to refresh it ahead of the {}s refusal skew",
+            OAUTH_REFRESH_SKEW.num_seconds()
+        );
+    }
+    Ok(())
 }
 
 /// Everything one refresh loop needs besides its binding. Cloned into each
@@ -520,8 +543,10 @@ impl OAuthRefreshDriver {
 /// Timer-driven by construction: each pass reads the stored expiry (the store
 /// is externally owned, so it is re-read rather than trusted from memory),
 /// sleeps until the proactive deadline, exchanges, and re-arms from the new
-/// expiry. Any persistent failure leaves the stored set untouched and ends
-/// the loop — resolution then fails closed with `OAuthRefreshRequired`,
+/// expiry. A set already past its expiry — including the one `mvmctl secret
+/// set` authors — is exchanged at once. Any persistent failure leaves the
+/// stored set untouched and ends the loop — resolution then fails closed
+/// with `OAuthRefreshRequired`,
 /// matching a host that never had a refresher. A policy refusal ends it at
 /// once: the VM's admitted policy does not change while it runs, so a retry
 /// would be refused the same way.
@@ -564,17 +589,9 @@ async fn refresh_loop(settings: RefreshSettings, binding: OAuthRefreshBinding) {
         {
             tokio::time::sleep(wait).await;
         }
-        if Utc::now() >= token_set.expires_at {
-            warn!(secret = %binding.name, expires_at = %token_set.expires_at, "oauth token expired before a refresh succeeded");
-            settings
-                .stopped(
-                    &binding.name,
-                    &destination,
-                    "token expired before a refresh succeeded",
-                )
-                .await;
-            return;
-        }
+        // An expired set is due, not lost: the grant needs only the client
+        // secret. `require_schedulable_expiry` is what keeps a success from
+        // leaving the set due again, so this never exchanges back to back.
         match refresh_once(
             &settings.resolver,
             &settings.client,
@@ -1014,6 +1031,7 @@ mod tests {
                 address: "cleartext-secret".into(),
             },
             destinations: vec![],
+            approval_required: false,
         };
         let err = discover_oauth_bindings(&[plan], "local", &bindings).unwrap_err();
         let message = format!("{err:#}");
@@ -1359,27 +1377,77 @@ mod tests {
         }
     }
 
+    /// The client-credentials grant needs only the client secret, so a set
+    /// past its expiry is due, not lost. `mvmctl secret set --oauth-*` stores
+    /// exactly such a set; the first exchange has to fire at endpoint boot.
     #[tokio::test]
-    async fn refresh_loop_gives_up_on_an_expired_set_without_exchanging() {
-        let (token_url, recorded) =
-            spawn_mock_token_server("200 OK", r#"{"access_token":"fresh-access-token"}"#);
-        let mut token_set = expired_token_set("stale-access-token", Some("the-client-secret"));
-        token_set.expires_at = Utc::now() - Duration::seconds(5);
-        let fixture = fixture(&token_set, &token_url);
+    async fn refresh_loop_exchanges_an_authored_initial_set_at_once() {
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(&initial_token_set("the-client-secret"), &token_url);
+        let resolver = resolver_over(&fixture);
+        let err = resolver
+            .resolve(&bearer_ref("oauth-secret", &["api.example.com"]))
+            .unwrap_err();
+        assert!(matches!(err, ResolveError::OAuthRefreshRequired { .. }));
+
         let (recorder, signer) = capturing_recorder();
-        refresh_loop(
-            audited_driver(&fixture, recorder).settings,
-            binding_for(&token_url),
+        // The loop re-arms and sleeps toward the new deadline; the timeout
+        // cancels that sleep.
+        let _ = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            refresh_loop(
+                audited_driver(&fixture, recorder).settings,
+                binding_for(&token_url),
+            ),
         )
         .await;
-        // Expired is expired: no exchange can help, and none was attempted.
-        assert!(
+
+        assert_eq!(
             recorded
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .is_empty()
+                .len(),
+            1
         );
-        assert_eq!(refresh_outcomes(&signer), ["stopped"]);
+        assert_eq!(refresh_outcomes(&signer), ["refreshed"]);
+        let secret = resolver
+            .resolve(&bearer_ref("oauth-secret", &["api.example.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"fresh-access-token");
+    }
+
+    /// A token the refresher cannot schedule ahead of the refusal skew is
+    /// refused rather than stored. Storing it would leave the old expiry in
+    /// place, so resolution would keep refusing while the loop exchanged
+    /// back to back.
+    #[tokio::test]
+    async fn refresh_once_refuses_a_token_it_cannot_schedule() {
+        for body in [
+            r#"{"access_token":"fresh-access-token"}"#,
+            r#"{"access_token":"fresh-access-token","expires_in":60}"#,
+        ] {
+            let (token_url, _recorded) = spawn_mock_token_server("200 OK", body);
+            let fixture = fixture(&initial_token_set("the-client-secret"), &token_url);
+            let err = refresh_once(
+                &resolver_over(&fixture),
+                &TokenEndpointClient::new(mvm_http::Client::new()),
+                "oauth-secret",
+                &oauth_meta(&token_url),
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("expiry"), "{body}: {err:#}");
+            assert!(
+                stored_token_set(&fixture)
+                    .access_token
+                    .expose_secret()
+                    .is_empty(),
+                "{body}: nothing may be stored"
+            );
+        }
     }
 
     #[tokio::test]
