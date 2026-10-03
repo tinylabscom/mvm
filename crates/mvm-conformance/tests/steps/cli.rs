@@ -902,6 +902,13 @@ fn collect_wrapped_help_items(
     }
 }
 
+/// Every command path under `command`, depth first.
+pub(crate) fn command_paths(command: &clap::Command) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    collect_command_paths(command, &[], &mut paths);
+    paths
+}
+
 pub(crate) fn collect_command_paths(
     command: &clap::Command,
     prefix: &[String],

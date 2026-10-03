@@ -265,6 +265,7 @@ struct ReadmeExampleManifest {
 /// a command a reader can paste.
 fn readme_runnable_examples() -> Vec<mvm_conformance::doc_examples::DocExample> {
     let readme = std::fs::read_to_string(repo_root().join("README.md")).expect("read README.md");
+    let known = crate::steps::cli::command_paths(&mvm_cli::commands::cli_command());
     let mut seen = BTreeSet::new();
     mvm_conformance::doc_examples::doc_examples("README.md", &readme)
         .into_iter()
@@ -274,7 +275,7 @@ fn readme_runnable_examples() -> Vec<mvm_conformance::doc_examples::DocExample> 
                 mvm_conformance::doc_examples::ExampleSource::Fenced
             )
         })
-        .filter(|example| !example.is_template())
+        .filter(|example| !example.is_template(&known))
         .filter(|example| seen.insert(example.command.clone()))
         .collect()
 }
