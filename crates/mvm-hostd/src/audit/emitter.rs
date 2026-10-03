@@ -73,7 +73,7 @@ pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 
 mod session_events;
 mod workspace;
-pub use workspace::{WorkspaceMutationAudit, workspace_audit};
+pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
 pub mod checkpoint_audit;
 pub mod drive_audit;

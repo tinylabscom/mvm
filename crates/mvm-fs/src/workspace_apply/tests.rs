@@ -148,6 +148,48 @@ fn apply_writes_guest_changes_and_captures_preimages() {
 }
 
 #[test]
+fn snapshot_root_binds_only_path_ordered_host_preimages() {
+    let first = ManifestOp {
+        path: "edit.txt".to_string(),
+        action: ManifestAction::WriteFile,
+        pre: OpImage {
+            sha256: Some("a".repeat(64)),
+            size: 3,
+        },
+        post: Some(OpImage {
+            sha256: Some("b".repeat(64)),
+            size: 5,
+        }),
+    };
+    let added = ManifestOp {
+        path: "added.txt".to_string(),
+        action: ManifestAction::WriteFile,
+        pre: OpImage::default(),
+        post: Some(OpImage {
+            sha256: Some("c".repeat(64)),
+            size: 7,
+        }),
+    };
+    let expected = snapshot_merkle_root(&[first.clone(), added.clone()]);
+    assert_eq!(
+        expected,
+        snapshot_merkle_root(&[added.clone(), first.clone()])
+    );
+    assert_eq!(expected.len(), 64);
+
+    let mut different_post = first.clone();
+    different_post.post.as_mut().expect("post image").size = 99;
+    assert_eq!(
+        expected,
+        snapshot_merkle_root(&[different_post, added.clone()])
+    );
+
+    let mut different_pre = first;
+    different_pre.pre.size = 4;
+    assert_ne!(expected, snapshot_merkle_root(&[different_pre, added]));
+}
+
+#[test]
 fn undo_restores_preimages_and_redo_reapplies() {
     let fixture = Fixture::new();
     let store = ApplyStore::open(&fixture.store_dir).expect("open store");

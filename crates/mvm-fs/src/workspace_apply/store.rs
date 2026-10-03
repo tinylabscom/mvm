@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ApplyError, ApplyPlan, FileOp, Manifest, ManifestAction, ManifestOp, OpAction, OpImage,
-    PlanParams, RelationKind, manifest_merkle_root, plan,
+    PlanParams, RelationKind, manifest_merkle_root, plan, snapshot_merkle_root,
 };
 
 /// The durable record of one staged apply.
@@ -70,6 +70,12 @@ impl StagedApply {
     #[must_use]
     pub fn merkle_root(&self) -> &str {
         &self.manifest.merkle_root
+    }
+
+    /// Root of the staged host pre-images, before any host-tree write.
+    #[must_use]
+    pub fn snapshot_merkle_root(&self) -> String {
+        snapshot_merkle_root(&self.manifest.ops)
     }
 }
 
