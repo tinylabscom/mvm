@@ -9,7 +9,7 @@ pub mod vsock_builder;
 /// Whether a build should produce a dev-shape or prod-shape image.
 ///
 /// **The command run by the user dictates this**, not the user's
-/// flake. `mvmctl up`/`run`/`start` are production-shape commands;
+/// flake. `mvmctl run`/`machine run`/`machine start` are production-shape commands;
 /// they build sealed images with runtime access gates. The builder VM's dev shell runs a separate dev-shell
 /// sandbox that doesn't go through this build path. An explicit
 /// `--dev` flag on production-shape commands is the documented
@@ -32,7 +32,7 @@ pub enum BuildMode {
     /// shape commands.
     Dev,
     /// Prod-shape build: sealed image wiring. The default for
-    /// `mvmctl up`/`run`/`start`/`build`/
+    /// `mvmctl run`/`machine run`/`machine start`/`build`/
     /// `template build`.
     Prod,
 }

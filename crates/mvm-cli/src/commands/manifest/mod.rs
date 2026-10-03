@@ -48,7 +48,7 @@ pub(in crate::commands) enum ManifestAction {
     /// Tags filter `mvmctl manifest ls` and surface in catalogs.
     Tag(tag::Args),
     /// Manage movable `alias → revision_hash` pointers (`set`, `rm`, `ls`).
-    /// `mvmctl up --manifest <template>@<alias>` resolves through here.
+    /// `mvmctl machine run --manifest <template>@<alias>` resolves through here.
     Alias(alias::Args),
     /// Export a slot's OCI tarball (`image.tar.gz`) so a non-KVM
     /// host can `docker load` the workload. Requires the flake's

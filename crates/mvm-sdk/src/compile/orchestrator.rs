@@ -8,7 +8,7 @@
 //! baked `launch.json` — the rootfs is secret-free by construction, the guest
 //! var is injected as an opaque placeholder only at boot by the substitution
 //! endpoint — but preserved in `workload.json`, the host-side admission input
-//! `mvmctl up --from-workload-ir` lowers into `plan.secrets` to spawn that
+//! `mvmctl machine run --from-workload-ir` lowers into `plan.secrets` to spawn that
 //! endpoint.
 
 use crate::compile::archive::{ArchiveError, archive_dir};
@@ -269,7 +269,7 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
         let launch = build_launch_json(&baked, &source_plan).map_err(CompileError::Render)?;
         write_lf(&staging.join("flake.nix"), &flake)?;
         write_lf(&staging.join("launch.json"), &launch)?;
-        // The canonical (unstripped) IR — `mvmctl up --from-workload-ir`'s
+        // The canonical (unstripped) IR — `mvmctl machine run --from-workload-ir`'s
         // admission input. Carries the managed `SecretRef`s the baked artifact
         // dropped, so the substitution endpoint is spawned at boot. Host-side
         // only: the flake builds the rootfs from `./src` + `launch.json`, never
@@ -696,7 +696,7 @@ mod tests {
 
     /// Compile emits the canonical (unstripped) Workload IR as
     /// `workload.json` alongside the build artifacts. This is the host-side
-    /// admission input `mvmctl up --from-workload-ir` lowers into
+    /// admission input `mvmctl machine run --from-workload-ir` lowers into
     /// `plan.secrets` — it carries the managed `SecretRef`s (which were
     /// stripped from the baked `launch.json`) so the substitution endpoint can
     /// be spawned at boot.

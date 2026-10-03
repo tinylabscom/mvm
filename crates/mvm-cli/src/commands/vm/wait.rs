@@ -166,9 +166,7 @@ pub(in crate::commands) fn run_boot_report(
     Ok(())
 }
 
-/// Render a `ReadinessReport` as the same human summary `mvmctl up
-/// --timings` uses. Public to the parent module so `up::run` can
-/// reuse it post-launch.
+/// Render a `ReadinessReport` as a human summary.
 pub(in crate::commands::vm) fn print_human_report(vm: &str, report: &ReadinessReport) {
     ui::info(&format!("{vm}: profile={:?}", report.profile));
     print_row("control plane", &report.control_plane);

@@ -1201,9 +1201,8 @@ fn build_exec_request(
         image,
         cpus: args.cpus,
         memory_mib,
-        // mvmctl exec is a one-shot transient; no balloon plumbing
-        // here yet. The manifest-driven path on mvmctl up is where
-        // mem_initial gets sourced for long-running workloads.
+        // A transient run has no balloon plumbing; it boots with its
+        // full memory.
         mem_initial_mib: None,
         dir_shares: mounts.dir_shares,
         disk_volumes: mounts.disk_volumes,

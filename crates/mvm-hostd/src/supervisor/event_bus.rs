@@ -66,7 +66,7 @@ pub const DEFAULT_CAPACITY: usize = 256;
 /// any future on-wire form will require a `PROTOCOL_VERSION` bump.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LifecycleEvent {
-    /// `mvmctl up` admitted a plan and the backend.start() returned
+    /// A boot admitted a plan and the backend.start() returned
     /// Ok. The audit Recorder emits a `plan.launched` at the same
     /// time; the event bus surfaces the same fact for live
     /// consumers.

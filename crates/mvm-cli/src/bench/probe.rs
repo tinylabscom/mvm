@@ -16,7 +16,7 @@ use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, SystemClock, 
 const PROBE_MEM_MIB: u32 = 2048;
 
 /// Resolved inputs for one benchmarked boot. `kernel`/`rootfs` come
-/// from the same `ensure_default_microvm_image()` `mvmctl up` uses —
+/// from the same `ensure_default_microvm_image()` `mvmctl machine run` uses —
 /// the canonical runtime image, NOT the interactive rootfs.
 // Fields are read by the live `boot_measure_once` + the HostDescriptor
 // kernel-sha; until then only the test reads them.
@@ -26,7 +26,7 @@ pub struct ProbeImage {
 }
 
 /// Resolve the canonical default-microvm image (kernel + rootfs) the
-/// same way `mvmctl up` does. No artifact override flags: the bench
+/// same way `mvmctl machine run` does. No artifact override flags: the bench
 /// measures the real runtime launch path, so it pins to one canonical
 /// target (a `HostDescriptor`-comparable baseline).
 pub fn resolve_probe_image() -> Result<ProbeImage> {

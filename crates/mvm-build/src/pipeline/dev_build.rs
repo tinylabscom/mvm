@@ -140,7 +140,7 @@ pub fn dev_build(
     // Nix build entirely and treat the env-var's value as the
     // build output directory. The directory must contain
     // `vmlinux` + `rootfs.ext4`. Same env-var-escape-hatch shape
-    // `MVM_DIRECT_BOOT` uses for `mvmctl up`. Logged loudly so a
+    // `MVM_DIRECT_BOOT` uses for `mvmctl machine run`. Logged loudly so a
     // production misconfiguration can't go silent.
     if let Ok(stub) = std::env::var("MVM_BUILD_STUB_OUTDIR")
         && !stub.trim().is_empty()

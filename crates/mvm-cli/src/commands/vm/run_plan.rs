@@ -415,7 +415,7 @@ fn synthesis_input_for_app<'a>(
         bundle_pin: None,
         // Plan-mode synthesis does not run the install pipeline; it
         // synthesizes one plan per Sandbox call for dry-run admission.
-        // deps_volume is wired into the live `mvmctl up` path only.
+        // No boot path supplies a deps-volume binding today.
         deps_volume: None,
         shares: Vec::new(),
         assets: Vec::new(),

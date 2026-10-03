@@ -58,7 +58,7 @@ pub(in crate::commands) enum BundleAction {
     Push(push::Args),
     /// Verify and atomically install a `.mvmpkg` archive into the
     /// local bundle registry (`~/.mvm/bundles/<sha>/`). Once
-    /// installed, `mvmctl up --manifest <sha>` launches from it.
+    /// installed, `mvmctl machine run --manifest <sha>` launches from it.
     Install(install::Args),
     /// Prune installed bundles from the registry. Either a specific
     /// `<SHA>` or `--all` to wipe everything. Emits
