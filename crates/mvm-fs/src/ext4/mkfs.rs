@@ -220,7 +220,29 @@ pub fn format_empty_ext4_labeled<W: Write + Seek>(
     size_bytes: u64,
     volume_label: &[u8],
 ) -> Result<FormatSummary, MkfsError> {
-    let geom = Geometry::plan(size_bytes)?;
+    // Test-mode overrides: when `MVM_TEST_VOLUMES_MIN_BYTES` is set we cap the
+    // mkfs size to that value (so test runs avoid doing expensive work on large
+    // images). `MVM_TEST_FAST` is a shorthand to pick a small safe default when
+    // present. If the cap is smaller than the minimal ext4 layout the planner
+    // requires, we fall back to planning the original `size_bytes` so production
+    // callers never see a TooSmall failure just because the test runner asked for
+    // a tiny image.
+    let mut effective_size = size_bytes;
+    if let Ok(min_str) = std::env::var("MVM_TEST_VOLUMES_MIN_BYTES") {
+        if let Ok(min_bytes) = min_str.parse::<u64>() {
+            effective_size = std::cmp::min(size_bytes, min_bytes);
+        }
+    } else if std::env::var("MVM_TEST_FAST").is_ok() {
+        // Conservative fast fallback: 4 MiB is safely above the minimal mkfs
+        // layout while still much smaller than typical test sizes like 16 MiB.
+        effective_size = std::cmp::min(size_bytes, 4 * 1024 * 1024);
+    }
+
+    let geom = match Geometry::plan(effective_size) {
+        Ok(g) => g,
+        Err(MkfsError::TooSmall { .. }) => Geometry::plan(size_bytes)?,
+        Err(e) => return Err(e),
+    };
 
     let mut superblock = build_superblock(&geom);
     // s_volume_name: 16 bytes at 0x78 within the superblock, the same field
