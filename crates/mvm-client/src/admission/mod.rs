@@ -3404,3 +3404,7 @@ allow_hosts = ["localhost:8443"]
 #[cfg(test)]
 #[path = "instruction_admission_tests.rs"]
 mod instruction_admission_tests;
+
+#[cfg(test)]
+#[path = "bundle_admission_tests.rs"]
+mod bundle_admission_tests;
