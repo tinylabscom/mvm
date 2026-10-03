@@ -150,6 +150,29 @@ software-managed key, decrypted only inside the minimal jailed keyholder.
 Hardware sealing changes nothing about the code path, only what the host
 process ever sees.
 
+### OAuth client-credentials refresh
+
+A secret bound to an OAuth client-credentials flow keeps its client secret in
+the same encrypted store entry as its token set. The per-VM network endpoint
+refreshes that token set before it expires, which sends the client secret to
+the binding's `token_url` as an HTTP Basic credential. That is the one time the
+client secret leaves the host, and it is held to the same policy as the
+substitution path:
+
+- The token endpoint must be an absolute `https` URL with a host. A binding
+  naming anything else fails the endpoint's assembly, whoever wrote the
+  binding.
+- The endpoint decides the token endpoint's destination against the VM's
+  egress gate before sending anything, and dials only the addresses the gate
+  admits. The decision is made on the host even when an operator proxy
+  carries the connection, so a destination the admitted network policy does
+  not allow, or a restricted address such as cloud metadata, never receives
+  the client secret.
+- Every attempt is a chain-signed `secret.oauth_refresh` entry carrying the
+  secret's name, the token endpoint's host, and a fixed outcome label:
+  refreshed, failed, policy denied, or stopped. It records no URL path,
+  no error text, and no client secret, token, or response body.
+
 ### IR contract, placeholder, audit
 
 - A workload's secret reference (`mvm_contract::ir::Workload`) carries

@@ -371,6 +371,7 @@ tenant, `~/.mvm/audit/local.jsonl`, signed with the host key at
 | `secret.placeholder_dropped` | A placeholder was found where it may not travel and was dropped | `destination` |
 | `secret.reflection_scrubbed` | A response carried back a value the endpoint had substituted, and each occurrence was replaced by the binding's placeholder before the guest read it | `name`, `destination`, `count` |
 | `secret.flow_refused` | A request was refused before anything was forwarded: the network policy does not admit its destination (`policy_denied`), it names a peer (`peer_destination`), its URL has no host and port (`malformed`), it carries a placeholder outside a header (`placeholder_in_url`, `placeholder_in_body`), or, on a connection the host intercepted, it was addressed to a different host than the connection or could not be framed | `destination`, `reason` |
+| `secret.oauth_refresh` | The host refreshed an OAuth client-credentials token for a bound secret, or tried to: `refreshed` (a fresh token set was stored), `failed` (an attempt failed and will be retried), `policy_denied` (the network policy does not admit the token endpoint, so nothing was sent) or `stopped` (the refresher gave up and resolution fails closed once the token expires) | `name`, `destination` (the token endpoint's host), `outcome` |
 
 No entry carries a secret value, a request body, or a header value.
 

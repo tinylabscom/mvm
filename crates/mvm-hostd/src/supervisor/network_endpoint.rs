@@ -423,10 +423,19 @@ pub fn assemble_with_projection(
         )),
     };
 
+    // Resolve the operator's proxy before building anything that dials out, so
+    // a bad value is reported here rather than as an unexplained egress
+    // failure later. The forward leg and the OAuth refresher share it.
+    let proxy = cfg.resolve_proxy()?;
+    if let Some(p) = proxy.as_ref() {
+        tracing::info!(proxy = %p.summary(), "forward leg routed through an upstream proxy");
+    }
+
     // Discover the OAuth-bound secrets while the local resolver is still in
     // hand, and build the proactive-refresh driver over the very same
     // resolver the service will use. Discovery mirrors `bound_hosts`:
-    // `Keystore` sources only, a missing binding is an assembly error.
+    // `Keystore` sources only, a missing binding is an assembly error, and so
+    // is a token endpoint that is not `https`.
     let oauth_refresh = match &cfg.resolver {
         ResolverBackend::Local => {
             let items = crate::keyholder::oauth::discover_oauth_bindings(
@@ -438,10 +447,11 @@ pub fn assemble_with_projection(
             if items.is_empty() {
                 None
             } else {
-                Some(crate::keyholder::OAuthRefreshDriver::new(
-                    Arc::clone(&resolver),
-                    items,
-                ))
+                Some(oauth_refresh_driver(
+                    crate::keyholder::OAuthRefreshDriver::new(Arc::clone(&resolver), items),
+                    projection,
+                    proxy.as_ref(),
+                )?)
             }
         }
         ResolverBackend::Remote { .. } => None,
@@ -463,13 +473,6 @@ pub fn assemble_with_projection(
     // the redaction / reversible-replacement / TLS / recorder wiring; passing
     // `resolver` in means it no longer hardcodes a `LocalResolver`, so a
     // `Remote` backend actually reaches its `RemoteResolver`.
-    // Resolve the operator's proxy before building the service so a bad value
-    // is reported here rather than as an unexplained egress failure later.
-    let proxy = cfg.resolve_proxy()?;
-    if let Some(p) = proxy.as_ref() {
-        tracing::info!(proxy = %p.summary(), "forward leg routed through an upstream proxy");
-    }
-
     let ai_policy = cfg
         .network_policy
         .as_ref()
@@ -592,6 +595,39 @@ pub fn fingerprint_bound_secrets(cfg: &EndpointConfig) -> anyhow::Result<Vec<Sec
         }
     }
     Ok(out)
+}
+
+/// Hold the OAuth refresher to the same policy as every other connection the
+/// endpoint originates. The client secret goes only where the VM's egress gate
+/// admits: the client dials through the gate's resolver, and because an
+/// upstream proxy resolves the destination itself, the same resolver also
+/// decides each token endpoint before anything is sent. Every refresh outcome
+/// is recorded through the endpoint's audit recorder, when it has one.
+fn oauth_refresh_driver(
+    driver: crate::keyholder::OAuthRefreshDriver,
+    projection: &EndpointNetworkProjection,
+    proxy: Option<&mvm_http::ProxyConfig>,
+) -> anyhow::Result<crate::keyholder::OAuthRefreshDriver> {
+    use crate::supervisor::network_endpoint_proxy::pinned_dns::{AdmittedAddresses, GateResolver};
+
+    let gate_resolver: Arc<dyn mvm_http::resolve::Resolve> = Arc::new(GateResolver::new(
+        Arc::new(AdmittedAddresses::default()),
+        projection.gate(),
+    ));
+    let http = crate::supervisor::tools::http_hardening::hardened_client_builder_via(
+        crate::keyholder::oauth::EXCHANGE_TIMEOUT.as_secs(),
+        proxy,
+    )
+    .resolver(Arc::clone(&gate_resolver))
+    .build()
+    .context("building the oauth refresher's http client")?;
+    let driver = driver
+        .with_http_client(http)
+        .with_destination_check(gate_resolver);
+    Ok(match projection.recorder() {
+        Some(recorder) => driver.with_observer(recorder),
+        None => driver,
+    })
 }
 
 /// Build a chain-signed audit [`Recorder`] from the standard host paths
@@ -789,6 +825,181 @@ mod tests {
             recorder: None,
         };
         assert!(assemble_with_projection(&cfg, &projection).is_err());
+    }
+
+    /// A loopback listener that counts the connections it accepts, so a test
+    /// can prove nothing was ever dialled.
+    fn counting_listener() -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                drop(stream);
+            }
+        });
+        (port, accepted)
+    }
+
+    /// Assemble an endpoint carrying one OAuth-bound secret whose token
+    /// endpoint is `token_url`, run its refresher to completion, and return
+    /// the `secret.oauth_refresh` outcomes it recorded.
+    async fn run_assembled_refresher(
+        dir: &std::path::Path,
+        token_url: &str,
+        proxy_https: Option<String>,
+    ) -> Vec<String> {
+        use crate::keyholder::resolver::{OAuthSecretString, OAuthTokenSet};
+
+        let mut oauth_meta = SecretBindingMeta {
+            auth_type: AuthType::Bearer,
+            allowed_hosts: vec!["api.example.com".into()],
+            sigv4: None,
+            inject: Default::default(),
+            provider: None,
+            approve: Default::default(),
+            oauth: None,
+        };
+        oauth_meta.oauth = Some(mvm_core::crypto::secret_binding::OAuthBindingMeta {
+            authorization_url: "https://auth.example.com/authorize".into(),
+            token_url: token_url.into(),
+            client_id: "public-client-id".into(),
+            scopes: Vec::new(),
+            response_access_token_pointer: None,
+        });
+        FileBindingStore::with_dir(dir.join("bindings"))
+            .put("local", "oauth-secret", &oauth_meta)
+            .unwrap();
+        let token_set = OAuthTokenSet {
+            access_token: OAuthSecretString::from("stale-access-token".to_string()),
+            refresh_token: None,
+            client_secret: Some(OAuthSecretString::from("the-client-secret".to_string())),
+            // Inside the proactive window, so the loop exchanges at once.
+            expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+        };
+        FileSecretStore::with_dir(dir.join("secrets"))
+            .put(
+                "local",
+                "oauth-secret",
+                &SecretBox::new(Box::new(serde_json::to_string(&token_set).unwrap())),
+            )
+            .unwrap();
+        let mut cfg = vsock_cfg(
+            vec![SecretBinding {
+                name: "API_KEY".into(),
+                source: SecretSource::Keystore {
+                    address: "oauth-secret".into(),
+                },
+                destinations: Vec::new(),
+            }],
+            dir,
+        );
+        cfg.proxy_https = proxy_https;
+
+        let signer = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
+        let projection = EndpointNetworkProjection {
+            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
+            recorder: Some(Arc::new(crate::supervisor::audit_recorder::Recorder::new(
+                signer.clone(),
+                mvm_core::plan::TenantId("local".into()),
+            ))),
+        };
+        let (_, _, oauth_refresh) = assemble_with_projection(&cfg, &projection).unwrap();
+        oauth_refresh
+            .expect("an oauth-bound secret yields a refresher")
+            .with_retry_policy(Duration::from_millis(10), 3)
+            .run_to_completion()
+            .await;
+        signer
+            .entries()
+            .iter()
+            .filter(|entry| entry.event == "secret.oauth_refresh")
+            .map(|entry| entry.labels["outcome"].clone())
+            .collect()
+    }
+
+    /// The refresher sends the client secret only where the VM's egress gate
+    /// admits. A default-deny gate admits nothing, so the token endpoint is
+    /// never dialled and the refusal is recorded in the chain.
+    #[tokio::test]
+    async fn the_assembled_refresher_never_reaches_a_token_endpoint_the_gate_refuses() {
+        let dir = tempdir().unwrap();
+        let (port, accepted) = counting_listener();
+        let outcomes =
+            run_assembled_refresher(dir.path(), &format!("https://127.0.0.1:{port}/token"), None)
+                .await;
+        assert_eq!(outcomes, ["policy_denied", "stopped"]);
+        assert_eq!(accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// Through an upstream proxy the proxy resolves the destination, so the
+    /// client's own resolver never sees it. The refresher still decides the
+    /// token endpoint against the gate first: neither the proxy nor the
+    /// endpoint is ever dialled.
+    #[tokio::test]
+    async fn the_assembled_refresher_does_not_reach_a_refused_endpoint_through_a_proxy() {
+        let dir = tempdir().unwrap();
+        let (token_port, token_accepted) = counting_listener();
+        let (proxy_port, proxy_accepted) = counting_listener();
+        let outcomes = run_assembled_refresher(
+            dir.path(),
+            &format!("https://127.0.0.1:{token_port}/token"),
+            Some(format!("http://127.0.0.1:{proxy_port}")),
+        )
+        .await;
+        assert_eq!(outcomes, ["policy_denied", "stopped"]);
+        assert_eq!(token_accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(proxy_accepted.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A binding that would send the client secret in cleartext fails the
+    /// endpoint's assembly, naming the secret.
+    #[test]
+    fn assembly_refuses_a_cleartext_oauth_token_endpoint() {
+        let dir = tempdir().unwrap();
+        FileBindingStore::with_dir(dir.path().join("bindings"))
+            .put(
+                "local",
+                "oauth-secret",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.example.com".into()],
+                    sigv4: None,
+                    inject: Default::default(),
+                    provider: None,
+                    approve: Default::default(),
+                    oauth: Some(mvm_core::crypto::secret_binding::OAuthBindingMeta {
+                        authorization_url: "https://auth.example.com/authorize".into(),
+                        token_url: "http://auth.example.com/token".into(),
+                        client_id: "public-client-id".into(),
+                        scopes: Vec::new(),
+                        response_access_token_pointer: None,
+                    }),
+                },
+            )
+            .unwrap();
+        let cfg = vsock_cfg(
+            vec![SecretBinding {
+                name: "API_KEY".into(),
+                source: SecretSource::Keystore {
+                    address: "oauth-secret".into(),
+                },
+                destinations: Vec::new(),
+            }],
+            dir.path(),
+        );
+        let projection = EndpointNetworkProjection {
+            gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
+            recorder: None,
+        };
+        let err = match assemble_with_projection(&cfg, &projection) {
+            Ok(_) => panic!("a cleartext token endpoint must refuse assembly"),
+            Err(err) => format!("{err:#}"),
+        };
+        assert!(err.contains("oauth-secret"), "{err}");
+        assert!(err.contains("https"), "{err}");
     }
 
     /// No admitted policy means nothing is admitted, in either egress mode.
