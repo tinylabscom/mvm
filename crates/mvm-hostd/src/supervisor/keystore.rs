@@ -2,7 +2,7 @@
 //!
 //! Per-run secret grants: the supervisor releases a plan's
 //! `secrets: Vec<SecretBinding>` only after `attestation` passes
-//! (the Tpm2 / SevSnp / Tdx providers). Grants are revoked on plan
+//! (the TPM2 provider). Grants are revoked on plan
 //! exit; an audit entry is emitted on grant + revoke.
 //!
 //! ## Three states
