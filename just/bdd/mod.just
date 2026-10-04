@@ -3,8 +3,9 @@ set working-directory := "../.."
 # BDD conformance suite (cucumber-rs): builds mvmctl and the TypeScript SDK,
 # checks generated SDK artifacts, then runs every Gherkin scenario under
 # features/suites/ against it. Scenarios tagged `@wip` describe
-
 # not-yet-implemented coverage and are filtered out by the runner.
+
+# Run the hermetic BDD conformance suite
 run:
     # `user` pulls the sigstore/aws-lc verifier. Keep that native dependency on
     # the standard compiler/linker path: Cranelift leaves its symbols unresolved
@@ -26,8 +27,9 @@ run:
 
 # KVM-backed merge-queue witness for the cheap documented machine lifecycle.
 # The tag selector keeps registry/build-heavy live scenarios in their dedicated
-
 # witness lanes while proving that the public commands operate a real guest.
+
+# Run the merge-queue subset of live BDD scenarios on a KVM host
 live-ci:
     # `embed-host-bins` because these scenarios boot real microVMs: `MVM_BDD_LIVE=1`
     # admits the `@live` set, which reaches the builder VM. Without the payload
@@ -42,6 +44,8 @@ live-ci:
 # fresh home, which would add minutes to every merge. The run must report
 # exactly that scenario passing, so a tag or gate change that quietly skips it
 # fails this recipe instead of passing it.
+
+# Run the warm-claim BDD scenario end to end on a KVM host
 live-warm-claim:
     #!/usr/bin/env bash
     set -euo pipefail

@@ -48,14 +48,14 @@ gated TARGET="x86_64-unknown-linux-gnu":
     ./scripts/cargo-stable.sh --direct cargo-zigbuild check --target {{ TARGET }} --workspace --all-targets
     ./scripts/cargo-stable.sh check -p mvm-conformance --all-targets --features bdd
 
-# Bare-metal no_std proof for the embeddable foundation crate (mvm-contract).
 # A `-none-elf` target exposes only core + alloc with no std to leak into, so
 # this is a stricter no_std check than the wasm32 gate. riscv32imac is the
 # mainline stand-in for the RISC-V microcontrollers the on-device verifier
 # targets; lib-only means an rlib with no final link, so no cross-linker is
 # needed. Note: riscv32imc parts (no atomics) and Xtensa parts need extra
-
 # shims/toolchains — see specs/notes for the embedding track.
+
+# Bare-metal no_std proof for the embeddable foundation crate (mvm-contract)
 embedded TARGET="riscv32imac-unknown-none-elf":
     rustup target add {{ TARGET }}
     cargo build -p mvm-contract --lib --target {{ TARGET }}
@@ -65,22 +65,25 @@ run *ARGS:
     ./scripts/cargo-fast.sh run -- {{ ARGS }}
 
 
-# Verify that the nightly fast path stays pinned and does not leak into the
+# The release and MSRV lanes build with the stable-compatible configuration;
+# the nightly fast path must stay pinned and must not leak into it.
 
-# stable-compatible Cargo configuration used by release and MSRV lanes.
+# Verify the nightly fast path stays pinned and isolated from stable builds
 fast-cargo:
     ./scripts/check-fast-cargo.sh
 
-# Build the host-side eBPF object for vsock egress telemetry.
 # Requires nightly Rust and `cargo install bpf-linker`.
+
+# Build the host-side eBPF object for vsock egress telemetry
 ebpf:
     #!/usr/bin/env bash
     set -euo pipefail
     cd crates/mvm-hostd/ebpf
     PATH="${HOME}/.cargo/bin:${PATH}" cargo +nightly build --release --target bpfel-unknown-none -Z build-std=core
 
-# Prebuild or refresh the version-matched read-only runtime overlay once so
-# later required-overlay boots can reuse it without rebuilding guest binaries
-# on the hot path. Pass through extra args like `--force` or `--source download`.
+# Later required-overlay boots reuse it without rebuilding guest binaries on
+# the hot path. Pass through extra args like `--force` or `--source download`.
+
+# Prebuild or refresh the version-matched read-only runtime overlay
 overlay *ARGS:
     bin/dev build runtime-overlay build {{ ARGS }}

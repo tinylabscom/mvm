@@ -44,7 +44,7 @@ to the repository's evidence catalog.
 ## Developing
 
 Run unit tests with `cargo test -p mvm-conformance`. Compile and run the BDD
-target with the repository's `just bdd` workflow or
+target with the repository's `just bdd::run` workflow or
 `cargo test -p mvm-conformance --features bdd`. Live microVM scenarios must run
 only in their approved environment and must never be silently substituted for
 hermetic coverage.

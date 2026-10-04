@@ -1,13 +1,12 @@
 set working-directory := "../.."
 
-# Provision the pinned cross-compile toolchain the Linux host binaries are built
-# with — by a release `cargo build`, or by an `mvmctl` built without them: the
+# The Linux host binaries are built with it — by a release `cargo build`, or by an `mvmctl` built without them: the
 # exact zig from the `ziglang` PyPI package, the musl rust targets, and the
 # pinned cargo-zigbuild. Homebrew's `zig` drifts to newer, incompatible releases
 # (fails downstream with `CacheCheckFailed`); the `ziglang`-installed zig is
-# auto-detected instead.
+# auto-detected instead. Run once per machine (or after a toolchain pin bump).
 
-# Run once per machine (or after a toolchain pin bump).
+# Provision the pinned zig + cargo-zigbuild cross-compile toolchain
 toolchain:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -47,9 +46,10 @@ supervisors *ARGS:
     ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
     ./scripts/cargo-fast.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
 
-# Explicit contributor-only libkrun integration. This is intentionally absent
-# from `build` and `supervisors` so standard builds never probe for
-# libkrun.h or enable native libkrun linkage.
+# Intentionally absent from `build` and `supervisors` so standard builds never
+# probe for libkrun.h or enable native libkrun linkage.
+
+# Build the contributor-only libkrun supervisor
 libkrun-supervisor *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -57,12 +57,12 @@ libkrun-supervisor *ARGS:
     ./scripts/cargo-fast.sh build -p mvm-hostd \
       --bin mvm-libkrun-supervisor --features libkrun-sys {{ARGS}}
 
-# Drop the cached cross-compiled host binaries so the next build rebuilds them.
 # Dev builds reuse these instead of re-running cargo-zigbuild, which is the bulk
 # of mvm-cli's build-script wall time. Run this after editing anything they link
 # (mvm-build, mvm-core, ...) when you are about to boot a real VM; ordinary
-
 # check/test/clippy runs never need it. Release builds always rebuild.
+
+# Drop the cached cross-compiled host binaries so the next build rebuilds them
 refresh:
     #!/usr/bin/env bash
     set -euo pipefail

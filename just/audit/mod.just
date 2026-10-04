@@ -15,9 +15,9 @@ supply-chain: audit deny
 prod-agent:
     ./scripts/check-prod-agent-no-exec.sh
 
-# Run the GuestRequest deserializer fuzzer (ADR-001 claim 5). Default 5min.
+# Override the duration with: just audit::fuzz-guest-request 3600
 
-# Override with: just audit::fuzz-guest-request 3600
+# Run the GuestRequest deserializer fuzzer (ADR-001 claim 5). Default 5min.
 fuzz-guest-request SECONDS="300":
     cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{ SECONDS }}
 

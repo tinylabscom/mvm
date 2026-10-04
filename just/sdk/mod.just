@@ -1,8 +1,9 @@
 set working-directory := "../.."
 
-# Build the publishable SDK artifacts without building the full Rust workspace.
 # Usage: just sdk::build [lang]
 #   lang: sdk name (python, typescript) or "all" (default)
+
+# Build the publishable SDK artifacts without building the Rust workspace
 build LANG="all":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -20,24 +21,28 @@ build LANG="all":
         ;;
     esac
 
-# Build a single language SDK.
+# Build the Python SDK wheel and sdist
 build-python:
     uv build crates/mvm-sdk/sdks/python --out-dir crates/mvm-sdk/sdks/python/dist
 
+# Build the TypeScript SDK
 build-typescript:
     npm --prefix crates/mvm-sdk/sdks/typescript run build
 
+# Run once after a fresh clone or whenever package-lock.json changes.
 
-# Install TypeScript SDK dependencies locally. Run once after a fresh clone or
-# whenever package-lock.json changes.
+# Install TypeScript SDK dependencies locally
 install-typescript:
     npm --prefix crates/mvm-sdk/sdks/typescript ci
-# Run the language SDKs' own unit suites. Neither is a cargo target, so
-# `cargo nextest run --workspace` does not touch them and a Rust-only gate
-# leaves the hand-written half of each SDK — the subprocess wrappers, the
-# argv builders, the refusal paths — unproven.
+
+# Neither SDK suite is a cargo target, so `cargo nextest run --workspace` does
+# not touch them and a Rust-only gate leaves the hand-written half of each
+# SDK — the subprocess wrappers, the argv builders, the refusal paths —
+# unproven.
 # Usage: just sdk::test [lang]
 #   lang: sdk name (python, typescript) or "all" (default)
+
+# Run the language SDKs' own unit suites
 test LANG="all":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -57,8 +62,11 @@ test LANG="all":
 
 # `--extra schema` installs pydantic; without it the eight
 # `derive_schema` tests fail on an ImportError rather than being skipped.
+
+# Run the Python SDK's unit suite
 test-python:
     uv run --directory crates/mvm-sdk/sdks/python --group dev --extra schema pytest -q
 
+# Run the TypeScript SDK's unit suite
 test-typescript: install-typescript
     npm --prefix crates/mvm-sdk/sdks/typescript run test
