@@ -12,7 +12,7 @@ use mvm_core::plan::bundle::{
 
 use crate::debug;
 use crate::inputs::BundleExportInputs;
-use crate::signer::BundleSigner;
+use crate::signer::{AsManifestSigner, BundleSigner};
 
 const KERNEL_NAME: &str = "vmlinux";
 const ROOTFS_NAME: &str = "rootfs.ext4";
@@ -72,7 +72,7 @@ pub fn export_bundle_with_signer(
 
     let key_id = signer.key_id();
     let manifest = manifest_for(inputs, signer, &key_id, contents.artifacts, verity);
-    let archive = write_bundle(&manifest, signer.signing_key(), contents.payload)
+    let archive = write_bundle(&manifest, &AsManifestSigner(signer), contents.payload)
         .context("sealing bundle (manifest + signature + artifacts)")?;
 
     write_creating_parent(inputs.out, &archive, "bundle")?;

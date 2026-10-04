@@ -190,8 +190,12 @@ mod tests {
             "test:publisher".to_string()
         }
 
-        fn signing_key(&self) -> &SigningKey {
-            &self.0
+        fn verifying_key(&self) -> VerifyingKey {
+            self.0.verifying_key()
+        }
+
+        fn sign(&self, canonical_manifest: &[u8]) -> anyhow::Result<[u8; 64]> {
+            Ok(ed25519_dalek::Signer::sign(&self.0, canonical_manifest).to_bytes())
         }
     }
 

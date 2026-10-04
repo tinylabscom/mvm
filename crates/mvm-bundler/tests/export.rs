@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use mvm_bundler::{
     BundleExportInputs, BundleSigner, DebugOutput, ExportedBundle, export_bundle_with_signer,
 };
@@ -36,8 +36,12 @@ impl BundleSigner for TestSigner {
         "test:publisher".to_string()
     }
 
-    fn signing_key(&self) -> &SigningKey {
-        &self.key
+    fn verifying_key(&self) -> VerifyingKey {
+        self.key.verifying_key()
+    }
+
+    fn sign(&self, canonical_manifest: &[u8]) -> anyhow::Result<[u8; 64]> {
+        Ok(self.key.sign(canonical_manifest).to_bytes())
     }
 }
 
@@ -52,12 +56,47 @@ impl BundleSigner for MislabelledSigner {
         "test:mislabelled".to_string()
     }
 
-    fn signing_key(&self) -> &SigningKey {
-        &self.key
+    fn verifying_key(&self) -> VerifyingKey {
+        self.key.verifying_key()
+    }
+
+    fn sign(&self, canonical_manifest: &[u8]) -> anyhow::Result<[u8; 64]> {
+        Ok(self.key.sign(canonical_manifest).to_bytes())
     }
 
     fn key_id(&self) -> KeyId {
         self.claimed.clone()
+    }
+}
+
+/// A signer that holds its key out of reach and answers per `outcome`, the
+/// way a remote signing service would.
+struct RemoteSigner {
+    key: SigningKey,
+    outcome: Outcome,
+}
+
+enum Outcome {
+    /// A valid signature, but over bytes other than the manifest.
+    WrongMessage,
+    /// The service could not sign.
+    Unavailable,
+}
+
+impl BundleSigner for RemoteSigner {
+    fn publisher_id(&self) -> String {
+        "test:remote".to_string()
+    }
+
+    fn verifying_key(&self) -> VerifyingKey {
+        self.key.verifying_key()
+    }
+
+    fn sign(&self, _canonical_manifest: &[u8]) -> anyhow::Result<[u8; 64]> {
+        match self.outcome {
+            Outcome::WrongMessage => Ok(self.key.sign(b"not the manifest").to_bytes()),
+            Outcome::Unavailable => anyhow::bail!("signing service unavailable"),
+        }
     }
 }
 
@@ -289,6 +328,50 @@ fn a_signer_naming_another_key_is_refused_and_writes_nothing() {
     .expect_err("refused");
 
     assert!(format!("{err:#}").contains("does not match"), "{err:#}");
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn a_signer_that_cannot_sign_fails_the_export_and_writes_nothing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = RemoteSigner {
+        key: SigningKey::from_bytes(&[9; 32]),
+        outcome: Outcome::Unavailable,
+    };
+
+    let err = export_bundle_with_signer(
+        &BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out),
+        &signer,
+    )
+    .expect_err("refused");
+
+    assert!(
+        format!("{err:#}").contains("signing service unavailable"),
+        "{err:#}"
+    );
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn a_signature_that_does_not_verify_is_refused_and_writes_nothing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = RemoteSigner {
+        key: SigningKey::from_bytes(&[9; 32]),
+        outcome: Outcome::WrongMessage,
+    };
+
+    let err = export_bundle_with_signer(
+        &BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out),
+        &signer,
+    )
+    .expect_err("refused");
+
+    assert!(
+        format!("{err:#}").contains("does not verify under its own key"),
+        "{err:#}"
+    );
     assert_nothing_written(&out);
 }
 

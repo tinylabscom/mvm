@@ -20,15 +20,17 @@ without linking the CLI.
 1. The caller fills in `BundleExportInputs`: artifact paths, the
    architecture label, the output path, and optionally the profile and the
    resources the workload was sized for.
-2. The caller supplies a `BundleSigner`. The host key is one implementation;
-   a test or another tool can supply its own.
+2. The caller supplies a `BundleSigner`: a verifying key and a way to sign
+   the canonical manifest bytes. The host key is one implementation. A KMS or
+   HSM can be another, because the trait never asks for private key bytes.
 3. `export_bundle_with_signer` reads the artifacts, records a SHA-256 and a
    role for each, builds the manifest, signs it, and writes the archive.
 4. `ExportedBundle` reports where the archive went, how large it is, and
    which key signed it.
 
 A rootfs with half a dm-verity binding, or with no sidecar beside it, is
-refused before anything is written. Both would otherwise produce a bundle
+refused before anything is written. So is a signature that does not verify
+under the signer's own verifying key. Both would otherwise produce a bundle
 that installs cleanly and fails at admission on the host it was sent to.
 
 ## Debug summary
