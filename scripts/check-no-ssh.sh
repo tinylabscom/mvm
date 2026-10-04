@@ -57,6 +57,13 @@ ALLOWED_FILES=(
   # capability.
   "crates/mvm-build/src/builder_vm_runtime.rs"
   "crates/mvm-build/src/rootfs.rs"
+  # Contributor lab harness: drives a disposable GCP Compute Engine host from
+  # the developer's machine with `gcloud compute ssh` / `gcloud compute scp`,
+  # waiting for that cloud host's own sshd before uploading the tree. The
+  # session ends at the nested-KVM host the test runs on. No guest image,
+  # template, or microVM this repository builds gains SSH, and nothing is
+  # forwarded into one.
+  "scripts/run-gcp-kvm-test.sh"
   # Docs asserting the no-SSH promise / listing airgapped file-transfer
   # options unrelated to guest communication.
   "public/src/content/docs/guides/airgapped-bootstrap.md"
@@ -84,7 +91,10 @@ while IFS= read -r match; do
   fi
   violations+="$match"$'\n'
 done < <(
-  grep -rniE \
+  # -I skips binary files: BSD grep reports case-insensitive matches inside
+  # image bytes that GNU grep only mentions on stderr, so without it the gate
+  # fails on a contributor's macOS host and passes in CI for the same tree.
+  grep -rniIE \
     --exclude-dir=.git \
     --exclude-dir=.mvm-test \
     --exclude-dir=.venv \

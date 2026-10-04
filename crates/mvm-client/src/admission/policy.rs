@@ -274,14 +274,16 @@ pub fn generated_policy_bundle_for_network_policy(
 }
 
 #[cfg(test)]
-mod bundle_pin_tests {
+pub(super) mod bundle_pin_tests {
     use super::*;
     use rand::Rng;
 
     /// Build a signed `.mvmpkg` archive in-memory so the
     /// `--bundle-pin` test path doesn't need a real fetched bundle.
     /// Uses mvm_plan's own writer + signing primitives.
-    fn make_bundle_for_pin(sk: &ed25519_dalek::SigningKey) -> (Vec<u8>, mvm_core::plan::KeyId) {
+    pub(in crate::admission) fn make_bundle_for_pin(
+        sk: &ed25519_dalek::SigningKey,
+    ) -> (Vec<u8>, mvm_core::plan::KeyId) {
         use mvm_core::plan::bundle::{
             ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             key_id_from_pubkey, sha256_hex, write_bundle,

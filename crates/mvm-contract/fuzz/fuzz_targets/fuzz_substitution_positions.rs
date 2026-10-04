@@ -126,7 +126,15 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let encoded = basic_header(&value);
-    assert_eq!(basic_credential("authorization", &encoded).as_deref(), Some(value.as_ref()));
+    let decoded = basic_credential("authorization", &encoded);
+    if value.is_empty() {
+        // `basic_header("")` is `"Basic "`: a scheme with no token, so there is
+        // no credential to recover. Either answer leaves the header searched
+        // as written, because an empty credential cannot hold a placeholder.
+        assert!(decoded.as_deref().is_none_or(str::is_empty));
+    } else {
+        assert_eq!(decoded.as_deref(), Some(value.as_ref()));
+    }
     let escaped = percent_encode(&value);
     assert!(!escaped.bytes().any(|byte| byte.is_ascii_whitespace()));
 
