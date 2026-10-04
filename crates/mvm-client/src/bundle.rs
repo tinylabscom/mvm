@@ -7,7 +7,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, VerifyingKey};
 use mvm_hostd::audit::host_keypair::{self, HostSigner};
 
 pub use mvm_bundler::{
@@ -49,8 +49,12 @@ impl BundleSigner for HostBundleSigner {
         host_keypair::host_signer_id()
     }
 
-    fn signing_key(&self) -> &SigningKey {
-        &self.inner.signing
+    fn verifying_key(&self) -> VerifyingKey {
+        self.inner.verifying
+    }
+
+    fn sign(&self, canonical_manifest: &[u8]) -> Result<[u8; 64]> {
+        Ok(self.inner.signing.sign(canonical_manifest).to_bytes())
     }
 }
 
@@ -68,9 +72,19 @@ mod tests {
 
         let host = host_keypair::load_or_init_at(keys.path()).expect("reload");
         assert_eq!(
-            signer.signing_key().to_bytes(),
-            host.signing.to_bytes(),
+            signer.verifying_key(),
+            host.verifying,
             "the bundle signer is the host key, not a key of its own"
+        );
+        let signature = signer.sign(b"manifest").expect("sign");
+        assert!(
+            ed25519_dalek::Verifier::verify(
+                &host.verifying,
+                b"manifest",
+                &ed25519_dalek::Signature::from_bytes(&signature)
+            )
+            .is_ok(),
+            "a host-key signature verifies under the host's public key"
         );
         assert_eq!(signer.key_id(), key_id_from_pubkey(&host.verifying));
         assert_eq!(signer.publisher_id(), host_keypair::host_signer_id());
