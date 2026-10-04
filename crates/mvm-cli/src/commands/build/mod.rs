@@ -7,7 +7,6 @@ pub(super) mod address;
 #[allow(clippy::module_inception)]
 pub(in crate::commands) mod build;
 pub(super) mod compile;
-#[cfg(feature = "builder-vm")]
 #[cfg(test)]
 mod driver_builder_live;
 pub(super) mod group;
@@ -27,11 +26,6 @@ pub(super) mod kernel;
 /// `PersistentBuilderSupervisor` together via three subcommands
 /// (start / submit / stop) so contributors can exercise the
 /// dispatch path end-to-end without going through a full build.
-/// Gated on the `builder-vm` feature because the host-side types
-/// it dispatches into (`LibkrunPersistentHostVm` etc.) only
-/// exist with that feature — `mvm-cli`'s default features include
-/// it, so production builds always have this verb.
-#[cfg(feature = "builder-vm")]
 pub(super) mod persistent_builder;
 pub(super) mod runtime_overlay;
 /// Shared helpers for the SDK record-mode auto-exec path. Used by

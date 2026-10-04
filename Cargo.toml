@@ -455,17 +455,6 @@ anyhow.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAutoreleasePool"] }
 
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-# Apple Silicon uses the in-house HVF backend by default on macOS 26+.
-# Keep builder orchestration available without linking optional libkrun FFI;
-# the standard source and release builds never enable the native bindings.
-mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"] }
-
-[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-# Intel uses HVF directly. Retain builder orchestration while leaving the
-# arm64-only libkrun firmware and FFI feature out of the dependency graph.
-mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"] }
-
 [dev-dependencies]
 mvm-contract.workspace = true
 hex.workspace = true
@@ -509,8 +498,8 @@ mvm-client.workspace = true
 # There are exactly two: what the **host machine runs** to host sandboxes
 # (`host`), and what a **user runs** to drive them (`user`). Every capability
 # folds into one of the two; the individual pass-through flags that used to sit
-# here (builder-vm, pure-mkfs, custom-dns, manifest-verify, dev-watch,
-# contributor-bootstrap) are GONE — inlined below. `dev` is the host+user union
+# here (custom-dns, manifest-verify, dev-watch, contributor-bootstrap) are
+# GONE — inlined below. `dev` is the host+user union
 # (a contributor laptop is both). The only other root features are internal
 # knobs that cannot be unconditional and are NOT consumer-facing product
 # surfaces: the optional libkrun C-lib test integration, the
@@ -530,8 +519,6 @@ mvm-client.workspace = true
 # already carries through `user`. mvmd depends on `mvm-core` and `mvm-client`
 # directly, so nothing here reaches it.
 default = [
-    "mvm-cli/builder-vm",
-    "mvm-cli/pure-mkfs",
     "mvm-cli/manifest-verify",
 ]
 
@@ -540,8 +527,6 @@ default = [
 # trait); the standard product paths never enable libkrun. Superset of `default`
 # plus the full host networking + hostd IPC.
 host = [
-    "mvm-cli/builder-vm",
-    "mvm-cli/pure-mkfs",
     "mvm-cli/manifest-verify",
     "mvm-cli/custom-dns",
     "mvm-core/hostd-transport",

@@ -477,7 +477,6 @@ fn internal_builder_egress_supervisor_command_is_hidden_but_parseable() {
 }
 
 #[test]
-#[cfg(feature = "builder-vm")]
 fn internal_builder_shell_job_command_is_hidden_but_parseable() {
     let cli = Cli::try_parse_from(["mvmctl", "__builder-shell-job", "--script", "/tmp/dummy.sh"])
         .unwrap();

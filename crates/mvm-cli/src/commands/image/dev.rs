@@ -25,26 +25,10 @@ pub(in crate::commands) fn run(action: DevAction) -> Result<()> {
 /// members when `MVM_FETCH_UNCHANGED_IMAGES` asks for them; otherwise answer
 /// from the pair build / cache path `mvmctl run` uses, which pair-builds from
 /// the selected checkout or answers a complete cache.
-#[cfg(feature = "builder-vm")]
 fn run_ensure() -> Result<()> {
     ensure_from(crate::commands::env::builder_vm::selected_local_checkout()?.as_ref())
 }
 
-#[cfg(not(feature = "builder-vm"))]
-fn run_ensure() -> Result<()> {
-    if mvm_build::image_source::configured_images_dir().is_some() {
-        anyhow::bail!(
-            "{} names an image checkout, but building the dev default image from it requires \
-             the `builder-vm` feature; rebuild the binary with that feature enabled",
-            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
-        );
-    }
-    anyhow::bail!(
-        "ensuring the dev default image requires the `builder-vm` feature; use a release binary"
-    )
-}
-
-#[cfg(feature = "builder-vm")]
 fn ensure_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -> Result<()> {
     use mvm_build::fetch_unchanged::{self as fetch, ArmRequest, FetchMode, PinnedMembers};
     let request = ArmRequest::for_host(PinnedMembers::DevDefaultImage);
@@ -72,7 +56,6 @@ fn ensure_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -
 /// Install the set's dev members as the dev slot and stamp them as fetched
 /// under the set's tag. A failure is final: the verified bytes were asked for
 /// and refused, which must not silently fall back to a pair build.
-#[cfg(feature = "builder-vm")]
 fn adopt_dev_image(
     set: &mvm_build::published_image_set::PublishedImageSet,
     arch: mvm_core::arch::GuestArch,
@@ -96,7 +79,7 @@ fn adopt_dev_image(
     Ok(())
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

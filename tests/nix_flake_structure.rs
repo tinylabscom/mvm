@@ -413,10 +413,8 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
         "enabling native libkrun FFI must require an explicit Nix libkrunfw package"
     );
     assert!(
-        content.contains("assert withNativeLibkrun -> withBuilderVm")
-            && content.contains("\"mvm-cli/builder-vm\"")
-            && !content.contains("\"mvm-build/builder-vm\""),
-        "the Nix package must enable the CLI surface without reviving mvm-build's removed feature"
+        !content.contains("withBuilderVm") && !content.contains("builder-vm\""),
+        "builder orchestration is unconditional; the Nix package must not revive a builder-vm feature"
     );
     assert!(
         content.contains("lib.optionals withTpm2 [ \"mvmctl/attestation-tpm2\" ]"),

@@ -467,7 +467,8 @@ mvmctl root; `crates/deps/libkrun-sys` is vendored FFI and stays as-is):
 | `mvm-build/interactive` | **Deleted** — zero enablers anywhere (the Cargo comment claiming "tests/dev enable it" was stale); its two `#[cfg]` blocks in `mvm-egress-proxy.rs` were unreachable. The env-override behaviour was deliberately compile-time (the proxy faces the guest; an env-tweakable allowlist is a security property), so it was deleted rather than moved to runtime config. |
 | `mvm-core/attestation-{sev-snp,tdx,apple-device}` | Keep, **owner decision** — dead as compile flags (stubs are always compiled, zero cfg gates) but SPRINT.md records them as documented future scaffolding pending a maintainer ratification call on deleting the stubs themselves. |
 | `mvm-agentd/flowmux-async` | Keep, **owner decision** — merge candidate into `addons` (strict subset minus tokio-vsock/hickory); benches and hostd dev-deps use the narrower surface. |
-| `mvm-cli/pure-mkfs`, `mvm-cli/builder-vm` | Keep, **owner decision** — near-always-on (only test builds opt out); folding into unconditional code changes what nix builds compile. |
+| `mvm-cli/pure-mkfs`, `mvm-cli/builder-vm` | **Deleted** (owner decision 2026-10-02) — the code is unconditional. `mvm-cli` always enables `mvm-build/builder-libkrun` (the Rust builder code, not the libkrun FFI, which stays behind `libkrun-sys`); the root `default`/`host` lists, the macOS target-specific `mvm-cli` dependencies, the Nix package's `withBuilderVm` switch and its `--no-default-features` branch went with them. `check-two-surfaces` now refuses both names in `mvm-cli` as it already did in `mvm-build`, and in the root manifest, `ci.yml` and `ci-full.yml`. |
+| `mvm-client/clap`, `mvm-core/provenance`, `mvm-core/egress-ca` | Keep — each holds code out of a lean closure that has a consumer for it. `clap` keeps the argument parser out of an embedder's build, and only `mvm-cli` enables it. `provenance` keeps the PROV-O exporter out of the builder-VM binaries, and only `mvm-cli` enables it. `egress-ca` keeps `rcgen` out of `mvm-core`'s default build, and `mvm-vmm`, `mvm-runtime` and `mvm-hostd` enable it. |
 | Everything else (`hostd-transport`, `client`/`client-remote`, `manifest-verify`, `schema` family, `test-support` family, `bdd`, `embed-host-bins`, `contributor-bootstrap`, `release-channel`, `release-artifact-bootstrap`, `template-registry-s3`, `hvf-live-validation`, `trusted-apfs`, `wasm-backend`, `ebpf-telemetry`, `network-perf`, `custom-dns`, `dev-watch`, `tracing-bridge`, `remote`, `deploy-remote`, libkrun family, `attestation-tpm2`, mvmctl `host`/`user`/`dev`) | Keep — each has a live consumer, a CI lane, an xtask gate, or an mvmd-facing contract (mvmd needs `client`/`client-remote`, `hostd-transport`, `remote`, `release-channel`, `tracing-bridge`, the `mvm-contract` family, and the schema emitters). |
 
 CI lanes: no lane referenced the two deleted flags, so `lint-features`,
@@ -476,9 +477,9 @@ check, and the xtask gates (`check-two-surfaces`, `check-core-runtime-free`,
 `check-guest-agent-runtime-free`, `check-sdk-transport-free`,
 `check-closure-budget`, `check-feature-closure-budget`) are unchanged; the
 all-features closure shrinks, which the 488-crate budget ratchet absorbs.
-Follow-ups for the owner-decision rows above, plus re-examining
-`mvm-build/builder-libkrun` staying in `default`, are best done as their own
-small PRs.
+The owner decided the three parked groups on 2026-10-02; their rows above
+record the outcome. Re-examining `mvm-build/builder-libkrun` staying in
+`default` is best done as its own small PR.
 
 ### PS-20 — Unreachable surface (#3729)
 - [x] `up::Args` wired or deleted; `--network-allow` references and `publish-crates.yml` crate list corrected

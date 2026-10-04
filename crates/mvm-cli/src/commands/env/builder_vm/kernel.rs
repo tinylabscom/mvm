@@ -1,9 +1,7 @@
-#[cfg(any(feature = "builder-vm", test))]
 use super::*;
 
 /// Which custom kernel `mvmctl kernel build` realizes. Each maps to a
 /// variant of the `mvm-images` kernel flake and a cache subdir.
-#[cfg(feature = "builder-vm")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum KernelVariant {
     /// Builder-VM kernel — shared base + overlay / netfilter / nix-sandbox
@@ -22,7 +20,6 @@ pub(crate) enum KernelVariant {
     Rootless,
 }
 
-#[cfg(feature = "builder-vm")]
 impl KernelVariant {
     fn label(self) -> &'static str {
         match self {
@@ -36,7 +33,6 @@ impl KernelVariant {
 
 /// A resolved `kernel build` source: the host directory the Stage 0 guest
 /// sees at `/work`, the flake it builds there, and the flake attrs to build.
-#[cfg(feature = "builder-vm")]
 #[derive(Debug)]
 struct KernelFlakeSource {
     /// Host directory mounted at `/work` in the Stage 0 guest: the image
@@ -50,7 +46,6 @@ struct KernelFlakeSource {
     config_attr: String,
 }
 
-#[cfg(feature = "builder-vm")]
 impl KernelFlakeSource {
     /// Attribute names on an `mvm-images` kernel flake: every variant
     /// publishes `<name>-vmlinux` + `<name>-configfile`.
@@ -88,7 +83,6 @@ impl KernelFlakeSource {
 /// precedence every other image consumer uses: a configured `MVM_IMAGES_DIR`
 /// (strict — an invalid one is an error, never a fallback), then a sibling
 /// `mvm-images` checkout. Without either there is nothing to compile from.
-#[cfg(feature = "builder-vm")]
 fn resolve_kernel_flake_source(variant: KernelVariant) -> Result<KernelFlakeSource> {
     let source = mvm_build::image_source::resolve_current_source()?;
     kernel_flake_source_for(variant, &source)
@@ -99,7 +93,6 @@ fn resolve_kernel_flake_source(variant: KernelVariant) -> Result<KernelFlakeSour
 /// checkout marker, so a valid checkout always carries it). The released set
 /// carries built kernels, not their sources, so a compile without a checkout
 /// is refused.
-#[cfg(feature = "builder-vm")]
 fn kernel_flake_source_for(
     variant: KernelVariant,
     source: &mvm_build::image_source::ImageSource,
@@ -128,11 +121,9 @@ fn kernel_flake_source_for(
 pub(crate) enum KernelSource {
     Compile,
     Download,
-    #[cfg(feature = "builder-vm")]
     Auto,
 }
 
-#[cfg(feature = "builder-vm")]
 pub(crate) fn resolve_kernel_source() -> Option<KernelSource> {
     let raw = std::env::var("MVM_KERNEL_SOURCE").ok()?;
     match raw.trim().to_ascii_lowercase().as_str() {
@@ -150,7 +141,6 @@ pub(crate) fn resolve_kernel_source() -> Option<KernelSource> {
     }
 }
 
-#[cfg(feature = "builder-vm")]
 pub(super) fn format_compile_start(label: &str, arch: &str) -> String {
     format!(
         "Compiling {label} kernel ({arch}) via Stage 0 — the first build can take several minutes depending on the host; later runs reuse the persistent Nix store"
@@ -160,7 +150,6 @@ pub(super) fn format_compile_start(label: &str, arch: &str) -> String {
 /// `mvmctl kernel build --source compile`: compile a single kernel attr
 /// through the Stage 0 nix-seed bootstrap and land its `vmlinux` in the
 /// per-arch builder-VM cache. Returns the cached kernel path.
-#[cfg(feature = "builder-vm")]
 pub(crate) fn build_kernel_via_stage0(
     variant: KernelVariant,
     verbose: bool,
@@ -212,7 +201,6 @@ pub(crate) fn build_kernel_via_stage0(
     published
 }
 
-#[cfg(feature = "builder-vm")]
 fn publish_kernel_artifacts(
     staging_dir: &std::path::Path,
     out_dir: &std::path::Path,
@@ -303,12 +291,11 @@ fn publish_kernel_artifacts(
     Ok(dest)
 }
 
-#[cfg(feature = "builder-vm")]
 fn has_linux_x86_boot_protocol_header(bytes: &[u8]) -> bool {
     bytes.get(0x202..0x206) == Some(b"HdrS".as_slice())
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
