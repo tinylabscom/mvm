@@ -830,7 +830,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     # The queue aggregate only inspects `needs` results, so use the small,
     # fast-starting image. Pull requests still need the full image for the
     # admission smoke below.
@@ -875,6 +875,7 @@ jobs:
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
+          MUSL_CONFINEMENT_RESULT: ${{ needs.test-musl-confinement.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           BOOT_RESULT: ${{ needs.boot-latency.result }}
@@ -916,7 +917,8 @@ jobs:
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
-            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
+            "$RELEASE_WITNESS_RESULT" "$MUSL_CONFINEMENT_RESULT" "$EBPF_RESULT" \
+            "$BDD_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
@@ -1140,6 +1142,60 @@ jobs:
         run: |
           cargo nextest run --cargo-profile release-witness \
             -p mvm-fs -p mvm-core -p mvm-contract -p mvm-hostd -p mvm-agentd
+
+  test-musl-confinement:
+    name: Confinement under the release libc (${{ matrix.target }})
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    # The Linux release ships static musl binaries; every other lane here builds
+    # against the runner's glibc. The two libcs reach the kernel through
+    # different syscalls for the same call — on x86_64 musl's open() issues the
+    # legacy `open` where glibc issues `openat` — and a confined role's seccomp
+    # filter kills it for any call it does not list. v0.22.0's network endpoint
+    # died that way on every egress grant, with every glibc lane green.
+    #
+    # So the endpoint's confinement tests run here against the musl target, in
+    # the release-witness profile and through the same cargo-zigbuild the
+    # release uses: the filter applied in-process under a real self-test, and
+    # the endpoint binary itself spawned and driven through a session. aarch64
+    # keeps a separate syscall table, so it gets its own leg; neither needs KVM.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+          targets: ${{ matrix.target }}
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Run the endpoint's confinement tests against the musl build
+        env:
+          TARGET: ${{ matrix.target }}
+          # zig's linker reports an optimisation flag it ignores on stderr, and
+          # rustc turns linker stderr into a warning. Every other warning stays
+          # an error.
+          RUSTFLAGS: -D warnings -A linker-messages
+        # `--include-ignored` runs the seccomp property test, which is ignored
+        # by default only because a contributor's kernel may predate 5.19.
+        run: |
+          cargo-zigbuild test --profile release-witness --target "${TARGET}" \
+            -p mvm-hostd \
+            --test confinement_self_test \
+            --test network_endpoint_bin \
+            --test seccomp_property \
+            -- --include-ignored
 
   test-linux:
     name: Test Linux and conformance
