@@ -152,7 +152,7 @@ fn read_failure(error: std::io::Error, buffered: bool) -> ReadError {
 }
 
 /// Error kinds that mean the peer is no longer there to send anything.
-fn is_peer_gone(kind: std::io::ErrorKind) -> bool {
+pub(super) fn is_peer_gone(kind: std::io::ErrorKind) -> bool {
     use std::io::ErrorKind;
     matches!(
         kind,

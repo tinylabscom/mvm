@@ -26,6 +26,7 @@ use mvm_core::substitution_wire::{HttpFlowHead, WireResponse};
 use tracing::warn;
 use zeroize::Zeroizing;
 
+use super::guest_tls::TerminatedTls;
 use super::read::{ReadError, read_http_request};
 use super::request::{method_of, proxy_request_from_connect_authority};
 use super::tls::{is_framing_header, reason_phrase, server_config_for_sni, smuggles_crlf};
@@ -273,7 +274,7 @@ impl TerminatedFlow {
     /// against. A guest that sends a different SNI gets a certificate it will
     /// reject, which is the right answer: the flow it opened is not the flow
     /// it is now trying to use.
-    fn serve_tls(&self, transport: UnixStream) -> Result<(), FlowError> {
+    fn serve_tls<T: Read + Write>(&self, transport: T) -> Result<(), FlowError> {
         let intermediate = self
             .service
             .tls_intermediate()
@@ -281,7 +282,7 @@ impl TerminatedFlow {
         let config = self.leaves.config_for(intermediate, &self.authority.host)?;
         let connection = rustls::ServerConnection::new(config)
             .map_err(|error| FlowError::Tls(error.to_string()))?;
-        let mut tls = rustls::StreamOwned::new(connection, transport);
+        let mut tls = TerminatedTls::new(connection, transport);
         self.serve_requests(&mut tls)
     }
 
@@ -1734,6 +1735,92 @@ mod tests {
         assert!(chain.contains("secret.flow_refused"), "{chain}");
         assert!(chain.contains(REASON_TRUNCATED_REQUEST), "{chain}");
         assert!(!chain.contains(REASON_UNFRAMEABLE_REQUEST), "{chain}");
+        assert!(!chain.contains(REAL_SECRET), "no credential in the chain");
+    }
+
+    /// The guest's end of a flow as a Linux Unix socket behaves once the guest
+    /// has shut it down: every later write fails with `EPIPE`.
+    ///
+    /// The flow's first read after it has written anything is held until the
+    /// guest has gone, so the session tickets the server queues once the
+    /// handshake completes are written into a socket the guest has already
+    /// left. That is the ordering a real socket pair reaches only by racing.
+    struct GoneBeforeTheTickets {
+        socket: UnixStream,
+        wrote: bool,
+        guest_gone: Option<std::sync::mpsc::Receiver<()>>,
+        refusing: bool,
+    }
+
+    impl Read for GoneBeforeTheTickets {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.wrote
+                && let Some(guest_gone) = self.guest_gone.take()
+            {
+                // A test that failed before signalling drops the sender, and
+                // the read goes on rather than hanging the thread.
+                let _ = guest_gone.recv_timeout(Duration::from_secs(10));
+                self.refusing = true;
+            }
+            self.socket.read(buf)
+        }
+    }
+
+    impl Write for GoneBeforeTheTickets {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.refusing {
+                return Err(std::io::ErrorKind::BrokenPipe.into());
+            }
+            self.wrote = true;
+            self.socket.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The truncation is recorded whether or not the host lets the flow write
+    /// to a guest that has gone. A Linux socket refuses the session tickets
+    /// the flow sends from its first read, and that refusal must not stand in
+    /// for the guest having sent nothing.
+    #[test]
+    fn a_hang_up_part_way_through_is_truncated_even_when_the_tickets_cannot_be_sent() {
+        let harness = harness(BOUND_HOST, b"never sent");
+        let request = request_with_placeholder(&harness.placeholder, BOUND_HOST);
+        let headers_only =
+            super::super::find_subslice(&request, b"\r\n\r\n").expect("the request has a head");
+        let (_runtime, flow) = tls_flow_to(&harness, BOUND_HOST);
+        let (endpoint_side, guest_side) = UnixStream::pair().expect("socket pair");
+        endpoint_side
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("read deadline");
+        let (gone, guest_gone) = std::sync::mpsc::channel();
+        let transport = GoneBeforeTheTickets {
+            socket: endpoint_side,
+            wrote: false,
+            guest_gone: Some(guest_gone),
+            refusing: false,
+        };
+        let served = std::thread::spawn(move || flow.serve_tls(transport));
+
+        let mut tls = guest_tls(BOUND_HOST, &harness.intermediate_pem, guest_side);
+        tls.write_all(&request[..headers_only])
+            .expect("the guest writes part of its request");
+        tls.flush().expect("the guest flushes it");
+        tls.sock
+            .shutdown(std::net::Shutdown::Both)
+            .expect("the guest drops its socket");
+        gone.send(())
+            .expect("the flow is waiting for the guest to go");
+        let served = served.join().expect("terminated flow thread");
+
+        assert!(
+            matches!(served, Err(FlowError::Read(ReadError::Truncated))),
+            "{served:?}"
+        );
+        let chain = harness.audit_chain();
+        assert!(chain.contains(REASON_TRUNCATED_REQUEST), "{chain}");
         assert!(!chain.contains(REAL_SECRET), "no credential in the chain");
     }
 
