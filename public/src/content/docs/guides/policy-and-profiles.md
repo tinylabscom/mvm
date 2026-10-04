@@ -323,8 +323,8 @@ mvmctl run --policy agent/claude@1.0.1 --policy ./mine.toml -- make test
 A pack with only a group, such as `runtime/python`, can be the root `--policy`
 reference or be included by a profile's `[groups] include = ["runtime/python"]`
 or a project's `[policy] include`.
-`pull` fetches the one pack it is given, so a profile that includes other
-packs needs each of them pulled too; `agent/claude` includes `runtime/python`.
+`pull` follows pack references in the signed profile, verifying and pinning
+each dependency; `agent/claude` includes `runtime/python`.
 [Author and publish a signed pack](/guides/pack-authoring/) covers writing
 one, and the client guides under
 [AI agent integration](/guides/ai-agent-integration/) cover the published

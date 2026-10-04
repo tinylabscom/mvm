@@ -61,9 +61,9 @@ allow = [
 ]
 ```
 
-A group pack is used by including it, in a profile's `[groups] include` or a
-project's `[policy] include`. It is not a profile: `--policy runtime/node` is
-refused, because the pack declares no `pack/profile.toml`.
+A group pack is used by including it in a profile's `[groups] include` or a
+project's `[policy] include`; `--policy runtime/node` also selects it directly
+as the root policy. It does not need a `pack/profile.toml` for that use.
 
 ## A profile pack
 
@@ -91,8 +91,8 @@ Three things in that file are worth copying:
   secret under exactly that name; a run without it stops before anything boots.
 - **It includes another pack by reference.** `runtime/node` resolves on the
   consumer's host from their own installed, verified copy. `mvmctl pull`
-  fetches one pack and does not follow these references, so say in the pack's
-  description which packs it composes.
+  follows pack references in the signed profile, verifying and pinning each
+  dependency under the consumer's publisher trust policy.
 - **Its secret binding is under `[overrides]`.** A top-level `[secrets]` or
   `[network]` table is the group form and does not parse in a profile.
 
@@ -126,9 +126,9 @@ mvmctl policy validate ./pack-sources/runtime/node/pack/group.toml
 mvmctl policy validate ./pack-sources/agent/codex/pack/profile.toml
 ```
 
-A profile that includes other packs resolves them from your own lockfile, so
-pull the published ones it names first; a pack it names that is not published
-yet has nothing to resolve against until it is. For a profile,
+A profile that includes other packs resolves them from your own lockfile.
+`mvmctl pull` fetches its published dependencies; a pack it names that is not
+published yet has nothing to resolve against until it is. For a profile,
 `mvmctl policy show` on the same path prints the merged result with the layer
 each line came from, which is the quickest way to see that it grants what you
 meant and nothing more. Add `--strict` to `validate` to turn every note into
@@ -282,8 +282,10 @@ The index is a small JSON document, and unknown fields in it are refused:
 
 - A pack carries policy. It does not carry or select an image, and it installs
   nothing in a guest.
-- `mvmctl pull` does not resolve the packs a profile includes. Each one is
-  pulled by name.
+- `mvmctl pull` follows signed profile dependencies. Cycles, conflicting
+  versions, more than 128 packs, or an unpublished dependency stop the pull.
+  Packs already installed before a later dependency fails remain pinned, but a run
+  cannot load a missing dependency.
 - A `[tools]` section in a pack composes like any other, and has the
   enforcement limits listed under
   [Not yet](/guides/policy-and-profiles/#not-yet).
