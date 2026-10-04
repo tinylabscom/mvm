@@ -2657,7 +2657,11 @@ mod tests {
             rand::rng().fill_bytes(&mut seed);
             SigningKey::from_bytes(&seed)
         };
-        let emitter = AuditEmitter::new(key).expect("construct an emitter");
+        // `with_dir`, not `new`: `new` resolves the audit dir from the process
+        // environment, which other tests in this binary point at their own
+        // short-lived homes.
+        let emitter =
+            AuditEmitter::with_dir(key, &dir.path().join("audit")).expect("construct an emitter");
         // The default has to be observed too, or "always true" would pass.
         assert!(
             !emitter.decisions_enabled(),

@@ -3379,7 +3379,12 @@ mod tests {
             .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
             .finish();
-        let value = tracing::subscriber::with_default(subscriber, f);
+        // Another thread may have cached a callsite as uninteresting before
+        // this per-thread subscriber existed; recompute before running `f`.
+        let value = tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            f()
+        });
         let logged = String::from_utf8(sink.0.lock().expect("log sink poisoned").clone())
             .expect("log output is utf-8");
         (value, logged)
