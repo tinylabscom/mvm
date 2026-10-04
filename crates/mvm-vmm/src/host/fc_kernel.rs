@@ -82,8 +82,7 @@ pub fn ensure_fc_loadable_kernel(path: &Path) -> Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
 
-    let elf_path = sibling_elf(path);
-    let stamp_path = sibling(path, ".elf.src");
+    let [elf_path, stamp_path] = extracted_elf_files(path);
     let source = source_stamp(path)?;
     if file_starts_with_elf(&elf_path).unwrap_or(false)
         && std::fs::read_to_string(&stamp_path).ok().as_deref() == Some(source.as_str())
@@ -163,6 +162,14 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(suffix);
     PathBuf::from(s)
+}
+
+/// The files [`ensure_fc_loadable_kernel`] keeps beside a kernel it had to
+/// extract: the ELF it boots, and the stamp naming the kernel it came from.
+/// Public because a cache that boots kernels in place has to recognise them.
+#[must_use]
+pub fn extracted_elf_files(path: &Path) -> [PathBuf; 2] {
+    [sibling_elf(path), sibling(path, ".elf.src")]
 }
 
 fn sibling_elf(path: &Path) -> PathBuf {
@@ -394,6 +401,30 @@ mod tests {
             DigestSource::Sidecar,
             "kernel preparation must digest through the shared cache, not a raw re-read"
         );
+    }
+
+    /// A cache that boots kernels in place tolerates exactly the files named
+    /// here beside one, so an extraction must leave nothing else behind.
+    #[test]
+    fn an_extraction_leaves_only_the_files_it_names_beside_the_kernel() {
+        let dir = tempfile::tempdir().unwrap();
+        let kpath = dir.path().join("vmlinux");
+        std::fs::write(&kpath, fake_bzimage(&fake_vmlinux_tagged(0x42))).unwrap();
+
+        ensure_fc_loadable_kernel(&kpath).unwrap();
+
+        let mut left: Vec<PathBuf> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        left.sort();
+        let mut named = vec![
+            kpath.clone(),
+            mvm_core::crypto::image_verify::sha256_cache_path(&kpath),
+        ];
+        named.extend(extracted_elf_files(&kpath));
+        named.sort();
+        assert_eq!(left, named);
     }
 
     #[test]

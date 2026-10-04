@@ -894,3 +894,248 @@ fn a_cache_that_already_has_entries_keeps_them_and_ignores_the_donor() {
         "a warm cache is not reseeded with the donor's entries"
     );
 }
+
+fn kernel_in(dir: &Path) -> PathBuf {
+    dir.join(kernel_name(GuestArch::Aarch64))
+}
+
+/// The real thing a launch does to an entry: boot its kernel in place, which
+/// hashes it through the size+mtime digest cache and leaves a sidecar beside
+/// it. The next run's lookup has to answer from that entry, not rebuild it.
+#[test]
+fn an_entry_whose_kernel_a_launch_hashed_still_hits() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    fx.publish(&key);
+    let kernel = kernel_in(&fx.cache.entry_dir(&key));
+
+    let digest = mvm_core::crypto::image_verify::sha256_file_cached(&kernel).unwrap();
+
+    assert_eq!(digest, Sha256Hex::from_bytes(KERNEL).as_str());
+    let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&kernel);
+    assert!(sidecar.is_file(), "the launch left its digest sidecar");
+    let entry = expect_hit(fx.lookup(&key));
+    assert_eq!(entry.dir, fx.cache.entry_dir(&key));
+    // A second publisher of the key re-reads the same entry and accepts it.
+    assert!(matches!(
+        fx.publish(&key),
+        PublishOutcome::AlreadyPresent(_)
+    ));
+    assert!(sidecar.is_file(), "a hit leaves the sidecar where it was");
+}
+
+/// An x86_64 bzImage wrapped around an ELF kernel: what a launch has to
+/// extract before its VMM can load it.
+fn fake_bzimage() -> Vec<u8> {
+    use std::io::Write;
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(b"\x7fELF an uncompressed kernel").unwrap();
+    let mut image = b"bzImage setup header ".to_vec();
+    image.extend(gz.finish().unwrap());
+    image
+}
+
+/// The same, for a kernel a launch has to extract in place: the extracted ELF
+/// and its stamp land beside it in the entry.
+#[test]
+fn an_entry_whose_kernel_a_launch_extracted_still_hits() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    let staged = fx.cache.stage(&key).unwrap();
+    emit(staged.dir(), &fx.recorded(&key), key.arch, &fake_bzimage());
+    fx.cache.publish(staged, &fx.ctx()).unwrap();
+    let kernel = kernel_in(&fx.cache.entry_dir(&key));
+
+    let booted = mvm_vmm::host::fc_kernel::ensure_fc_loadable_kernel(&kernel).unwrap();
+
+    let [elf, stamp] = mvm_vmm::host::fc_kernel::extracted_elf_files(&kernel);
+    assert_eq!(booted, elf);
+    assert!(stamp.is_file());
+    expect_hit(fx.lookup(&key));
+}
+
+#[test]
+fn a_digest_sidecar_beside_any_file_of_the_set_is_tolerated() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    fx.publish(&key);
+    let dir = fx.cache.entry_dir(&key);
+    for member in [
+        kernel_name(GuestArch::Aarch64),
+        LOCAL_SET_MANIFEST_NAME.to_string(),
+        ENTRY_RECORD_NAME.to_string(),
+    ] {
+        std::fs::write(
+            mvm_core::crypto::image_verify::sha256_cache_path(&dir.join(member)),
+            b"not even a digest\n",
+        )
+        .unwrap();
+    }
+
+    expect_hit(fx.lookup(&key));
+}
+
+#[test]
+fn a_digest_sidecar_for_a_file_outside_the_set_is_evicted() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    fx.publish(&key);
+    let dir = fx.cache.entry_dir(&key);
+    let stray = mvm_core::crypto::image_verify::sha256_cache_path(&dir.join("rootfs.ext4"));
+    std::fs::write(&stray, b"sidecar\n").unwrap();
+
+    let reason = expect_evicted(fx.lookup(&key));
+
+    assert!(
+        reason.contains("rootfs.ext4.sha256cache is not part of the set"),
+        "{reason}"
+    );
+    assert!(!dir.exists());
+}
+
+#[test]
+fn any_other_file_added_to_a_published_entry_is_evicted() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    fx.publish(&key);
+    let dir = fx.cache.entry_dir(&key);
+    let kernel = kernel_name(GuestArch::Aarch64);
+    // Near-misses of a member's sidecar name are not sidecars.
+    for extra in [
+        "stray".to_string(),
+        format!("{kernel}.sha256cache.123.tmp"),
+        format!("{kernel}.sha256"),
+    ] {
+        fx.publish(&key);
+        std::fs::write(dir.join(&extra), b"extra\n").unwrap();
+
+        let reason = expect_evicted(fx.lookup(&key));
+
+        assert!(
+            reason.contains(&format!("{extra} is not part of the set")),
+            "{reason}"
+        );
+    }
+}
+
+/// Verification hashes every artifact itself. A sidecar forged to vouch the
+/// manifest's digest for tampered bytes — keyed on the tampered file's own
+/// size and mtime, so the digest cache would serve it — changes nothing.
+#[cfg(unix)]
+#[test]
+fn a_tampered_member_with_a_forged_sidecar_is_evicted_sidecars_and_all() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    fx.publish(&key);
+    let dir = fx.cache.entry_dir(&key);
+    let kernel = kernel_in(&dir);
+    make_writable(&kernel);
+    let tampered = b"kernel BYTES\n";
+    assert_eq!(tampered.len(), KERNEL.len());
+    std::fs::write(&kernel, tampered).unwrap();
+    let meta = std::fs::metadata(&kernel).unwrap();
+    let mtime = meta
+        .modified()
+        .unwrap()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&kernel);
+    let vouched = Sha256Hex::from_bytes(KERNEL);
+    std::fs::write(
+        &sidecar,
+        format!("{} {} {mtime}\n", vouched.as_str(), meta.len()),
+    )
+    .unwrap();
+    assert_eq!(
+        mvm_core::crypto::image_verify::sha256_file_cached(&kernel).unwrap(),
+        vouched.as_str(),
+        "the forgery is one the digest cache itself would serve"
+    );
+
+    let reason = expect_evicted(fx.lookup(&key));
+
+    // Refused on the bytes' own digest, not the one the sidecar vouched.
+    let actual = Sha256Hex::from_bytes(tampered);
+    assert!(
+        reason.contains(&format!("hashes to {}", actual.as_str())),
+        "{reason}"
+    );
+    assert!(!dir.exists(), "the entry is gone");
+    assert!(!sidecar.exists(), "its sidecar went with it");
+    assert!(children(&fx.cache.root().join("v1").join(".evicted")).is_empty());
+    assert!(matches!(fx.lookup(&key), CacheLookup::Miss));
+}
+
+#[test]
+fn a_seeded_entry_carrying_a_digest_sidecar_still_hits() {
+    let fx = Fixture::new();
+    let key = fx.key();
+    fx.publish(&key);
+    mvm_core::crypto::image_verify::sha256_file_cached(&kernel_in(&fx.cache.entry_dir(&key)))
+        .unwrap();
+    let seeded = LocalImageCache::at(fx.tmp.path().join("seeded-cache"));
+
+    assert!(seeded.seed_from(fx.cache.root()).unwrap());
+
+    expect_hit(seeded.lookup(&key, &fx.ctx()).expect("seeded lookup"));
+}
+
+/// What a pair build passed its admission hook: the artifact and the
+/// eviction reason, if any.
+type Admitted = Vec<(String, Option<String>)>;
+
+/// Drive a pair build of the overlay target up to the builder, which refuses,
+/// so nothing past admission runs.
+fn build_overlay_until_the_builder(fx: &Fixture, admitted: &mut Admitted) -> String {
+    let mut ran_job = false;
+    let err = super::build::build_target_for_pair_with(
+        &fx.images,
+        &fx.mvm(),
+        overlay_target(),
+        GuestArch::Aarch64,
+        &fx.cache,
+        super::build::PairBuildHooks {
+            admit: &mut |artifact, evicted| {
+                admitted.push((artifact.to_string(), evicted.map(str::to_string)));
+                Ok(())
+            },
+            prepare_builder: &mut || Err("no builder in this test".to_string()),
+            run_job: &mut |_| {
+                ran_job = true;
+                Ok(())
+            },
+        },
+    )
+    .expect_err("the builder refuses");
+    assert!(!ran_job);
+    err.to_string()
+}
+
+#[test]
+fn a_pair_build_after_an_eviction_reports_the_reason_and_a_miss_does_not() {
+    let scratch = tempfile::tempdir().unwrap();
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(scratch.path());
+    let fx = Fixture::new();
+    let overlay = fx.key_for(&overlay_target(), GuestArch::Aarch64);
+    let mut admitted = Admitted::new();
+
+    build_overlay_until_the_builder(&fx, &mut admitted);
+    std::fs::create_dir_all(fx.cache.entry_dir(&overlay)).unwrap();
+    std::fs::write(fx.cache.entry_dir(&overlay).join("junk"), b"junk").unwrap();
+    let err = build_overlay_until_the_builder(&fx, &mut admitted);
+
+    assert!(err.contains("no builder in this test"), "{err}");
+    let artifact = "the runtime-overlay.default image".to_string();
+    assert_eq!(
+        admitted[0],
+        (artifact.clone(), None),
+        "a miss is a cold build"
+    );
+    assert_eq!(admitted[1].0, artifact);
+    let reason = admitted[1].1.as_deref().expect("the eviction reason");
+    assert!(reason.contains(ENTRY_RECORD_NAME), "{reason}");
+    assert_eq!(admitted.len(), 2);
+    assert!(!fx.cache.entry_dir(&overlay).exists());
+}

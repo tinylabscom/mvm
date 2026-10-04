@@ -221,6 +221,41 @@ fn admit_cold_build_with(
     }
 }
 
+/// Gate the rebuild of a cached artifact whose entry failed verification and
+/// was evicted. The user is told why it is being rebuilt in place of the
+/// first-run notice, which would blame the checkout for the cache's fault; a
+/// refusal carries the reason too.
+pub fn admit_rebuild_after_eviction(artifact: &str, reason: &str) -> Result<(), String> {
+    admit_rebuild_after_eviction_with(
+        mvm_core::cold_build::admit,
+        artifact,
+        reason,
+        activity::println_above,
+    )
+}
+
+fn admit_rebuild_after_eviction_with(
+    admit: impl FnOnce(&str) -> mvm_core::cold_build::ColdBuildAdmission,
+    artifact: &str,
+    reason: &str,
+    emit: impl FnOnce(&str),
+) -> Result<(), String> {
+    use mvm_core::cold_build::ColdBuildAdmission;
+    match admit(artifact) {
+        ColdBuildAdmission::Build | ColdBuildAdmission::Announce(_) => {
+            emit(&format!(
+                "[mvm] Rebuilding {artifact}: its cached copy failed verification ({reason}) \
+                 and was removed. This can take tens of minutes."
+            ));
+            Ok(())
+        }
+        ColdBuildAdmission::Refuse(message) => Err(format!(
+            "the cached copy of {artifact} failed verification ({reason}) and was removed.\n\
+             {message}"
+        )),
+    }
+}
+
 /// Print a numbered step: `[mvm]` Step n/total: message. Opt-in chatter —
 /// suppressed unless `--verbose`/`--debug` or `RUST_LOG` is set.
 pub fn step(n: u32, total: u32, msg: &str) {
@@ -599,6 +634,51 @@ mod tests {
         )
         .expect_err("Refuse must refuse");
         assert!(refused.contains("`--no-build`"));
+        assert!(printed.is_empty());
+    }
+
+    #[test]
+    fn a_rebuild_after_eviction_names_the_reason_in_place_of_the_first_run_notice() {
+        use mvm_core::cold_build::{ColdBuildGate, ColdBuildPolicy};
+        for policy in [ColdBuildPolicy::Announce, ColdBuildPolicy::Allow] {
+            let gate = ColdBuildGate::new();
+            gate.set_policy(policy);
+            let mut printed = Vec::new();
+            let admitted = admit_rebuild_after_eviction_with(
+                |artifact| gate.admit(artifact),
+                "the default-tenant.default image",
+                "vmlinux is missing",
+                |line| printed.push(line.to_string()),
+            );
+            assert_eq!(admitted, Ok(()));
+            assert_eq!(printed.len(), 1, "{policy:?}: {printed:?}");
+            let line = &printed[0];
+            assert!(
+                line.starts_with("[mvm] Rebuilding the default-tenant.default image"),
+                "{line}"
+            );
+            assert!(line.contains(
+                "its cached copy failed verification (vmlinux is missing) and was removed"
+            ));
+            assert!(!line.contains("First run"), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_refused_rebuild_after_eviction_carries_the_reason_and_prints_nothing() {
+        use mvm_core::cold_build::{ColdBuildGate, ColdBuildPolicy, RefusalSource};
+        let gate = ColdBuildGate::new();
+        gate.set_policy(ColdBuildPolicy::Refuse(RefusalSource::Env));
+        let mut printed = Vec::new();
+        let refused = admit_rebuild_after_eviction_with(
+            |artifact| gate.admit(artifact),
+            "the default-tenant.default image",
+            "vmlinux is missing",
+            |line| printed.push(line.to_string()),
+        )
+        .expect_err("Refuse must refuse");
+        assert!(refused.contains("failed verification (vmlinux is missing)"));
+        assert!(refused.contains("`MVM_COLD_BUILD=refuse`"));
         assert!(printed.is_empty());
     }
 

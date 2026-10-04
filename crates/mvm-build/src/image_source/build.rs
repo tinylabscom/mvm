@@ -764,7 +764,8 @@ fn seed_local_images_from_default_home(cache: &LocalImageCache) {
 /// either way is the same bytes under the same key. The two closures are the
 /// VM boundary, injected so this crate stays free of backend drivers and tests
 /// can run a build without a VM: `prepare_builder` readies the builder image
-/// the job runs in, and `run_job` boots it. Neither runs on a cache hit.
+/// the job runs in, and `run_job` boots it. Neither runs on a cache hit. An
+/// entry that fails verification is evicted, and the rebuild says why.
 ///
 /// `prepare_builder` must not itself route through this function for the
 /// builder-vm target: the image-set build runs *inside* a builder, so its
@@ -778,6 +779,52 @@ pub fn build_target_for_pair(
     cache: &LocalImageCache,
     prepare_builder: &mut dyn FnMut() -> Result<(), String>,
     run_job: &mut dyn FnMut(&crate::builder_vm::BuilderShellJob) -> Result<(), String>,
+) -> Result<PairBuild, LocalImageBuildError> {
+    build_target_for_pair_with(
+        checkout,
+        mvm_root,
+        target,
+        arch,
+        cache,
+        PairBuildHooks {
+            admit: &mut admit_pair_build,
+            prepare_builder,
+            run_job,
+        },
+    )
+}
+
+/// Admits the build of the named artifact, told the reason its cache entry was
+/// just evicted when one was.
+pub(super) type AdmitPairBuild<'a> = &'a mut dyn FnMut(&str, Option<&str>) -> Result<(), String>;
+
+/// The boundaries a pair build crosses once the cache has not answered:
+/// admitting the build to the user, readying the builder, and booting it.
+/// Injected so a test can drive a build with neither a terminal nor a VM.
+pub(super) struct PairBuildHooks<'a> {
+    pub(super) admit: AdmitPairBuild<'a>,
+    pub(super) prepare_builder: &'a mut dyn FnMut() -> Result<(), String>,
+    pub(super) run_job:
+        &'a mut dyn FnMut(&crate::builder_vm::BuilderShellJob) -> Result<(), String>,
+}
+
+/// A rebuild after an eviction says why, rather than showing the first-run
+/// notice, which would blame the checkout for the cache's fault.
+fn admit_pair_build(artifact: &str, evicted: Option<&str>) -> Result<(), String> {
+    match evicted {
+        Some(reason) => mvm_vmm::host::ui::admit_rebuild_after_eviction(artifact, reason),
+        None => mvm_vmm::host::ui::admit_cold_build(artifact),
+    }
+}
+
+/// [`build_target_for_pair`] over injected [`PairBuildHooks`].
+pub(super) fn build_target_for_pair_with(
+    checkout: &LocalImageCheckout,
+    mvm_root: &Path,
+    target: ImageBuildTarget,
+    arch: GuestArch,
+    cache: &LocalImageCache,
+    hooks: PairBuildHooks<'_>,
 ) -> Result<PairBuild, LocalImageBuildError> {
     let contract = contract_for(&target)?;
     let ctx = EntryContext {
@@ -799,7 +846,7 @@ pub fn build_target_for_pair(
     // A worktree-isolated home starts with an empty local-image cache; inherit
     // the default home's entries before deciding to build.
     seed_local_images_from_default_home(cache);
-    match cache
+    let evicted = match cache
         .lookup(&key, &ctx)
         .map_err(|error| LocalImageBuildError::Tool {
             what: "looking up the local image cache".to_string(),
@@ -812,17 +859,17 @@ pub fn build_target_for_pair(
                 built: false,
             });
         }
-        CacheLookup::Evicted { .. } | CacheLookup::Miss => {}
-    }
-
-    mvm_vmm::host::ui::admit_cold_build(&format!("the {target} image")).map_err(|detail| {
+        CacheLookup::Miss => None,
+        CacheLookup::Evicted { reason } => Some(reason),
+    };
+    (hooks.admit)(&format!("the {target} image"), evicted.as_deref()).map_err(|detail| {
         LocalImageBuildError::Tool {
             what: "cold local-image cache".to_string(),
             detail,
         }
     })?;
 
-    prepare_builder().map_err(|detail| LocalImageBuildError::Tool {
+    (hooks.prepare_builder)().map_err(|detail| LocalImageBuildError::Tool {
         what: "preparing the builder VM image".to_string(),
         detail,
     })?;
@@ -863,7 +910,7 @@ pub fn build_target_for_pair(
         script: render_build_script(&target, arch, contract),
         extra_disks: Vec::new(),
     };
-    run_job(&job).map_err(|detail| LocalImageBuildError::Tool {
+    (hooks.run_job)(&job).map_err(|detail| LocalImageBuildError::Tool {
         what: format!("running the builder shell job for {target}"),
         detail,
     })?;
