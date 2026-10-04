@@ -111,9 +111,8 @@ impl std::error::Error for CompileError {}
 /// Returns true when `out` should be written as a single deterministic
 /// `.tar.gz` rather than as a directory of individual
 /// files. Triggered by the `.tar.gz` suffix on the output path. The
-/// directory mode remains supported for in-tree consumers like
-/// `just real-mvm-check`, which calls `nix flake check` against a
-/// directory artifact.
+/// directory mode remains supported for in-tree consumers, including
+/// the runtime compile integration test that inspects the generated flake.
 pub fn is_archive_output(out: &Path) -> bool {
     let s = out.to_string_lossy().to_ascii_lowercase();
     s.ends_with(".tar.gz") || s.ends_with(".tgz")

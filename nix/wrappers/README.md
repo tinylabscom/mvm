@@ -96,15 +96,14 @@ Both wrappers enforce ADR-0009 §Decoder hardening:
 - reject non-finite floats (NaN, ±Infinity)
 - pinned to stdlib + a single audited msgpack library per language
 
-## Forbidden imports (CI lane)
+## Dynamic-code review
 
-Phase 1 of plan-0007 wires `just wrapper-forbidden-check` into `just ci`:
-the script greps wrapper templates for code-executing serializer
-formats and dynamic-execution surfaces (per-language list in
-[`scripts/wrapper_forbidden_tokens.json`](../../scripts/wrapper_forbidden_tokens.json),
-derived from ADR-0009 §Decision). Lines containing
-`# mvm-allow: <reason>` (Python) or `// mvm-allow: <reason>`
-(JS/TS) are exempt.
+The wrappers dispatch user modules, so changes to imports, decoding, or
+serialization require security review. They accept only the declared JSON
+and MessagePack formats; decoder limits are enforced in the wrappers. There
+is no dedicated forbidden-import recipe or exemption marker in the current
+CI surface. The workspace tests and `just ci` exercise the shipped behavior,
+but they do not replace review of a new dynamic-execution path.
 
 ## Threat model
 

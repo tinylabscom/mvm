@@ -2,9 +2,9 @@
 //!
 //! The output is written in RFC 8785 canonical form so that
 //! schema freshness checks are deterministic across toolchain versions and
-//! platforms. `just schema-gen` redirects this binary's stdout into
-//! `schema/workload-ir-v0.json`; `just schema-check` compares fresh output
-//! against the committed file.
+//! platforms. `cargo xtask gen-stubs` regenerates
+//! `schema/workload-ir-v0.json`; `cargo xtask check-stubs` compares fresh
+//! output against the committed file.
 
 use mvm_sdk::ir::{Workload, canonicalize};
 use schemars::schema_for;
