@@ -145,9 +145,12 @@ In order, the first that exists wins:
    SDK refuses rather than falling through. `mvmctl run --mode live` sets it
    to the library installed beside itself, so a script it runs drives the
    same build.
-2. Packaged with the SDK: `mvm/_native/` inside the Python package, `native/`
-   inside the npm package. Building wheels and npm packages that carry the
-   library is follow-up work (issue #3724); the loaders already look there.
+2. Packaged with the SDK: `mvm/_native/` inside the Python wheel; for npm,
+   `native/` under the package root and then the per-host platform package
+   (`@runmvm/mvm-<os>-<cpu>[-gnu|-musl]`) that `@runmvm/mvm` installs as an
+   optional dependency. Linux wheels and packages are built against glibc
+   2.17 (tagged `manylinux2014`) and against dynamic musl (`musllinux_1_2`),
+   for x86_64 and aarch64.
 3. The installed bundle: beside `mvmctl` on `PATH`, and beside the real file
    when `PATH` holds a symlink. The binary is located, never run; the release
    bundle ships the CLI and the library side by side.

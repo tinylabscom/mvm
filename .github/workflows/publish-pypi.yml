@@ -10,13 +10,44 @@ on:
 
 jobs:
   build:
-    # One wheel per platform: the wheel embeds the platform's host
-    # library, so its tag must match the machine that built it. The sdist
-    # is built once, on Linux.
+    # One wheel per platform: the wheel embeds that platform's host library,
+    # so its tag must say which hosts can load it. Each leg runs on a runner
+    # of its own architecture, so the library it builds is loaded by the
+    # same job before anything is uploaded.
+    #
+    # Linux wheels are repaired by auditwheel into the policy tag the
+    # library actually satisfies — PyPI refuses a plain `linux_<arch>` wheel.
+    # The gnu library is built against glibc 2.17, so it carries the
+    # manylinux2014 tag and is smoke-tested inside the manylinux2014 image,
+    # on glibc 2.17 itself; the musl one is smoke-tested on Alpine. Both run
+    # in a container rather than on the runner, whose newer glibc would load
+    # a library that the tag oversold.
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-14]
+        include:
+          - platform: linux-x64-gnu
+            runner: ubuntu-latest
+            policy: manylinux_2_17_x86_64
+            image: quay.io/pypa/manylinux2014_x86_64
+            python: /opt/python/cp312-cp312/bin/python3
+          - platform: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+            policy: manylinux_2_17_aarch64
+            image: quay.io/pypa/manylinux2014_aarch64
+            python: /opt/python/cp312-cp312/bin/python3
+          - platform: linux-x64-musl
+            runner: ubuntu-latest
+            policy: musllinux_1_2_x86_64
+            image: python:3.12-alpine
+            python: python3
+          - platform: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            policy: musllinux_1_2_aarch64
+            image: python:3.12-alpine
+            python: python3
+          - platform: darwin-arm64
+            runner: macos-14
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -58,60 +89,101 @@ jobs:
           )
           PY
 
-      - name: Build the in-process host library and embed it in the package
-        shell: bash
+      - name: Build the in-process host library
+        id: hostlib
+        uses: ./.github/actions/build-hostlib
+        with:
+          platform: ${{ matrix.platform }}
+
+      - name: Embed the host library in the package
+        env:
+          HOSTLIB: ${{ steps.hostlib.outputs.path }}
         run: |
           set -euo pipefail
-          HOSTLIB_EXT="so"
-          if [[ "${RUNNER_OS}" == "macOS" ]]; then
-            HOSTLIB_EXT="dylib"
-          fi
-          cargo build --release -p mvm-hostlib
-          SRC="$(find target/release -maxdepth 1 -name "libmvm_hostlib.${HOSTLIB_EXT}" -print -quit)"
-          test -n "${SRC}" || { echo "::error::libmvm_hostlib.${HOSTLIB_EXT} was not built" >&2; exit 1; }
           mkdir -p crates/mvm-sdk/sdks/python/mvm/_native
-          cp "${SRC}" crates/mvm-sdk/sdks/python/mvm/_native/
-          echo "embedded ${SRC}"
+          cp "${HOSTLIB}" crates/mvm-sdk/sdks/python/mvm/_native/
+          echo "embedded ${HOSTLIB}"
 
       - name: Build sdist + wheel
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          python -m pip install --upgrade build twine
+          set -euo pipefail
+          python -m pip install build==1.6.1 twine==7.0.0
           # The wheel is built from the tree, never from the sdist: the sdist
           # deliberately omits mvm/_native, so a wheel built from it carries
           # no host library and comes out universal. Plain `python -m build`
           # does exactly that, which is why the two are built separately.
-          python -m build --wheel crates/mvm-sdk/sdks/python --outdir dist
-          # One sdist, from Linux; every runner builds its own wheel.
+          #
+          # A Linux wheel lands in raw-dist/ tagged linux_<arch> and only
+          # reaches dist/ through the auditwheel repair below.
           if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            python -m build --wheel crates/mvm-sdk/sdks/python --outdir raw-dist
+          else
+            python -m build --wheel crates/mvm-sdk/sdks/python --outdir dist
+          fi
+          # One sdist, from one leg; every leg builds its own wheel.
+          if [[ "${PLATFORM}" == "linux-x64-gnu" ]]; then
             python -m build --sdist crates/mvm-sdk/sdks/python --outdir dist
+          fi
+
+      # auditwheel reads which libc symbols the library needs and refuses a
+      # policy it does not satisfy, then rewrites the tag; the repaired wheel
+      # is installed into a fresh venv in the same image and loaded. The
+      # image's own interpreter runs the tools, so nothing from the runner's
+      # newer userland is involved.
+      - name: Repair the wheel to ${{ matrix.policy }} and smoke it in ${{ matrix.image }}
+        if: ${{ runner.os == 'Linux' }}
+        env:
+          IMAGE: ${{ matrix.image }}
+          POLICY: ${{ matrix.policy }}
+          PY: ${{ matrix.python }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "${PWD}:/w" -w /w -e POLICY -e PY "${IMAGE}" sh -euc '
+            "${PY}" -m venv /tmp/tools
+            /tmp/tools/bin/pip install --quiet auditwheel==6.8.2 patchelf==0.19.1.0
+            /tmp/tools/bin/auditwheel show raw-dist/*.whl
+            /tmp/tools/bin/auditwheel repair --plat "${POLICY}" --wheel-dir dist raw-dist/*.whl
+            "${PY}" -m venv /tmp/smoke
+            /tmp/smoke/bin/pip install --quiet dist/*.whl
+            cd /
+            /tmp/smoke/bin/python /w/crates/mvm-sdk/sdks/python/scripts/smoke_installed.py
+          '
+          ls -la dist/
+
+      - name: Smoke the wheel in a fresh venv
+        if: ${{ runner.os == 'macOS' }}
+        run: |
+          set -euo pipefail
+          python -m venv "${RUNNER_TEMP}/smoke"
+          "${RUNNER_TEMP}/smoke/bin/pip" install --quiet dist/*.whl
+          cd "${RUNNER_TEMP}"
+          "${RUNNER_TEMP}/smoke/bin/python" "${GITHUB_WORKSPACE}/crates/mvm-sdk/sdks/python/scripts/smoke_installed.py"
+
+      - name: Check the distributions PyPI will receive
+        shell: bash
+        env:
+          POLICY: ${{ matrix.policy }}
+        run: |
+          set -euo pipefail
+          # Exactly one wheel per leg, and on Linux it must carry the policy
+          # tag: a `linux_<arch>` wheel here is one PyPI would reject.
+          wheels=(dist/*.whl)
+          [ "${#wheels[@]}" -eq 1 ] || { echo "::error::expected one wheel, got ${wheels[*]}" >&2; exit 1; }
+          if [[ "${RUNNER_OS}" == "Linux" ]] && [[ "${wheels[0]}" != *"${POLICY}"* ]]; then
+            echo "::error::${wheels[0]} is not tagged ${POLICY}" >&2
+            exit 1
           fi
           python -m twine check dist/*
 
-      - name: Smoke install built wheel
-        shell: bash
-        run: |
-          python -m venv .venv-smoke
-          . .venv-smoke/bin/activate
-          python -m pip install --upgrade pip
-          python -m pip install dist/*.whl
-          python - <<'PY'
-          import pathlib
-          import mvm
-          assert mvm.__name__ == "mvm"
-          # The wheel must carry the host library: a platform wheel that
-          # installed without it would leave the SDK without its transport.
-          native = pathlib.Path(mvm.__file__).parent / "_native"
-          libs = [p for p in native.iterdir() if p.name.startswith("libmvm_hostlib")]
-          assert libs, f"wheel installed without a host library in {native}"
-          print("smoke install passed; packaged library:", libs[0].name)
-          PY
-
-      # One artifact per runner: two matrix legs uploading the same name
+      # One artifact per leg: two matrix legs uploading the same name
       # collide, and the second upload fails.
       - name: Upload built artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: pypi-dist-${{ matrix.runner }}
+          name: pypi-dist-${{ matrix.platform }}
           path: dist/*
           retention-days: 1
 

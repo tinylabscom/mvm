@@ -13,13 +13,25 @@ on:
 
 jobs:
   hostlib:
-    # The package's native/ directory carries the host library for every
-    # supported platform file name, and the loader picks by platform — so
-    # each runner builds its own library and the pack job assembles them.
+    # `@runmvm/mvm` is platform-neutral; each host's library ships in its
+    # own package (`@runmvm/mvm-<key>`, the table in src/_platform.ts), which
+    # npm installs as an optional dependency only on a matching os, cpu and
+    # libc. Each library is built on a runner of its own architecture; see
+    # the build-hostlib action for the libc each Linux key targets.
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest, macos-14]
+        include:
+          - platform: darwin-arm64
+            runner: macos-14
+          - platform: linux-x64-gnu
+            runner: ubuntu-latest
+          - platform: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+          - platform: linux-x64-musl
+            runner: ubuntu-latest
+          - platform: linux-arm64-musl
+            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -29,23 +41,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Build the in-process host library for this platform
-        shell: bash
-        run: |
-          set -euo pipefail
-          HOSTLIB_EXT="so"
-          if [[ "${RUNNER_OS}" == "macOS" ]]; then
-            HOSTLIB_EXT="dylib"
-          fi
-          cargo build --release -p mvm-hostlib
-          SRC="$(find target/release -maxdepth 1 -name "libmvm_hostlib.${HOSTLIB_EXT}" -print -quit)"
-          test -n "${SRC}" || { echo "::error::libmvm_hostlib.${HOSTLIB_EXT} was not built" >&2; exit 1; }
-          echo "built ${SRC}"
+        uses: ./.github/actions/build-hostlib
+        with:
+          platform: ${{ matrix.platform }}
 
+      # The artifact keeps the `<platform>/` directory, so the build job can
+      # download every leg into one tree without the five same-named files
+      # overwriting each other.
       - name: Upload the platform library
         uses: actions/upload-artifact@v7
         with:
-          name: hostlib-${{ matrix.runner }}
-          path: target/release/libmvm_hostlib.*
+          name: hostlib-${{ matrix.platform }}
+          path: hostlib-out/
           retention-days: 1
 
   build:
@@ -108,66 +115,123 @@ jobs:
           path: crates/mvm-sdk/sdks/typescript/native-downloads
           merge-multiple: true
 
-      - name: Place the libraries in native/ and verify both platforms
-        run: |
-          set -euo pipefail
-          mkdir -p native
-          cp native-downloads/libmvm_hostlib.* native/
-          test -f native/libmvm_hostlib.so || { echo "::error::the Linux host library is missing" >&2; exit 1; }
-          test -f native/libmvm_hostlib.dylib || { echo "::error::the macOS host library is missing" >&2; exit 1; }
-          ls -la native/
-
       - name: Install + build
         run: |
           npm ci
           npm run build
 
-      - name: Pack npm artifact
-        # native/ was assembled from both platform artifacts above; npm
-        # pack fails closed here if a library is missing because the
-        # place step already refused to continue without both.
+      # Packs one package per platform from the downloaded libraries —
+      # refusing if any platform's library is missing — and writes the
+      # matching optionalDependencies into package.json before the main
+      # package is packed. Not into dist/: that is the compiled output the
+      # main package ships, and tarballs left there would ship inside it.
+      - name: Pack the platform packages and the main package
         run: |
-          mkdir -p dist
-          npm pack --pack-destination dist
+          set -euo pipefail
+          mkdir -p packed
+          node scripts/pack-platform-packages.mjs --libs native-downloads --out packed
+          npm pack --pack-destination packed
+          ls -la packed/
 
-      - name: Smoke install packed artifact
+      - name: Check the main package is platform-neutral
         run: |
-          TARBALL="$(find "$PWD/dist" -maxdepth 1 -name '*.tgz' -print -quit)"
-          test -n "$TARBALL"
-          TMPDIR="$(mktemp -d)"
-          cd "$TMPDIR"
-          npm init -y >/dev/null 2>&1
-          npm install "$TARBALL" >/dev/null
-          node --input-type=module - <<'EOF'
-          import { existsSync } from "node:fs";
-          import { fileURLToPath } from "node:url";
-          import path from "node:path";
-          import { Sandbox } from "@runmvm/mvm";
-          if (typeof Sandbox?.create !== "function") {
-            throw new Error("packed SDK did not expose Sandbox.create");
-          }
-          // The packed package must carry this platform's host library.
-          // `exports` publishes only the entry point, so the package root is
-          // found from it (dist/index.js) rather than from package.json.
-          const entry = fileURLToPath(import.meta.resolve("@runmvm/mvm"));
-          const pkgRoot = path.dirname(path.dirname(entry));
-          const libName = process.platform === "darwin" ? "libmvm_hostlib.dylib" : "libmvm_hostlib.so";
-          const libPath = path.join(pkgRoot, "native", libName);
-          if (!existsSync(libPath)) {
-            throw new Error(`packed SDK is missing ${libPath}`);
-          }
-          EOF
+          set -euo pipefail
+          VERSION="$(node -p 'require("./package.json").version')"
+          MAIN="packed/runmvm-mvm-${VERSION}.tgz"
+          if tar tzf "${MAIN}" | grep -E '^package/native/|libmvm_hostlib' ; then
+            echo "::error::${MAIN} carries a host library; it belongs in the platform packages" >&2
+            exit 1
+          fi
+          # shellcheck disable=SC2016
+          tar xzf "${MAIN}" -O package/package.json \
+            | node -e '
+              const pkg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+              const deps = Object.keys(pkg.optionalDependencies ?? {});
+              if (deps.length !== 5) throw new Error(`expected 5 platform packages, got ${deps}`);
+              for (const d of deps) {
+                if (pkg.optionalDependencies[d] !== pkg.version) throw new Error(`${d} is not pinned to ${pkg.version}`);
+              }
+              console.log(deps.join("\n"));
+            '
 
-      - name: Upload packed artifact
+      - name: Upload packed artifacts
         uses: actions/upload-artifact@v7
         with:
           name: npm-dist
-          path: crates/mvm-sdk/sdks/typescript/dist/*.tgz
+          path: crates/mvm-sdk/sdks/typescript/packed/*.tgz
           retention-days: 1
+
+  smoke:
+    # Install the packed main package with this host's platform package
+    # into an empty project and load the library through the SDK. The other
+    # platforms' optional dependencies are skipped by npm — on os/cpu/libc,
+    # and before a release also because they are not on the registry yet.
+    # The musl legs run in Alpine, where Node itself is a musl build.
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin-arm64
+            runner: macos-14
+          - platform: linux-x64-gnu
+            runner: ubuntu-latest
+          - platform: linux-arm64-gnu
+            runner: ubuntu-24.04-arm
+          - platform: linux-x64-musl
+            runner: ubuntu-latest
+            image: node:22-alpine
+          - platform: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            image: node:22-alpine
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Download packed artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: npm-dist
+          path: npm-dist
+
+      - name: Install and load on ${{ matrix.platform }}
+        env:
+          KEY: ${{ matrix.platform }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          # One script for both cases; DIST, SMOKE and APP say where things
+          # are on whichever side of the container boundary it runs.
+          # shellcheck disable=SC2016
+          smoke='
+            main="$(ls "${DIST}"/runmvm-mvm-[0-9]*.tgz)"
+            platform="$(ls "${DIST}/runmvm-mvm-${KEY}"-[0-9]*.tgz)"
+            mkdir -p "${APP}"
+            cd "${APP}"
+            npm init -y >/dev/null
+            npm install --no-audit --no-fund "${main}" "${platform}"
+            cp "${SMOKE}" ./smoke-installed.mjs
+            node smoke-installed.mjs "${KEY}"
+          '
+          script="crates/mvm-sdk/sdks/typescript/scripts/smoke-installed.mjs"
+          if [ -n "${IMAGE}" ]; then
+            docker run --rm -e KEY -e DIST=/dist -e SMOKE=/smoke.mjs -e APP=/tmp/app \
+              -v "${PWD}/npm-dist:/dist:ro" -v "${PWD}/${script}:/smoke.mjs:ro" \
+              "${IMAGE}" sh -euc "${smoke}"
+          else
+            DIST="${PWD}/npm-dist" SMOKE="${PWD}/${script}" APP="${RUNNER_TEMP}/app" \
+              sh -euc "${smoke}"
+          fi
 
   publish:
     if: ${{ !inputs.dry_run }}
-    needs: build
+    needs: [build, smoke]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -187,13 +251,34 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Download packed artifact
+      - name: Download packed artifacts
         uses: actions/download-artifact@v8
         with:
           name: npm-dist
           path: dist
 
+      # Platform packages first: the main package names them as optional
+      # dependencies, and an install that resolves the main package before
+      # they exist silently gets no library. A version already on the
+      # registry is skipped, so a rerun after a partial publish finishes the
+      # set instead of failing on the first package it already uploaded.
       - name: Publish to npm
-        run: npm publish dist/*.tgz --provenance --access public
+        run: |
+          set -euo pipefail
+          publish() {
+            local tarball="$1" spec
+            # shellcheck disable=SC2016
+            spec="$(tar xzf "${tarball}" -O package/package.json | node -p 'const p = JSON.parse(require("fs").readFileSync(0, "utf8")); `${p.name}@${p.version}`')"
+            if npm view "${spec}" version >/dev/null 2>&1; then
+              echo "${spec} is already published; skipping"
+              return
+            fi
+            npm publish "${tarball}" --provenance --access public
+          }
+          main="$(ls dist/runmvm-mvm-[0-9]*.tgz)"
+          for tarball in dist/*.tgz; do
+            [ "${tarball}" = "${main}" ] || publish "${tarball}"
+          done
+          publish "${main}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

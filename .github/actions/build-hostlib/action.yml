@@ -1,0 +1,98 @@
+name: Build libmvm_hostlib for one SDK platform
+description: |
+  Build the in-process SDK host library for one platform key — the keys the
+  TypeScript SDK's platform-package table defines (darwin-arm64,
+  linux-{x64,arm64}-{gnu,musl}) — and copy it to `hostlib-out/<platform>/`.
+
+  The build runs on a runner of the platform's own architecture, so the job
+  that built the library can also load it. On Linux the libc the library
+  needs is chosen here rather than inherited from the runner, because the
+  package tag claims it:
+
+  - gnu: cargo-zigbuild against glibc 2.17, the manylinux2014 floor. A
+    native build on the runner would require the runner's glibc and could
+    only honestly be tagged for that.
+  - musl: a musl cdylib linked against the dynamic musl libc
+    (`-crt-static`), which is what a musllinux interpreter can dlopen. The
+    default static musl target builds no cdylib at all.
+
+inputs:
+  platform:
+    description: SDK platform key
+    required: true
+
+outputs:
+  path:
+    description: Path of the built library
+    value: ${{ steps.build.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install zig + cargo-zigbuild
+      if: ${{ startsWith(inputs.platform, 'linux-') }}
+      uses: ./.github/actions/install-zigbuild
+
+    - name: Build the host library
+      id: build
+      shell: bash
+      env:
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        case "${PLATFORM}" in
+          darwin-arm64)     arch=aarch64; target="";                         ext=dylib ;;
+          linux-x64-gnu)    arch=x86_64;  target=x86_64-unknown-linux-gnu;   ext=so ;;
+          linux-arm64-gnu)  arch=aarch64; target=aarch64-unknown-linux-gnu;  ext=so ;;
+          linux-x64-musl)   arch=x86_64;  target=x86_64-unknown-linux-musl;  ext=so ;;
+          linux-arm64-musl) arch=aarch64; target=aarch64-unknown-linux-musl; ext=so ;;
+          *) echo "::error::unknown SDK platform ${PLATFORM}" >&2; exit 1 ;;
+        esac
+        host_arch="$(uname -m)"
+        [ "${host_arch}" = arm64 ] && host_arch=aarch64
+        if [ "${host_arch}" != "${arch}" ]; then
+          echo "::error::${PLATFORM} must build on an ${arch} runner, not ${host_arch}: the job loads what it built" >&2
+          exit 1
+        fi
+
+        case "${target}" in
+          "")
+            cargo build --release -p mvm-hostlib
+            src="target/release/libmvm_hostlib.${ext}"
+            ;;
+          *-gnu)
+            cargo zigbuild --release --target "${target}.2.17" -p mvm-hostlib
+            src="target/${target}/release/libmvm_hostlib.${ext}"
+            ;;
+          *-musl)
+            var="CARGO_TARGET_$(echo "${target}" | tr 'a-z-' 'A-Z_')_RUSTFLAGS"
+            export "${var}=-C target-feature=-crt-static"
+            cargo zigbuild --release --target "${target}" -p mvm-hostlib
+            src="target/${target}/release/libmvm_hostlib.${ext}"
+            ;;
+        esac
+        if [ ! -f "${src}" ]; then
+          echo "::error::${src} was not built" >&2
+          exit 1
+        fi
+
+        # The npm platform packages have no auditwheel to hold the glibc
+        # floor, so it is held here: a symbol newer than 2.17 would make the
+        # gnu library refuse to load on a host the package claims to support.
+        if [[ "${target}" == *-linux-* ]]; then
+          readelf -d "${src}" | grep NEEDED
+        fi
+        if [[ "${target}" == *-gnu ]]; then
+          newest="$(objdump -T "${src}" | grep -o 'GLIBC_[0-9][0-9.]*' | sed 's/^GLIBC_//' | sort -uV | tail -1)"
+          echo "newest glibc symbol version required: ${newest}"
+          if [ "$(printf '%s\n' "${newest}" 2.17 | sort -V | tail -1)" != 2.17 ]; then
+            echo "::error::${src} needs glibc ${newest}, above the 2.17 floor it is built for" >&2
+            exit 1
+          fi
+        fi
+
+        out="hostlib-out/${PLATFORM}"
+        mkdir -p "${out}"
+        cp "${src}" "${out}/"
+        echo "path=${out}/libmvm_hostlib.${ext}" >> "${GITHUB_OUTPUT}"
+        echo "built ${src} for ${PLATFORM}"

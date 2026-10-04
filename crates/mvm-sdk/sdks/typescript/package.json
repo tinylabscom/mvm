@@ -16,8 +16,7 @@
   },
   "files": [
     "dist",
-    "src",
-    "native"
+    "src"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
