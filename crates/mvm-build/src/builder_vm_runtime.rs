@@ -375,6 +375,11 @@ const WORKSPACE_SNAPSHOT_SKIP: &[&str] = &[
     ".playwright-mcp",
     "keys",
     "result",
+    "__pycache__",
+    ".venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
 ];
 
 /// Stage an allowlisted, filtered copy of the mvm workspace into `mvm_src`:
