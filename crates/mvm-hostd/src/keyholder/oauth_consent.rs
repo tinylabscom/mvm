@@ -18,6 +18,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use mvm_core::crypto::constant_time::constant_time_eq;
 use mvm_core::crypto::secret_binding::OAuthBindingMeta;
 use sha2::{Digest, Sha256};
 
@@ -182,7 +183,10 @@ impl ConsentRequest {
             }
         }
         let state = state.ok_or(RedirectRefusal::MissingState)?;
-        if state != self.state {
+        // Constant time: a local process can send the listener as many guesses
+        // as it likes, so a comparison that stopped at the first wrong byte
+        // would tell it how much of the state it had right.
+        if !constant_time_eq(state.as_bytes(), self.state.as_bytes()) {
             return Err(RedirectRefusal::StateMismatch);
         }
         if let Some(error) = error {

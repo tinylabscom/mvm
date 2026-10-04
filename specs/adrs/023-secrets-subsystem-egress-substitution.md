@@ -185,8 +185,13 @@ login` runs the authorization-code grant on the host as a native public client
 - The redirect comes back to a listener bound to `127.0.0.1` on a
   kernel-chosen port, named by the IPv4 literal rather than `localhost`.
 - The authorization request carries a PKCE S256 challenge (RFC 7636) and a
-  fresh random `state`. A callback whose `state` is not this login's ends the
-  login with nothing exchanged, whatever else it carries.
+  fresh random `state`, compared in constant time. A callback whose `state`
+  is missing or not this login's is answered 400 and ignored, whatever else it
+  carries, and the login keeps waiting: the port is reachable by any local
+  process or browser page, so letting such a callback end the login would let
+  anyone on the host cancel it. Request heads are read concurrently with a
+  short per-connection timeout, so a stalled connection cannot delay the real
+  callback.
 - The code is redeemed at the binding's `https` token endpoint with the
   verifier, through the same exchange code the refresher uses. A confidential
   client authenticates with its stored client secret; a public client names

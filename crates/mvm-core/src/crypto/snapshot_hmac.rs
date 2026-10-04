@@ -35,6 +35,8 @@ use secrecy::SecretBox;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
+use super::constant_time::constant_time_eq;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Length of the host-local snapshot HMAC key, in bytes. 32 bytes =
@@ -557,21 +559,6 @@ fn nibble_from(b: u8) -> Option<u8> {
     }
 }
 
-/// Constant-time byte comparison. Avoids leaking match-prefix length
-/// via timing — more thorough HMAC libraries do this internally, but
-/// when comparing the stored tag against a recomputed one we go
-/// through the bytes ourselves.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -930,13 +917,5 @@ mod tests {
         store.next().unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
-    }
-
-    #[test]
-    fn test_constant_time_eq_basics() {
-        assert!(constant_time_eq(b"abc", b"abc"));
-        assert!(!constant_time_eq(b"abc", b"abd"));
-        assert!(!constant_time_eq(b"abc", b"ab"));
-        assert!(constant_time_eq(b"", b""));
     }
 }

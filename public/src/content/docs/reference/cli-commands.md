@@ -329,8 +329,9 @@ For an API a person signs in to, the consent happens in a browser on the host.
 authorization-code grant with PKCE (S256): it listens on `127.0.0.1` on a port
 the kernel picks, prints the authorization URL and opens it in the desktop
 browser, and accepts the redirect to `http://127.0.0.1:<port>/callback` only if
-its `state` matches the one this login sent — any other callback ends the login
-with nothing exchanged. The code is redeemed at the token endpoint with the
+its `state` matches the one this login sent. A callback with a missing or
+different `state` is answered with an error and ignored, and the login keeps
+waiting, so another process on the host cannot cancel it. The code is redeemed at the token endpoint with the
 PKCE verifier, and the resulting token set replaces the stored value. Register
 `http://127.0.0.1/callback` as the client's redirect URI. Without
 `--oauth-client-secret` the client is public and identifies itself with its

@@ -384,6 +384,16 @@ impl From<mvm_http::Client> for TokenEndpointClient {
     }
 }
 
+/// The client id and secret as RFC 6749 §2.3.1 sends them in HTTP Basic:
+/// each form-urlencoded before the pair is joined and base64-encoded, so a
+/// `:` in the id cannot shift the split and `+`, `%`, spaces or non-ASCII in
+/// the secret reach the server as the server decodes them.
+fn basic_client_credential(client_id: &str, client_secret: &str) -> (String, String) {
+    let encode =
+        |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
+    (encode(client_id), encode(client_secret))
+}
+
 /// POST one grant to the binding's token endpoint and parse the token set out
 /// of the response. Any failure — a destination the client's check refuses,
 /// unreachable endpoint, non-success status, unparseable body, no access
@@ -403,7 +413,8 @@ async fn post_grant(
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/json");
     if let Some(client_secret) = client_secret {
-        request = request.basic_auth(&meta.client_id, Some(client_secret));
+        let (user, password) = basic_client_credential(&meta.client_id, client_secret);
+        request = request.basic_auth(user, Some(password));
     }
     let response = request
         .body(body.into_bytes())
@@ -1616,6 +1627,61 @@ mod tests {
             "a permission error from somewhere else",
         ));
         assert!(!is_policy_denial(&err));
+    }
+
+    #[test]
+    fn the_basic_client_credential_is_form_urlencoded_first() {
+        let (user, password) = basic_client_credential("id:with:colon", "a+b%c:d é");
+        assert_eq!(user, "id%3Awith%3Acolon");
+        assert_eq!(password, "a%2Bb%25c%3Ad+%C3%A9");
+        // Unreserved characters pass through, so plain credentials are unchanged.
+        let (user, password) = basic_client_credential("public-client-id", "the-client-secret");
+        assert_eq!(user, "public-client-id");
+        assert_eq!(password, "the-client-secret");
+    }
+
+    #[tokio::test]
+    async fn a_client_credential_with_reserved_characters_reaches_the_server_decodable() {
+        use base64::Engine as _;
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(
+            &consented_expiring_set("first-refresh-token", Some("a+b%c:d é")),
+            &token_url,
+        );
+        let mut meta = oauth_meta(&token_url);
+        meta.client_id = "id:with:colon".into();
+        refresh_once(
+            &resolver_over(&fixture),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
+            "oauth-secret",
+            &meta,
+        )
+        .await
+        .unwrap();
+        let requests = recorded.lock().unwrap_or_else(|error| error.into_inner());
+        let header = requests[0].authorization.as_deref().unwrap();
+        let encoded = header.strip_prefix("Basic ").unwrap();
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        // One unencoded `:` separates the pair, as RFC 6749 §2.3.1 requires.
+        assert_eq!(decoded, "id%3Awith%3Acolon:a%2Bb%25c%3Ad+%C3%A9");
+        let (user, password) = decoded.split_once(':').unwrap();
+        let decode = |value: &str| {
+            url::form_urlencoded::parse(format!("v={value}").as_bytes())
+                .next()
+                .unwrap()
+                .1
+                .into_owned()
+        };
+        assert_eq!(decode(user), "id:with:colon");
+        assert_eq!(decode(password), "a+b%c:d é");
     }
 
     // -- the refresh-token grant ---------------------------------------------

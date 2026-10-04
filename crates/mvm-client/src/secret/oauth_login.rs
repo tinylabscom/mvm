@@ -34,9 +34,14 @@ pub const DEFAULT_CONSENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// GET line plus browser headers; anything larger is not one.
 const MAX_REQUEST_HEAD_BYTES: usize = 16 * 1024;
 
-/// How long one connection may take to send its request head, so a client
-/// that connects and stalls cannot hold the listener for the whole login.
-const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long one connection may take to send its request head before it is
+/// dropped. Heads are read concurrently, so this bounds what a stalled client
+/// costs, not how long the real callback waits.
+const REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Connections whose request head is still being read. Past this, a new
+/// connection is closed at once, so a flood cannot grow without bound.
+const MAX_PENDING_CONNECTIONS: usize = 64;
 
 /// Settings for one login. Defaults: a five-minute wait and a plain HTTP
 /// client with no destination check — the operator is on the host, choosing
@@ -98,54 +103,96 @@ impl LoopbackRedirect {
             .context("reading the loopback redirect listener's address")
     }
 
-    /// Serve the listener until the login's callback arrives. A request for
-    /// any other path is answered 404 and the wait goes on; the callback ends
-    /// it, with the code or with the reason it was refused.
+    /// Serve the listener until this login's callback arrives.
+    ///
+    /// The port is on loopback but not private: any local process, or a page
+    /// open in the browser, can reach it. So nothing that fails to prove it
+    /// belongs to this login ends the wait. A request for another path is
+    /// answered 404, and a callback with a missing or wrong `state` is
+    /// answered 400; the wait goes on after both. Only a callback carrying
+    /// this login's `state` ends it, with the code or with the authorization
+    /// server's refusal.
+    ///
+    /// Each connection's request head is read on its own task, so a client
+    /// that connects and stalls cannot keep the real callback waiting behind
+    /// it.
     pub(crate) async fn receive_code(
         &self,
         consent: &ConsentRequest,
     ) -> anyhow::Result<OAuthSecretString> {
+        let mut pending = tokio::task::JoinSet::new();
         loop {
-            let (mut stream, _) = self
-                .listener
-                .accept()
-                .await
-                .context("accepting on the loopback redirect listener")?;
-            let target =
-                match tokio::time::timeout(REQUEST_READ_TIMEOUT, read_request_target(&mut stream))
-                    .await
-                {
-                    Ok(Ok(Some(target))) => target,
-                    // A malformed, stalled or non-GET request is not the
-                    // callback; drop it and keep waiting.
-                    Ok(Ok(None) | Err(_)) | Err(_) => {
-                        respond(&mut stream, "400 Bad Request", "Not an OAuth callback.").await;
+            tokio::select! {
+                accepted = self.listener.accept() => {
+                    let (mut stream, _) =
+                        accepted.context("accepting on the loopback redirect listener")?;
+                    if pending.len() >= MAX_PENDING_CONNECTIONS {
+                        // Dropping the stream closes it; the browser's own
+                        // request is retried by the browser, a flood is not.
                         continue;
                     }
-                };
-            match consent.accept_redirect(&target) {
-                Ok(code) => {
-                    respond(
-                        &mut stream,
-                        "200 OK",
-                        "Consent received. You can close this window and return to the terminal.",
-                    )
-                    .await;
-                    return Ok(code);
+                    pending.spawn(async move {
+                        let target = tokio::time::timeout(
+                            REQUEST_READ_TIMEOUT,
+                            read_request_target(&mut stream),
+                        )
+                        .await;
+                        (stream, target)
+                    });
                 }
-                Err(RedirectRefusal::NotTheCallback) => {
-                    respond(&mut stream, "404 Not Found", "Not found.").await;
-                }
-                Err(refusal) => {
-                    respond(
-                        &mut stream,
-                        "400 Bad Request",
-                        "This sign-in was not completed. Return to the terminal for details.",
-                    )
-                    .await;
-                    return Err(refusal.into());
+                Some(read) = pending.join_next() => {
+                    let Ok((mut stream, target)) = read else {
+                        continue;
+                    };
+                    let Ok(Ok(Some(target))) = target else {
+                        // A malformed, stalled or non-GET request is not the
+                        // callback.
+                        respond(&mut stream, "400 Bad Request", "Not an OAuth callback.").await;
+                        continue;
+                    };
+                    if let Some(outcome) = judge_callback(consent, &mut stream, &target).await {
+                        return outcome;
+                    }
                 }
             }
+        }
+    }
+}
+
+/// Answer one request that reached the listener, and return the login's
+/// outcome when the request ends it.
+async fn judge_callback(
+    consent: &ConsentRequest,
+    stream: &mut TcpStream,
+    target: &str,
+) -> Option<anyhow::Result<OAuthSecretString>> {
+    match consent.accept_redirect(target) {
+        Ok(code) => {
+            respond(
+                stream,
+                "200 OK",
+                "Consent received. You can close this window and return to the terminal.",
+            )
+            .await;
+            Some(Ok(code))
+        }
+        Err(RedirectRefusal::NotTheCallback) => {
+            respond(stream, "404 Not Found", "Not found.").await;
+            None
+        }
+        Err(refusal @ (RedirectRefusal::MissingState | RedirectRefusal::StateMismatch)) => {
+            tracing::warn!(%refusal, "ignored a callback that does not belong to this login");
+            respond(stream, "400 Bad Request", "Not this sign-in's callback.").await;
+            None
+        }
+        Err(refusal @ (RedirectRefusal::Denied(_) | RedirectRefusal::MissingCode)) => {
+            respond(
+                stream,
+                "400 Bad Request",
+                "This sign-in was not completed. Return to the terminal for details.",
+            )
+            .await;
+            Some(Err(refusal.into()))
         }
     }
 }
@@ -409,26 +456,85 @@ mod tests {
         );
     }
 
+    /// One GET to the loopback listener; returns the whole response.
+    fn http_get(port: u16, target: &str) -> String {
+        let mut stream = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+        write!(stream, "GET {target} HTTP/1.1\r\nhost: 127.0.0.1\r\n\r\n").unwrap();
+        let mut response = String::new();
+        let _ = stream.read_to_string(&mut response);
+        response
+    }
+
     #[tokio::test]
-    async fn a_callback_with_another_state_is_refused_and_nothing_is_exchanged() {
-        let (token_url, seen) =
-            mock_token_endpoint("200 OK", r#"{"access_token":"a","expires_in":3600}"#);
-        let err = run_consent(
+    async fn a_forged_callback_is_refused_without_ending_the_wait() {
+        let (token_url, seen) = mock_token_endpoint(
+            "200 OK",
+            r#"{"access_token":"a","refresh_token":"r","expires_in":3600}"#,
+        );
+        let forged_responses = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&forged_responses);
+        let present = move |authorization_url: &str| {
+            let redirect =
+                mvm_http::Url::parse(&query_param(authorization_url, "redirect_uri")).unwrap();
+            let port = redirect.port().unwrap();
+            let state = query_param(authorization_url, "state");
+            let recorded = Arc::clone(&recorded);
+            std::thread::spawn(move || {
+                // Anything on this host can reach the port: a wrong state and
+                // a missing one are both answered and ignored...
+                for forged in [
+                    "/callback?code=forged-code&state=forged".to_owned(),
+                    "/callback?code=forged-code".to_owned(),
+                    "/callback?error=access_denied&state=forged".to_owned(),
+                ] {
+                    recorded.lock().unwrap().push(http_get(port, &forged));
+                }
+                // ...and the real callback still lands afterwards.
+                http_get(port, &format!("/callback?code=the-code&state={state}"));
+            });
+        };
+        let set = run_consent(
             &meta(&token_url),
             None,
             &OAuthLoginOptions::default().with_timeout(Duration::from_secs(10)),
-            &browser("code=the-code&state=forged"),
+            &present,
         )
         .await
-        .unwrap_err();
-        assert!(
-            matches!(
-                err.downcast_ref::<RedirectRefusal>(),
-                Some(RedirectRefusal::StateMismatch)
-            ),
-            "{err:#}"
-        );
-        assert!(seen.lock().unwrap().body.is_empty());
+        .unwrap();
+        assert_eq!(set.access_token.expose_secret(), "a");
+        let forged = forged_responses.lock().unwrap();
+        assert_eq!(forged.len(), 3);
+        for response in forged.iter() {
+            assert!(response.starts_with("HTTP/1.1 400"), "{response}");
+        }
+        // Only the real code was redeemed.
+        let body = seen.lock().unwrap().body.clone();
+        assert!(body.contains("code=the-code"), "{body}");
+        assert!(!body.contains("forged-code"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn a_stalled_connection_does_not_hold_up_the_real_callback() {
+        let redirect = LoopbackRedirect::bind().await.unwrap();
+        let port = redirect.local_addr().unwrap().port();
+        let consent = ConsentRequest::new(&meta("https://auth.example.com/token"), port).unwrap();
+        let state = query_param(consent.authorization_url(), "state");
+        let client = std::thread::spawn(move || {
+            // Connects first and never sends a byte.
+            let stalled = std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).unwrap();
+            let response = http_get(port, &format!("/callback?code=c&state={state}"));
+            drop(stalled);
+            response
+        });
+        // Well inside the per-connection read timeout: a listener that read
+        // heads one at a time would still be waiting on the stalled client.
+        let wait = REQUEST_READ_TIMEOUT / 2;
+        let code = tokio::time::timeout(wait, redirect.receive_code(&consent))
+            .await
+            .expect("the real callback must not queue behind a stalled connection")
+            .unwrap();
+        assert_eq!(code.expose_secret(), "c");
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 200"));
     }
 
     #[tokio::test]
