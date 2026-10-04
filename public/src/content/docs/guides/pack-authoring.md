@@ -61,9 +61,9 @@ allow = [
 ]
 ```
 
-A group pack is used by including it, in a profile's `[groups] include` or a
-project's `[policy] include`. It is not a profile: `--policy runtime/node` is
-refused, because the pack declares no `pack/profile.toml`.
+A group pack is used by including it in a profile's `[groups] include` or a
+project's `[policy] include`; `--policy runtime/node` also selects it directly
+as the root policy. It does not need a `pack/profile.toml` for that use.
 
 ## A profile pack
 

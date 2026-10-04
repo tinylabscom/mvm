@@ -195,11 +195,9 @@ test("pack authoring guide matches the registry layout and trust model", () => {
   assert.match(guide, /\$MVM_HOME\/registry\/packs\.lock\.toml/);
   assert.match(guide, /A published version is immutable/);
   assert.match(guide, /It cannot import local policy/);
-  assert.match(guide, /does not resolve the packs a profile includes/);
-  // A group-only pack is not a profile; the policy guide used to show one
-  // passed to `--policy`, which the client refuses.
-  assert.match(guide, /`--policy runtime\/node` is\s+refused/);
-  assert.doesNotMatch(policy, /--policy runtime\//);
+  assert.match(guide, /follows signed profile dependencies/);
+  assert.match(guide, /`--policy runtime\/node` also selects it directly/);
+  assert.match(policy, /each entry is a profile or a\s+group/);
 });
 
 test("every agent-sandbox capability links to a concrete feature page", () => {
