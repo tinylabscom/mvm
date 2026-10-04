@@ -299,6 +299,51 @@ fn a_relative_share_resolves_against_its_file_and_a_relative_guest_is_refused() 
     assert_eq!(err.key.as_deref(), Some("shares.mount.guest"));
 }
 
+#[test]
+fn a_pack_cannot_add_or_modify_a_host_share() {
+    let resolved = merged(&[
+        user(
+            "owner",
+            "[[shares.mount]]\nhost = \"/work\"\nguest = \"/work\"\nwritable = true\n",
+        ),
+        layer(
+            "signed-pack",
+            LayerOrigin::Pack,
+            "[[shares.mount]]\nhost = \"/work\"\nguest = \"/work\"\n\
+             [[shares.mount]]\nhost = \"/private\"\nguest = \"/private\"\nwritable = true\n",
+        ),
+    ]);
+    assert_eq!(resolved.policy.shares.mount.len(), 1);
+    assert_eq!(resolved.policy.shares.mount[0].host, "/work");
+    assert!(resolved.policy.shares.mount[0].writable);
+    assert_eq!(resolved.provenance["shares.mount./work"], "owner");
+    assert!(resolved.notes.iter().any(|note| {
+        note.contains("signed-pack") && note.contains("shares.mount") && note.contains("ignored")
+    }));
+}
+
+#[test]
+fn a_pack_share_deny_can_still_narrow_a_user_share() {
+    let resolved = merged(&[
+        user(
+            "owner",
+            "[[shares.mount]]\nhost = \"/private\"\nguest = \"/private\"\n",
+        ),
+        layer(
+            "signed-pack",
+            LayerOrigin::Pack,
+            "[shares]\ndeny = [\"/private\"]\n",
+        ),
+    ]);
+    assert!(resolved.policy.shares.mount.is_empty());
+    assert!(
+        resolved
+            .notes
+            .iter()
+            .any(|note| note.contains("share /private") && note.contains("signed-pack"))
+    );
+}
+
 // ---- env and the escape hatch ---------------------------------------------
 
 #[test]

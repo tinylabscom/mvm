@@ -184,7 +184,7 @@ These are the security contract of composition:
 
 | Rule | Effect |
 | --- | --- |
-| Allows are unioned | Hosts, secrets, shares, env names and tools from every layer add up. |
+| Allows are unioned | Hosts, secrets, user-authored shares, env names and tools add up. A signed pack cannot add a host share. |
 | Tool `ask` sits between | `deny` beats `ask` beats `allow` for whole-tool decisions. |
 | Tool detail only narrows | A later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them; per-tool `deny` argv patterns union. |
 | Denies are unioned, and a deny beats an allow | Anything a deny covers is removed from the result, whichever layer allowed it. The note says which layer did what. |
@@ -192,6 +192,7 @@ These are the security contract of composition:
 | Required groups cannot be excluded | `groups.exclude` naming a required group that is already included is an error. |
 | Secret destinations only narrow | A later layer naming the same secret may list a subset of the hosts, never a host outside them. The launch then checks the result against the allow-list stored with `mvmctl secret set`, which no layer can widen. |
 | A share is writable only if every layer says so | Two different host sources for one guest path is an error. |
+| Signed packs cannot mount host directories | A pack's `shares.mount` entries are stripped with a note; `shares.deny` can still narrow a user-authored share. |
 | Resources are ceilings | The smallest value from any layer wins, and a flag cannot exceed it. |
 | Escape hatches are user-only | `env.readmit` (re-admitting a variable the hygiene denylist refuses) is honoured only in a profile from your policy directory or a path you pass. In a project or pack layer the entry is stripped with a note, never honoured. |
 | Signed packs cannot import local policy | A pack-authored `extends` or group include may name an unshadowed built-in or another installed, verified pack. A filesystem path or a name resolved from your policy directory is refused, so local files cannot silently become part of a signed pack's policy. |
@@ -319,9 +320,9 @@ reference sits in the `--policy` order:
 mvmctl run --policy agent/claude@1.0.1 --policy ./mine.toml -- make test
 ```
 
-A pack with only a group, such as `runtime/python`, is not a profile and is
-refused by `--policy`. Include it where groups are included: a profile's
-`[groups] include = ["runtime/python"]`, or a project's `[policy] include`.
+A pack with only a group, such as `runtime/python`, can be the root `--policy`
+reference or be included by a profile's `[groups] include = ["runtime/python"]`
+or a project's `[policy] include`.
 `pull` fetches the one pack it is given, so a profile that includes other
 packs needs each of them pulled too; `agent/claude` includes `runtime/python`.
 [Author and publish a signed pack](/guides/pack-authoring/) covers writing
@@ -333,8 +334,8 @@ A pack layer is verified every time it loads: the signature is re-checked
 against the publisher policy and the manifest digest against the lockfile,
 so a tampered cache entry cannot reopen what the pack denied. It composes
 under the same rules as every non-user layer — denies stick, resource
-bounds are ceilings, and an `env.readmit` escape hatch the pack carries is
-stripped with a note, never honoured.
+bounds are ceilings, and `env.readmit` and `shares.mount` entries the pack
+carries are stripped with notes, never honoured.
 
 Trust in the official registry is the default: with no publisher policy
 file, packs signed by the `mvm-templates` publish workflow verify in any
