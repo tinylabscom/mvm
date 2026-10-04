@@ -73,6 +73,11 @@ crash mid-apply recovers on the next command: begun-without-finished rolls
 back from the snapshot; finished-without-recorded completes the entry.
 The apply refuses a host symlink whose target cannot be represented as UTF-8,
 because it could not restore that target safely after a crash.
+If the signed `workspace.applied` entry cannot be appended during the command,
+`mvmctl` restores the staged pre-images and cancels that commit. If restoration
+also fails, the command reports that the working tree may have changed and
+requires inspection before another apply. A process crash after the host
+commit but before the signed append is not yet reconciled by this failure path.
 
 Two gates shape the plan:
 

@@ -730,6 +730,82 @@ fn crash_after_done_completes_the_commit() {
 }
 
 #[test]
+fn failed_apply_audit_cancels_the_commit_and_restores_host_pre_images() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let staged = fixture.apply(&store);
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+
+    store
+        .rollback_unsealed(&staged, &fixture.source_dir)
+        .expect("restore after audit failure");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert_eq!(
+        read(&fixture.source_dir.join("gone.txt")),
+        "original gone\n"
+    );
+    assert!(!fixture.source_dir.join("added.txt").exists());
+    assert!(store.effective_applies().expect("effective").is_empty());
+    assert!(store.history().expect("history").is_empty());
+    assert!(
+        store
+            .redo_latest(&fixture.source_dir)
+            .expect("redo")
+            .is_none()
+    );
+    let journal = store.journal_read().expect("journal");
+    assert_eq!(
+        journal.iter().map(|entry| entry.kind).collect::<Vec<_>>(),
+        [
+            JournalKind::Begin,
+            JournalKind::Commit,
+            JournalKind::Rollback
+        ]
+    );
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("reopen");
+    assert!(reopened.effective_applies().expect("effective").is_empty());
+}
+
+#[test]
+fn audit_rollback_restores_a_replaced_symlink() {
+    let fixture = Fixture::new();
+    let path = fixture.source_dir.join("edit.txt");
+    fs::remove_file(&path).expect("remove host file");
+    std::os::unix::fs::symlink("keep.txt", &path).expect("host symlink");
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let staged = fixture.apply(&store);
+
+    store
+        .rollback_unsealed(&staged, &fixture.source_dir)
+        .expect("audit rollback");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("restored path")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&path).expect("target"), Path::new("keep.txt"));
+}
+
+#[test]
+fn audit_rollback_refuses_to_clobber_a_newer_commit() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let first = fixture.apply(&store);
+    fixture.apply(&store);
+
+    let error = store
+        .rollback_unsealed(&first, &fixture.source_dir)
+        .expect_err("older apply cannot be cancelled");
+    assert!(error.to_string().contains("not the latest"), "{error}");
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+}
+
+#[test]
 fn nothing_to_undo_or_redo_says_so() {
     let fixture = Fixture::new();
     let store = ApplyStore::open(&fixture.store_dir).expect("open store");

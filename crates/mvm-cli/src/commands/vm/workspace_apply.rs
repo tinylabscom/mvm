@@ -194,19 +194,26 @@ pub(in crate::commands) fn run_apply(
                 .map_err(Into::into)
         },
     )?;
-    emitter
-        .emit_workspace_mutation(
-            &audit_plan,
-            WorkspaceMutationAudit {
-                event: workspace_audit::APPLIED_EVENT,
-                vm_name: &args.name,
-                volume: &selected.volume,
-                apply_id: staged.id(),
-                target_id: None,
-                merkle_root: staged.merkle_root(),
-            },
-        )
-        .context("recording the workspace apply in the signed audit chain")?;
+    seal_apply_or_rollback(
+        || {
+            emitter.emit_workspace_mutation(
+                &audit_plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: &args.name,
+                    volume: &selected.volume,
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+        },
+        || {
+            store
+                .rollback_unsealed(&staged, &selected.source_dir)
+                .map_err(Into::into)
+        },
+    )?;
     mvm_core::audit_emit!(
         WorkspaceApply,
         vm: &args.name,
@@ -232,6 +239,25 @@ fn record_snapshot_then_commit(
 ) -> Result<()> {
     record_snapshot().context("recording the host pre-apply snapshot in the signed audit chain")?;
     commit()
+}
+
+/// A failed applied-event append must not leave unrecorded host writes behind.
+fn seal_apply_or_rollback(
+    record_applied: impl FnOnce() -> Result<()>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let Err(audit_error) = record_applied() else {
+        return Ok(());
+    };
+    match rollback() {
+        Ok(()) => Err(audit_error)
+            .context("recording the signed workspace apply failed; host pre-images were restored"),
+        Err(rollback_error) => Err(rollback_error).with_context(|| {
+            format!(
+                "recording the signed workspace apply failed ({audit_error}); host rollback also failed and the working tree may have changed"
+            )
+        }),
+    }
 }
 
 pub(in crate::commands) fn run_undo(
@@ -443,7 +469,7 @@ fn op_summary(op: &mvm_fs::workspace_apply::FileOp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_apply_authorized, record_snapshot_then_commit};
+    use super::{ensure_apply_authorized, record_snapshot_then_commit, seal_apply_or_rollback};
     use anyhow::anyhow;
     use std::cell::RefCell;
 
@@ -508,5 +534,45 @@ mod tests {
         .expect_err("commit error must propagate");
         assert!(recorded.get());
         assert!(error.to_string().contains("host write refused"));
+    }
+
+    #[test]
+    fn a_signed_apply_entry_keeps_the_committed_host_tree() {
+        let rolled_back = std::cell::Cell::new(false);
+        seal_apply_or_rollback(
+            || Ok(()),
+            || {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect("signed apply");
+        assert!(!rolled_back.get());
+    }
+
+    #[test]
+    fn a_failed_signed_apply_entry_restores_host_pre_images() {
+        let rolled_back = std::cell::Cell::new(false);
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("audit append refused")),
+            || {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("apply must fail");
+        assert!(rolled_back.get());
+        assert!(error.to_string().contains("pre-images were restored"));
+    }
+
+    #[test]
+    fn a_failed_rollback_warns_that_host_changes_may_remain() {
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("audit append refused")),
+            || Err(anyhow!("host restore refused")),
+        )
+        .expect_err("apply must fail");
+        assert!(error.to_string().contains("may have changed"));
+        assert!(error.to_string().contains("audit append refused"));
     }
 }

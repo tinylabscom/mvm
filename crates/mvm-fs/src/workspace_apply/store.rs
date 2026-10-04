@@ -104,7 +104,8 @@ pub enum JournalKind {
     Begin,
     /// The host writes are durable.
     Commit,
-    /// A begun apply was rolled back (crash recovery).
+    /// A begun apply was rolled back, or a committed apply was cancelled
+    /// because its signed audit entry could not be recorded.
     Rollback,
 }
 
@@ -217,6 +218,35 @@ impl ApplyStore {
             None,
         )?;
         Ok(())
+    }
+
+    /// Restore a just-committed apply when its required signed audit append
+    /// fails. Only the newest commit may be cancelled: a later apply could
+    /// depend on these bytes. The cancellation remains in the journal while
+    /// the manifest and pre-image blobs remain available for inspection.
+    pub fn rollback_unsealed(
+        &self,
+        staged: &StagedApply,
+        source_dir: &Path,
+    ) -> Result<(), ApplyError> {
+        let latest = self.committed_order()?.pop();
+        if latest.as_deref() != Some(staged.id()) {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} is not the latest committed apply; refusing audit rollback",
+                staged.id()
+            )));
+        }
+        let dir = self.committed_dir(staged.id());
+        for op in staged.manifest.ops.iter().rev() {
+            self.rollback_op(op, source_dir, &dir)?;
+        }
+        sync_dir(source_dir)?;
+        self.journal(
+            JournalKind::Rollback,
+            staged.id(),
+            None,
+            Some("signed apply audit append failed; host pre-images restored".into()),
+        )
     }
 
     /// Reverse the most recent committed, still-effective apply: stage an
@@ -353,9 +383,16 @@ impl ApplyStore {
 
     fn committed_order(&self) -> Result<Vec<String>, ApplyError> {
         let journal = self.journal_read()?;
+        let cancelled: HashSet<&str> = journal
+            .iter()
+            .filter(|entry| entry.kind == JournalKind::Rollback)
+            .map(|entry| entry.apply.as_str())
+            .collect();
         let mut order: Vec<String> = journal
             .iter()
-            .filter(|e| e.kind == JournalKind::Commit)
+            .filter(|entry| {
+                entry.kind == JournalKind::Commit && !cancelled.contains(entry.apply.as_str())
+            })
             .map(|e| e.apply.clone())
             .collect();
         // A commit completed by recovery may appear twice; dedup, keep order.
