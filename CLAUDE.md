@@ -824,7 +824,7 @@ fmt --all` and re-stages — `just maint::hooks` wires
 `core.hooksPath` to `.githooks/` so it fires on every commit.
 
 The Justfile recipes wrap this correctly: `just lints::fmt-check`, `just
-clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
+lints::clippy`, `just lint` (both), `just ci` (lint + test + doctests). Prefer
 those over raw cargo invocations.
 
 Every new module, type, or function needs test coverage:

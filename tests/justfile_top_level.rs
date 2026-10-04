@@ -9,12 +9,17 @@ use std::fs;
 
 const JUSTFILE: &str = include_str!("../Justfile");
 
-/// Contributor docs that tell people which recipe to run. A stale name here
-/// is a command that fails the first time someone copies it.
+/// Contributor guidance and source comments that name recipes. A stale name
+/// here is a command that fails the first time someone follows it.
 const RECIPE_DOCS: &[&str] = &[
     "AGENTS.md",
+    "CLAUDE.md",
     "README.md",
+    "crates/mvm-agentd/tests/runner_end_to_end.rs",
     "crates/mvm-conformance/README.md",
+    "crates/mvm-sdk/src/bin/emit_schema.rs",
+    "crates/mvm-sdk/src/compile/orchestrator.rs",
+    "nix/wrappers/README.md",
     "public/src/content/docs/contributing/ai-coding-workflow.md",
     "public/src/content/docs/contributing/development.md",
 ];
@@ -352,12 +357,17 @@ fn contributor_docs_name_real_recipes() {
 
 #[test]
 fn the_call_scanner_reads_namespaced_bare_and_flag_invocations() {
-    let calls = just_calls("run `just lints::fmt`, then just ci; `just --list` and adjust x");
+    let calls = just_calls(
+        "run `just lints::fmt`, then just ci; `just --list` and `just\nclippy` and adjust x",
+    );
     let targets: Vec<(&str, bool)> = calls
         .iter()
         .map(|call| (call.target, call.backticked))
         .collect();
-    assert_eq!(targets, [("lints::fmt", true), ("ci", false)]);
+    assert_eq!(
+        targets,
+        [("lints::fmt", true), ("ci", false), ("clippy", true)]
+    );
 }
 
 #[test]
