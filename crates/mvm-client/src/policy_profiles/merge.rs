@@ -13,6 +13,7 @@
 //!   outside it. The launch then checks the result against the allow-list
 //!   stored with `mvmctl secret set`, which no layer can widen either.
 //! - **A share is writable only if every layer naming it says so.**
+//!   Signed pack layers cannot add or modify host shares.
 //! - **Every resource bound is a ceiling**: the smallest wins.
 //! - **Escape hatches** (`env.readmit`) are honoured only in user-authored
 //!   layers.
@@ -395,6 +396,17 @@ impl Accumulator {
 
     fn shares(&mut self, layer: &Layer) -> Result<(), PolicyError> {
         let SharesSection { mount, deny } = &layer.body.shares;
+        let mount: &[ShareGrant] = if layer.origin == LayerOrigin::Pack {
+            if !mount.is_empty() {
+                self.notes.push(format!(
+                    "{}: shares.mount ignored: signed packs cannot add or modify host shares",
+                    layer.label
+                ));
+            }
+            &[]
+        } else {
+            mount.as_slice()
+        };
         for share in mount {
             if !share.guest.starts_with('/') {
                 return Err(layer_error(

@@ -106,6 +106,8 @@ yourself, plus one of its own:
   name that resolves from the consumer's policy directory, is refused.
 - **It cannot use an escape hatch.** An `env.readmit` entry in a pack is
   stripped with a note, never honoured.
+- **It cannot mount a host directory.** `shares.mount` entries in a pack are
+  stripped with a note; `shares.deny` may still narrow a share the user added.
 - **It cannot undo a deny.** Denies union across layers and beat any allow, a
   blocked network stays blocked, and resource values are ceilings.
 - **It cannot widen a stored secret.** A binding may only narrow the
