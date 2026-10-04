@@ -33,6 +33,24 @@ Everything else returns EACCES at the kernel level. Sockets are
 inherited fds or opened by the endpoint itself, not opened by name from
 the ruleset, so no network paths appear in it.
 
+## Threads
+
+`landlock_restrict_self` restricts the calling thread and the threads
+it creates afterwards. A thread that already exists is untouched and
+keeps the whole filesystem for the rest of its life. The process-wide
+form (`LANDLOCK_RESTRICT_SELF_TSYNC`) arrived with Landlock ABI v8, far
+above the v2 floor mvm supports, so it cannot be relied on.
+
+`landlock::apply` therefore counts the process's threads in
+`/proc/self/task` first and refuses with
+`JailerError::NotSingleThreaded` — before building the ruleset, so
+nothing is applied — if there is more than one. The count has to come
+first: the ruleset does not grant `/proc`. Callers confine before
+starting any thread; `mvm-network-endpoint` builds its async runtime
+after `confine_self` returns, and its self-test then requires a runtime
+worker and a blocking-pool thread to be refused a path outside the
+ruleset.
+
 ## `mvm-network-endpoint` — resolver UDS (M3)
 
 `ConfinementSpec::network_endpoint(..., resolver_uds)` additionally
