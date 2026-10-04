@@ -1380,6 +1380,7 @@ jobs:
           MVM_RUNTIME_BOOT_OVERLAY: /tmp/boot-image/overlay/overlay.ext4
           MVM_RUNTIME_BOOT_OVERLAY_VERITY: /tmp/boot-image/overlay/overlay.verity
           MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_GRANT: "1"
           MVM_RUNTIME_BOOT_RUNS: "5"
           MVM_RUNTIME_BOOT_CONCURRENT: "3"
           MVM_RUNTIME_BOOT_BUDGET_MS: "6000"
