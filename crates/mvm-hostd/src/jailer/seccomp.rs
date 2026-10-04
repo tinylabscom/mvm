@@ -53,10 +53,21 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // path; allowing only the lock moves the kill one syscall later.
     ("fdatasync", libc::SYS_fdatasync),
     ("openat", libc::SYS_openat),
+    // musl's `open` issues the legacy `open` syscall on x86_64, where glibc
+    // issues `openat`. Release binaries link musl statically, so every file a
+    // released endpoint opened after confinement — the session marker first —
+    // SIGSYS-killed it the moment a guest authenticated. glibc development
+    // builds never made the call, which is why only releases broke.
+    ("open", libc::SYS_open),
     ("close", libc::SYS_close),
     // glibc's resolver seeks while reading /etc/hosts (getaddrinfo); a missing
     // `lseek` SIGSYS-kills the endpoint mid-egress on a Linux host.
     ("lseek", libc::SYS_lseek),
+    // Audit segment rotation renames the full active segment aside. The
+    // Landlock grant on the audit dir already carries `Refer` for it; without
+    // the syscall the endpoint dies the first time its log reaches the
+    // rotation threshold.
+    ("rename", libc::SYS_rename),
     // arch divergence: x86_64 keeps `stat` / `lstat` as their own
     // syscalls; aarch64 folds both into `fstatat` (see aarch64 block).
     ("stat", libc::SYS_stat),
@@ -180,10 +191,16 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // path; allowing only the lock moves the kill one syscall later.
     ("fdatasync", libc::SYS_fdatasync),
     ("openat", libc::SYS_openat),
+    // arch divergence: aarch64 has no legacy `open`; musl and glibc both
+    // issue `openat` there (the policy layer keeps the name).
+    ("open", libc::SYS_openat),
     ("close", libc::SYS_close),
     // glibc's resolver seeks while reading /etc/hosts (getaddrinfo); a missing
     // `lseek` SIGSYS-kills the endpoint mid-egress on a Linux host.
     ("lseek", libc::SYS_lseek),
+    // Audit segment rotation (see the x86_64 block). aarch64 has no bare
+    // `rename`; both C libraries issue `renameat`.
+    ("rename", libc::SYS_renameat),
     // arch divergence: aarch64 does not expose `stat` / `lstat` as
     // their own syscalls — both fold into `newfstatat` (syscall 79; libc
     // exposes no bare `SYS_fstatat` on aarch64). The policy layer still
@@ -298,7 +315,13 @@ fn syscall_name_to_nr(name: &str) -> Option<libc::c_long> {
         .map(|(_, nr)| *nr)
 }
 
+/// Install the confined-role filter on the calling thread; threads it spawns
+/// afterwards inherit it.
+///
+/// First installs the refusal reporter, so a call the filter refuses is named
+/// on stderr before the process dies of it rather than silently.
 pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
+    crate::jailer::refusal_report::install(process_label())?;
     let mut rules: BTreeMap<i64, Vec<SeccompRule>> = BTreeMap::new();
     for name in &spec.allowed_syscalls {
         let nr = syscall_name_to_nr(name).ok_or_else(|| {
@@ -327,6 +350,18 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
         .map_err(|e| JailerError::SeccompInstall(format!("{e:?}")))?;
     seccompiler::apply_filter(&bpf).map_err(|e| JailerError::SeccompInstall(format!("{e:?}")))?;
     Ok(())
+}
+
+/// The name a refusal line is attributed to: this executable's file name.
+fn process_label() -> &'static str {
+    let name = std::env::args_os()
+        .next()
+        .map(std::path::PathBuf::from)
+        .and_then(|path| path.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "confined process".to_string());
+    // A signal handler reads it for the rest of the process's life, so it has
+    // to outlive every borrow. Computed once per confinement.
+    Box::leak(name.into_boxed_str())
 }
 
 #[cfg(test)]
@@ -358,6 +393,11 @@ mod tests {
         // which reads as a guest-egress transport failure minutes later
         //. Pin it so the allowlist can never regress here again.
         assert!(syscall_name_to_nr("uname").is_some());
+        // musl's `open` on x86_64 — omitting it SIGSYS-killed every released
+        // endpoint when its first guest authenticated.
+        assert!(syscall_name_to_nr("open").is_some());
+        // Audit segment rotation.
+        assert!(syscall_name_to_nr("rename").is_some());
     }
 
     #[test]

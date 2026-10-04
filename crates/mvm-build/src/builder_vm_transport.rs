@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
+use mvm_vmm::host::helper_exit::HelperExit;
 use mvm_vmm::host::network_endpoint_spawn::{
     HandshakeContext, handshake_timeout, read_handshake_line,
 };
@@ -19,6 +20,14 @@ use crate::builder_egress_process::{
     builder_egress_endpoint_was_terminated, builder_egress_supervisor_command_for,
 };
 use crate::builder_host_binaries::{endpoint_in_host_binary_dir, endpoint_predates_running_exe};
+
+/// How the endpoint ended, naming a seccomp kill as one rather than as a bare
+/// signal number.
+fn describe_exit(status: &std::process::ExitStatus) -> String {
+    HelperExit::from_exit_status(status)
+        .map(|exit| exit.to_string())
+        .unwrap_or_else(|| format!("ended with status {status}"))
+}
 
 fn terminate_and_reap(child: &mut Child) {
     if matches!(child.try_wait(), Ok(Some(_))) {
@@ -345,8 +354,10 @@ impl BuilderVsockEgressEndpoint {
                 );
             }
             Ok(status) => eprintln!(
-                "builder egress endpoint pid={} exited unexpectedly with status {}",
-                child_pid, status
+                "builder egress endpoint pid={child_pid} stopped unexpectedly: it {}. \
+                 Its stderr is in {}",
+                describe_exit(&status),
+                stderr_log_path.display()
             ),
             Err(e) => eprintln!("builder egress endpoint pid={} wait failed: {e}", child_pid),
         });
@@ -573,5 +584,22 @@ pub(crate) fn builder_runtime_overlay_attachment<'a>(
             })
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt as _;
+
+    #[test]
+    fn an_endpoint_killed_by_its_seccomp_filter_is_named_as_one() {
+        let seccomp = describe_exit(&std::process::ExitStatus::from_raw(libc::SIGSYS));
+        assert!(seccomp.contains("killed by SIGSYS"), "{seccomp}");
+        assert!(seccomp.contains("seccomp filter refused"), "{seccomp}");
+        assert_eq!(
+            describe_exit(&std::process::ExitStatus::from_raw(2 << 8)),
+            "exited with status 2"
+        );
     }
 }
