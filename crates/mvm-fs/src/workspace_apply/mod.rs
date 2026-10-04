@@ -343,6 +343,9 @@ fn merkle_leaf(op: &ManifestOp) -> String {
             .unwrap_or("-"),
         op.post.as_ref().map_or(0, |p| p.size),
     );
+    if let Some(kind) = op.pre_kind {
+        let _ = write!(line, "\0{}", kind.label());
+    }
     line
 }
 
@@ -355,7 +358,8 @@ pub(crate) fn manifest_merkle_root(ops: &[ManifestOp]) -> String {
 }
 
 /// The root of the host pre-images captured before an apply, independent of
-/// the guest post-images. An absent host path has a distinct empty image.
+/// the guest post-images. The path kind distinguishes identical file bytes
+/// from symlink target bytes; absence has its own identity.
 pub(crate) fn snapshot_merkle_root(ops: &[ManifestOp]) -> String {
     let mut ordered: Vec<&ManifestOp> = ops.iter().collect();
     ordered.sort_by(|a, b| a.path.cmp(&b.path));
@@ -363,8 +367,9 @@ pub(crate) fn snapshot_merkle_root(ops: &[ManifestOp]) -> String {
         .iter()
         .map(|op| {
             format!(
-                "workspace-preimage-v1\0{}\0{}\0{}",
+                "workspace-preimage-v2\0{}\0{}\0{}\0{}",
                 op.path,
+                op.pre_kind.map_or("legacy_unknown", PreImageKind::label),
                 op.pre.sha256.as_deref().unwrap_or("-"),
                 op.pre.size
             )
@@ -421,7 +426,29 @@ pub struct ManifestOp {
     pub path: String,
     pub action: ManifestAction,
     pub pre: OpImage,
+    /// The original host path kind. Older manifests omit it and retain the
+    /// historical action-based restore behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_kind: Option<PreImageKind>,
     pub post: Option<OpImage>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreImageKind {
+    Absent,
+    File,
+    Symlink,
+}
+
+impl PreImageKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::File => "file",
+            Self::Symlink => "symlink",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

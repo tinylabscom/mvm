@@ -38,7 +38,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ApplyError, ApplyPlan, FileOp, Manifest, ManifestAction, ManifestOp, OpAction, OpImage,
-    PlanParams, RelationKind, manifest_merkle_root, plan, snapshot_merkle_root,
+    PlanParams, PreImageKind, RelationKind, manifest_merkle_root, plan, snapshot_merkle_root,
 };
 
 /// The durable record of one staged apply.
@@ -228,7 +228,7 @@ impl ApplyStore {
         };
         let manifest = self.committed_manifest(&target)?;
         let staged = self.stage(
-            inverse_plan(&manifest),
+            inverse_plan(&manifest)?,
             source_dir,
             &EmptySource,
             Some((target.clone(), RelationKind::Undoes)),
@@ -386,7 +386,7 @@ impl ApplyStore {
         source_dir: &Path,
         live: &dyn crate::tree_diff::TreeSource,
     ) -> Result<ManifestOp, ApplyError> {
-        let pre = self.stage_pre(&op, source_dir)?;
+        let (pre, pre_kind) = self.stage_pre(&op, source_dir)?;
         let (action, post) = match (&op.action, op.post) {
             (OpAction::Remove, _) => (ManifestAction::Remove, None),
             (OpAction::WriteFile, Some(image)) => {
@@ -408,27 +408,43 @@ impl ApplyStore {
             path: op.path,
             action,
             pre,
+            pre_kind: Some(pre_kind),
             post,
         })
     }
 
     /// The pre-image from the host tree: the bytes undo restores. An absent
     /// host path stages no blob and records size zero.
-    fn stage_pre(&self, op: &FileOp, source_dir: &Path) -> Result<OpImage, ApplyError> {
+    fn stage_pre(
+        &self,
+        op: &FileOp,
+        source_dir: &Path,
+    ) -> Result<(OpImage, PreImageKind), ApplyError> {
         let full = super::host_path(source_dir, &op.path)?;
         let meta = match fs::symlink_metadata(&full) {
             Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(OpImage::default()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok((OpImage::default(), PreImageKind::Absent));
+            }
             Err(e) => return Err(e.into()),
         };
         if meta.file_type().is_symlink() {
             let target = fs::read_link(&full)?;
-            self.store_bytes(target.as_os_str().as_encoded_bytes())
+            let target = target.to_str().ok_or_else(|| {
+                ApplyError::UnsafePath(format!(
+                    "{}: a host symlink target is not UTF-8 and cannot be restored safely",
+                    op.path
+                ))
+            })?;
+            Ok((self.store_bytes(target.as_bytes())?, PreImageKind::Symlink))
         } else if meta.file_type().is_file() {
             let mut file = OpenOptions::new().read(true).open(&full)?;
             let mut sink = self.hashing_blob_sink()?;
             io::copy(&mut file, &mut sink)?;
-            self.finish_streaming_blob(sink, &op.path)
+            Ok((
+                self.finish_streaming_blob(sink, &op.path)?,
+                PreImageKind::File,
+            ))
         } else {
             Err(ApplyError::UnsafePath(format!(
                 "{}: the host path is neither a file nor a symlink; refusing to replace it",
@@ -707,18 +723,18 @@ impl ApplyStore {
         let full = super::host_path(source_dir, &op.path)?;
         match &op.action {
             ManifestAction::WriteFile | ManifestAction::WriteSymlink { .. } => {
-                match op.pre.sha256.as_deref() {
-                    // The apply created this path: remove it.
-                    None => remove_path(&full)?,
-                    // Restore the bytes the apply replaced.
-                    Some(sha) => {
+                match restored_pre_kind(op)? {
+                    PreImageKind::Absent => remove_path(&full)?,
+                    PreImageKind::File => {
+                        let sha = pre_image_sha(op)?;
                         self.verify_blob(sha, op.pre.size)?;
-                        if matches!(op.action, ManifestAction::WriteFile) {
-                            write_file_atomic(&full, &self.blob_path(sha), op.pre.size)?;
-                        } else {
-                            let target = fs::read_to_string(self.blob_path(sha))?;
-                            write_symlink_atomic(&full, &target)?;
-                        }
+                        write_file_atomic(&full, &self.blob_path(sha), op.pre.size)?;
+                    }
+                    PreImageKind::Symlink => {
+                        let sha = pre_image_sha(op)?;
+                        self.verify_blob(sha, op.pre.size)?;
+                        let target = fs::read_to_string(self.blob_path(sha))?;
+                        write_symlink_atomic(&full, &target)?;
                     }
                 }
             }
@@ -846,63 +862,53 @@ fn now_secs() -> u64 {
 /// one's post-images, and each op reverses. Undo consults nothing but the
 /// manifest — the exclusions it recorded are the only ones in force, and a
 /// restore never rebuilds a default list.
-fn inverse_plan(manifest: &Manifest) -> ApplyPlan {
+fn inverse_plan(manifest: &Manifest) -> Result<ApplyPlan, ApplyError> {
     let mut plan = ApplyPlan {
         exclusion_patterns: manifest.exclusions.clone(),
         ..ApplyPlan::default()
     };
     for op in &manifest.ops {
-        let file_op = match &op.action {
-            ManifestAction::WriteFile => match op.pre.sha256.clone() {
-                Some(sha) => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::WriteFile,
-                    pre: OpImage::default(),
-                    post: Some(OpImage {
-                        sha256: Some(sha),
-                        size: op.pre.size,
-                    }),
+        let (action, post) = match restored_pre_kind(op)? {
+            PreImageKind::Absent => (OpAction::Remove, None),
+            PreImageKind::File => (OpAction::WriteFile, Some(op.pre.clone())),
+            PreImageKind::Symlink => (
+                OpAction::WriteSymlink {
+                    target: String::new(),
                 },
-                None => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::Remove,
-                    pre: OpImage::default(),
-                    post: None,
-                },
-            },
-            ManifestAction::WriteSymlink { .. } => match op.pre.sha256.clone() {
-                Some(sha) => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::WriteSymlink {
-                        target: String::new(),
-                    },
-                    pre: OpImage::default(),
-                    post: Some(OpImage {
-                        sha256: Some(sha),
-                        size: op.pre.size,
-                    }),
-                },
-                None => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::Remove,
-                    pre: OpImage::default(),
-                    post: None,
-                },
-            },
-            // The original removed the path; undo restores its pre-image.
-            ManifestAction::Remove => FileOp {
-                path: op.path.clone(),
-                action: OpAction::WriteFile,
-                pre: OpImage::default(),
-                post: Some(OpImage {
-                    sha256: op.pre.sha256.clone(),
-                    size: op.pre.size,
-                }),
-            },
+                Some(op.pre.clone()),
+            ),
         };
-        plan.ops.push(file_op);
+        plan.ops.push(FileOp {
+            path: op.path.clone(),
+            action,
+            pre: OpImage::default(),
+            post,
+        });
     }
-    plan
+    Ok(plan)
+}
+
+fn pre_image_sha(op: &ManifestOp) -> Result<&str, ApplyError> {
+    op.pre.sha256.as_deref().ok_or_else(|| {
+        ApplyError::Corrupt(format!("{}: a present pre-image has no digest", op.path))
+    })
+}
+
+fn restored_pre_kind(op: &ManifestOp) -> Result<PreImageKind, ApplyError> {
+    let kind = op.pre_kind.unwrap_or(match (&op.action, &op.pre.sha256) {
+        (_, None) => PreImageKind::Absent,
+        (ManifestAction::WriteSymlink { .. }, Some(_)) => PreImageKind::Symlink,
+        (ManifestAction::WriteFile | ManifestAction::Remove, Some(_)) => PreImageKind::File,
+    });
+    match (kind, op.pre.sha256.is_some()) {
+        (PreImageKind::Absent, false) | (PreImageKind::File | PreImageKind::Symlink, true) => {
+            Ok(kind)
+        }
+        _ => Err(ApplyError::Corrupt(format!(
+            "{}: the pre-image kind and digest disagree",
+            op.path
+        ))),
+    }
 }
 
 /// The forward re-application of a committed apply: its post-images, with
