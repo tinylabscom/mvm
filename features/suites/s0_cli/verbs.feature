@@ -28,7 +28,7 @@ Feature: mvmctl top-level CLI surface
     And the help output contains "Boot an OCI image"
     And the help output contains "Allow outbound access"
     And the help output contains "Select the VMM"
-    And the help output contains "Record check interval"
+    And the help output contains "Seconds between health checks"
     But the help output does not contain "Mutually exclusive with"
     And the help output does not contain "production-safe call surface"
 

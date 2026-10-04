@@ -162,9 +162,10 @@ pub struct SessionRecord {
     /// `dev` if the wrapper was started with `mode=dev` (allows ad-hoc
     /// `mvmctl session exec` / `run-code`); `prod` otherwise.
     pub mode: SessionMode,
-    /// Substrate-side idle reaper timeout. `mvmctl session set-timeout`
-    /// updates this; the warm-process pool consults it when deciding
-    /// whether to retire an idle worker.
+    /// Seconds the session may sit idle before it is reaped (see
+    /// [`SessionRecord::idle_expired_at`]). `mvmctl machine session
+    /// set-timeout` updates this, and also hands it to the guest's
+    /// warm-process pool.
     pub idle_timeout_secs: u64,
     /// RFC 3339 wall-clock when the session was created. Stable for
     /// the lifetime of the session.
@@ -247,6 +248,29 @@ impl SessionRecord {
             creator_pid: std::process::id(),
             ephemeral: false,
         }
+    }
+
+    /// Whether this session has sat idle past its timeout as of `now`,
+    /// whatever its state.
+    ///
+    /// Idle is measured from `last_invoke_at` once the session has handled a
+    /// call, else from `started_at`. A record whose timestamp does not parse
+    /// is never expired: a corrupt record must not get a live VM torn down.
+    #[must_use]
+    pub fn idle_expired_at(&self, now: chrono::DateTime<chrono::Utc>) -> bool {
+        let last = self.last_invoke_at.as_deref().unwrap_or(&self.started_at);
+        let Ok(last) = chrono::DateTime::parse_from_rfc3339(last) else {
+            tracing::warn!(
+                session = %self.id,
+                ts = %last,
+                "skip expiry check: unparseable timestamp"
+            );
+            return false;
+        };
+        let elapsed = now
+            .signed_duration_since(last.with_timezone(&chrono::Utc))
+            .num_seconds();
+        u64::try_from(elapsed).is_ok_and(|elapsed| elapsed > self.idle_timeout_secs)
     }
 }
 
@@ -380,40 +404,14 @@ where
 }
 
 /// Return the IDs of `Running` sessions whose idle timeout has elapsed
-/// as of `now`. Pure: does not perform any teardown — the caller in
-/// `mvm-cli` translates each id into `tear_down_session_vm` + a
-/// `state = Reaped` update.
-///
-/// Idle is measured against `last_invoke_at` if the session has
-/// handled at least one call, else against `started_at`. Records whose
-/// timestamps fail to parse are skipped (warn-and-continue rather than
-/// erroring out — a corrupt record shouldn't block reaping the rest).
+/// as of `now` (see [`SessionRecord::idle_expired_at`]). Pure: does not
+/// perform any teardown.
 pub fn list_expired_session_ids(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<SessionId>> {
-    let mut expired = Vec::new();
-    for record in list_sessions()? {
-        if record.state != SessionState::Running {
-            continue;
-        }
-        let last_str = record
-            .last_invoke_at
-            .as_deref()
-            .unwrap_or(&record.started_at);
-        let Ok(last_dt) = chrono::DateTime::parse_from_rfc3339(last_str) else {
-            tracing::warn!(
-                session = %record.id,
-                ts = %last_str,
-                "skip expiry check: unparseable timestamp"
-            );
-            continue;
-        };
-        let elapsed = now
-            .signed_duration_since(last_dt.with_timezone(&chrono::Utc))
-            .num_seconds();
-        if elapsed > 0 && (elapsed as u64) > record.idle_timeout_secs {
-            expired.push(record.id);
-        }
-    }
-    Ok(expired)
+    Ok(list_sessions()?
+        .into_iter()
+        .filter(|record| record.state == SessionState::Running && record.idle_expired_at(now))
+        .map(|record| record.id)
+        .collect())
 }
 
 /// The most-recently-active Running session, ranked by
@@ -710,6 +708,40 @@ mod tests {
         let dir = ensure_sessions_dir().unwrap();
         let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700);
+    }
+
+    #[test]
+    fn idle_expiry_counts_from_the_last_call_and_is_strict_at_the_timeout() {
+        let now = chrono::Utc::now();
+        let ago = |secs: i64| {
+            (now - chrono::Duration::seconds(secs))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        };
+        let mut record = SessionRecord::new_running("vm", "x", SessionMode::Prod);
+        record.idle_timeout_secs = 60;
+        record.started_at = ago(600);
+        assert!(
+            record.idle_expired_at(now),
+            "never called: idle since start"
+        );
+
+        record.last_invoke_at = Some(ago(10));
+        assert!(
+            !record.idle_expired_at(now),
+            "a recent call resets idleness"
+        );
+
+        record.last_invoke_at = Some(ago(60));
+        assert!(
+            !record.idle_expired_at(now),
+            "exactly at the timeout is not past it"
+        );
+
+        record.last_invoke_at = Some("not a timestamp".to_string());
+        assert!(
+            !record.idle_expired_at(now),
+            "an unreadable timestamp never expires a session"
+        );
     }
 
     #[cfg(unix)]

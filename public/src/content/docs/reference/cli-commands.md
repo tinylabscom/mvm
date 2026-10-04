@@ -677,6 +677,15 @@ mechanism to reason about.
 This is a dev/accessible-tier feature: the check runs inside the guest via the
 host agent, so it only applies to backends where that agent is reachable.
 
+A warm session (`machine session start`, or a session opened through an SDK)
+is stopped once it has sat idle past its `--idle-timeout` (default 300
+seconds), measured from its last call. On libkrun and HVF the per-VM
+supervisor enforces this with no command running: it marks the session
+`reaped`, records the reap in the audit log, seals the session's audit chain
+the way `machine stop` does, and stops the machine. Firecracker and QEMU have
+no per-VM supervisor, so there an expired session is stopped by the next
+`machine session` command, or by `machine session reap` run on a schedule.
+
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
