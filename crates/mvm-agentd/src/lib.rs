@@ -50,7 +50,7 @@ pub use mvm_setpriv::fd_hygiene;
 /// Guest-wide filesystem flush shared by forced-shutdown paths.
 pub mod filesystem_sync;
 /// Guest-side FlowMux client for the converged single networking path.
-#[cfg(feature = "flowmux-async")]
+#[cfg(feature = "addons")]
 pub mod flowmux;
 /// Load the per-boot FlowMux identity material used by the guest-side adapters.
 pub mod flowmux_drive;

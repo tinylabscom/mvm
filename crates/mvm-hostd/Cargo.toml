@@ -178,9 +178,10 @@ hickory-proto = { workspace = true }
 [dev-dependencies]
 tempfile.workspace = true
 xtask = { path = "../../xtask" }
-# The release-only networking probe drives the same guest FlowMux client used
-# by the loopback adapters without linking their Linux AF_VSOCK binaries.
-mvm-agentd = { workspace = true, features = ["flowmux-async"] }
+# The release-only networking probe drives the guest FlowMux client the
+# loopback adapters use. A dependency's binaries are never built, so only the
+# library half of `addons` reaches this test closure.
+mvm-agentd = { workspace = true, features = ["addons"] }
 # plan_admission bundle re-verify tests build/read `.mvmpkg` archives; verb-grant
 # test decodes the signer pubkey hex.
 hex.workspace = true

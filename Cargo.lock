@@ -2857,7 +2857,7 @@ dependencies = [
  "mvm-contract",
  "mvm-core",
  "mvm-setpriv",
- "nix 0.29.0",
+ "nix",
  "rand 0.10.2",
  "schemars",
  "seccompiler",
@@ -2887,7 +2887,7 @@ dependencies = [
  "mvm-core",
  "mvm-net",
  "mvm-vmm",
- "nix 0.29.0",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",
@@ -2917,7 +2917,7 @@ dependencies = [
  "mvm-net",
  "mvm-sdk",
  "mvm-vmm",
- "nix 0.29.0",
+ "nix",
  "rand 0.10.2",
  "serde",
  "serde_jcs",
@@ -2997,7 +2997,7 @@ dependencies = [
  "mvm-runtime",
  "mvm-sdk",
  "mvm-vmm",
- "nix 0.29.0",
+ "nix",
  "notify",
  "notify-debouncer-mini",
  "rand 0.10.2",
@@ -3082,7 +3082,7 @@ dependencies = [
  "mvm-sdk",
  "mvm-vmm",
  "mvmctl",
- "nix 0.29.0",
+ "nix",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -3405,7 +3405,7 @@ dependencies = [
  "mvm-fs",
  "mvm-net",
  "mvm-vmm",
- "nix 0.29.0",
+ "nix",
  "object_store",
  "rand 0.10.2",
  "secrecy",
@@ -3551,19 +3551,6 @@ name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.13.0",
- "cfg-if",
- "cfg_aliases",
- "libc",
- "memoffset",
-]
-
-[[package]]
-name = "nix"
-version = "0.31.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.13.0",
  "cfg-if",
@@ -6170,12 +6157,12 @@ dependencies = [
 
 [[package]]
 name = "vsock"
-version = "0.5.4"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba782755fc073877e567c2253c0be48e4aa9a254c232d36d3985dfae0bd5205"
+checksum = "4e8b4d00e672f147fc86a09738fadb1445bd1c0a40542378dfb82909deeee688"
 dependencies = [
  "libc",
- "nix 0.31.3",
+ "nix",
 ]
 
 [[package]]

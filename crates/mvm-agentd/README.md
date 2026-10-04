@@ -72,9 +72,8 @@ pipe-EOF/reaping waits. VM-lifetime collection remains separate work.
 
 ## Features and platforms
 
-`addons` enables the DNS/vsock bridge binaries and their async dependencies.
-`flowmux-async` enables Tokio transport support, and `schema` enables protocol
-schema generation. Linux-only helpers compile as stubs or are target-gated on
+`addons` enables the async FlowMux client, the DNS/vsock bridge binaries and
+their async dependencies, and `schema` enables protocol schema generation. Linux-only helpers compile as stubs or are target-gated on
 other development hosts.
 
 ## Developing
