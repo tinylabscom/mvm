@@ -389,6 +389,37 @@ mod tests {
 
     #[cfg(feature = "manifest-verify")]
     #[test]
+    fn a_project_composes_its_local_group_with_a_signed_pack_group() {
+        let (_env, home) = isolated();
+        install_signed_python_image(home.path());
+        let project = tempfile::tempdir().expect("project directory");
+        std::fs::write(
+            project.path().join("mvm.toml"),
+            "schema_version = 1\nflake = \".\"\nprofile = \"default\"\n[policy]\ninclude = [\"runtime/python@1.1.0\", \"./local.toml\"]\n",
+        )
+        .expect("project manifest");
+        std::fs::write(
+            project.path().join("local.toml"),
+            "[network]\nallow = [\"app.example:443\"]\ndeny = [\"pypi.org:443\"]\n",
+        )
+        .expect("local policy group");
+        let mut args = RunArgs {
+            manifest: Some(project.path().join("mvm.toml").display().to_string()),
+            ..RunArgs::default()
+        };
+        apply_run_policy(&mut args).expect("compose application and signed pack policies");
+        assert!(args.allow_host.contains(&"app.example:443".to_string()));
+        assert!(
+            args.allow_host
+                .contains(&"files.pythonhosted.org:443".to_string())
+        );
+        assert!(!args.allow_host.contains(&"pypi.org:443".to_string()));
+        let policy = args.applied_policy.expect("effective authored policy");
+        assert!(policy.network.deny.contains(&"pypi.org:443".to_string()));
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
     fn a_tampered_signed_image_is_refused_before_source_selection() {
         let (_env, home) = isolated();
         let installed = install_signed_python_image(home.path());

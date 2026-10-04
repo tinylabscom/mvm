@@ -310,8 +310,10 @@ The index is a small JSON document, and unknown fields in it are refused:
 
 ## Limits
 
-- A pack carries policy. It does not carry or select an image, and it installs
-  nothing in a guest.
+- A pack always carries policy and may declare a signed workload image. A
+  policy-only pack installs nothing in a guest; an image-bearing pack selects
+  its image only when named by `--policy` and no explicit boot source
+  was supplied.
 - `mvmctl pull` follows signed profile dependencies. Cycles, conflicting
   versions, more than 128 packs, or an unpublished dependency stop the pull.
   Packs already installed before a later dependency fails remain pinned, but a run

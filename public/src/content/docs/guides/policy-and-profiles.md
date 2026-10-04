@@ -233,9 +233,10 @@ include = ["policy/apis.toml"]  # extra groups
 `mvmctl generate template <name> <dir>` downloads the declared files with
 the rest of the template, copies them into the project, and writes a
 `[policy]` table into the generated `mvm.toml` referencing them. Every
-launch of the project then composes the template's policy the way it
-composes any project policy, and an explicit `--policy` composes on top —
-so the operator's file still wins the conflicts. Declared paths must stay
+launch of the project then composes the template's policy with any groups
+added to the generated `[policy] include` list. An explicit `--policy` replaces
+the project's `[policy]` table for that launch; list every policy you want in
+that invocation. Declared paths must stay
 inside the template directory, and generation refuses — naming the template
 and the file — when a declared policy file is missing or does not resolve,
 so a broken template fails at generation time, not on the first run.
@@ -323,6 +324,20 @@ mvmctl run --policy agent/claude@1.0.1 --policy ./mine.toml -- make test
 A pack with only a group, such as `runtime/python`, can be the root `--policy`
 reference or be included by a profile's `[groups] include = ["runtime/python"]`
 or a project's `[policy] include`.
+
+An application can compose a signed pack's policy with its own groups in
+`mvm.toml` without selecting the pack as its boot image:
+
+```toml
+[policy]
+include = ["runtime/python", "./policy/app.toml"]
+```
+
+Pull and pin the pack before launching the application. The installed pack is
+verified again when the policy loads; an application group can deny a host the
+pack allows, and that deny wins. A generated template can use the same
+`[policy]` table to expose its shipped policy to the application.
+
 `pull` follows pack references in the signed profile, verifying and pinning
 each dependency; `agent/claude` includes `runtime/python`.
 If a root pack also declares a signed workload image, `run` and `machine run`

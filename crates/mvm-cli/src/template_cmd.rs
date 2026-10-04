@@ -133,7 +133,7 @@ net = false
 /// The `[policy]` table wiring a template's shipped policy into the project.
 fn policy_table_toml(policy: &crate::template_registry::TemplatePolicy) -> String {
     let mut out = String::from(
-        "\n# Policy this template ships; tighten with your own\n# `--policy` files, which compose on top.\n[policy]\n",
+        "\n# Policy this template ships. Add policy groups to `include` to compose them.\n# An explicit `--policy` replaces this table for that launch.\n[policy]\n",
     );
     if let Some(profile) = &policy.profile {
         out.push_str(&format!("profile = \"{profile}\"\n"));
