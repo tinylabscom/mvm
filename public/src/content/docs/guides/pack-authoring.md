@@ -3,8 +3,9 @@ title: Author and publish a signed pack
 description: Write a policy pack as a group or a profile, check it locally, publish it through the mvm-templates signing workflow, and decide which publishers your hosts trust.
 ---
 
-A pack is a named, versioned, signed bundle of policy. It carries a policy
-group, a policy profile, or both, under a `namespace/name@version` reference,
+A pack is a named, versioned, signed bundle of policy and, optionally, a
+buildable workload image. It carries a policy group, a policy profile, or both,
+under a `namespace/name@version` reference,
 and `mvmctl` verifies its signature every time it is pulled and every time a
 policy that names it is loaded. The official registry is the
 [`mvm-templates`](https://github.com/tinylabscom/mvm-templates) repository.
@@ -40,9 +41,38 @@ description = "Node.js runtime policy: the npm registry, Node downloads, and Git
   same set plus `.`, up to 64 characters, and requires the last character to be
   a letter or digit too.
 
-Everything under `pack/` is the payload. `mvmctl` reads two files from it,
-`pack/group.toml` and `pack/profile.toml`. Any other file there is signed,
-verified and installed with the pack, and nothing reads it today.
+Everything under `pack/` is the signed payload. Policy loading reads
+`pack/group.toml` and `pack/profile.toml`; image-bearing packs additionally
+declare an `mvm.toml` and its neighboring Nix source and lock.
+
+## An image-bearing pack
+
+An optional `[image]` table in `pack.toml` names a signed workload manifest:
+
+```toml
+version = "1.1.0"
+description = "Python runtime policy and image"
+
+[image]
+manifest = "pack/image/mvm.toml"
+```
+
+The payload must include `pack/image/mvm.toml`, `pack/image/flake.nix`, and
+`pack/image/flake.lock`. The image manifest may contain only
+`schema_version`, `flake`, `profile`, and `name`; `flake = "."` (or no `flake`
+field) selects only the neighboring signed source. The publisher workflow
+and client refuse missing source files, unlisted payload, external flake
+selectors, and host-grant fields. An image source never authorizes a host
+directory share or a guest network device.
+
+When `run` or `machine run` names an installed image-bearing pack with
+`--policy` and no explicit boot source, the signed image is built and booted.
+The exact pack reference and manifest digest enter the signed execution plan
+and chain-signed audit record. Host admission reopens the installed pack under
+the current lock and publisher trust before boot. An explicit image, manifest,
+flake, deployment, or runtime source keeps its own boot-source precedence;
+the pack still contributes its policy. The separate `machine run --entrypoint`
+boot path refuses an image-bearing pack; use the ordinary machine run path.
 
 ## A group pack
 

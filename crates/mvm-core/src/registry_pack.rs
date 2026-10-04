@@ -362,6 +362,17 @@ pub struct RegistryPackFile {
     pub size: u64,
 }
 
+/// Source files for the microVM image a pack can build and boot.
+///
+/// The manifest and neighboring flake files are ordinary signed payload
+/// files; their exact digests are carried by `RegistryPackManifest::files`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RegistryPackImage {
+    /// In-pack path to `mvm.toml` beside `flake.nix` and `flake.lock`.
+    pub manifest: String,
+}
+
 /// Strict metadata signed by a registry-pack publisher.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -370,6 +381,9 @@ pub struct RegistryPackManifest {
     /// Exact versioned identity of these manifest bytes.
     pub reference: PackReference,
     pub description: String,
+    /// Optional for policy-only packs; required when booting a pack's image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<RegistryPackImage>,
     pub files: Vec<RegistryPackFile>,
 }
 
@@ -693,6 +707,10 @@ pub enum RegistryPackVerificationError {
     DuplicateFile { path: String },
     #[error("registry-pack manifest contains unsafe file path {path:?}")]
     UnsafeFilePath { path: String },
+    #[error("registry-pack image declaration is invalid: {reason}")]
+    InvalidImageDeclaration { reason: String },
+    #[error("registry-pack image mvm.toml is invalid: {reason}")]
+    InvalidImageManifest { reason: String },
     #[error("registry-pack payload path {path:?} could not be read: {reason}")]
     PayloadFileRead { path: String, reason: String },
     #[error("registry-pack payload path {path:?} is not a regular file")]
@@ -852,7 +870,7 @@ fn validate_registry_pack_manifest(
     }
     let mut paths = BTreeSet::new();
     for file in &manifest.files {
-        if !paths.insert(&file.path) {
+        if !paths.insert(file.path.as_str()) {
             return Err(RegistryPackVerificationError::DuplicateFile {
                 path: file.path.clone(),
             });
@@ -861,6 +879,32 @@ fn validate_registry_pack_manifest(
             return Err(RegistryPackVerificationError::UnsafeFilePath {
                 path: file.path.clone(),
             });
+        }
+    }
+    if let Some(image) = &manifest.image {
+        let path = &image.manifest;
+        let manifest_path = Path::new(path);
+        if !pack_path_is_safe(path)
+            || !path.starts_with("pack/")
+            || manifest_path
+                .file_name()
+                .is_none_or(|name| name != "mvm.toml")
+        {
+            return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+                reason: format!("manifest path {path:?} must be a safe in-pack mvm.toml"),
+            });
+        }
+        let parent = manifest_path
+            .parent()
+            .expect("a safe in-pack mvm.toml has a parent");
+        for name in ["mvm.toml", "flake.nix", "flake.lock"] {
+            let required = parent.join(name);
+            let required = required.to_string_lossy();
+            if !paths.contains(required.as_ref()) {
+                return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+                    reason: format!("image source file {required:?} is not declared"),
+                });
+            }
         }
     }
     Ok(())
@@ -927,7 +971,76 @@ pub fn verify_registry_pack_contents(
             });
         }
     }
-    refuse_undeclared_payload_paths(root, root, &declared)
+    refuse_undeclared_payload_paths(root, root, &declared)?;
+    if let Some(image) = &verified.manifest().image {
+        validate_registry_pack_image_manifest(verified, root, image)?;
+    }
+    Ok(())
+}
+
+fn validate_registry_pack_image_manifest(
+    verified: &VerifiedRegistryPack,
+    root: &Path,
+    image: &RegistryPackImage,
+) -> Result<(), RegistryPackVerificationError> {
+    const MAX_IMAGE_MANIFEST_BYTES: u64 = 64 * 1024;
+    let file = verified
+        .manifest()
+        .files
+        .iter()
+        .find(|file| file.path == image.manifest)
+        .ok_or_else(|| RegistryPackVerificationError::InvalidImageDeclaration {
+            reason: "the image mvm.toml is not a signed payload file".to_string(),
+        })?;
+    if file.size > MAX_IMAGE_MANIFEST_BYTES {
+        return Err(RegistryPackVerificationError::InvalidImageManifest {
+            reason: "mvm.toml exceeds the 64 KiB limit".to_string(),
+        });
+    }
+    let bytes = std::fs::read(root.join(&image.manifest)).map_err(|error| {
+        RegistryPackVerificationError::PayloadFileRead {
+            path: image.manifest.clone(),
+            reason: error.to_string(),
+        }
+    })?;
+    let digest = Sha256Hex::from_bytes(&bytes);
+    if digest != file.sha256 {
+        return Err(RegistryPackVerificationError::PayloadHashMismatch {
+            path: image.manifest.clone(),
+            declared: file.sha256.clone(),
+            actual: digest,
+        });
+    }
+    let text = std::str::from_utf8(&bytes).map_err(|_| {
+        RegistryPackVerificationError::InvalidImageManifest {
+            reason: "mvm.toml must be UTF-8".to_string(),
+        }
+    })?;
+    let table: toml::Table =
+        toml::from_str(text).map_err(|_| RegistryPackVerificationError::InvalidImageManifest {
+            reason: "mvm.toml is not valid TOML".to_string(),
+        })?;
+    for key in table.keys() {
+        if !matches!(
+            key.as_str(),
+            "schema_version" | "flake" | "profile" | "name"
+        ) {
+            return Err(RegistryPackVerificationError::InvalidImageManifest {
+                reason: format!("mvm.toml field {key:?} cannot grant host authority"),
+            });
+        }
+    }
+    let manifest = crate::domain::manifest::Manifest::from_toml_str(text).map_err(|_| {
+        RegistryPackVerificationError::InvalidImageManifest {
+            reason: "mvm.toml does not satisfy the workload manifest schema".to_string(),
+        }
+    })?;
+    if manifest.flake.as_deref().is_some_and(|flake| flake != ".") {
+        return Err(RegistryPackVerificationError::InvalidImageManifest {
+            reason: "flake must select the signed local image directory".to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Verify and atomically publish a registry pack beneath its manifest digest.
@@ -1215,6 +1328,7 @@ mod tests {
             schema_version: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
             reference: self::reference(reference),
             description: "Python runtime".to_string(),
+            image: None,
             files: vec![RegistryPackFile {
                 path: "pack/profile.toml".to_string(),
                 sha256: Sha256Hex::from_bytes(b"profile"),
@@ -1473,6 +1587,7 @@ mod tests {
         let request = RegistryPackVerification::new(&requested, &bytes, b"bundle", &lock, &policy);
         let verified = verify_registry_pack_with(&request, accept_signature).unwrap();
         assert_eq!(verified.manifest().reference, requested);
+        assert!(verified.manifest().image.is_none());
         assert_eq!(verified.manifest_sha256(), &Sha256Hex::from_bytes(&bytes));
         assert_eq!(verified.manifest_bytes(), bytes);
         assert_eq!(verified.signature_bundle(), b"bundle");
@@ -1500,6 +1615,7 @@ mod tests {
                 schema_version: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
                 reference: reference("runtime/python@1.2.3"),
                 description: "invalid".to_string(),
+                image: None,
                 files,
             })
             .unwrap();
@@ -1507,6 +1623,70 @@ mod tests {
             let request =
                 RegistryPackVerification::new(&requested, &invalid, b"bundle", &lock, &policy);
             assert!(verify_registry_pack_with(&request, accept_signature).is_err());
+        }
+    }
+
+    #[test]
+    fn a_signed_image_descriptor_names_only_declared_in_pack_source_files() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&signed_manifest_bytes("runtime/python@1.2.3")).unwrap();
+        manifest["image"] = serde_json::json!({"manifest": "pack/image/mvm.toml"});
+        for path in [
+            "pack/image/mvm.toml",
+            "pack/image/flake.nix",
+            "pack/image/flake.lock",
+        ] {
+            manifest["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "path": path,
+                    "sha256": Sha256Hex::from_bytes(path.as_bytes()),
+                    "size": path.len(),
+                }));
+        }
+        let requested = reference("runtime/python@1.2.3");
+        let policy = publisher_policy();
+        let verify = |value: &serde_json::Value| {
+            let bytes = serde_json::to_vec(value).unwrap();
+            let lock = PackLockfile::new(vec![pin("runtime/python@1.2.3", &bytes)]).unwrap();
+            let request =
+                RegistryPackVerification::new(&requested, &bytes, b"bundle", &lock, &policy);
+            verify_registry_pack_with(&request, accept_signature)
+        };
+
+        let verified = verify(&manifest).expect("declared image files verify");
+        assert_eq!(
+            verified.manifest().image.as_ref().unwrap().manifest,
+            "pack/image/mvm.toml"
+        );
+        let mut unknown = manifest.clone();
+        unknown["image"]["host_path"] = serde_json::json!("/etc/mvm");
+        assert!(matches!(
+            verify(&unknown),
+            Err(RegistryPackVerificationError::ManifestParse(_))
+        ));
+
+        for missing in [
+            "pack/image/mvm.toml",
+            "pack/image/flake.nix",
+            "pack/image/flake.lock",
+        ] {
+            let mut invalid = manifest.clone();
+            invalid["files"]
+                .as_array_mut()
+                .unwrap()
+                .retain(|file| file["path"] != missing);
+            assert!(verify(&invalid).is_err(), "missing {missing} must fail");
+        }
+
+        for path in ["../mvm.toml", "/etc/mvm.toml", "pack/other.toml"] {
+            let mut invalid = manifest.clone();
+            invalid["image"]["manifest"] = serde_json::json!(path);
+            assert!(
+                verify(&invalid).is_err(),
+                "unsafe image path {path} must fail"
+            );
         }
     }
 
@@ -1604,6 +1784,78 @@ mod tests {
         assert!(matches!(
             undeclared,
             RegistryPackVerificationError::UndeclaredPayloadPath { .. }
+        ));
+    }
+
+    fn image_payload(manifest_toml: &[u8]) -> (tempfile::TempDir, VerifiedRegistryPack) {
+        let root = tempfile::tempdir().unwrap();
+        let image = root.path().join("pack/image");
+        std::fs::create_dir_all(&image).unwrap();
+        let files = [
+            ("pack/image/mvm.toml", manifest_toml),
+            ("pack/image/flake.nix", b"{ outputs = _: {}; }".as_slice()),
+            ("pack/image/flake.lock", b"{}".as_slice()),
+        ];
+        let declared = files
+            .into_iter()
+            .map(|(path, bytes)| {
+                std::fs::write(root.path().join(path), bytes).unwrap();
+                RegistryPackFile {
+                    path: path.to_string(),
+                    sha256: Sha256Hex::from_bytes(bytes),
+                    size: bytes.len() as u64,
+                }
+            })
+            .collect();
+        let manifest = RegistryPackManifest {
+            schema_version: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
+            reference: reference("runtime/python@1.2.3"),
+            description: "Python image".to_string(),
+            image: Some(RegistryPackImage {
+                manifest: "pack/image/mvm.toml".to_string(),
+            }),
+            files: declared,
+        };
+        let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
+        let verified = VerifiedRegistryPack {
+            manifest,
+            manifest_sha256: Sha256Hex::from_bytes(&manifest_bytes),
+            manifest_bytes,
+            signature_bundle: b"test bundle".to_vec(),
+        };
+        (root, verified)
+    }
+
+    #[test]
+    fn verified_image_payload_requires_a_local_source_only_manifest() {
+        let (root, verified) = image_payload(b"schema_version = 1\nflake = \".\"\n");
+        verify_registry_pack_contents(&verified, root.path()).unwrap();
+
+        for invalid in [
+            b"flake = \"github:elsewhere/image\"\n".as_slice(),
+            b"flake = \"../outside\"\n".as_slice(),
+            b"flake = \".\"\nnet = true\n".as_slice(),
+            b"flake = \".\"\n[policy]\nprofile = \"host-admin\"\n".as_slice(),
+            b"this is not TOML".as_slice(),
+        ] {
+            let (root, verified) = image_payload(invalid);
+            assert!(matches!(
+                verify_registry_pack_contents(&verified, root.path()),
+                Err(RegistryPackVerificationError::InvalidImageManifest { .. })
+            ));
+        }
+
+        let oversized = vec![b' '; 64 * 1024 + 1];
+        let (root, verified) = image_payload(&oversized);
+        assert!(matches!(
+            verify_registry_pack_contents(&verified, root.path()),
+            Err(RegistryPackVerificationError::InvalidImageManifest { .. })
+        ));
+
+        let (root, verified) = image_payload(b"\xff");
+        assert!(matches!(
+            verify_registry_pack_contents(&verified, root.path()),
+            Err(RegistryPackVerificationError::InvalidImageManifest { .. })
         ));
     }
 

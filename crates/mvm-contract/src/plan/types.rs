@@ -1418,6 +1418,8 @@ pub enum AssetKind {
     Agent,
     /// An admitted policy (network, egress, tool, or filesystem).
     Policy,
+    /// A publisher-verified registry pack, named by its exact versioned reference.
+    RegistryPack,
     /// The boot environment: image + kernel pin + verity state.
     ComputeEnvironment,
     /// Anything the caller did not classify.
@@ -2193,7 +2195,7 @@ mod asset_identity_tests {
     }
 
     #[test]
-    fn asset_kind_covers_the_six_classes() {
+    fn asset_kind_roundtrips_every_class() {
         // Exhaustive match: adding a variant breaks this test, forcing the
         // audit label mapping in the emitter to be revisited.
         for kind in [
@@ -2202,6 +2204,7 @@ mod asset_identity_tests {
             AssetKind::Prompt,
             AssetKind::Agent,
             AssetKind::Policy,
+            AssetKind::RegistryPack,
             AssetKind::ComputeEnvironment,
             AssetKind::Other,
         ] {

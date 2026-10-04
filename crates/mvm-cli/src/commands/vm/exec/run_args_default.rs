@@ -56,6 +56,7 @@ impl Default for RunArgs {
             receipt: None,
             caller_commitment: None,
             assets: Vec::new(),
+            registry_pack_image: None,
             outputs: Vec::new(),
             json: false,
             dry_run: false,

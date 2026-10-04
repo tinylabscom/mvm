@@ -48,16 +48,17 @@ pub mod secrets;
 
 pub use instructions::InstructionSources;
 
-/// A declared asset accepted by `--asset KIND:HOST_PATH`: a file or
-/// directory tree the run binds by content identity without attaching it
-/// to the guest (unlike a `--mount`, nothing is materialized or shared —
-/// the asset's canonical hash is recorded in the signed plan and the
-/// chain-signed audit log).
+/// A content-bound asset. Operator-declared files and internally selected
+/// signed packs are recorded in the plan without sharing them with the guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssetSpec {
-    pub kind: mvm_contract::plan::AssetKind,
-    /// Host file or directory to hash. Must exist at admission time.
-    pub host_path: String,
+pub enum AssetSpec {
+    /// An operator-declared host file or directory to hash.
+    File {
+        kind: mvm_contract::plan::AssetKind,
+        host_path: String,
+    },
+    /// An internally selected signed pack; never accepted from `--asset`.
+    RegistryPack(mvm_core::registry_pack::PackPin),
 }
 
 pub const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
@@ -536,23 +537,53 @@ pub fn admit_plan_for_boot_with_ingress(
         }
     }
 
-    // Caller-declared `--asset` files/dirs: the canonical tree hash is the
-    // asset's identity. A missing path fails admission here, before signing.
+    // Caller-declared files and selected signed packs are verified here,
+    // before their identities enter the signed plan.
     let mut caller_assets = Vec::with_capacity(p.assets.len());
     for spec in &p.assets {
-        let resolved = std::fs::canonicalize(&spec.host_path)?;
-        let digest = mvm_fs::hash::hash_source(&resolved).with_context(|| {
-            format!(
-                "hashing declared {} asset {} for its content identity",
-                serde_json::to_string(&spec.kind).expect("asset kind serializes"),
-                spec.host_path
-            )
-        })?;
-        let name = std::path::Path::new(&spec.host_path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| spec.host_path.clone());
-        caller_assets.push(mvm_core::plan::AssetIdentity::new(spec.kind, name, digest)?);
+        match spec {
+            AssetSpec::File { kind, host_path } => {
+                let resolved = std::fs::canonicalize(host_path)?;
+                let digest = mvm_fs::hash::hash_source(&resolved).with_context(|| {
+                    format!(
+                        "hashing declared {} asset {} for its content identity",
+                        serde_json::to_string(kind).expect("asset kind serializes"),
+                        host_path
+                    )
+                })?;
+                let name = std::path::Path::new(host_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| host_path.clone());
+                caller_assets.push(mvm_core::plan::AssetIdentity::new(*kind, name, digest)?);
+            }
+            AssetSpec::RegistryPack(pin) => {
+                let lock = mvm_core::registry_pack_store::load_pack_lockfile(
+                    &mvm_core::config::pack_lockfile_path(),
+                )?;
+                let publisher =
+                    mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+                        &mvm_core::config::registry_pack_publisher_policy_path(),
+                    )?
+                    .policy;
+                let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+                    &mvm_core::config::registry_pack_cache_dir(),
+                    &lock,
+                    &publisher,
+                    pin.reference(),
+                )?;
+                anyhow::ensure!(
+                    verified.manifest_sha256() == pin.manifest_sha256(),
+                    "registry pack {} changed after source selection",
+                    pin.reference()
+                );
+                caller_assets.push(mvm_core::plan::AssetIdentity::new(
+                    mvm_core::plan::AssetKind::RegistryPack,
+                    verified.manifest().reference.to_string(),
+                    verified.manifest_sha256().as_str(),
+                )?);
+            }
+        }
     }
 
     // Instruction files the boot copies into the guest, verified against the
@@ -1463,6 +1494,31 @@ mod admit_plan_tests {
 
         let admitted = admit_plan_for_boot(params).expect("admission succeeds");
         assert_eq!(admitted.admitted.plan().caller_commitment, Some(commitment));
+    }
+
+    #[test]
+    fn an_uninstalled_pack_image_is_refused_before_plan_signing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let rootfs = write_rootfs(dir.path(), b"pack rootfs");
+        let keys_dir = dir.path().join("keys");
+        let ledger = InMemoryNonceLedger::new();
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "runtime/absent@1.0.0".parse().expect("versioned reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pin");
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.assets = vec![AssetSpec::RegistryPack(pin)];
+
+        let error = admit_plan_for_boot(params).expect_err("uninstalled pack refused");
+        assert!(format!("{error:#}").contains("not pinned"), "{error:#}");
+        assert!(
+            !keys_dir.exists(),
+            "refusal must not initialize signer keys"
+        );
     }
 
     /// The image digest says what the workload *is* and nothing about what

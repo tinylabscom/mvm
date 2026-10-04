@@ -88,7 +88,11 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
+mod host_trust;
+mod registry_pack;
 mod verb_grant_sidecar;
+use host_trust::{host_grant_ceiling, host_trusted_plan_signers};
+use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
 
 pub use mvm_core::time::{Clock, SystemClock};
@@ -361,6 +365,7 @@ fn admit_plan_for_run_inner(
 ) -> Result<AdmittedPlan> {
     validate_extension_bindings(plan)?;
     let extensions = verify_extension_packs(plan, extension_ctx)?;
+    verify_registry_pack_assets(plan)?;
     // Grants are checked in the pre-keystore window, and for the same
     // reason as synthesis: a plan we would refuse must never leave here with a
     // signature on it. A signed refused plan is indistinguishable from a
@@ -444,6 +449,7 @@ pub fn admit_signed_plan_for_run(
     // No extension verification context on this path: a plan that binds
     // optional extensions is refused rather than admitted unchecked.
     let extensions = verify_extension_packs(&verified, None)?;
+    verify_registry_pack_assets(&verified)?;
     admit_grants(&verified, &host_grant_ceiling(), posture)?;
     admit_within_host_budget(&verified)?;
 
@@ -458,16 +464,6 @@ pub fn admit_signed_plan_for_run(
         ledger,
         bundle_ctx,
     })
-}
-
-/// The external plan signers this host trusts, from operator config.
-///
-/// Read from config rather than taken as a parameter for the same reason as
-/// the grant ceiling: admission's trust root must not be widen-able by the
-/// caller asking for admission. A malformed pin fails the whole read, so the
-/// set in force is exactly the set the operator wrote.
-fn host_trusted_plan_signers() -> Result<Vec<(String, VerifyingKey)>> {
-    mvm_core::user_config::load(None).trusted_plan_signer_keys()
 }
 
 /// Everything the shared post-verification tail of admission needs.
@@ -772,17 +768,6 @@ pub fn admit_for_run(
         bundle_ctx,
         posture,
     )
-}
-
-/// The bound this host puts on what any workload may be granted.
-///
-/// Read from the operator's config, never from the plan under admission. The
-/// two have different trust roots: whoever authors a plan also authors its
-/// grants, so a ceiling the plan could carry would be a bound the bounded party
-/// writes. There is no parameter for it here for the same reason — a caller
-/// cannot hand admission a wider ceiling than the host configured.
-fn host_grant_ceiling() -> GrantCeiling {
-    mvm_core::user_config::load(None).grant_ceiling()
 }
 
 /// Refuse a boot that, on top of every live machine's admitted charge, would
@@ -2341,6 +2326,63 @@ mod tests {
 
     const FIXTURE_SHA: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_MANIFEST: &[u8] =
+        include_bytes!("../../mvm-cli/tests/fixtures/signed-registry-python/manifest.json");
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_BUNDLE: &[u8] = include_bytes!(
+        "../../mvm-cli/tests/fixtures/signed-registry-python/manifest.sigstore.json"
+    );
+
+    #[cfg(feature = "manifest-verify")]
+    fn install_signed_python_pack(
+        home: &std::path::Path,
+    ) -> mvm_core::registry_pack::InstalledRegistryPack {
+        use mvm_core::registry_pack::{
+            PackAdoption, RegistryPackPublisher, RegistryPackPublisherPolicy,
+        };
+        use mvm_core::registry_pack_store::{adopt_install_and_pin, save_publisher_policy};
+
+        let publisher = RegistryPackPublisher::new(
+            "runtime",
+            "https://token.actions.githubusercontent.com",
+            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/feat/3716-python-image-pack".to_string()],
+        )
+        .expect("branch publisher identity");
+        let policy = RegistryPackPublisherPolicy::new(vec![publisher]).expect("publisher trust");
+        save_publisher_policy(
+            &mvm_core::config::registry_pack_publisher_policy_path(),
+            &policy,
+        )
+        .expect("save publisher trust");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvm-cli/tests/fixtures/signed-registry-python/files");
+        let staged = home.join("staged-pack");
+        std::fs::create_dir_all(staged.join("pack/image")).expect("staged image directory");
+        for relative in [
+            "pack/group.toml",
+            "pack/image/mvm.toml",
+            "pack/image/flake.nix",
+            "pack/image/flake.lock",
+        ] {
+            std::fs::copy(fixture.join(relative), staged.join(relative))
+                .expect("stage signed payload bytes");
+        }
+        let reference = "runtime/python@1.1.0".parse().expect("pack reference");
+        adopt_install_and_pin(
+            &PackAdoption {
+                requested: &reference,
+                manifest_bytes: PYTHON_MANIFEST,
+                signature_bundle: PYTHON_BUNDLE,
+                publisher_policy: &policy,
+            },
+            &staged,
+            &mvm_core::config::registry_pack_cache_dir(),
+            &mvm_core::config::pack_lockfile_path(),
+        )
+        .expect("adopt signed image pack")
+    }
+
     /// This module's own source, for the unforgeability check below.
     const SOURCE: &str = include_str!("plan_admission.rs");
 
@@ -2943,6 +2985,90 @@ mod tests {
             })
             .collect();
         synthesize_plan(&input).expect("fixture plan synthesizes")
+    }
+
+    #[test]
+    fn registry_pack_asset_requires_an_exact_version_and_a_verified_installation() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let mut plan = plan_binding(&[]);
+        plan.asset_identities.push(
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::RegistryPack,
+                "runtime/python",
+                FIXTURE_SHA,
+            )
+            .expect("valid digest"),
+        );
+        let error = verify_registry_pack_assets(&plan).expect_err("version required");
+        assert!(error.to_string().contains("exact version"), "{error}");
+
+        plan.asset_identities
+            .last_mut()
+            .expect("pack identity was appended")
+            .name = "runtime/python@1.0.0".to_string();
+        let error = verify_registry_pack_assets(&plan).expect_err("uninstalled pack refused");
+        assert!(
+            error.to_string().contains("verifying registry pack"),
+            "{error}"
+        );
+
+        plan.asset_identities
+            .last_mut()
+            .expect("pack identity was appended")
+            .name = "../../outside@1.0.0".to_string();
+        let error = verify_registry_pack_assets(&plan).expect_err("unsafe reference refused");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid registry pack reference"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn admission_without_registry_pack_assets_needs_no_pack_store() {
+        let (_env, _home) = host_with_ceiling(Default::default());
+        let plan = plan_binding(&[]);
+        verify_registry_pack_assets(&plan).expect("ordinary plan has no pack lookup");
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn real_signed_pack_identity_is_reverified_at_host_admission() {
+        let (_env, home) = host_with_ceiling(Default::default());
+        let installed = install_signed_python_pack(home.path());
+        let digest = mvm_core::packs::Sha256Hex::from_bytes(PYTHON_MANIFEST);
+        let mut plan = plan_binding(&[]);
+        plan.asset_identities.push(
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::RegistryPack,
+                "runtime/python@1.1.0",
+                digest.as_str(),
+            )
+            .expect("pack asset identity"),
+        );
+        verify_registry_pack_assets(&plan).expect("signed pack admits");
+
+        plan.asset_identities
+            .last_mut()
+            .expect("pack identity")
+            .digest = FIXTURE_SHA.to_string();
+        let error = verify_registry_pack_assets(&plan).expect_err("wrong plan digest refused");
+        assert!(error.to_string().contains("signed-plan digest"), "{error}");
+
+        plan.asset_identities
+            .last_mut()
+            .expect("pack identity")
+            .digest = digest.as_str().to_string();
+        let path = installed.payload_root().join("pack/image/mvm.toml");
+        let mut bytes = std::fs::read(&path).expect("read signed image manifest");
+        bytes[0] ^= 1;
+        std::fs::write(path, bytes).expect("tamper cached payload without changing length");
+        let error = verify_registry_pack_assets(&plan).expect_err("tampered pack refused");
+        assert!(
+            format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
     }
 
     struct FixedClock(DateTime<Utc>);

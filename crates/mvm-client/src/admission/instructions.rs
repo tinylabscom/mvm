@@ -90,7 +90,10 @@ fn boot_inputs(
             .map_or_else(Vec::new, <[PathBuf]>::to_vec),
         assets: assets
             .iter()
-            .map(|asset| PathBuf::from(&asset.host_path))
+            .filter_map(|asset| match asset {
+                AssetSpec::File { host_path, .. } => Some(PathBuf::from(host_path)),
+                AssetSpec::RegistryPack(_) => None,
+            })
             .collect(),
         workload_dir: sources.workload_dir.map(Path::to_path_buf),
     }
@@ -174,7 +177,7 @@ mod tests {
 
     #[test]
     fn directory_shares_assets_and_the_workload_are_scanned_and_disks_are_not() {
-        let assets = vec![AssetSpec {
+        let assets = vec![AssetSpec::File {
             kind: mvm_contract::plan::AssetKind::Prompt,
             host_path: "/assets/prompt".to_string(),
         }];
@@ -201,8 +204,20 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_identity_is_not_mistaken_for_a_host_file_to_scan() {
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.0.0".parse().expect("pack reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("versioned pin");
+        let assets = vec![AssetSpec::RegistryPack(pin)];
+        let inputs = boot_inputs(&[], &assets, InstructionSources::default());
+        assert!(inputs.assets.is_empty());
+    }
+
+    #[test]
     fn explicit_mount_roots_override_admitted_share_paths() {
-        let assets = vec![AssetSpec {
+        let assets = vec![AssetSpec::File {
             kind: mvm_contract::plan::AssetKind::Prompt,
             host_path: "/assets/prompt".to_string(),
         }];
