@@ -10,7 +10,7 @@
 //! This module computes a **host-side input fingerprint** so an
 //! unchanged build can be short-circuited before the builder VM is ever
 //! booted: map `fingerprint -> ActionCacheRecord` (the revision plus
-//! every artifact's sha256 + size), and on the next `up` resolve the
+//! every artifact's sha256 + size), and on the next build resolve the
 //! fingerprint host-side, verify the record against what is actually on
 //! disk, and reuse the already-materialised `~/.mvm/dev/builds/<revision>/`
 //! artifacts only when it checks out.

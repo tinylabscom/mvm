@@ -63,8 +63,9 @@ Owner-approved exceptions (unchanged):
 the host so worktrees do not deadlock on shared builder state. Tests needing
 Linux (vsock, jailer/seccomp, dm-verity, network namespaces, `/dev/kvm`,
 `/proc/net`) are gated `#[cfg(target_os = "linux")]` and only those sub-targets
-run inside the builder VM. `mvmctl` via `cargo run` (`build`, `up`, `down`,
-`logs`, `ls`) runs inside the builder VM (explicit `wasm` target excepted).
+run inside the builder VM. `mvmctl` via `cargo run` (`build`, `machine run`,
+`machine stop`, `machine logs`, `machine ls`) runs inside the builder VM
+(explicit `wasm` target excepted).
 
 **Disposable GCP KVM test host.** Linux/KVM E2E tests that cannot run on the
 builder VM or GitHub-hosted runners have one repository-owned remote lifecycle.

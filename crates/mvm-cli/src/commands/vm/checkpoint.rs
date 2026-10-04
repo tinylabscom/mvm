@@ -1080,7 +1080,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     let tenant = super::tenant_resolution::resolve_tenant(None);
 
     // The booted child needs a real kernel path; work-image boots ship none.
-    // Fall back to the cached builder-VM kernel the same way `up` does.
+    // Fall back to the cached builder-VM kernel when the placeholder is absent.
     let vmlinux_placeholder = p
         .instance_rootfs
         .parent()

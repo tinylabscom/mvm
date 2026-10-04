@@ -66,7 +66,7 @@ pub const DEFAULT_TENANT: &str = "local";
 /// supervisor's policy bundle.
 pub const DEFAULT_POLICY_REF: &str = "local-default";
 
-/// Default intent for direct `mvmctl up` boots. Higher-level callers
+/// Default intent for direct VM boots. Higher-level callers
 /// can pass a more specific purpose such as `code:execute` or
 /// `agent:web-research` once their API has that context.
 pub const DEFAULT_INTENT: &str = "vm:boot";
@@ -151,15 +151,11 @@ pub struct SynthesisInput<'a> {
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
     /// set, the synthesised plan carries the pin and the supervisor's
     /// admit path re-verifies the archive against this triple before
-    /// backend dispatch. Populating it from `mvmctl up` flags is the
-    /// next step.
+    /// backend dispatch. No boot path sets it today.
     pub bundle_pin: Option<crate::plan::bundle::PlanArtifact>,
     /// Optional pin to an application-dependencies volume sealed by
-    /// `mvm_sdk::compile::deps_audit::seal_volume`. Populated by
-    /// `mvmctl up`'s deps-install path when the workload declares
-    /// `App.dependencies = Dependencies::Python | Dependencies::Node`;
-    /// absent when `Dependencies::None` / no `--from-workload-ir` flag
-    /// is set. The supervisor's admit path re-runs
+    /// `mvm_sdk::compile::deps_audit::seal_volume`. No boot path sets it
+    /// today. When it is set, the supervisor's admit path re-runs
     /// `verify_sealed_volume` against the pinned `volume_hash` +
     /// `manifest_sha256` before backend dispatch (security claim 9).
     pub deps_volume: Option<DepsVolumeBinding>,
@@ -854,10 +850,8 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         nonce,
         agent_verbs: input.agent_verbs.clone(),
         bundle: input.bundle_pin.clone(),
-        // Populated by the caller when an `mvmctl up --from-workload-ir
-        // <path>` invocation drove `install_app_deps` to a sealed
-        // volume. `None` preserves claim 8 (the supervisor's
-        // deps-volume gate is skipped).
+        // No boot path supplies a deps volume today, so this is `None` and
+        // the supervisor's deps-volume gate is skipped.
         deps_volume: input.deps_volume.clone(),
         shares: input.shares.clone(),
         asset_identities: assemble_asset_identities(input),
@@ -1444,9 +1438,9 @@ mod tests {
 
     #[test]
     fn with_deps_volume_plan_carries_binding_verbatim() {
-        // `mvmctl up`'s install pipeline yielded an `InstallResult`;
-        // the caller turns it into a `DepsVolumeBinding` and threads it
-        // through synthesis. The plan field must round-trip the volume
+        // A caller holding a sealed volume turns its `InstallResult` into a
+        // `DepsVolumeBinding` and threads it through synthesis. The plan
+        // field must round-trip the volume
         // + manifest hashes verbatim so the supervisor's verifier
         // re-derives them against the on-disk volume.
         let volume_hash = "a".repeat(64);

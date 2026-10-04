@@ -266,7 +266,7 @@ pub enum GuestRequest {
     /// Distinct from `EntrypointStatus` (which is entrypoint-only and
     /// returns a flat `EntrypointStatusReport`): `ReadinessStatus`
     /// reports the *full* boot phase set with `ComponentState` per
-    /// component, and is intended to be polled (`mvmctl wait`).
+    /// component, and is intended to be polled (`mvmctl machine wait`).
     ReadinessStatus,
 
     // ========================================================================

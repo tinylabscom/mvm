@@ -154,7 +154,7 @@ impl BrokerGuard {
 /// something" problem — and, like the ordinary `VmBackend` methods this
 /// trait's two calls sit beside, `start`/`stop` are independent entry points
 /// keyed by `vm_name` rather than a value threaded between them: a `start`
-/// during `up` and the matching `stop` commonly run in different process
+/// during `machine run -d` and the matching `machine stop` commonly run in different process
 /// invocations against the same disk-backed VM state, so nothing here can
 /// rely on an in-process object outliving the call that created it.
 ///

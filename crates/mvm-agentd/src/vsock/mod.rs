@@ -166,7 +166,7 @@ pub const CONSOLE_PORT_BASE: u32 = 20000;
 pub const DEV_CONSOLE_DATA_PORT_COUNT: u32 = 128;
 
 /// The host-side console data-port range a dev-accessible VM pre-opens so an
-/// interactive PTY (`machine run -t`, `machine shell`, `up --console`) can
+/// interactive PTY (`machine run -t`, `machine shell`) can
 /// reach the agent-allocated `CONSOLE_PORT_BASE + session_id` data channel.
 ///
 /// The per-port-UDS backends (libkrun, HVF) bind a *static* vsock port list at
@@ -260,7 +260,8 @@ const ADAPTIVE_BACKOFF_BASE_MS: u64 = 20;
 /// this ceiling so a slow guest still polls at the old steady cadence.
 const ADAPTIVE_BACKOFF_CAP_MS: u64 = 500;
 
-/// Adaptive backoff delay for the `mvmctl up` readiness poll.
+/// Adaptive backoff delay for host-side polls that wait for the guest
+/// agent to answer (the boot path's readiness wait, `mvmctl bench`).
 /// `attempt` is 0-based: attempt 0 waits the
 /// base, each subsequent attempt doubles, capped at
 /// `ADAPTIVE_BACKOFF_CAP_MS`. This replaces a fixed 500 ms sleep that
