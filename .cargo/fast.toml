@@ -31,10 +31,13 @@ codegen-backend = "llvm"
 # Bindgen declares aws-lc's C functions with a `\u{1}` link name, which LLVM
 # reads as "use this symbol verbatim" and Cranelift does not: on macOS it adds a
 # second leading underscore, so a Cranelift-compiled caller asks the linker for
-# a symbol aws-lc does not define. The image-set signature verifier in the
-# default build reaches aws-lc through these crates, so they compile with LLVM
-# here too. A new undefined `aws_lc_*` symbol at link time names the next crate
-# to add.
+# a symbol aws-lc does not define, and on Linux the reference is left
+# unresolved. The image-set signature verifier in the default build reaches
+# aws-lc through these crates, so they compile with LLVM here too. `rustls` is
+# among them because aws-lc-rs's generic and inline functions are instantiated
+# in the calling crate's own codegen units. A new undefined `aws_lc_*` symbol at
+# link time names the next crate to add: the linker's `>>>` lines name the
+# object file that referenced it.
 [profile.dev.package.aws-lc-sys]
 codegen-backend = "llvm"
 
@@ -42,4 +45,7 @@ codegen-backend = "llvm"
 codegen-backend = "llvm"
 
 [profile.dev.package.sigstore-crypto]
+codegen-backend = "llvm"
+
+[profile.dev.package.rustls]
 codegen-backend = "llvm"
