@@ -6,12 +6,17 @@
 //!
 //! ## Which processes can build
 //!
-//! The build runs on the builder backend the host resolves to, and a backend
-//! has to be constructible in the calling process. `mvmctl` registers the HVF
-//! and Firecracker builders at startup and carries the builder boot payload;
-//! a process that has done neither gets that backend's refusal, by name, from
-//! [`build_and_export_bundle`]. Such a caller either selects a backend it can
-//! construct (`MVM_BUILDER_BACKEND`) or hands one to
+//! The build runs on the builder backend the host resolves to.
+//! [`build_and_export_bundle`] registers the HVF and Firecracker builders
+//! before it resolves one, so every backend is constructible here, as it is in
+//! `mvmctl`.
+//!
+//! What a library process lacks is the builder boot payload: `mvmctl` embeds
+//! mvm's builder binaries and hands them to each builder boot, and nothing
+//! else carries them. A builder image that bakes its own binaries boots
+//! without one. An image that relies on the payload is refused before it
+//! boots, and the refusal names the missing payload rather than the image.
+//! Such a caller runs the build through `mvmctl`, or hands its own builder to
 //! [`build_and_export_bundle_on`].
 
 use std::path::{Path, PathBuf};
@@ -78,6 +83,7 @@ pub fn build_and_export_bundle(
     request: &BuilderBundleRequest,
     signer: &dyn BundleSigner,
 ) -> Result<BuilderBundleResult> {
+    mvm_runtime::builder_runner::register_driver_backed_builders();
     let built = run_builder_for_request(&request.build_request())?;
     export_builder_result(&built, request, signer)
 }
