@@ -68,18 +68,21 @@ Feature: The documented machine verbs operate a real guest
     Then the journey machine is still running
 
   @live @snapshot
-  Scenario: the guest checkpoints and restores
+  Scenario: a checkpoint fork replays the recorded guest command
     # `--class vm-full` because that is the form the docs teach, and the two
     # classes have opposite preconditions: `vm-full` checkpoints a *running*
     # guest (it pauses internally), while the default `fs-quick` refuses one
     # and wants it stopped or paused first.
-    When I run mvmctl against the journey machine with "machine checkpoint create bdd-journey --class vm-full"
+    Given the journey replay marker is absent
+    When I run mvmctl against the journey machine with "machine checkpoint create bdd-journey --class vm-full --verbose"
     Then the command exits with code 0
+    And I remember the journey checkpoint
     # No machine name: `checkpoint ls` lists every checkpoint and takes no
     # positional, which is the form the docs show. Passing one made clap refuse
     # the whole command.
     When I run mvmctl against the journey machine with "machine checkpoint ls"
     Then the command exits with code 0
+    When I replay a recorded journey command from the checkpoint
     Then the journey machine is still running
 
   # The scenario that found #3024. `machine diff` parsed and then died with

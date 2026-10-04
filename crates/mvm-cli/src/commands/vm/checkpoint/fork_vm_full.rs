@@ -17,8 +17,8 @@ use mvm_core::config::vm_state_dir;
 use mvm_runtime::checkpoint::{CheckpointStore, ForkParams, ForkParentLiveness, fork_vm_full};
 
 use super::{
-    CheckpointForkJson, SignedChainAnchor, bind_checkpoint_forked, grant_predecessor_from_vm_name,
-    now_unix, parent_agent_verb_override, read_grant_envelope_for,
+    CheckpointForkJson, ForkIntent, SignedChainAnchor, bind_checkpoint_forked,
+    grant_predecessor_from_vm_name, now_unix, parent_agent_verb_override, read_grant_envelope_for,
 };
 use crate::ui;
 
@@ -39,6 +39,7 @@ pub(in crate::commands) struct ForkVmFullArmParams<'a> {
     /// behaviour: a child admitted with no bindings.
     pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
     pub(in crate::commands) allow_secret_drop: bool,
+    pub(in crate::commands) intent: ForkIntent,
 }
 
 /// vm_full fork: clone the captured triple into a new child identity, admit a
@@ -97,6 +98,7 @@ fn fork_vm_full_arm_inner(
             json: p.json,
             declared_secrets: p.declared_secrets,
             allow_secret_drop: p.allow_secret_drop,
+            intent: p.intent,
         }),
         Some(VmFullOrigin::Firecracker) => fork_vm_full_arm_fc(ForkVmFullArmFcParams {
             store: p.store,
@@ -109,6 +111,7 @@ fn fork_vm_full_arm_inner(
             json: p.json,
             declared_secrets: p.declared_secrets,
             allow_secret_drop: p.allow_secret_drop,
+            intent: p.intent,
         }),
         Some(VmFullOrigin::Retired) => anyhow::bail!(
             "this vm_full checkpoint was captured under a backend that has been removed; \
@@ -137,6 +140,7 @@ pub(in crate::commands) struct ForkVmFullArmFcParams<'a> {
     /// behaviour: a child admitted with no bindings.
     pub(in crate::commands) declared_secrets: &'a [mvm_core::plan::SecretBinding],
     pub(in crate::commands) allow_secret_drop: bool,
+    pub(in crate::commands) intent: ForkIntent,
 }
 
 /// FC vm_full fork: clone the captured triple, admit a fresh claim-8 plan for
@@ -176,6 +180,7 @@ pub(in crate::commands) fn fork_vm_full_arm_fc(
         backend_kind: BackendKind::Firecracker,
         declared_secrets: p.declared_secrets,
         allow_secret_drop: p.allow_secret_drop,
+        intent: p.intent,
     })?;
 
     // Verify the parent against the signed audit chain before cloning/restoring.
@@ -293,6 +298,7 @@ struct AdmitForkedChildParams<'a> {
     /// operator has not bound grants nothing.
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
     allow_secret_drop: bool,
+    intent: ForkIntent,
 }
 
 /// The admitted claim-8 envelope a vm_full fork boots its child under.
@@ -314,19 +320,17 @@ struct AdmittedForkChild {
 /// the real shape is baked into the saved machine state and enforced by the VMM
 /// at load time, so these values are claim-8 admission metadata only.
 fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChild> {
+    let restrict_agent_verbs = fork_restrict_agent_verbs(p)?;
     let user_cfg = mvm_core::user_config::load(None);
-    // The checkpoint's RECORDED rootfs sha, so admission pins the bytes the
-    // capture sealed rather than re-hashing a file that could have moved.
-    let rootfs_blob = p
-        .store
-        .content_dir(p.checkpoint)
-        .join(mvm_core::checkpoint::ROOTFS_BLOB);
-    let recorded_sha = p
-        .parent_meta
-        .content
-        .iter()
-        .find(|b| b.name == mvm_core::checkpoint::ROOTFS_BLOB)
-        .map(|b| b.sha256.clone());
+    // A chunked checkpoint has no contiguous rootfs in its content directory.
+    // Keep the verified materialization alive through admission, which hashes
+    // these exact bytes against the authenticated materialized digest.
+    let scratch = tempfile::Builder::new()
+        .prefix(".fork-admit-")
+        .tempdir_in(p.store.root())
+        .context("creating fork admission materialization")?;
+    let (rootfs_blob, recorded_sha) =
+        fork_admission_rootfs(p.store, p.parent_meta, scratch.path())?;
     let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
     let tenant = crate::commands::vm::tenant_resolution::resolve_tenant(None);
     super::validate_fork_secret_policy(
@@ -352,7 +356,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             // not the parent's: a child admitted under an environment it did
             // not itself load would record a pin nothing here verified.
             kernel_path: None,
-            precomputed_image_sha256: recorded_sha,
+            precomputed_image_sha256: Some(recorded_sha),
             boot_artifact_identity: None,
             cpus: user_cfg.default_cpus,
             mem_mib: user_cfg.default_memory_mib as u64,
@@ -378,10 +382,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             tools: Default::default(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             agent_verb_override: parent_agent_verbs.clone(),
-            // A restored child is never interactive, never carries ad-hoc argv, and
-            // is always prod-profile, so it qualifies for the attenuated grant.
-            restrict_agent_verbs: !parent_agent_verbs.is_empty()
-                || crate::commands::vm::agent_verbs::grant_eligible(false, false, false),
+            restrict_agent_verbs,
             services: Vec::new(),
             // The child inherits the permission set the parent was captured
             // under. Anything else is refused downstream, and declaring nothing
@@ -418,6 +419,58 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     })
 }
 
+fn fork_restrict_agent_verbs(p: &AdmitForkedChildParams<'_>) -> Result<bool> {
+    match p.intent {
+        ForkIntent::Ordinary => Ok(true),
+        ForkIntent::Replay => {
+            let anchor = SignedChainAnchor::load().context("loading replay source audit chain")?;
+            mvm_runtime::checkpoint::verify_lineage(p.store, p.checkpoint, &anchor)
+                .context("verifying replay source checkpoint lineage")?;
+            let recorded_plan_id = anchor
+                .checkpoint_plan_id(p.parent_meta)?
+                .context("replay source checkpoint has no signed plan identity")?;
+            let source = super::super::plan_persist::read_plan(&p.parent_meta.vm_name)
+                .context("reading replay source plan")?;
+            mvm_core::plan::verify_plan_id(&source)
+                .context("verifying replay source plan content id")?;
+            replay_source_permits_exec(&source, &recorded_plan_id)?;
+            Ok(false)
+        }
+    }
+}
+
+fn replay_source_permits_exec(
+    source: &mvm_core::plan::ExecutionPlan,
+    recorded_plan_id: &str,
+) -> Result<()> {
+    if source.plan_id.0 != recorded_plan_id {
+        anyhow::bail!("replay source plan differs from the signed checkpoint creation entry");
+    }
+    if source.agent_verbs.is_some() {
+        anyhow::bail!("replay source has an attenuated agent-verb grant; exec is not authorized");
+    }
+    Ok(())
+}
+
+fn fork_admission_rootfs(
+    store: &CheckpointStore,
+    parent: &mvm_core::checkpoint::CheckpointMeta,
+    scratch: &std::path::Path,
+) -> Result<(std::path::PathBuf, String)> {
+    let rootfs = mvm_runtime::checkpoint::materialized_source(
+        store,
+        parent,
+        mvm_core::checkpoint::ROOTFS_BLOB,
+        scratch,
+    )?;
+    let digest = mvm_runtime::checkpoint::materialized_blob_sha256(
+        store,
+        parent,
+        mvm_core::checkpoint::ROOTFS_BLOB,
+    )?;
+    Ok((rootfs, digest))
+}
+
 /// Inputs for [`fork_vm_full_arm_hvf`].
 struct ForkVmFullArmHvfParams<'a> {
     store: &'a CheckpointStore,
@@ -432,6 +485,7 @@ struct ForkVmFullArmHvfParams<'a> {
     /// behaviour: a child admitted with no bindings.
     declared_secrets: &'a [mvm_core::plan::SecretBinding],
     allow_secret_drop: bool,
+    intent: ForkIntent,
 }
 
 /// HVF vm_full fork: clone the captured state into a fresh child identity, admit
@@ -458,6 +512,7 @@ fn fork_vm_full_arm_hvf(
         backend_kind: BackendKind::Hvf,
         declared_secrets: p.declared_secrets,
         allow_secret_drop: p.allow_secret_drop,
+        intent: p.intent,
     })?;
 
     // Verify the parent against the signed audit chain before cloning anything.
@@ -499,10 +554,11 @@ fn fork_vm_full_arm_hvf(
         p.parent_meta.meta_digest.as_str(),
         read_grant_envelope_for(&p.child_vm_name),
     ) {
-        return Err(stop_child_after_post_restore_failure(
-            &p.child_vm_name,
-            error,
-        ));
+        return Err(stop_child_after_restore_failure(&p.child_vm_name, error));
+    }
+
+    if let Err(error) = record_hvf_fork_runtime_meta(&p.child_vm_name, &p.parent_meta) {
+        return Err(stop_child_after_restore_failure(&p.child_vm_name, error));
     }
 
     if p.json {
@@ -525,28 +581,54 @@ fn fork_vm_full_arm_hvf(
     Ok(meta)
 }
 
-/// A restored child that cannot prove it rotated its identity must not stay up:
-/// it is still running with the parent's CSPRNG state. Stop it and report both
-/// the original failure and the outcome of the stop.
-fn stop_child_after_post_restore_failure(
-    child_vm_name: &str,
-    error: anyhow::Error,
-) -> anyhow::Error {
+/// Stop a restored child when identity rotation or required runtime metadata
+/// fails, and report both the original failure and the outcome of the stop.
+fn stop_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -> anyhow::Error {
     match mvm_runtime::backend::AnyBackend::for_started_vm(child_vm_name) {
         Some(backend) => match backend.stop(&mvm_core::vm_backend::VmId(child_vm_name.to_string()))
         {
             Ok(()) => error.context(format!(
-                "stopped forked child '{child_vm_name}' after post-restore hygiene failure"
+                "stopped forked child '{child_vm_name}' after restore completion failure"
             )),
             Err(stop_error) => error.context(format!(
-                "post-restore hygiene failed for '{child_vm_name}' and stopping the child \
+                "restore completion failed for '{child_vm_name}' and stopping the child \
                  also failed: {stop_error}"
             )),
         },
         None => error.context(format!(
-            "post-restore hygiene failed for '{child_vm_name}' and no backend claims it"
+            "restore completion failed for '{child_vm_name}' and no backend claims it"
         )),
     }
+}
+
+fn record_hvf_fork_runtime_meta(
+    child_vm_name: &str,
+    parent: &mvm_core::checkpoint::CheckpointMeta,
+) -> Result<()> {
+    use mvm_runtime::vm::runtime_meta;
+
+    let rootfs = vm_state_dir(child_vm_name).join(mvm_core::checkpoint::ROOTFS_BLOB);
+    anyhow::ensure!(
+        rootfs.is_file(),
+        "restored HVF child has no rootfs at {}",
+        rootfs.display()
+    );
+    runtime_meta::record_from_rootfs(
+        child_vm_name,
+        mvm_core::vm_backend::StartMode::Detached,
+        &rootfs,
+    )?;
+    let mut meta = runtime_meta::read(child_vm_name)?
+        .context("restored HVF child runtime metadata was not written")?;
+    meta.runtime_overlay_version = parent.runtime_overlay_version.clone();
+    runtime_meta::write(child_vm_name, &meta)?;
+    let persisted = runtime_meta::read(child_vm_name)?
+        .context("restored HVF child runtime metadata did not persist")?;
+    anyhow::ensure!(
+        persisted == meta,
+        "restored HVF child runtime metadata changed during write"
+    );
+    Ok(())
 }
 
 /// Hand a freshly restored HVF child its fresh generation token (and its grant,
@@ -642,6 +724,122 @@ mod tests {
     use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ContentBlob, ROOTFS_BLOB};
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 
+    #[test]
+    fn restored_hvf_child_records_its_own_rootfs_and_overlay() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let child = "restored-meta-child";
+        let child_dir = vm_state_dir(child);
+        std::fs::create_dir_all(&child_dir).expect("child dir");
+        let rootfs = child_dir.join(ROOTFS_BLOB);
+        std::fs::write(&rootfs, b"rootfs").expect("rootfs");
+        let mut parent = CheckpointMeta::builder(
+            CheckpointId::new("parent-meta"),
+            CheckpointClass::VmFull,
+            "source-meta",
+        )
+        .build();
+        parent.runtime_overlay_version = Some("overlay-v1".into());
+
+        record_hvf_fork_runtime_meta(child, &parent).expect("record child metadata");
+        let saved = mvm_runtime::vm::runtime_meta::read(child)
+            .expect("read child metadata")
+            .expect("present");
+        assert_eq!(saved.rootfs_path.as_deref(), rootfs.to_str());
+        assert_eq!(saved.runtime_overlay_version.as_deref(), Some("overlay-v1"));
+        assert_eq!(
+            saved.mode,
+            mvm_runtime::vm::runtime_meta::StartModeKind::Detached
+        );
+    }
+
+    #[test]
+    fn restored_hvf_child_refuses_missing_rootfs_metadata() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let parent = CheckpointMeta::builder(
+            CheckpointId::new("parent-meta"),
+            CheckpointClass::VmFull,
+            "source-meta",
+        )
+        .build();
+        assert!(record_hvf_fork_runtime_meta("missing-child", &parent).is_err());
+        assert!(
+            mvm_runtime::vm::runtime_meta::read("missing-child")
+                .expect("read metadata")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn replay_only_permits_the_audited_unrestricted_source() {
+        let mut source = mvm_core::plan::test_support::PlanFixture::new().build();
+        source.plan_id = mvm_core::plan::compute_plan_id(&source);
+        let recorded = source.plan_id.0.clone();
+        assert!(replay_source_permits_exec(&source, &recorded).is_ok());
+        assert!(replay_source_permits_exec(&source, "sha256:other").is_err());
+
+        source.agent_verbs = Some(Vec::new());
+        source.plan_id = mvm_core::plan::compute_plan_id(&source);
+        assert!(replay_source_permits_exec(&source, &source.plan_id.0).is_err());
+    }
+
+    fn chunked_parent(store: &CheckpointStore, source: &std::path::Path) -> CheckpointMeta {
+        std::fs::write(source, b"chunked rootfs bytes").unwrap();
+        mvm_runtime::checkpoint::capture_fs_quick(
+            store,
+            mvm_runtime::checkpoint::CaptureFsQuickParams {
+                id: CheckpointId::new("chunked-parent"),
+                vm_name: "parent-vm".into(),
+                rootfs: source.to_path_buf(),
+                supervisor_config_digest: "digest".into(),
+                runtime_overlay_version: None,
+                tag: None,
+                created_unix: 1,
+                quiesced: true,
+                grants: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fork_admission_reads_and_binds_chunked_rootfs_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = chunked_parent(&store, &tmp.path().join(ROOTFS_BLOB));
+        assert!(!store.content_dir(&parent.id).join(ROOTFS_BLOB).exists());
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        let (rootfs, digest) = fork_admission_rootfs(&store, &parent, &scratch).unwrap();
+        assert_eq!(std::fs::read(&rootfs).unwrap(), b"chunked rootfs bytes");
+        assert_eq!(
+            mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap(),
+            digest
+        );
+    }
+
+    #[test]
+    fn fork_admission_refuses_tampered_chunk_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let parent = chunked_parent(&store, &tmp.path().join(ROOTFS_BLOB));
+        std::fs::write(
+            store
+                .content_dir(&parent.id)
+                .join("rootfs.ext4.chunks.json"),
+            b"tampered",
+        )
+        .unwrap();
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+
+        assert!(fork_admission_rootfs(&store, &parent, &scratch).is_err());
+    }
+
     /// A parent checkpoint whose recorded rootfs sha matches a real blob on
     /// disk. The blob has to exist: admission *verifies* the recorded digest
     /// against the bytes rather than trusting it, so a fixture that records a
@@ -708,6 +906,7 @@ mod tests {
             backend_kind: BackendKind::Hvf,
             declared_secrets: declared,
             allow_secret_drop: false,
+            intent: ForkIntent::Ordinary,
         })
         .expect("a fork child is admitted");
         admitted.admission.admitted.plan().secrets.clone()
@@ -801,6 +1000,7 @@ mod tests {
             declared_secrets: &[],
             // Strict default: these cases do not exercise attenuation.
             allow_secret_drop: false,
+            intent: ForkIntent::Ordinary,
         })
         .expect("a cpu-bounded parent is forkable on a tier that meters CPU");
 
@@ -846,6 +1046,7 @@ mod tests {
             declared_secrets: &[],
             // Strict default: these cases do not exercise attenuation.
             allow_secret_drop: false,
+            intent: ForkIntent::Ordinary,
         }) {
             // `AdmittedForkChild` carries the child's plan JSON and is
             // deliberately not `Debug`, so this cannot use `expect_err`.
@@ -887,6 +1088,7 @@ mod tests {
             declared_secrets: &[],
             // Strict default: these cases do not exercise attenuation.
             allow_secret_drop: false,
+            intent: ForkIntent::Ordinary,
         })
         .expect("a grantless parent is forkable");
 
@@ -953,6 +1155,7 @@ mod tests {
             json: false,
             declared_secrets: &[],
             allow_secret_drop: false,
+            intent: ForkIntent::Ordinary,
         })
         .unwrap_err();
         let msg = err.to_string();
@@ -976,6 +1179,7 @@ mod tests {
             json: false,
             declared_secrets: &[],
             allow_secret_drop: false,
+            intent: ForkIntent::Ordinary,
         })
         .unwrap_err();
         let msg = err.to_string();
