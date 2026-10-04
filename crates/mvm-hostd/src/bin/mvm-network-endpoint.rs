@@ -186,15 +186,19 @@ fn main() -> Result<()> {
         // The embedded telemetry collector starts after confinement so its
         // threads inherit the confined policy; its state-dir grant is part
         // of the confinement spec. It lives and dies with this process —
-        // nothing here stops or joins it.
-        let _telemetry = cfg
-            .telemetry
-            .as_ref()
-            .map(|telemetry| {
-                mvm_hostd::telemetry_collector::start_embedded(&cfg.instance_id, telemetry)
-            })
-            .transpose()
-            .context("starting the embedded telemetry collector")?;
+        // nothing here stops or joins it. A collector that cannot start costs
+        // this VM its telemetry, never its egress: the ready handshake has
+        // already gone out and the guest is booting against this process.
+        let _telemetry = cfg.telemetry.as_ref().and_then(|telemetry| {
+            mvm_hostd::telemetry_collector::start_embedded(&cfg.instance_id, telemetry)
+                .inspect_err(|error| {
+                    warn!(
+                        error = format!("{error:#}"),
+                        "embedded telemetry collector did not start; serving without it"
+                    );
+                })
+                .ok()
+        });
         serve(
             ServeParams::builder()
                 .cfg(&cfg)

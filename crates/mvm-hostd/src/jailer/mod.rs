@@ -233,9 +233,10 @@ impl ConfinementSpec {
     }
 
     /// Permit the embedded telemetry collector's I/O: the VM state dir
-    /// (records + status files, and the per-VM sockets bound inside it) and
-    /// the host keys dir the anchor is read from. Opt-in so an endpoint with
-    /// no embedded collector keeps the narrower grant.
+    /// (records + status files, and the per-VM sockets bound inside it). The
+    /// host anchor it reads lives in the keys dir, which `network_endpoint`
+    /// already makes readable. Opt-in so an endpoint with no embedded
+    /// collector keeps the narrower grant.
     #[must_use]
     pub fn with_telemetry_state(mut self, state_dir: Option<&Path>) -> Self {
         if let Some(state_dir) = state_dir {
