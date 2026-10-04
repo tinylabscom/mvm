@@ -642,6 +642,7 @@ mod tests {
             "crates/mvm-core/src",
             "crates/mvm-agentd/src",
             "crates/mvm-host-services/src",
+            "crates/mvm-setpriv/src",
         ] {
             std::fs::create_dir_all(root.join(rel)).unwrap();
             std::fs::write(root.join(rel).join("lib.rs"), "pub fn shared() {}\n").unwrap();
@@ -653,6 +654,7 @@ mod tests {
             "crates/mvm-core/Cargo.toml",
             "crates/mvm-agentd/Cargo.toml",
             "crates/mvm-host-services/Cargo.toml",
+            "crates/mvm-setpriv/Cargo.toml",
         ] {
             std::fs::write(root.join(rel), "[package]\n").unwrap();
         }

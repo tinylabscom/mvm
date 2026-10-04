@@ -142,7 +142,7 @@ jobs:
           # their build. Host-only Rust (CLI, hostd, client) changes nothing
           # the lane compiles, so it skips — the lane still runs for every
           # change that can alter the guest bytes.
-          if grep -zE '^(crates/(mvm-contract|mvm-core|mvm-agentd|mvm-host-services)/|third_party/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|nix/|build\.rs$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/(mvm-contract|mvm-core|mvm-agentd|mvm-host-services|mvm-setpriv)/|third_party/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|nix/|build\.rs$)' "$CHANGED_FILE" >/dev/null; then
             echo "guest_image=true" >> "$GITHUB_OUTPUT"
           else
             echo "guest_image=false" >> "$GITHUB_OUTPUT"
