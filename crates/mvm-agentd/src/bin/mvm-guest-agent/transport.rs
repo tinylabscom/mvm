@@ -201,9 +201,19 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::fd::FromRawFd;
 
+    /// A socket directory under `/tmp`. `sun_path` holds about 104 bytes, and
+    /// a default temp dir inside a nested worktree or a macOS `TMPDIR` can
+    /// exceed that before the socket name is appended.
+    fn short_socket_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("agt")
+            .tempdir_in("/tmp")
+            .unwrap()
+    }
+
     #[test]
     fn unix_listener_round_trips_a_byte_stream() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_dir();
         let sock = dir.path().join("nested").join("agent.sock");
         // bind_unix_listener creates the missing parent dir.
         let listener = bind_unix_listener(&sock).expect("bind unix listener");
@@ -239,7 +249,7 @@ mod tests {
     fn control_sockets_are_close_on_exec() {
         use std::os::fd::AsRawFd;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_dir();
         let sock = dir.path().join("agent.sock");
         let listener = bind_unix_listener(&sock).expect("bind unix listener");
         assert!(is_cloexec(listener.as_raw_fd()), "unix listener");
@@ -276,7 +286,7 @@ mod tests {
 
     #[test]
     fn bind_unix_listener_replaces_a_stale_socket_file() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_dir();
         let sock = dir.path().join("agent.sock");
         std::fs::write(&sock, b"stale").unwrap();
         let listener = bind_unix_listener(&sock);
