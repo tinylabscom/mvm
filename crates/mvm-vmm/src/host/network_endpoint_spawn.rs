@@ -19,6 +19,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
 use crate::host::private_file::write_private;
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
@@ -348,22 +349,18 @@ fn wait_for_endpoint_session_with_timeout(
     let Some(pid) = read_pid(&pid_file) else {
         return Ok(());
     };
-    if !pid_alive(pid) {
-        return refuse_launch_without_endpoint_session(vm_name, state_dir);
+    if let EndpointState::Exited(exit) = endpoint_state(pid) {
+        bail!("{}", endpoint_exited_message(vm_name, exit));
     }
 
     let socket = session_ready_socket_path(state_dir);
     let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| {
-        if pid_alive(pid) {
-            anyhow!(
+        match endpoint_state(pid) {
+            EndpointState::Running => anyhow!(
                 "VM {vm_name}: connect to network endpoint session readiness socket {}: {e}",
                 socket.display()
-            )
-        } else {
-            anyhow!(
-                "VM {vm_name}: the network endpoint exited before any guest authenticated \
-                 against it — the workload has no network."
-            )
+            ),
+            EndpointState::Exited(exit) => anyhow!("{}", endpoint_exited_message(vm_name, exit)),
         }
     })?;
     stream
@@ -389,8 +386,14 @@ fn wait_for_endpoint_session_with_timeout(
             )
         }
         Err(e) => {
-            if !pid_alive(pid) {
-                return refuse_launch_without_endpoint_session(vm_name, state_dir);
+            // A closed readiness socket usually means the endpoint died. Its
+            // status trails the close by a moment, and it is the one thing
+            // that says why.
+            if let Some(exit) = await_child_exit(pid, EXIT_STATUS_GRACE) {
+                bail!("{}", endpoint_exited_message(vm_name, Some(exit)));
+            }
+            if let EndpointState::Exited(exit) = endpoint_state(pid) {
+                bail!("{}", endpoint_exited_message(vm_name, exit));
             }
             return Err(anyhow!(
                 "VM {vm_name}: waiting for the network endpoint's authenticated session: {e}"
@@ -436,16 +439,54 @@ pub fn refuse_launch_without_endpoint_session(
     let Some(pid) = read_pid(&pid_file) else {
         return Ok(());
     };
-    if pid_alive(pid) {
-        anyhow::bail!(
+    match endpoint_state(pid) {
+        EndpointState::Running => anyhow::bail!(
             "VM {vm_name}: the network endpoint is running but no guest ever \
              authenticated against it — the workload has no network. Check that the \
              guest found its FlowMux identity drive."
-        );
+        ),
+        EndpointState::Exited(exit) => bail!("{}", endpoint_exited_message(vm_name, exit)),
     }
-    anyhow::bail!(
+}
+
+/// How long a caller that has just seen the endpoint's pipe or socket close
+/// waits for the kernel to publish its exit status.
+const EXIT_STATUS_GRACE: Duration = Duration::from_secs(1);
+
+/// Whether the endpoint process is still serving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointState {
+    Running,
+    /// Gone. The status is known only when this process is the endpoint's
+    /// parent and it has not been reaped yet.
+    Exited(Option<HelperExit>),
+}
+
+/// Liveness that does not mistake a zombie for a live endpoint.
+///
+/// The endpoint is detached but stays this process's child, and nothing reaps
+/// it until this process exits. A bare `kill(pid, 0)` answers for that zombie,
+/// so an endpoint killed by its seccomp filter used to read as alive and the
+/// launch reported a closed socket instead of the death.
+fn endpoint_state(pid: libc::pid_t) -> EndpointState {
+    if let Some(exit) = peek_child_exit(pid) {
+        return EndpointState::Exited(Some(exit));
+    }
+    if pid_alive(pid) {
+        EndpointState::Running
+    } else {
+        EndpointState::Exited(None)
+    }
+}
+
+/// The refusal for a launch whose endpoint is gone: how it ended when that is
+/// known, and what it last wrote to its stderr log.
+fn endpoint_exited_message(vm_name: &str, exit: Option<HelperExit>) -> String {
+    let how = exit.map(|exit| format!(". It {exit}")).unwrap_or_default();
+    format!(
         "VM {vm_name}: the network endpoint exited before any guest authenticated \
-         against it — the workload has no network."
+         against it — the workload has no network{how}{}",
+        stderr_note(&endpoint_stderr_log_path(vm_name))
     )
 }
 /// Default bound on the endpoint's ready handshake.
@@ -498,15 +539,26 @@ impl HandshakeContext<'_> {
     /// Append which binary was run and what it said before it stopped talking.
     fn describe(&self, what: &str) -> String {
         let mut msg = format!("{what} (endpoint {})", self.endpoint.display());
-        let Some(log) = self.stderr_log else {
-            return msg;
-        };
-        match stderr_tail(log, STDERR_TAIL_BYTES) {
-            Some(tail) => msg.push_str(&format!("; its stderr said: {tail}")),
-            None => msg.push_str(&format!("; it wrote nothing to {}", log.display())),
+        if let Some(log) = self.stderr_log {
+            msg.push_str(&stderr_note(log));
         }
         msg
     }
+}
+
+/// `"; its stderr said: …"` from the tail of `log`, or a note that it wrote
+/// nothing there — a silent endpoint is itself a finding.
+fn stderr_note(log: &Path) -> String {
+    match stderr_tail(log, STDERR_TAIL_BYTES) {
+        Some(tail) => format!("; its stderr said: {tail}"),
+        None => format!("; it wrote nothing to {}", log.display()),
+    }
+}
+
+/// Where a VM's endpoint stderr is captured. Per VM and truncated on each
+/// spawn, so the tail always belongs to the endpoint the launch is reporting.
+fn endpoint_stderr_log_path(vm_name: &str) -> PathBuf {
+    PathBuf::from("/tmp").join(format!("mvm-network-endpoint-{vm_name}.log"))
 }
 
 /// Last `max_bytes` of `path`, collapsed onto one line so it survives an error
@@ -1052,8 +1104,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
 
     // Capture endpoint diagnostics to /tmp so hangs/refusals are observable.
     // The file is per-VM and truncated each run; stderr was previously /dev/null.
-    let stderr_log =
-        std::path::PathBuf::from("/tmp").join(format!("mvm-network-endpoint-{vm_name}.log"));
+    let stderr_log = endpoint_stderr_log_path(vm_name);
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -1211,17 +1262,21 @@ pub fn read_handshake_line(
             )
         }),
         Ok(Ok(_)) => {
+            let ended = ended_note(pid);
             kill(pid as libc::pid_t, libc::SIGKILL);
             bail!(
                 "{}",
-                ctx.describe("substitution endpoint closed stdout without a ready handshake")
+                ctx.describe(&format!(
+                    "substitution endpoint closed stdout without a ready handshake{ended}"
+                ))
             )
         }
         Ok(Err(e)) => {
+            let ended = ended_note(pid);
             kill(pid as libc::pid_t, libc::SIGKILL);
             bail!(
                 "{}",
-                ctx.describe(&format!("read substitution endpoint handshake: {e}"))
+                ctx.describe(&format!("read substitution endpoint handshake: {e}{ended}"))
             )
         }
         Err(_) => {
@@ -1235,6 +1290,14 @@ pub fn read_handshake_line(
             )
         }
     }
+}
+
+/// `"; it <how it ended>"` for an endpoint whose stdout just closed, when this
+/// process is its parent and the status arrives within the grace period.
+fn ended_note(pid: u32) -> String {
+    await_child_exit(pid as libc::pid_t, EXIT_STATUS_GRACE)
+        .map(|exit| format!("; it {exit}"))
+        .unwrap_or_default()
 }
 
 /// RAII reaper for the per-VM substitution endpoint, armed while a backend's
@@ -1714,6 +1777,84 @@ mod tests {
                 .contains("closed stdout without a ready handshake")
         );
         let _ = child.wait();
+    }
+
+    /// An endpoint that dies by SIGSYS before answering is reported as a
+    /// seccomp refusal, not as a pipe that happened to close.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_handshake_cut_short_by_a_seccomp_kill_names_the_filter() {
+        let mut child = Command::new("sh")
+            .args(["-c", "kill -SYS $$"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().expect("child stdout is piped");
+        let err = read_handshake_line(
+            stdout,
+            child.id(),
+            Duration::from_secs(5),
+            &HandshakeContext {
+                endpoint: std::path::Path::new("/bin/sh"),
+                stderr_log: None,
+            },
+        )
+        .expect_err("a dead endpoint has no handshake");
+        let message = err.to_string();
+        assert!(
+            message.contains("closed stdout without a ready handshake"),
+            "{message}"
+        );
+        assert!(message.contains("killed by SIGSYS"), "{message}");
+        assert!(message.contains("seccomp filter refused"), "{message}");
+        let _ = child.wait();
+    }
+
+    /// The launch-time check reads the death of a detached, unreaped endpoint
+    /// rather than mistaking its zombie for a live process, and quotes what it
+    /// wrote before dying.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_launch_names_an_endpoint_that_seccomp_killed_and_quotes_its_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm_name = format!("seccomp-kill-test-{}", std::process::id());
+        let log = endpoint_stderr_log_path(&vm_name);
+        std::fs::write(
+            &log,
+            "mvm-network-endpoint: seccomp refused x86_64 syscall 2 during self-test probe \"file-append\"\n",
+        )
+        .unwrap();
+        let mut child = Command::new("sh")
+            .args(["-c", "kill -SYS $$"])
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        assert!(
+            crate::host::helper_exit::await_child_exit(pid, Duration::from_secs(10)).is_some(),
+            "the child must die"
+        );
+        std::fs::write(dir.path().join(SUBST_PID_FILE), pid.to_string()).unwrap();
+
+        let refused = refuse_launch_without_endpoint_session(&vm_name, dir.path())
+            .unwrap_err()
+            .to_string();
+        let waited = wait_for_endpoint_session(&vm_name, dir.path())
+            .unwrap_err()
+            .to_string();
+        let _ = std::fs::remove_file(&log);
+        let _ = child.wait();
+
+        for message in [refused, waited] {
+            assert!(
+                message.contains("exited before any guest authenticated"),
+                "{message}"
+            );
+            assert!(message.contains("killed by SIGSYS"), "{message}");
+            assert!(
+                message.contains("during self-test probe \"file-append\""),
+                "{message}"
+            );
+        }
     }
 
     #[test]

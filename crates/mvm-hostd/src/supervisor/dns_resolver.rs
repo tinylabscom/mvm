@@ -191,6 +191,23 @@ fn query_upstream(
     packet: &[u8],
     timeout: Duration,
 ) -> std::io::Result<Vec<u8>> {
+    let socket = connected_upstream_socket(upstream, timeout)?;
+    socket.send(packet)?;
+    let mut buf = vec![0u8; 1232];
+    let len = socket.recv(&mut buf)?;
+    buf.truncate(len);
+    Ok(buf)
+}
+
+/// The UDP socket a query to `upstream` goes out on: bound to the wildcard
+/// address of the upstream's family, deadlines set, connected. Nothing is
+/// sent until the caller writes, which is what lets the confinement self-test
+/// run this exact setup at startup without a packet leaving the host.
+#[cfg(target_os = "linux")]
+pub(crate) fn connected_upstream_socket(
+    upstream: SocketAddr,
+    timeout: Duration,
+) -> std::io::Result<UdpSocket> {
     let bind_addr = match upstream.ip() {
         IpAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
         IpAddr::V6(_) => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)),
@@ -199,11 +216,7 @@ fn query_upstream(
     socket.set_read_timeout(Some(timeout))?;
     socket.set_write_timeout(Some(timeout))?;
     socket.connect(upstream)?;
-    socket.send(packet)?;
-    let mut buf = vec![0u8; 1232];
-    let len = socket.recv(&mut buf)?;
-    buf.truncate(len);
-    Ok(buf)
+    Ok(socket)
 }
 
 #[cfg(target_os = "linux")]
