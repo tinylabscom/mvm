@@ -134,10 +134,17 @@ pub(crate) fn ensure_pair_workload_kernel(
 /// files are sealed at 0444, and cache consumers (the HVF bake opens the
 /// builder rootfs read-write; the sidecar stamp rewrites the default
 /// image's) must not inherit that. A destination left read-only by an
-/// earlier install is replaced rather than refused.
+/// earlier install is replaced rather than refused. The replaced file's
+/// launch-written digest sidecar goes with it, so it can never vouch for the
+/// new bytes.
 pub(crate) fn copy_contract_file(from: &Path, to: &Path) -> Result<()> {
     mvm_core::util::atomic_io::copy_writable(from, to)?;
-    Ok(())
+    let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(to);
+    match std::fs::remove_file(&sidecar) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("removing {}", sidecar.display())),
+    }
 }
 
 /// A staging directory holding a pair entry's contract files under their
@@ -276,6 +283,29 @@ mod tests {
     /// pair state — publish the same target. Each pair's cache holds exactly
     /// its own entry under its own key in its own home; the two entries
     /// coexist, and neither side's build touches the other.
+    /// A reinstall replaces the file a launch already hashed. The digest the
+    /// launch cached for the old bytes must not survive to answer for the new
+    /// ones, whatever mtime the copy carries over.
+    #[test]
+    fn a_reinstalled_contract_file_drops_the_digest_cached_for_the_old_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let installed = tmp.path().join("rootfs.ext4");
+        std::fs::write(&installed, b"old bytes").unwrap();
+        mvm_core::crypto::image_verify::sha256_file_cached(&installed).unwrap();
+        let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&installed);
+        assert!(sidecar.exists(), "the digest cache wrote its sidecar");
+
+        let replacement = tmp.path().join("entry-rootfs.ext4");
+        std::fs::write(&replacement, b"new bytes").unwrap();
+        copy_contract_file(&replacement, &installed).unwrap();
+
+        assert!(!sidecar.exists(), "the old digest went with the old bytes");
+        assert_eq!(
+            mvm_core::crypto::image_verify::sha256_file_cached(&installed).unwrap(),
+            mvm_core::crypto::image_verify::sha256_file(&replacement).unwrap(),
+        );
+    }
+
     #[test]
     fn two_pairs_publish_concurrently_without_sharing_cache_entries() {
         let mut env = TestEnv::new();

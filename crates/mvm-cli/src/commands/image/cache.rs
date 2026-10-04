@@ -726,7 +726,26 @@ pub(super) fn remove_cache_file(
     fs::remove_file(&path).with_context(|| format!("remove {}", path.display()))?;
     *removed_files += 1;
     *freed_bytes = freed_bytes.saturating_add(len);
+    remove_digest_sidecar(&path, removed_files, freed_bytes)?;
     prune_empty_parents(cache_root, path.parent())?;
+    Ok(())
+}
+
+/// A removed artifact takes its launch-written digest sidecar with it: the
+/// sidecar is keyed on size+mtime, so an orphan could be served to a
+/// replacement that lands on the same pair.
+fn remove_digest_sidecar(
+    artifact: &Path,
+    removed_files: &mut usize,
+    freed_bytes: &mut u64,
+) -> Result<()> {
+    let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(artifact);
+    let Ok(meta) = fs::symlink_metadata(&sidecar) else {
+        return Ok(());
+    };
+    fs::remove_file(&sidecar).with_context(|| format!("remove {}", sidecar.display()))?;
+    *removed_files += 1;
+    *freed_bytes = freed_bytes.saturating_add(meta.len());
     Ok(())
 }
 
@@ -1452,6 +1471,40 @@ mod tests {
         remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
 
         assert!(!tmp.path().join("legacy/alpine.ext4").exists());
+    }
+
+    /// A launch hashes the rootfs through the size+mtime digest cache, which
+    /// writes a sidecar beside it. Removing the rootfs removes that too, or a
+    /// replacement landing on the same size+mtime could be served its digest.
+    #[test]
+    fn removing_an_image_removes_the_digest_sidecar_a_launch_wrote() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut image = sample_image("docker.io/library/alpine:3.20", SAMPLE_DIGEST, "blobs/a");
+        image.config_path = None;
+        image.claims_path = None;
+        image.rootfs_path = Some("legacy/alpine.ext4".to_string());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), "manifests/alpine.json", b"{}");
+        write_file(tmp.path(), "legacy/alpine.ext4", b"x");
+        let rootfs = tmp.path().join("legacy/alpine.ext4");
+        mvm_core::crypto::image_verify::sha256_file_cached(&rootfs).expect("hash");
+        let sidecar = mvm_core::crypto::image_verify::sha256_cache_path(&rootfs);
+        assert!(sidecar.exists(), "the digest cache wrote its sidecar");
+
+        remove_image(tmp.path(), "docker.io/library/alpine:3.20").expect("remove");
+
+        assert!(!rootfs.exists());
+        assert!(!sidecar.exists(), "the sidecar went with its rootfs");
+        assert!(
+            !tmp.path().join("legacy").exists(),
+            "the emptied directory is pruned"
+        );
     }
 
     /// `image rm` waits for a run building the image, and leaves the build
