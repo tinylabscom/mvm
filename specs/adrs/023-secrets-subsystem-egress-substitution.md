@@ -173,6 +173,39 @@ substitution path:
   refreshed, failed, policy denied, or stopped. It records no URL path,
   no error text, and no client secret, token, or response body.
 
+### OAuth consent on the host, and refresh-token renewal
+
+An API a person signs in to is reached the same way, with the consent moved
+out of the guest. A sign-in performed inside the guest would leave its session
+cookie and refresh token in guest memory and on guest disk, readable by the
+workload and copied into every snapshot and warm fork. Instead `mvmctl secret
+login` runs the authorization-code grant on the host as a native public client
+(RFC 8252):
+
+- The redirect comes back to a listener bound to `127.0.0.1` on a
+  kernel-chosen port, named by the IPv4 literal rather than `localhost`.
+- The authorization request carries a PKCE S256 challenge (RFC 7636) and a
+  fresh random `state`. A callback whose `state` is not this login's ends the
+  login with nothing exchanged, whatever else it carries.
+- The code is redeemed at the binding's `https` token endpoint with the
+  verifier, through the same exchange code the refresher uses. A confidential
+  client authenticates with its stored client secret; a public client names
+  its client id.
+- The token set replaces the stored value in the encrypted store, and the
+  login is a `secret.oauth_login` entry in the secret audit log carrying the
+  outcome only.
+
+The stored set records the grant that renews it. A consented set is renewed
+with the refresh-token grant, under every rule above for the client-credentials
+grant: `https` only, the VM's egress gate decides the token endpoint before
+anything is sent, and each attempt is a `secret.oauth_refresh` entry with no
+credential in it. A rotated refresh token replaces the stored one; an
+unrotated one is kept. A consented set without a refresh token is never renewed
+with the client-credentials grant, even when a client secret is stored: that
+would swap the user's identity for the application's without anyone deciding
+to. The guest sees none of this — it holds a placeholder for the access token,
+exactly as for any other bound secret.
+
 ### IR contract, placeholder, audit
 
 - A workload's secret reference (`mvm_contract::ir::Workload`) carries

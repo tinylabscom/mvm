@@ -358,6 +358,9 @@ const VOLUME_SUB: &[(&str, AuditPosture)] = &[
 const SECRET_SUB: &[(&str, AuditPosture)] = &[
     ("put", AuditPosture::Emits("SecretPut")),
     ("set", AuditPosture::Emits("SecretSet")),
+    // Every consent outcome, refusals included, is a secret-audit
+    // `oauth_login` entry, dual-emitted to the chain when it is reachable.
+    ("login", AuditPosture::Emits("secret.oauth_login")),
     ("get", AuditPosture::Emits("SecretGet")),
     ("ls", AuditPosture::ReadOnly),
     // Reads the catalog compiled into this binary. No store access, no

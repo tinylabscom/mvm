@@ -886,6 +886,7 @@ mod tests {
             client_secret: Some(OAuthSecretString::from("the-client-secret".to_string())),
             // Inside the proactive window, so the loop exchanges at once.
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+            grant: Default::default(),
         };
         FileSecretStore::with_dir(dir.join("secrets"))
             .put(
