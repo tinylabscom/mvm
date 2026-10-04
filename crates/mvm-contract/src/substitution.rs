@@ -103,17 +103,26 @@ impl Placeholder {
 /// reserved prefix plus its trailing hex run — or `None` if no token is
 /// present. Used by the substitution endpoint to locate the placeholder a
 /// guest put in a request header without the guest having to name the header.
+///
+/// A prefix with no hex run after it is not a token and is skipped, not
+/// treated as the end of the search: the refusal and substitution decisions
+/// all ask this function whether a placeholder is present, so a guest must
+/// not be able to hide one behind a bare `mvm-secret-`.
 pub fn find_placeholder(text: &str) -> Option<&str> {
-    let start = text.find(SECRET_PLACEHOLDER_PREFIX)?;
-    let after = start + SECRET_PLACEHOLDER_PREFIX.len();
-    let hex_len = text[after..]
-        .bytes()
-        .take_while(u8::is_ascii_hexdigit)
-        .count();
-    if hex_len == 0 {
-        return None;
+    let mut from = 0;
+    while let Some(offset) = text[from..].find(SECRET_PLACEHOLDER_PREFIX) {
+        let start = from + offset;
+        let after = start + SECRET_PLACEHOLDER_PREFIX.len();
+        let hex_len = text[after..]
+            .bytes()
+            .take_while(u8::is_ascii_hexdigit)
+            .count();
+        if hex_len > 0 {
+            return Some(&text[start..after + hex_len]);
+        }
+        from = after;
     }
-    Some(&text[start..after + hex_len])
+    None
 }
 
 #[cfg(test)]
@@ -173,6 +182,27 @@ mod tests {
         // No token, and the bare prefix with no hex run, both yield None.
         assert_eq!(find_placeholder("Bearer ya29.real-token"), None);
         assert_eq!(find_placeholder("mvm-secret-"), None);
+    }
+
+    /// A prefix with no hex run is not a token, and it must not end the
+    /// search: every refusal and substitution decision asks this function
+    /// whether a placeholder is present, so stopping at a decoy would let any
+    /// placeholder after it through unseen.
+    #[test]
+    fn find_placeholder_looks_past_a_prefix_without_hex() {
+        assert_eq!(
+            find_placeholder("mvm-secret-zmvm-secret-abc123"),
+            Some("mvm-secret-abc123")
+        );
+        assert_eq!(
+            find_placeholder("mvm-secret- mvm-secret-v00zd mvm-secret-f00d"),
+            Some("mvm-secret-f00d")
+        );
+        assert_eq!(
+            find_placeholder("mvm-secret-mvm-secret-ab"),
+            Some("mvm-secret-ab")
+        );
+        assert_eq!(find_placeholder("mvm-secret-z mvm-secret-"), None);
     }
 
     /// `is_empty` is session bookkeeping, but it is bookkeeping the keyholder
@@ -768,6 +798,30 @@ mod prepare_tests {
         );
     }
 
+    /// A header placeholder behind a bare prefix is still found and
+    /// substituted, rather than forwarded verbatim. This is the shape the
+    /// position fuzz target found: a value ending `mvm-secret-v00zd` followed
+    /// directly by a real placeholder.
+    #[test]
+    fn substitutes_a_header_placeholder_behind_a_bare_prefix() {
+        let driver = DummyDriver {
+            allow_substitute: true,
+            ..DummyDriver::default()
+        };
+        let req = ProxyRequest {
+            headers: vec![(
+                "X-Api".to_string(),
+                "mvm-secret-v00zdmvm-secret-bea70000".to_string(),
+            )],
+            ..req()
+        };
+        let prepared = prepare_request(&driver, "api.example.com", req).unwrap();
+        assert_eq!(
+            prepared.headers,
+            vec![("X-Api".to_string(), "mvm-secret-v00zdREAL".to_string())]
+        );
+    }
+
     #[test]
     fn substitutes_an_inject_placeholder() {
         let driver = DummyDriver {
@@ -1012,6 +1066,29 @@ mod prepare_tests {
             (
                 ProxyRequest {
                     url: "https://h/x#mvm-secret-a0e70000".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlOther,
+            ),
+            // A bare prefix with no hex run in front of a placeholder hides
+            // nothing: each position is still refused.
+            (
+                ProxyRequest {
+                    url: "https://h/x?mvm-secret-zmvm-secret-a0e70000=1".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlOther,
+            ),
+            (
+                ProxyRequest {
+                    url: "https://mvm-secret-z.mvm-secret-a0a70000.h/x".into(),
+                    ..req()
+                },
+                PlaceholderPosition::UrlOther,
+            ),
+            (
+                ProxyRequest {
+                    url: "https://h/x#mvm-secret-zmvm-secret-a0e70000".into(),
                     ..req()
                 },
                 PlaceholderPosition::UrlOther,
