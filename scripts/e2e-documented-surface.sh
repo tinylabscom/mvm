@@ -417,42 +417,66 @@ if ! MVM_HOME="$E2E_HOME" "$MVMCTL" bootstrap; then
   BOOTSTRAP_FAILED=1
 fi
 
-# The service-plane scenarios load this sidecar from the version-matched cache,
-# so it is built from this tree rather than fetched: a published sidecar carries
-# the C ABI of the mvm commit its image set was built from, not this one. The
-# recipe lives in mvm-images, and the build compiles it against this checkout.
-# The checkout is handed to this step alone, so every other step keeps resolving
-# images from the pinned set, and it is kept out of the sibling path an image
-# checkout is discovered at for the same reason.
-e2e_phase sdk-sidecar
-E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
-if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
-  echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the SDK sidecar is built from" >&2
-  echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout." >&2
-  exit 1
+# Where the SDK sidecar and the dev default image come from. The two image
+# verbs below read `MVM_FETCH_UNCHANGED_IMAGES`, and this runner hands it to
+# them alone, so every scenario sees the environment it always has:
+#
+#   1 (default)  build both from this tree through an mvm-images checkout,
+#                adopting the pinned set's members only when they were built
+#                from exactly this tree's sources. A published sidecar carries
+#                the C ABI of the mvm commit its image set was built from, so a
+#                tree that changed it gets a sidecar built from itself.
+#   pinned       adopt the pinned, signed set's members whatever they were
+#                built from — what a user of this CLI boots. No checkout is
+#                needed, and a set that is refused or lacks them fails the
+#                step rather than falling back to a build. The release lane
+#                runs this way; guest-source changes are pair-built and booted
+#                by the merge queue's guest-image-boot lane instead.
+E2E_FETCH_MODE="${MVM_FETCH_UNCHANGED_IMAGES:-1}"
+unset MVM_FETCH_UNCHANGED_IMAGES
+case "$E2E_FETCH_MODE" in
+  1|pinned) ;;
+  *)
+    echo "!!! MVM_FETCH_UNCHANGED_IMAGES=$E2E_FETCH_MODE: this runner takes 1 or pinned." >&2
+    exit 1
+    ;;
+esac
+echo "    image source: MVM_FETCH_UNCHANGED_IMAGES=$E2E_FETCH_MODE"
+
+# The image checkout is handed to these steps alone, so every other step keeps
+# resolving images from the pinned set, and it is kept out of the sibling path
+# an image checkout is discovered at for the same reason. Under `pinned` there
+# is none: nothing is built.
+E2E_IMAGE_ENV=(MVM_HOME="$E2E_HOME" MVM_FETCH_UNCHANGED_IMAGES="$E2E_FETCH_MODE")
+if [[ "$E2E_FETCH_MODE" != pinned ]]; then
+  E2E_IMAGES_DIR="${MVM_E2E_IMAGES_DIR:-$(cd "$(dirname "$0")/.." && pwd)/../mvm-images}"
+  if [[ ! -d "$E2E_IMAGES_DIR" ]]; then
+    echo "!!! no mvm-images checkout at $E2E_IMAGES_DIR: the SDK sidecar is built from" >&2
+    echo "!!! its recipe. Set MVM_E2E_IMAGES_DIR to a tinylabscom/mvm-images checkout," >&2
+    echo "!!! or MVM_FETCH_UNCHANGED_IMAGES=pinned to boot the pinned set's members." >&2
+    exit 1
+  fi
+  E2E_IMAGE_ENV+=(MVM_IMAGES_DIR="$E2E_IMAGES_DIR")
 fi
-# Fetch-when-unchanged: when the pinned set's sidecar members were built
-# from exactly this tree's cdylib sources, adopt those verified bytes instead
-# of pair-building (~24 min). A fingerprint mismatch or an older set
-# pair-builds exactly as before; the verb reports which arm ran.
-echo "==> adopting or building the source-matched SDK sidecar through unembedded mvmctl"
-MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" \
-  MVM_FETCH_UNCHANGED_IMAGES=1 "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
+
+# The service-plane scenarios load this sidecar. The verb reports which arm
+# ran and why, including how this tree's fingerprint compares with the set's.
+e2e_phase sdk-sidecar
+echo "==> preparing the SDK sidecar through unembedded mvmctl"
+env "${E2E_IMAGE_ENV[@]}" "$UNEMBEDDED_MVMCTL" build sdk-sidecar build
 
 # The dev default image (`mvmctl run` with no image) is the writable variant.
-# `image dev ensure` adopts it from the pinned set when the set's dev members
-# were built from this tree (fetch-when-unchanged), and pair-builds from the
-# checkout when they were not; the verb reports which arm ran. Only the ensure
-# step names the checkout: a fetched install carries no pair identity, and
-# the warm boot below must answer from the completed cache, not rebuild it.
-# The one scenario that boots the dev image is Firecracker-only (the cached
-# dev rootfs must stay byte-identical across launches), so only the Linux
-# lane prepares it, into the warm home every scenario shares.
+# `image dev ensure` takes the same arm as the sidecar, and reports it. A
+# fetched install carries no pair identity, and the warm boot below must
+# answer from the completed cache, not rebuild it, so only the ensure step
+# sees the image environment. The one scenario that boots the dev image is
+# Firecracker-only (the cached dev rootfs must stay byte-identical across
+# launches), so only the Linux lane prepares it, into the warm home every
+# scenario shares.
 if [[ "$(uname -s)" == Linux ]]; then
   e2e_phase dev-image
-  echo "==> ensuring the dev default image (adopt from the pinned set when unchanged)"
-  MVM_HOME="$E2E_HOME" MVM_IMAGES_DIR="$E2E_IMAGES_DIR" \
-    MVM_FETCH_UNCHANGED_IMAGES=1 "$MVMCTL" image dev ensure
+  echo "==> preparing the dev default image"
+  env "${E2E_IMAGE_ENV[@]}" "$MVMCTL" image dev ensure
   echo "==> booting the dev default image once to warm and prove the launch path"
   MVM_HOME="$E2E_HOME" "$MVMCTL" run --no-detect -- /bin/true
 fi

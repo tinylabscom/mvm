@@ -574,7 +574,7 @@ fn seed_from_default_cache(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::published_image_set::PublishedImageSet;
     use crate::published_image_set::fixture::ImageSetFixture;
@@ -930,7 +930,9 @@ mod tests {
 
     /// The archive a well-formed release publishes: the image, the VERSION
     /// marker, and the derivation's own `sha256sum` manifest over both.
-    fn well_formed_archive(version: &str, libc: GuestLibc) -> Vec<u8> {
+    /// A sound sidecar archive for `libc` labelled `version`, as the image set
+    /// publishes it.
+    pub(crate) fn well_formed_archive(version: &str, libc: GuestLibc) -> Vec<u8> {
         let image = sidecar_ext4_bytes(libc);
         let version_text = format!("{version}\n").into_bytes();
         let manifest = format!(

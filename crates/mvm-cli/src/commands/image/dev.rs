@@ -1,7 +1,8 @@
 //! `mvmctl image dev ensure` — ensure the writable dev default-tenant image
-//! is installed in the local cache, adopting the pinned set's dev members
-//! when they were built from this tree (fetch-when-unchanged), and
-//! pair-building from the selected `mvm-images` checkout otherwise.
+//! is installed in the local cache: adopt the pinned set's dev members when
+//! `MVM_FETCH_UNCHANGED_IMAGES` asks for them (`1`: only when they were built
+//! from this tree; `pinned`: whatever they were built from), and pair-build
+//! from the selected `mvm-images` checkout otherwise.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -9,7 +10,7 @@ use clap::Subcommand;
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum DevAction {
     /// Ensure the dev default-tenant image is installed: adopt the pinned
-    /// set's dev members when fetch-when-unchanged matches this tree,
+    /// set's dev members when MVM_FETCH_UNCHANGED_IMAGES asks for them,
     /// pair-build from the selected image checkout otherwise
     Ensure,
 }
@@ -21,10 +22,9 @@ pub(in crate::commands) fn run(action: DevAction) -> Result<()> {
 }
 
 /// Ensure the dev default image is installed — fetch the pinned set's dev
-/// members when the caller opted into fetch-when-unchanged and the set was
-/// built from exactly this tree's sources; otherwise answer from the pair
-/// build / cache path `mvmctl run` uses, which pair-builds from the selected
-/// checkout or answers a complete cache.
+/// members when `MVM_FETCH_UNCHANGED_IMAGES` asks for them; otherwise answer
+/// from the pair build / cache path `mvmctl run` uses, which pair-builds from
+/// the selected checkout or answers a complete cache.
 #[cfg(feature = "builder-vm")]
 fn run_ensure() -> Result<()> {
     ensure_from(crate::commands::env::builder_vm::selected_local_checkout()?.as_ref())
@@ -46,10 +46,15 @@ fn run_ensure() -> Result<()> {
 
 #[cfg(feature = "builder-vm")]
 fn ensure_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -> Result<()> {
-    if mvm_build::fetch_unchanged::fetch_unchanged_enabled()
-        && let Some(result) = try_fetch_unchanged_dev()
-    {
-        return result;
+    use mvm_build::fetch_unchanged::{self as fetch, ArmRequest, FetchMode, PinnedMembers};
+    let request = ArmRequest::for_host(PinnedMembers::DevDefaultImage);
+    if request.mode != FetchMode::Off {
+        // Said at notice level whichever arm runs, so the e2e log records it.
+        let arm = fetch::resolve_arm(request)?;
+        crate::ui::notice(&arm.report(request));
+        if let fetch::Arm::Adopt { set, .. } = arm {
+            return adopt_dev_image(&set, request.arch);
+        }
     }
     let (_, rootfs) = crate::commands::env::builder_vm::default_microvm::dev_image_from(
         checkout.cloned(),
@@ -64,54 +69,31 @@ fn ensure_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -
     Ok(())
 }
 
-/// The fetch-when-unchanged arm for `image dev ensure`. `None` means "use the
-/// local path instead" — the knob is off, there is no source workspace to
-/// fingerprint, the set cannot be acquired, or the set's dev members were
-/// built from different sources (or predate them). A fetch failure is
-/// `Some(Err(..))`: the verified bytes were asked for and refused, which must
-/// not silently fall back to a pair build.
+/// Install the set's dev members as the dev slot and stamp them as fetched
+/// under the set's tag. A failure is final: the verified bytes were asked for
+/// and refused, which must not silently fall back to a pair build.
 #[cfg(feature = "builder-vm")]
-fn try_fetch_unchanged_dev() -> Option<Result<()>> {
-    use mvm_build::fetch_unchanged as fetch;
-    let workspace = mvm_build::guest_agent_build::detect_source_workspace()?;
-    let fingerprint = fetch::tree_sdk_fingerprint(&workspace)
-        .map_err(|e| anyhow::anyhow!("fingerprint the tree's cdylib sources: {e}"))
-        .ok()?;
-    let set = mvm_build::published_image_set::PublishedImageSet::acquire().ok()?;
-    let arch = mvm_core::arch::GuestArch::host();
-    if !fetch::set_dev_members_match_tree(&set, arch, &fingerprint) {
-        crate::ui::info(
-            "fetch-when-unchanged: the pinned set's dev default image was built from              different sources; pair-building",
-        );
-        return None;
-    }
+fn adopt_dev_image(
+    set: &mvm_build::published_image_set::PublishedImageSet,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<()> {
     let cache_dir =
         crate::commands::env::builder_vm::default_microvm::dev_default_image_cache_dir();
-    Some(
-        set.fetch_dev_workload(arch, &cache_dir)
-            .and_then(|()| {
-                super::boot::cache::stamp_provenance(
-                    &cache_dir,
-                    &super::boot::cache::AcquiredProvenance::fetched(
-                        &set.release_tag().to_string(),
-                    ),
-                )
-            })
-            .map(|()| {
-                crate::commands::env::builder_vm::report_recorded_boot_tier(
-                    "Default image",
-                    &cache_dir,
-                );
-                crate::ui::info(
-                    "fetch-when-unchanged: adopted the pinned set's dev default image                (source fingerprint matched; no build run)",
-                );
-            })
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "fetch-when-unchanged: adopting the pinned set's dev default image failed: {e}"
-                )
-            }),
-    )
+    set.fetch_dev_workload(arch, &cache_dir)
+        .and_then(|()| {
+            super::boot::cache::stamp_provenance(
+                &cache_dir,
+                &super::boot::cache::AcquiredProvenance::fetched(&set.release_tag().to_string()),
+            )
+        })
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "adopting the dev default image of the pinned image set {} failed: {e:#}",
+                set.release_tag()
+            )
+        })?;
+    crate::commands::env::builder_vm::report_recorded_boot_tier("Default image", &cache_dir);
+    Ok(())
 }
 
 #[cfg(all(test, feature = "builder-vm"))]
