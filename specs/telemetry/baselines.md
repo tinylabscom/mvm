@@ -170,11 +170,11 @@ bench boot — the harness change merely started timing and reporting the stop
 it always performed, which is how the refusal became visible at all. The
 VMM is killed on the error path exactly as before.
 
-Two honest consequences. First, CI's boot-latency lane has exercised only
-the failed-stop path since it exists; nothing noticed because the warning is
-non-fatal. Second, a graceful-stop baseline requires a bench boot that
-provisions a verb grant the way admitted runs do — that harness capability
-is the remaining work, filed as
-[#3637](https://github.com/tinylabscom/mvm/issues/3637), and until it
-lands, exit latency has a reproduced refusal and a follow-up, not a
-baseline. Nothing here claims otherwise.
+The grant-provisioned harness capability landed in
+[#3865](https://github.com/tinylabscom/mvm/pull/3865). The merge-queue boot
+lane now opts into that path and requires successful stops, so it can catch a
+graceful-stop regression. The historical measurements above remain the
+grantless failed-stop record; a graceful-stop latency baseline on the W1e
+reference host is still required by
+[#3637](https://github.com/tinylabscom/mvm/issues/3637). No exit-latency
+number is claimed until that run is recorded.

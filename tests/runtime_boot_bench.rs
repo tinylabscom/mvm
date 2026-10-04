@@ -25,8 +25,8 @@
 //!   carries. Every backend boots guests under `mvm.require_grant=1`, so a
 //!   raw boot's guest agent refuses the stop-time filesystem-flush verb and
 //!   every stop lands on the kill path; with the grant provisioned the stop
-//!   distribution measures graceful stops. Off by default so the existing
-//!   lane's behavior is unchanged.
+//!   distribution measures graceful stops. With a grant, any failed stop
+//!   fails the benchmark; without one, stop failures remain informational.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
@@ -245,6 +245,7 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
     );
     assert_within_budget("serial max", serial_summary.max, spec.budget);
     report_stop_summary("serial", &spec, &serial);
+    assert_graceful_stops("serial", spec.grant, &serial)?;
 
     let concurrent = measure_concurrent(&spec)?;
     let concurrent_summary = summarize(&concurrent);
@@ -260,17 +261,16 @@ fn prebuilt_runtime_image_boots_within_budget() -> Result<()> {
     );
     assert_within_budget("concurrent max", concurrent_summary.max, spec.budget);
     report_stop_summary("concurrent", &spec, &concurrent);
+    assert_graceful_stops("concurrent", spec.grant, &concurrent)?;
 
     Ok(())
 }
 
-/// Informational stop-latency distribution, printed beside the boot summary.
+/// Stop-latency distribution, printed beside the boot summary.
 ///
-/// A distribution, never an assertion: the budget gate stays about boot, and
-/// baseline readers get the teardown half of the lifecycle from the stops the
-/// harness performs anyway. Failed stops are excluded from the percentiles
-/// and counted, so a refusal shows up as a count rather than skewing a
-/// duration.
+/// Failed stops are excluded from the percentiles and counted, so a refusal
+/// shows up as a count rather than skewing a duration. Grant-enabled runs
+/// assert that all stops succeeded after printing this distribution.
 fn report_stop_summary(label: &str, spec: &BenchSpec, measurements: &[BootMeasurement]) {
     let mut stops: Vec<Duration> = measurements.iter().filter_map(|m| m.stop).collect();
     let failed = measurements.len() - stops.len();
@@ -291,6 +291,19 @@ fn report_stop_summary(label: &str, spec: &BenchSpec, measurements: &[BootMeasur
         percentile(&stops, 95).as_millis(),
         stops.last().expect("non-empty stops").as_millis(),
     );
+}
+
+fn assert_graceful_stops(label: &str, grant: bool, measurements: &[BootMeasurement]) -> Result<()> {
+    if !grant {
+        return Ok(());
+    }
+    let failed = measurements.iter().filter(|m| m.stop.is_none()).count();
+    anyhow::ensure!(
+        !measurements.is_empty() && failed == 0,
+        "{label} grant-enabled benchmark failed to stop {failed} of {} VMs gracefully",
+        measurements.len()
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -893,6 +906,51 @@ fn summary_reports_percentiles_and_max() {
     assert_eq!(summary.p50, Duration::from_millis(20));
     assert_eq!(summary.p95, Duration::from_millis(40));
     assert_eq!(summary.max, Duration::from_millis(40));
+}
+
+#[test]
+fn grant_enabled_requires_every_stop_to_succeed() {
+    let measurements = [
+        BootMeasurement {
+            elapsed: Duration::from_millis(10),
+            stop: Some(Duration::from_millis(5)),
+        },
+        BootMeasurement {
+            elapsed: Duration::from_millis(20),
+            stop: Some(Duration::from_millis(6)),
+        },
+    ];
+    assert_graceful_stops("serial", true, &measurements).expect("all stops succeeded");
+}
+
+#[test]
+fn grant_enabled_rejects_failed_or_missing_stop_samples() {
+    let measurements = [
+        BootMeasurement {
+            elapsed: Duration::from_millis(10),
+            stop: Some(Duration::from_millis(5)),
+        },
+        BootMeasurement {
+            elapsed: Duration::from_millis(20),
+            stop: None,
+        },
+    ];
+    let error = assert_graceful_stops("concurrent", true, &measurements)
+        .expect_err("a failed stop must fail the grant-enabled benchmark")
+        .to_string();
+    assert!(error.contains("concurrent"), "{error}");
+    assert!(error.contains("1 of 2"), "{error}");
+    assert!(assert_graceful_stops("serial", true, &[]).is_err());
+}
+
+#[test]
+fn grant_disabled_keeps_stop_failures_informational() {
+    let measurements = [BootMeasurement {
+        elapsed: Duration::from_millis(10),
+        stop: None,
+    }];
+    assert_graceful_stops("serial", false, &measurements)
+        .expect("grantless benchmark keeps the existing boot-only gate");
 }
 
 #[test]
