@@ -266,6 +266,7 @@ pub(in crate::commands) fn fork_vm_full_machine(
             json: input.json,
             declared_secrets: &input.declared_secrets,
             allow_secret_drop: input.allow_secret_drop,
+            intent: crate::commands::vm::checkpoint::ForkIntent::Ordinary,
         },
     )
 }

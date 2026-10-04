@@ -648,19 +648,9 @@ pub(crate) fn handle_post_restore(
             ),
         }
     }
-    // Then send SIGUSR1 to PID 1 to trigger drive remount + service restart.
-    let mut command = std::process::Command::new("kill");
-    command.args(["-USR1", "1"]);
-    mvm_agentd::fd_hygiene::configure_close_fds(&mut command, 3, None);
-    let result = command.output();
-    let signal_detail = match result {
-        Ok(out) if out.status.success() => None,
-        Ok(out) => Some(format!(
-            "kill failed: {}",
-            String::from_utf8_lossy(&out.stderr)
-        )),
-        Err(e) => Some(format!("failed to send signal: {}", e)),
-    };
+    // Then signal PID 1 directly: a minimal guest image need not carry a
+    // `kill` executable, and restore must not depend on shell utilities.
+    let signal_detail = send_init_signal_with(send_sigusr1_to_init);
     post_restore_ack(PostRestoreSteps {
         reseed,
         hostname_requested: hostname.is_some(),
@@ -670,6 +660,31 @@ pub(crate) fn handle_post_restore(
         clock_error,
         signal_error: signal_detail,
     })
+}
+
+fn send_init_signal_with(send: impl FnOnce() -> std::io::Result<()>) -> Option<String> {
+    send()
+        .err()
+        .map(|error| format!("failed to send signal: {error}"))
+}
+
+#[cfg(target_os = "linux")]
+fn send_sigusr1_to_init() -> std::io::Result<()> {
+    // SAFETY: PID 1 and SIGUSR1 are fixed; the syscall does not dereference
+    // process memory. The guest init owns the restore remount hook.
+    if unsafe { libc::kill(1, libc::SIGUSR1) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn send_sigusr1_to_init() -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "post-restore init signaling requires Linux",
+    ))
 }
 
 /// What each post-restore step did, gathered so the acknowledgement is decided
@@ -1131,6 +1146,22 @@ mod post_restore_ack_tests {
     use mvm_agentd::vsock::ReseedShortfall;
 
     use super::*;
+
+    #[test]
+    fn init_signal_success_needs_no_guest_executable() {
+        assert_eq!(send_init_signal_with(|| Ok(())), None);
+    }
+
+    #[test]
+    fn init_signal_error_is_reported_for_a_negative_ack() {
+        let error = send_init_signal_with(|| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        assert!(error.is_some_and(|detail| {
+            detail.contains("failed to send signal")
+                && detail.to_ascii_lowercase().contains("permission denied")
+        }));
+    }
 
     fn steps(reseed: GenIdAction) -> PostRestoreSteps {
         PostRestoreSteps {
