@@ -76,8 +76,16 @@ because it could not restore that target safely after a crash.
 If the signed `workspace.applied` entry cannot be appended during the command,
 `mvmctl` restores the staged pre-images and cancels that commit. If restoration
 also fails, the command reports that the working tree may have changed and
-requires inspection before another apply. A process crash after the host
-commit but before the signed append is not yet reconciled by this failure path.
+requires inspection before another apply. A durable marker also covers a
+process crash after the host commit but before the signed append: the next
+`machine apply`, `machine undo`, or `machine redo` command verifies the signed
+audit chain, keeps a matching signed
+commit, or restores and cancels an unsigned one. A broken or unavailable audit
+chain stops recovery rather than treating an unverified entry as proof.
+If an append reports an error after writing a valid signed entry, verification
+keeps the audited commit. If verification itself is unavailable, the command
+stops with the durable marker intact and refuses another apply until recovery
+can determine the signed result.
 
 Two gates shape the plan:
 
