@@ -102,16 +102,24 @@ fn run_build() -> Result<()> {
 }
 
 /// Build both libc variants from the selected checkout — or, when the caller
-/// opted into fetch-when-unchanged and the pinned set's sidecar members were
-/// built from exactly this tree's sources, adopt those verified bytes instead.
-/// Without either there is nothing to build from: the sidecars are image-set
-/// members, and image construction lives in `mvm-images`.
+/// set `MVM_FETCH_UNCHANGED_IMAGES`, adopt the pinned set's verified sidecar
+/// members instead: under `1` only when they were built from exactly this
+/// tree's sources, under `pinned` whatever they were built from. Without
+/// either there is nothing to build from: the sidecars are image-set members,
+/// and image construction lives in `mvm-images`.
 #[cfg(feature = "builder-vm")]
 fn build_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -> Result<()> {
-    if mvm_build::fetch_unchanged::fetch_unchanged_enabled()
-        && let Some(result) = try_fetch_unchanged_sidecars()
-    {
-        return result;
+    use mvm_build::fetch_unchanged::{self as fetch, ArmRequest, FetchMode, PinnedMembers};
+    let request = ArmRequest::for_host(PinnedMembers::SdkSidecars);
+    if request.mode != FetchMode::Off {
+        // Said at notice level whichever arm runs: the documented-surface e2e
+        // records which one did, and an unannounced fall-through is
+        // indistinguishable from the knob doing nothing.
+        let arm = fetch::resolve_arm(request)?;
+        ui::notice(&arm.report(request));
+        if let fetch::Arm::Adopt { set, .. } = arm {
+            return adopt_sidecars(&set, request.arch);
+        }
     }
     match checkout {
         Some(checkout) => build_pair_sidecars(checkout),
@@ -119,56 +127,26 @@ fn build_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) ->
     }
 }
 
-/// The fetch-when-unchanged arm for `build sdk-sidecar build`. `None` means
-/// "build locally instead" — the knob is off, there is no source workspace to
-/// fingerprint, the set cannot be acquired, or the set's sidecar members were
-/// built from different sources (or predate the fingerprint field). A fetch
-/// failure is `Some(Err(..))`: the verified bytes were asked for and refused,
-/// which must not silently fall back to a local build.
+/// Install both libc variants from the verified set. A failure is final: the
+/// verified bytes were asked for and refused, which must not silently fall
+/// back to a local build.
 #[cfg(feature = "builder-vm")]
-fn try_fetch_unchanged_sidecars() -> Option<Result<()>> {
-    use mvm_build::fetch_unchanged as fetch;
-    // Every bail names its reason at notice level, never silently: the
-    // documented-surface e2e records which arm ran, and an unannounced
-    // fall-through is indistinguishable from the knob doing nothing.
-    let workspace = mvm_build::guest_agent_build::detect_source_workspace()?;
-    let fingerprint = match fetch::tree_sdk_fingerprint(&workspace) {
-        Ok(fingerprint) => fingerprint,
-        Err(e) => {
-            crate::ui::notice(&format!(
-                "fetch-when-unchanged: cannot fingerprint the tree's cdylib sources ({e}); pair-building"
-            ));
-            return None;
-        }
-    };
-    let set = match mvm_build::published_image_set::PublishedImageSet::acquire() {
-        Ok(set) => set,
-        Err(e) => {
-            crate::ui::notice(&format!(
-                "fetch-when-unchanged: cannot acquire the pinned image set ({e:#}); pair-building"
-            ));
-            return None;
-        }
-    };
-    let arch = mvm_core::arch::GuestArch::host();
-    if !fetch::set_sidecars_match_tree(&set, arch, &fingerprint) {
-        crate::ui::notice(
-            "fetch-when-unchanged: the pinned set's sidecars were built from              different sources; pair-building",
-        );
-        return None;
-    }
+fn adopt_sidecars(
+    set: &mvm_build::published_image_set::PublishedImageSet,
+    arch: GuestArch,
+) -> Result<()> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    Some(
-        fetch::fetch_sidecars_from_set(&set, arch, &cache_root)
-            .map(|()| {
-                crate::ui::notice(
-                    "fetch-when-unchanged: adopted the pinned set's SDK sidecars                      (source fingerprint matched; no build run)",
-                );
-            })
-            .map_err(|e| {
-                anyhow::anyhow!("fetch-when-unchanged: adopting the pinned set's sidecars failed: {e}")
-            }),
-    )
+    mvm_build::fetch_unchanged::fetch_sidecars_from_set(set, arch, &cache_root).map_err(|e| {
+        anyhow::anyhow!(
+            "adopting the SDK sidecars of the pinned image set {} failed: {e}",
+            set.release_tag()
+        )
+    })?;
+    ui::success(&format!(
+        "SDK sidecars (glibc, musl) installed from the pinned image set {}; no build run.",
+        set.release_tag()
+    ));
+    Ok(())
 }
 
 fn sidecar_needs_a_checkout() -> anyhow::Error {

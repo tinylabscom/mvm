@@ -1240,6 +1240,98 @@ fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
     }
 }
 
+/// A release boots the image set it pins; Extended CI keeps building from
+/// the tree. The release passes the input, both jobs translate it into the
+/// image-arm knob, the image checkout is skipped exactly when it is set, and
+/// the runner hands the knob to the two image verbs without demanding a
+/// checkout under `pinned`.
+#[test]
+fn the_release_lane_boots_the_pinned_image_set_and_the_nightly_builds_from_the_tree() {
+    let release =
+        fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
+    let call = job_block(&release, "e2e-docs");
+    assert!(
+        call.contains("boot_pinned_images: true"),
+        "the release must test the pinned image set its users boot"
+    );
+    let nightly =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    assert!(
+        !nightly.contains("boot_pinned_images"),
+        "Extended CI keeps pair-building the sidecar and dev image from the tree"
+    );
+
+    let workflow = extended_ci();
+    assert!(
+        workflow.contains("      boot_pinned_images:\n")
+            && workflow.contains("        default: false\n"),
+        "the input must exist and default off"
+    );
+    for job in ["e2e-docs-linux", "e2e-docs-macos"] {
+        let block = job_block(&workflow, job);
+        assert!(
+            block.contains(
+                "MVM_FETCH_UNCHANGED_IMAGES: ${{ inputs.boot_pinned_images && 'pinned' || '1' }}"
+            ),
+            "{job} must select the image arm from the input"
+        );
+        for step in [
+            "- name: Resolve the mvm-images commit images.lock pins\n        if: ${{ !inputs.boot_pinned_images }}",
+            "- name: Check out mvm-images for the source-matched SDK sidecar\n        if: ${{ !inputs.boot_pinned_images }}",
+        ] {
+            assert!(
+                block.contains(step),
+                "{job}: the image checkout must be skipped when the pinned set is booted"
+            );
+        }
+    }
+
+    let script = documented_surface_script();
+    assert!(
+        script.contains("E2E_FETCH_MODE=\"${MVM_FETCH_UNCHANGED_IMAGES:-1}\"")
+            && script.contains("unset MVM_FETCH_UNCHANGED_IMAGES"),
+        "the runner must take the knob from the job and keep it away from the scenarios"
+    );
+    assert!(
+        script.contains("if [[ \"$E2E_FETCH_MODE\" != pinned ]]; then"),
+        "only the pair-build arm may demand an image checkout"
+    );
+    for verb in [
+        "env \"${E2E_IMAGE_ENV[@]}\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
+        "env \"${E2E_IMAGE_ENV[@]}\" \"$MVMCTL\" image dev ensure",
+    ] {
+        assert!(
+            script.contains(verb),
+            "both image verbs must run under the chosen arm: {verb}"
+        );
+    }
+}
+
+/// An unrecognised arm stops the runner before it builds anything, rather than
+/// silently picking one.
+#[cfg(unix)]
+#[test]
+fn the_documented_surface_refuses_an_unknown_image_arm() {
+    let home = tempfile::tempdir().expect("create home fixture");
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            "sed -n '/^E2E_FETCH_MODE=/,/^esac$/p' scripts/e2e-documented-surface.sh > \"$1\" \
+             && bash \"$1\"",
+        )
+        .arg("bash")
+        .arg(home.path().join("arm.sh"))
+        .env("MVM_FETCH_UNCHANGED_IMAGES", "pinnned")
+        .output()
+        .expect("run the arm selection");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("takes 1 or pinned"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn documented_surface_warms_the_source_matched_sdk_sidecar() {
     let script = documented_surface_script();

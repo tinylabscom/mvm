@@ -11,7 +11,8 @@ landed and been verified against the published sets; the sidecar arm's
 reporting gap found during verification is fixed in the mvm branch
 `fix/3457-sidecar-arm-reporting`. What remains: the re-measure box (no
 release-window run has yet matched the pinned set's fingerprint) and the
-merge-queue boxes below.
+merge-queue boxes below. 2026-10-04: the release lane moves to the pinned set;
+see "Decision 2026-10-04" below.
 **Date opened:** 2026-09-27
 **Parent:** `specs/plans/2026-09-16-image-repository-extraction.md` (W8 re-measure)
 
@@ -129,6 +130,63 @@ build?"
       over-approximation open question below: at the observed merge pace the
       cdylib inputs churn within days of a set publish, so the ≥25-minute
       saving may accrue on fewer runs than the plan assumed.
+      *2026-10-04:* the release lane now adopts the pinned set under
+      `MVM_FETCH_UNCHANGED_IMAGES=pinned` (decision above), so its image-prep
+      phase no longer depends on a fingerprint match. This box still ticks
+      only after two green release runs under that arm are measured.
+
+## Decision 2026-10-04: the release lane boots the pinned set
+
+The maintainer decided on 2026-10-04 that the release workflow's
+documented-surface lanes adopt the pinned, signed image set's SDK sidecars
+and dev default image instead of pair-building them from the tree. A release
+tests what its users get, which is the new CLI against the set
+`crates/mvm-core/images.lock` pins, not a pair build of guest sources the set
+does not carry. Guest-source changes keep being pair-built and booted by the
+merge queue's guest-image-boot lane, which this decision does not touch.
+
+Why fetch-when-unchanged could not carry the release lane: its match window
+is too narrow at the current merge pace. Twelve commits touching the cdylib
+fingerprint inputs (`Cargo.lock`, `Cargo.toml`, and `mvm-contract`,
+`mvm-core`, `mvm-agentd`, `mvm-host-services`) landed on `main` between
+2026-10-02T21:37Z and 2026-10-03T20:31Z, about 22 hours: `ce6433ce5e`,
+`af1f5afd7d`, `65e52f6c6a`, `e3579647ac`, `1673510385`, `eb05b2f8ad`,
+`5aea865efb`, `fe84cbcf2a`, `c187f53993`, `1603f729c8`, `baf9248c34`,
+`0fce7cb506`. Each one moves the tree's fingerprint away from the one
+recorded in any published set, so a release-window run almost never matches.
+
+How it is wired:
+
+- `MVM_FETCH_UNCHANGED_IMAGES=pinned` is a third value of the existing knob,
+  next to `1` (fetch-when-unchanged) and unset (pair-build, the default). It
+  skips only the fingerprint equality. The root is still digest-pinned,
+  signature-verified and refused when its signed compatibility declaration
+  excludes the CLI; every member is still size- and digest-checked; the dev
+  image is stamped `source=fetched` with the set tag. Under `pinned`, a
+  refused set or a set lacking the members fails the step and names the
+  reason (for an incompatible set, the declared range); it never falls back
+  to a pair build. Both verbs print one line naming the arm, the knob and how
+  the tree's fingerprint compares with the set's.
+- `e2e-docs.yml` gains a `boot_pinned_images` input, default off.
+  `release.yml` sets it, which selects `pinned` and skips the mvm-images
+  checkout; Extended CI leaves it off and keeps pair-building nightly.
+- A source-checkout launch now also resolves an SDK sidecar the verb adopted
+  into the pinned set's member cache. Without that, the adopt arm installed
+  bytes that a source-channel launch never looked at.
+
+Scenario dependence on newer guest behaviour, checked against
+`image-set/v0.2.4` (built from mvm `4e65b22`) by reading the range
+`4e65b22..4075b8fbf1`: the documented-surface scenarios that load the real
+sidecar (`s30_service_plane/host_kv.feature` round-trip and unbound refusal;
+`declared_bindings.feature` mounts it without loading it) and the one that
+boots the dev image (`s5_lifecycle/transient_sandbox_boot.feature`) exercise
+no change in that range. No commit in it touches `crates/mvm-host-services`,
+the cdylib's guest modules, the broker wire types or the guest-agent protocol
+(2..=2 at both ends), and the dev rootfs's own boot path is replaced by the
+tree-built initramfs and runtime overlay. This reading is preview evidence: a
+live run against v0.2.4 has not been recorded yet, and `main` still pins
+`image-set/v0.2.3`, built from `0f33c057`, whose range to `main` is wider and
+was not read scenario by scenario.
 
 ## PR merge time (measured 2026-09-29, the other half of the goal)
 
