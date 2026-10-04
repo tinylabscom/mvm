@@ -30,7 +30,6 @@ mod tests {
             mvm_vmm::host::egress_bridge::verb_grant_cmdline_token(vm_name),
             mvm_vmm::host::egress_bridge::require_grant_cmdline_token(vm_name),
             mvm_vmm::host::egress_bridge::host_signer_pub_cmdline_token(vm_name),
-            mvm_vmm::host::egress_bridge::telemetry_cmdline_token(vm_name),
         ]
         .into_iter()
         .flatten()
