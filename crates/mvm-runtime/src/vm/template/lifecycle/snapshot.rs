@@ -68,7 +68,7 @@ fn persisted_to_synthetic_spec(p: &PersistedManifest) -> TemplateSpec {
 ///    → `bundle_artifacts_for_sha`. Bundles are content-addressed
 ///    images fetched + installed via `mvmctl bundle install`.
 ///
-/// Used by `mvmctl up` / `mvmctl exec` so the CLI can resolve a
+/// Used by `mvmctl run` / `mvmctl machine run` so the CLI can resolve a
 /// `--manifest <PATH>` argument to a slot hash and pass it through
 /// unchanged. Returns the same shape as [`super::artifacts::template_artifacts`].
 #[instrument(skip_all, fields(id_or_slot = id_or_slot))]

@@ -129,8 +129,8 @@ pub struct AdmitPlanForBootParams<'a> {
     /// admit path re-verifies on every launch. Production callers
     /// thread `args.bundle_pin`; tests pass `None`.
     pub bundle_pin: Option<&'a std::path::Path>,
-    /// Optional deps-volume binding produced by `mvmctl up`'s
-    /// install pipeline. When `Some`, the
+    /// Optional deps-volume binding from the app-deps install pipeline.
+    /// No boot path supplies one today. When `Some`, the
     /// synthesised `ExecutionPlan` carries `deps_volume = Some(...)`,
     /// and the supervisor's admission gate re-verifies
     /// the on-disk sealed volume before launch — claim 9.
@@ -294,9 +294,9 @@ impl std::fmt::Debug for AdmissionContext {
 }
 
 /// Run admission (`synthesize → sign → verify → check_window →
-/// nonce`) right before a backend `start()`. Called from every
-/// `mvmctl up` call site that boots a VM: the main path, the
-/// `MVM_DIRECT_BOOT` launchd branch, and the `--watch` rebuild loop.
+/// nonce`) right before a backend `start()`. Every path that boots an
+/// admitted workload calls it: `mvmctl run`, `mvmctl machine run` and
+/// `machine start`, and checkpoint forks.
 ///
 /// There is no way to boot without it: this returns an admitted plan or an
 /// error, never an unadmitted success.
@@ -704,8 +704,7 @@ pub fn admit_plan_for_boot_with_ingress(
     // re-read it (rather than threading it out of `admit_for_run`)
     // because the key bytes are still on disk and the re-read is
     // cheap — keeps `admit_for_run`'s shape unchanged. Audit failures
-    // here surface as `Err` so the caller sees them; in production
-    // mvmctl up degrades gracefully (logs a warning, continues).
+    // here surface as `Err`; the caller decides whether one is fatal.
     let signer = match p.keys_dir {
         Some(dir) => load_or_init_at(dir),
         None => mvm_hostd::audit::host_keypair::load_or_init(),

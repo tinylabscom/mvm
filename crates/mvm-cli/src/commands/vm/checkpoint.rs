@@ -141,7 +141,7 @@ pub(in crate::commands) enum CheckpointCmd {
         #[arg(long)]
         boot: bool,
         /// Hypervisor backend for `--boot` (fs_quick forks only).
-        /// Defaults to the same auto-detect order as `mvmctl up`.
+        /// Defaults to the same auto-detect order as `machine run`.
         #[arg(long, default_value = "firecracker")]
         hypervisor: String,
         /// vCPU count for the booted child (fs_quick `--boot` only).

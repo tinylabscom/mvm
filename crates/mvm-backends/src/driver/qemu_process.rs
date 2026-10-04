@@ -278,7 +278,7 @@ pub(crate) fn allocate_cid(name: &str) -> Result<u32> {
     if let Some(existing) = read_cid(name) {
         return Ok(existing);
     }
-    // Serialize the scan→pick→write across concurrent `mvmctl up
+    // Serialize the scan→pick→write across concurrent `mvmctl machine run
     // --hypervisor qemu` so two VMs can't pick the same CID in the window
     // before either qemu has daemonized (vhost-vsock refuses duplicate live
     // CIDs). A held `flock` on a shared lock file under the vms root is the

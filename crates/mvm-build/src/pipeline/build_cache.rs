@@ -1,6 +1,6 @@
 //! Host-side workload-flake build cache.
 //!
-//! `mvmctl up --flake` runs `nix build` inside a builder VM on every
+//! `mvmctl machine run --flake` runs `nix build` inside a builder VM on every
 //! invocation. Even when the resulting image is byte-identical to the
 //! previous run, the build leg pays the full builder-VM boot + nix
 //! evaluation (~tens of seconds) just to rediscover the cache hit —

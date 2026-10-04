@@ -1,4 +1,4 @@
-//! Workload-kernel resolution for `mvmctl up` boots — the kernel-less-image
+//! Workload-kernel resolution for `mvmctl machine run` boots — the kernel-less-image
 //! fallback to the cached builder-VM kernel, and the `--kernel-pin` /
 //! bundle-pin resolution paths against the mvm cache.
 

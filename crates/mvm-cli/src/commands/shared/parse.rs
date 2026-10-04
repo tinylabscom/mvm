@@ -524,7 +524,7 @@ fn validate_host_path(host: &str, expect_dir: bool) -> Result<String> {
 }
 
 /// Parse-then-validate a single volume spec into a [`VmVolume`], the
-/// shared choke point for both `mvmctl up`/`run`.
+/// shared choke point for both `mvmctl run` and `mvmctl machine run`.
 ///
 /// Enforces, in order:
 /// - **Encryption fail-closed:** a `:enc` disk is refused with a clear

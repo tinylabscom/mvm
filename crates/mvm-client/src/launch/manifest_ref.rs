@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 /// manifest path that resolves to a slot hash, or a manifest selecting a
 /// pre-built wasm module.
 ///
-/// `mvmctl up` / `mvmctl exec` accept either form via their
+/// `mvmctl run` / `mvmctl machine run` accept either form via their
 /// `--manifest` flag. A manifest is addressed by its path; the slot hash is
 /// derived from that path.
 ///
@@ -135,7 +135,7 @@ pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     let slot_hash = canonical_key_for_path(&canonical)?;
 
     // Verify the slot exists; surface a clear error otherwise so
-    // `mvmctl up` doesn't proceed against a manifest that's never
+    // a boot doesn't proceed against a manifest that's never
     // been built. The slot's persisted record is dropped here —
     // callers that need it re-read via `template_load_slot`.
     mvm_runtime::vm::template::lifecycle::template_load_slot(&slot_hash).with_context(|| {

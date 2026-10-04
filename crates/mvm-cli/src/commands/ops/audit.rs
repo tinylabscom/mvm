@@ -1184,8 +1184,8 @@ fn audit_tail_chain(tenant: &str, lines: usize, follow: bool) -> Result<()> {
     let path = audit_path_for_tenant(&dir, tenant);
     if !path.exists() {
         ui::info(&format!(
-            "No plan-64 audit chain found for tenant '{tenant}'. \
-             Events appear at {} after the next `mvmctl up`.",
+            "No audit chain found for tenant '{tenant}'. \
+             Events appear at {} after the next `mvmctl run` or `mvmctl machine run`.",
             path.display()
         ));
         return Ok(());

@@ -497,7 +497,7 @@ fn a_detached_runs_output_after_its_recorder_exited_still_reaches_the_reader() {
 
 #[test]
 fn an_entrypoint_run_whose_caller_exits_is_sealed_by_the_stop_that_follows() {
-    // `mvmctl up`: an admitted workload whose entrypoint output arrives over
+    // `mvmctl machine run`: an admitted workload whose entrypoint output arrives over
     // the agent channel rather than the console. Same process boundary, and
     // the same requirement — except that these frames are the only ones that
     // carry which channel a byte came out of, so losing them costs the
