@@ -21,13 +21,17 @@
 //!
 //! Entries are immutable once published. A read re-derives the key from the
 //! checkouts as they are now and re-verifies the entry against its manifest;
-//! an entry that fails is evicted and reported, never served.
+//! an entry that fails is evicted and reported, never served. All a published
+//! entry can gain is what a launch derives beside a file it uses in place — a
+//! digest sidecar, an extracted kernel — which a read tolerates and never
+//! consults.
 
 use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mvm_core::crypto::image_verify::sha256_cache_path;
 use mvm_core::image_set::{
     ImageSetRole, ImageTrustTier, LOCAL_SET_MANIFEST_NAME, LocalCheckouts, LocalImageSet,
 };
@@ -320,6 +324,13 @@ impl LocalImageCache {
     /// Hardlink (or copy, across filesystems) every seeded entry directory
     /// with all of its files — the manifest, the artifacts, and the entry
     /// record — as-is.
+    ///
+    /// What a launch derived beside a file comes along too. The digest
+    /// sidecar is keyed on its file's size and mtime, which a hardlink shares,
+    /// so it stays correct; a copy carries the same bytes, so it is either
+    /// still correct or, with a new mtime, stale and re-hashed by the next
+    /// launch. An extracted kernel is stamped with its source's digest and is
+    /// re-extracted whenever that stops matching.
     fn install_seeded_entries(
         &self,
         default_root: &Path,
@@ -497,6 +508,7 @@ fn read_entry(
     }
     let mut expected = set_file_names(&set);
     expected.insert(ENTRY_RECORD_NAME.to_string());
+    let names = without_launch_derived_files(names, &expected);
     check_exact_contents(&names, &expected).map_err(EntryFault::Corrupt)?;
     Ok(CachedImageSet {
         dir: dir.to_path_buf(),
@@ -586,6 +598,39 @@ fn set_file_names(set: &LocalImageSet) -> BTreeSet<String> {
         .map(|artifact| artifact.name.as_str().to_string())
         .chain([LOCAL_SET_MANIFEST_NAME.to_string()])
         .collect()
+}
+
+/// `present` less the files a launch derives beside an entry's own files when
+/// it uses them in place.
+///
+/// A launch boots the workload kernel straight out of its entry. Hashing it
+/// with [`sha256_file_cached`] leaves a `<file>.sha256cache` beside it, and on
+/// x86_64 a kernel that has to be extracted for its VMM leaves the extracted
+/// ELF and its stamp ([`extracted_elf_files`]). Verification never reads any
+/// of them: every read hashes each artifact afresh against the manifest. So
+/// they are tolerated, never trusted, and only for a file the entry holds;
+/// one named for anything else is still a file that is not part of the set.
+///
+/// [`sha256_file_cached`]: mvm_core::crypto::image_verify::sha256_file_cached
+/// [`extracted_elf_files`]: mvm_vmm::host::fc_kernel::extracted_elf_files
+fn without_launch_derived_files(
+    present: BTreeSet<String>,
+    expected: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let derived: BTreeSet<String> = expected
+        .iter()
+        .flat_map(|name| launch_derived_files(Path::new(name)))
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect();
+    present
+        .into_iter()
+        .filter(|name| !derived.contains(name))
+        .collect()
+}
+
+fn launch_derived_files(file: &Path) -> impl Iterator<Item = PathBuf> {
+    std::iter::once(sha256_cache_path(file))
+        .chain(mvm_vmm::host::fc_kernel::extracted_elf_files(file))
 }
 
 fn check_exact_contents(
