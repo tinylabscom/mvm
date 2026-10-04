@@ -452,6 +452,8 @@ fn wasm_network_endpoint_spawn_params<'a>(
     crate::network_endpoint_spawn::SubstitutionSpawnParams {
         vm_name: &plan.vm_name,
         state_dir: &plan.state_dir,
+        // The wasm guest runs inside this process.
+        lifetime: crate::network_endpoint_spawn::EndpointLifetime::Launcher,
         tenant: &plan.tenant,
         secrets: &plan.secrets,
         redaction: &plan.redaction,

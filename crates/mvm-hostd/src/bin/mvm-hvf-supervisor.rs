@@ -531,6 +531,8 @@ fn spawn_owned_builder_endpoint(
         mvm_vmm::host::network_endpoint_spawn::SubstitutionSpawnParams {
             vm_name: &endpoint.vm_name,
             state_dir: &endpoint.state_dir,
+            // This supervisor is the builder VM, so its own life is the VM's.
+            lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Launcher,
             tenant: "builder",
             secrets: &[],
             redaction: &mvm_core::policy::RedactionPolicy::default(),
