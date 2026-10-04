@@ -19,7 +19,7 @@
 //! seven CI-enforced security claims because it doesn't run a guest
 //! at all — there's no isolation, no rootfs, no vsock. A loud
 //! `--hypervisor mock` banner is expected (the CLI surfaces backend
-//! tier on every `up`).
+//! tier on every boot).
 
 use std::collections::HashMap;
 use std::sync::Mutex;

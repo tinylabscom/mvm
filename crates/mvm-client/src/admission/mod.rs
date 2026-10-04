@@ -127,8 +127,8 @@ pub struct AdmitPlanForBootParams<'a> {
     /// Optional path to a `.mvmpkg` bundle archive. When set, the
     /// archive is read + verified at admit time, the resulting
     /// `PlanArtifact` is embedded into the plan, and the supervisor's
-    /// admit path re-verifies on every launch. Production callers
-    /// thread `args.bundle_pin`; tests pass `None`.
+    /// admit path re-verifies on every launch. No boot path sets it
+    /// today; only tests pass a bundle.
     pub bundle_pin: Option<&'a std::path::Path>,
     /// Optional deps-volume binding from the app-deps install pipeline.
     /// No boot path supplies one today. When `Some`, the

@@ -98,9 +98,8 @@ pub struct BootTimingReport {
 /// Snapshot of agent readiness at the moment of a `ReadinessStatus`
 /// call.
 ///
-/// Used by host
-/// callers (`mvmctl wait`, `mvmctl up --timings`, `mvmctl doctor`)
-/// to distinguish:
+/// Used by host callers (`mvmctl machine wait`, `mvmctl machine
+/// boot-report`) to distinguish:
 ///
 /// - "control plane is up, workload not yet warm" → invoke would
 ///   block; the host can stream progress to the user
@@ -840,7 +839,7 @@ pub enum GuestCapability {
     UpdateIdleTimeout,
     /// `ReadinessStatus` returns
     /// `GuestResponse::ReadinessStatusReport(ReadinessReport)`.
-    /// `mvmctl wait` / `mvmctl boot-report` require this capability.
+    /// `mvmctl machine wait` / `mvmctl machine boot-report` require this capability.
     Readiness,
 }
 

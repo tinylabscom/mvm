@@ -1292,7 +1292,7 @@ shareable: boolean
 /**
  * Snapshot of agent readiness at the moment of a `ReadinessStatus` call.
  * 
- * Used by host callers (`mvmctl wait`, `mvmctl up --timings`, `mvmctl doctor`) to distinguish:
+ * Used by host callers (`mvmctl machine wait`, `mvmctl machine boot-report`) to distinguish:
  * 
  * - "control plane is up, workload not yet warm" → invoke would block; the host can stream progress to the user - "entrypoint validation failed" → invoke would fail fast with a typed error; the host can surface the validation message - "optional subsystem failed" → invoke is still safe; the host surfaces a warning
  * 

@@ -198,7 +198,7 @@ pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
 }
 
 /// Install a pair-built `builder-vm` entry into the builder-VM cache that
-/// `up` and the build paths read, staging and promoting through the same
+/// the boot and build paths read, staging and promoting through the same
 /// sidecar-validated swap Stage 0 uses.
 pub(crate) fn install_pair_builder_vm(
     entry: &CachedImageSet,

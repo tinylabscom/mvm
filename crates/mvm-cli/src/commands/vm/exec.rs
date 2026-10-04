@@ -629,7 +629,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let network_access = NetworkAccess::of_run(&network_policy, !admit_secrets.secrets.is_empty());
 
     // Every transient run is admitted as a locally-signed workload (uniform
-    // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
+    // with `machine run`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
     // libkrun/HVF supervisor spawn the enforcing gateway bridge (so the egress
     // policy is enforced and the run is chain-audited) instead of the legacy
     // unfiltered path. The closure runs inside the boot path with the resolved

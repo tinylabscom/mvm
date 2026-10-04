@@ -180,7 +180,7 @@ function updateCliPreview() {
   const memory = $("memory").value || "128";
   const cpus = $("cpus").value || "1";
   cliPreviewEl.textContent =
-    `mvmctl up ${name} --image ${image} --memory ${memory} --cpus ${cpus}`;
+    `mvmctl machine run -d --name ${name} --image ${image} --memory ${memory} --cpus ${cpus}`;
 }
 
 function focusInput() {

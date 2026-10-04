@@ -124,7 +124,7 @@ fn collect_help_width_violations(
     path.pop();
 }
 
-// Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
+// Group module aliases — give tests short names (`cleanup`, `compile`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
 use super::agent_session;
 use super::build::build;

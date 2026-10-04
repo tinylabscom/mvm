@@ -59,7 +59,7 @@ use mvm_core::plan::NonceStore;
 // A prelaunched **pool** standby legitimately blocks a long time waiting to be claimed —
 // it's the warm pool's whole point. Its lifetime is bounded by the pool reaper TTL
 // (`mvmctl cache prune`, ~30 min), NOT a short self-timeout; a 30s value
-// made standbys self-exit before a later `up` could claim them. The per-conn read timeout
+// made standbys self-exit before a later boot could claim them. The per-conn read timeout
 // (set on the accepted stream) still caps a connected-but-silent peer, so DoS protection is
 // unaffected. Keep this aligned with the reaper TTL.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
