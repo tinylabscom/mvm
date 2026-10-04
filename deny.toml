@@ -114,32 +114,17 @@ highlight = "all"
 # there and absent here is not drift; it is a duplication only the wider
 # graph can see. Compare them by that rule, not entry for entry.
 skip = [
-    # Windows host-target shim umbrellas. `sysinfo` remains on windows 0.52,
-    # while Tokio and the current Windows support crates resolve the 0.53
-    # target shims. They are host/build-only and carry no Linux guest runtime
-    # surface; collapse this set when sysinfo moves to the newer family.
+    # Windows API umbrellas. `sysinfo` remains on an older windows-sys and
+    # windows-core than Tokio and the current Windows support crates. They are
+    # host/build-only and carry no Linux guest runtime surface; collapse this
+    # set when sysinfo moves to the newer family.
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
 
     # Foundational crates mid v1->v2 ecosystem migration. mvm pins one major
     # for each it uses directly; the other is dragged in by deps that have not
     # finished migrating. Not collapsible without forking those deps.
     "getrandom",
-
-    # The workspace's Linux syscall users still use nix 0.29, while the
-    # maintained tokio-vsock/vsock transport family requires nix 0.31. The
-    # latter is the sole guest↔host network transport and cannot be removed;
-    # unify once the direct syscall call sites migrate together.
-    "nix",
 
     # bitflags 1.3.2 vs 2.x. mvm depends on neither major directly — both are
     # wholly transitive, so there is no local pin to change. The 1.x side comes

@@ -52,40 +52,71 @@ fn default_runtime_overlay_mode(
     }
 }
 
+/// How one overlay acquisition gets its bytes. Only a source build is a cold
+/// build; a published download is never gated by the cold-build policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OverlayAcquisition<'a> {
+    BuildFromSource { workspace_root: &'a Path },
+    Download,
+}
+
+impl OverlayAcquisition<'_> {
+    fn for_params<'a>(params: &RuntimeOverlayAcquireParams<'a>) -> OverlayAcquisition<'a> {
+        match params.source_checkout_root {
+            Some(workspace_root) => OverlayAcquisition::BuildFromSource { workspace_root },
+            None => OverlayAcquisition::Download,
+        }
+    }
+
+    /// The artifact name the cold-build gate is consulted for, if any.
+    fn cold_build_artifact(&self) -> Option<&'static str> {
+        match self {
+            OverlayAcquisition::BuildFromSource { .. } => {
+                Some("the MVM guest runtime (runtime overlay)")
+            }
+            OverlayAcquisition::Download => None,
+        }
+    }
+}
+
 pub fn acquire_runtime_overlay(
     params: &RuntimeOverlayAcquireParams<'_>,
 ) -> Result<RuntimeOverlayArtifact> {
-    if let Some(workspace_root) = params.source_checkout_root {
-        mvm_runtime::ui::admit_cold_build("the MVM guest runtime (runtime overlay)")
-            .map_err(anyhow::Error::msg)?;
-        return build_runtime_overlay_from_source_checkout(
-            workspace_root,
-            params.cache_root,
+    let acquisition = OverlayAcquisition::for_params(params);
+    if let Some(artifact) = acquisition.cold_build_artifact() {
+        mvm_runtime::ui::admit_cold_build(artifact).map_err(anyhow::Error::msg)?;
+    }
+    match acquisition {
+        OverlayAcquisition::BuildFromSource { workspace_root } => {
+            build_runtime_overlay_from_source_checkout(
+                workspace_root,
+                params.cache_root,
+                params.expected_version,
+                params.arch,
+            )
+            .with_context(|| {
+                format!(
+                    "build runtime overlay {} for {} from source checkout {}",
+                    params.expected_version,
+                    params.arch,
+                    workspace_root.display()
+                )
+            })
+        }
+        OverlayAcquisition::Download => mvm_build::runtime_overlay::download_runtime_overlay(
             params.expected_version,
             params.arch,
+            params.cache_root,
         )
         .with_context(|| {
             format!(
-                "build runtime overlay {} for {} from source checkout {}",
+                "download runtime overlay {} for {} into {}",
                 params.expected_version,
                 params.arch,
-                workspace_root.display()
+                params.cache_root.display()
             )
-        });
+        }),
     }
-    mvm_build::runtime_overlay::download_runtime_overlay(
-        params.expected_version,
-        params.arch,
-        params.cache_root,
-    )
-    .with_context(|| {
-        format!(
-            "download runtime overlay {} for {} into {}",
-            params.expected_version,
-            params.arch,
-            params.cache_root.display()
-        )
-    })
 }
 
 /// Prepare the channel-appropriate OCI guest runtime before a command reaches
@@ -190,6 +221,39 @@ mod acquisition_policy_tests {
                 true,
             ),
             RuntimeOverlayAcquireMode::DownloadPublishedArtifact
+        );
+    }
+
+    fn params(source_checkout_root: Option<&Path>) -> RuntimeOverlayAcquireParams<'_> {
+        RuntimeOverlayAcquireParams {
+            cache_root: Path::new("/cache"),
+            expected_version: "0.0.0",
+            arch: GuestArch::host(),
+            source_checkout_root,
+        }
+    }
+
+    #[test]
+    fn a_published_download_is_never_a_cold_build() {
+        let acquisition = OverlayAcquisition::for_params(&params(None));
+        assert_eq!(acquisition, OverlayAcquisition::Download);
+        assert_eq!(acquisition.cold_build_artifact(), None);
+    }
+
+    #[test]
+    fn a_source_build_consults_the_cold_build_gate() {
+        let root = Path::new("/checkout");
+        let acquisition = OverlayAcquisition::for_params(&params(Some(root)));
+        assert_eq!(
+            acquisition,
+            OverlayAcquisition::BuildFromSource {
+                workspace_root: root
+            }
+        );
+        assert!(
+            acquisition
+                .cold_build_artifact()
+                .is_some_and(|name| name.contains("runtime overlay"))
         );
     }
 

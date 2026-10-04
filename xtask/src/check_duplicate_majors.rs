@@ -66,19 +66,10 @@ const ALLOWLIST: &[&str] = &[
     "sha2",
     "signature",
     "untrusted",
-    // sysinfo remains on the Windows 0.52 family while Tokio and current
-    // Windows support crates use the 0.53 target shims. These are host-only.
+    // sysinfo remains on an older Windows API family than Tokio and the
+    // current Windows support crates. These are host-only.
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
