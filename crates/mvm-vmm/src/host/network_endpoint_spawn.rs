@@ -341,6 +341,20 @@ fn session_ready_socket_path(state_dir: &std::path::Path) -> std::path::PathBuf 
     mvm_core::config::vm_socket_dir_at(state_dir).join(SUBST_SESSION_READY_SOCKET)
 }
 
+/// Remove a socket a previous endpoint left behind and no longer serves.
+///
+/// The endpoint binds its listeners fresh, and a path that already exists fails
+/// that bind with "Address already in use" whether or not anything listens on
+/// it. A stopped or crashed endpoint leaves its socket files, so the next start
+/// under the same name died before its handshake. A path that still accepts a
+/// connection belongs to a live endpoint and is left alone: refusing to start a
+/// second one beside it is the right outcome.
+fn clear_stale_socket(path: &Path) {
+    if std::os::unix::net::UnixStream::connect(path).is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Same treatment for the connector socket, which shares the directory and the
 /// same limit.
 fn connector_socket_path(state_dir: &std::path::Path) -> std::path::PathBuf {
@@ -1090,6 +1104,10 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     // exists to catch.
     let _ = std::fs::remove_file(&session_marker);
     let _ = std::fs::remove_file(&session_ready_socket);
+    if let EndpointTransport::Uds { path } = &params.transport {
+        clear_stale_socket(path);
+    }
+    clear_stale_socket(&connector_socket_path(params.state_dir));
     params.session_marker = Some(session_marker);
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
@@ -2112,6 +2130,24 @@ mod tests {
     // (`{"kind":"uds","path":...}`). Drive it with a stub bin (via
     // `MVM_SUBSTITUTION_ENDPOINT_PATH`) that copies its stdin config to a file
     // for inspection and prints a one-line ready handshake.
+    #[test]
+    fn a_socket_nothing_serves_is_cleared_and_a_served_one_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("stale.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        assert!(stale.exists(), "a dropped listener leaves its socket file");
+        clear_stale_socket(&stale);
+        assert!(!stale.exists());
+        std::os::unix::net::UnixListener::bind(&stale).expect("the path binds again");
+
+        let live = dir.path().join("live.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        clear_stale_socket(&live);
+        assert!(live.exists(), "a live endpoint's socket must be left alone");
+
+        clear_stale_socket(&dir.path().join("absent.sock"));
+    }
+
     #[test]
     fn only_a_vm_lifetime_endpoint_starts_as_its_vms_keeper() {
         let bin = Path::new("/opt/mvm/mvm-network-endpoint");
