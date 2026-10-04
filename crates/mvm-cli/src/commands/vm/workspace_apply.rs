@@ -13,7 +13,7 @@
 
 use std::io::IsTerminal as _;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -23,7 +23,7 @@ use mvm_contract::policy::protected_paths::{
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::tree_diff::Ext4Tree;
-use mvm_fs::workspace_apply::store::ApplyStore;
+use mvm_fs::workspace_apply::store::{ApplyStore, StagedApply};
 use mvm_fs::workspace_apply::{ApplyPlan, PlanParams};
 use mvm_hostd::audit::emitter::{
     AuditEmitter, WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit,
@@ -189,24 +189,45 @@ pub(in crate::commands) fn run_apply(
             )
         },
         || {
+            store.arm_signed_audit(&staged)?;
             store
                 .commit(&staged, &selected.source_dir)
                 .map_err(Into::into)
         },
     )?;
-    emitter
-        .emit_workspace_mutation(
-            &audit_plan,
-            WorkspaceMutationAudit {
+    seal_apply_or_rollback(
+        || {
+            emitter.emit_workspace_mutation(
+                &audit_plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: &args.name,
+                    volume: &selected.volume,
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+        },
+        || {
+            emitter.workspace_mutation_recorded(WorkspaceMutationAudit {
                 event: workspace_audit::APPLIED_EVENT,
                 vm_name: &args.name,
                 volume: &selected.volume,
                 apply_id: staged.id(),
                 target_id: None,
                 merkle_root: staged.merkle_root(),
-            },
-        )
-        .context("recording the workspace apply in the signed audit chain")?;
+            })
+        },
+        || {
+            store
+                .rollback_unsealed(&staged, &selected.source_dir)
+                .map_err(Into::into)
+        },
+    )?;
+    store
+        .seal_signed_audit(&staged)
+        .context("clearing the reconciled workspace audit marker")?;
     mvm_core::audit_emit!(
         WorkspaceApply,
         vm: &args.name,
@@ -232,6 +253,35 @@ fn record_snapshot_then_commit(
 ) -> Result<()> {
     record_snapshot().context("recording the host pre-apply snapshot in the signed audit chain")?;
     commit()
+}
+
+/// A failed applied-event append must not leave unrecorded host writes behind.
+fn seal_apply_or_rollback(
+    record_applied: impl FnOnce() -> Result<()>,
+    verify_recorded: impl FnOnce() -> Result<bool>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    let Err(audit_error) = record_applied() else {
+        return Ok(());
+    };
+    match verify_recorded() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(verify_error) => {
+            return Err(verify_error).context(format!(
+                "signed workspace append reported {audit_error}; whether it committed could not be verified, so the host tree and durable recovery marker were left intact"
+            ));
+        }
+    }
+    match rollback() {
+        Ok(()) => Err(audit_error)
+            .context("recording the signed workspace apply failed; host pre-images were restored"),
+        Err(rollback_error) => Err(rollback_error).with_context(|| {
+            format!(
+                "recording the signed workspace apply failed ({audit_error}); host rollback also failed and the working tree may have changed"
+            )
+        }),
+    }
 }
 
 pub(in crate::commands) fn run_undo(
@@ -368,7 +418,45 @@ fn open_recovered_store(vm: &str, selected: &Workspace) -> Result<ApplyStore> {
             "rolled back an interrupted apply ({rolled_back}) before continuing"
         ));
     }
+    let pending = store.pending_signed_audits()?;
+    if !pending.is_empty() {
+        let emitter = workspace_audit_emitter()?;
+        let restored =
+            reconcile_pending_signed_audits(&store, &selected.source_dir, pending, |staged| {
+                emitter.workspace_mutation_recorded(WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: vm,
+                    volume: &selected.volume,
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                })
+            })?;
+        for id in restored {
+            crate::ui::warn(&format!(
+                "restored unaudited workspace apply {id} after an interrupted command"
+            ));
+        }
+    }
     Ok(store)
+}
+
+fn reconcile_pending_signed_audits(
+    store: &ApplyStore,
+    source_dir: &Path,
+    pending: Vec<StagedApply>,
+    mut recorded: impl FnMut(&StagedApply) -> Result<bool>,
+) -> Result<Vec<String>> {
+    let mut restored = Vec::new();
+    for staged in pending {
+        if recorded(&staged)? {
+            store.seal_signed_audit(&staged)?;
+        } else {
+            store.rollback_unsealed(&staged, source_dir)?;
+            restored.push(staged.id().to_string());
+        }
+    }
+    Ok(restored)
 }
 
 fn apply_store_root(vm: &str, volume: &str) -> PathBuf {
@@ -443,9 +531,54 @@ fn op_summary(op: &mvm_fs::workspace_apply::FileOp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_apply_authorized, record_snapshot_then_commit};
+    use super::{
+        ensure_apply_authorized, reconcile_pending_signed_audits, record_snapshot_then_commit,
+        seal_apply_or_rollback,
+    };
     use anyhow::anyhow;
+    use mvm_fs::ext4::{Node, Owner, build_image};
+    use mvm_fs::tree_diff::Ext4Tree;
+    use mvm_fs::workspace_apply::PlanParams;
+    use mvm_fs::workspace_apply::store::{ApplyStore, StagedApply};
+    use mvm_hostd::audit::emitter::{AuditEmitter, WorkspaceMutationAudit, workspace_audit};
     use std::cell::RefCell;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn pending_apply_fixture() -> (tempfile::TempDir, PathBuf, ApplyStore, StagedApply) {
+        let home = tempfile::tempdir().expect("home");
+        let source = home.path().join("source");
+        fs::create_dir(&source).expect("source");
+        fs::write(source.join("edit.txt"), "before\n").expect("host pre-image");
+        let image = |data: &[u8], name: &str| {
+            let bytes = build_image(
+                vec![Node::File {
+                    path: "/edit.txt".to_string(),
+                    mode: 0o644,
+                    data: data.to_vec(),
+                    xattrs: Vec::new(),
+                    owner: Owner::ROOT,
+                }],
+                &Default::default(),
+            )
+            .expect("image");
+            let path = home.path().join(name);
+            fs::write(&path, bytes).expect("write image");
+            path
+        };
+        let baseline_path = image(b"before\n", "baseline.ext4");
+        let live_path = image(b"after\n", "live.ext4");
+        let baseline = Ext4Tree::open(&baseline_path).expect("baseline");
+        let live = Ext4Tree::open(&live_path).expect("live");
+        let store = ApplyStore::open(home.path().join("store")).expect("store");
+        let plan = store
+            .plan(&PlanParams::new(&baseline, &live, &source))
+            .expect("plan");
+        let staged = store.stage(plan, &source, &live, None).expect("stage");
+        store.arm_signed_audit(&staged).expect("arm audit");
+        store.commit(&staged, &source).expect("commit");
+        (home, source, store, staged)
+    }
 
     #[test]
     fn yes_authorizes_without_a_terminal() {
@@ -508,5 +641,167 @@ mod tests {
         .expect_err("commit error must propagate");
         assert!(recorded.get());
         assert!(error.to_string().contains("host write refused"));
+    }
+
+    #[test]
+    fn a_signed_apply_entry_keeps_the_committed_host_tree() {
+        let rolled_back = std::cell::Cell::new(false);
+        seal_apply_or_rollback(
+            || Ok(()),
+            || Ok(false),
+            || {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect("signed apply");
+        assert!(!rolled_back.get());
+    }
+
+    #[test]
+    fn a_failed_signed_apply_entry_restores_host_pre_images() {
+        let rolled_back = std::cell::Cell::new(false);
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("audit append refused")),
+            || Ok(false),
+            || {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("apply must fail");
+        assert!(rolled_back.get());
+        assert!(error.to_string().contains("pre-images were restored"));
+    }
+
+    #[test]
+    fn a_failed_rollback_warns_that_host_changes_may_remain() {
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("audit append refused")),
+            || Ok(false),
+            || Err(anyhow!("host restore refused")),
+        )
+        .expect_err("apply must fail");
+        assert!(error.to_string().contains("may have changed"));
+        assert!(error.to_string().contains("audit append refused"));
+    }
+
+    #[test]
+    fn an_append_error_with_a_verified_signed_entry_keeps_the_host_commit() {
+        let rolled_back = std::cell::Cell::new(false);
+        seal_apply_or_rollback(
+            || Err(anyhow!("append result lost")),
+            || Ok(true),
+            || {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect("verified signed entry settles the apply");
+        assert!(!rolled_back.get());
+    }
+
+    #[test]
+    fn an_unverifiable_append_leaves_recovery_marker_and_host_unchanged() {
+        let rolled_back = std::cell::Cell::new(false);
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("append result lost")),
+            || Err(anyhow!("audit chain unavailable")),
+            || {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("unverifiable append must fail");
+        assert!(!rolled_back.get());
+        assert!(error.to_string().contains("durable recovery marker"));
+    }
+
+    #[test]
+    fn recovery_restores_a_committed_tree_without_a_signed_entry() {
+        let (_home, source, store, staged) = pending_apply_fixture();
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "after\n"
+        );
+        let reopened = ApplyStore::open(store.root()).expect("reopen");
+        let pending = reopened.pending_signed_audits().expect("pending");
+        let restored = reconcile_pending_signed_audits(&reopened, &source, pending, |_| Ok(false))
+            .expect("reconcile unsigned");
+        assert_eq!(restored, [staged.id()]);
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(reopened.effective_applies().expect("effective").is_empty());
+    }
+
+    #[test]
+    fn recovery_keeps_a_commit_with_a_matching_signed_entry() {
+        let (home, source, store, staged) = pending_apply_fixture();
+        let emitter = AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+            &home.path().join("audit"),
+        )
+        .expect("emitter");
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("workspace-recovery")
+            .build();
+        emitter
+            .emit_workspace_mutation(
+                &plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: "agent-vm",
+                    volume: "source",
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+            .expect("signed entry");
+
+        let reopened = ApplyStore::open(store.root()).expect("reopen");
+        let pending = reopened.pending_signed_audits().expect("pending");
+        let restored = reconcile_pending_signed_audits(&reopened, &source, pending, |item| {
+            emitter.workspace_mutation_recorded(WorkspaceMutationAudit {
+                event: workspace_audit::APPLIED_EVENT,
+                vm_name: "agent-vm",
+                volume: "source",
+                apply_id: item.id(),
+                target_id: None,
+                merkle_root: item.merkle_root(),
+            })
+        })
+        .expect("reconcile signed");
+        assert!(restored.is_empty());
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "after\n"
+        );
+        assert!(
+            reopened
+                .pending_signed_audits()
+                .expect("pending")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recovery_with_an_unverifiable_chain_keeps_the_marker_and_blocks() {
+        let (_home, source, store, _staged) = pending_apply_fixture();
+        let reopened = ApplyStore::open(store.root()).expect("reopen");
+        let pending = reopened.pending_signed_audits().expect("pending");
+        let error = reconcile_pending_signed_audits(&reopened, &source, pending, |_| {
+            Err(anyhow!("chain verification refused"))
+        })
+        .expect_err("unverifiable chain must block");
+        assert!(error.to_string().contains("chain verification refused"));
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "after\n"
+        );
+        assert_eq!(reopened.pending_signed_audits().expect("pending").len(), 1);
     }
 }

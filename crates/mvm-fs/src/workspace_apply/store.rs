@@ -20,7 +20,11 @@
 //!    (each write is a tmp file + atomic rename, so a torn file does not
 //!    exist; each delete went to `trash/` first) and journals `rollback`.
 //! 3. After `done`, before `commit`: the writes finished. Recovery moves the
-//!    apply to `committed/` and journals `commit`.
+//!    apply to `committed/` if needed and journals `commit`, including when
+//!    the directory moved before the process stopped.
+//! 4. After `commit`, before the required signed audit append settles: the
+//!    committed directory retains `signed-audit-pending`. The caller verifies
+//!    the signed chain and either seals the commit or restores its pre-images.
 //!
 //! `open` performs windows 1 and 3, which need no knowledge of the host
 //! tree. Window 2 is host-tree-shaped, so the caller runs
@@ -104,7 +108,8 @@ pub enum JournalKind {
     Begin,
     /// The host writes are durable.
     Commit,
-    /// A begun apply was rolled back (crash recovery).
+    /// A begun apply was rolled back, or a committed apply was cancelled
+    /// because its signed audit entry could not be recorded.
     Rollback,
 }
 
@@ -124,8 +129,13 @@ impl ApplyStore {
         fs::create_dir_all(store.root.join("staging"))?;
         fs::create_dir_all(store.root.join("committed"))?;
         if let Some((id, true)) = store.pending_begin()? {
-            let manifest = store.read_staging_manifest(&id)?;
-            store.move_to_committed(&id)?;
+            let manifest = if store.committed_dir(&id).join("done").exists() {
+                store.committed_manifest(&id)?
+            } else {
+                let manifest = store.read_staging_manifest(&id)?;
+                store.move_to_committed(&id)?;
+                manifest
+            };
             store.journal(JournalKind::Commit, &id, Some(manifest.merkle_root), None)?;
         }
         store.sweep_orphans()?;
@@ -156,7 +166,7 @@ impl ApplyStore {
         live: &dyn crate::tree_diff::TreeSource,
         relation: Option<(String, RelationKind)>,
     ) -> Result<StagedApply, ApplyError> {
-        if self.pending_begin()?.is_some() {
+        if self.pending_begin()?.is_some() || !self.pending_signed_audits()?.is_empty() {
             return Err(ApplyError::PendingApply);
         }
         if !plan.refused_protected.is_empty() || !plan.refused_unappliable.is_empty() {
@@ -217,6 +227,97 @@ impl ApplyStore {
             None,
         )?;
         Ok(())
+    }
+
+    /// Durably mark a staged apply as requiring a signed audit entry before
+    /// the host tree may be considered settled. The marker moves with the
+    /// staged directory through commit and survives a process crash.
+    pub fn arm_signed_audit(&self, staged: &StagedApply) -> Result<(), ApplyError> {
+        let dir = self.staging_dir(staged.id());
+        let manifest = self.read_staging_manifest(staged.id())?;
+        if manifest.merkle_root != staged.merkle_root() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has a different staged manifest root",
+                staged.id()
+            )));
+        }
+        atomic_write(&dir.join("signed-audit-pending"), staged.id().as_bytes())?;
+        sync_dir(&dir)
+    }
+
+    /// Committed applies whose signed entry still needs reconciliation.
+    /// Canceled commits are excluded by the journal, even if a crash left
+    /// their marker behind.
+    pub fn pending_signed_audits(&self) -> Result<Vec<StagedApply>, ApplyError> {
+        let mut pending = Vec::new();
+        for id in self.committed_order()? {
+            let dir = self.committed_dir(&id);
+            let marker = dir.join("signed-audit-pending");
+            let metadata = match marker.symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.file_type().is_file() {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {id} has a non-file signed-audit marker"
+                )));
+            }
+            if fs::read(&marker)? != id.as_bytes() {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {id} has an invalid signed-audit marker"
+                )));
+            }
+            pending.push(StagedApply {
+                manifest: self.committed_manifest(&id)?,
+            });
+        }
+        Ok(pending)
+    }
+
+    /// Clear the pending marker only after the matching signed entry exists.
+    /// A crash before the directory sync leaves a marker that recovery can
+    /// safely verify again.
+    pub fn seal_signed_audit(&self, staged: &StagedApply) -> Result<(), ApplyError> {
+        let dir = self.committed_dir(staged.id());
+        let marker = dir.join("signed-audit-pending");
+        if fs::read(&marker)? != staged.id().as_bytes() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has an invalid signed-audit marker",
+                staged.id()
+            )));
+        }
+        fs::remove_file(marker)?;
+        sync_dir(&dir)
+    }
+
+    /// Restore a just-committed apply when its required signed audit append
+    /// fails. Only the newest commit may be cancelled: a later apply could
+    /// depend on these bytes. The cancellation remains in the journal while
+    /// the manifest and pre-image blobs remain available for inspection.
+    pub fn rollback_unsealed(
+        &self,
+        staged: &StagedApply,
+        source_dir: &Path,
+    ) -> Result<(), ApplyError> {
+        let latest = self.committed_order()?.pop();
+        if latest.as_deref() != Some(staged.id()) {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} is not the latest committed apply; refusing audit rollback",
+                staged.id()
+            )));
+        }
+        let dir = self.committed_dir(staged.id());
+        for op in staged.manifest.ops.iter().rev() {
+            self.rollback_op(op, source_dir, &dir)?;
+        }
+        sync_dir(source_dir)?;
+        self.journal(
+            JournalKind::Rollback,
+            staged.id(),
+            None,
+            Some("signed apply audit append failed; host pre-images restored".into()),
+        )
     }
 
     /// Reverse the most recent committed, still-effective apply: stage an
@@ -353,9 +454,16 @@ impl ApplyStore {
 
     fn committed_order(&self) -> Result<Vec<String>, ApplyError> {
         let journal = self.journal_read()?;
+        let cancelled: HashSet<&str> = journal
+            .iter()
+            .filter(|entry| entry.kind == JournalKind::Rollback)
+            .map(|entry| entry.apply.as_str())
+            .collect();
         let mut order: Vec<String> = journal
             .iter()
-            .filter(|e| e.kind == JournalKind::Commit)
+            .filter(|entry| {
+                entry.kind == JournalKind::Commit && !cancelled.contains(entry.apply.as_str())
+            })
             .map(|e| e.apply.clone())
             .collect();
         // A commit completed by recovery may appear twice; dedup, keep order.
@@ -647,7 +755,8 @@ impl ApplyStore {
             .collect();
         for id in begun {
             if !closed.contains(id) {
-                let done = self.staging_dir(id).join("done").exists();
+                let done = self.staging_dir(id).join("done").exists()
+                    || self.committed_dir(id).join("done").exists();
                 return Ok(Some((id.to_string(), done)));
             }
         }

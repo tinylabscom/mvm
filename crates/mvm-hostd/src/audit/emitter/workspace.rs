@@ -1,7 +1,7 @@
 //! Chain-signed records for reviewed workspace mutations.
 
 use super::AuditEmitter;
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use mvm_core::plan::ExecutionPlan;
 
 /// Wire-stable event and label names for reviewed workspace mutations.
@@ -78,6 +78,68 @@ impl AuditEmitter {
             labels.push((k::LABEL_TARGET_ID.to_string(), target.to_string()));
         }
         self.emit(plan, audit.event, labels)
+    }
+
+    /// Check the entire authenticated local chain for this exact mutation,
+    /// then sync the containing segment and directory before treating it as
+    /// durable. Recovery cannot trust a visible but unsynced JSON match.
+    pub fn workspace_mutation_recorded(&self, audit: WorkspaceMutationAudit<'_>) -> Result<bool> {
+        let segments = crate::supervisor::audit_set::read_verified_set(
+            self.audit_dir(),
+            "local",
+            &self.verifying_key(),
+        )
+        .context("verifying the signed workspace audit chain")?;
+        for segment in segments {
+            for entry in segment.entries.unwrap_or_default() {
+                if entry.event != audit.event
+                    || entry
+                        .labels
+                        .get(workspace_audit::LABEL_APPLY_ID)
+                        .map(String::as_str)
+                        != Some(audit.apply_id)
+                {
+                    continue;
+                }
+                let labels = &entry.labels;
+                if labels
+                    .get(workspace_audit::LABEL_VM_NAME)
+                    .map(String::as_str)
+                    == Some(audit.vm_name)
+                    && labels
+                        .get(workspace_audit::LABEL_VOLUME)
+                        .map(String::as_str)
+                        == Some(audit.volume)
+                    && labels
+                        .get(workspace_audit::LABEL_MERKLE_ROOT)
+                        .map(String::as_str)
+                        == Some(audit.merkle_root)
+                    && labels
+                        .get(workspace_audit::LABEL_TARGET_ID)
+                        .map(String::as_str)
+                        == audit.target_id
+                {
+                    std::fs::File::open(&segment.path)
+                        .with_context(|| {
+                            format!("opening audit segment {}", segment.path.display())
+                        })?
+                        .sync_all()
+                        .with_context(|| {
+                            format!("syncing audit segment {}", segment.path.display())
+                        })?;
+                    std::fs::File::open(self.audit_dir())
+                        .context("opening the audit directory for sync")?
+                        .sync_all()
+                        .context("syncing the audit directory")?;
+                    return Ok(true);
+                }
+                bail!(
+                    "signed workspace mutation labels disagree for apply {}",
+                    audit.apply_id
+                );
+            }
+        }
+        Ok(false)
     }
 }
 
@@ -191,5 +253,71 @@ mod tests {
 
         std::fs::write(&path, content.replacen(&snapshot_root, &"c".repeat(64), 1)).unwrap();
         assert!(verify_audit_chain(&path, &verifier).is_err());
+    }
+
+    #[test]
+    fn recovery_uses_only_a_matching_verified_workspace_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        let emitter = AuditEmitter::with_dir(SigningKey::from_bytes(&seed), dir.path()).unwrap();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("workspace-recovery")
+            .build();
+        let root = "a".repeat(64);
+        let expected = || WorkspaceMutationAudit {
+            event: workspace_audit::APPLIED_EVENT,
+            vm_name: "agent-vm",
+            volume: "source",
+            apply_id: "apply-1",
+            target_id: None,
+            merkle_root: &root,
+        };
+        emitter
+            .emit_workspace_snapshot(
+                &plan,
+                WorkspaceSnapshotAudit {
+                    vm_name: "agent-vm",
+                    volume: "source",
+                    apply_id: "apply-1",
+                    snapshot_root: &root,
+                    manifest_root: &root,
+                },
+            )
+            .unwrap();
+        assert!(!emitter.workspace_mutation_recorded(expected()).unwrap());
+        emitter.emit_workspace_mutation(&plan, expected()).unwrap();
+        assert!(emitter.workspace_mutation_recorded(expected()).unwrap());
+        assert!(
+            emitter
+                .workspace_mutation_recorded(WorkspaceMutationAudit {
+                    apply_id: "another-apply",
+                    ..expected()
+                })
+                .is_ok_and(|recorded| !recorded)
+        );
+        assert!(
+            emitter
+                .workspace_mutation_recorded(WorkspaceMutationAudit {
+                    merkle_root: "wrong-root",
+                    ..expected()
+                })
+                .is_err()
+        );
+        let wrong_key = SigningKey::from_bytes(&[8u8; 32]);
+        assert!(
+            crate::supervisor::audit_set::verify_segment_entries(
+                dir.path(),
+                "local",
+                &wrong_key.verifying_key()
+            )
+            .is_err()
+        );
+
+        let path = dir.path().join("local.jsonl");
+        let content = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, content.replacen(&root, &"b".repeat(64), 1)).unwrap();
+        assert!(emitter.workspace_mutation_recorded(expected()).is_err());
     }
 }

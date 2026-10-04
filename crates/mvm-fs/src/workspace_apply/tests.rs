@@ -730,6 +730,269 @@ fn crash_after_done_completes_the_commit() {
 }
 
 #[test]
+fn failed_apply_audit_cancels_the_commit_and_restores_host_pre_images() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let staged = fixture.apply(&store);
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+
+    store
+        .rollback_unsealed(&staged, &fixture.source_dir)
+        .expect("restore after audit failure");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert_eq!(
+        read(&fixture.source_dir.join("gone.txt")),
+        "original gone\n"
+    );
+    assert!(!fixture.source_dir.join("added.txt").exists());
+    assert!(store.effective_applies().expect("effective").is_empty());
+    assert!(store.history().expect("history").is_empty());
+    assert!(
+        store
+            .redo_latest(&fixture.source_dir)
+            .expect("redo")
+            .is_none()
+    );
+    let journal = store.journal_read().expect("journal");
+    assert_eq!(
+        journal.iter().map(|entry| entry.kind).collect::<Vec<_>>(),
+        [
+            JournalKind::Begin,
+            JournalKind::Commit,
+            JournalKind::Rollback
+        ]
+    );
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("reopen");
+    assert!(reopened.effective_applies().expect("effective").is_empty());
+}
+
+#[test]
+fn pending_signed_audit_survives_commit_and_blocks_a_second_stage() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let plan = fixture.plan(&store);
+    let staged = store
+        .stage(plan.clone(), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    store.commit(&staged, &fixture.source_dir).expect("commit");
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("reopen");
+    let pending = reopened.pending_signed_audits().expect("pending audits");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id(), staged.id());
+    assert_eq!(pending[0].merkle_root(), staged.merkle_root());
+    assert!(matches!(
+        reopened.stage(plan, &fixture.source_dir, &live, None),
+        Err(ApplyError::PendingApply)
+    ));
+
+    reopened.seal_signed_audit(&staged).expect("seal audit");
+    assert!(
+        reopened
+            .pending_signed_audits()
+            .expect("pending")
+            .is_empty()
+    );
+}
+
+#[test]
+fn failed_signed_audit_rollback_is_not_recovered_as_a_pending_commit() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let staged = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    store.commit(&staged, &fixture.source_dir).expect("commit");
+    store
+        .rollback_unsealed(&staged, &fixture.source_dir)
+        .expect("rollback");
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("reopen");
+    assert!(
+        reopened
+            .pending_signed_audits()
+            .expect("pending")
+            .is_empty()
+    );
+    assert!(reopened.effective_applies().expect("effective").is_empty());
+}
+
+#[test]
+fn a_tampered_pending_audit_marker_is_not_ignored() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let staged = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    store.commit(&staged, &fixture.source_dir).expect("commit");
+    let marker = fixture
+        .store_dir
+        .join("committed")
+        .join(staged.id())
+        .join("signed-audit-pending");
+    fs::remove_file(&marker).expect("remove marker");
+    std::os::unix::fs::symlink("missing", &marker).expect("tamper marker");
+
+    let error = store
+        .pending_signed_audits()
+        .expect_err("symlink marker must be refused");
+    assert!(error.to_string().contains("non-file"), "{error}");
+}
+
+#[test]
+fn crash_after_done_keeps_the_audit_marker_for_unsigned_commit_recovery() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let staged = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    let staging = fixture.store_dir.join("staging").join(staged.id());
+    fs::write(fixture.source_dir.join("edit.txt"), "guest edit\n").expect("write edit");
+    fs::write(fixture.source_dir.join("added.txt"), "guest added\n").expect("write added");
+    fs::create_dir_all(staging.join("trash")).expect("trash");
+    fs::rename(
+        fixture.source_dir.join("gone.txt"),
+        staging.join("trash/gone.txt"),
+    )
+    .expect("trash removed file");
+    fs::write(staging.join("done"), staged.id()).expect("done marker");
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("complete commit");
+    let pending = reopened.pending_signed_audits().expect("pending");
+    assert_eq!(pending.len(), 1);
+    reopened
+        .rollback_unsealed(&pending[0], &fixture.source_dir)
+        .expect("restore unsigned commit");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert_eq!(
+        read(&fixture.source_dir.join("gone.txt")),
+        "original gone\n"
+    );
+    assert!(!fixture.source_dir.join("added.txt").exists());
+    assert!(reopened.effective_applies().expect("effective").is_empty());
+}
+
+#[test]
+fn crash_after_move_before_commit_journal_keeps_audit_recovery_possible() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let staged = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    let staging = fixture.store_dir.join("staging").join(staged.id());
+    fs::write(fixture.source_dir.join("edit.txt"), "guest edit\n").expect("write edit");
+    fs::write(fixture.source_dir.join("added.txt"), "guest added\n").expect("write added");
+    fs::create_dir_all(staging.join("trash")).expect("trash");
+    fs::rename(
+        fixture.source_dir.join("gone.txt"),
+        staging.join("trash/gone.txt"),
+    )
+    .expect("trash removed file");
+    fs::write(staging.join("done"), staged.id()).expect("done marker");
+    fs::rename(
+        &staging,
+        fixture.store_dir.join("committed").join(staged.id()),
+    )
+    .expect("move before journal");
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("complete commit");
+    assert_eq!(reopened.pending_signed_audits().expect("pending").len(), 1);
+    let pending = reopened.pending_signed_audits().expect("pending");
+    reopened
+        .rollback_unsealed(&pending[0], &fixture.source_dir)
+        .expect("restore unsigned commit");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert_eq!(
+        read(&fixture.source_dir.join("gone.txt")),
+        "original gone\n"
+    );
+    assert!(!fixture.source_dir.join("added.txt").exists());
+}
+
+#[test]
+fn crash_before_done_with_audit_marker_uses_partial_apply_recovery() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let staged = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    fs::write(fixture.source_dir.join("edit.txt"), "guest edit\n").expect("partial write");
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("reopen");
+    reopened
+        .recover_source(&fixture.source_dir)
+        .expect("recover")
+        .expect("pending partial apply");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert!(
+        reopened
+            .pending_signed_audits()
+            .expect("pending")
+            .is_empty()
+    );
+}
+
+#[test]
+fn audit_rollback_restores_a_replaced_symlink() {
+    let fixture = Fixture::new();
+    let path = fixture.source_dir.join("edit.txt");
+    fs::remove_file(&path).expect("remove host file");
+    std::os::unix::fs::symlink("keep.txt", &path).expect("host symlink");
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let staged = fixture.apply(&store);
+
+    store
+        .rollback_unsealed(&staged, &fixture.source_dir)
+        .expect("audit rollback");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("restored path")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&path).expect("target"), Path::new("keep.txt"));
+}
+
+#[test]
+fn audit_rollback_refuses_to_clobber_a_newer_commit() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let first = fixture.apply(&store);
+    fixture.apply(&store);
+
+    let error = store
+        .rollback_unsealed(&first, &fixture.source_dir)
+        .expect_err("older apply cannot be cancelled");
+    assert!(error.to_string().contains("not the latest"), "{error}");
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+}
+
+#[test]
 fn nothing_to_undo_or_redo_says_so() {
     let fixture = Fixture::new();
     let store = ApplyStore::open(&fixture.store_dir).expect("open store");
