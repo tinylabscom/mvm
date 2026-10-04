@@ -156,6 +156,7 @@ fn snapshot_root_binds_only_path_ordered_host_preimages() {
             sha256: Some("a".repeat(64)),
             size: 3,
         },
+        pre_kind: Some(PreImageKind::File),
         post: Some(OpImage {
             sha256: Some("b".repeat(64)),
             size: 5,
@@ -165,6 +166,7 @@ fn snapshot_root_binds_only_path_ordered_host_preimages() {
         path: "added.txt".to_string(),
         action: ManifestAction::WriteFile,
         pre: OpImage::default(),
+        pre_kind: Some(PreImageKind::Absent),
         post: Some(OpImage {
             sha256: Some("c".repeat(64)),
             size: 7,
@@ -187,6 +189,283 @@ fn snapshot_root_binds_only_path_ordered_host_preimages() {
     let mut different_pre = first;
     different_pre.pre.size = 4;
     assert_ne!(expected, snapshot_merkle_root(&[different_pre, added]));
+}
+
+#[test]
+fn snapshot_root_distinguishes_file_bytes_from_symlink_target_bytes() {
+    let file = Fixture::new();
+    fs::write(file.source_dir.join("edit.txt"), "keep.txt").expect("host file");
+    let file_store = ApplyStore::open(&file.store_dir).expect("file store");
+    let file_live = Ext4Tree::open(&file.live).expect("file live image");
+    let file_staged = file_store
+        .stage(file.plan(&file_store), &file.source_dir, &file_live, None)
+        .expect("stage file pre-image");
+
+    let link = Fixture::new();
+    fs::remove_file(link.source_dir.join("edit.txt")).expect("remove host file");
+    std::os::unix::fs::symlink("keep.txt", link.source_dir.join("edit.txt")).expect("host symlink");
+    let link_store = ApplyStore::open(&link.store_dir).expect("link store");
+    let link_live = Ext4Tree::open(&link.live).expect("link live image");
+    let link_staged = link_store
+        .stage(link.plan(&link_store), &link.source_dir, &link_live, None)
+        .expect("stage symlink pre-image");
+
+    assert_ne!(
+        file_staged.snapshot_merkle_root(),
+        link_staged.snapshot_merkle_root(),
+        "the signed snapshot must bind the prior path kind"
+    );
+}
+
+#[test]
+fn undo_and_redo_restore_a_symlink_replaced_by_a_file() {
+    let fixture = Fixture::new();
+    let path = fixture.source_dir.join("edit.txt");
+    fs::remove_file(&path).expect("remove host file");
+    std::os::unix::fs::symlink("keep.txt", &path).expect("host symlink");
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    fixture.apply(&store);
+    assert!(fs::symlink_metadata(&path).expect("applied file").is_file());
+
+    store
+        .undo_latest(&fixture.source_dir)
+        .expect("undo")
+        .expect("prior apply");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("restored link")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&path).expect("target"), Path::new("keep.txt"));
+
+    store
+        .redo_latest(&fixture.source_dir)
+        .expect("redo")
+        .expect("prior undo");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("reapplied file")
+            .is_file()
+    );
+    assert_eq!(read(&path), "guest edit\n");
+}
+
+#[test]
+fn undo_restores_a_removed_host_symlink() {
+    let fixture = Fixture::new();
+    let path = fixture.source_dir.join("gone.txt");
+    fs::remove_file(&path).expect("remove host file");
+    std::os::unix::fs::symlink("keep.txt", &path).expect("host symlink");
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    fixture.apply(&store);
+    assert!(fs::symlink_metadata(&path).is_err());
+
+    store
+        .undo_latest(&fixture.source_dir)
+        .expect("undo")
+        .expect("prior apply");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("restored link")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&path).expect("target"), Path::new("keep.txt"));
+}
+
+#[test]
+fn contradictory_typed_pre_image_refuses_undo_without_host_write() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let staged = fixture.apply(&store);
+    let path = fixture
+        .store_dir
+        .join("committed")
+        .join(staged.id())
+        .join("manifest.json");
+    let mut manifest: Manifest =
+        serde_json::from_slice(&fs::read(&path).expect("read manifest")).expect("decode");
+    let edited = manifest
+        .ops
+        .iter_mut()
+        .find(|op| op.path == "edit.txt")
+        .expect("edited op");
+    edited.pre_kind = Some(PreImageKind::Absent);
+    fs::write(&path, serde_json::to_vec(&manifest).expect("encode")).expect("corrupt manifest");
+
+    let error = store
+        .undo_latest(&fixture.source_dir)
+        .expect_err("inconsistent typed image must be refused");
+    assert!(
+        error.to_string().contains("kind and digest disagree"),
+        "{error}"
+    );
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+}
+
+#[test]
+fn crash_recovery_restores_a_symlink_replaced_by_a_file() {
+    let fixture = Fixture::new();
+    let path = fixture.source_dir.join("edit.txt");
+    fs::remove_file(&path).expect("remove host file");
+    std::os::unix::fs::symlink("keep.txt", &path).expect("host symlink");
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    fs::remove_file(&path).expect("remove link during partial apply");
+    fs::write(&path, "guest edit\n").expect("partial file write");
+
+    let recovered = ApplyStore::open(&fixture.store_dir).expect("reopen store");
+    recovered
+        .recover_source(&fixture.source_dir)
+        .expect("recover")
+        .expect("pending apply");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("restored link")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&path).expect("target"), Path::new("keep.txt"));
+}
+
+#[test]
+fn undo_and_redo_restore_a_file_replaced_by_a_symlink() {
+    let fixture = Fixture::new();
+    let live = Ext4Tree::open(&fixture.live).expect("live");
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let plan = ApplyPlan {
+        ops: vec![FileOp {
+            path: "edit.txt".to_string(),
+            action: OpAction::WriteSymlink {
+                target: "keep.txt".to_string(),
+            },
+            pre: OpImage::default(),
+            post: Some(OpImage {
+                sha256: None,
+                size: 8,
+            }),
+        }],
+        ..ApplyPlan::default()
+    };
+    let staged = store
+        .stage(plan, &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.commit(&staged, &fixture.source_dir).expect("commit");
+    let path = fixture.source_dir.join("edit.txt");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("applied link")
+            .file_type()
+            .is_symlink()
+    );
+
+    store
+        .undo_latest(&fixture.source_dir)
+        .expect("undo")
+        .expect("prior apply");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("restored file")
+            .is_file()
+    );
+    assert_eq!(read(&path), "original edit\n");
+
+    store
+        .redo_latest(&fixture.source_dir)
+        .expect("redo")
+        .expect("prior undo");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("reapplied link")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_link(&path).expect("target"), Path::new("keep.txt"));
+}
+
+#[test]
+fn staging_refuses_a_host_symlink_target_that_cannot_be_restored() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let fixture = Fixture::new();
+    let path = fixture.source_dir.join("edit.txt");
+    fs::remove_file(&path).expect("remove host file");
+    let target = std::ffi::OsString::from_vec(vec![0xff]);
+    std::os::unix::fs::symlink(&target, &path).expect("host symlink");
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live");
+    let error = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect_err("unrestorable pre-image must be refused");
+    assert!(error.to_string().contains("not UTF-8"), "{error}");
+    assert!(
+        fs::symlink_metadata(&path)
+            .expect("host link intact")
+            .file_type()
+            .is_symlink()
+    );
+}
+
+#[test]
+fn typed_pre_image_roundtrips_and_legacy_manifest_op_still_parses() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let staged = fixture.apply(&store);
+    let op = staged
+        .manifest()
+        .ops
+        .iter()
+        .find(|op| op.path == "edit.txt")
+        .expect("edited op");
+    let encoded = serde_json::to_value(op).expect("serialize");
+    let decoded: ManifestOp = serde_json::from_value(encoded.clone()).expect("typed decode");
+    assert_eq!(decoded.pre_kind, Some(PreImageKind::File));
+
+    let mut legacy = encoded.clone();
+    legacy.as_object_mut().expect("object").remove("pre_kind");
+    let decoded: ManifestOp = serde_json::from_value(legacy).expect("legacy decode");
+    assert_eq!(decoded.pre_kind, None);
+
+    let mut invalid = encoded;
+    invalid["pre_kind"] = serde_json::json!("device");
+    assert!(serde_json::from_value::<ManifestOp>(invalid).is_err());
+}
+
+#[test]
+fn a_legacy_manifest_without_path_kinds_still_undoes_same_kind_files() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let staged = fixture.apply(&store);
+    let path = fixture
+        .store_dir
+        .join("committed")
+        .join(staged.id())
+        .join("manifest.json");
+    let mut manifest: Manifest =
+        serde_json::from_slice(&fs::read(&path).expect("read manifest")).expect("decode");
+    for op in &mut manifest.ops {
+        op.pre_kind = None;
+    }
+    manifest.merkle_root = manifest_merkle_root(&manifest.ops);
+    fs::write(&path, serde_json::to_vec(&manifest).expect("encode")).expect("legacy manifest");
+
+    store
+        .undo_latest(&fixture.source_dir)
+        .expect("legacy undo")
+        .expect("prior apply");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert_eq!(
+        read(&fixture.source_dir.join("gone.txt")),
+        "original gone\n"
+    );
+    assert!(!fixture.source_dir.join("added.txt").exists());
 }
 
 #[test]
