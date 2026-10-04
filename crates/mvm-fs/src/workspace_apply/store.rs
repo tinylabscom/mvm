@@ -166,7 +166,10 @@ impl ApplyStore {
         live: &dyn crate::tree_diff::TreeSource,
         relation: Option<(String, RelationKind)>,
     ) -> Result<StagedApply, ApplyError> {
-        if self.pending_begin()?.is_some() || !self.pending_signed_audits()?.is_empty() {
+        if self.pending_begin()?.is_some()
+            || !self.pending_signed_audits()?.is_empty()
+            || !self.uncertain_signed_audits()?.is_empty()
+        {
             return Err(ApplyError::PendingApply);
         }
         if !plan.refused_protected.is_empty() || !plan.refused_unappliable.is_empty() {
@@ -288,6 +291,147 @@ impl ApplyStore {
             )));
         }
         fs::remove_file(marker)?;
+        sync_dir(&dir)
+    }
+
+    /// A cancelled host apply whose signed append may nevertheless have landed.
+    /// The marker survives rollback and blocks new applies until the chain can
+    /// prove whether a compensating rollback entry is needed.
+    pub fn uncertain_signed_audits(&self) -> Result<Vec<StagedApply>, ApplyError> {
+        let mut uncertain = Vec::new();
+        for entry in fs::read_dir(self.root.join("committed"))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let marker = entry.path().join("signed-audit-uncertain");
+            match marker.symlink_metadata() {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                Ok(_) => {
+                    return Err(ApplyError::Corrupt(format!(
+                        "apply {id} has a non-file uncertain-audit marker"
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
+            if fs::read(&marker)? != id.as_bytes() {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {id} has an invalid uncertain-audit marker"
+                )));
+            }
+            uncertain.push(StagedApply {
+                manifest: self.committed_manifest(&id)?,
+            });
+        }
+        uncertain.sort_by(|a, b| a.id().cmp(b.id()));
+        Ok(uncertain)
+    }
+
+    /// Restore host pre-images after an append whose outcome cannot be read.
+    /// The durable marker is written first, so recovery repeats an interrupted
+    /// rollback before it attempts any chain reconciliation.
+    pub fn rollback_unverifiable(
+        &self,
+        staged: &StagedApply,
+        source_dir: &Path,
+    ) -> Result<(), ApplyError> {
+        let committed = self.committed_manifest(staged.id())?;
+        if committed != staged.manifest {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} differs from its committed manifest",
+                staged.id()
+            )));
+        }
+        let rolled_back = self
+            .journal_read()?
+            .iter()
+            .any(|entry| entry.kind == JournalKind::Rollback && entry.apply == staged.id());
+        if !rolled_back && self.committed_order()?.last().map(String::as_str) != Some(staged.id()) {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} is not the latest committed apply; refusing audit rollback",
+                staged.id()
+            )));
+        }
+        let dir = self.committed_dir(staged.id());
+        let marker = dir.join("signed-audit-uncertain");
+        match marker.symlink_metadata() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                atomic_write(&marker, staged.id().as_bytes())?;
+                sync_dir(&dir)?;
+            }
+            Ok(metadata) if metadata.file_type().is_file() => {
+                if fs::read(&marker)? != staged.id().as_bytes() {
+                    return Err(ApplyError::Corrupt(format!(
+                        "apply {} has an invalid uncertain-audit marker",
+                        staged.id()
+                    )));
+                }
+            }
+            Ok(_) => {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {} has a non-file uncertain-audit marker",
+                    staged.id()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if rolled_back {
+            return Ok(());
+        }
+        self.rollback_unsealed(staged, source_dir)
+    }
+
+    /// Clear an uncertain marker only after the signed chain has settled the
+    /// original apply entry and, if needed, its compensating rollback entry.
+    pub fn settle_uncertain_signed_audit(&self, staged: &StagedApply) -> Result<(), ApplyError> {
+        let rolled_back = self
+            .journal_read()?
+            .iter()
+            .any(|entry| entry.kind == JournalKind::Rollback && entry.apply == staged.id());
+        if !rolled_back {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has not restored its host pre-images",
+                staged.id()
+            )));
+        }
+        let dir = self.committed_dir(staged.id());
+        let uncertain = dir.join("signed-audit-uncertain");
+        if !uncertain.symlink_metadata()?.file_type().is_file() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has a non-file uncertain-audit marker",
+                staged.id()
+            )));
+        }
+        if fs::read(&uncertain)? != staged.id().as_bytes() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has an invalid uncertain-audit marker",
+                staged.id()
+            )));
+        }
+        let pending = dir.join("signed-audit-pending");
+        match pending.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                if fs::read(&pending)? != staged.id().as_bytes() {
+                    return Err(ApplyError::Corrupt(format!(
+                        "apply {} has an invalid pending-audit marker",
+                        staged.id()
+                    )));
+                }
+                fs::remove_file(&pending)?;
+                sync_dir(&dir)?;
+            }
+            Ok(_) => {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {} has a non-file pending-audit marker",
+                    staged.id()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::remove_file(&uncertain)?;
         sync_dir(&dir)
     }
 

@@ -10,6 +10,7 @@ pub mod workspace_audit {
     pub const APPLIED_EVENT: &str = "workspace.applied";
     pub const UNDONE_EVENT: &str = "workspace.undone";
     pub const REDONE_EVENT: &str = "workspace.redone";
+    pub const AUDIT_ROLLBACK_EVENT: &str = "workspace.audit_rollback";
     pub const LABEL_VM_NAME: &str = "vm_name";
     pub const LABEL_VOLUME: &str = "volume";
     pub const LABEL_APPLY_ID: &str = "apply_id";
@@ -29,6 +30,7 @@ pub struct WorkspaceSnapshotAudit<'a> {
 }
 
 /// One committed workspace mutation to bind into the host-signed chain.
+#[derive(Clone, Copy)]
 pub struct WorkspaceMutationAudit<'a> {
     pub event: &'static str,
     pub vm_name: &'a str,

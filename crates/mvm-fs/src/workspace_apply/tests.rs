@@ -826,6 +826,120 @@ fn failed_signed_audit_rollback_is_not_recovered_as_a_pending_commit() {
 }
 
 #[test]
+fn unverifiable_audit_restores_host_and_blocks_until_settled() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let plan = fixture.plan(&store);
+    let staged = store
+        .stage(plan.clone(), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    store.commit(&staged, &fixture.source_dir).expect("commit");
+
+    store
+        .rollback_unverifiable(&staged, &fixture.source_dir)
+        .expect("restore host pre-images");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert!(store.effective_applies().expect("effective").is_empty());
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("reopen");
+    let uncertain = reopened.uncertain_signed_audits().expect("uncertain");
+    assert_eq!(uncertain.len(), 1);
+    assert_eq!(uncertain[0].id(), staged.id());
+    assert!(matches!(
+        reopened.stage(plan.clone(), &fixture.source_dir, &live, None),
+        Err(ApplyError::PendingApply)
+    ));
+    reopened
+        .rollback_unverifiable(&uncertain[0], &fixture.source_dir)
+        .expect("idempotent recovery");
+    reopened
+        .settle_uncertain_signed_audit(&uncertain[0])
+        .expect("settle after chain reconciliation");
+    assert!(
+        reopened
+            .uncertain_signed_audits()
+            .expect("uncertain")
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .pending_signed_audits()
+            .expect("pending")
+            .is_empty()
+    );
+    assert!(
+        reopened
+            .stage(plan, &fixture.source_dir, &live, None)
+            .is_ok()
+    );
+}
+
+#[test]
+fn an_interrupted_uncertain_rollback_is_repeated_from_pre_images() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let staged = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    store.commit(&staged, &fixture.source_dir).expect("commit");
+    let marker = fixture
+        .store_dir
+        .join("committed")
+        .join(staged.id())
+        .join("signed-audit-uncertain");
+    fs::write(&marker, staged.id()).expect("interrupted rollback intent");
+
+    let reopened = ApplyStore::open(&fixture.store_dir).expect("reopen");
+    let uncertain = reopened.uncertain_signed_audits().expect("uncertain");
+    assert_eq!(uncertain.len(), 1);
+    reopened
+        .rollback_unverifiable(&uncertain[0], &fixture.source_dir)
+        .expect("finish interrupted rollback");
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert!(reopened.effective_applies().expect("effective").is_empty());
+}
+
+#[test]
+fn a_non_file_uncertain_marker_is_refused_before_host_rollback() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("store");
+    let live = Ext4Tree::open(&fixture.live).expect("live image");
+    let staged = store
+        .stage(fixture.plan(&store), &fixture.source_dir, &live, None)
+        .expect("stage");
+    store.arm_signed_audit(&staged).expect("arm audit");
+    store.commit(&staged, &fixture.source_dir).expect("commit");
+    let marker = fixture
+        .store_dir
+        .join("committed")
+        .join(staged.id())
+        .join("signed-audit-uncertain");
+    let target = fixture.store_dir.join("unrelated");
+    fs::write(&target, staged.id()).expect("target");
+    symlink(&target, &marker).expect("symlink");
+
+    assert!(store.uncertain_signed_audits().is_err());
+    assert!(
+        store
+            .rollback_unverifiable(&staged, &fixture.source_dir)
+            .is_err()
+    );
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+}
+
+#[test]
 fn a_tampered_pending_audit_marker_is_not_ignored() {
     let fixture = Fixture::new();
     let store = ApplyStore::open(&fixture.store_dir).expect("store");

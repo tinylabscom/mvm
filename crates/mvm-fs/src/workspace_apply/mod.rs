@@ -379,7 +379,7 @@ pub(crate) fn snapshot_merkle_root(ops: &[ManifestOp]) -> String {
 }
 
 /// On-disk manifest: the persisted, self-describing record of one apply.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     /// Unique id (uuid v4).
     pub id: String,
@@ -403,7 +403,7 @@ pub struct Manifest {
 }
 
 /// How this apply relates to an earlier one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApplyRelation {
     /// The earlier apply's id.
     pub apply: String,
@@ -421,7 +421,7 @@ pub enum RelationKind {
 }
 
 /// A manifest op: the plan op plus the staged digests both sides.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestOp {
     pub path: String,
     pub action: ManifestAction,
