@@ -10,12 +10,6 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum AttestationError {
-    /// The selected hardware provider is wired in (feature enabled)
-    /// but its bring-up has not landed yet. v0 stubs return this
-    /// from `measure()` for every provider.
-    #[error("attestation provider {0:?} is wired but not yet implemented")]
-    NotYetImplemented(HwProviderKind),
-
     /// The supervisor was asked to honor a hardware attestation
     /// mode but the binary was compiled without the corresponding
     /// feature flag.
