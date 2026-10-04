@@ -983,6 +983,10 @@ mod tests {
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
         assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
+        assert!(
+            nix.contains("run: sh scripts/check-devshell-tiers.sh"),
+            "the dev shell tier check must run in the Nix lane"
+        );
         assert!(!nix.contains("Boot the mvm-images-built image"));
 
         let guest = job_block(&ci, "guest-image-boot");
