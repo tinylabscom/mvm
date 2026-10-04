@@ -20,7 +20,7 @@ use std::time::Duration;
 use zeroize::Zeroizing;
 
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
-use crate::host::private_file::write_private;
+use mvm_core::atomic_io::write_private;
 
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
 /// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
