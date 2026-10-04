@@ -88,7 +88,11 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
+mod host_trust;
+mod registry_pack;
 mod verb_grant_sidecar;
+use host_trust::{host_grant_ceiling, host_trusted_plan_signers};
+use registry_pack::verify_registry_pack_assets;
 use verb_grant_sidecar::mint_verb_grant_sidecar;
 
 pub use mvm_core::time::{Clock, SystemClock};
@@ -462,60 +466,6 @@ pub fn admit_signed_plan_for_run(
     })
 }
 
-/// Re-open every pack identity under the host's current publisher trust and
-/// lock state. A signed plan alone cannot establish that an installed payload
-/// is still present, unmodified, and published by a trusted identity.
-fn verify_registry_pack_assets(plan: &ExecutionPlan) -> Result<()> {
-    use mvm_core::plan::AssetKind;
-
-    let packs = plan
-        .asset_identities
-        .iter()
-        .filter(|identity| identity.kind == AssetKind::RegistryPack)
-        .collect::<Vec<_>>();
-    if packs.is_empty() {
-        return Ok(());
-    }
-    let lock =
-        mvm_core::registry_pack_store::load_pack_lockfile(&mvm_core::config::pack_lockfile_path())
-            .context("loading registry pack lockfile for admission")?;
-    let publisher = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
-        &mvm_core::config::registry_pack_publisher_policy_path(),
-    )
-    .context("loading registry pack publisher trust for admission")?
-    .policy;
-    let cache = mvm_core::config::registry_pack_cache_dir();
-    for identity in packs {
-        let reference: mvm_core::registry_pack::PackReference = identity
-            .name
-            .parse()
-            .context("invalid registry pack reference in signed plan")?;
-        anyhow::ensure!(
-            reference.version().is_some(),
-            "registry pack identity in signed plan must name an exact version"
-        );
-        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
-            &cache, &lock, &publisher, &reference,
-        )
-        .with_context(|| format!("verifying registry pack {reference} at admission"))?;
-        anyhow::ensure!(
-            verified.manifest_sha256().as_str() == identity.digest,
-            "registry pack {reference} does not match its signed-plan digest"
-        );
-    }
-    Ok(())
-}
-
-/// The external plan signers this host trusts, from operator config.
-///
-/// Read from config rather than taken as a parameter for the same reason as
-/// the grant ceiling: admission's trust root must not be widen-able by the
-/// caller asking for admission. A malformed pin fails the whole read, so the
-/// set in force is exactly the set the operator wrote.
-fn host_trusted_plan_signers() -> Result<Vec<(String, VerifyingKey)>> {
-    mvm_core::user_config::load(None).trusted_plan_signer_keys()
-}
-
 /// Everything the shared post-verification tail of admission needs.
 ///
 /// A params struct rather than seven positional arguments: `verified`,
@@ -818,17 +768,6 @@ pub fn admit_for_run(
         bundle_ctx,
         posture,
     )
-}
-
-/// The bound this host puts on what any workload may be granted.
-///
-/// Read from the operator's config, never from the plan under admission. The
-/// two have different trust roots: whoever authors a plan also authors its
-/// grants, so a ceiling the plan could carry would be a bound the bounded party
-/// writes. There is no parameter for it here for the same reason — a caller
-/// cannot hand admission a wider ceiling than the host configured.
-fn host_grant_ceiling() -> GrantCeiling {
-    mvm_core::user_config::load(None).grant_ceiling()
 }
 
 /// Refuse a boot that, on top of every live machine's admitted charge, would

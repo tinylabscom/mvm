@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use mvm_client::policy_profiles::{LayerOrigin, PolicyRef, PolicyStore};
 use mvm_core::registry_pack::{RegistryPackPublisher, RegistryPackPublisherPolicy};
-use mvm_core::registry_pack_store::{load_pack_lockfile, save_publisher_policy};
+use mvm_core::registry_pack_store::{
+    load_pack_lockfile, open_installed_registry_pack, save_publisher_policy,
+};
 use mvm_core::util::test_env::TestEnv;
 use tempfile::TempDir;
 
@@ -12,6 +14,27 @@ const MANIFEST: &[u8] = include_bytes!("fixtures/signed-registry-go/manifest.jso
 const BUNDLE: &[u8] = include_bytes!("fixtures/signed-registry-go/manifest.sigstore.json");
 const GROUP: &[u8] = include_bytes!("fixtures/signed-registry-go/pack/group.toml");
 const MANIFEST_SHA256: &str = "ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50";
+const PYTHON_MANIFEST: &[u8] = include_bytes!("fixtures/signed-registry-python/manifest.json");
+const PYTHON_BUNDLE: &[u8] =
+    include_bytes!("fixtures/signed-registry-python/manifest.sigstore.json");
+const PYTHON_FILES: [(&str, &[u8]); 4] = [
+    (
+        "pack/group.toml",
+        include_bytes!("fixtures/signed-registry-python/files/pack/group.toml"),
+    ),
+    (
+        "pack/image/mvm.toml",
+        include_bytes!("fixtures/signed-registry-python/files/pack/image/mvm.toml"),
+    ),
+    (
+        "pack/image/flake.nix",
+        include_bytes!("fixtures/signed-registry-python/files/pack/image/flake.nix"),
+    ),
+    (
+        "pack/image/flake.lock",
+        include_bytes!("fixtures/signed-registry-python/files/pack/image/flake.lock"),
+    ),
+];
 
 fn registry_files(root: &Path, manifest: &[u8], group: &[u8]) -> PathBuf {
     let registry = root.join("registry");
@@ -138,4 +161,57 @@ fn a_different_publisher_identity_cannot_adopt_the_signed_pack() {
     .expect("save publisher policy");
     let error = mvm_cli::pack_registry::pull("runtime/go").expect_err("wrong publisher refused");
     assert!(format!("{error:#}").contains("signature"));
+}
+
+#[test]
+fn a_real_signed_image_pack_pulls_with_its_image_and_reopens_under_the_pin() {
+    let temp = TempDir::new().expect("tempdir");
+    let registry = temp.path().join("registry");
+    let pack = registry.join("packs/runtime/python/1.1.0");
+    std::fs::create_dir_all(pack.join("files/pack/image")).expect("image payload directory");
+    std::fs::write(
+        registry.join("packs/index.json"),
+        br#"{"schema_version":1,"packs":[{"namespace":"runtime","name":"python","description":"Python runtime","versions":["1.1.0"]}]}"#,
+    )
+    .expect("registry index");
+    std::fs::write(pack.join("manifest.json"), PYTHON_MANIFEST).expect("signed manifest");
+    std::fs::write(pack.join("manifest.sigstore.json"), PYTHON_BUNDLE).expect("signature bundle");
+    for (path, bytes) in PYTHON_FILES {
+        std::fs::write(pack.join("files").join(path), bytes).expect("signed payload");
+    }
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(temp.path().join("home"));
+    env.set(
+        "MVM_PACK_REGISTRY",
+        format!("file://{}", registry.display()),
+    );
+    let publisher = RegistryPackPublisher::new(
+        "runtime",
+        "https://token.actions.githubusercontent.com",
+        vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/feat/3716-python-image-pack".to_string()],
+    )
+    .expect("branch publisher identity");
+    let policy = RegistryPackPublisherPolicy::new(vec![publisher]).expect("publisher trust");
+    save_publisher_policy(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+        &policy,
+    )
+    .expect("save publisher trust");
+
+    let summary = mvm_cli::pack_registry::pull("runtime/python@1.1.0")
+        .expect("pull a real signed image pack");
+    assert_eq!(summary.files, 4);
+    let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
+    let (_, verified) = open_installed_registry_pack(
+        &mvm_core::config::registry_pack_cache_dir(),
+        &lock,
+        &policy,
+        &summary.reference,
+    )
+    .expect("reopen signed pack");
+    assert_eq!(
+        verified.manifest().image.as_ref().expect("image").manifest,
+        "pack/image/mvm.toml"
+    );
+    assert_eq!(verified.manifest_sha256().as_str(), summary.manifest_sha256);
 }
