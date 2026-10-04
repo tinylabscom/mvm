@@ -100,6 +100,15 @@ fn run_persistent(
     run_persistent_post_start(cli, cfg, &args, &name, denials)
 }
 
+fn check_pack_entrypoint(args: &MachineRunArgs) -> Result<()> {
+    anyhow::ensure!(
+        !args.entrypoint || args.run.registry_pack_image.is_none(),
+        "machine run --entrypoint cannot carry a signed pack identity through its \
+         separate boot path; run the pack without --entrypoint"
+    );
+    Ok(())
+}
+
 fn should_watch_denials(args: &MachineRunArgs) -> bool {
     !args.run.json
         && !args.up_json
@@ -519,6 +528,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer
     // identically or not at all.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
+    crate::commands::vm::run_policy::select_pack_image(&mut args.run)?;
     crate::commands::vm::exec::resolve_run_source(
         &mut args.run,
         &cwd,
@@ -528,6 +538,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
+    check_pack_entrypoint(&args)?;
     let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
         let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
         args.run.manifest = Some(slot_hash.clone());
@@ -653,6 +664,29 @@ pub(in crate::commands) fn boot_persistent_by_name(
 #[cfg(test)]
 mod entrypoint_stdin_tests {
     use super::*;
+
+    #[test]
+    fn a_pack_image_refuses_the_separate_entrypoint_boot_path() {
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pin");
+        let mut args = MachineRunArgs {
+            run: RunArgs {
+                registry_pack_image: Some(pin),
+                ..RunArgs::default()
+            },
+            ..MachineRunArgs::default()
+        };
+        check_pack_entrypoint(&args).expect("ordinary pack run supported");
+        args.entrypoint = true;
+        let error = check_pack_entrypoint(&args).expect_err("unbound path refused");
+        assert!(
+            error.to_string().contains("without --entrypoint"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn a_persistent_entrypoint_preserves_the_requested_machine_name() {

@@ -238,6 +238,7 @@ pub fn start_machine_spec(
     params: MachineStartParams<'_>,
 ) -> Result<MachineStart> {
     AnyBackend::require_hypervisor_selectable(params.hypervisor)?;
+    validate_registry_pack_source(spec)?;
     let network_policy = persisted_network_policy(spec)?;
     let (memory_mib, mem_initial_mib) =
         mp::validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
@@ -270,6 +271,8 @@ pub fn start_machine_spec(
         kernel_path,
         agent_verb: spec.agent_verb.clone(),
         caller_commitment: spec.caller_commitment.clone(),
+        registry_pack_image: spec.registry_pack_image.clone(),
+        tools: spec.tools.clone(),
         has_ad_hoc_argv: params.has_ad_hoc_argv,
         grants: spec.grants.clone(),
         gpu: spec.gpu,
@@ -282,6 +285,19 @@ pub fn start_machine_spec(
         resolved_digest: boot.digest,
         admitted,
     })
+}
+
+fn validate_registry_pack_source(spec: &mp::MachineSpec) -> Result<()> {
+    if spec.registry_pack_image.is_some() {
+        anyhow::ensure!(
+            spec.manifest.is_some()
+                && spec.image.is_none()
+                && spec.deployment.is_none()
+                && !spec.runtime_pack,
+            "a pinned registry pack image requires exactly a built manifest source"
+        );
+    }
+    Ok(())
 }
 
 /// The workload kernel a process that never builds one can boot on
@@ -454,6 +470,8 @@ mod tests {
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,
+            registry_pack_image: None,
+            tools: Default::default(),
             net: false,
             allow_host: Vec::new(),
             peer: Vec::new(),
@@ -476,6 +494,23 @@ mod tests {
             gpu: false,
             gpu_device: None,
         }
+    }
+
+    #[test]
+    fn a_persistent_pack_pin_requires_a_manifest_source() {
+        let mut machine = spec("pack-image");
+        machine.registry_pack_image = Some(
+            mvm_core::registry_pack::PackPin::new(
+                "runtime/python@1.1.0".parse().expect("reference"),
+                mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+            )
+            .expect("pin"),
+        );
+        assert!(validate_registry_pack_source(&machine).is_err());
+        machine.manifest = Some("built-slot".to_string());
+        validate_registry_pack_source(&machine).expect("pack with manifest source");
+        machine.image = Some("alpine:3.20".to_string());
+        assert!(validate_registry_pack_source(&machine).is_err());
     }
 
     #[test]

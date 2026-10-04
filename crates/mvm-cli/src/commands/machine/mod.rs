@@ -664,6 +664,13 @@ fn machine_run_spec(
         deployment,
         resolved_digest: None,
         runtime_pack: args.run.runtime_pack,
+        registry_pack_image: args.run.registry_pack_image.clone(),
+        tools: args
+            .run
+            .applied_policy
+            .as_ref()
+            .map(|policy| policy.tools.to_tool_rules())
+            .unwrap_or_default(),
         net,
         allow_host,
         peer: Vec::new(),
@@ -1183,6 +1190,12 @@ fn build_machine_spec(inputs: MachineSpecInputs<'_>) -> Result<MachineSpec> {
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
+        registry_pack_image: None,
+        tools: policy
+            .policy
+            .as_ref()
+            .map(|body| body.tools.to_tool_rules())
+            .unwrap_or_default(),
         net,
         allow_host,
         peer: inputs.peer.to_vec(),

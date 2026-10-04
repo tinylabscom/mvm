@@ -805,6 +805,7 @@ impl AuditEmitter {
                 mvm_core::plan::AssetKind::Prompt => "prompt",
                 mvm_core::plan::AssetKind::Agent => "agent",
                 mvm_core::plan::AssetKind::Policy => "policy",
+                mvm_core::plan::AssetKind::RegistryPack => "registry_pack",
                 mvm_core::plan::AssetKind::ComputeEnvironment => "compute_environment",
                 mvm_core::plan::AssetKind::Other => "other",
             };
@@ -3257,6 +3258,12 @@ mod asset_identities_emit_tests {
                 DIGEST64,
             )
             .expect("valid digest"),
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::RegistryPack,
+                "runtime/python@1.0.0",
+                DIGEST64,
+            )
+            .expect("valid digest"),
         ];
         plan
     }
@@ -3276,7 +3283,7 @@ mod asset_identities_emit_tests {
         let entry = &envelope["entry"];
         assert_eq!(entry["event"], "plan.asset_identities");
         let labels = entry["labels"].as_object().expect("labels object");
-        assert_eq!(labels["asset_count"].as_str().expect("count"), "2");
+        assert_eq!(labels["asset_count"].as_str().expect("count"), "3");
         assert_eq!(
             labels["asset_0_kind"].as_str().expect("kind"),
             "compute_environment"
@@ -3286,6 +3293,15 @@ mod asset_identities_emit_tests {
         assert_eq!(labels["asset_1_kind"].as_str().expect("kind"), "dataset");
         assert_eq!(labels["asset_1_name"].as_str().expect("name"), "train-set");
         assert_eq!(labels["asset_1_digest"].as_str().expect("digest"), DIGEST64);
+        assert_eq!(
+            labels["asset_2_kind"].as_str().expect("kind"),
+            "registry_pack"
+        );
+        assert_eq!(
+            labels["asset_2_name"].as_str().expect("name"),
+            "runtime/python@1.0.0"
+        );
+        assert_eq!(labels["asset_2_digest"].as_str().expect("digest"), DIGEST64);
     }
 
     #[test]

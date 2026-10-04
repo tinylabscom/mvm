@@ -69,6 +69,9 @@ pub(in crate::commands) struct Args {
     /// Content-addressed asset binding. See `run --asset`.
     #[arg(long = "asset", value_name = "KIND:HOST_PATH")]
     pub assets: Vec<String>,
+    /// Internal signed pack identity selected as this run's image source.
+    #[arg(skip)]
+    pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
     /// Forward the guest's CUDA/NVML calls to a host GPU over vsock.
     #[arg(long)]
     pub gpu: bool,
@@ -244,6 +247,9 @@ pub(in crate::commands) struct RunArgs {
     // summary gate caps that at 64 characters too.
     #[arg(long = "asset", value_name = "KIND:HOST_PATH")]
     pub assets: Vec<String>,
+    /// Internal signed pack identity selected as this run's image source.
+    #[arg(skip)]
+    pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
     /// Collect a guest directory into HOST_DIR after exit (repeatable).
     //
     // HOST_DIR:/GUEST[:SIZE[:MAX_ENTRIES]]. The guest gets a fresh writable
@@ -470,6 +476,7 @@ impl RunArgs {
             memory: self.memory,
             mounts: self.mounts,
             assets: self.assets,
+            registry_pack_image: self.registry_pack_image,
             env: self.env,
             allow_env: self.allow_env,
             timeout: self.timeout,
@@ -528,6 +535,7 @@ pub(in crate::commands) fn run_transient(
     // The command is required here rather than by clap: the field is shared
     // with `machine run`, where `-d` boots with no command.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
+    super::run_policy::select_pack_image(&mut args.run)?;
     resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
     super::run_policy::apply_run_policy(&mut args.run)?;
     let image_supplies_entrypoint =
@@ -537,6 +545,15 @@ pub(in crate::commands) fn run_transient(
             "`mvmctl run` needs a command: `mvmctl run -- <cmd>`. Use `--launch-plan <path>` \
              for a launch document, or `mvmctl machine run -d` to boot a machine with no command."
         );
+    }
+    if !args.run.dry_run
+        && let Some(flake_ref) = args.run.flake.take()
+    {
+        let slot_hash = super::super::build::build::build_flake_to_slot(
+            &flake_ref,
+            args.run.flake_profile.as_deref(),
+        )?;
+        args.run.manifest = Some(slot_hash);
     }
     run_secure(cli, args.run, cfg)
 }
@@ -1223,6 +1240,11 @@ fn build_exec_request(
             .assets
             .iter()
             .map(|s| crate::commands::shared::parse_asset_spec(s))
+            .chain(
+                args.registry_pack_image
+                    .into_iter()
+                    .map(|pin| Ok(mvm_client::admission::AssetSpec::RegistryPack(pin))),
+            )
             .collect::<anyhow::Result<Vec<_>>>()?,
     })
 }

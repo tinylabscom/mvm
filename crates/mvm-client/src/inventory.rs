@@ -340,6 +340,8 @@ mod tests {
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,
+            registry_pack_image: None,
+            tools: Default::default(),
             net: false,
             allow_host: vec![],
             peer: Vec::new(),

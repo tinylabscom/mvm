@@ -360,6 +360,14 @@ rules and discovery order, and the [policy schema](/reference/policy-schema/).
 | `mvmctl run --policy NAME\|PATH\|ns/name[@version]... -- <cmd>` | Run under authored profiles or groups (repeatable; TOML or JSON documents). Each entry names a profile or a group — a group composes as one layer — and later entries take precedence over earlier ones — a later deny beats an earlier allow; allows union. Also on `machine run`, `machine create` and `machine start`. Replaces the project's `[policy]` table; the project's `[network] allow_hosts` still applies, and applies on every verb even with no policy. Flags add to its allows and cannot reach its denies, blocks or ceilings. Pack references require an installed, pinned, publisher-verified signed pack; pack-authored references cannot import local policy files |
 | `mvmctl run --plan FILE -- <cmd>` | Run under a resolved manifest. Mutually exclusive with `--policy`, `--net`, `--network-preset`, `--allow-host`, `--allow-endpoint`, `--peer`, `--cpu-limit`, `--grants-file`, `--mount`, `--allow-env` and `--secret`. The file is re-validated, and a plan or signature in it is refused: admission signs the plan itself |
 
+For `run` and `machine run`, a root `--policy` pack that declares a signed
+image supplies the boot source when no explicit image, manifest, flake,
+deployment, or runtime was selected. The pack's exact version and manifest
+digest are recorded in the signed plan and reverified by host admission.
+Explicit boot sources retain precedence; the pack still supplies policy.
+`machine run --entrypoint` refuses an image-bearing pack because that separate
+boot path does not bind the pack identity.
+
 ## Policy Contracts
 
 `mvmctl machine run` still synthesizes and admits signed execution plans with policy

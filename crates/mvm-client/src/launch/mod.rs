@@ -531,6 +531,8 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
+        registry_pack_image: None,
+        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),

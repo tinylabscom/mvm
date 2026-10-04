@@ -325,6 +325,12 @@ reference or be included by a profile's `[groups] include = ["runtime/python"]`
 or a project's `[policy] include`.
 `pull` follows pack references in the signed profile, verifying and pinning
 each dependency; `agent/claude` includes `runtime/python`.
+If a root pack also declares a signed workload image, `run` and `machine run`
+select that image when no explicit boot source was supplied. The image's
+`mvm.toml`, `flake.nix`, and `flake.lock` are verified as signed payload; the
+pack's exact version and manifest digest are bound into the execution plan
+and rechecked at host admission. An explicit source takes precedence and the
+pack contributes policy only.
 [Author and publish a signed pack](/guides/pack-authoring/) covers writing
 one, and the client guides under
 [AI agent integration](/guides/ai-agent-integration/) cover the published
