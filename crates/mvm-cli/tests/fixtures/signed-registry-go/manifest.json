@@ -1,0 +1,12 @@
+{
+  "description": "Go runtime policy: the module proxy and checksum database, the Go vanity host, and GitHub for direct module fetches.",
+  "files": [
+    {
+      "path": "pack/group.toml",
+      "sha256": "28a7326193e031cd853ac325fd5808f6b8a30bb4c1f77d10f9b50a2412bb6c54",
+      "size": 377
+    }
+  ],
+  "reference": "runtime/go@1.0.0",
+  "schema_version": 1
+}
