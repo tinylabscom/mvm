@@ -140,8 +140,7 @@ pub(in crate::commands) struct RunArgs {
     /// machine surface derives it from what the workload declares it needs.
     #[arg(skip)]
     pub network_mode: mvm_contract::plan::NetworkMode,
-    /// Boot an mvm.toml, slot, or .mvmpkg (manifest file or directory, built
-    /// slot, or signed bundle archive, which is verified and installed first).
+    /// Boot an mvm.toml, a built slot, or a signed .mvmpkg archive.
     #[arg(short = 'm', long, value_name = "PATH", conflicts_with_all = SOURCES_EXCEPT_MANIFEST)]
     pub manifest: Option<String>,
     /// Boot an OCI image (resolved through the local cache first).
