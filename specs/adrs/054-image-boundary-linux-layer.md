@@ -96,9 +96,11 @@ The rules that follow from the table:
    workload flake calls, and it co-changes with mvm's crates far more often
    than with anything in `mvm-images` (the 38-of-58 figure above).
 
-`nix/packages/libkrunfw.nix`, which builds a kernel inside mvm, is a host
-library for the libkrun backend rather than a guest image. The proposal is to
-exempt it from rule 1; that needs an owner decision and is tracked in #4060.
+`nix/packages/libkrunfw.nix` stays in mvm. It builds the kernel libkrun links
+into its own host library for the libkrun backend; it is a host dependency, not
+a guest image any image set carries, so rule 1 does not apply to it. Moving it
+would make `mvm-images` publish host libraries. Decided by the maintainer on
+2026-10-05 (#4015).
 
 ## Where the code is today
 
