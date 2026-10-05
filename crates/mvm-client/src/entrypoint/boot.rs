@@ -309,13 +309,23 @@ pub fn boot_session_vm(
 /// mismatch) is logged rather than returned, because the reaper calls this
 /// where nobody is waiting for an error.
 pub fn tear_down_session_vm(vm: SessionVm) {
+    if let Err(e) = stop_session_vm(&vm) {
+        tracing::warn!(vm = %vm.vm_name, err = %e, "session VM teardown failed");
+    }
+}
+
+/// Stop a session VM, reporting whether the stop took. A caller that records
+/// the end of the VM's session needs to know: a VM that may still be running
+/// is not one whose session can be sealed.
+///
+/// # Errors
+/// The backend refused or failed the stop.
+pub(crate) fn stop_session_vm(vm: &SessionVm) -> Result<()> {
     // The marker in the VM's state dir names the backend that actually
     // launched it. Falling back to the host default would send the stop to
     // the wrong VMM and leave the guest running.
     let backend = AnyBackend::for_started_vm(&vm.vm_name).unwrap_or_else(AnyBackend::auto_select);
-    if let Err(e) = backend.stop(&VmId(vm.vm_name.clone())) {
-        tracing::warn!(vm = %vm.vm_name, err = %e, "session VM teardown failed");
-    }
+    backend.stop(&VmId(vm.vm_name.clone()))
 }
 
 #[cfg(test)]
