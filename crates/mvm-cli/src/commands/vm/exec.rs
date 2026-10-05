@@ -729,7 +729,7 @@ pub(in crate::commands) fn run_secure_with_source(
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: bundle_archive,
+            bundle_pin: bundle_archive.map(mvm_client::admission::BundlePin::boots),
             deps_volume: None,
             // The grants come from the launch config's own volume list, so the
             // plan names exactly what the backend will mount and every

@@ -134,7 +134,7 @@ impl EntrypointAdmission {
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: bundle_archive,
+            bundle_pin: bundle_archive.map(crate::admission::BundlePin::boots),
             deps_volume: None,
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
             assets: assets.to_vec(),

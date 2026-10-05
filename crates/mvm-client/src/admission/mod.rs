@@ -47,6 +47,7 @@ pub mod run_routes;
 pub mod run_secrets;
 pub mod secrets;
 
+pub use bundle_binding::{BundlePin, InheritedBundle};
 pub use instructions::InstructionSources;
 
 /// A content-bound asset. Operator-declared files and internally selected
@@ -134,7 +135,10 @@ pub struct AdmitPlanForBootParams<'a> {
     /// must still match it; a mismatch is refused and recorded as
     /// `plan.failed`. Boots resolved from an installed bundle
     /// (`--manifest <bundle-sha256>`) set it to the registry archive.
-    pub bundle_pin: Option<&'a std::path::Path>,
+    /// A child forked or restored from a parent whose plan pins a bundle
+    /// inherits that pin ([`InheritedBundle`]): the archive is re-verified
+    /// and must still be the bundle the parent was admitted under.
+    pub bundle_pin: Option<BundlePin<'a>>,
     /// Optional deps-volume binding from the app-deps install pipeline.
     /// No boot path supplies one today. When `Some`, the
     /// synthesised `ExecutionPlan` carries `deps_volume = Some(...)`,
@@ -455,7 +459,8 @@ pub fn admit_plan_for_boot_with_ingress(
     let bundle_host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
     let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images, pinned_bundle) =
         match p.bundle_pin {
-            Some(path) => {
+            Some(bundle) => {
+                let path = bundle.archive();
                 let bytes = std::fs::read(path)
                     .with_context(|| format!("reading bundle archive at {}", path.display()))?;
                 let trust = mvm_core::plan::FsTrustStore::default_path()
@@ -500,7 +505,7 @@ pub fn admit_plan_for_boot_with_ingress(
                 // bytes; no need to walk the FS registry again.
                 let resolver = InMemoryBundleResolver::new(bytes);
                 let pinned = bundle_binding::PinnedBundle {
-                    archive: path,
+                    pin: bundle,
                     sha256: pin.bundle_sha256.clone(),
                     signed: verified.manifest,
                 };
