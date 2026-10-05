@@ -163,21 +163,6 @@ pub fn mvm_home_strict() -> std::io::Result<std::path::PathBuf> {
 // actually made, because that is also the only place the *ancestors* can be
 // got right.
 
-/// Chmod one directory to `0700`, leaving it alone if it is already
-/// there. Split out so [`create_private_dir`] can walk a chain of them
-/// without re-deciding the policy at each step.
-#[cfg(unix)]
-fn chmod_private(dir: &std::path::Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::create_dir_all(dir)?;
-    let mut perms = std::fs::metadata(dir)?.permissions();
-    if perms.mode() & 0o777 != 0o700 {
-        perms.set_mode(0o700);
-        std::fs::set_permissions(dir, perms)?;
-    }
-    Ok(())
-}
-
 /// Create a directory under the mvm home, with every component from the
 /// home root down to the leaf at mode `0700`.
 ///
@@ -207,27 +192,24 @@ fn chmod_private(dir: &std::path::Path) -> std::io::Result<()> {
 /// This is for state mvm owns. Do not point it at a location the operator
 /// named — an `--out` export target — where quietly tightening the mode would
 /// be a surprise rather than a guarantee.
-#[cfg(unix)]
+///
+/// On a host without Unix permission bits this refuses rather than creating
+/// the directory; see [`crate::private_fs`].
 pub fn create_private_dir(dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
+    use crate::private_fs::ensure_private_dir;
     let dir = dir.as_ref();
     let home = std::path::PathBuf::from(mvm_home());
     let Ok(under_home) = dir.strip_prefix(&home) else {
-        return chmod_private(dir);
+        return ensure_private_dir(dir);
     };
 
-    chmod_private(&home)?;
+    ensure_private_dir(&home)?;
     let mut walked = home;
     for component in under_home.components() {
         walked.push(component);
-        chmod_private(&walked)?;
+        ensure_private_dir(&walked)?;
     }
     Ok(())
-}
-
-/// Non-unix hosts get plain creation: there is no mode to set.
-#[cfg(not(unix))]
-pub fn create_private_dir(dir: impl AsRef<std::path::Path>) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)
 }
 
 // ============================================================================

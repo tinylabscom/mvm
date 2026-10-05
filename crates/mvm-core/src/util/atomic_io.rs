@@ -8,6 +8,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::private_fs::{self, PRIVATE_FILE_MODE};
+
 /// Create a temp file in `path`'s parent directory, write `data`, flush, and
 /// `fdatasync` it. Shared by [`atomic_write`] and [`atomic_write_new`], which
 /// differ only in how they move the finished temp file into place.
@@ -186,10 +188,6 @@ fn persist_noclobber(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Resu
     }
 }
 
-/// Mode of every file the private writers below leave behind: owner
-/// read/write, nothing for anyone else.
-const PRIVATE_FILE_MODE: u32 = 0o600;
-
 /// What [`write_new_with_mode`] found at its destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NewFile {
@@ -233,19 +231,18 @@ fn synced_temp_with_mode(
     data: &[u8],
     mode: u32,
 ) -> std::io::Result<tempfile::NamedTempFile> {
-    use std::os::unix::fs::PermissionsExt as _;
+    let permissions = private_fs::permissions(path, mode)?;
     let mut prefix = std::ffi::OsString::from(".");
     prefix.push(path.file_name().unwrap_or_default());
     prefix.push(".");
     let mut tmp = tempfile::Builder::new()
         .prefix(&prefix)
         .suffix(".tmp")
-        .permissions(fs::Permissions::from_mode(mode))
+        .permissions(permissions.clone())
         .tempfile_in(parent_dir(path)?)?;
     // The mode given at open is filtered through the process umask. Setting it
     // on the inode pins it to exactly `mode` before the first byte lands.
-    tmp.as_file()
-        .set_permissions(fs::Permissions::from_mode(mode))?;
+    tmp.as_file().set_permissions(permissions)?;
     tmp.write_all(data)?;
     tmp.as_file().sync_all()?;
     Ok(tmp)

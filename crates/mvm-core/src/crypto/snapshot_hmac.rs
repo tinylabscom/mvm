@@ -22,9 +22,9 @@
 //! (`deny_unknown_fields`) and a migration would bump
 //! `schema_version`.
 
+use crate::private_fs::{mode_bits, set_mode};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -182,13 +182,11 @@ pub fn load_or_init_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> 
 /// mode and refusing a file of the wrong length.
 fn load_existing_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> {
     let metadata = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    let mode = metadata.permissions().mode() & 0o777;
+    let mode = mode_bits(path, &metadata)?;
     if mode != 0o600 {
         // Tighten perms in place rather than refuse — the user may
         // have created the dir themselves; we want to be self-healing.
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(path, perms)
-            .with_context(|| format!("chmod 0600 {}", path.display()))?;
+        set_mode(path, 0o600).with_context(|| format!("chmod 0600 {}", path.display()))?;
     }
     if metadata.len() != HMAC_KEY_BYTES as u64 {
         bail!(
@@ -542,6 +540,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     use secrecy::ExposeSecret;
+    use std::os::unix::fs::PermissionsExt;
 
     fn make_snap(dir: &Path) -> SnapshotFiles {
         let v = dir.join("vmstate.bin");

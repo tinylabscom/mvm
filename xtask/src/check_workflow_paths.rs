@@ -762,7 +762,7 @@ mod tests {
         );
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
-             lint-features-test-support, lint-features-embed, pr-regressions, \
+             lint-features-test-support, lint-features-embed, lint-windows, pr-regressions, \
              test-workspace, test-workspace-aarch64, test-linux, \
              test-release-witness, test-ebpf-telemetry, bdd-conformance, \
              boot-latency, nix-flake-check]"
@@ -790,6 +790,7 @@ mod tests {
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
+            "lint-windows",
             "bdd-conformance",
             "test-workspace",
             "test-workspace-aarch64",
@@ -821,6 +822,7 @@ mod tests {
             "\"$FEATURES_RESULT\"",
             "\"$FEATURES_SUPPORT_RESULT\"",
             "\"$FEATURES_EMBED_RESULT\"",
+            "\"$WINDOWS_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
             "\"$EBPF_RESULT\"",
@@ -975,6 +977,7 @@ mod tests {
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
+            "lint-windows",
             "test-workspace",
             "test-release-witness",
             "test-linux",
@@ -1066,6 +1069,39 @@ mod tests {
                 && aggregate.contains(r#"if [ "$result" != "$required" ]"#),
             "Test must reuse PR proof in the queue and enforce it before admission"
         );
+    }
+
+    #[test]
+    fn windows_compile_lane_checks_the_portable_crates_and_gates_the_merge() {
+        let ci = ci_workflow();
+        let lane = job_block(&ci, "lint-windows");
+        assert!(
+            lane.contains("rustup target add x86_64-pc-windows-gnu"),
+            "the lane must install the Windows GNU target into the pinned toolchain it checks with"
+        );
+        let check = "cargo check --locked --target x86_64-pc-windows-gnu";
+        assert_eq!(
+            lane.matches(check).count(),
+            2,
+            "the lane must check the crate set and the pure-Rust mvm-core features"
+        );
+        for krate in [
+            "mvm-contract",
+            "mvm-core",
+            "mvm-net",
+            "mvm-bundler",
+            "mvm-backends",
+        ] {
+            assert!(
+                lane.contains(&format!("-p {krate}")),
+                "the Windows compile check must cover {krate}"
+            );
+        }
+        assert!(lane.contains("--features provenance,client,hostd-transport"));
+
+        // A lane outside the aggregate cannot fail the merge.
+        let aggregate = job_block(&ci, "test");
+        assert!(aggregate.contains("WINDOWS_RESULT: ${{ needs.lint-windows.result }}"));
     }
 
     #[test]

@@ -149,6 +149,7 @@ impl Verdict {
             .env("FEATURES_RESULT", self.lanes)
             .env("FEATURES_SUPPORT_RESULT", self.lanes)
             .env("FEATURES_EMBED_RESULT", self.lanes)
+            .env("WINDOWS_RESULT", self.lanes)
             .env("WORKSPACE_RESULT", self.lanes)
             // The aarch64 workspace lane carries the same `code` scope as the
             // other four in the loop, so it moves with them rather than getting
