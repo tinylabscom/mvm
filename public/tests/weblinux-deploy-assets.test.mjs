@@ -24,7 +24,12 @@ test("accepts a complete non-empty WebLinux deployment bundle", () => {
     for (const relativePath of requiredWebLinuxDeployAssets) {
       const asset = path.join(directory, relativePath);
       fs.mkdirSync(path.dirname(asset), { recursive: true });
-      fs.writeFileSync(asset, "present");
+      fs.writeFileSync(
+        asset,
+        relativePath.endsWith("pack.data.parts.json")
+          ? '{"size":7,"parts":["pack.data.part-000"]}'
+          : "present",
+      );
     }
 
     assert.doesNotThrow(() => assertWebLinuxDeployAssets(directory));
@@ -41,6 +46,47 @@ test("rejects missing and empty WebLinux deployment assets", () => {
     assert.throws(
       () => assertWebLinuxDeployAssets(directory),
       /missing or empty WebLinux deployment assets/,
+    );
+  });
+});
+
+test("rejects an incomplete or mismatched WebLinux preload", () => {
+  withBuildDirectory((directory) => {
+    for (const relativePath of requiredWebLinuxDeployAssets) {
+      const asset = path.join(directory, relativePath);
+      fs.mkdirSync(path.dirname(asset), { recursive: true });
+      fs.writeFileSync(
+        asset,
+        relativePath.endsWith("pack.data.parts.json")
+          ? '{"size":8,"parts":["pack.data.part-000"]}'
+          : "present",
+      );
+    }
+
+    assert.throws(
+      () => assertWebLinuxDeployAssets(directory),
+      /preload parts total 7 bytes; manifest declares 8/,
+    );
+  });
+});
+
+test("rejects deployment of the unsplit WebLinux preload", () => {
+  withBuildDirectory((directory) => {
+    for (const relativePath of requiredWebLinuxDeployAssets) {
+      const asset = path.join(directory, relativePath);
+      fs.mkdirSync(path.dirname(asset), { recursive: true });
+      fs.writeFileSync(
+        asset,
+        relativePath.endsWith("pack.data.parts.json")
+          ? '{"size":7,"parts":["pack.data.part-000"]}'
+          : "present",
+      );
+    }
+    fs.writeFileSync(path.join(directory, "demo/weblinux/pack.data"), "legacy");
+
+    assert.throws(
+      () => assertWebLinuxDeployAssets(directory),
+      /unsplit WebLinux preload must not be deployed/,
     );
   });
 });
