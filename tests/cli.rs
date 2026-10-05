@@ -2115,3 +2115,38 @@ fn pack_registry_ls_starts_empty_and_rm_unpinned_is_a_no_op() {
     );
     assert!(shown.contains("not pinned"), "{shown}");
 }
+
+/// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive
+/// launch, and an archive that does not verify is refused at the install step,
+/// before the run reaches admission or any backend, with nothing installed.
+#[test]
+fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("app.mvmpkg");
+    std::fs::write(&archive, b"not a signed bundle").unwrap();
+    let state = tmp.path().join("state");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("HOME", tmp.path())
+        .env("MVM_HOME", &state)
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args(["machine", "run", "--manifest"])
+        .arg(&archive)
+        .args(["--", "true"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "an unverifiable archive must not run"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed verification"),
+        "the refusal must come from bundle verification: {stderr}"
+    );
+    let installed = std::fs::read_dir(state.join("bundles"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(installed, 0, "a refused archive installs nothing");
+}

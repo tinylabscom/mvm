@@ -400,6 +400,7 @@ uncovered = [
     "mvmctl machine run --manifest . --name my-vm --port 8080:8080",
     "mvmctl machine run --manifest . --name servicebox --port 8080:8000 -- python -m http.server 8000",
     "mvmctl machine run --manifest . -d",
+    "mvmctl machine run --manifest ./app.mvmpkg -- python -m app",
     "mvmctl machine run --manifest ./mvm.toml --name api-dev --port 8080:8080",
     "mvmctl machine run --manifest ./mvm.toml --name debug-vm -d",
     "mvmctl machine run --manifest ./my-worker -- uname -a",

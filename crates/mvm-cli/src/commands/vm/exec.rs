@@ -140,7 +140,7 @@ pub(in crate::commands) struct RunArgs {
     /// machine surface derives it from what the workload declares it needs.
     #[arg(skip)]
     pub network_mode: mvm_contract::plan::NetworkMode,
-    /// Boot a pre-built manifest (mvm.toml, a directory, or a slot).
+    /// Boot an mvm.toml, a built slot, or a signed .mvmpkg archive.
     #[arg(short = 'm', long, value_name = "PATH", conflicts_with_all = SOURCES_EXCEPT_MANIFEST)]
     pub manifest: Option<String>,
     /// Boot an OCI image (resolved through the local cache first).
@@ -538,6 +538,7 @@ pub(in crate::commands) fn run_transient(
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     super::run_policy::select_pack_image(&mut args.run)?;
     resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
+    super::super::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
     super::run_policy::apply_run_policy(&mut args.run)?;
     let image_supplies_entrypoint =
         args.run.prod && (args.run.image.is_some() || args.run.runtime.is_some());
