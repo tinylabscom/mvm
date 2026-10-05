@@ -5173,6 +5173,30 @@ fn test_compile_default_no_from_flags_leaves_them_none() {
     }
 }
 
+#[test]
+fn build_compile_accepts_an_explicit_publish_revision() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "build",
+        "compile",
+        "--from-ir",
+        "/tmp/ir.json",
+        "--mvm-revision",
+        "4e65b221744885e536ec91a3f2948cdc508dcb49",
+    ])
+    .expect("parse pinned compile");
+    let Commands::Build(group) = cli.command else {
+        panic!("expected build group");
+    };
+    let build_group::BuildCmd::Compile(args) = group.action else {
+        panic!("expected compile command");
+    };
+    assert_eq!(
+        args.mvm_revision.as_deref(),
+        Some("4e65b221744885e536ec91a3f2948cdc508dcb49")
+    );
+}
+
 // ── `--builder` global flag ──
 
 #[test]
