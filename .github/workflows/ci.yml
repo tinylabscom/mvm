@@ -130,7 +130,7 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|third_party/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|scripts/check-devshell-tiers\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|third_party/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "nix=true" >> "$GITHUB_OUTPUT"
           else
             echo "nix=false" >> "$GITHUB_OUTPUT"
@@ -1605,6 +1605,12 @@ jobs:
             echo "=== $d ==="
             nix flake check --no-build "./$d"
           done
+
+      # The root flake's default dev shell stays lean: Zig, cargo-zigbuild and
+      # libclang belong to `.#full`. Evaluation only; nothing is built.
+      - name: Dev shell tiers stay split
+        if: needs.scope.outputs.nix == 'true'
+        run: sh scripts/check-devshell-tiers.sh
 
       # This runner is x86_64, so only the x86_64-linux check variant builds
       # here; the aarch64-linux variant stays defined for parity and for a

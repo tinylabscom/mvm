@@ -103,8 +103,9 @@ an admitted VM. For VM-bound execution and its audit boundary, see
 [Agent tool contract](/guides/agent-tool-contract/).
 
 This setup was checked with OpenCode 1.18.22, which opens the session with MCP
-protocol version `2025-11-25`. The server answers that version and the
-stateless `2026-07-28` form, and refuses an `initialize` naming any other.
+protocol version `2025-11-25`. The server echoes that version and
+`2025-06-18`, answers an `initialize` naming any other version with
+`2025-11-25`, and also serves the stateless `2026-07-28` form.
 
 ## The signed agent pack
 

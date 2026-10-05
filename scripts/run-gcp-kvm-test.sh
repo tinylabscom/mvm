@@ -128,7 +128,9 @@ case "$machine_type" in
 esac
 
 run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
-instance="mvm-${run_name}-${run_id,,}"
+# Compute Engine instance names must be lowercase. `tr` rather than the
+# `${var,,}` expansion, which macOS's stock bash 3.2 rejects.
+instance="mvm-${run_name}-$(printf '%s' "$run_id" | tr '[:upper:]' '[:lower:]')"
 if [[ -z "$results_dir" ]]; then
   results_dir="${TMPDIR:-/tmp}/mvm-gcp-kvm-results/$run_id"
 fi

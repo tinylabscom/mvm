@@ -654,6 +654,13 @@ fn installation_docs_keep_binary_install_primary() {
             && normalized.contains("`nix/#mvmctl` builds the checkout's source"),
         "installation docs must distinguish pinned release binaries from source-built Nix"
     );
+    // The release job pushes a pin branch but cannot open the pull request, so
+    // the pin trails releases until someone opens it.
+    assert!(
+        normalized.contains("The pin is bumped by hand and can trail the latest release")
+            && !normalized.contains("updated by a pull request after a release"),
+        "installation docs must not claim the prebuilt pin updates itself"
+    );
 }
 
 #[test]
