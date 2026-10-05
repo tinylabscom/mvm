@@ -169,7 +169,7 @@ tier = "live"
 [[command]]
 path = "machine check-artifact"
 tier = "parse"
-reason = "names a signed .mvm artifact that only a real build produces"
+reason = "names a signed .mvmpkg bundle that only a real build produces"
 
 [[command]]
 path = "machine checkpoint create"

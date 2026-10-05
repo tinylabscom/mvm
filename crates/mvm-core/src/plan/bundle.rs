@@ -34,9 +34,14 @@
 //!    *Unknown `key_id` → reject before reading any artifact bytes.*
 //! 3. Ed25519-verify the signature over the canonical manifest
 //!    bytes. *Mismatch → reject.*
-//! 4. For each artifact, re-hash its bytes and compare against the
+//! 4. Check what the manifest declares: every entry within the size caps
+//!    (2 GiB each, 4 GiB in total — archive entries are counted before
+//!    their bytes are read), at most one kernel command line, posture, and
+//!    provenance member, a posture that agrees with the verity binding, and
+//!    provenance digests that match the artifacts. *Incoherent → reject.*
+//! 5. For each artifact, re-hash its bytes and compare against the
 //!    SHA-256 declared in the signed manifest. *Mismatch → reject.*
-//! 5. dm-verity gives independent per-block integrity inside the
+//! 6. dm-verity gives independent per-block integrity inside the
 //!    rootfs at boot — the bundle layer covers tamper detection at
 //!    extract time.
 //!
@@ -71,8 +76,9 @@ use thiserror::Error;
 
 pub use mvm_contract::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
-    BundleMember, BundleResources, KeyId, MANIFEST_FILENAME, PlanArtifact, SIGNATURE_FILENAME,
-    VerityInfo, signature_from_base64, signature_to_base64,
+    BundleMember, BundleResources, BundleSecurityPosture, KeyId, MANIFEST_FILENAME,
+    MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact,
+    SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
 };
 
 use crate::arch::GuestArch;
@@ -83,7 +89,9 @@ use crate::image_set::{
 };
 use crate::packs::Sha256Hex;
 
+mod declarations;
 mod signer;
+pub use declarations::BundleSizeBudget;
 pub use signer::ManifestSigner;
 
 /// Derive the key_id from a verifying-key's bytes.
@@ -980,6 +988,24 @@ pub enum BundleVerifyError {
 
     #[error("bundle schema v{found} cannot declare typed members; members require schema v3")]
     MembersRequireSchemaV3 { found: u32 },
+
+    #[error("bundle entry {path} is {size} bytes, over the {limit}-byte per-entry limit")]
+    EntryTooLarge { path: String, size: u64, limit: u64 },
+
+    #[error("bundle payload reaches {total} bytes, over the {limit}-byte total limit")]
+    BundleTooLarge { total: u64, limit: u64 },
+
+    #[error("bundle declares more than one {class} member")]
+    DuplicateMember { class: &'static str },
+
+    #[error("bundle kernel command line is malformed: {reason}")]
+    MalformedCmdline { reason: String },
+
+    #[error("bundle security posture is malformed: {reason}")]
+    MalformedPosture { reason: String },
+
+    #[error("bundle build provenance does not match its {artifact}: {reason}")]
+    ProvenanceMismatch { artifact: String, reason: String },
 }
 
 /// Validate that an archive-relative path is safe to extract: no
@@ -1027,6 +1053,7 @@ pub fn write_bundle(
     // bundles from ever leaving the build host.
     let verifying_key = signer.verifying_key();
     let derived = key_id_from_pubkey(&verifying_key);
+    declarations::validate_declarations(manifest).context("refusing to seal the bundle")?;
     anyhow::ensure!(
         manifest.key_id == derived,
         "manifest key_id ({}) does not match signing key derivation ({})",
@@ -1226,6 +1253,7 @@ pub fn read_and_verify_bundle(
     // modest in size (≤ a few hundred MiB); a chunked impl can come
     // when that stops being true.
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut budget = declarations::BundleSizeBudget::default();
     let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
     for entry in archive
         .entries()
@@ -1239,6 +1267,7 @@ pub fn read_and_verify_bundle(
             .to_string_lossy()
             .into_owned();
         ensure_safe_path(&path)?;
+        budget.admit(&path, entry.size())?;
         let mut buf = Vec::new();
         entry
             .read_to_end(&mut buf)
@@ -1329,6 +1358,7 @@ pub fn read_and_verify_bundle(
             found: manifest.schema_version,
         });
     }
+    declarations::validate_declarations(&manifest)?;
 
     // ----- Step 6: per-artifact hash + size check -----
     let mut artifacts_out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -1387,11 +1417,13 @@ fn verify_embedded_image_sets(
     bundle
         .members
         .iter()
-        .map(|member| match member {
-            BundleMember::EmbeddedImageSet { manifest_artifact } => {
-                verify_embedded_image_set(bundle, artifacts, manifest_artifact)
-            }
+        .filter_map(|member| match member {
+            BundleMember::EmbeddedImageSet { manifest_artifact } => Some(manifest_artifact),
+            BundleMember::KernelCmdline { .. }
+            | BundleMember::SecurityPosture(_)
+            | BundleMember::BuildProvenance(_) => None,
         })
+        .map(|manifest_artifact| verify_embedded_image_set(bundle, artifacts, manifest_artifact))
         .collect()
 }
 
@@ -3131,5 +3163,144 @@ mod tests {
             vec![valid],
             "only a 64-char lowercase-hex directory is an installed bundle"
         );
+    }
+
+    fn sealed_posture() -> BundleSecurityPosture {
+        BundleSecurityPosture {
+            profile: crate::policy::security::AgentProfile::SealedProd,
+            verity_protected: true,
+            requires_auth: true,
+            allows_volumes: false,
+            allows_egress: false,
+        }
+    }
+
+    /// A kernel + rootfs + verity bundle carrying `members`, signed by `sk`
+    /// without going through [`write_bundle`]'s refusal — what a publisher
+    /// with other tooling could hand a consumer.
+    fn hand_sealed_bundle(sk: &SigningKey, members: Vec<BundleMember>) -> Vec<u8> {
+        let payload = [
+            ("artifacts/vmlinux", ArtifactRole::Kernel, b"k".as_slice()),
+            ("artifacts/rootfs.ext4", ArtifactRole::Rootfs, b"r"),
+            (
+                "artifacts/rootfs.verity",
+                ArtifactRole::VerityHashSidecar,
+                b"v",
+            ),
+        ];
+        let mut manifest = make_manifest(
+            key_id_from_pubkey(&sk.verifying_key()),
+            payload
+                .iter()
+                .map(|(path, role, bytes)| {
+                    art(path.rsplit('/').next().unwrap(), role.clone(), path, bytes)
+                })
+                .collect(),
+        );
+        manifest.verity = Some(VerityInfo {
+            roothash: "a".repeat(64),
+            sidecar_artifact: "rootfs.verity".to_string(),
+        });
+        manifest.members = members;
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
+        let sig = sk.sign(&manifest_bytes).to_bytes();
+        let mut tar = tar::Builder::new(Vec::new());
+        append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
+        append_bytes(&mut tar, SIGNATURE_FILENAME, &sig).unwrap();
+        for (path, _, bytes) in payload {
+            append_bytes(&mut tar, path, bytes).unwrap();
+        }
+        tar.into_inner().unwrap()
+    }
+
+    #[test]
+    fn declarations_survive_sign_and_verify() {
+        let sk = fresh_key();
+        let members = vec![
+            BundleMember::KernelCmdline {
+                cmdline: "console=ttyS0".to_string(),
+            },
+            BundleMember::SecurityPosture(sealed_posture()),
+        ];
+        let archive = hand_sealed_bundle(&sk, members);
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).expect("coherent bundle");
+        assert_eq!(verified.manifest.kernel_cmdline(), Some("console=ttyS0"));
+        assert_eq!(
+            verified.manifest.security_posture(),
+            Some(&sealed_posture())
+        );
+        assert!(verified.embedded_image_sets.is_empty());
+    }
+
+    #[test]
+    fn a_signed_but_malformed_posture_is_refused_at_verify() {
+        let sk = fresh_key();
+        let unauthenticated = BundleSecurityPosture {
+            requires_auth: false,
+            ..sealed_posture()
+        };
+        let archive = hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(unauthenticated)]);
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::MalformedPosture { .. })
+        ));
+    }
+
+    #[test]
+    fn widening_a_signed_posture_breaks_the_signature() {
+        let sk = fresh_key();
+        let archive =
+            hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(sealed_posture())]);
+        let needle = br#""allows_egress":false"#;
+        let at = archive
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("posture is in the manifest bytes");
+        let mut tampered = archive.clone();
+        tampered[at..at + needle.len()].copy_from_slice(br#""allows_egress":true "#);
+        assert!(matches!(
+            read_and_verify_bundle(&tampered, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn write_bundle_refuses_to_seal_a_malformed_posture() {
+        let sk = fresh_key();
+        let mut manifest = make_manifest(
+            key_id_from_pubkey(&sk.verifying_key()),
+            vec![art(
+                "vmlinux",
+                ArtifactRole::Kernel,
+                "artifacts/vmlinux",
+                b"k",
+            )],
+        );
+        manifest.members = vec![BundleMember::SecurityPosture(sealed_posture())];
+        let err = write_bundle(
+            &manifest,
+            &sk,
+            vec![("artifacts/vmlinux".to_string(), b"k".to_vec())],
+        )
+        .expect_err("sealed-prod posture without verity");
+        assert!(format!("{err:#}").contains("verity"), "{err:#}");
+    }
+
+    #[test]
+    fn an_entry_header_over_the_cap_is_refused_before_its_bytes_are_read() {
+        // The header claims 3 GiB; the archive holds a few bytes. Reading the
+        // body would fail with a short read; the cap must fire first.
+        let mut header = tar::Header::new_gnu();
+        header.set_path("artifacts/rootfs.ext4").unwrap();
+        header.set_size(3 * 1024 * 1024 * 1024);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut archive = header.as_bytes().to_vec();
+        archive.extend_from_slice(&[0u8; 512]);
+        let sk = fresh_key();
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::EntryTooLarge { size, .. }) if size == 3 * 1024 * 1024 * 1024
+        ));
     }
 }

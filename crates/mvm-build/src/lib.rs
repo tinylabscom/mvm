@@ -91,10 +91,6 @@ pub mod intoto;
 pub mod kernel_artifact;
 /// Hash-verify a fetched kernel image against its [`kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
-/// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +
-/// rootfs + verity sidecars + cmdline, with an Ed25519-signed manifest
-/// that hashes every payload.
-pub mod packed_artifact;
 /// Host-side scaffold for the persistent builder VM's dispatch
 /// supervisor. This module owns the dispatch wire over the socket
 /// libkrun creates; spawning the libkrun VM itself lives in
