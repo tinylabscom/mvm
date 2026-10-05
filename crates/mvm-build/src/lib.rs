@@ -179,6 +179,10 @@ pub mod fetch_unchanged;
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
 /// baked into an OCI rootfs by [`oci_runtime_inject`].
 pub mod guest_agent_build;
+/// The publishable `mvm-guest-bins` artifact: every guest binary for both
+/// guest architectures, with a manifest pinning their bytes and the producing
+/// tree's source fingerprints. Assembled from [`guest_agent_build`]'s builds.
+pub mod guest_bins;
 pub mod nix;
 /// Inject the mvm guest runtime (agent, netinit, `/init`, `/mvm/runtime`
 /// mount point) into an OCI-unpacked rootfs so `run --image` has a vsock

@@ -67,6 +67,44 @@ fn machine_check_artifact_help_names_bundle_verification_controls() {
     }
 }
 
+/// `build guest-bins` is the producer of the artifact mvm-images pins; its
+/// help names the output directory and the per-architecture selector.
+#[test]
+fn build_guest_bins_help_names_output_and_arch_controls() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "guest-bins", "--help"])
+        .output()
+        .expect("run build guest-bins help");
+    assert!(
+        out.status.success(),
+        "help must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in ["--out", "--arch", "mvm-guest-bins-v"] {
+        assert!(
+            stdout.contains(expected),
+            "help missing {expected}: {stdout}"
+        );
+    }
+}
+
+/// An unknown architecture is a parse error, not a silent fallback to the
+/// host's: a published artifact must carry exactly what was asked for.
+#[test]
+fn build_guest_bins_rejects_an_unknown_arch() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "guest-bins", "--arch", "riscv64"])
+        .output()
+        .expect("run build guest-bins with a bad arch");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("riscv64"),
+        "the refusal names the bad value: {stderr}"
+    );
+}
+
 #[test]
 fn ops_mcp_help_advertises_the_stdio_transport() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))

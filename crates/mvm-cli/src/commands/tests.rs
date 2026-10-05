@@ -1032,6 +1032,36 @@ fn build_sdk_sidecar_subcommand_parses() {
 }
 
 #[test]
+fn build_guest_bins_subcommand_parses_repeated_arches() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "build",
+        "guest-bins",
+        "--out",
+        "/tmp/guest-bins",
+        "--arch",
+        "aarch64",
+        "--arch",
+        "amd64",
+    ])
+    .expect("guest-bins build command must parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group");
+    };
+    let build_group::BuildCmd::GuestBins(args) = bg.action else {
+        panic!("expected guest-bins build command");
+    };
+    assert_eq!(args.out, std::path::PathBuf::from("/tmp/guest-bins"));
+    assert_eq!(
+        args.arches,
+        vec![
+            mvm_core::arch::GuestArch::Aarch64,
+            mvm_core::arch::GuestArch::X86_64
+        ]
+    );
+}
+
+#[test]
 fn top_level_kernel_build_subcommand_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "kernel", "build", "--which", "workload"])
         .expect("kernel build must parse");

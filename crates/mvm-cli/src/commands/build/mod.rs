@@ -11,6 +11,7 @@ pub(super) mod compile;
 #[cfg(test)]
 mod driver_builder_live;
 pub(super) mod group;
+pub(super) mod guest_bins;
 /// Records an audited image-lineage node after a successful flake build, so
 /// every compiled image produces a tamper-evident version-chain record anchored
 /// in the host-signed audit log.
