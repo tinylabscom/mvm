@@ -76,6 +76,7 @@ mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
 pub mod checkpoint_audit;
+pub mod display_audit;
 pub mod drive_audit;
 pub mod grants_audit;
 pub mod wall_clock_audit;

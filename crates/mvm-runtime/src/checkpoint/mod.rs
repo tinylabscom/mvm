@@ -843,7 +843,7 @@ fn capture_vm_full_inner(
     validate_step_lineage(store, params.parent.as_ref(), params.session.as_ref())?;
     // Everything is written under a private staging name and appears under
     // the checkpoint's own name only once it is complete and durable.
-    let staged = staging::StagedCapture::begin(store, &params.id)?;
+    let staged = staging::StagedCapture::begin_for_vm(store, &params.id, &params.vm_name)?;
     let content_dir = staged.content_dir();
 
     let memory = content_dir.join("memory.bin");
@@ -1462,7 +1462,7 @@ pub fn capture_fs_quick(
             params.vm_name
         );
     }
-    let staged = staging::StagedCapture::begin(store, &params.id)?;
+    let staged = staging::StagedCapture::begin_for_vm(store, &params.id, &params.vm_name)?;
     let content_dir = staged.content_dir();
 
     let file_name = params
@@ -2248,6 +2248,75 @@ mod tests {
         assert!(
             !capture_with_retention(true).contains(&"resume"),
             "the warm pool keeps its captured parent paused"
+        );
+    }
+
+    /// `machine fork` captures the live parent before it branches, so the
+    /// capture is where a fork of a run that carries a human credential stops.
+    /// It must stop before the pause: a refused capture that had already
+    /// frozen the guest would still have read its memory.
+    #[test]
+    fn fork_refused_after_human_credential_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", tmp.path().join("home"));
+        let vm = "credential-parent";
+        std::fs::create_dir_all(mvm_core::config::vm_state_dir(vm)).unwrap();
+        crate::vm::human_credential::begin_entry(vm).unwrap();
+        crate::vm::human_credential::end_entry(vm).unwrap();
+
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("live-rootfs.ext4");
+        std::fs::write(&rootfs, b"disk").unwrap();
+        let ctl = MockControl {
+            rootfs: rootfs.clone(),
+            identity: None,
+            events: RefCell::new(vec![]),
+        };
+        let error = capture_vm_full(
+            &store,
+            CaptureVmFullParams {
+                id: CheckpointId::new("after-credential"),
+                vm_name: vm.into(),
+                supervisor_config_digest: "d".into(),
+                runtime_overlay_version: None,
+                supervisor_config_src: None,
+                tag: None,
+                created_unix: 9,
+                retain_paused: false,
+                grants: None,
+                parent: None,
+                session: None,
+                workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
+            },
+            &ctl,
+        )
+        .expect_err("a run that carries a human credential must not be captured for a fork");
+        assert!(
+            format!("{error:#}").contains("human credential"),
+            "{error:#}"
+        );
+        assert!(
+            ctl.events.borrow().is_empty(),
+            "the refusal must come before the guest is paused"
+        );
+
+        let fs_quick = capture_fs_quick(
+            &store,
+            CaptureFsQuickParams::builder()
+                .id(CheckpointId::new("after-credential-fs"))
+                .vm_name(vm.to_string())
+                .rootfs(rootfs)
+                .supervisor_config_digest("d".to_string())
+                .created_unix(9)
+                .quiesced(true)
+                .build()
+                .unwrap(),
+        );
+        assert!(
+            fs_quick.is_err(),
+            "a filesystem checkpoint carries the session cookie too"
         );
     }
 
@@ -3719,6 +3788,7 @@ mod tests {
                 }),
                 egress: destinations(&[("api.example.com", 443), ("pypi.org", 443)]),
                 drive: None,
+                display_input: None,
             }),
             Some(mvm_contract::grants::Grants {
                 cpu: share(1000),
@@ -3727,6 +3797,7 @@ mod tests {
                 }),
                 egress: destinations(&[("api.example.com", 443)]),
                 drive: None,
+                display_input: None,
             }),
         )
         .expect("a narrowing child is admitted");
