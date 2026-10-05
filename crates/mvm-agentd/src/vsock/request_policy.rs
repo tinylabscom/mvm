@@ -93,6 +93,7 @@ impl GuestRequest {
             GuestRequest::RunCode { .. } => Verb::RunCode,
             GuestRequest::StreamInput(_) => Verb::StreamInput,
             GuestRequest::CloseStreamInput(_) => Verb::CloseStreamInput,
+            GuestRequest::DisplayInput(_) => Verb::DisplayInput,
         }
     }
 
@@ -142,7 +143,12 @@ impl GuestRequest {
             // SealedProd would make the whole gate unreachable exactly where
             // it matters, leaving the dev tier as the only place input works.
             | GuestRequest::StreamInput(_)
-            | GuestRequest::CloseStreamInput(_) => RequestClass::ProdSafe,
+            | GuestRequest::CloseStreamInput(_)
+            // Display input is the attended human's path into a sealed
+            // workload. The host gate refuses it without an attended grant,
+            // so refusing the verb here too would leave it working only on
+            // the development tier.
+            | GuestRequest::DisplayInput(_) => RequestClass::ProdSafe,
 
             // DevOnly: shell exec, process RPC, filesystem RPC,
             // console, port forwarding, code eval, filesystem diff.
@@ -227,6 +233,7 @@ impl GuestRequest {
             "cancel-extension",
             "stream-input",
             "close-stream-input",
+            "display-input",
             "mount-volume",
             "unmount-volume",
             "update-idle-timeout",
@@ -238,6 +245,7 @@ impl GuestRequest {
 mod tests {
     use super::*;
     use mvm_contract::stream::input::{CloseInput, InputFrame};
+    use mvm_contract::stream::{DisplayInputEvent, DisplayInputFrame};
 
     #[test]
     fn run_detached_classifies_dev_only() {
@@ -300,6 +308,10 @@ mod tests {
                 payload: vec![b'x'],
             }),
             GuestRequest::CloseStreamInput(CloseInput::default()),
+            GuestRequest::DisplayInput(DisplayInputFrame {
+                seq: 0,
+                events: vec![DisplayInputEvent::CredentialEntryEnd],
+            }),
             GuestRequest::RunDetached {
                 argv: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
                 env: vec![],
@@ -445,6 +457,7 @@ mod tests {
             "RunEntrypoint",
             "StreamInput",
             "CloseStreamInput",
+            "DisplayInput",
             "PostRestore",
             "EntrypointStatus",
             "ReadinessStatus",
@@ -616,6 +629,10 @@ mod tests {
                 payload: vec![b'x'],
             }),
             GuestRequest::CloseStreamInput(CloseInput::default()),
+            GuestRequest::DisplayInput(DisplayInputFrame {
+                seq: 0,
+                events: vec![DisplayInputEvent::CredentialEntryEnd],
+            }),
             GuestRequest::SleepPrep {
                 drain_timeout_secs: 5,
             },

@@ -483,6 +483,26 @@ pub fn send_close_stream_input(
     stream_input_result(stream, GuestRequest::CloseStreamInput(close))
 }
 
+/// Deliver one host-admitted display input frame to the display bridge.
+///
+/// One RPC per frame, for the reason [`send_stream_input`] gives: waiting for
+/// each answer is what makes arrival order at the guest the order the host's
+/// display input gate accepted.
+pub fn send_display_input(
+    stream: &mut UnixStream,
+    frame: mvm_contract::stream::DisplayInputFrame,
+) -> Result<DisplayInputResult, RpcError> {
+    let req = GuestRequest::DisplayInput(frame);
+    match call_unary(stream, &req)? {
+        GuestResponse::DisplayInputResult(result) => Ok(result),
+        other => Err(RpcError::OffContract {
+            verb: req.verb().name(),
+            got: other.variant(),
+            expected: req.response_contract().responses,
+        }),
+    }
+}
+
 fn stream_input_result(
     stream: &mut UnixStream,
     req: GuestRequest,

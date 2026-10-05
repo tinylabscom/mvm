@@ -919,6 +919,13 @@ pub(crate) fn handle_close_stream_input(close: CloseInput) -> GuestResponse {
     GuestResponse::StreamInputResult(InputDesk::close(close))
 }
 
+/// Hand one admitted display input frame to the display bridge.
+pub(crate) fn handle_display_input(
+    frame: &mvm_contract::stream::DisplayInputFrame,
+) -> GuestResponse {
+    GuestResponse::DisplayInputResult(mvm_agentd::display_input::DisplayInputDesk::deliver(frame))
+}
+
 pub(crate) fn handle_fs_diff() -> GuestResponse {
     // Walk the overlay upper dir to find changes since boot.
     // The overlay upper dir is typically at /overlay/upper when
