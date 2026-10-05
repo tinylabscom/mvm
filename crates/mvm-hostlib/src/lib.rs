@@ -87,8 +87,10 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// `machine.logs.stream.*`, the `template` and `manifest` launch sources, and
 /// a launch `command` with its `env` and `cwd`, whose process the reply names.
 /// 4 added the process-wide runtime-approval callback and retained brokers for
-/// machines launched or started through the host library.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 4;
+/// machines launched or started through the host library. 5 added
+/// `machine.pause`, `machine.resume`, `machine.reconfigure`, and
+/// `machine.set_ttl`.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 5;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -600,6 +602,27 @@ mod tests {
         let outcome = handle(true, b"machine.list", b"", &Mock);
         assert_eq!(outcome.status, MVM_HOSTLIB_OK);
         assert_eq!(outcome.body, b"[]");
+    }
+
+    /// The lifecycle methods are answered by the client like every other
+    /// client method: refused before negotiation without building one, and
+    /// refused when the process cannot declare itself.
+    #[test]
+    fn lifecycle_methods_are_routed_to_the_client_and_gated() {
+        for method in [
+            dispatch::MACHINE_PAUSE,
+            dispatch::MACHINE_RESUME,
+            dispatch::MACHINE_RECONFIGURE,
+            dispatch::MACHINE_SET_TTL,
+        ] {
+            let request = br#"{"id":"ghost"}"#;
+            let outcome = handle(false, method.as_bytes(), request, &Untouched);
+            assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED, "{method}");
+            let outcome = handle(true, method.as_bytes(), request, &Undeclared);
+            assert_eq!(outcome.status, MVM_HOSTLIB_EMBEDDER, "{method}");
+            let outcome = handle(true, method.as_bytes(), request, &Mock);
+            assert_eq!(outcome.status, status::MVM_HOSTLIB_NOT_FOUND, "{method}");
+        }
     }
 
     /// A client that cannot be built reports its own failure.

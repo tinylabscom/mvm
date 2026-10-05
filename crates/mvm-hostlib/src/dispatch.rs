@@ -8,7 +8,9 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_core::client::MvmClient;
-use mvm_core::client::dto::{LogOpts, MachineFilter, MachineId};
+use mvm_core::client::dto::{
+    LogOpts, MachineFilter, MachineId, MachineStatus, PauseOpts, ReconfigureRequest, ResumeOpts,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::status::Outcome;
@@ -39,9 +41,24 @@ pub const MACHINE_START: &str = "machine.start";
 /// ones — with each one's fail-closed `build_mode`. Request: empty. Reply: an
 /// array of inventory records.
 pub const MACHINE_INVENTORY: &str = "machine.inventory";
+/// Pauses a running machine, sealing a snapshot where the backend uses one.
+/// Request: `{"id", "primed_barrier"?, "primed_timeout_secs"?}`. Reply: a
+/// `PauseOutcome`.
+pub const MACHINE_PAUSE: &str = "machine.pause";
+/// Resumes a paused machine, refusing a replayed snapshot. Request: `{"id",
+/// "warm"?}`. Reply: a `ResumeOutcome`.
+pub const MACHINE_RESUME: &str = "machine.resume";
+/// Patches a persisted machine's resources and relaunches it when running.
+/// Request: `{"id", "net"?, "allow_host"?, "cpus"?, "memory_mib"?}`; an absent
+/// field is left unchanged. Reply: a `MachineState`.
+pub const MACHINE_RECONFIGURE: &str = "machine.reconfigure";
+/// Sets or clears the time the idle reaper removes a machine at. Request:
+/// `{"id", "expires_at": rfc3339 | null}`. Reply: `{}`. Errors when the
+/// machine is not registered.
+pub const MACHINE_SET_TTL: &str = "machine.set_ttl";
 
 /// Every method this library answers through the client.
-pub const METHODS: [&str; 9] = [
+pub const METHODS: [&str; 13] = [
     MACHINE_LIST,
     MACHINE_INSPECT,
     MACHINE_LOGS,
@@ -51,6 +68,10 @@ pub const METHODS: [&str; 9] = [
     MACHINE_EXEC,
     MACHINE_START,
     MACHINE_INVENTORY,
+    MACHINE_PAUSE,
+    MACHINE_RESUME,
+    MACHINE_RECONFIGURE,
+    MACHINE_SET_TTL,
 ];
 
 /// Whether `method` is one this library answers, checked before a client is
@@ -107,6 +128,116 @@ pub(crate) struct RemoveRequest {
 pub(crate) struct ExecRequest {
     id: String,
     command: Vec<String>,
+}
+
+/// A `machine.pause` request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PauseRequest {
+    id: String,
+    /// Wait for the workload to signal that it is primed before sealing, and
+    /// refuse rather than seal when it does not signal in time.
+    #[serde(default)]
+    primed_barrier: bool,
+    /// Seconds to wait for that signal. Defaults to the client's own default.
+    #[serde(default)]
+    primed_timeout_secs: Option<u64>,
+}
+
+impl PauseRequest {
+    /// The client options this request names, refusing a zero timeout, which
+    /// could only ever fail.
+    fn opts(&self) -> Result<PauseOpts, Outcome> {
+        let mut opts = PauseOpts {
+            primed_barrier: self.primed_barrier,
+            ..PauseOpts::default()
+        };
+        if let Some(secs) = self.primed_timeout_secs {
+            if secs == 0 {
+                return Err(Outcome::invalid_input(
+                    "primed_timeout_secs must be greater than zero",
+                ));
+            }
+            opts.primed_timeout_secs = secs;
+        }
+        Ok(opts)
+    }
+}
+
+/// A `machine.resume` request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ResumeRequest {
+    id: String,
+    /// Resume through the backend's live-memory warm-start path, which a
+    /// disk-only backend refuses.
+    #[serde(default)]
+    warm: bool,
+}
+
+/// A `machine.reconfigure` request: a patch, so an absent field keeps its
+/// current value.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ReconfigurePatchRequest {
+    id: String,
+    #[serde(default)]
+    net: Option<bool>,
+    #[serde(default)]
+    allow_host: Option<Vec<String>>,
+    #[serde(default)]
+    cpus: Option<u32>,
+    #[serde(default)]
+    memory_mib: Option<u32>,
+}
+
+impl ReconfigurePatchRequest {
+    /// The machine and the client patch, refusing a zero CPU count or memory
+    /// size before anything is persisted.
+    fn into_parts(self) -> Result<(MachineId, ReconfigureRequest), Outcome> {
+        if self.cpus == Some(0) || self.memory_mib == Some(0) {
+            return Err(Outcome::invalid_input(
+                "cpus and memory_mib must be greater than zero",
+            ));
+        }
+        Ok((
+            MachineId(self.id),
+            ReconfigureRequest {
+                net: self.net,
+                allow_host: self.allow_host,
+                cpus: self.cpus,
+                memory_mib: self.memory_mib,
+            },
+        ))
+    }
+}
+
+/// A `machine.set_ttl` request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SetTtlRequest {
+    id: String,
+    /// When the reaper may remove the machine, as RFC 3339. `null` clears it.
+    #[serde(default)]
+    expires_at: Option<String>,
+}
+
+impl SetTtlRequest {
+    /// The machine and expiry, refusing a timestamp the reaper could not read.
+    fn into_parts(self) -> Result<(MachineId, Option<String>), Outcome> {
+        if let Some(at) = &self.expires_at
+            && mvm_core::util::time::parse_iso8601(at).is_none()
+        {
+            return Err(Outcome::invalid_input(
+                "expires_at must be an RFC 3339 timestamp or null",
+            ));
+        }
+        Ok((MachineId(self.id), self.expires_at))
+    }
 }
 
 /// A `machine.exec` reply. Stream bytes cross as base64, because JSON
@@ -180,6 +311,30 @@ async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<
         MACHINE_INVENTORY => {
             let _: Empty = parse_or_default_empty(request)?;
             Outcome::ok(&mvm_client::inventory::list_local_inventory(client).await?)
+        }
+        MACHINE_PAUSE => {
+            let target: PauseRequest = parse(request)?;
+            let opts = target.opts()?;
+            Outcome::ok(&client.pause_machine(&MachineId(target.id), opts).await?)
+        }
+        MACHINE_RESUME => {
+            let target: ResumeRequest = parse(request)?;
+            let opts = ResumeOpts { warm: target.warm };
+            Outcome::ok(&client.resume_machine(&MachineId(target.id), opts).await?)
+        }
+        MACHINE_RECONFIGURE => {
+            let (id, patch) = parse::<ReconfigurePatchRequest>(request)?.into_parts()?;
+            let machine = client.reconfigure_machine(&id, patch).await?;
+            if machine.status == MachineStatus::Running {
+                // A relaunch is a start, and keeps the broker a start keeps.
+                crate::approval::ensure_server(&machine.name);
+            }
+            Outcome::ok(&machine)
+        }
+        MACHINE_SET_TTL => {
+            let (id, expires_at) = parse::<SetTtlRequest>(request)?.into_parts()?;
+            client.set_ttl(&id, expires_at).await?;
+            Outcome::ok(&Empty {})
         }
         MACHINE_EXEC => {
             let target: ExecRequest = parse(request)?;
@@ -423,6 +578,190 @@ mod tests {
         assert_eq!(alpha["build_mode"], "prod");
         let outcome = run(dispatch(&client, MACHINE_INVENTORY, br#"{"all":true}"#));
         assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    fn named(state: &MachineState) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap()
+    }
+
+    fn with_id(state: &MachineState, fields: serde_json::Value) -> Vec<u8> {
+        let mut request = fields;
+        request["id"] = serde_json::Value::String(state.id.0.clone());
+        serde_json::to_vec(&request).unwrap()
+    }
+
+    #[test]
+    fn machine_pause_then_resume_round_trips_the_machine() {
+        let (client, state) = with_machine("alpha");
+        let outcome = run(dispatch(&client, MACHINE_PAUSE, &named(&state)));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        assert_eq!(
+            body(&outcome),
+            serde_json::json!({ "epoch": 0, "vmstate_len": 0, "mem_len": 0 })
+        );
+        let inspected = run(dispatch(&client, MACHINE_INSPECT, &named(&state)));
+        assert_eq!(body(&inspected)["status"], "paused");
+
+        let outcome = run(dispatch(
+            &client,
+            MACHINE_RESUME,
+            &with_id(&state, serde_json::json!({ "warm": false })),
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        assert_eq!(body(&outcome)["epoch"], 0);
+        assert_eq!(body(&outcome)["reseed"], serde_json::Value::Null);
+        let inspected = run(dispatch(&client, MACHINE_INSPECT, &named(&state)));
+        assert_eq!(body(&inspected)["status"], "running");
+    }
+
+    #[test]
+    fn machine_pause_passes_the_primed_barrier_through() {
+        let (client, state) = with_machine("alpha");
+        let request = with_id(
+            &state,
+            serde_json::json!({ "primed_barrier": true, "primed_timeout_secs": 5 }),
+        );
+        let target: PauseRequest = parse(&request).unwrap();
+        let opts = target.opts().unwrap();
+        assert!(opts.primed_barrier);
+        assert_eq!(opts.primed_timeout_secs, 5);
+        let outcome = run(dispatch(&client, MACHINE_PAUSE, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+    }
+
+    /// An omitted timeout is the client's default, not zero.
+    #[test]
+    fn machine_pause_defaults_the_primed_timeout() {
+        let target: PauseRequest = parse(br#"{"id":"m","primed_barrier":true}"#).unwrap();
+        assert_eq!(
+            target.opts().unwrap().primed_timeout_secs,
+            PauseOpts::default().primed_timeout_secs
+        );
+    }
+
+    /// A zero wait could only fail, so it is refused before the client is asked.
+    #[test]
+    fn machine_pause_refuses_a_zero_primed_timeout() {
+        let (client, state) = with_machine("alpha");
+        let request = with_id(&state, serde_json::json!({ "primed_timeout_secs": 0 }));
+        let outcome = run(dispatch(&client, MACHINE_PAUSE, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+        let inspected = run(dispatch(&client, MACHINE_INSPECT, &named(&state)));
+        assert_eq!(body(&inspected)["status"], "running");
+    }
+
+    #[test]
+    fn machine_pause_and_resume_of_an_absent_machine_are_not_found() {
+        let client = MockBackend::default();
+        for method in [MACHINE_PAUSE, MACHINE_RESUME] {
+            let outcome = run(dispatch(&client, method, br#"{"id":"ghost"}"#));
+            assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND, "{method}");
+        }
+    }
+
+    #[test]
+    fn machine_resume_refuses_an_unknown_field() {
+        let (client, state) = with_machine("alpha");
+        let request = with_id(&state, serde_json::json!({ "epoch": 3 }));
+        let outcome = run(dispatch(&client, MACHINE_RESUME, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    #[test]
+    fn machine_reconfigure_answers_the_machine_state() {
+        let (client, state) = with_machine("alpha");
+        let request = with_id(&state, serde_json::json!({ "cpus": 2, "memory_mib": 512 }));
+        let outcome = run(dispatch(&client, MACHINE_RECONFIGURE, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        let reconfigured: MachineState = serde_json::from_slice(&outcome.body).unwrap();
+        assert_eq!(reconfigured.id, state.id);
+    }
+
+    #[test]
+    fn machine_reconfigure_carries_every_patch_field() {
+        let request =
+            br#"{"id":"m","net":true,"allow_host":["example.com"],"cpus":2,"memory_mib":256}"#;
+        let (id, patch) = parse::<ReconfigurePatchRequest>(request)
+            .unwrap()
+            .into_parts()
+            .unwrap();
+        assert_eq!(id, MachineId("m".into()));
+        assert_eq!(
+            patch,
+            ReconfigureRequest {
+                net: Some(true),
+                allow_host: Some(vec!["example.com".into()]),
+                cpus: Some(2),
+                memory_mib: Some(256),
+            }
+        );
+        let (_, empty) = parse::<ReconfigurePatchRequest>(br#"{"id":"m"}"#)
+            .unwrap()
+            .into_parts()
+            .unwrap();
+        assert_eq!(empty, ReconfigureRequest::default());
+    }
+
+    #[test]
+    fn machine_reconfigure_refuses_zero_resources() {
+        let (client, state) = with_machine("alpha");
+        for fields in [
+            serde_json::json!({ "cpus": 0 }),
+            serde_json::json!({ "memory_mib": 0 }),
+        ] {
+            let outcome = run(dispatch(
+                &client,
+                MACHINE_RECONFIGURE,
+                &with_id(&state, fields.clone()),
+            ));
+            assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT, "{fields}");
+        }
+        let outcome = run(dispatch(&client, MACHINE_RECONFIGURE, br#"{"id":"ghost"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+    }
+
+    #[test]
+    fn machine_set_ttl_arms_and_clears_the_expiry() {
+        let (client, state) = with_machine("alpha");
+        let at = "2030-01-02T03:04:05Z";
+        let outcome = run(dispatch(
+            &client,
+            MACHINE_SET_TTL,
+            &with_id(&state, serde_json::json!({ "expires_at": at })),
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK, "{}", body(&outcome));
+        assert_eq!(body(&outcome), serde_json::json!({}));
+        let inspected = run(dispatch(&client, MACHINE_INSPECT, &named(&state)));
+        assert_eq!(body(&inspected)["expires_at"], at);
+
+        let outcome = run(dispatch(
+            &client,
+            MACHINE_SET_TTL,
+            &with_id(&state, serde_json::json!({ "expires_at": null })),
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        let inspected: MachineState =
+            serde_json::from_slice(&run(dispatch(&client, MACHINE_INSPECT, &named(&state))).body)
+                .unwrap();
+        assert_eq!(inspected.expires_at, None);
+    }
+
+    /// A timestamp the reaper could not parse would arm nothing; refuse it.
+    #[test]
+    fn machine_set_ttl_refuses_a_timestamp_that_is_not_rfc3339() {
+        let (client, state) = with_machine("alpha");
+        let outcome = run(dispatch(
+            &client,
+            MACHINE_SET_TTL,
+            &with_id(&state, serde_json::json!({ "expires_at": "in an hour" })),
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+        let outcome = run(dispatch(
+            &client,
+            MACHINE_SET_TTL,
+            br#"{"id":"ghost","expires_at":"2030-01-02T03:04:05Z"}"#,
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
     }
 
     #[test]

@@ -23,8 +23,12 @@ from mvm._hostabi.methods import (
     MACHINE_INSPECT,
     MACHINE_INVENTORY,
     MACHINE_LOGS,
+    MACHINE_PAUSE,
+    MACHINE_RECONFIGURE,
+    MACHINE_RESUME,
     MACHINE_RM,
     MACHINE_RUN,
+    MACHINE_SET_TTL,
     MACHINE_START,
     MACHINE_STOP,
 )
@@ -364,6 +368,61 @@ class Machine:
     def inspect(self) -> dict[str, Any]:
         """The machine's current state."""
         return _hostlib.call(MACHINE_INSPECT, {"id": self.name})
+
+    def pause(
+        self, *, primed_barrier: bool = False, primed_timeout: int | None = None
+    ) -> dict[str, Any]:
+        """Pause the machine; returns the sealed snapshot's ``epoch``,
+        ``vmstate_len`` and ``mem_len``, all zero on a backend that pauses its
+        vCPUs in place instead of sealing a snapshot.
+
+        With ``primed_barrier=True`` the pause first waits for the workload to
+        signal that it is primed, for up to ``primed_timeout`` seconds, and is
+        refused rather than sealing a half-warmed snapshot when it does not."""
+        if not isinstance(primed_barrier, bool):
+            raise ValueError("primed_barrier must be a bool")
+        request: dict[str, Any] = {"id": self.name}
+        if primed_barrier:
+            request["primed_barrier"] = True
+        if primed_timeout is not None:
+            request["primed_timeout_secs"] = _positive_int(primed_timeout, "primed_timeout")
+        return _hostlib.call(MACHINE_PAUSE, request)
+
+    def resume(self, *, warm: bool = False) -> dict[str, Any]:
+        """Resume a paused machine; returns what the resume restored, including
+        whether the guest reseeded its random state (``reseed``).
+
+        A snapshot older than the newest one sealed is refused, as is a resume
+        whose guest did not reseed. ``warm=True`` resumes from live memory,
+        which a backend without that tier refuses."""
+        if not isinstance(warm, bool):
+            raise ValueError("warm must be a bool")
+        request: dict[str, Any] = {"id": self.name}
+        if warm:
+            request["warm"] = True
+        return _hostlib.call(MACHINE_RESUME, request)
+
+    def reconfigure(
+        self, *, cpus: int | None = None, memory_mib: int | None = None
+    ) -> dict[str, Any]:
+        """Change the machine's CPU count or memory, leaving whatever is not
+        given as it is, and relaunch it if it is running; returns its state."""
+        if cpus is None and memory_mib is None:
+            raise ValueError("reconfigure needs cpus or memory_mib")
+        request: dict[str, Any] = {"id": self.name}
+        if cpus is not None:
+            request["cpus"] = _positive_int(cpus, "cpus")
+        if memory_mib is not None:
+            request["memory_mib"] = _positive_int(memory_mib, "memory_mib")
+        return _hostlib.call(MACHINE_RECONFIGURE, request)
+
+    def set_ttl(self, expires_at: str | None) -> None:
+        """Set when the idle reaper removes the machine, as an RFC 3339
+        timestamp, or clear it with ``None``."""
+        _hostlib.call(
+            MACHINE_SET_TTL,
+            {"id": self.name, "expires_at": _optional_str(expires_at, "expires_at")},
+        )
 
     @overload
     def logs(self, lines: int | None = None, *, follow: Literal[False] = False) -> str: ...
