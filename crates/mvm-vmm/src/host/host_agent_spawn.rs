@@ -594,8 +594,8 @@ fn send_control(
     key_bytes: &[u8; 32],
     request: ControlRequest,
 ) -> Result<()> {
-    let signed = broker_control::sign_with_key_bytes(request, key_bytes)
-        .context("sign host-agent control request")?;
+    let signed =
+        broker_control::sign(request, key_bytes).context("sign host-agent control request")?;
     let mut last_err = None;
     for attempt in 0..CONTROL_RETRIES {
         let result = (|| -> Result<()> {
