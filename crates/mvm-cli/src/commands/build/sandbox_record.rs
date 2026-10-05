@@ -22,7 +22,7 @@ use std::process::Command;
 use anyhow::{Context, Result, bail};
 use mvm_contract::ir::Workload;
 use mvm_sdk::runtime::{
-    Divergence, RuntimeRecording, compile_recording_with_findings, recording_sha256_hex,
+    CompiledRecording, Divergence, RuntimeRecording, compile_recording, recording_sha256_hex,
     verify_recording_digest,
 };
 
@@ -178,7 +178,7 @@ pub(in crate::commands) fn load_recording(
         &recording,
         &mvm_hostd::supervisor::secrets_scanner::SecretsScanner::with_default_rules(),
     );
-    let (workload, findings) = compile_recording_with_findings(&recording)
+    let CompiledRecording { workload, findings } = compile_recording(&recording)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("lowering runtime recording from {}", path.display()))?;
     Ok(LoadedRecording {
