@@ -52,9 +52,13 @@ cosign verify-blob --bundle mvmctl_0.22.0-1_amd64.deb.bundle \
 gh attestation verify mvmctl_0.22.0-1_amd64.deb --repo tinylabscom/mvm
 ```
 
-Upgrade and remove a package install with the package manager. `mvmctl env
-update` does not know a package manager owns `/usr/bin/mvmctl` and would
-replace the file underneath it.
+Upgrade and remove a package install with the package manager. Each package
+also installs `/usr/share/mvmctl/package-managed`, naming its format, and
+`mvmctl env update` refuses when the running `mvmctl` sits beside that marker:
+replacing `/usr/bin/mvmctl` behind dpkg's or rpm's back would leave the package
+database describing files that are no longer on disk. The refusal says which
+command upgrades the install instead. `mvmctl env update --check` still reports
+whether a newer release exists.
 
 ## Where install.sh Puts Things
 
@@ -232,7 +236,8 @@ current, and `--skip-verify` bypasses checksum verification (don't).
 An `install.sh` install is upgraded by re-running `install.sh`, which moves
 `mvmctl`, its host binaries and `assets/` together and can roll back. `env update`
 refuses on such an install and says so, rather than overwrite binaries inside
-the active release directory.
+the active release directory. It refuses a `.deb` or `.rpm` install the same
+way, before contacting GitHub, and names the `apt` or `dnf` command to run.
 
 ```bash
 mvmctl env update --check
