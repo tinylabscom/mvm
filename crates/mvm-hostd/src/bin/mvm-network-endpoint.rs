@@ -53,6 +53,20 @@ fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("substitution-endpoint");
+    // A machine that outlives its launcher gets a keeper between the two: this
+    // same binary, started with the VM's state directory, running the real
+    // endpoint as its child for as long as the VM runs. The keeper never reads
+    // stdin, so the endpoint below receives the launcher's config untouched.
+    if let Some(vm_state_dir) = mvm_hostd::vm_lifetime::requested_vm_state_dir(std::env::args_os())?
+    {
+        let endpoint = mvm_core::env_hygiene::helper_command(
+            std::env::current_exe().context("locating the endpoint binary to keep")?,
+        );
+        std::process::exit(mvm_hostd::vm_lifetime::keep_endpoint_for_vm(
+            endpoint,
+            &vm_state_dir,
+        ));
+    }
     // This process holds the workload's secrets in the clear; a backend that
     // died must not leave it serving as an orphan. Exit the instant the parent
     // is gone (macOS / SIGKILL gap the spawn-side attach misses).

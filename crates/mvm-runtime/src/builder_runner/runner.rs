@@ -240,6 +240,9 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: &transport.name,
             state_dir: &transport.state_dir,
+            // One builder job: the runner owns the VM and stops it before it
+            // returns.
+            lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Launcher,
             tenant: "builder",
             secrets: &[],
             redaction: &RedactionPolicy::default(),
