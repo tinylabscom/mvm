@@ -132,6 +132,12 @@ startup.
 
 ## Building
 
+`mvmctl build compile app.py --mvm-revision 4e65b221744885e536ec91a3f2948cdc508dcb49`
+renders the SDK workload with an immutable mvm flake input for a publishable image source. It
+does not create `flake.lock` or run Nix; lock and build the generated flake in
+the builder VM before signing a pack. An invalid or abbreviated revision is
+refused before any output is written.
+
 | Command                                                             | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl machine build <path>`                                       | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision                                                                                                                                                                                                                                                                                                                                                                                                  |

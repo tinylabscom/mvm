@@ -4,6 +4,36 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn build_compile_help_advertises_pinned_publication_input() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "compile", "--help"])
+        .output()
+        .expect("run build compile help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--mvm-revision"), "{stdout}");
+    assert!(stdout.contains("COMMIT"), "{stdout}");
+}
+
+#[test]
+fn build_compile_rejects_invalid_pin_before_reading_source() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args([
+            "build",
+            "compile",
+            "/does/not/exist.py",
+            "--mvm-revision",
+            "main",
+        ])
+        .output()
+        .expect("run build compile with invalid revision");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("40-character hexadecimal"), "{stderr}");
+    assert!(!stderr.contains("does/not/exist.py"), "{stderr}");
+}
+
+#[test]
 fn machine_workspace_apply_verbs_are_discoverable() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "--help"])
