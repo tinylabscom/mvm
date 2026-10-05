@@ -549,6 +549,163 @@ mod tests {
         );
     }
 
+    /// Whether `haystack` contains `needle` anywhere.
+    fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+    }
+
+    /// Every regular file under `dir`.
+    fn files_under(dir: &Path) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(next) = pending.pop() {
+            for entry in std::fs::read_dir(&next).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    pending.push(entry.path());
+                } else if kind.is_file() {
+                    out.push(entry.path());
+                }
+            }
+        }
+        out
+    }
+
+    /// The builder guest runs whatever a flake's derivations do, so it is
+    /// untrusted, and the host signs bundles with a key it must never reach.
+    /// This checks everything a builder boot hands the guest — the kernel
+    /// command line, every disk and share, the boot payload, the staged job
+    /// directory, the work tree — for the host signer's private key, by bytes,
+    /// and for the path that would lead to it, by name.
+    ///
+    /// The identity drive is the one input derived from the signer. It must
+    /// carry the signer's public half, which the guest pins as its trust
+    /// anchor; finding that half is the check that the byte scan reads the
+    /// drive at all.
+    #[test]
+    fn nothing_handed_to_the_builder_carries_the_host_signing_key() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = TestEnv::new();
+        let fx = builder_fixture(&mut env);
+        let tmp = &fx.tmp;
+
+        // A seed nothing else in the inputs could contain by accident.
+        let seed: [u8; 32] =
+            std::array::from_fn(|i| u8::try_from(i).unwrap().wrapping_mul(37).wrapping_add(11));
+        let keys = mvm_core::config::mvm_keys_dir();
+        std::fs::write(keys.join("host-signer.ed25519"), seed).unwrap();
+        let public = ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        // A home kept inside the project being built: the work tree is packed
+        // for the guest, and its `keys` directory must not go with it.
+        let nested_keys = fx.work.join(".mvm-home/keys");
+        std::fs::create_dir_all(&nested_keys).unwrap();
+        std::fs::write(nested_keys.join("host-signer.ed25519"), seed).unwrap();
+
+        // The job directory a flake build stages, not a hand-written one.
+        let job = tmp.path().join("staged-job");
+        mvm_build::builder_vm_runtime::stage_job_dir(
+            &job,
+            &mvm_build::builder_vm::BuilderJob::Flake {
+                flake_ref: "/work".to_string(),
+                attr_path: "packages.x86_64-linux.default".to_string(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+
+        // See `build_packs_inputs_boots_the_builder_spec_and_extracts_the_output`.
+        let _endpoint = EndpointGuard::new("bld-keys");
+        let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
+        runner
+            .build(&BuilderBuild {
+                name: "bld-keys",
+                kernel: &fx.kernel,
+                rootfs: &fx.rootfs,
+                nix_store: &fx.nix_store,
+                job_dir: &job,
+                work_src: &fx.work,
+                host_bin_dir: &fx.bins,
+                runtime_overlay: None,
+                closure_nar: None,
+                output_size: 1 << 20,
+                vcpus: 2,
+                memory_mib: 1024,
+            })
+            .expect("build orchestrates against the mock driver");
+        let specs = runner.driver.booted_specs();
+        let spec = &specs[0];
+
+        // By name: the spec, command line included, never points at the keys.
+        let described = format!("{spec:?}");
+        for needle in [
+            keys.to_string_lossy().into_owned(),
+            "host-signer.ed25519".to_string(),
+        ] {
+            assert!(
+                !described.contains(&needle),
+                "the builder spec names {needle}:\n{described}"
+            );
+        }
+        assert!(
+            spec.plan_binding.is_none(),
+            "a builder boot carries no plan binding, so no signing key path"
+        );
+        for share in &spec.shares {
+            assert!(
+                !share.host_path.starts_with(&keys),
+                "share {} exposes the keys directory",
+                share.tag
+            );
+        }
+
+        // By bytes: no file the guest can read holds the private seed.
+        let mut handed: Vec<PathBuf> = spec.blocks.iter().map(|b| b.source.clone()).collect();
+        if let crate::driver::KernelImage::Path(kernel) = &spec.kernel {
+            handed.push(kernel.clone());
+        }
+        handed.extend(spec.initramfs.clone());
+        let unpacked = tmp.path().join("unpacked-input");
+        mvm_build::builder_disk_transport::read_output_disk(
+            &tmp.path().join("vms/bld-keys/input.img"),
+            &unpacked,
+        )
+        .unwrap();
+        let members = files_under(&unpacked);
+        assert!(
+            members.iter().any(|m| m.ends_with("job/cmd.sh")),
+            "the scan must see the staged job: {members:?}"
+        );
+        handed.extend(members);
+        let mut anchor_seen = false;
+        for path in &handed {
+            assert_ne!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some("host-signer.ed25519"),
+                "the builder is handed the key file itself"
+            );
+            let bytes = std::fs::read(path).unwrap();
+            assert!(
+                !contains_bytes(&bytes, &seed),
+                "{} carries the host signer's private key",
+                path.display()
+            );
+            anchor_seen |= contains_bytes(&bytes, &public);
+        }
+        assert!(
+            anchor_seen,
+            "the identity drive carries the signer's public half; not finding it \
+             means the scan did not read the drive"
+        );
+    }
+
     #[test]
     fn build_rides_the_closure_nar_on_the_same_input_disk_when_present() {
         // Attaching a seeded closure must never grow the disk layout — it

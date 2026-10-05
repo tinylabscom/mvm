@@ -1068,6 +1068,7 @@ pub fn stage_flake_dispatch_job(
     let sub = session_job_dir.join(&job_id);
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)?;
+    crate::builder_job_contract::write_marker(&sub)?;
     let out_dir = guest_artifact_dir(transport, &job_id);
     // The boot payload's copy when the session booted with one, else the copy
     // a legacy image baked.
@@ -1416,6 +1417,7 @@ fn stage_install_dispatch_job(
     let sub = session_job_dir.join(&job_id);
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)?;
+    crate::builder_job_contract::write_marker(&sub)?;
     let dst_spec = sub.join("install_spec.json");
     std::fs::copy(host_spec_path, &dst_spec)?;
     Ok(job_id)
@@ -1794,6 +1796,8 @@ mod tests {
         .expect("stage");
         let cmd_path = job_dir.join(&job_id).join("cmd.sh");
         assert!(cmd_path.is_file(), "{}", cmd_path.display());
+        crate::builder_job_contract::check_job_dir(&job_dir.join(&job_id))
+            .expect("a dispatch job dir carries the job contract marker");
         let body = std::fs::read_to_string(&cmd_path).expect("read");
         assert!(body.contains("'path:/work'"), "{body}");
         assert!(body.contains("'packages.aarch64-linux.default'"), "{body}");
@@ -1926,6 +1930,8 @@ mod tests {
         assert!(staged_spec.is_file(), "{}", staged_spec.display());
         let staged_body = std::fs::read(&staged_spec).unwrap();
         assert_eq!(&staged_body, spec_body);
+        crate::builder_job_contract::check_job_dir(&session_job_dir.join(&job_id))
+            .expect("an install dispatch job dir carries the job contract marker");
 
         let out_dir = artifact_dir_for(&session_job_dir, &job_id);
         assert!(out_dir.is_dir(), "expected out/ at {}", out_dir.display());

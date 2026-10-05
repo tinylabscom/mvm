@@ -137,6 +137,34 @@ release, the builder's host binaries are authenticated by the `mvmctl`
 archive signature rather than by the image set, and they always match the
 running CLI.
 
+**A builder job has its own versioned contract, separate from the boot
+ABI.** The boot ABI says which images a payload can boot; the job contract
+says what a staged job directory means to the guest that runs it, and what
+that guest reports back. Its owner is `mvm_build::builder_job_contract`.
+
+- *Request.* Every job directory the host stages, one-shot or persistent
+  dispatch, carries a contract-version marker file. The guest's init reads it
+  before running anything in the directory and refuses a directory without
+  one, with a malformed one, or with a version other than its own. The
+  refusal is the job's outcome, so it surfaces as a failed build naming both
+  versions rather than as a build that ran under the wrong assumptions.
+- *Result.* The guest writes its outcome as JSON: the contract version it
+  speaks, the exit code, a stderr tail bounded at 4 KiB, a failure category
+  (evaluation, build, fetch, timeout, output contract, and the rest of the
+  categories the typed `mvm-builderd` protocol uses), and how long the job
+  ran. The host denies unknown fields and refuses an outcome
+  from another version, or one without a version at all, before reading its
+  shape. The full build log stays in a file beside the outcome; the result
+  names where it is.
+- *Policy.* Exact match, as with the `mvm-builderd` handshake. The payload
+  makes the two sides one build in the normal case; the check is for a boot
+  without a payload, where the image's baked init answers.
+
+The builder VM never receives the host signing key. A build's output leaves
+the guest as files and an outcome; the host verifies them, and only then does
+`mvmctl bundle export` or `mvm_client::builder_bundle` sign a `.mvmpkg`
+under the host signer.
+
 **Building an artifact is two phases, and only one of them has to happen
 inside a VM.** Evaluating and running Nix build logic — fetching sources,
 compiling, executing arbitrary derivation or package-install code —

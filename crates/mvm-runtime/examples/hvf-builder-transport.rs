@@ -57,7 +57,7 @@ fn main() {
         Ok(f) => std::fs::read_to_string(&f).expect("read MVM_BUILDER_CMD_FILE"),
         Err(_) => default_cmd,
     };
-    std::fs::write(job.join("cmd.sh"), cmd).unwrap();
+    mvm_build::builder_vm_runtime::stage_shell_job_dir(&job, &cmd).unwrap();
 
     // Empty nix-store scratch — the guest formats + seeds it at boot.
     let nix_store = scratch.join("nix-store.img");

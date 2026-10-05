@@ -693,6 +693,8 @@ fn stage_flake_cmd_sh(
     let artifact_dir = sub.join(ARTIFACT_SUBDIR);
     std::fs::create_dir_all(&artifact_dir)
         .with_context(|| format!("creating {}", artifact_dir.display()))?;
+    mvm_build::builder_job_contract::write_marker(&sub)
+        .with_context(|| format!("stamping {} with its job contract", sub.display()))?;
     // The guest runs the staged script as the unprivileged builder uid while
     // the host creates this share as the invoking user. Make only this
     // per-dispatch subtree guest-writable so Nix diagnostics and copied
@@ -993,6 +995,8 @@ mod tests {
         .expect("stage");
         let cmd_path = job_dir.join(&relpath).join("cmd.sh");
         assert!(cmd_path.is_file(), "{}", cmd_path.display());
+        mvm_build::builder_job_contract::check_job_dir(&job_dir.join(&relpath))
+            .expect("a dispatch job dir carries the job contract marker");
         let body = std::fs::read_to_string(&cmd_path).expect("read");
         // The shell script must reference the flake_ref + attr
         // (both escaped) and use the `nix build` invocation the
