@@ -166,8 +166,10 @@ looking, in order, at:
 
 1. `MVM_HOSTLIB_PATH` — the library file itself. If it is set and names
    nothing, that is an error; the SDK does not fall back to another copy.
-2. `mvm/_native/` inside the installed package, for a package that bundles
-   the library.
+2. `mvm/_native/` inside the installed package. Every published wheel
+   carries it: `manylinux2014` (glibc 2.17 or newer) and `musllinux_1_2`
+   wheels for x86_64 and aarch64 Linux, and an arm64 macOS wheel. The sdist
+   does not, so an install from source falls through to the next entry.
 3. The directory holding `mvmctl` on `PATH`, and the directory of the file
    that path resolves to. `mvmctl` is only located, never run.
 
