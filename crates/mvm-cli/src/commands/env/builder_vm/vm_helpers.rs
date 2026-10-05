@@ -135,24 +135,28 @@ fn reap_orphaned_vm_helpers_both_roots(
     let workload_root = mvm_core::config::vms_dir();
     let snapshot = ProcSnapshot::capture();
 
-    let mut out = reap_orphaned_vm_helpers_at_with_snapshot(
-        &builder_root,
-        BUILDER_SIDECARS,
-        remove_builder_dirs,
-        false,
-        dry_run,
+    let mut out = reap_orphaned_vm_helpers_at(
+        &ReapScope {
+            vms_root: &builder_root,
+            sidecars: BUILDER_SIDECARS,
+            remove_dead_dirs: remove_builder_dirs,
+            all_dirs_managed: false,
+            dry_run,
+        },
         &snapshot,
     )?;
     // `remove_builder_dirs` rather than a flat `false`: everything under the
     // workload root is managed except a per-job builder dir, so this grants
     // exactly the authority to prune finished builds that stage there, and
     // the kill-only startup sweep (which passes `false`) still removes nothing.
-    let workload = reap_orphaned_vm_helpers_at_with_snapshot(
-        &workload_root,
-        WORKLOAD_SIDECARS,
-        remove_builder_dirs,
-        true,
-        dry_run,
+    let workload = reap_orphaned_vm_helpers_at(
+        &ReapScope {
+            vms_root: &workload_root,
+            sidecars: WORKLOAD_SIDECARS,
+            remove_dead_dirs: remove_builder_dirs,
+            all_dirs_managed: true,
+            dry_run,
+        },
         &snapshot,
     )?;
     out.killed += workload.killed;
@@ -202,33 +206,34 @@ pub(super) fn reap_orphaned_builder_egress_supervisors(
     u64::try_from(victims.len()).expect("process count fits in u64")
 }
 
-#[cfg(test)]
+/// Which VM state directories one reap pass walks, and what it may do there.
+pub(super) struct ReapScope<'a> {
+    /// Directory whose children are per-VM state dirs.
+    pub vms_root: &'a std::path::Path,
+    /// Sidecar PID file names that mark a state dir as having a live owner.
+    pub sidecars: &'a [&'a str],
+    /// Remove a state dir once nothing in it is alive.
+    pub remove_dead_dirs: bool,
+    /// Every child of `vms_root` is a dir this reaper manages, rather than
+    /// only the per-job builder dirs.
+    pub all_dirs_managed: bool,
+    /// Report what would be signalled and removed without doing it.
+    pub dry_run: bool,
+}
+
+/// Reap the orphaned helpers under one VM root, against a process table
+/// captured once for the whole sweep.
 pub(super) fn reap_orphaned_vm_helpers_at(
-    vms_root: &std::path::Path,
-    sidecars: &[&str],
-    remove_dead_dirs: bool,
-    all_dirs_managed: bool,
-    dry_run: bool,
+    scope: &ReapScope<'_>,
+    snapshot: &ProcSnapshot,
 ) -> Result<ReapOutcome> {
-    let snapshot = ProcSnapshot::capture();
-    reap_orphaned_vm_helpers_at_with_snapshot(
+    let ReapScope {
         vms_root,
         sidecars,
         remove_dead_dirs,
         all_dirs_managed,
         dry_run,
-        &snapshot,
-    )
-}
-
-pub(super) fn reap_orphaned_vm_helpers_at_with_snapshot(
-    vms_root: &std::path::Path,
-    sidecars: &[&str],
-    remove_dead_dirs: bool,
-    all_dirs_managed: bool,
-    dry_run: bool,
-    snapshot: &ProcSnapshot,
-) -> Result<ReapOutcome> {
+    } = *scope;
     let mut outcome = ReapOutcome {
         killed: 0,
         removed_dirs: 0,
@@ -371,7 +376,7 @@ pub(super) struct ProcSnapshot {
 
 impl ProcSnapshot {
     #[tracing::instrument(name = "proc_snapshot.capture", skip_all)]
-    fn capture() -> Self {
+    pub(super) fn capture() -> Self {
         // Reported here rather than at the callers: this is the function that
         // pays for the snapshot, and a caller that forgot to report would make
         // a launch look cheaper than it was.

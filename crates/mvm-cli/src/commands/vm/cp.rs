@@ -175,7 +175,9 @@ fn copy_guest_to_host(vm: &str, guest_path: &str, host: &Path, args: &Args) -> R
             )
         })?;
     }
-    let content = super::fs::read_guest_chunks(vm, guest_path, 0, stat.size)?;
+    let content = mvm_client::guest::read_file_chunks(
+        vm, guest_path, 0, stat.size, /* follow_symlinks = */ true,
+    )?;
     let content_len = u64::try_from(content.len()).expect("content length fits u64");
     if content_len != stat.size {
         bail!(

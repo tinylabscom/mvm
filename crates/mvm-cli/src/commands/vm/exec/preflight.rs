@@ -126,14 +126,9 @@ impl RunJsonSummary {
 }
 
 impl RunPreflightSummary {
-    pub(super) fn from_args(args: &RunArgs) -> Result<Self> {
-        Self::from_args_with_backend_override(args, None)
-    }
-
-    pub(super) fn from_args_with_backend_override(
-        args: &RunArgs,
-        backend_override: Option<&str>,
-    ) -> Result<Self> {
+    /// Summarize what a run of `args` would do. `backend_override` replaces
+    /// the backend the host would resolve; production passes `None`.
+    pub(super) fn from_args(args: &RunArgs, backend_override: Option<&str>) -> Result<Self> {
         let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
         let env = args
             .env

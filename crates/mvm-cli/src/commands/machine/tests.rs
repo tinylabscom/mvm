@@ -1783,7 +1783,7 @@ fn fixture_machine_run_default_fixture_uses_cli_default_deny_preflight() {
     let run = parse_owned_run(&sdk_args)
         .expect("the fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+    let summary = super::super::vm::exec::test_run_security_summary(&run, None, "firecracker")
         .expect("CLI preflight accepts the fixture");
 
     assert!(summary.dry_run);
@@ -1801,9 +1801,9 @@ fn fixture_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
     let run = parse_owned_run(&sdk_args)
         .expect("the fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+    let summary = super::super::vm::exec::test_run_security_summary(
         &run,
-        SDK_RUN_EGRESS_BACKEND,
+        Some(SDK_RUN_EGRESS_BACKEND),
         SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts the fixture");
@@ -1829,9 +1829,9 @@ fn fixture_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
     let run = parse_owned_run(&sdk_args)
         .expect("the fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+    let summary = super::super::vm::exec::test_run_security_summary(
         &run,
-        SDK_RUN_EGRESS_BACKEND,
+        Some(SDK_RUN_EGRESS_BACKEND),
         SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts the fixture");

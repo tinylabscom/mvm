@@ -101,8 +101,17 @@ mod reap_orphans_tests {
     fn missing_vms_root_is_empty_outcome() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("does-not-exist");
-        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, false)
-            .expect("reap");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: false,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("reap");
         assert_eq!(out.killed, 0);
         assert_eq!(out.removed_dirs, 0);
         assert_eq!(out.freed_bytes, 0);
@@ -122,8 +131,17 @@ mod reap_orphans_tests {
         )
         .expect("write builder egress runtime sidecar");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, false)
-            .expect("reap");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: false,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("reap");
         assert_eq!(out.killed, 0, "no live PID, so nothing to kill");
         assert_eq!(out.removed_dirs, 1, "dir should be removed");
         assert!(
@@ -142,8 +160,17 @@ mod reap_orphans_tests {
         let my_pid = std::process::id() as i32;
         std::fs::write(vm.join("builder.pid"), format!("{my_pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, false)
-            .expect("reap");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: false,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("reap");
         assert_eq!(out.killed, 0, "live owner should not be killed");
         assert_eq!(out.removed_dirs, 0, "dir preserved while owner alive");
         assert!(vm.exists(), "dir should still be on disk");
@@ -158,8 +185,17 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("libkrun.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("config"), vec![0u8; 512]).expect("write state");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, false, true, false)
-            .expect("reap workload root");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: false,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("reap workload root");
         assert_eq!(out.killed, 0, "dead PID, nothing to kill");
         assert_eq!(out.removed_dirs, 0, "workload dir must never be removed");
         assert!(vm.exists(), "workload VM state dir must survive the sweep");
@@ -179,8 +215,17 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("hvf.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 2048]).expect("write payload");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, true, true, false)
-            .expect("reap workload root");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("reap workload root");
         assert_eq!(out.removed_dirs, 1, "a dead per-job builder dir is garbage");
         assert!(!vm.exists(), "the job dir should be gone");
         assert!(out.freed_bytes >= 2048);
@@ -200,8 +245,17 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("hvf.pid"), "2147483646\n").expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, true, true, false)
-            .expect("reap workload root");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("reap workload root");
         assert_eq!(out.removed_dirs, 0);
         assert!(vm.exists(), "the warm store must survive a prune");
     }
@@ -216,8 +270,17 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("libkrun.pid"), "2147483646\n").expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, WORKLOAD_SIDECARS, true, true, false)
-            .expect("reap workload root");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("reap workload root");
         assert_eq!(out.removed_dirs, 0);
         assert!(vm.exists(), "a stopped machine keeps its state dir");
     }
@@ -231,8 +294,17 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 256]).expect("write payload");
 
-        let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, true)
-            .expect("dry-run reap");
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: true,
+            },
+            &ProcSnapshot::capture(),
+        )
+        .expect("dry-run reap");
         assert_eq!(out.removed_dirs, 1);
         assert!(vm.exists(), "dry-run must not remove the dir");
         assert!(vm.join("builder.pid").exists(), "pid file untouched");
@@ -258,12 +330,14 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            BUILDER_SIDECARS,
-            true,
-            false,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -292,12 +366,14 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("libkrun.pid"), format!("{pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            WORKLOAD_SIDECARS,
-            false,
-            true,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: false,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -325,12 +401,14 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("hvf.pid"), format!("{pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            WORKLOAD_SIDECARS,
-            false,
-            true,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: false,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -409,12 +487,14 @@ mod reap_orphans_tests {
         );
         std::fs::write(vm.join("qemu.pid"), format!("{supervisor_pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            WORKLOAD_SIDECARS,
-            false,
-            true,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: false,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -458,12 +538,14 @@ mod reap_orphans_tests {
         );
         std::fs::write(vm.join("fc.pid"), format!("{supervisor_pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            WORKLOAD_SIDECARS,
-            false,
-            true,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: false,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -493,12 +575,14 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            BUILDER_SIDECARS,
-            true,
-            false,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -534,12 +618,14 @@ mod reap_orphans_tests {
 
         std::fs::write(vm.join("libkrun.pid"), format!("{sup_pid}\n")).expect("write sup pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            WORKLOAD_SIDECARS,
-            false,
-            true,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: false,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -578,12 +664,14 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("libkrun.pid"), format!("{dead_sup}\n"))
             .expect("write dead sup pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            WORKLOAD_SIDECARS,
-            false,
-            true,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: WORKLOAD_SIDECARS,
+                remove_dead_dirs: false,
+                all_dirs_managed: true,
+                dry_run: false,
+            },
             &snapshot,
         )
         .expect("reap");
@@ -606,12 +694,14 @@ mod reap_orphans_tests {
         std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
         std::fs::write(vm.join("store"), vec![0u8; 4096]).expect("write store payload");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            BUILDER_SIDECARS,
-            true,
-            false,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: false,
+            },
             &ProcSnapshot::from_parts(std::collections::HashMap::new(), Vec::new()),
         )
         .expect("reap");
@@ -635,12 +725,14 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
 
-        let out = reap_orphaned_vm_helpers_at_with_snapshot(
-            &vms_root,
-            BUILDER_SIDECARS,
-            true,
-            false,
-            false,
+        let out = reap_orphaned_vm_helpers_at(
+            &ReapScope {
+                vms_root: &vms_root,
+                sidecars: BUILDER_SIDECARS,
+                remove_dead_dirs: true,
+                all_dirs_managed: false,
+                dry_run: false,
+            },
             &ProcSnapshot::from_parts(std::collections::HashMap::new(), Vec::new()),
         )
         .expect("reap");

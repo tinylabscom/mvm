@@ -594,11 +594,14 @@ fn reap_picks_up_orphaned_builder_state_dir_regardless_of_prefix() {
     std::fs::write(builder_dir.join("builder.pid"), format!("{}\n", i32::MAX)).unwrap();
 
     let outcome = reap_orphaned_vm_helpers_at(
-        vms,
-        BUILDER_SIDECARS,
-        true,
-        /* all_dirs_managed = */ false,
-        /* dry_run = */ false,
+        &ReapScope {
+            vms_root: vms,
+            sidecars: BUILDER_SIDECARS,
+            remove_dead_dirs: true,
+            all_dirs_managed: false,
+            dry_run: false,
+        },
+        &ProcSnapshot::capture(),
     )
     .expect("reap should succeed");
 

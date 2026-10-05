@@ -150,9 +150,8 @@ use stage0_cache::{
 };
 #[cfg(test)]
 use vm_helpers::{
-    BUILDER_SIDECARS, ProcSnapshot, WORKLOAD_SIDECARS, pid_is_alive,
+    BUILDER_SIDECARS, ProcSnapshot, ReapScope, WORKLOAD_SIDECARS, pid_is_alive,
     reap_orphaned_builder_egress_supervisors, reap_orphaned_vm_helpers_at,
-    reap_orphaned_vm_helpers_at_with_snapshot,
 };
 pub(in crate::commands) use vm_helpers::{
     sweep_orphaned_vm_helpers_before_spawn, sweep_orphaned_vm_helpers_on_startup,
