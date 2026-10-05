@@ -562,6 +562,7 @@ fn fc_live_fork_n_children_from_running_parent() {
             parent: None,
             session: None,
             workspace_volumes: Vec::new(),
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         },
         control.as_ref(),
     )
