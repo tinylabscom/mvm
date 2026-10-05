@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mvm_client::approval_broker::display_safe;
@@ -19,7 +19,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 use super::egress_denials::{DenialTally, DeniedDestination};
 use super::exec::RunArgs;
 use super::host_notices::{NoticeSink, Stderr};
-use crate::approval::tty::{ARMING_WINDOW, ControllingTty, Terminal};
+use crate::approval::tty::{ControllingTty, Terminal, ask_armed};
 
 const ANSWER_LIMIT: usize = 32;
 const DISPLAY_LIMIT: usize = 200;
@@ -399,15 +399,9 @@ fn review_with_terminal(
     Ok(true)
 }
 
-/// Read one armed answer. Only the first ASCII word is relevant; everything
-/// typed before the prompt or during its arming window is discarded.
+/// Read one armed answer, lowercased.
 fn ask(terminal: &mut dyn Terminal, prompt: &str) -> Result<Option<String>> {
-    terminal.discard_input()?;
-    terminal.write(prompt)?;
-    terminal.pause(ARMING_WINDOW);
-    terminal.discard_input()?;
-    Ok(terminal
-        .read_line(Instant::now() + REVIEW_TIMEOUT, ANSWER_LIMIT)?
+    Ok(ask_armed(terminal, prompt, REVIEW_TIMEOUT, ANSWER_LIMIT)?
         .map(|line| line.trim().to_ascii_lowercase()))
 }
 
@@ -515,7 +509,7 @@ mod tests {
         }
         fn read_line(
             &mut self,
-            _deadline: Instant,
+            _deadline: std::time::Instant,
             _max_bytes: usize,
         ) -> std::io::Result<Option<String>> {
             Ok(self.answers.pop_front())
@@ -654,7 +648,7 @@ mod tests {
         }
         fn read_line(
             &mut self,
-            deadline: Instant,
+            deadline: std::time::Instant,
             max_bytes: usize,
         ) -> std::io::Result<Option<String>> {
             self.0.borrow_mut().read_line(deadline, max_bytes)

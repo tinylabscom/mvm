@@ -51,6 +51,7 @@ pub mod bundle;
 pub mod connect;
 pub mod drive;
 pub mod entrypoint;
+pub mod event_plan;
 pub mod grants;
 pub mod grants_resolve;
 pub mod guest;
@@ -69,6 +70,7 @@ pub mod stream;
 pub mod stream_tracing;
 pub mod tool_mediation;
 pub mod volume;
+pub mod workspace_apply;
 
 /// The workload authoring surface: builders, constructors, IR emission.
 pub use mvm_sdk as authoring;

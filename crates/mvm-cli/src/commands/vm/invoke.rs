@@ -159,42 +159,50 @@ impl EntrypointStdin {
 
 pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     if call.attach {
-        // Dispatch into an already-running workload by name (booted by
-        // `machine run --name <NAME>`), reusing its substitution endpoint and
-        // boot-minted placeholders. No transient boot, no teardown — the VM is
-        // the user's to reap.
-        if call.stdin.is_streaming() {
-            // The grant lives on the plan the *boot* was admitted under, and
-            // that admission happened in whatever process ran `machine run
-            // --name`. This one holds no admitted plan for the VM, so there is
-            // nothing here that could authorize a write — and a message saying
-            // so beats a refusal from three layers down.
-            anyhow::bail!(
-                "streamed stdin needs the run that boots the workload: the input grant \
-                 rides on the plan admitted at boot, and `--attach` dispatches into a \
-                 machine another invocation admitted — drop `--attach`, or pipe a \
-                 complete payload with `--stdin <PATH>`"
-            );
-        }
-        ui::info(&format!(
-            "entrypoint: dispatching into running workload '{}'",
-            call.source
-        ));
-        let mut denials = CallDenials::new(call.show_denials, ReviewSource::admitted_elsewhere());
-        denials.arm(&call.source);
-        let outcome = dispatch(EntrypointDispatch {
-            vm_name: &call.source,
-            stdin: DispatchStdin::OneShot(call.stdin.prologue()),
-            timeout_secs: call.timeout,
-            session_id: None,
-        });
-        denials.finish();
-        let exit_code = outcome?;
+        let exit_code = dispatch_attached(call)?;
         if exit_code != 0 {
             mvm_observability::exit(exit_code);
         }
         return Ok(());
     }
+    run_booted_entrypoint(call)
+}
+
+/// Dispatch into an already-running workload by name (booted by `machine run
+/// --name <NAME>`), reusing its substitution endpoint and boot-minted
+/// placeholders, and return the entrypoint's exit status. No transient boot,
+/// no teardown — the VM is the user's to reap.
+pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32> {
+    if call.stdin.is_streaming() {
+        // The grant lives on the plan the *boot* was admitted under, and
+        // that admission happened in whatever process ran `machine run
+        // --name`. This one holds no admitted plan for the VM, so there is
+        // nothing here that could authorize a write — and a message saying
+        // so beats a refusal from three layers down.
+        anyhow::bail!(
+            "streamed stdin needs the run that boots the workload: the input grant \
+             rides on the plan admitted at boot, and `--attach` dispatches into a \
+             machine another invocation admitted — drop `--attach`, or pipe a \
+             complete payload with `--stdin <PATH>`"
+        );
+    }
+    ui::info(&format!(
+        "entrypoint: dispatching into running workload '{}'",
+        call.source
+    ));
+    let mut denials = CallDenials::new(call.show_denials, ReviewSource::admitted_elsewhere());
+    denials.arm(&call.source);
+    let outcome = dispatch(EntrypointDispatch {
+        vm_name: &call.source,
+        stdin: DispatchStdin::OneShot(call.stdin.prologue()),
+        timeout_secs: call.timeout,
+        session_id: None,
+    });
+    denials.finish();
+    outcome
+}
+
+fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
     warn_accepted_but_inert(&call);
 
     // The entrypoint action targets a manifest slot, resolved through the same

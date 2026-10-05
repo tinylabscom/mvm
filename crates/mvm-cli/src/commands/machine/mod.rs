@@ -309,6 +309,9 @@ pub(in crate::commands) struct MachineRunArgs {
         conflicts_with_all = ["image", "manifest", "flake", "deployment", "fresh", "reset", "detach"]
     )]
     pub attach: bool,
+    /// Apply the machine's workspace changes at exit without asking.
+    #[arg(long, requires = "attach", conflicts_with = "json")]
+    pub apply: bool,
 }
 
 /// The same values clap fills in when a flag is absent, for the same reason
@@ -339,6 +342,7 @@ impl Default for MachineRunArgs {
             reset: false,
             stdin: None,
             attach: false,
+            apply: false,
         }
     }
 }
