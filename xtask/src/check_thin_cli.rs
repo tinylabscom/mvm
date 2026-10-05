@@ -112,7 +112,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     // Runs, checkpoints, workspaces and the audit-chain readers behind them.
     ("vm/artifact.rs", RUNTIME),
     ("vm/audit_chain.rs", HOSTD),
-    ("vm/audit_follow.rs", HOSTD),
     ("vm/checkpoint.rs", BOTH),
     ("vm/checkpoint/fork_vm_full.rs", BOTH),
     ("vm/checkpoint/lineage.rs", BOTH),
@@ -121,10 +120,7 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("vm/checkpoint/vm_state.rs", RUNTIME),
     ("vm/console.rs", RUNTIME),
     ("vm/diff.rs", RUNTIME),
-    ("vm/egress_denials/denial.rs", HOSTD),
-    ("vm/egress_denials/mod.rs", HOSTD),
     ("vm/exec.rs", BOTH),
-    ("vm/explain.rs", HOSTD),
     ("vm/host_signer.rs", HOSTD),
     ("vm/invoke.rs", HOSTD),
     ("vm/outputs.rs", HOSTD),
