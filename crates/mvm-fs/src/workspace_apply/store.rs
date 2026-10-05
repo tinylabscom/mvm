@@ -76,6 +76,20 @@ impl StagedApply {
         &self.manifest.merkle_root
     }
 
+    /// The apply this one reverses or re-applies, with this apply's own id
+    /// and root. `None` for a forward apply.
+    #[must_use]
+    pub fn relation(&self) -> Option<AppliedRelation> {
+        self.manifest
+            .relation
+            .as_ref()
+            .map(|relation| AppliedRelation {
+                apply_id: self.manifest.id.clone(),
+                target_id: relation.apply.clone(),
+                merkle_root: self.manifest.merkle_root.clone(),
+            })
+    }
+
     /// Root of the staged host pre-images, before any host-tree write.
     #[must_use]
     pub fn snapshot_merkle_root(&self) -> String {
@@ -468,23 +482,7 @@ impl ApplyStore {
     /// inverse apply — the original's pre-images become this one's
     /// post-images — and commit it. Returns the committed relation and root.
     pub fn undo_latest(&self, source_dir: &Path) -> Result<Option<AppliedRelation>, ApplyError> {
-        let Some(target) = self.effective_applies()?.last().cloned() else {
-            return Ok(None);
-        };
-        let manifest = self.committed_manifest(&target)?;
-        let staged = self.stage(
-            inverse_plan(&manifest)?,
-            source_dir,
-            &EmptySource,
-            Some((target.clone(), RelationKind::Undoes)),
-        )?;
-        let result = AppliedRelation {
-            apply_id: staged.id().to_string(),
-            target_id: target,
-            merkle_root: staged.merkle_root().to_string(),
-        };
-        self.commit(&staged, source_dir)?;
-        Ok(Some(result))
+        self.commit_staged(self.stage_undo(source_dir)?, source_dir)
     }
 
     /// Re-apply the target of the most recent undo, but only when that undo
@@ -492,6 +490,31 @@ impl ApplyStore {
     /// the tree the undo restored, so redo would clobber it). Returns
     /// the committed relation and root.
     pub fn redo_latest(&self, source_dir: &Path) -> Result<Option<AppliedRelation>, ApplyError> {
+        self.commit_staged(self.stage_redo(source_dir)?, source_dir)
+    }
+
+    /// Stage the inverse of the most recent committed, still-effective apply,
+    /// without touching the host tree. `None` when there is nothing to undo.
+    /// The staged apply carries an `Undoes` relation naming its target.
+    pub fn stage_undo(&self, source_dir: &Path) -> Result<Option<StagedApply>, ApplyError> {
+        let Some(target) = self.effective_applies()?.last().cloned() else {
+            return Ok(None);
+        };
+        let manifest = self.committed_manifest(&target)?;
+        self.stage(
+            inverse_plan(&manifest)?,
+            source_dir,
+            &EmptySource,
+            Some((target, RelationKind::Undoes)),
+        )
+        .map(Some)
+    }
+
+    /// Stage a redo of the most recent undo's target, without touching the
+    /// host tree. `None` unless that undo is the newest effective apply and
+    /// its target was itself a forward apply. The staged apply carries a
+    /// `Redoes` relation naming the target.
+    pub fn stage_redo(&self, source_dir: &Path) -> Result<Option<StagedApply>, ApplyError> {
         let effective = self.effective_applies()?;
         let Some(last) = effective.last().cloned() else {
             return Ok(None);
@@ -510,19 +533,25 @@ impl ApplyStore {
         if target.relation.is_some() {
             return Ok(None);
         }
-        let staged = self.stage(
+        self.stage(
             forward_plan(&target),
             source_dir,
             &EmptySource,
             Some((target.id.clone(), RelationKind::Redoes)),
-        )?;
-        let result = AppliedRelation {
-            apply_id: staged.id().to_string(),
-            target_id: target.id.clone(),
-            merkle_root: staged.merkle_root().to_string(),
+        )
+        .map(Some)
+    }
+
+    fn commit_staged(
+        &self,
+        staged: Option<StagedApply>,
+        source_dir: &Path,
+    ) -> Result<Option<AppliedRelation>, ApplyError> {
+        let Some(staged) = staged else {
+            return Ok(None);
         };
         self.commit(&staged, source_dir)?;
-        Ok(Some(result))
+        Ok(staged.relation())
     }
 
     /// The journal, in order.

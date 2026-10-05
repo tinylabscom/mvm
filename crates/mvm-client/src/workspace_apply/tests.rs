@@ -460,7 +460,7 @@ fn an_uncertain_apply_whose_entry_landed_gets_a_compensating_entry() {
     audit
         .record_mutation(
             "workspace:apply",
-            applied_entry(workspace.target(), &staged),
+            mutation_entry(workspace.target(), &staged),
         )
         .expect("the original entry did land");
 
@@ -468,7 +468,7 @@ fn an_uncertain_apply_whose_entry_landed_gets_a_compensating_entry() {
         .expect("reconcile");
     let rollback = WorkspaceMutationAudit {
         event: workspace_audit::AUDIT_ROLLBACK_EVENT,
-        ..applied_entry(workspace.target(), &staged)
+        ..mutation_entry(workspace.target(), &staged)
     };
     assert!(audit.mutation_recorded(rollback).expect("verify"));
     assert_eq!(workspace.host(), "before\n");
@@ -492,7 +492,7 @@ fn a_damaged_chain_keeps_the_restored_host_and_the_uncertain_marker() {
     audit
         .record_mutation(
             "workspace:apply",
-            applied_entry(workspace.target(), &staged),
+            mutation_entry(workspace.target(), &staged),
         )
         .expect("signed entry");
     let chain = workspace.home.path().join("audit/local.jsonl");
@@ -720,4 +720,160 @@ fn applied_entry_of(applied: &Applied) -> WorkspaceMutationAudit<'_> {
         target_id: None,
         merkle_root: &applied.merkle_root,
     }
+}
+
+// ── undo and redo through the same signed sequence ────────────────────────
+
+/// A workspace with one signed apply already committed to the host.
+fn applied_workspace() -> Workspace {
+    let workspace = Workspace::new(None);
+    let audit = workspace.signed_audit();
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+            .expect("open");
+    applier.apply(workspace.ready()).expect("apply");
+    assert_eq!(workspace.host(), "after\n");
+    workspace
+}
+
+#[test]
+fn an_undo_whose_signed_entry_cannot_be_written_is_not_left_undone() {
+    let workspace = applied_workspace();
+    let audit = ScriptedAudit {
+        refuse_mutation: true,
+        ..ScriptedAudit::verifying(false)
+    };
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+            .expect("open");
+    let error = applier.undo().expect_err("the undo must fail");
+    assert!(
+        format!("{error:#}").contains("pre-images were restored"),
+        "{error:#}"
+    );
+    assert_eq!(workspace.host(), "after\n", "the apply is back in force");
+    let calls = audit.calls.borrow();
+    assert_eq!(calls.len(), 3, "{calls:?}");
+    assert!(calls[0].starts_with("snapshot "), "{calls:?}");
+    assert_eq!(
+        calls[1..],
+        ["workspace:undo workspace.undone", "verify workspace.undone"],
+        "the undone entry, then its verification"
+    );
+    drop(calls);
+    let store = ApplyStore::open(workspace.store_root()).expect("store");
+    assert_eq!(store.effective_applies().expect("effective").len(), 1);
+}
+
+#[test]
+fn a_redo_whose_signed_entry_cannot_be_written_is_not_left_redone() {
+    let workspace = applied_workspace();
+    {
+        let audit = workspace.signed_audit();
+        let (applier, _) =
+            WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+                .expect("open");
+        applier.undo().expect("undo").expect("an apply to undo");
+    }
+    assert_eq!(workspace.host(), "before\n");
+    let audit = ScriptedAudit {
+        refuse_mutation: true,
+        ..ScriptedAudit::verifying(false)
+    };
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+            .expect("open");
+    applier.redo().expect_err("the redo must fail");
+    assert_eq!(workspace.host(), "before\n", "the undo is back in force");
+    assert!(
+        audit
+            .calls
+            .borrow()
+            .contains(&"verify workspace.redone".to_string())
+    );
+}
+
+#[test]
+fn an_unverifiable_chain_restores_an_undo_and_blocks() {
+    let workspace = applied_workspace();
+    let audit = ScriptedAudit {
+        refuse_mutation: true,
+        ..ScriptedAudit::default()
+    };
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+            .expect("open");
+    applier.undo().expect_err("the undo must fail");
+    assert_eq!(workspace.host(), "after\n");
+    let store = ApplyStore::open(workspace.store_root()).expect("store");
+    assert_eq!(store.uncertain_signed_audits().expect("uncertain").len(), 1);
+}
+
+/// Commit an undo with its pending-audit marker armed and no signed entry:
+/// the state a crash between the host commit and the append leaves.
+fn undo_committed_without_signed_entry(workspace: &Workspace) -> StagedApply {
+    let store = ApplyStore::open(workspace.store_root()).expect("store");
+    let undo = store
+        .stage_undo(&workspace.source)
+        .expect("stage undo")
+        .expect("an apply to undo");
+    store.arm_signed_audit(&undo).expect("arm audit");
+    store.commit(&undo, &workspace.source).expect("commit");
+    undo
+}
+
+#[test]
+fn an_interrupted_undo_without_its_signed_entry_is_restored_on_open() {
+    let workspace = applied_workspace();
+    let undo = undo_committed_without_signed_entry(&workspace);
+    assert_eq!(workspace.host(), "before\n");
+
+    let audit = ScriptedAudit::verifying(false);
+    let (_, recovered) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+            .expect("open");
+    assert_eq!(recovered, [Recovered::Unaudited(undo.id().to_string())]);
+    assert_eq!(workspace.host(), "after\n");
+    assert_eq!(
+        audit.calls.borrow().as_slice(),
+        ["verify workspace.undone"],
+        "recovery looks for the entry the undo owed, not an applied one"
+    );
+}
+
+#[test]
+fn an_interrupted_undo_with_its_signed_entry_is_kept_on_open() {
+    let workspace = applied_workspace();
+    let undo = undo_committed_without_signed_entry(&workspace);
+    let audit = workspace.signed_audit();
+    audit
+        .record_mutation("workspace:undo", mutation_entry(workspace.target(), &undo))
+        .expect("the undone entry landed");
+
+    let (_, recovered) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+            .expect("open");
+    assert!(recovered.is_empty());
+    assert_eq!(workspace.host(), "before\n");
+    let store = ApplyStore::open(workspace.store_root()).expect("store");
+    assert!(store.pending_signed_audits().expect("pending").is_empty());
+}
+
+#[test]
+fn an_undo_records_its_snapshot_before_writing() {
+    let workspace = applied_workspace();
+    let audit = workspace.signed_audit();
+    let (applier, _) =
+        WorkspaceApplier::open_at(workspace.store_root(), workspace.target(), &audit)
+            .expect("open");
+    let undone = applier.undo().expect("undo").expect("an apply to undo");
+    let chain = fs::read_to_string(workspace.home.path().join("audit/local.jsonl")).expect("chain");
+    let snapshot = chain
+        .rfind(workspace_audit::SNAPSHOT_EVENT)
+        .expect("the undo's snapshot entry");
+    let entry = chain
+        .rfind(workspace_audit::UNDONE_EVENT)
+        .expect("the undone entry");
+    assert!(snapshot < entry);
+    assert!(chain[snapshot..].contains(&undone.apply_id));
 }

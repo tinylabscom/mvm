@@ -160,7 +160,13 @@ mvmctl machine redo coding-agent
 apply deleted. `redo` re-applies, but only while the undo is still the newest
 entry: once anything else has been applied on top, redo says so instead of
 clobbering it. Each undo and redo is itself a journaled apply, so it carries
-the same crash guarantees and lands in the same audit history.
+the same crash guarantees and lands in the same audit history: a signed
+`workspace.snapshot` of the bytes it will replace, then a signed
+`workspace.undone` or `workspace.redone` entry naming the apply it traverses.
+If that entry cannot be shown written, the undo or redo is rolled back and the
+command fails, exactly as an apply would be. An undo or redo interrupted
+between its host writes and its signed entry is reconciled the same way the
+next time an apply command opens the workspace.
 
 ## Replay recorded input
 
