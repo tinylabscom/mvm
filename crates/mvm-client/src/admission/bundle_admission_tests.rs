@@ -2,6 +2,8 @@
 //! the trust store under an isolated `MVM_HOME`, the pin is signed into the
 //! plan, and the supervisor's admit-time re-verify runs against the same bytes.
 
+#![cfg(test)]
+
 use ed25519_dalek::SigningKey;
 use mvm_core::util::test_env::TestEnv;
 
