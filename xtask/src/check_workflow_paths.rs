@@ -761,7 +761,7 @@ mod tests {
             "pull requests must publish the required context after the full validation matrix"
         );
         assert!(test.contains(
-            "needs: [scope, lint-core, lint-policy, lint-features, \
+            "needs: [scope, lane-scope, lint-core, lint-policy, lint-features, \
              lint-features-test-support, lint-features-embed, pr-regressions, \
              test-workspace, test-workspace-aarch64, test-linux, \
              test-release-witness, test-ebpf-telemetry, bdd-conformance, \
@@ -790,7 +790,6 @@ mod tests {
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
-            "bdd-conformance",
             "test-workspace",
             "test-workspace-aarch64",
             "test-release-witness",
@@ -898,13 +897,34 @@ mod tests {
             bdd_workflow.contains("just bdd"),
             "bdd-conformance must still run the Gherkin suite"
         );
-        // ...and it has to be reachable on every code run the Linux lane
-        // covers, including pull requests before queue admission.
+        // ...keyed on its own lane scope, which only exists for code changes,
+        // on pull requests as well as in the queue.
+        let bdd = job_block(&workflow, "bdd-conformance");
         assert!(
-            job_block(&workflow, "bdd-conformance")
-                .contains("if: needs.scope.outputs.code == 'true'"),
-            "bdd-conformance must carry the broad code scope"
+            bdd.contains("needs: [scope, lane-scope]")
+                && bdd.contains("if: needs.lane-scope.outputs.bdd == 'true'")
+                && !bdd.contains("github.event_name"),
+            "bdd-conformance must be keyed on its lane scope for every event"
         );
+        let lane_scope = job_block(&workflow, "lane-scope");
+        for expected in [
+            "needs: [scope]",
+            "if: needs.scope.outputs.code == 'true'",
+            "bdd: ${{ steps.validate.outputs.bdd }}",
+            "BASE: ${{ needs.scope.outputs.base }}",
+            "HEAD: ${{ needs.scope.outputs.head }}",
+            "git diff --no-renames --name-only -z \"$BASE\" \"$HEAD\"",
+            "mode=(--all)",
+            "cargo run --locked -p xtask -- ci-lane-scopes",
+            "echo \"failed=true\" >> \"$GITHUB_OUTPUT\"",
+            "invalid or missing ${name} lane scope",
+            "validate bdd \"$BDD\"",
+        ] {
+            assert!(
+                lane_scope.contains(expected),
+                "lane-scope must fail closed to every lane; missing {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -921,6 +941,7 @@ mod tests {
             "origin/$TARGET_BRANCH",
             "grep -zE",
             "could not diff $BASE..$HEAD — running every lane to stay safe",
+            "echo \"base=$BASE\" >> \"$GITHUB_OUTPUT\"",
             "invalid or missing ${name} scope",
             "code=true",
             "nix=true",
@@ -1020,6 +1041,13 @@ mod tests {
         let aggregate = job_block(&ci, "test");
         assert!(aggregate.contains("needs.scope.result"));
         assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
+        assert!(
+            aggregate.contains("LANE_SCOPE_RESULT: ${{ needs.lane-scope.result }}")
+                && aggregate.contains("SCOPE_BDD: ${{ needs.lane-scope.outputs.bdd }}")
+                && aggregate.contains("true:success|false:skipped)")
+                && aggregate.contains(r#"if [ "$BDD_RESULT" != "$bdd_required" ]"#),
+            "Test must match lane-scope to code and BDD to its lane scope"
+        );
         assert!(
             aggregate.contains("true) required=success")
                 && aggregate.contains("false) required=skipped")

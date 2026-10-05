@@ -40,6 +40,10 @@ jobs:
       nix: ${{ steps.validate.outputs.nix }}
       architecture: ${{ steps.validate.outputs.architecture }}
       guest_image: ${{ steps.validate.outputs.guest_image }}
+      # The diff the classification was made from, for `lane-scope`. Both stay
+      # empty whenever every lane was selected without a diff.
+      base: ${{ steps.decide.outputs.base }}
+      head: ${{ steps.decide.outputs.head }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -108,6 +112,8 @@ jobs:
             echo "could not diff $BASE..$HEAD — running every lane to stay safe"
             exit 0
           fi
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
 
           # Anything that can change a compiled target, generated artifact, or
           # the commands used by a Rust lane keeps the full compiler/test
@@ -174,6 +180,81 @@ jobs:
           validate nix "$NIX"
           validate architecture "$ARCHITECTURE"
           validate guest_image "$GUEST_IMAGE"
+
+  # Narrows `code` for each specialist lane from the cargo graph: the lane's
+  # package closure under its own features and platform, plus the non-Cargo
+  # files it reads. `xtask ci-lane-scopes` holds the model and fails closed —
+  # an unclassified path, a global input, or a missing diff runs every lane.
+  # It is a job of its own rather than a step of `scope` because it needs a
+  # toolchain and an xtask build; only the lanes that read its outputs wait
+  # for it. Each output is a subset of `code`: the job runs, and so sets
+  # outputs, only when `code` is true.
+  lane-scope:
+    name: Specialist lane scope
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      bdd: ${{ steps.validate.outputs.bdd }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
+
+      - uses: ./.github/actions/rust-cache
+
+      # `--no-renames` lists a moved file under both names, so a file leaving a
+      # lane's closure still counts against that lane.
+      - name: Classify specialist lanes
+        id: classify
+        env:
+          BASE: ${{ needs.scope.outputs.base }}
+          HEAD: ${{ needs.scope.outputs.head }}
+        run: |
+          set -euo pipefail
+          changed=$(mktemp)
+          trap 'rm -f "$changed"' EXIT
+          mode=()
+          if [ -z "$BASE" ] || [ -z "$HEAD" ]; then
+            echo "CI scope selected every lane without a diff — running every specialist lane"
+            mode=(--all)
+          elif ! git diff --no-renames --name-only -z "$BASE" "$HEAD" > "$changed"; then
+            echo "could not diff $BASE..$HEAD — running every specialist lane"
+            mode=(--all)
+          fi
+          if ! cargo run --locked -p xtask -- ci-lane-scopes "${mode[@]}" < "$changed" >> "$GITHUB_OUTPUT"; then
+            echo "::warning::ci-lane-scopes failed — running every specialist lane"
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate lane classification
+        id: validate
+        env:
+          FAILED: ${{ steps.classify.outputs.failed }}
+          BDD: ${{ steps.classify.outputs.bdd }}
+        run: |
+          set -euo pipefail
+          validate() {
+            local name="$1" value="$2"
+            if [ "$FAILED" = true ]; then
+              value=true
+            fi
+            case "$value" in
+              true|false) echo "${name}=${value}" >> "$GITHUB_OUTPUT" ;;
+              *) echo "::error::invalid or missing ${name} lane scope: ${value}" >&2; exit 1 ;;
+            esac
+          }
+          validate bdd "$BDD"
 
   lint-core:
     name: Lint core (fmt + clippy)
@@ -805,25 +886,20 @@ jobs:
             -o "$RUNNER_TEMP/embed-recipe-test"
           "$RUNNER_TEMP/embed-recipe-test"
 
-  # The Gherkin scenarios previously ran only from release-tag workflows, so a
-  # PR could break a scenario and merge green. Same reusable workflow the
-  # release path calls, gated on the narrower `bdd` scope.
-  # The single owner of the Gherkin suite, and gated on `code` rather than the
-  # narrower `bdd` scope because it inherited `ci-linux-coverage.sh`'s trigger
-  # along with its `just bdd::run`. `bdd` is a strict subset of `code` — `crates/`
-  # contains `crates/mvm-cli/`, `tests/` contains `tests/machine-fixtures/`, and
-  # both cover `features/` and the Justfile — so this widening admits exactly
-  # the runs the Linux lane was already covering and no others.
+  # The single owner of the Gherkin suite, which used to run only from
+  # release-tag workflows. Keyed on its own lane scope: `lane-scope` runs only
+  # when `code` is true, so this is a subset of `code` derived from the cargo
+  # graph and the suite's own inputs rather than a narrower path regex.
   bdd-conformance:
     name: BDD conformance
-    needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    needs: [scope, lane-scope]
+    if: needs.lane-scope.outputs.bdd == 'true'
     uses: ./.github/workflows/bdd.yml
 
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lane-scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -855,6 +931,8 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
+          LANE_SCOPE_RESULT: ${{ needs.lane-scope.result }}
+          SCOPE_BDD: ${{ needs.lane-scope.outputs.bdd }}
           PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
@@ -880,6 +958,17 @@ jobs:
             false) required=skipped ;;
             *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
           esac
+          # `lane-scope` runs exactly when `code` does, and its outputs are
+          # empty when it skipped.
+          case "$SCOPE_CODE:$LANE_SCOPE_RESULT" in
+            true:success|false:skipped) ;;
+            *) echo "Specialist lane scope did not match scope $SCOPE_CODE: $LANE_SCOPE_RESULT"; exit 1 ;;
+          esac
+          case "$SCOPE_CODE:$SCOPE_BDD" in
+            true:true) bdd_required=success ;;
+            true:false|false:) bdd_required=skipped ;;
+            *) echo "Invalid bdd scope: code=$SCOPE_CODE bdd=$SCOPE_BDD"; exit 1 ;;
+          esac
           if [ "$POLICY_RESULT" != success ]; then
             echo "Policy lint did not pass: $POLICY_RESULT"
             exit 1
@@ -896,12 +985,16 @@ jobs:
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
-            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
+            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
             fi
           done
+          if [ "$BDD_RESULT" != "$bdd_required" ]; then
+            echo "BDD conformance did not match scope code=$SCOPE_CODE bdd=$SCOPE_BDD: $BDD_RESULT"
+            exit 1
+          fi
           case "$EVENT_NAME" in
             pull_request) nix_required=skipped ;;
             merge_group|workflow_dispatch) nix_required=success ;;

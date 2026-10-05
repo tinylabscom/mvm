@@ -69,11 +69,13 @@ struct Verdict {
     event_name: &'static str,
     scope_result: &'static str,
     code: &'static str,
+    /// The `lane-scope` job's result, and the BDD lane scope it published.
+    lane_scope: &'static str,
+    bdd_scope: &'static str,
     policy: &'static str,
     preflight: &'static str,
     lanes: &'static str,
-    /// Kept separate from `lanes` even though it now shares their scope, so
-    /// "the BDD lane skipped while in scope" stays expressible on its own.
+    /// Kept separate from `lanes` because it follows its own lane scope.
     bdd: &'static str,
     boot: &'static str,
     nix: &'static str,
@@ -86,6 +88,8 @@ impl Verdict {
             event_name: "pull_request",
             scope_result: "success",
             code: "true",
+            lane_scope: "success",
+            bdd_scope: "true",
             policy: "success",
             preflight: "success",
             lanes: "success",
@@ -101,12 +105,24 @@ impl Verdict {
             event_name: "pull_request",
             scope_result: "success",
             code: "false",
+            lane_scope: "skipped",
+            bdd_scope: "",
             policy: "success",
             preflight: "skipped",
             lanes: "skipped",
             bdd: "skipped",
             boot: "skipped",
             nix: "skipped",
+        }
+    }
+
+    /// A code change the BDD lane's scope does not reach: every other lane
+    /// runs, BDD skips.
+    fn bdd_out_of_scope() -> Self {
+        Self {
+            bdd_scope: "false",
+            bdd: "skipped",
+            ..Self::in_scope()
         }
     }
 
@@ -140,6 +156,8 @@ impl Verdict {
             .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
+            .env("LANE_SCOPE_RESULT", self.lane_scope)
+            .env("SCOPE_BDD", self.bdd_scope)
             .env("PREFLIGHT_RESULT", self.preflight)
             .env("CORE_RESULT", self.lanes)
             .env("POLICY_RESULT", self.policy)
@@ -181,6 +199,10 @@ fn a_fully_out_of_scope_run_is_admitted() {
 #[test]
 fn a_fully_in_scope_green_run_is_admitted() {
     assert!(Verdict::in_scope().accepts());
+    assert!(
+        Verdict::bdd_out_of_scope().accepts(),
+        "a code change outside the BDD lane's scope must admit a skipped BDD lane"
+    );
     assert!(Verdict::queue_in_scope().accepts());
     assert!(Verdict::queue_out_of_scope().accepts());
 }
@@ -189,13 +211,63 @@ fn a_fully_in_scope_green_run_is_admitted() {
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 11] = [
+    let cases: [(&str, Verdict); 17] = [
         (
-            // New with the suite moving onto the `code` scope: BDD is matched
-            // by the same arithmetic as every other lane, so a run on a
-            // docs-only PR is as wrong as a skip on a code one. Under the old
-            // `bdd`-keyed branch this combination was legal.
-            "a bdd lane that ran while out of scope",
+            "a bdd lane that ran while its lane scope was false",
+            Verdict {
+                bdd: "success",
+                ..Verdict::bdd_out_of_scope()
+            },
+        ),
+        (
+            "a bdd lane that skipped while its lane scope was true",
+            Verdict {
+                bdd: "skipped",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a failed lane-scope job, even with BDD skipped",
+            Verdict {
+                lane_scope: "failure",
+                bdd_scope: "",
+                bdd: "skipped",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a lane-scope job that skipped while code was in scope",
+            Verdict {
+                lane_scope: "skipped",
+                bdd_scope: "",
+                bdd: "skipped",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a lane-scope job that ran while code was out of scope",
+            Verdict {
+                lane_scope: "success",
+                ..Verdict::out_of_scope()
+            },
+        ),
+        (
+            "a missing bdd lane scope while code was in scope",
+            Verdict {
+                bdd_scope: "",
+                bdd: "skipped",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a bdd lane scope of true while code was out of scope",
+            Verdict {
+                bdd_scope: "true",
+                ..Verdict::out_of_scope()
+            },
+        ),
+        (
+            "a bdd lane that ran while code was out of scope",
             Verdict {
                 bdd: "success",
                 ..Verdict::out_of_scope()
@@ -212,13 +284,6 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             "a test lane that skipped while in scope",
             Verdict {
                 lanes: "skipped",
-                ..Verdict::in_scope()
-            },
-        ),
-        (
-            "a bdd lane that skipped while in scope",
-            Verdict {
-                bdd: "skipped",
                 ..Verdict::in_scope()
             },
         ),
