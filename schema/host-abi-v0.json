@@ -1849,6 +1849,116 @@
       "title": "PauseRequest",
       "type": "object"
     },
+    "MachinePromptReply": {
+      "description": "The reply to `machine.prompt`.",
+      "properties": {
+        "agent_error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AgentErrorReply"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Set when the agent, not the workload, ended the call."
+        },
+        "delivered": {
+          "description": "False when a prompt under the same retry key was already accepted and nothing was sent.",
+          "type": "boolean"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemoteErrorReply"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The wrapper's error envelope, when the call failed with one."
+        },
+        "exit_code": {
+          "description": "The workload's exit status, or the conventional status for how the agent ended the call (124 timeout, 137 crashed wrapper, 142 killed session, 75 not ready, 1 otherwise).",
+          "format": "int32",
+          "type": "integer"
+        },
+        "journal_cursor": {
+          "description": "The agent-session journal cursor the prompt was accepted at.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "output_truncated": {
+          "description": "Output past the per-channel cap was dropped.",
+          "type": "boolean"
+        },
+        "stderr_b64": {
+          "type": "string"
+        },
+        "stdout_b64": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "delivered",
+        "journal_cursor"
+      ],
+      "title": "MachinePromptReply",
+      "type": "object"
+    },
+    "MachinePromptRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.prompt` request.",
+      "properties": {
+        "id": {
+          "description": "The running machine whose agent is prompted.",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "default": null,
+          "description": "A prompt sent again under a key already accepted is not delivered twice; the request id when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prompt_b64": {
+          "description": "The prompt, base64.",
+          "type": "string"
+        },
+        "request_id": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "default": null,
+          "description": "The agent session to journal under; the machine's name when absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "prompt_b64"
+      ],
+      "title": "MachinePromptRequest",
+      "type": "object"
+    },
     "MachineReconfigureReply": {
       "additionalProperties": false,
       "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
@@ -3600,6 +3710,23 @@
       "title": "MachinePause",
       "type": "object"
     },
+    "machine_prompt": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachinePromptReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachinePromptRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachinePrompt",
+      "type": "object"
+    },
     "machine_reconfigure": {
       "additionalProperties": false,
       "properties": {
@@ -3802,6 +3929,7 @@
     "machine_logs_stream_next",
     "machine_logs_stream_open",
     "machine_pause",
+    "machine_prompt",
     "machine_reconfigure",
     "machine_resume",
     "machine_run",

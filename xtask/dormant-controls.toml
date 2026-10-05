@@ -137,3 +137,14 @@ digest. It is the only path that classifies a locally built set, and it always \
 yields `local-dev`. The local image cache calls it on every publish and every \
 lookup; losing that caller would let the cache publish or serve an entry whose \
 bytes nothing verified, under a key that says it matches the checkouts."""
+
+[[control]]
+symbol = "commit_replayable_step"
+file = "crates/mvm-runtime/src/agent_session/mod.rs"
+dormant = false
+why = """
+The commit point that binds a prompt's encrypted input, its step checkpoint \
+and the session's journal cursor into one resume point. It shipped with no \
+caller outside its tests, so no recorded prompt could ever be replayed. \
+`machine prompt` is its production caller; losing it leaves prompts recorded \
+but never on a replayable timeline."""

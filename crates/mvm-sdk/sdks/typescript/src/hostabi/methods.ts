@@ -66,6 +66,12 @@ export const MACHINE_LOGS_STREAM_OPEN = "machine.logs.stream.open";
  */
 export const MACHINE_PAUSE = "machine.pause";
 
+/**
+ * Sends one prompt to a running machine's resident agent, granted by
+ * its plan, journaled, recorded encrypted and chain-audited.
+ */
+export const MACHINE_PROMPT = "machine.prompt";
+
 /** Patches a machine's resources and relaunches it when running. */
 export const MACHINE_RECONFIGURE = "machine.reconfigure";
 
@@ -161,6 +167,7 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "machine.logs.stream.next": { key: "machine_logs_stream_next", classification: "prod_safe", summary: "Returns the captured output that has arrived." },
   "machine.logs.stream.open": { key: "machine_logs_stream_open", classification: "prod_safe", summary: "Opens a stream over a machine's captured output, replayed then followed." },
   "machine.pause": { key: "machine_pause", classification: "prod_safe", summary: "Pauses a running machine, sealing a snapshot where the backend uses one." },
+  "machine.prompt": { key: "machine_prompt", classification: "prod_safe", summary: "Sends one prompt to a running machine's resident agent, granted by its plan, journaled, recorded encrypted and chain-audited." },
   "machine.reconfigure": { key: "machine_reconfigure", classification: "prod_safe", summary: "Patches a machine's resources and relaunches it when running." },
   "machine.resume": { key: "machine_resume", classification: "prod_safe", summary: "Resumes a paused machine, refusing a replayed snapshot." },
   "machine.run": { key: "machine_run", classification: "prod_safe", summary: "Boots a machine through the admitted local launch." },

@@ -434,6 +434,16 @@ class MachinePauseRequest:
 
 
 @dataclass
+class MachinePromptRequest:
+    id: str
+    prompt_b64: str
+    idempotency_key: Optional[str] = None
+    request_id: Optional[str] = None
+    session_id: Optional[str] = None
+    timeout_secs: Optional[int] = None
+
+
+@dataclass
 class MachineReconfigureRequest:
     id: str
     allow_host: Optional[List[str]] = None
@@ -984,6 +994,18 @@ class MachineLogsStreamOpenRequest:
 
 
 @dataclass
+class MachinePromptReply:
+    delivered: bool
+    journal_cursor: int
+    agent_error: Optional[AgentErrorReply] = None
+    error: Optional[RemoteErrorReply] = None
+    exit_code: Optional[int] = None
+    output_truncated: Optional[bool] = None
+    stderr_b64: Optional[str] = None
+    stdout_b64: Optional[str] = None
+
+
+@dataclass
 class MachineReconfigureReply:
     id: MachineId
     name: str
@@ -1131,6 +1153,12 @@ class MachineLogsStreamOpen:
 
 
 @dataclass
+class MachinePrompt:
+    reply: MachinePromptReply
+    request: MachinePromptRequest
+
+
+@dataclass
 class MachineReconfigure:
     reply: MachineReconfigureReply
     request: MachineReconfigureRequest
@@ -1219,6 +1247,7 @@ class HostAbi:
     machine_logs_stream_next: MachineLogsStreamNext
     machine_logs_stream_open: MachineLogsStreamOpen
     machine_pause: MachinePause
+    machine_prompt: MachinePrompt
     machine_reconfigure: MachineReconfigure
     machine_resume: MachineResume
     machine_rm: MachineRm

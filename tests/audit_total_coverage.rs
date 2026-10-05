@@ -314,6 +314,12 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("cp", AuditPosture::Emits("VmFileCopy")),
     ("fs", AuditPosture::Emits("VmFsMutate")),
     ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
+    // Chain-signs the delivery and completion of every prompt, and binds each
+    // step checkpoint with `checkpoint.created`.
+    (
+        "prompt",
+        AuditPosture::Emits("CheckpointCreated+agent.prompt_delivered"),
+    ),
     ("diff", AuditPosture::ReadOnly),
     // Reviewed workspace apply: snapshots the host tree it overwrites,
     // journals the apply, and emits the manifest Merkle root.

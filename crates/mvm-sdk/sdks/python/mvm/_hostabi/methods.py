@@ -85,6 +85,11 @@ MACHINE_LOGS_STREAM_OPEN: Final = "machine.logs.stream.open"
 MACHINE_PAUSE: Final = "machine.pause"
 
 
+#: Sends one prompt to a running machine's resident agent, granted by
+#: its plan, journaled, recorded encrypted and chain-audited.
+MACHINE_PROMPT: Final = "machine.prompt"
+
+
 #: Patches a machine's resources and relaunches it when running.
 MACHINE_RECONFIGURE: Final = "machine.reconfigure"
 
@@ -207,6 +212,7 @@ METHODS: dict[str, Method] = {
     "machine.logs.stream.next": Method(key="machine_logs_stream_next", classification=Classification.PROD_SAFE, summary="Returns the captured output that has arrived."),
     "machine.logs.stream.open": Method(key="machine_logs_stream_open", classification=Classification.PROD_SAFE, summary="Opens a stream over a machine's captured output, replayed then followed."),
     "machine.pause": Method(key="machine_pause", classification=Classification.PROD_SAFE, summary="Pauses a running machine, sealing a snapshot where the backend uses one."),
+    "machine.prompt": Method(key="machine_prompt", classification=Classification.PROD_SAFE, summary="Sends one prompt to a running machine's resident agent, granted by its plan, journaled, recorded encrypted and chain-audited."),
     "machine.reconfigure": Method(key="machine_reconfigure", classification=Classification.PROD_SAFE, summary="Patches a machine's resources and relaunches it when running."),
     "machine.resume": Method(key="machine_resume", classification=Classification.PROD_SAFE, summary="Resumes a paused machine, refusing a replayed snapshot."),
     "machine.run": Method(key="machine_run", classification=Classification.PROD_SAFE, summary="Boots a machine through the admitted local launch."),
@@ -250,6 +256,7 @@ __all__ = [
     "MACHINE_LOGS_STREAM_NEXT",
     "MACHINE_LOGS_STREAM_OPEN",
     "MACHINE_PAUSE",
+    "MACHINE_PROMPT",
     "MACHINE_RECONFIGURE",
     "MACHINE_RESUME",
     "MACHINE_RUN",

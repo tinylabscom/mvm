@@ -1,5 +1,6 @@
-//! `entrypoint.call` and `session.*`: calling a function workload's baked
-//! entrypoint, in a transient microVM or a warm session.
+//! `entrypoint.call`, `session.*` and `machine.prompt`: calling a workload's
+//! baked entrypoint, in a transient microVM, a warm session, or — as a prompt
+//! for its resident agent — a running machine.
 //!
 //! Every method goes through `mvm_client::entrypoint`, the implementation
 //! `mvmctl machine run --entrypoint` and `mvmctl machine session …` use, so a
@@ -18,6 +19,7 @@ use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use mvm_agentd::vsock::RunEntrypointError;
+use mvm_client::agent_prompt::{AgentPrompt, PromptOutcome};
 use mvm_client::entrypoint::{
     CallLifecycle, CallOutcome, CallStdin, CallTerminal, CapturedOutput, EntrypointAdmission,
     EntrypointCall, EntrypointVm, ONE_SHOT_PAYLOAD_LIMIT, SessionStart, SessionVmName,
@@ -43,14 +45,19 @@ pub const SESSION_STOP: &str = "session.stop";
 /// Reads a session's record. Request: a [`SessionRef`]. Reply: a
 /// [`SessionInfoReply`].
 pub const SESSION_INFO: &str = "session.info";
+/// Sends one prompt to a running machine's resident agent, granted, journaled,
+/// recorded and audited exactly as `mvmctl machine prompt` does. Request: a
+/// [`MachinePromptRequest`]. Reply: a [`MachinePromptReply`].
+pub const MACHINE_PROMPT: &str = "machine.prompt";
 
-/// Every entrypoint and session method.
-pub const METHODS: [&str; 5] = [
+/// Every entrypoint, session and prompt method.
+pub const METHODS: [&str; 6] = [
     ENTRYPOINT_CALL,
     SESSION_START,
     SESSION_CALL,
     SESSION_STOP,
     SESSION_INFO,
+    MACHINE_PROMPT,
 ];
 
 /// A call's wall-clock kill window when the request names none — the same
@@ -116,6 +123,20 @@ pub(crate) trait EntrypointOps: Send + Sync {
     ) -> Result<CallResult>;
     fn stop(&self, id: &SessionId) -> Result<()>;
     fn info(&self, id: &SessionId) -> Result<SessionRecord>;
+    fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer>;
+}
+
+/// What one prompt produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PromptAnswer {
+    /// The prompt was delivered at this journal cursor and the agent's run
+    /// ended as `result`.
+    Delivered {
+        journal_cursor: u64,
+        result: CallResult,
+    },
+    /// A prompt under the same retry key was already accepted.
+    Duplicate { journal_cursor: u64 },
 }
 
 /// The operations on this host.
@@ -194,6 +215,28 @@ impl EntrypointOps for LocalEntrypoint {
     fn info(&self, id: &SessionId) -> Result<SessionRecord> {
         mvm_client::entrypoint::session_info(id.as_str())
     }
+
+    /// No step checkpointer: capturing a `vm_full` step is owned by the
+    /// command line's checkpoint machinery, so a prompt sent from here is
+    /// recorded and audited but is not a replayable step.
+    fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer> {
+        let mut output = CapturedOutput::default();
+        Ok(
+            match mvm_client::agent_prompt::send_prompt(&prompt, &mut output, None)? {
+                PromptOutcome::Delivered {
+                    journal_cursor,
+                    call,
+                    ..
+                } => PromptAnswer::Delivered {
+                    journal_cursor,
+                    result: CallResult::new(call, output),
+                },
+                PromptOutcome::Duplicate { journal_cursor } => {
+                    PromptAnswer::Duplicate { journal_cursor }
+                }
+            },
+        )
+    }
 }
 
 // ── requests ─────────────────────────────────────────────────────────────
@@ -247,6 +290,28 @@ pub(crate) struct SessionCallRequest {
     session_id: String,
     /// The encoded `[args, kwargs]` call, base64.
     payload_b64: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+/// A `machine.prompt` request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct MachinePromptRequest {
+    /// The running machine whose agent is prompted.
+    id: String,
+    /// The prompt, base64.
+    prompt_b64: String,
+    /// The agent session to journal under; the machine's name when absent.
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
+    /// A prompt sent again under a key already accepted is not delivered
+    /// twice; the request id when absent.
+    #[serde(default)]
+    idempotency_key: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
 }
@@ -322,6 +387,42 @@ impl From<CallResult> for EntrypointCallReply {
             output_truncated: result.output.truncated,
             error,
             agent_error,
+        }
+    }
+}
+
+/// The reply to `machine.prompt`.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub(crate) struct MachinePromptReply {
+    /// The agent-session journal cursor the prompt was accepted at.
+    journal_cursor: u64,
+    /// False when a prompt under the same retry key was already accepted and
+    /// nothing was sent.
+    delivered: bool,
+    /// The agent's answer, in the shape `session.call` replies with, when the
+    /// prompt was delivered. Flattened so the reply carries one definition of
+    /// that shape rather than a second, nested one.
+    #[serde(flatten)]
+    answer: Option<EntrypointCallReply>,
+}
+
+impl From<PromptAnswer> for MachinePromptReply {
+    fn from(answer: PromptAnswer) -> Self {
+        match answer {
+            PromptAnswer::Delivered {
+                journal_cursor,
+                result,
+            } => Self {
+                journal_cursor,
+                delivered: true,
+                answer: Some(EntrypointCallReply::from(result)),
+            },
+            PromptAnswer::Duplicate { journal_cursor } => Self {
+                journal_cursor,
+                delivered: false,
+                answer: None,
+            },
         }
     }
 }
@@ -442,8 +543,35 @@ fn answer(ops: &dyn EntrypointOps, method: &str, request: &[u8]) -> Result<Outco
                 .map_err(backend_error)?;
             Outcome::ok(&SessionInfoReply::from(record))
         }
+        MACHINE_PROMPT => {
+            let r: MachinePromptRequest = parse(request)?;
+            let prompt = agent_prompt(r)?;
+            Outcome::ok(&MachinePromptReply::from(
+                ops.prompt(prompt).map_err(backend_error)?,
+            ))
+        }
         other => return Err(Outcome::invalid_input(&format!("unknown method `{other}`"))),
     })
+}
+
+/// Validate a prompt request into the prompt the client library delivers.
+fn agent_prompt(r: MachinePromptRequest) -> Result<AgentPrompt, Outcome> {
+    let mut builder = AgentPrompt::builder(r.id, decode(&r.prompt_b64)?);
+    if let Some(session) = r.session_id {
+        builder = builder.session(session);
+    }
+    if let Some(request_id) = r.request_id {
+        builder = builder.request_id(request_id);
+    }
+    if let Some(key) = r.idempotency_key {
+        builder = builder.idempotency_key(key);
+    }
+    if let Some(secs) = r.timeout_secs {
+        builder = builder.timeout_secs(secs);
+    }
+    builder
+        .build()
+        .map_err(|e| Outcome::invalid_input(&format!("{e:#}")))
 }
 
 /// The workload a request names: exactly one of its two ways of naming one.
@@ -610,6 +738,18 @@ mod tests {
             self.note(format!("info {id}"))?;
             Ok(self.record())
         }
+        fn prompt(&self, prompt: AgentPrompt) -> Result<PromptAnswer> {
+            self.note(format!(
+                "prompt {} {} {}",
+                prompt.vm_name(),
+                prompt.session_id(),
+                prompt.idempotency_key()
+            ))?;
+            Ok(PromptAnswer::Delivered {
+                journal_cursor: 2,
+                result: self.result(),
+            })
+        }
     }
 
     const SESSION: &str = "abcdefghijklmnopqrstuvwxyz";
@@ -655,6 +795,50 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    #[test]
+    fn a_prompt_reaches_the_machine_and_returns_the_agents_answer() {
+        let ops = Recording::answering(exited(0, b"two files changed", b""));
+        let request = serde_json::json!({
+            "id": "agent-vm",
+            "prompt_b64": b64(b"what changed?"),
+            "session_id": "review",
+            "idempotency_key": "retry-1",
+        });
+        let outcome = dispatch(&ops, MACHINE_PROMPT, request.to_string().as_bytes());
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        let body = reply(&outcome);
+        assert_eq!(body["delivered"], true);
+        assert_eq!(body["journal_cursor"], 2);
+        assert_eq!(body["exit_code"], 0);
+        assert_eq!(body["stdout_b64"], b64(b"two files changed"));
+        assert_eq!(ops.calls(), ["prompt agent-vm review retry-1"]);
+    }
+
+    #[test]
+    fn an_invalid_prompt_is_refused_before_the_machine_is_touched() {
+        let ops = Recording::default();
+        for request in [
+            serde_json::json!({"id": "agent-vm", "prompt_b64": ""}),
+            serde_json::json!({"id": "agent-vm", "prompt_b64": b64(b"hi"), "session_id": "Bad Id"}),
+            serde_json::json!({"id": "agent-vm", "prompt_b64": "%%%"}),
+        ] {
+            let outcome = dispatch(&ops, MACHINE_PROMPT, request.to_string().as_bytes());
+            assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT, "{request}");
+        }
+        assert!(ops.calls().is_empty());
+    }
+
+    #[test]
+    fn a_refused_prompt_is_the_backends_answer() {
+        let ops = Recording {
+            fail: true,
+            ..Recording::default()
+        };
+        let request = serde_json::json!({"id": "agent-vm", "prompt_b64": b64(b"hi")});
+        let outcome = dispatch(&ops, MACHINE_PROMPT, request.to_string().as_bytes());
+        assert_eq!(outcome.status, MVM_HOSTLIB_BACKEND);
     }
 
     #[test]
