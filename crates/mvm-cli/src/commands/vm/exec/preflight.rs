@@ -171,7 +171,7 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
-        let policy = super::super::shared::resolve_run_network_policy_with_preset_and_peers(
+        let policy = super::super::shared::resolve_run_network_policy(
             args.net,
             args.network_preset,
             &args.allow_host,

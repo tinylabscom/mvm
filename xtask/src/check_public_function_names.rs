@@ -5,7 +5,7 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const MAX_SIBLING_PAIRS: usize = 30;
+const MAX_SIBLING_PAIRS: usize = 28;
 const CLEARED_MODULES: &[&str] = &[
     "crates/mvm-build/src/builder_backend_select.rs",
     "crates/mvm-build/src/builder_vm_runtime.rs",
@@ -22,6 +22,8 @@ const CLEARED_MODULES: &[&str] = &[
     "crates/mvm-cli/src/commands/vm/fs.rs",
     "crates/mvm-cli/src/config_watcher.rs",
     "crates/mvm-cli/src/exec.rs",
+    "crates/mvm-client/src/admission/policy_resolver.rs",
+    "crates/mvm-client/src/admission/run_network.rs",
     "crates/mvm-contract/src/policy/network_policy.rs",
     "crates/mvm-contract/src/protocol/network_flow/state.rs",
     "crates/mvm-fs/src/ext4/mod.rs",
