@@ -1,6 +1,18 @@
 # Decouple mvm-images from the mvm source tree via a guest-bins artifact
 
-Backing: preview
+> **Superseded (2026-10-05)** by ADR-054
+> (`specs/adrs/054-image-boundary-linux-layer.md`) and its design attachment
+> `specs/plans/2026-10-05-image-boundary-linux-layer.md`; tracking issue
+> [#4100](https://github.com/tinylabscom/mvm/issues/4100). The producer half
+> survives: `mvmctl build guest-bins` and its archive carry over, now as a
+> signed CLI release asset that `mvmctl` itself consumes. The consumer half
+> does not: `mvm-images` stops depending on mvm entirely instead of building
+> from the archive, so the bump job, `guest-bins.nix`, vendoring `mkGuest`,
+> fetch-when-unchanged across the decoupling and `image-set/v0.3.0` built on
+> the artifact are all dropped. The body below is kept as history and is not
+> current work.
+
+Backing: historical
 Validation: each box ticks only with the live evidence its text names;
 unchecked boxes remain in progress.
 
