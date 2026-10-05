@@ -755,7 +755,7 @@ fn run_zigbuild(spec: &GuestAgentBuildSpec, args: &[String]) -> Result<(), Guest
         workspace = %spec.workspace_root.display(),
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
-    let mut cmd = std::process::Command::new(&cargo);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(args))
         .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
@@ -819,7 +819,7 @@ pub fn build_guest_binaries(
         workspace = %spec.workspace_root.display(),
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
-    let mut cmd = std::process::Command::new(&cargo);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(&argv[1..]))
         .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
@@ -1018,7 +1018,7 @@ fn pinned_rust_toolchain(workspace_root: &Path) -> Result<String, GuestAgentBuil
 }
 
 fn rustup_tool(toolchain: &str, tool: &str) -> Result<PathBuf, GuestAgentBuildError> {
-    let output = std::process::Command::new("rustup")
+    let output = mvm_core::env_hygiene::helper_command("rustup")
         .args(["which", tool, "--toolchain", toolchain])
         .output()
         .map_err(|e| GuestAgentBuildError::BuildFailed {

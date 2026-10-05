@@ -284,7 +284,7 @@ fn boot_check_run_args(name: &str) -> Vec<&str> {
 
 /// Run `mvmctl <args>` inheriting stdio; error on non-zero exit.
 fn run_self(exe: &std::path::Path, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new(exe)
+    let status = mvm_core::env_hygiene::helper_command(exe)
         .args(args)
         .status()
         .with_context(|| format!("spawning mvmctl {}", args.join(" ")))?;

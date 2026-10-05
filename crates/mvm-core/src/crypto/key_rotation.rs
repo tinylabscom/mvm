@@ -45,7 +45,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use crate::domain::volume::{MasterKeyRef, MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use anyhow::{Context, Result};
@@ -368,7 +368,7 @@ pub fn rotate_luks_slot(device: &Path, old_pass: &[u8], new_pass: &[u8]) -> Resu
     let new_file = write_secret_tempfile(new_pass)?;
 
     // cryptsetup luksChangeKey <device> [<new key file>] --key-file <old>
-    let output = Command::new("cryptsetup")
+    let output = crate::env_hygiene::helper_command("cryptsetup")
         .arg("luksChangeKey")
         .arg(device)
         .arg(new_file.path())

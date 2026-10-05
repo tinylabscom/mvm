@@ -438,11 +438,9 @@ fn remove_transient_state_dir(staging_dir: &str) {
             // and left for the next convergence pass / manual cleanup.
             #[cfg(target_os = "linux")]
             {
-                let quoted = mvm_runtime::shell::shell_quote(staging_dir);
-                match std::process::Command::new("bash")
-                    .args(["-c", &format!("sudo rm -rf {quoted}")])
-                    .output()
-                {
+                // Argv, not a shell: no shell startup file runs, and the
+                // helper seam strips what the child would otherwise inherit.
+                match mvm_runtime::shell::run_host("sudo", &["rm", "-rf", "--", staging_dir]) {
                     Ok(output) if output.status.success() => {}
                     Ok(output) => {
                         tracing::debug!(
