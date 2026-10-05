@@ -1,0 +1,48 @@
+#!/bin/sh
+# Install a built mvmctl .deb or .rpm, run what it installed, and remove it.
+#
+#   distro-package-smoke.sh <package> <version> <payload-sums>
+#
+# Runs as root inside a throwaway distribution container (distro-packages.yml
+# mounts the packages read-only). <payload-sums> is the `sha256sum` manifest
+# build-distro-packages.sh wrote from the release tarball, with /usr/bin
+# paths, so the check is that the package manager put the tarball's exact
+# bytes where mvmctl and the SDKs look for them, not merely that something
+# called mvmctl runs.
+set -eu
+
+[ $# -eq 3 ] || { sed -n '4p' "$0" | sed 's/^# *//' >&2; exit 2; }
+package="$1"
+version="$2"
+sums="$3"
+
+fail() { echo "distro-package-smoke: $*" >&2; exit 1; }
+
+case "${package}" in
+  *.deb)
+    apt-get update -qq >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${package}" >/dev/null
+    remove() { DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq mvmctl >/dev/null; }
+    ;;
+  *.rpm)
+    dnf install -y -q "${package}" >/dev/null
+    remove() { dnf remove -y -q mvmctl >/dev/null; }
+    ;;
+  *) fail "not a .deb or .rpm: ${package}" ;;
+esac
+
+[ "$(command -v mvmctl)" = /usr/bin/mvmctl ] || fail "mvmctl on PATH is $(command -v mvmctl || echo nothing)"
+reported="$(mvmctl --version)"
+case "${reported}" in
+  *"${version}"*) ;;
+  *) fail "mvmctl reports '${reported}', not ${version}" ;;
+esac
+mvmctl --help >/dev/null
+sha256sum -c --quiet "${sums}" || fail "installed files differ from the release tarball"
+echo "installed ${package}: ${reported}; $(wc -l < "${sums}") files match the tarball"
+
+remove
+while read -r _ path; do
+  [ ! -e "${path}" ] || fail "${path} is left behind after removal"
+done < "${sums}"
+echo "removed cleanly"

@@ -430,6 +430,45 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+# Linux distribution packages, built by .github/workflows/distro-packages.yml
+# with cargo-deb and cargo-generate-rpm. Neither tool compiles anything here:
+# scripts/build-distro-packages.sh unpacks the released tarball into
+# target/distro-pkg/ and both package exactly those files, so a package and
+# the tarball beside it carry the same bytes.
+#
+# The layout is the tarball's: every executable and libmvm_hostlib.so sit
+# side by side in /usr/bin, because mvmctl finds its per-VM helpers, and the
+# SDKs find the library, beside the running mvmctl. The executables are
+# static musl builds, so there are no runtime dependencies to declare; the
+# library is only ever loaded into an interpreter that already has its libc.
+[package.metadata.deb]
+name = "mvmctl"
+maintainer = "mvm contributors <https://github.com/tinylabscom/mvm>"
+copyright = "mvm contributors"
+license-file = ["LICENSE", "0"]
+extended-description = """\
+mvmctl builds and runs Firecracker microVMs: Nix-based image builds, \
+single-VM lifecycle, and reusable templates, with the guest reached only \
+over vsock."""
+section = "utils"
+priority = "optional"
+depends = []
+assets = [
+    ["target/distro-pkg/bin/*", "usr/bin/", "755"],
+    ["target/distro-pkg/doc/README.md", "usr/share/doc/mvmctl/", "644"],
+    ["target/distro-pkg/man/*", "usr/share/man/man1/", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "mvmctl"
+summary = "Firecracker microVM development tool"
+release = "1"
+assets = [
+    { source = "target/distro-pkg/bin/*", dest = "/usr/bin/", mode = "755" },
+    { source = "target/distro-pkg/doc/README.md", dest = "/usr/share/doc/mvmctl/README.md", mode = "644", doc = true },
+    { source = "target/distro-pkg/man/*", dest = "/usr/share/man/man1/", mode = "644", doc = true },
+]
+
 [lib]
 name = "mvmctl"
 path = "src/lib.rs"
@@ -793,6 +832,13 @@ nextest-min = "0.9.143"
 # installs this version, and the gate refuses both a different installed
 # mutator and outcomes recorded by one.
 cargo-mutants = "27.1.0"
+
+# The Linux package builders distro-packages.yml installs. Exact pins: the
+# packages they write are signed release assets, and an unpinned
+# `cargo install` would let a new upstream release change their contents
+# between two releases built from the same tree.
+cargo-deb = "3.8.0"
+cargo-generate-rpm = "0.21.0"
 
 # Per-arch musl target. build.rs picks the entry for CARGO_CFG_TARGET_ARCH
 # (the arch mvmctl is built for == the arch of the guest it boots, since the
