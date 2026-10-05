@@ -10,6 +10,7 @@ on:
 
 jobs:
   build:
+    name: ${{ matrix.platform }}
     # One wheel per platform: the wheel embeds that platform's host library,
     # so its tag must say which hosts can load it. Each leg runs on a runner
     # of its own architecture, so the library it builds is loaded by the
@@ -144,8 +145,10 @@ jobs:
           docker run --rm -v "${PWD}:/w" -w /w -e POLICY -e PY "${IMAGE}" sh -euc '
             "${PY}" -m venv /tmp/tools
             /tmp/tools/bin/pip install --quiet auditwheel==6.8.2 patchelf==0.19.1.0
-            /tmp/tools/bin/auditwheel show raw-dist/*.whl
-            /tmp/tools/bin/auditwheel repair --plat "${POLICY}" --wheel-dir dist raw-dist/*.whl
+            # auditwheel runs patchelf by name.
+            export PATH="/tmp/tools/bin:${PATH}"
+            auditwheel show raw-dist/*.whl
+            auditwheel repair --plat "${POLICY}" --wheel-dir dist raw-dist/*.whl
             "${PY}" -m venv /tmp/smoke
             /tmp/smoke/bin/pip install --quiet dist/*.whl
             cd /

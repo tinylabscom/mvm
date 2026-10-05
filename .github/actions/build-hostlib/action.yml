@@ -33,6 +33,19 @@ runs:
       if: ${{ startsWith(inputs.platform, 'linux-') }}
       uses: ./.github/actions/install-zigbuild
 
+    # patchelf for the musl soname fix below; pinned like the wheel
+    # workflow's copy.
+    - name: Set up Python for patchelf
+      if: ${{ endsWith(inputs.platform, '-musl') }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install patchelf
+      if: ${{ endsWith(inputs.platform, '-musl') }}
+      shell: bash
+      run: python -m pip install --quiet patchelf==0.19.1.0
+
     - name: Build the host library
       id: build
       shell: bash
@@ -74,6 +87,17 @@ runs:
         if [ ! -f "${src}" ]; then
           echo "::error::${src} was not built" >&2
           exit 1
+        fi
+
+        # zig links a musl cdylib against its own libc stub, whose soname is
+        # the bare `libc.so`. musl's loader treats any `libc.*` request as
+        # itself, so the library loads either way, but `libc.so` is the
+        # development name musl-dev installs, not the runtime soname: on a
+        # host without musl-dev nothing has that name, and auditwheel refuses
+        # the musllinux tag over it. Name the runtime library the way a
+        # library built on Alpine does.
+        if [[ "${target}" == *-musl ]]; then
+          patchelf --replace-needed libc.so "libc.musl-${arch}.so.1" "${src}"
         fi
 
         # The npm platform packages have no auditwheel to hold the glibc

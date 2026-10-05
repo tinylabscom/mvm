@@ -13,6 +13,7 @@ on:
 
 jobs:
   hostlib:
+    name: ${{ matrix.platform }}
     # `@runmvm/mvm` is platform-neutral; each host's library ships in its
     # own package (`@runmvm/mvm-<key>`, the table in src/_platform.ts), which
     # npm installs as an optional dependency only on a matching os, cpu and
@@ -162,6 +163,7 @@ jobs:
           retention-days: 1
 
   smoke:
+    name: ${{ matrix.platform }}
     # Install the packed main package with this host's platform package
     # into an empty project and load the library through the SDK. The other
     # platforms' optional dependencies are skipped by npm — on os/cpu/libc,
