@@ -46,6 +46,13 @@ test("homepage content renders immediately without a reveal animation", () => {
   assert.doesNotMatch(styles, /html\.js .*site-reveal|site-reveal-failsafe/);
 });
 
+test("documentation code blocks provide dark and light syntax themes", () => {
+  const astroConfig = readFileSync(join(publicRoot, "astro.config.mjs"), "utf8");
+
+  assert.match(astroConfig, /themes:\s*\["github-dark",\s*"github-light"\]/);
+  assert.match(astroConfig, /borderColor:\s*"var\(--color-border\)"/);
+});
+
 test("non-doc pages share one content width and responsive gutter", () => {
   const header = readFileSync(join(publicRoot, "src/overrides/Header.astro"), "utf8");
   const blogStyles = readFileSync(join(publicRoot, "src/styles/custom.css"), "utf8");

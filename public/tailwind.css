@@ -79,16 +79,10 @@
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
   --font-body: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
 
-  /* Code-block palette — scheme-invariant, by design, not by omission.
-     astro.config.mjs pins Expressive Code's theme to "github-dark"
-     unconditionally, so a code frame never follows the site's light/dark
-     switch; these tokens describe that one fixed theme rather than a role
-     that varies with it. They used to be redeclared identically in both
-     light palette blocks below (plus a --color-code-success that quietly
-     diverged from the dark block's `var(--color-green)`, since light mode's
-     --color-green is a different, lighter hex than the dark-canvas-tuned
-     green this success color needs) — defining them once here removes that
-     drift risk and the token-for-token duplication. */
+  /* Landing-page terminal and React CodeBlock palette — scheme-invariant by
+     design. Documentation fences use Expressive Code's paired github-dark and
+     github-light themes from astro.config.mjs instead; keeping that separate is
+     load-bearing because Shiki token colors must switch with the docs canvas. */
   --color-code-canvas: #161b22;
   --color-code-header: #21262d;
   --color-code-border: #30363d;
