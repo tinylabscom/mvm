@@ -41,7 +41,9 @@ fn a_bundle_without_an_image_set_admits_before_a_backend_is_chosen() {
     let bundle_path = home.path().join("plain.mvmpkg");
     std::fs::write(&bundle_path, &archive).expect("write bundle");
 
-    let rootfs = write_rootfs(home.path(), b"bundle-pinned rootfs");
+    // The boot must run the bundle it pins, so the rootfs carries the bundle's
+    // own rootfs bytes.
+    let rootfs = write_rootfs(home.path(), b"rootfs-bytes");
     let keys_dir = home.path().join("keys");
     let audit_dir = home.path().join("audit");
     let ledger = InMemoryNonceLedger::new();
@@ -61,4 +63,221 @@ fn a_bundle_without_an_image_set_admits_before_a_backend_is_chosen() {
         .expect("the signed plan carries the bundle pin");
     assert_eq!(pin.bundle_sha256, mvm_core::plan::bundle_sha256(&archive));
     assert_eq!(pin.key_id, key_id);
+}
+
+/// A bundle installed into the registry under the isolated `MVM_HOME`, the way
+/// `mvmctl bundle install` (and `bundle fetch`) leaves it.
+struct InstalledFixture {
+    home: tempfile::TempDir,
+    _env: TestEnv,
+    sha256: String,
+}
+
+impl InstalledFixture {
+    fn new() -> Self {
+        let home = tempfile::tempdir().expect("mvm home");
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let sk = SigningKey::from_bytes(&[9; 32]);
+        trust_publisher(home.path(), &sk);
+        let (archive, _) = make_bundle_for_pin(&sk);
+        let trust = mvm_core::plan::FsTrustStore::default_path().expect("trust store");
+        let installed = mvm_core::plan::BundleRegistry::default_path()
+            .expect("registry")
+            .install(&archive, &trust, false)
+            .expect("install bundle");
+        Self {
+            home,
+            _env: env,
+            sha256: installed.sha256,
+        }
+    }
+
+    fn install_dir(&self) -> std::path::PathBuf {
+        mvm_core::config::bundles_dir().join(&self.sha256)
+    }
+
+    fn audit_dir(&self) -> std::path::PathBuf {
+        self.home.path().join("audit")
+    }
+
+    /// Admit a boot of `--manifest <sha256>`: the artifacts and the pin come
+    /// from the same resolution the transient run and entrypoint boots use.
+    fn admit(&self) -> Result<AdmissionContext> {
+        self.admit_with_kernel(true)
+    }
+
+    /// `with_kernel = false` is a tier that boots no kernel of the bundle's,
+    /// so admission hashes none; the extracted copy is still checked.
+    fn admit_with_kernel(&self, with_kernel: bool) -> Result<AdmissionContext> {
+        let (_, kernel, _, rootfs, _) =
+            mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(&self.sha256)?;
+        let archive = mvm_runtime::vm::template::lifecycle::installed_bundle_archive(&self.sha256)?
+            .expect("an installed bundle names its archive");
+        let rootfs = std::path::PathBuf::from(rootfs);
+        let kernel = std::path::PathBuf::from(kernel);
+        let keys_dir = self.home.path().join("keys");
+        let audit_dir = self.audit_dir();
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.kernel_path = with_kernel.then_some(kernel.as_path());
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.bundle_pin = Some(&archive);
+        admit_plan_for_boot(params)
+    }
+
+    fn chain(&self) -> String {
+        std::fs::read_to_string(self.audit_dir().join("local.jsonl")).unwrap_or_default()
+    }
+
+    fn flip_first_byte(&self, relative: &str) {
+        let path = self.install_dir().join(relative);
+        let mut bytes = std::fs::read(&path).expect("read installed file");
+        bytes[0] ^= 0xff;
+        std::fs::write(&path, bytes).expect("rewrite installed file");
+    }
+
+    /// Refuse, and record the refusal against the plan that pinned the bundle.
+    fn assert_refused_and_audited(&self, err: &anyhow::Error, names: &str) {
+        let message = format!("{err:#}");
+        assert!(message.contains(names), "{message}");
+        let chain = self.chain();
+        assert!(chain.contains("plan.admitted"), "{chain}");
+        assert!(chain.contains("plan.failed"), "{chain}");
+        assert!(
+            chain.contains(super::bundle_binding::BUNDLE_VERIFY_CLASS),
+            "the refusal is classed as a bundle verification failure: {chain}"
+        );
+    }
+}
+
+/// An untouched installed bundle boots under a plan that pins it.
+#[test]
+fn an_installed_bundle_admits_with_its_pin_signed_into_the_plan() {
+    let fixture = InstalledFixture::new();
+
+    let ctx = fixture
+        .admit()
+        .expect("an untampered installed bundle admits");
+
+    let pin = ctx
+        .admitted
+        .plan()
+        .bundle
+        .as_ref()
+        .expect("a boot from an installed bundle pins it");
+    assert_eq!(pin.bundle_sha256, fixture.sha256);
+    assert!(!fixture.chain().contains("plan.failed"));
+}
+
+/// The extracted root filesystem is what boots. One flipped byte after install
+/// is refused, though the archive beside it still verifies.
+#[test]
+fn an_installed_rootfs_changed_after_install_is_refused_at_admission() {
+    let fixture = InstalledFixture::new();
+    fixture.flip_first_byte("artifacts/rootfs.ext4");
+
+    let err = fixture
+        .admit()
+        .expect_err("a tampered installed rootfs must not boot");
+
+    fixture.assert_refused_and_audited(&err, "root filesystem");
+}
+
+#[test]
+fn an_installed_kernel_changed_after_install_is_refused_at_admission() {
+    let fixture = InstalledFixture::new();
+    fixture.flip_first_byte("artifacts/vmlinux");
+
+    let err = fixture
+        .admit()
+        .expect_err("a tampered installed kernel must not boot");
+
+    fixture.assert_refused_and_audited(&err, "kernel");
+}
+
+/// Every extracted artifact is held to the signed manifest, not only the two
+/// admission hashes for the plan: with no kernel pinned, a changed installed
+/// kernel is still refused.
+#[test]
+fn every_installed_artifact_is_checked_not_only_the_ones_the_plan_pins() {
+    let fixture = InstalledFixture::new();
+    fixture.flip_first_byte("artifacts/vmlinux");
+
+    let err = fixture
+        .admit_with_kernel(false)
+        .expect_err("a tampered installed artifact must not boot");
+
+    fixture.assert_refused_and_audited(&err, "installed artifact");
+}
+
+/// The boot resolver reads the extracted `manifest.json`, which nothing signs
+/// on its own. An edit that still parses is refused against the signed copy.
+#[test]
+fn an_installed_manifest_changed_after_install_is_refused_at_admission() {
+    let fixture = InstalledFixture::new();
+    let path = fixture.install_dir().join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("read manifest")).expect("parse");
+    manifest["profile"] = serde_json::Value::String("edited-after-install".to_string());
+    std::fs::write(&path, serde_json::to_vec(&manifest).expect("encode")).expect("write");
+
+    let err = fixture
+        .admit()
+        .expect_err("an edited installed manifest must not boot");
+
+    fixture.assert_refused_and_audited(&err, "installed manifest");
+}
+
+/// The cached archive is the pin's source of truth; a changed archive fails
+/// verification before a plan is synthesized, so nothing is admitted.
+#[test]
+fn a_cached_archive_changed_after_install_is_refused_before_a_plan_exists() {
+    let fixture = InstalledFixture::new();
+    let archive = mvm_core::config::bundles_dir().join(format!("{}.mvmpkg", fixture.sha256));
+    let mut bytes = std::fs::read(&archive).expect("read archive");
+    let last = bytes.len() / 2;
+    bytes[last] ^= 0xff;
+    std::fs::write(&archive, bytes).expect("rewrite archive");
+
+    let err = fixture
+        .admit()
+        .expect_err("a tampered archive must not boot");
+
+    assert!(format!("{err:#}").contains("verifying bundle"), "{err:#}");
+    assert!(!fixture.chain().contains("plan.admitted"));
+}
+
+#[test]
+fn a_missing_cached_archive_is_refused() {
+    let fixture = InstalledFixture::new();
+    std::fs::remove_file(
+        mvm_core::config::bundles_dir().join(format!("{}.mvmpkg", fixture.sha256)),
+    )
+    .expect("remove archive");
+
+    let err = fixture
+        .admit()
+        .expect_err("an installed bundle without its archive must not boot");
+
+    assert!(
+        format!("{err:#}").contains("reading bundle archive"),
+        "{err:#}"
+    );
+}
+
+/// A publisher removed from the trust store after install no longer vouches
+/// for the bundle, so its boots stop.
+#[test]
+fn an_installed_bundle_whose_publisher_is_no_longer_trusted_is_refused() {
+    let fixture = InstalledFixture::new();
+    std::fs::remove_dir_all(fixture.home.path().join("trusted-publishers"))
+        .expect("untrust publisher");
+
+    let err = fixture
+        .admit()
+        .expect_err("an untrusted publisher's bundle must not boot");
+
+    assert!(format!("{err:#}").contains("verifying bundle"), "{err:#}");
 }

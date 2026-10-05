@@ -699,6 +699,7 @@ pub(in crate::commands) fn run_secure_with_source(
             sdk_sidecar,
             assets,
             volumes,
+            bundle_archive,
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
@@ -727,7 +728,7 @@ pub(in crate::commands) fn run_secure_with_source(
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: None,
+            bundle_pin: bundle_archive,
             deps_volume: None,
             // The grants come from the launch config's own volume list, so the
             // plan names exactly what the backend will mount and every
