@@ -45,8 +45,8 @@ merge-group runs, jobs started 4.7 minutes after the workflow at the median and
 and then on the integrated merge-group commit.
 
 On 2026-10-05, the queue had 40 entries and the live ruleset had drifted back
-to two speculative builds. One code-scoped merge-group run allocated about 16
-hosted runners, so two groups requested roughly 32 against the organization's
+to two speculative builds. One code-scoped merge-group run peaked around 14
+hosted runners, so two groups requested roughly 28 against the organization's
 20-runner limit before pull-request workflows were counted. GitHub marked jobs
 it could not acquire after repeated attempts as cancelled; the required
 aggregate correctly surfaced those infrastructure cancellations as `Checks
@@ -80,12 +80,11 @@ failed` on #4048, #4051, and #4044. The tests themselves were not the failure.
       every merge. It remains in `ci-full.yml` (nightly + manual dispatch) so
       the path is still exercised, and the structural tests assert it no longer
       blocks the `Test` aggregate.
-- [x] Replace both failed extremes—compile-free PR admission and a duplicate
-      full PR matrix—with bounded meaningful admission. Pull requests run
-      policy/invariants, hermetic BDD, formatting, metadata, and focused
-      regressions; the exact merge-group commit runs the complete platform,
-      feature, workspace, architecture, release, Linux, eBPF, Nix, and boot
-      matrix. No verification is deleted, and the two graphs can fit together.
+- [x] Run the complete deterministic proof before queue admission, including
+      platform, feature, workspace, architecture, release, Linux, eBPF, Nix,
+      boot, policy, and BDD verification. Keep merge-group execution to
+      fail-closed scope classification and the required aggregate so the queue
+      does not allocate a second copy of the full graph.
 - [x] Trial two speculative entries building. Returned to one during reliability
       stabilization: GitHub may build later entries on cumulative speculative
       heads, so a failure in front can still make unrelated entries appear red.
@@ -102,8 +101,9 @@ failed` on #4048, #4051, and #4044. The tests themselves were not the failure.
       merge refs; only the trusted main warmer writes a reusable cache.
 - [x] Add a bounded PR preflight: run the real policy/invariant lane before
       queue admission, ShellCheck changed scripts, and execute the embedded
-      helper recipe regression. Hermetic BDD remains an admission check, and the
-      merge-group matrix remains authoritative for the exact integration commit.
+      helper recipe regression. These checks now sit inside the complete PR
+      proof; the singleton merge group verifies the synthetic commit's scope and
+      required aggregate without repeating every lane.
 - [x] Require the stable `Test` context against current `main`, build one queue
       entry at a time, and merge one PR per group while the queue is stabilized.
       Keep all required and recommended verification; optimize lane internals,

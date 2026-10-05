@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_ci_runs_bounded_admission_without_redundant_caches() {
+    fn pull_request_ci_runs_the_required_matrix_without_redundant_caches() {
         let workflow = ci_workflow();
         assert!(
             job_body(&workflow, "lint").is_none(),
@@ -758,7 +758,7 @@ mod tests {
                 && test.contains("cargo fmt -- --check")
                 && test.contains("cargo metadata --locked --format-version 1 --no-deps")
                 && test.contains("name: Require every validation lane to pass"),
-            "pull requests must publish the required context after bounded admission"
+            "pull requests must publish the required context after the full validation matrix"
         );
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
@@ -782,14 +782,15 @@ mod tests {
             );
         }
 
-        // The complete matrix runs once on the exact integration commit. PRs
-        // retain policy, BDD, formatting, metadata, and focused regression
-        // admission checks without competing with the queue for 16 runners.
+        // Deterministic failures must be exposed before queue admission. The
+        // merge group repeats these lanes against the exact integration commit;
+        // Nix and published-image boot remain integration-only below.
         for lane in [
             "lint-core",
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
+            "bdd-conformance",
             "test-workspace",
             "test-workspace-aarch64",
             "test-release-witness",
@@ -798,10 +799,9 @@ mod tests {
         ] {
             let block = job_block(&workflow, lane);
             assert!(
-                block.contains(
-                    "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
-                ),
-                "{lane} must run on integration commits without duplicating the full PR graph"
+                block.contains("if: needs.scope.outputs.code == 'true'")
+                    && !block.contains("github.event_name != 'pull_request'"),
+                "{lane} must validate code pull requests before queue admission"
             );
         }
 
@@ -908,11 +908,11 @@ mod tests {
     }
 
     #[test]
-    fn merge_group_ci_skips_rust_work_for_non_code_diffs_without_losing_gates() {
+    fn merge_group_ci_reuses_pr_proof_and_runs_only_the_integration_scope() {
         let ci = ci_workflow();
         let scope = job_block(&ci, "scope");
         for expected in [
-            "name: Enforce merge queue runner budget",
+            "name: Enforce merge queue policy",
             "bash scripts/check-merge-queue-policy.sh",
             "MG_BASE_REF: ${{ github.event.merge_group.base_ref }}",
             "MG_HEAD: ${{ github.event.merge_group.head_sha }}",
@@ -954,10 +954,9 @@ mod tests {
                 "{job} must depend on CI scope"
             );
             assert!(
-                block.contains(
-                    "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
-                ),
-                "{job} must run for queue code changes and skip PR/non-code work"
+                block.contains("needs.scope.outputs.code == 'true'")
+                    && block.contains("github.event_name != 'merge_group'"),
+                "{job} must prove PR code without rerunning in the merge queue"
             );
         }
         // `cargo install --locked` pins the installed crate's own dependencies
@@ -978,7 +977,7 @@ mod tests {
         let policy = job_block(&ci, "lint-policy");
         assert!(policy.contains("needs: [scope]"));
         assert!(
-            !policy.contains("github.event_name != 'pull_request'"),
+            policy.contains("if: github.event_name != 'merge_group'"),
             "policy invariants must fail deterministic PR defects before queue admission"
         );
         assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
@@ -986,6 +985,9 @@ mod tests {
 
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
+        assert!(nix.contains(
+            "if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'"
+        ));
         assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
         assert!(
             nix.contains("run: sh scripts/check-devshell-tiers.sh"),
@@ -1025,11 +1027,12 @@ mod tests {
         assert!(aggregate.contains("needs.scope.result"));
         assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
         assert!(
-            aggregate.contains("true) required=success")
-                && aggregate.contains("false) required=skipped")
-                && aggregate.contains(r#"if [ "$result" != "$matrix_required" ]"#)
-                && aggregate.contains(r#"if [ "$BDD_RESULT" != "$required" ]"#),
-            "Test must apply event-specific queue and admission requirements"
+            aggregate.contains("merge_group:true|merge_group:false)")
+                && aggregate.contains("required=skipped")
+                && aggregate.contains("pull_request:true|workflow_dispatch:true)")
+                && aggregate.contains("required=success")
+                && aggregate.contains(r#"if [ "$result" != "$required" ]"#),
+            "Test must reuse PR proof in the queue and enforce it before admission"
         );
     }
 
@@ -1211,15 +1214,14 @@ mod tests {
     }
 
     #[test]
-    fn required_workflows_keep_merge_group_runs_independent_and_conclusive() {
-        let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}";
-        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' }}";
+    fn required_workflows_cancel_superseded_merge_groups_and_remain_conclusive() {
+        let expected_group = "group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event_name == 'merge_group' && 'queue' || github.ref }}";
+        let expected_cancel = "cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}";
 
         let ci = ci_workflow();
         assert!(ci.contains("merge_group:\n    types: [checks_requested]"));
         assert!(ci.contains(expected_group));
         assert!(ci.contains(expected_cancel));
-        assert!(!ci.contains("cancel-in-progress: true"));
         assert!(ci.contains("permissions:\n  contents: read"));
         for required_name in [
             "name: Test",
