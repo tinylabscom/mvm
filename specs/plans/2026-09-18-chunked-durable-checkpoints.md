@@ -376,10 +376,32 @@ same tenant still shares every one.
 
 ### C8 — Retire the whole-blob layout
 
-- [ ] C8.1 The chunked reader refuses a whole-blob checkpoint with a message
+- [x] C8.1 The chunked reader refuses a whole-blob checkpoint with a message
       that names it and says to capture again.
-- [ ] C8.2 Remove the whole-blob capture path once C2 ships.
-- [ ] C8.3 Update the CLI reference and the troubleshooting guide.
+- [x] C8.2 Remove the whole-blob capture path once C2 ships.
+- [x] C8.3 Update the CLI reference and the troubleshooting guide.
+
+**C8 notes.** C2 already removed the whole-blob capture; what remained were the
+read-side fallbacks that accepted a large blob without an index. They are gone:
+`materialized_source` no longer hands back the stored file,
+`materialized_sha256` no longer falls back to the record's digest, and the
+restore digest substitution no longer skips an unchunked memory image. Every
+reader (`verify_content` and its deferred variant, `materialize_checkpoint_blobs`,
+`materialized_source`, `materialized_blob_sha256`) first runs
+`ensure_chunked_layout`, which refuses a checkpoint holding its rootfs or memory
+image as a whole file with no index, naming the checkpoint and the blob and
+telling the user to remove it and capture again. The chunked blobs are the
+rootfs and memory image of a vm_full checkpoint, and the first blob of an
+fs_quick one, whose rootfs keeps the live image's file name. A blob with
+neither an index nor a whole file keeps its missing-blob error. The small blobs
+(sidecars, configs, machine state, workspace volumes) stay whole files by
+design and are unaffected.
+
+`restore_checkpoint` now checks the record against the chain before it
+verifies content. The record names the blobs, so authenticating it first means
+an edited or unaudited record is refused for that reason, without hashing the
+memory image it names. The fork paths already ran content verification first
+and still do; they read the parent's blobs either way.
 
 ## Issue acceptance, mapped
 
