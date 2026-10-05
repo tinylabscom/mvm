@@ -158,8 +158,8 @@ impl NoManifest {
                 "this run's policy came from --plan, not from a project mvm.toml".into()
             }
             Self::AdmittedElsewhere => format!(
-                "machine {} was admitted by another mvmctl invocation, so its project \
-                 manifest is not known here",
+                "machine {} was admitted by a separate run, so its project manifest is not \
+                 known here",
                 display_safe(vm_name, DISPLAY_LIMIT)
             ),
         }
@@ -847,7 +847,7 @@ mod tests {
             (NoManifest::NotNamed, "without a project mvm.toml"),
             (NoManifest::SignedPack, "verified pack"),
             (NoManifest::ResolvedPlan, "--plan"),
-            (NoManifest::AdmittedElsewhere, "another mvmctl invocation"),
+            (NoManifest::AdmittedElsewhere, "admitted by a separate run"),
         ] {
             let terminal = SharedTerminal::answering(&["g", "y"]);
             let mut host = FakeHost::with_terminal(&terminal);
