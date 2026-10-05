@@ -31,7 +31,7 @@ void     mvm_hostlib_free(MvmHostlibBuf buf);
    `MVM_HOSTLIB_ABI_NOT_NEGOTIATED`: a binding and library that disagree about
    the buffer layout would otherwise read and free memory neither described.
 2. It calls a dotted method with a JSON request. Request types refuse unknown
-   fields. The ABI is 1.2.
+   fields. The ABI is 1.5.
 3. It gets back a status and a JSON buffer, and releases the buffer with
    `mvm_hostlib_free`. Statuses 1 to 7 mirror `MvmError`, and the error body
    carries the same `code` and `retryable` every other programmatic surface
@@ -46,12 +46,18 @@ classes and method tables for both SDKs.
 
 | Family | Methods | Answered by |
 |---|---|---|
-| Lifecycle | `machine.list`, `machine.inspect`, `machine.logs`, `machine.start`, `machine.stop`, `machine.rm`, `machine.exec`, `machine.inventory`, `backend.capabilities` | the `MvmClient` trait, and `mvm_client::inventory` |
+| Lifecycle | `machine.list`, `machine.inspect`, `machine.logs`, `machine.start`, `machine.stop`, `machine.rm`, `machine.exec`, `machine.pause`, `machine.resume`, `machine.reconfigure`, `machine.set_ttl`, `machine.inventory`, `backend.capabilities` | the `MvmClient` trait, and `mvm_client::inventory` |
 | Launch | `machine.run`, `machine.create` | `LocalBackend::launch` / `create_from_request`, through `LaunchRequest` |
 | Guest (DevOnly) | `guest.proc.{start,list,signal,kill,stdin,wait}`, `guest.fs.{read,write,list,stat,mkdir,remove,rename}`, `guest.cp` | `mvm_client::guest` |
 | Streams (DevOnly) | `guest.proc.stream.{open,next,close}` | `mvm_client::guest::wait_process`, on a reader thread |
 | Log streams | `machine.logs.stream.{open,next,close}` | `mvm_core::stream_client::open_vm_output` (what `mvmctl machine logs --follow` reads), on a reader thread |
 | Functions | `entrypoint.call`, `session.{start,call,stop,info}` | `mvm_client::entrypoint`, the dispatch `mvmctl machine run --entrypoint` and `machine session` use |
+
+`machine.pause`, `machine.resume` and `machine.set_ttl` are recorded in the
+local audit log by `LocalBackend` itself (`WorkloadSleep`, `WorkloadWake`,
+`VmTtlSet`), so a call through the library leaves the same entry as the
+matching `mvmctl` verb. `machine.reconfigure` changes CPU count and memory;
+the local backend refuses a network policy change it could not enforce.
 
 `machine.run` builds a `LaunchRequest`, so every field is validated by the
 same builder a Rust caller uses, and the machine is admitted under a signed,

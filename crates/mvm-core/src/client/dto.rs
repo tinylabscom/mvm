@@ -424,7 +424,9 @@ impl Default for PauseOpts {
 /// The outcome of a successful `pause_machine`. A sealed-snapshot backend
 /// reports its replay epoch and artifact lengths; a backend-native vCPU pause
 /// reports zeroes because it creates no sealed artifacts. Plain data the caller
-/// renders in its success line and audit entry.
+/// renders in its success line, and the detail of the `WorkloadSleep` entry the
+/// local backend writes to its local audit log.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PauseOutcome {
@@ -454,6 +456,7 @@ pub struct ResumeOpts {
 /// line, and the detail of the `WorkloadWake` entry the local backend writes to
 /// its local audit log, at parity with [`PauseOutcome`]. Plain data,
 /// REST-satisfiable.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeOutcome {

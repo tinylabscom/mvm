@@ -126,8 +126,12 @@ machine_logs: MachineLogs
 machine_logs_stream_close: MachineLogsStreamClose
 machine_logs_stream_next: MachineLogsStreamNext
 machine_logs_stream_open: MachineLogsStreamOpen
+machine_pause: MachinePause
+machine_reconfigure: MachineReconfigure
+machine_resume: MachineResume
 machine_rm: MachineRm
 machine_run: MachineRun
+machine_set_ttl: MachineSetTtl
 machine_start: MachineStart
 machine_stop: MachineStop
 session_call: SessionCall
@@ -858,6 +862,156 @@ streams?: StreamName[]
  */
 tail_lines?: (number | null)
 }
+export interface MachinePause {
+reply: PauseOutcome
+request: PauseRequest
+}
+/**
+ * The outcome of a successful `pause_machine`. A sealed-snapshot backend reports its replay epoch and artifact lengths; a backend-native vCPU pause reports zeroes because it creates no sealed artifacts. Plain data the caller renders in its success line, and the detail of the `WorkloadSleep` entry the local backend writes to its local audit log.
+ */
+export interface PauseOutcome {
+/**
+ * Monotonic replay-defence counter stamped into the sealed envelope; a resume refuses any snapshot whose epoch is below the high-water mark. Zero for a backend-native pause that creates no sealed snapshot.
+ */
+epoch: number
+/**
+ * Length in bytes of the sealed `mem.bin`; zero for backend-native pause.
+ */
+mem_len: number
+/**
+ * Length in bytes of the sealed `vmstate.bin`; zero for backend-native pause.
+ */
+vmstate_len: number
+}
+/**
+ * A `machine.pause` request.
+ */
+export interface PauseRequest {
+id: string
+/**
+ * Wait for the workload to signal that it is primed before sealing, and refuse rather than seal when it does not signal in time.
+ */
+primed_barrier?: boolean
+/**
+ * Seconds to wait for that signal. Defaults to the client's own default.
+ */
+primed_timeout_secs?: (number | null)
+}
+export interface MachineReconfigure {
+reply: MachineState3
+request: ReconfigurePatchRequest
+}
+/**
+ * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
+ */
+export interface MachineState3 {
+/**
+ * Whether connecting auto-resumes a sleeping machine.
+ */
+auto_resume?: boolean
+/**
+ * Backend that owns this machine (e.g. `"firecracker"`, `"hvf"`, `"libkrun"`). Empty when unknown.
+ */
+backend?: string
+/**
+ * vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).
+ */
+cpus?: number
+/**
+ * RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.
+ */
+expires_at?: (string | null)
+/**
+ * Original flake reference, when known.
+ */
+flake_ref?: (string | null)
+/**
+ * Guest IP, when networking is configured.
+ */
+guest_ip?: (string | null)
+id: MachineId
+/**
+ * RFC 3339 timestamp of the last `readiness` change.
+ */
+last_readiness_change_at?: (string | null)
+/**
+ * Guest memory in MiB. `0` when unknown.
+ */
+memory_mib?: number
+name: string
+/**
+ * Active host:guest port forwardings.
+ */
+ports?: PortMapping[]
+/**
+ * Flake profile name, when built from a profile.
+ */
+profile?: (string | null)
+/**
+ * Finer-grained host-observed readiness, when tracked.
+ */
+readiness?: (InstanceReadiness | null)
+/**
+ * Nix store revision hash, when known.
+ */
+revision?: (string | null)
+status: MachineStatus
+/**
+ * Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.
+ */
+status_detail?: (string | null)
+/**
+ * Caller-supplied metadata tags.
+ */
+tags?: {
+[k: string]: string
+}
+}
+/**
+ * A `machine.reconfigure` request: a patch, so an absent field keeps its current value.
+ */
+export interface ReconfigurePatchRequest {
+allow_host?: (string[] | null)
+cpus?: (number | null)
+id: string
+memory_mib?: (number | null)
+net?: (boolean | null)
+}
+export interface MachineResume {
+reply: ResumeOutcome
+request: ResumeRequest
+}
+/**
+ * What a `resume_machine` did — the detail the caller renders in its success line, and the detail of the `WorkloadWake` entry the local backend writes to its local audit log, at parity with [`PauseOutcome`]. Plain data, REST-satisfiable.
+ */
+export interface ResumeOutcome {
+/**
+ * The verified snapshot's epoch (plain resume). `0` for a warm resume or backend-native vCPU resume, neither of which restores a sealed snapshot.
+ */
+epoch?: number
+/**
+ * Length in bytes of the restored `mem.bin` (plain resume); `0` for warm.
+ */
+mem_len?: number
+/**
+ * Whether the guest rotated its VMGenID and reseeded its kernel generator. `Some` for a warm resume and for a plain resume that restored a sealed snapshot into a guest with an agent; `None` when nothing asked the guest to reseed (a backend-native vCPU resume, or the hermetic mock). A resume whose guest did not reseed is refused rather than reported here.
+ */
+reseed?: (string | null)
+/**
+ * Length in bytes of the restored `vmstate.bin` (plain resume); `0` for warm.
+ */
+vmstate_len?: number
+}
+/**
+ * A `machine.resume` request.
+ */
+export interface ResumeRequest {
+id: string
+/**
+ * Resume through the backend's live-memory warm-start path, which a disk-only backend refuses.
+ */
+warm?: boolean
+}
 export interface MachineRm {
 reply: Empty9
 request: RemoveRequest1
@@ -883,7 +1037,7 @@ export interface RunReply {
  * `dev` or `prod`, decided by the admitted profile's `dev_guest` grant, the same declaration the guest agent's DevOnly refusal keys on. Only `dev` admits the DevOnly `guest.*` methods.
  */
 build_mode: string
-machine: MachineState3
+machine: MachineState4
 /**
  * Content-addressed id of the admitted plan, for correlating with the chain-signed audit log.
  */
@@ -896,7 +1050,7 @@ process?: (string | null)
 /**
  * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
  */
-export interface MachineState3 {
+export interface MachineState4 {
 /**
  * Whether connecting auto-resumes a sleeping machine.
  */
@@ -1015,14 +1169,31 @@ profile?: (string | null)
 template?: (string | null)
 ttl_seconds?: (number | null)
 }
+export interface MachineSetTtl {
+reply: Empty10
+request: SetTtlRequest
+}
+export interface Empty10 {
+
+}
+/**
+ * A `machine.set_ttl` request.
+ */
+export interface SetTtlRequest {
+/**
+ * When the reaper may remove the machine, as RFC 3339. `null` clears it.
+ */
+expires_at?: (string | null)
+id: string
+}
 export interface MachineStart {
-reply: MachineState4
+reply: MachineState5
 request: MachineRef1
 }
 /**
  * A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.
  */
-export interface MachineState4 {
+export interface MachineState5 {
 /**
  * Whether connecting auto-resumes a sleeping machine.
  */
@@ -1092,10 +1263,10 @@ export interface MachineRef1 {
 id: string
 }
 export interface MachineStop {
-reply: Empty10
+reply: Empty11
 request: StopRequest
 }
-export interface Empty10 {
+export interface Empty11 {
 
 }
 /**
@@ -1201,10 +1372,10 @@ memory_mib?: (number | null)
 workload?: (string | null)
 }
 export interface SessionStop {
-reply: Empty11
+reply: Empty12
 request: SessionRef1
 }
-export interface Empty11 {
+export interface Empty12 {
 
 }
 /**
