@@ -3964,6 +3964,84 @@ mod tests {
         assert_eq!(parent.meta_digest, parent.compute_meta_digest());
     }
 
+    /// A chunked blob's recorded content-address is the SHA-256 of its index
+    /// file, not of the bytes it materializes to. `meta_digest` covers that
+    /// address, so the chain's one digest anchors every chunk through it.
+    #[test]
+    fn a_chunked_blob_records_its_index_digest_as_the_content_address() {
+        use sha2::Digest as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let blob = blob_named(&meta, "rootfs.ext4");
+        let index = std::fs::read(chunks::index_path(
+            &store.content_dir(&meta.id),
+            "rootfs.ext4",
+        ))
+        .unwrap();
+
+        assert_eq!(blob.sha256, hex::encode(sha2::Sha256::digest(&index)));
+        assert_ne!(
+            blob.sha256,
+            materialized_blob_sha256(&store, &meta, "rootfs.ext4").unwrap(),
+            "the whole-file digest lives inside the index, not in the record"
+        );
+    }
+
+    /// Replace a chunked blob's index after capture, then re-seal the record
+    /// around it step by step. Each step defeats one more local check; the
+    /// digest the chain recorded at capture refuses the last one.
+    #[test]
+    fn an_index_replaced_after_capture_fails_lineage_against_the_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let captured = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let chain = DisagreeingAnchor(captured.meta_digest.clone());
+        verify_content(&store, &captured).unwrap();
+        verify_lineage(&store, &captured.id, &chain).unwrap();
+
+        // Re-chunk different bytes into the checkpoint, which rewrites its
+        // index and links the new objects beside the old ones.
+        let content_dir = store.content_dir(&captured.id);
+        let substitute = tmp.path().join("substitute.ext4");
+        std::fs::write(&substitute, b"substituted-ext4-bytes").unwrap();
+        let pool = chunks::ObjectPool::new(store.root(), &captured.key_domain).unwrap();
+        let replaced =
+            chunks::chunk_blob(&pool, &content_dir, "rootfs.ext4", &substitute, true).unwrap();
+        assert_ne!(replaced.sha256, blob_named(&captured, "rootfs.ext4").sha256);
+
+        // The index alone: the record still names the captured index.
+        let err = verify_content(&store, &captured).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("index failed integrity"),
+            "expected an index integrity refusal, got: {err:#}"
+        );
+
+        // The index and the recorded address: the record's own digest drifts.
+        let mut edited = captured.clone();
+        edited.content[0] = replaced;
+        store.write_meta(&edited).unwrap();
+        verify_content(&store, &edited).unwrap();
+        let err = verify_lineage(&store, &captured.id, &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("meta_digest drift"),
+            "expected meta_digest drift, got: {err}"
+        );
+
+        // Everything local re-sealed: only the chain still disagrees.
+        edited.meta_digest = edited.compute_meta_digest();
+        store.write_meta(&edited).unwrap();
+        verify_content(&store, &edited).unwrap();
+        assert_eq!(edited.meta_digest, edited.compute_meta_digest());
+        let err = verify_lineage(&store, &captured.id, &chain).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the signed audit chain"),
+            "expected a chain mismatch, got: {err}"
+        );
+    }
+
     // ── chain-anchored verification (the signed-chain leg) ───────────────────
 
     #[test]
