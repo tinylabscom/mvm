@@ -65,7 +65,7 @@ fn run_persistent(
 
     // Watch for egress refusals from before the boot, so one the workload
     // hits while it starts is not lost to the moment before the attach.
-    let denials = (args.run.argv.is_empty() && post_start_action(&args) == PostStart::Attach)
+    let denials = should_watch_denials(&args)
         .then(|| {
             super::super::vm::egress_denials::watch_machine(
                 &name,
@@ -98,6 +98,21 @@ fn run_persistent(
     }
 
     run_persistent_post_start(cli, cfg, &args, &name, denials)
+}
+
+fn check_pack_entrypoint(args: &MachineRunArgs) -> Result<()> {
+    anyhow::ensure!(
+        !args.entrypoint || args.run.registry_pack_image.is_none(),
+        "machine run --entrypoint cannot carry a signed pack identity through its \
+         separate boot path; run the pack without --entrypoint"
+    );
+    Ok(())
+}
+
+fn should_watch_denials(args: &MachineRunArgs) -> bool {
+    !args.run.json
+        && !args.up_json
+        && (!args.run.argv.is_empty() || post_start_action(args) == PostStart::Attach)
 }
 
 /// The secret references a persistent machine records beside its spec: those
@@ -138,22 +153,31 @@ fn run_persistent_post_start(
     denials: Option<super::super::vm::egress_denials::DenialWatch>,
 ) -> Result<()> {
     if !args.run.argv.is_empty() {
-        if !shared::wait_for_guest_agent(name, 30) {
-            anyhow::bail!("guest agent for {name:?} not reachable to run the command");
+        let outcome = if shared::wait_for_guest_agent(name, 30) {
+            console::run_for_exit(
+                cli,
+                console::Args {
+                    name: name.to_string(),
+                    command: Some(machine_exec_command(&args.run.argv)),
+                    force: false,
+                    list: false,
+                    detach_timeout: None,
+                    env: Vec::new(),
+                    pty_argv: Vec::new(),
+                },
+                cfg,
+            )
+        } else {
+            Err(anyhow::anyhow!(
+                "guest agent for {name:?} not reachable to run the command"
+            ))
+        };
+        super::super::vm::egress_denials::finish_and_summarize(denials);
+        let code = outcome?;
+        if code != 0 {
+            mvm_observability::exit(code);
         }
-        return console::run(
-            cli,
-            console::Args {
-                name: name.to_string(),
-                command: Some(machine_exec_command(&args.run.argv)),
-                force: false,
-                list: false,
-                detach_timeout: None,
-                env: Vec::new(),
-                pty_argv: Vec::new(),
-            },
-            cfg,
-        );
+        return Ok(());
     }
     match post_start_action(args) {
         PostStart::Envelope => {
@@ -434,9 +458,14 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         session: None,
         r#fn: None,
         attach: args.attach,
+        show_denials: show_entrypoint_denials(&args),
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
     })
+}
+
+fn show_entrypoint_denials(args: &MachineRunArgs) -> bool {
+    !args.run.json
 }
 
 /// Resolve the VM identity for a fresh entrypoint boot.
@@ -485,9 +514,10 @@ fn resolve_entrypoint_stdin_with(
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
     // Settle the cold-build policy before any launch phase runs: `machine
-    // run` refuses silent minute-scale source builds unless the caller asked
-    // for them (`--build`) or exported `MVM_COLD_BUILD=auto`.
-    mvm_core::cold_build::set_policy(mvm_core::cold_build::launch_policy(args.build));
+    // run` builds what a cold cache lacks and announces the first such build,
+    // unless the caller opted into failing fast (`--no-build`,
+    // `MVM_COLD_BUILD=refuse`).
+    mvm_core::cold_build::set_policy(mvm_core::cold_build::launch_policy(args.cold_build_flag()));
     // Read from `machine run`'s own full command, not `RunArgs` alone, so a
     // flag that only exists on this verb (`--name`, `-d`/`--detach`, …) is
     // still caught when placed right after `--`.
@@ -498,6 +528,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer
     // identically or not at all.
     let cwd = std::env::current_dir().context("resolving the working directory")?;
+    crate::commands::vm::run_policy::select_pack_image(&mut args.run)?;
     crate::commands::vm::exec::resolve_run_source(
         &mut args.run,
         &cwd,
@@ -507,6 +538,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
+    check_pack_entrypoint(&args)?;
     let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
         let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
         args.run.manifest = Some(slot_hash.clone());
@@ -634,6 +666,29 @@ mod entrypoint_stdin_tests {
     use super::*;
 
     #[test]
+    fn a_pack_image_refuses_the_separate_entrypoint_boot_path() {
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.1.0".parse().expect("reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("pin");
+        let mut args = MachineRunArgs {
+            run: RunArgs {
+                registry_pack_image: Some(pin),
+                ..RunArgs::default()
+            },
+            ..MachineRunArgs::default()
+        };
+        check_pack_entrypoint(&args).expect("ordinary pack run supported");
+        args.entrypoint = true;
+        let error = check_pack_entrypoint(&args).expect_err("unbound path refused");
+        assert!(
+            error.to_string().contains("without --entrypoint"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_persistent_entrypoint_preserves_the_requested_machine_name() {
         let args = MachineRunArgs {
             name: Some("named-agent".to_string()),
@@ -646,6 +701,19 @@ mod entrypoint_stdin_tests {
             resolve_entrypoint_machine_name(&args).expect("valid machine name"),
             Some("named-agent".to_string())
         );
+    }
+
+    #[test]
+    fn entrypoint_denial_notices_do_not_interrupt_machine_readable_output() {
+        assert!(show_entrypoint_denials(&MachineRunArgs::default()));
+        let json = MachineRunArgs {
+            run: RunArgs {
+                json: true,
+                ..RunArgs::default()
+            },
+            ..MachineRunArgs::default()
+        };
+        assert!(!show_entrypoint_denials(&json));
     }
 
     /// Name the variant the flag resolved to. A payload and a stream are
@@ -743,6 +811,42 @@ mod entrypoint_stdin_tests {
             format!("{error:#}").contains("exceeds the limit"),
             "{error:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod command_denial_tests {
+    use super::*;
+
+    #[test]
+    fn command_and_attached_runs_watch_before_boot() {
+        let command = MachineRunArgs {
+            run: RunArgs {
+                argv: vec!["curl".to_string(), "example.com".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(should_watch_denials(&command));
+        assert!(should_watch_denials(&MachineRunArgs::default()));
+    }
+
+    #[test]
+    fn detached_and_machine_readable_runs_do_not_emit_denial_notices() {
+        let detached = MachineRunArgs {
+            detach: true,
+            ..Default::default()
+        };
+        assert!(!should_watch_denials(&detached));
+        let json_command = MachineRunArgs {
+            run: RunArgs {
+                argv: vec!["false".to_string()],
+                json: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!should_watch_denials(&json_command));
     }
 }
 

@@ -152,10 +152,8 @@ fn build_if_needed(spec: &AuxBin, lookup: &Lookup, env: &VerifyEnv) -> Result<Op
     let Some(reason) = build.needed() else {
         return Ok(None);
     };
-    if let Some(message) = mvm_core::cold_build::refusal(&format!("the `{}` host helper", spec.bin))
-    {
-        anyhow::bail!(message);
-    }
+    crate::host::ui::admit_cold_build(&format!("the `{}` host helper", spec.bin))
+        .map_err(anyhow::Error::msg)?;
     build.run(spec, env, reason).map(Some)
 }
 
@@ -222,7 +220,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Run `helper --contract-version` and classify the answer.
 fn probe_contract(helper: &Path, timeout: Duration) -> ProbeOutcome {
-    let child = match Command::new(helper)
+    let child = match mvm_core::env_hygiene::helper_command(helper)
         .arg(helper_contract::CONTRACT_PROBE_FLAG)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

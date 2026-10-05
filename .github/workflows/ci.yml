@@ -130,7 +130,7 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
-          if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|third_party/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|scripts/check-devshell-tiers\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|third_party/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "nix=true" >> "$GITHUB_OUTPUT"
           else
             echo "nix=false" >> "$GITHUB_OUTPUT"
@@ -142,7 +142,7 @@ jobs:
           # their build. Host-only Rust (CLI, hostd, client) changes nothing
           # the lane compiles, so it skips — the lane still runs for every
           # change that can alter the guest bytes.
-          if grep -zE '^(crates/(mvm-contract|mvm-core|mvm-agentd|mvm-host-services)/|third_party/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|nix/|build\.rs$)' "$CHANGED_FILE" >/dev/null; then
+          if grep -zE '^(crates/(mvm-contract|mvm-core|mvm-agentd|mvm-host-services|mvm-setpriv)/|third_party/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|nix/|build\.rs$)' "$CHANGED_FILE" >/dev/null; then
             echo "guest_image=true" >> "$GITHUB_OUTPUT"
           else
             echo "guest_image=false" >> "$GITHUB_OUTPUT"
@@ -538,14 +538,25 @@ jobs:
           cargo nextest run -p mvm-sdk --features schema
           cargo check -p mvm-sdk --features schema --bins
 
-      # The release signature verifier only exists under `manifest-verify`,
-      # which the default lane never enables, so without this step the tests
-      # that parse a real Sigstore bundle compile to nothing and pass. The
-      # claim 20 ledger cites them; this is the lane that runs them.
+      # The release signature verifier only exists under `manifest-verify`.
+      # The workspace lane gets it through the root default, but that is
+      # feature unification, not something these crates ask for, so this step
+      # runs the tests that parse a real Sigstore bundle with the feature named.
+      # The claim 20 ledger cites them; this is the lane that runs them.
       - name: release signature tests (manifest-verify)
         run: |
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
+          cargo nextest run -p mvm-cli --features manifest-verify --test signed_registry_pack
+
+      # The other half: a build without the verifier must refuse every signature
+      # and say why. The workspace lane unifies the verifier in, so those tests
+      # compile out there; mvmd links mvm-core without it, so the refusal is a
+      # shipped path. Run per crate with no features.
+      - name: verifier-absent refusal tests (no manifest-verify)
+        run: |
+          cargo nextest run -p mvm-core -p mvm-build -p mvm-client \
+            -E 'test(/without_the_verifier|cannot_verify|without_manifest_verify|no_feature_build/)'
 
       # The authored-policy schema is generated from the Rust types and
       # published twice (schema/ and the docs reference page); the drift tests
@@ -555,8 +566,9 @@ jobs:
           cargo nextest run -p mvm-client --features schema -E 'test(/policy_profiles::/)'
       # Instruction-file provenance: the keyless half verifies a real Sigstore
       # bundle only under `manifest-verify`, and the committed policy schema is
-      # checked against the Rust types only under `schema`. Neither feature is
-      # on in the default lane, so without this step both compile to nothing.
+      # checked against the Rust types only under `schema`. `schema` is off in
+      # the default lane, and this step names `manifest-verify` rather than
+      # relying on the root default to unify it in.
       - name: instruction provenance tests (manifest-verify + schema)
         run: |
           cargo nextest run -p mvm-client --features manifest-verify,schema -E 'test(/instruction/)'
@@ -575,6 +587,17 @@ jobs:
         run: |
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
+
+      # `wasm-backend` is off by default so the shipped closure carries no
+      # wasmtime. Nothing else in CI turns it on, so a wasmtime bump that
+      # changed the WASI preopen API merged green and broke the build of the
+      # whole wasm tier — including the read-only preopen grants and the
+      # egress witness that drives a real WasmBackend through the hostd
+      # substitution seam.
+      - name: wasm-backend feature tests (wasmtime tier)
+        run: |
+          cargo nextest run -p mvm-runtime --features wasm-backend -E 'test(/wasm/)'
+          cargo nextest run -p mvm-hostd --features wasm-backend --test wasm_egress_witness
 
       # End-user release builds enable an acquisition policy that contributor
       # builds deliberately omit: checkout proximity must never select a local
@@ -1358,6 +1381,7 @@ jobs:
           MVM_RUNTIME_BOOT_OVERLAY: /tmp/boot-image/overlay/overlay.ext4
           MVM_RUNTIME_BOOT_OVERLAY_VERITY: /tmp/boot-image/overlay/overlay.verity
           MVM_RUNTIME_BOOT_READY: guest-agent
+          MVM_RUNTIME_BOOT_GRANT: "1"
           MVM_RUNTIME_BOOT_RUNS: "5"
           MVM_RUNTIME_BOOT_CONCURRENT: "3"
           MVM_RUNTIME_BOOT_BUDGET_MS: "6000"
@@ -1581,6 +1605,12 @@ jobs:
             echo "=== $d ==="
             nix flake check --no-build "./$d"
           done
+
+      # The root flake's default dev shell stays lean: Zig, cargo-zigbuild and
+      # libclang belong to `.#full`. Evaluation only; nothing is built.
+      - name: Dev shell tiers stay split
+        if: needs.scope.outputs.nix == 'true'
+        run: sh scripts/check-devshell-tiers.sh
 
       # This runner is x86_64, so only the x86_64-linux check variant builds
       # here; the aarch64-linux variant stays defined for parity and for a

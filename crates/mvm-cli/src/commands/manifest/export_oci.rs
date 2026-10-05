@@ -53,7 +53,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // Walk into the current revision dir via the lifecycle module.
     // template_artifacts_dispatched already disambiguates slot vs.
     // bundle vs. legacy name; we reuse it so the resolution
-    // matches what `mvmctl up` does.
+    // matches what `mvmctl machine run --manifest` does.
     let (_, _vmlinux, _initrd, rootfs_path, _rev) = tmpl::template_artifacts_dispatched(&slot_hash)
         .with_context(|| format!("resolving template artifacts for {:?}", args.template))?;
 

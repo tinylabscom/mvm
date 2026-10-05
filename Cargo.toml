@@ -500,6 +500,9 @@ which.workspace = true
 # `tests/audit_receipt_export.rs` builds a synthetic chain-signed audit log
 # directly with the same primitives the host uses.
 mvm-hostd = { workspace = true, default-features = false }
+# `tests/runtime_boot_bench.rs` provisions grant-bearing boots with the same
+# attenuated default agent-verb set an admitted run receives.
+mvm-client.workspace = true
 
 [features]
 # ── The two product surfaces — the only two things this project ships ─────────
@@ -517,12 +520,19 @@ mvm-hostd = { workspace = true, default-features = false }
 # `host`). `xtask check-two-surfaces` fails CI if a third consumer-facing
 # *product* knob appears; internal knobs live on its allowlist.
 
-# The default binary is the lean host-runtime core (builder VM dispatch +
-# in-process rootfs materialize) — unchanged closure. mvmd builds lean with
-# `default-features = false`.
+# The default binary is the host-runtime core (builder VM dispatch + in-process
+# rootfs materialize) plus the image-set signature verifier. The verifier is not
+# optional in practice: a first run fetches the signed image set the image lock
+# pins, and a build that cannot check its signature refuses it, so a default
+# `cargo build` without the verifier cannot boot anything. Verification is
+# offline against an embedded trust root; the cost is the Sigstore crate stack
+# (aws-lc, plus an HTTP client this path never calls), which the release binary
+# already carries through `user`. mvmd depends on `mvm-core` and `mvm-client`
+# directly, so nothing here reaches it.
 default = [
     "mvm-cli/builder-vm",
     "mvm-cli/pure-mkfs",
+    "mvm-cli/manifest-verify",
 ]
 
 # `host` — everything the host machine runs to boot/manage/secure/build
@@ -532,12 +542,15 @@ default = [
 host = [
     "mvm-cli/builder-vm",
     "mvm-cli/pure-mkfs",
+    "mvm-cli/manifest-verify",
     "mvm-cli/custom-dns",
     "mvm-core/hostd-transport",
 ]
 
 # `user` — everything a user runs to create/drive sandboxes: cosign manifest
-# verification for `--prod` and `build --watch`.
+# verification for `--prod` and `build --watch`. `default` already carries the
+# verifier; `user` names it too so a `default-features = false` build that asks
+# for the user surface still gets it.
 user = [
     "mvm-runtime/manifest-verify",
     "mvm-cli/manifest-verify",

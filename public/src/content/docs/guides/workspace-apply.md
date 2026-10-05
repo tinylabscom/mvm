@@ -8,6 +8,10 @@ and writes its own ext4 image, and nothing it does reaches your tree by
 itself. That boundary is what makes an agent safe to point at real code — and
 this guide is the one reviewed path back across it.
 
+`mvmctl machine --help` lists `apply`, `undo`, and `redo`. These commands
+operate on named machines with workspace volumes, not transient `run --mount`
+copies.
+
 Everything here is journaled and reversible. An apply snapshots every host
 byte it will replace before touching anything, the snapshot's Merkle root
 lands in the audit chain, and undo/redo walk the same journal. The agent
@@ -60,9 +64,32 @@ mvmctl machine apply coding-agent --yes
 Before anything is written, every host file the apply would overwrite or
 delete is copied into a content-addressed snapshot under the machine's state
 dir, the manifest records a Merkle root over the plan, and the journal gains
-a begin entry. Writes then land through temp files and atomic renames. A
+a begin entry. Before any host write, a separate root over the captured host
+pre-images, including whether each path was absent, a file, or a symlink, is
+recorded as a chain-signed `workspace.snapshot` entry, linked
+to the later `workspace.applied` entry by apply ID and manifest root. Writes
+then land through temp files and atomic renames. A
 crash mid-apply recovers on the next command: begun-without-finished rolls
 back from the snapshot; finished-without-recorded completes the entry.
+The apply refuses a host symlink whose target cannot be represented as UTF-8,
+because it could not restore that target safely after a crash.
+If the signed `workspace.applied` entry cannot be appended during the command,
+`mvmctl` restores the staged pre-images and cancels that commit. If restoration
+also fails, the command reports that the working tree may have changed and
+requires inspection before another apply. A durable marker also covers a
+process crash after the host commit but before the signed append: the next
+`machine apply`, `machine undo`, or `machine redo` command verifies the signed
+audit chain, keeps a matching signed commit, or restores and cancels an
+unsigned one. If the chain is unavailable, recovery restores host pre-images
+and retains an uncertainty marker rather than treating an unverified entry
+as proof.
+If an append reports an error after writing a valid signed entry, verification
+keeps the audited commit. If verification itself is unavailable, the command
+restores host pre-images and refuses another apply until recovery can determine
+the signed result. Recovery retries an interrupted restore before reading the
+chain. If the original apply entry did land, it records a chain-signed
+`workspace.audit_rollback` compensation before clearing the marker; otherwise
+it clears the marker without claiming a mutation occurred.
 
 Two gates shape the plan:
 

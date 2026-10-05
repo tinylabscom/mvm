@@ -11,7 +11,7 @@ pub(crate) struct HostShellEnvironment;
 
 impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment {
     fn shell_exec(&self, script: &str) -> Result<()> {
-        let output = std::process::Command::new("bash")
+        let output = mvm_core::env_hygiene::helper_command("bash")
             .args(["-c", script])
             .output()
             .context("failed to run shell command")?;
@@ -32,7 +32,7 @@ impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment {
     }
 
     fn shell_exec_visible(&self, script: &str) -> Result<()> {
-        let status = std::process::Command::new("bash")
+        let status = mvm_core::env_hygiene::helper_command("bash")
             .args(["-c", script])
             .stdin(std::process::Stdio::inherit())
             .stdout(std::process::Stdio::inherit())
@@ -58,7 +58,7 @@ impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment {
     }
 
     fn shell_exec_capture(&self, script: &str) -> Result<(String, String)> {
-        let output = std::process::Command::new("bash")
+        let output = mvm_core::env_hygiene::helper_command("bash")
             .args(["-c", script])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

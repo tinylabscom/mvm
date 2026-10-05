@@ -1,6 +1,6 @@
 //! Host-side workload-flake build cache.
 //!
-//! `mvmctl up --flake` runs `nix build` inside a builder VM on every
+//! `mvmctl machine run --flake` runs `nix build` inside a builder VM on every
 //! invocation. Even when the resulting image is byte-identical to the
 //! previous run, the build leg pays the full builder-VM boot + nix
 //! evaluation (~tens of seconds) just to rediscover the cache hit —
@@ -125,6 +125,13 @@ const EXCLUDED_BASENAMES: &[&str] = &[
     ".claude",
     ".worktrees",
     ".playwright-mcp",
+    // Python interpreter and tool caches: the SDK test suite writes them, so
+    // hashing them made every test run change the workload image keys.
+    "__pycache__",
+    ".venv",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
 ];
 
 /// Compute the host-side fingerprint of every input the workload nix
@@ -484,6 +491,41 @@ mod tests {
         assert_eq!(
             before, after,
             "excluded dirs must not affect the fingerprint"
+        );
+    }
+
+    #[test]
+    fn running_the_python_sdk_tests_does_not_move_the_workspace_digest() {
+        let ws = tempfile::tempdir().unwrap();
+        let sdk = "crates/mvm-sdk/sdks/python";
+        write(ws.path(), &format!("{sdk}/mvm/__init__.py"), "");
+
+        let before = mvm_workspace_source_digest(ws.path()).unwrap();
+        write(
+            ws.path(),
+            &format!("{sdk}/mvm/__pycache__/__init__.cpython-312.pyc"),
+            "pyc",
+        );
+        write(ws.path(), &format!("{sdk}/.venv/bin/python"), "venv");
+        write(
+            ws.path(),
+            &format!("{sdk}/.pytest_cache/v/cache/nodeids"),
+            "[]",
+        );
+        write(
+            ws.path(),
+            &format!("{sdk}/.mypy_cache/3.12/mvm.data.json"),
+            "{}",
+        );
+        write(ws.path(), &format!("{sdk}/.ruff_cache/CACHEDIR.TAG"), "tag");
+        let after = mvm_workspace_source_digest(ws.path()).unwrap();
+        assert_eq!(before, after, "python tool caches are not build inputs");
+
+        write(ws.path(), &format!("{sdk}/mvm/__init__.py"), "x = 1");
+        assert_ne!(
+            after,
+            mvm_workspace_source_digest(ws.path()).unwrap(),
+            "the SDK's own sources still move the digest"
         );
     }
 

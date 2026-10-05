@@ -513,7 +513,7 @@
           ]
         },
         {
-          "description": "Ask an approval backend. Until one is wired, an `ask` is refused.",
+          "description": "Ask the host approval supervisor. Without a live broker, it is refused.",
           "type": "string",
           "enum": [
             "ask"

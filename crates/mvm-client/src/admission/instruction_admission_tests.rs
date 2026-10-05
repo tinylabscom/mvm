@@ -241,27 +241,10 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
 
 #[test]
 fn deny_audits_and_refuses_an_unsigned_instruction_in_a_host_snapshot_image() {
-    use mvm_fs::ext4::{Node, Owner, build_image};
-
     let f = fixture(Some("deny"));
     let live = f.mount.join("CLAUDE.md");
     crate::instruction_trust::sign::sign_file(&live, &publisher_key()).unwrap();
-    let image = f._dir.path().join("host-snapshot.ext4");
-    std::fs::write(
-        &image,
-        build_image(
-            vec![Node::File {
-                path: "/CLAUDE.md".to_string(),
-                mode: 0o644,
-                data: b"guest-visible unsigned instructions\n".to_vec(),
-                xattrs: Vec::new(),
-                owner: Owner::ROOT,
-            }],
-            &Default::default(),
-        )
-        .unwrap(),
-    )
-    .unwrap();
+    let image = unsigned_instruction_image(&f, "host-snapshot.ext4");
     let images = vec![image.clone()];
     let mut disk_share = share(&f.mount);
     disk_share.kind = mvm_core::plan::ShareKind::Disk;
@@ -279,6 +262,67 @@ fn deny_audits_and_refuses_an_unsigned_instruction_in_a_host_snapshot_image() {
         ..pinning_params(&f.rootfs, &ledger)
     })
     .expect_err("the image's unsigned file must refuse a deny boot");
+    assert!(format!("{err:#}").contains("unsigned"), "{err:#}");
+    let entries = chain(&f);
+    assert_eq!(
+        entry(&entries, "trust.instruction_unsigned")["root"],
+        image.display().to_string()
+    );
+    entry(&entries, "plan.admission_refused");
+}
+
+/// An ext4 image holding one unsigned `CLAUDE.md`, the shape a `--mount` is
+/// materialized into before it reaches the guest.
+fn unsigned_instruction_image(f: &Fixture, name: &str) -> PathBuf {
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    let image = f._dir.path().join(name);
+    std::fs::write(
+        &image,
+        build_image(
+            vec![Node::File {
+                path: "/CLAUDE.md".to_string(),
+                mode: 0o644,
+                data: b"guest-visible unsigned instructions\n".to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            }],
+            &Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    image
+}
+
+#[test]
+fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
+    let f = fixture(Some("deny"));
+    crate::instruction_trust::sign::sign_file(&f.mount.join("CLAUDE.md"), &publisher_key())
+        .unwrap();
+    let image = unsigned_instruction_image(&f, "0123abcd.ext4");
+    let volumes = vec![mvm_core::vm_backend::VmVolume {
+        host: f.mount.display().to_string(),
+        guest: "/work".to_string(),
+        read_only: true,
+        materialized_image: Some(image.display().to_string()),
+        ..Default::default()
+    }];
+    let images = super::instructions::materialized_mount_images(&volumes);
+    let ledger = InMemoryNonceLedger::new();
+    let err = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            user_policy: Some(&f.policy),
+            ..InstructionSources::for_workload(None)
+                .with_mount_roots(&[])
+                .with_mount_images(&images)
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("the image the guest mounts carries an unsigned file");
     assert!(format!("{err:#}").contains("unsigned"), "{err:#}");
     let entries = chain(&f);
     assert_eq!(

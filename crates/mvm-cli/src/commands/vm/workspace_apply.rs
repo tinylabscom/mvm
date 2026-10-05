@@ -13,7 +13,7 @@
 
 use std::io::IsTerminal as _;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Args;
@@ -23,9 +23,11 @@ use mvm_contract::policy::protected_paths::{
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::tree_diff::Ext4Tree;
-use mvm_fs::workspace_apply::store::ApplyStore;
+use mvm_fs::workspace_apply::store::{ApplyStore, StagedApply};
 use mvm_fs::workspace_apply::{ApplyPlan, PlanParams};
-use mvm_hostd::audit::emitter::{AuditEmitter, WorkspaceMutationAudit, workspace_audit};
+use mvm_hostd::audit::emitter::{
+    AuditEmitter, WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit,
+};
 
 use super::workspace::Workspace;
 use super::{diff, workspace};
@@ -160,26 +162,76 @@ pub(in crate::commands) fn run_apply(
 
     let emitter = workspace_audit_emitter()?;
     let staged = store.stage(plan, &selected.source_dir, &live_image, None)?;
+    let snapshot_root = staged.snapshot_merkle_root();
+    let snapshot_plan = workspace_audit_plan(
+        &args.name,
+        &selected.volume,
+        "workspace:snapshot",
+        &snapshot_root,
+    )?;
     let audit_plan = workspace_audit_plan(
         &args.name,
         &selected.volume,
         "workspace:apply",
         staged.merkle_root(),
     )?;
-    store.commit(&staged, &selected.source_dir)?;
-    emitter
-        .emit_workspace_mutation(
-            &audit_plan,
-            WorkspaceMutationAudit {
+    record_snapshot_then_commit(
+        || {
+            emitter.emit_workspace_snapshot(
+                &snapshot_plan,
+                WorkspaceSnapshotAudit {
+                    vm_name: &args.name,
+                    volume: &selected.volume,
+                    apply_id: staged.id(),
+                    snapshot_root: &snapshot_root,
+                    manifest_root: staged.merkle_root(),
+                },
+            )
+        },
+        || {
+            store.arm_signed_audit(&staged)?;
+            store
+                .commit(&staged, &selected.source_dir)
+                .map_err(Into::into)
+        },
+    )?;
+    seal_apply_or_rollback(
+        || {
+            emitter.emit_workspace_mutation(
+                &audit_plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: &args.name,
+                    volume: &selected.volume,
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+        },
+        || {
+            emitter.workspace_mutation_recorded(WorkspaceMutationAudit {
                 event: workspace_audit::APPLIED_EVENT,
                 vm_name: &args.name,
                 volume: &selected.volume,
                 apply_id: staged.id(),
                 target_id: None,
                 merkle_root: staged.merkle_root(),
-            },
-        )
-        .context("recording the workspace apply in the signed audit chain")?;
+            })
+        },
+        |certainty| {
+            match certainty {
+                AuditCertainty::Absent => store.rollback_unsealed(&staged, &selected.source_dir),
+                AuditCertainty::Unverifiable => {
+                    store.rollback_unverifiable(&staged, &selected.source_dir)
+                }
+            }
+            .map_err(Into::into)
+        },
+    )?;
+    store
+        .seal_signed_audit(&staged)
+        .context("clearing the reconciled workspace audit marker")?;
     mvm_core::audit_emit!(
         WorkspaceApply,
         vm: &args.name,
@@ -189,11 +241,60 @@ pub(in crate::commands) fn run_apply(
         staged.merkle_root()
     );
     crate::ui::success(&format!(
-        "applied {} change(s); snapshot merkle root {}",
+        "applied {} change(s); snapshot merkle root {}; apply manifest root {}",
         staged.manifest().ops.len(),
+        snapshot_root,
         staged.merkle_root()
     ));
     Ok(())
+}
+
+/// The staged pre-images must reach the signed chain before any host write.
+/// A refused audit append leaves the host tree untouched for recovery.
+fn record_snapshot_then_commit(
+    record_snapshot: impl FnOnce() -> Result<()>,
+    commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    record_snapshot().context("recording the host pre-apply snapshot in the signed audit chain")?;
+    commit()
+}
+
+/// A failed applied-event append must not leave unrecorded host writes behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuditCertainty {
+    Absent,
+    Unverifiable,
+}
+
+fn seal_apply_or_rollback(
+    record_applied: impl FnOnce() -> Result<()>,
+    verify_recorded: impl FnOnce() -> Result<bool>,
+    rollback: impl FnOnce(AuditCertainty) -> Result<()>,
+) -> Result<()> {
+    let Err(audit_error) = record_applied() else {
+        return Ok(());
+    };
+    match verify_recorded() {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(verify_error) => return match rollback(AuditCertainty::Unverifiable) {
+            Ok(()) => Err(verify_error).context(format!(
+                "signed workspace append reported {audit_error}; the chain could not verify its outcome, so host pre-images were restored and a durable recovery marker retained"
+            )),
+            Err(rollback_error) => Err(rollback_error).context(format!(
+                "signed workspace append reported {audit_error} and chain verification failed ({verify_error}); host rollback also failed and the working tree may have changed"
+            )),
+        },
+    }
+    match rollback(AuditCertainty::Absent) {
+        Ok(()) => Err(audit_error)
+            .context("recording the signed workspace apply failed; host pre-images were restored"),
+        Err(rollback_error) => Err(rollback_error).with_context(|| {
+            format!(
+                "recording the signed workspace apply failed ({audit_error}); host rollback also failed and the working tree may have changed"
+            )
+        }),
+    }
 }
 
 pub(in crate::commands) fn run_undo(
@@ -330,7 +431,109 @@ fn open_recovered_store(vm: &str, selected: &Workspace) -> Result<ApplyStore> {
             "rolled back an interrupted apply ({rolled_back}) before continuing"
         ));
     }
+    reconcile_uncertain_signed_audits(&store, vm, selected)?;
+    let pending = store.pending_signed_audits()?;
+    if !pending.is_empty() {
+        let restored =
+            reconcile_pending_signed_audits(&store, &selected.source_dir, pending, |staged| {
+                let emitter = workspace_audit_emitter()?;
+                emitter.workspace_mutation_recorded(WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: vm,
+                    volume: &selected.volume,
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                })
+            })?;
+        for id in restored {
+            crate::ui::warn(&format!(
+                "restored unaudited workspace apply {id} after an interrupted command"
+            ));
+        }
+    }
     Ok(store)
+}
+
+fn reconcile_uncertain_signed_audits(
+    store: &ApplyStore,
+    vm: &str,
+    selected: &Workspace,
+) -> Result<()> {
+    let uncertain = store.uncertain_signed_audits()?;
+    for staged in &uncertain {
+        store
+            .rollback_unverifiable(staged, &selected.source_dir)
+            .context("restoring host pre-images after an interrupted audit rollback")?;
+    }
+    if uncertain.is_empty() {
+        return Ok(());
+    }
+    let emitter = workspace_audit_emitter()?;
+    for staged in uncertain {
+        let applied = WorkspaceMutationAudit {
+            event: workspace_audit::APPLIED_EVENT,
+            vm_name: vm,
+            volume: &selected.volume,
+            apply_id: staged.id(),
+            target_id: None,
+            merkle_root: staged.merkle_root(),
+        };
+        if emitter.workspace_mutation_recorded(applied)? {
+            let rollback = WorkspaceMutationAudit {
+                event: workspace_audit::AUDIT_ROLLBACK_EVENT,
+                vm_name: vm,
+                volume: &selected.volume,
+                apply_id: staged.id(),
+                target_id: None,
+                merkle_root: staged.merkle_root(),
+            };
+            if !emitter.workspace_mutation_recorded(rollback)? {
+                let plan = workspace_audit_plan(
+                    vm,
+                    &selected.volume,
+                    "workspace:audit-rollback",
+                    staged.merkle_root(),
+                )?;
+                let appended = emitter.emit_workspace_mutation(&plan, rollback);
+                if let Err(append_error) = appended
+                    && !emitter.workspace_mutation_recorded(rollback)?
+                {
+                    return Err(append_error)
+                        .context("recording the signed compensation for an uncertain apply");
+                }
+            }
+        }
+        store.settle_uncertain_signed_audit(&staged)?;
+    }
+    Ok(())
+}
+
+fn reconcile_pending_signed_audits(
+    store: &ApplyStore,
+    source_dir: &Path,
+    pending: Vec<StagedApply>,
+    mut recorded: impl FnMut(&StagedApply) -> Result<bool>,
+) -> Result<Vec<String>> {
+    let mut restored = Vec::new();
+    for staged in pending {
+        match recorded(&staged) {
+            Ok(true) => store.seal_signed_audit(&staged)?,
+            Ok(false) => {
+                store.rollback_unsealed(&staged, source_dir)?;
+                restored.push(staged.id().to_string());
+            }
+            Err(audit_error) => {
+                store
+                    .rollback_unverifiable(&staged, source_dir)
+                    .context("restoring host pre-images while the signed chain is unavailable")?;
+                return Err(audit_error).context(
+                    "the signed audit result is unavailable; host pre-images were restored and reconciliation remains pending",
+                );
+            }
+        }
+    }
+    Ok(restored)
 }
 
 fn apply_store_root(vm: &str, volume: &str) -> PathBuf {
@@ -405,7 +608,65 @@ fn op_summary(op: &mvm_fs::workspace_apply::FileOp) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_apply_authorized;
+    use super::{
+        AuditCertainty, ensure_apply_authorized, reconcile_pending_signed_audits,
+        reconcile_uncertain_signed_audits, record_snapshot_then_commit, seal_apply_or_rollback,
+        workspace_audit_emitter, workspace_audit_plan,
+    };
+    use anyhow::anyhow;
+    use mvm_fs::ext4::{Node, Owner, build_image};
+    use mvm_fs::tree_diff::Ext4Tree;
+    use mvm_fs::workspace_apply::PlanParams;
+    use mvm_fs::workspace_apply::store::{ApplyStore, StagedApply};
+    use mvm_hostd::audit::emitter::{AuditEmitter, WorkspaceMutationAudit, workspace_audit};
+    use std::cell::RefCell;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn audit_workspace(source_dir: PathBuf) -> super::super::workspace::Workspace {
+        super::super::workspace::Workspace {
+            volume: "source".into(),
+            guest_path: "/work".into(),
+            source_dir,
+            baseline_key: "baseline".into(),
+            image: PathBuf::from("unused.ext4"),
+        }
+    }
+
+    fn pending_apply_fixture() -> (tempfile::TempDir, PathBuf, ApplyStore, StagedApply) {
+        let home = tempfile::tempdir().expect("home");
+        let source = home.path().join("source");
+        fs::create_dir(&source).expect("source");
+        fs::write(source.join("edit.txt"), "before\n").expect("host pre-image");
+        let image = |data: &[u8], name: &str| {
+            let bytes = build_image(
+                vec![Node::File {
+                    path: "/edit.txt".to_string(),
+                    mode: 0o644,
+                    data: data.to_vec(),
+                    xattrs: Vec::new(),
+                    owner: Owner::ROOT,
+                }],
+                &Default::default(),
+            )
+            .expect("image");
+            let path = home.path().join(name);
+            fs::write(&path, bytes).expect("write image");
+            path
+        };
+        let baseline_path = image(b"before\n", "baseline.ext4");
+        let live_path = image(b"after\n", "live.ext4");
+        let baseline = Ext4Tree::open(&baseline_path).expect("baseline");
+        let live = Ext4Tree::open(&live_path).expect("live");
+        let store = ApplyStore::open(home.path().join("store")).expect("store");
+        let plan = store
+            .plan(&PlanParams::new(&baseline, &live, &source))
+            .expect("plan");
+        let staged = store.stage(plan, &source, &live, None).expect("stage");
+        store.arm_signed_audit(&staged).expect("arm audit");
+        store.commit(&staged, &source).expect("commit");
+        (home, source, store, staged)
+    }
 
     #[test]
     fn yes_authorizes_without_a_terminal() {
@@ -421,5 +682,372 @@ mod tests {
     fn no_terminal_and_no_yes_refuses() {
         let err = ensure_apply_authorized(false, false).expect_err("must refuse");
         assert!(err.to_string().contains("--yes"), "{err}");
+    }
+
+    #[test]
+    fn snapshot_audit_precedes_host_commit() {
+        let order = RefCell::new(Vec::new());
+        record_snapshot_then_commit(
+            || {
+                order.borrow_mut().push("snapshot");
+                Ok(())
+            },
+            || {
+                order.borrow_mut().push("commit");
+                Ok(())
+            },
+        )
+        .expect("both steps succeed");
+        assert_eq!(*order.borrow(), ["snapshot", "commit"]);
+    }
+
+    #[test]
+    fn snapshot_audit_failure_prevents_host_commit() {
+        let committed = std::cell::Cell::new(false);
+        let error = record_snapshot_then_commit(
+            || Err(anyhow!("audit unavailable")),
+            || {
+                committed.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("audit refusal must stop commit");
+        assert!(!committed.get());
+        assert!(error.to_string().contains("pre-apply snapshot"));
+    }
+
+    #[test]
+    fn a_commit_failure_is_reported_after_the_snapshot() {
+        let recorded = std::cell::Cell::new(false);
+        let error = record_snapshot_then_commit(
+            || {
+                recorded.set(true);
+                Ok(())
+            },
+            || Err(anyhow!("host write refused")),
+        )
+        .expect_err("commit error must propagate");
+        assert!(recorded.get());
+        assert!(error.to_string().contains("host write refused"));
+    }
+
+    #[test]
+    fn a_signed_apply_entry_keeps_the_committed_host_tree() {
+        let rolled_back = std::cell::Cell::new(false);
+        seal_apply_or_rollback(
+            || Ok(()),
+            || Ok(false),
+            |_| {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect("signed apply");
+        assert!(!rolled_back.get());
+    }
+
+    #[test]
+    fn a_failed_signed_apply_entry_restores_host_pre_images() {
+        let rolled_back = std::cell::Cell::new(false);
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("audit append refused")),
+            || Ok(false),
+            |certainty| {
+                assert_eq!(certainty, AuditCertainty::Absent);
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("apply must fail");
+        assert!(rolled_back.get());
+        assert!(error.to_string().contains("pre-images were restored"));
+    }
+
+    #[test]
+    fn a_failed_rollback_warns_that_host_changes_may_remain() {
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("audit append refused")),
+            || Ok(false),
+            |_| Err(anyhow!("host restore refused")),
+        )
+        .expect_err("apply must fail");
+        assert!(error.to_string().contains("may have changed"));
+        assert!(error.to_string().contains("audit append refused"));
+    }
+
+    #[test]
+    fn an_append_error_with_a_verified_signed_entry_keeps_the_host_commit() {
+        let rolled_back = std::cell::Cell::new(false);
+        seal_apply_or_rollback(
+            || Err(anyhow!("append result lost")),
+            || Ok(true),
+            |_| {
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect("verified signed entry settles the apply");
+        assert!(!rolled_back.get());
+    }
+
+    #[test]
+    fn an_unverifiable_append_restores_host_pre_images() {
+        let rolled_back = std::cell::Cell::new(false);
+        let error = seal_apply_or_rollback(
+            || Err(anyhow!("append result lost")),
+            || Err(anyhow!("audit chain unavailable")),
+            |certainty| {
+                assert_eq!(certainty, AuditCertainty::Unverifiable);
+                rolled_back.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("unverifiable append must fail");
+        assert!(rolled_back.get());
+        assert!(error.to_string().contains("host pre-images were restored"));
+    }
+
+    #[test]
+    fn an_uncertain_apply_with_no_signed_entry_settles_without_compensation() {
+        let (home, source, store, staged) = pending_apply_fixture();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path().join("mvm-home"));
+        store
+            .rollback_unverifiable(&staged, &source)
+            .expect("restore host");
+        let emitter = workspace_audit_emitter().expect("emitter");
+        let plan = workspace_audit_plan(
+            "agent-vm",
+            "source",
+            "workspace:apply",
+            staged.merkle_root(),
+        )
+        .expect("plan");
+        emitter
+            .emit_workspace_mutation(
+                &plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: "agent-vm",
+                    volume: "source",
+                    apply_id: "unrelated-apply",
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+            .expect("unrelated signed entry");
+        reconcile_uncertain_signed_audits(&store, "agent-vm", &audit_workspace(source.clone()))
+            .expect("settle absent entry");
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(
+            store
+                .uncertain_signed_audits()
+                .expect("uncertain")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_uncertain_signed_apply_gets_a_compensating_rollback_entry() {
+        let (home, source, store, staged) = pending_apply_fixture();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path().join("mvm-home"));
+        store
+            .rollback_unverifiable(&staged, &source)
+            .expect("restore host");
+        let emitter = workspace_audit_emitter().expect("emitter");
+        let plan = workspace_audit_plan(
+            "agent-vm",
+            "source",
+            "workspace:apply",
+            staged.merkle_root(),
+        )
+        .expect("plan");
+        emitter
+            .emit_workspace_mutation(
+                &plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: "agent-vm",
+                    volume: "source",
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+            .expect("signed apply entry");
+        reconcile_uncertain_signed_audits(&store, "agent-vm", &audit_workspace(source.clone()))
+            .expect("compensate signed entry");
+        assert!(
+            emitter
+                .workspace_mutation_recorded(WorkspaceMutationAudit {
+                    event: workspace_audit::AUDIT_ROLLBACK_EVENT,
+                    vm_name: "agent-vm",
+                    volume: "source",
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                })
+                .expect("verify compensation")
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(
+            store
+                .uncertain_signed_audits()
+                .expect("uncertain")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_damaged_chain_keeps_the_restored_host_and_uncertain_marker() {
+        let (home, source, store, staged) = pending_apply_fixture();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let mvm_home = home.path().join("mvm-home");
+        env.isolate_mvm_home(&mvm_home);
+        store
+            .rollback_unverifiable(&staged, &source)
+            .expect("restore host");
+        let emitter = workspace_audit_emitter().expect("emitter");
+        let plan = workspace_audit_plan(
+            "agent-vm",
+            "source",
+            "workspace:apply",
+            staged.merkle_root(),
+        )
+        .expect("plan");
+        emitter
+            .emit_workspace_mutation(
+                &plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: "agent-vm",
+                    volume: "source",
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+            .expect("signed apply entry");
+        let chain = mvm_home.join("audit/local.jsonl");
+        let original = fs::read_to_string(&chain).expect("chain");
+        fs::write(
+            &chain,
+            original.replacen("workspace.applied", "workspace.undone", 1),
+        )
+        .expect("tamper chain");
+
+        assert!(
+            reconcile_uncertain_signed_audits(&store, "agent-vm", &audit_workspace(source.clone()))
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "before\n"
+        );
+        assert_eq!(store.uncertain_signed_audits().expect("uncertain").len(), 1);
+    }
+
+    #[test]
+    fn recovery_restores_a_committed_tree_without_a_signed_entry() {
+        let (_home, source, store, staged) = pending_apply_fixture();
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "after\n"
+        );
+        let reopened = ApplyStore::open(store.root()).expect("reopen");
+        let pending = reopened.pending_signed_audits().expect("pending");
+        let restored = reconcile_pending_signed_audits(&reopened, &source, pending, |_| Ok(false))
+            .expect("reconcile unsigned");
+        assert_eq!(restored, [staged.id()]);
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(reopened.effective_applies().expect("effective").is_empty());
+    }
+
+    #[test]
+    fn recovery_keeps_a_commit_with_a_matching_signed_entry() {
+        let (home, source, store, staged) = pending_apply_fixture();
+        let emitter = AuditEmitter::with_dir(
+            ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]),
+            &home.path().join("audit"),
+        )
+        .expect("emitter");
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("local")
+            .plan_id("workspace-recovery")
+            .build();
+        emitter
+            .emit_workspace_mutation(
+                &plan,
+                WorkspaceMutationAudit {
+                    event: workspace_audit::APPLIED_EVENT,
+                    vm_name: "agent-vm",
+                    volume: "source",
+                    apply_id: staged.id(),
+                    target_id: None,
+                    merkle_root: staged.merkle_root(),
+                },
+            )
+            .expect("signed entry");
+
+        let reopened = ApplyStore::open(store.root()).expect("reopen");
+        let pending = reopened.pending_signed_audits().expect("pending");
+        let restored = reconcile_pending_signed_audits(&reopened, &source, pending, |item| {
+            emitter.workspace_mutation_recorded(WorkspaceMutationAudit {
+                event: workspace_audit::APPLIED_EVENT,
+                vm_name: "agent-vm",
+                volume: "source",
+                apply_id: item.id(),
+                target_id: None,
+                merkle_root: item.merkle_root(),
+            })
+        })
+        .expect("reconcile signed");
+        assert!(restored.is_empty());
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "after\n"
+        );
+        assert!(
+            reopened
+                .pending_signed_audits()
+                .expect("pending")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recovery_with_an_unverifiable_chain_restores_host_and_blocks() {
+        let (_home, source, store, _staged) = pending_apply_fixture();
+        let reopened = ApplyStore::open(store.root()).expect("reopen");
+        let pending = reopened.pending_signed_audits().expect("pending");
+        let error = reconcile_pending_signed_audits(&reopened, &source, pending, |_| {
+            Err(anyhow!("chain verification refused"))
+        })
+        .expect_err("unverifiable chain must block");
+        assert!(format!("{error:#}").contains("chain verification refused"));
+        assert_eq!(
+            fs::read_to_string(source.join("edit.txt")).unwrap(),
+            "before\n"
+        );
+        assert!(
+            reopened
+                .pending_signed_audits()
+                .expect("pending")
+                .is_empty()
+        );
+        assert_eq!(
+            reopened.uncertain_signed_audits().expect("uncertain").len(),
+            1
+        );
     }
 }

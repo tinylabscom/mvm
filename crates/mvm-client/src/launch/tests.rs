@@ -275,6 +275,110 @@ async fn an_exit_records_the_host_state_size_even_when_the_backend_measured_noth
 }
 
 #[tokio::test]
+async fn a_transient_command_exit_is_sealed_from_its_admitted_plan() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = transient_request(&home.rootfs())
+        .name("t-cli-exit")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    let signed_plan_json = serde_json::to_string(outcome.admitted.signed()).expect("signed plan");
+
+    record_transient_exit(TransientExitAudit {
+        signed_plan_json: &signed_plan_json,
+        vm_name: "t-cli-exit",
+        backend: "mock",
+        exit_code: Some(0),
+        completed: true,
+    })
+    .expect("record transient exit");
+
+    let audit = home.audit_text();
+    assert!(audit.contains("plan.exited"), "got: {audit}");
+    assert!(audit.contains("session.sealed"), "got: {audit}");
+    assert!(audit.contains("\"exit_code\":\"0\""), "got: {audit}");
+    let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+    let verified = mvm_hostd::audit::session::verify_session(
+        &mvm_core::config::mvm_audit_dir(),
+        "local",
+        &outcome.plan_id,
+        &signer.verifying,
+    );
+    assert_eq!(
+        verified.verdict,
+        mvm_hostd::audit::session::Verdict::Verified,
+        "{verified:?}"
+    );
+}
+
+#[test]
+fn malformed_transient_plan_cannot_create_an_exit_seal() {
+    let home = Isolated::new();
+    let result = record_transient_exit(TransientExitAudit {
+        signed_plan_json: "not a signed plan",
+        vm_name: "t-invalid-exit",
+        backend: "mock",
+        exit_code: Some(0),
+        completed: true,
+    });
+
+    assert!(result.is_err());
+    assert!(!home.audit_text().contains("session.sealed"));
+}
+
+#[tokio::test]
+async fn a_tampered_transient_plan_cannot_create_an_exit_seal() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = transient_request(&home.rootfs())
+        .name("t-tampered-exit")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    let mut signed = outcome.admitted.signed().clone();
+    signed.0.payload.push(b' ');
+    let signed_plan_json = serde_json::to_string(&signed).expect("signed plan");
+
+    let result = record_transient_exit(TransientExitAudit {
+        signed_plan_json: &signed_plan_json,
+        vm_name: "t-tampered-exit",
+        backend: "mock",
+        exit_code: Some(0),
+        completed: true,
+    });
+
+    assert!(result.is_err());
+    assert!(!home.audit_text().contains("session.sealed"));
+}
+
+#[tokio::test]
+async fn a_failed_transient_dispatch_never_attests_exit_zero() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = transient_request(&home.rootfs())
+        .name("t-cli-failed")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    let signed_plan_json = serde_json::to_string(outcome.admitted.signed()).expect("signed plan");
+
+    record_transient_exit(TransientExitAudit {
+        signed_plan_json: &signed_plan_json,
+        vm_name: "t-cli-failed",
+        backend: "mock",
+        exit_code: None,
+        completed: false,
+    })
+    .expect("record failed transient");
+
+    let audit = home.audit_text();
+    assert!(audit.contains("\"captured\":\"false\""), "got: {audit}");
+    assert!(audit.contains("\"exit_code\":\"none\""), "got: {audit}");
+    assert!(audit.contains("\"seal.reason\":\"failed\""), "got: {audit}");
+}
+
+#[tokio::test]
 async fn transient_failed_launch_rolls_back_session_state() {
     let home = Isolated::new();
     let service = fixture_secret_service(&home);
@@ -626,6 +730,8 @@ async fn start_refuses_spec_shapes_the_in_process_backend_cannot_honor() {
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
+        registry_pack_image: None,
+        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),

@@ -544,7 +544,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           ]
         },
         {
-          "description": "Ask an approval backend. Until one is wired, an `ask` is refused.",
+          "description": "Ask the host approval supervisor. Without a live broker, it is refused.",
           "type": "string",
           "enum": [
             "ask"

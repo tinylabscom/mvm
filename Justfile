@@ -28,18 +28,17 @@ default:
     @just --list
 
 
-# Build all crates (debug), including the per-VM host helpers `mvmctl` spawns.
-#
-# The native per-VM helpers are separate bin targets. The optional libkrun
-# integration has its own explicit recipe `libkrun-supervisor`.
-#
-# Build all crates (debug).
+# The native per-VM helpers are separate bin targets, so a workspace build
+# covers them. The optional libkrun integration has its own explicit recipe,
+# `payload::libkrun-supervisor`.
+
+# Build all crates (debug), including the per-VM host helpers `mvmctl` spawns
 build:
     ./scripts/cargo-fast.sh build --workspace
 
 
 # ── Testing (nextest) ────────────────────────────────────────────────────
-# Run all tests, keeping the full output at target/nextest/last-run.log.
+# Keeps the full output at target/nextest/last-run.log.
 #
 # An intermittent failure in a suite this size is only diagnosable from the
 # panic and captured streams nextest prints beside it, and those survive
@@ -49,21 +48,10 @@ build:
 # is gitignored and never uploaded, so this says nothing about the CI-artifact
 # question that .config/nextest.toml settles deliberately.
 #
-# `pipefail` is load-bearing: without it the recipe reports `tee`'s status and
-# a failing suite exits 0, which is the exact silent-green this whole change
-# ── Testing (nextest) ────────────────────────────────────────────────────
-# Run all tests, keeping the full output at target/nextest/last-run.log.
-# An intermittent failure in a suite this size is only diagnosable from the
-# panic and captured streams nextest prints beside it, and those survive
-# nowhere by default — a dev who hits one has terminal scrollback at best,
-# and anyone piping this through `grep` has already discarded the part that
-# mattered. `tee` costs nothing and leaves the evidence under target/, which
-# is gitignored and never uploaded, so this says nothing about the CI-artifact
-# question that .config/nextest.toml settles deliberately.
 # `pipefail` is load-bearing: without it the recipe reports `tee`'s status and
 # a failing suite exits 0, which is the exact silent-green this whole change
 # is trying to remove.
-
+#
 # Usage: just test [FILTER]
 #   FILTER: optional test filter expression (e.g., "my_test" or "test(my_*)")
 
@@ -88,11 +76,9 @@ test FILTER="":
 # it needs a builder VM. This recipe does both halves in one go and embeds in a
 # debug build too. Note that it and a plain `cargo build` write the same
 # `target/<profile>/mvmctl` under different feature sets, so alternating the two
-
 # relinks mvmctl; that is why this is a deliberate step and not part of `build`.
 # Bare, this writes `target/debug/mvmctl` — pass `--release` if the mvmctl you
 # invoke is the release one, or the release binary is left untouched.
-#
 
 # Build an mvmctl carrying the embedded Linux host binaries (--release for a release one)
 embed *ARGS:
@@ -107,12 +93,12 @@ embed *ARGS:
     # executable lookup always finds the helper matching the selected mvmctl.
     ./scripts/cargo-fast.sh build -p mvm-hostd --bins {{ARGS}}
     ./scripts/cargo-fast.sh build -p mvm-gpu --bin mvm-gpu-endpoint {{ARGS}}
-    # The default embeds the host binaries alone. bin/dev overrides this to
+    # The default embeds the host binaries into the default surface, which
+    # carries the image-set signature verifier. bin/dev overrides this to
     # "embed-host-bins,dev" so the binary it runs carries the contributor
-    # surface (manifest-verify included) and can verify published image-set
-    # signatures during bootstrap. Any surface carrying manifest-verify must
-    # build with plain cargo: the fast-codegen config wrapper leaves the
-    # verifier's native aws-lc symbols unresolved on macOS.
+    # surface. The default surface links on the fast-codegen wrapper because
+    # .cargo/fast.toml compiles the aws-lc callers with LLVM; `dev` and `user`
+    # keep plain cargo, the path they were validated on.
     FEATURES="${MVM_EMBED_FEATURES:-embed-host-bins}"
     case ",$FEATURES," in
       *,dev,*|*,user,*) CARGO=(cargo) ;;
@@ -121,27 +107,32 @@ embed *ARGS:
     "${CARGO[@]}" build --features "$FEATURES" {{ARGS}}
 
 
-# Lint all: fmt-check + clippy + clippy-bdd + model gates
-# Usage: just lint [subset]
-#   subset: subset of checks (fmt, clippy, clippy-bdd, model)
+# SUBSET picks one group: fmt, clippy, clippy-bdd, model, or all (the default).
+# `all` also runs `check::fast-cargo`, the fast/stable toolchain-split check CI
+# runs. The body must stay a shebang script: a recipe without one runs each
+# line in its own shell, and no shell can parse half of a `case`.
+
+# Lint: fmt-check + clippy + clippy-bdd + model gates (or one SUBSET of them)
 lint SUBSET="all":
+    #!/usr/bin/env bash
+    set -euo pipefail
     case "{{ SUBSET }}" in
-    fmt) just lints::fmt-check ;;
-    clippy) just lint::clippy ;;
-    clippy-bdd) just lints::clippy-bdd ;;
-    model) just lint::model ;;
-    all)
-    just lints::fmt-check
-    just lints::clippy
-    just lints::clippy-bdd
-    just lints::model
-    just check::fast-cargo
-    ;;
-    *)
-    echo "Unknown lint subset: {{ SUBSET }}" >&2
-    echo "Valid subsets: fmt, clippy, clippy-bdd, model, all" >&2
-    exit 1
-    ;;
+      fmt) just lints::fmt-check ;;
+      clippy) just lints::clippy ;;
+      clippy-bdd) just lints::clippy-bdd ;;
+      model) just lints::model ;;
+      all)
+        just lints::fmt-check
+        just lints::clippy
+        just lints::clippy-bdd
+        just lints::model
+        just check::fast-cargo
+        ;;
+      *)
+        echo "Unknown lint subset: {{ SUBSET }}" >&2
+        echo "Valid subsets: fmt, clippy, clippy-bdd, model, all" >&2
+        exit 1
+        ;;
     esac
 
 
@@ -151,11 +142,12 @@ lint SUBSET="all":
 ci: lint test (tests::doc) (bdd::run)
 
 
-# Build optimized release binary. `embed-host-bins` matches the release
-# workflow's `MVMCTL_RELEASE_FEATURES`; without it this produces the one build
-# that looks finished and cannot bootstrap a builder VM. `release-channel` is
-# deliberately absent — it would resolve artifacts from the published channel
-# rather than this checkout.
+# `embed-host-bins` matches the release workflow's `MVMCTL_RELEASE_FEATURES`;
+# without it this produces the one build that looks finished and cannot
+# bootstrap a builder VM. `release-channel` is deliberately absent — it would
+# resolve artifacts from the published channel rather than this checkout.
+
+# Build the optimized release mvmctl with the release workflow's feature set
 release-build:
     cargo build --release --features host,user,template-registry-s3,release-artifact-bootstrap,embed-host-bins
 

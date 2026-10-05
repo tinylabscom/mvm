@@ -25,10 +25,8 @@
 //   - prod: sanitized error envelope on stderr; no stack trace, no file
 //     paths, no payload bytes in logs. Dev mode echoes the stack.
 //   - decoder hardening: reject non-finite numbers, max nesting 64.
-//   - serialization format is closed (json | msgpack). Code-execution
-//     surfaces forbidden by ADR-0009 — never reachable from this file.
-//     See scripts/wrapper_forbidden_check.py for the enforced list.
-//     mvm-allow: this is the comment that documents the gate.
+//   - serialization format is closed (json | msgpack); review new imports
+//     and decoding paths before extending this wrapper.
 
 import { readFileSync, existsSync } from "node:fs";
 import { chdir } from "node:process";

@@ -11,3 +11,8 @@ Feature: explain policy without starting a workload
     And the output contains "allowed"
     And the output contains "false"
     And the output contains "absolute runtime deny"
+
+  Scenario: a documented routed-host question parses without booting a workload
+    When I run mvmctl with "why --host api.github.com:443 --method GET --request-path /repos/org/project" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "DENY: host api.github.com:443"

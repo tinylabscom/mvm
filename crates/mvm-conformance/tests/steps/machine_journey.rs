@@ -26,6 +26,8 @@ use mvm_conformance::IsolatedHome;
 /// generated: a leaked machine from an aborted run is then findable by name
 /// and reclaimed by the next run's teardown, instead of accumulating.
 const JOURNEY_MACHINE: &str = "bdd-journey";
+const REPLAY_MACHINE: &str = "bdd-journey-replay";
+const REPLAY_MARKER: &str = "/tmp/bdd-journey-replay-marker";
 
 /// The home the journey machine lives in, booted once per process.
 ///
@@ -70,6 +72,8 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
     static BOOTED: OnceLock<Result<(), String>> = OnceLock::new();
     BOOTED.get_or_init(|| {
         // Reclaim a machine leaked by an aborted earlier run before creating.
+        let _ = run_in_journey_home(["machine", "stop", REPLAY_MACHINE, "--yes"]);
+        let _ = run_in_journey_home(["machine", "rm", REPLAY_MACHINE, "--yes"]);
         let _ = run_in_journey_home(["machine", "stop", JOURNEY_MACHINE, "--yes"]);
         let _ = run_in_journey_home(["machine", "rm", JOURNEY_MACHINE, "--yes"]);
 
@@ -124,6 +128,106 @@ fn ensure_journey_machine() -> &'static Result<(), String> {
         }
         Ok(())
     })
+}
+
+fn successful_journey_command(args: &[&str]) -> Result<Output, String> {
+    let output = run_in_journey_home(args);
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(format!(
+            "{} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// Always reclaim the fork, including when an assertion in the live witness fails.
+struct ReplayMachineCleanup {
+    active: bool,
+}
+
+impl ReplayMachineCleanup {
+    fn new() -> Self {
+        Self { active: true }
+    }
+
+    fn finish(mut self) -> Result<(), String> {
+        successful_journey_command(&["machine", "stop", REPLAY_MACHINE, "--yes"])?;
+        successful_journey_command(&["machine", "rm", REPLAY_MACHINE, "--yes"])?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for ReplayMachineCleanup {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = run_in_journey_home(["machine", "stop", REPLAY_MACHINE, "--yes"]);
+            let _ = run_in_journey_home(["machine", "rm", REPLAY_MACHINE, "--yes"]);
+        }
+    }
+}
+
+#[given(expr = "the journey replay marker is absent")]
+fn clear_journey_replay_marker(_world: &mut CliWorld) {
+    successful_journey_command(&[
+        "machine",
+        "exec",
+        JOURNEY_MACHINE,
+        "--",
+        "/bin/rm",
+        "-f",
+        REPLAY_MARKER,
+    ])
+    .expect("clear replay marker before checkpoint");
+}
+
+#[then(expr = "I remember the journey checkpoint")]
+fn remember_journey_checkpoint(world: &mut CliWorld) {
+    let output = world.last_output();
+    let stdout = std::str::from_utf8(&output.stdout).expect("checkpoint output must be UTF-8");
+    let id = mvm_conformance::journey::vm_full_checkpoint_id(stdout)
+        .expect("checkpoint creation must report its id");
+    world.journey_checkpoint_id = Some(id.to_owned());
+}
+
+#[when(expr = "I replay a recorded journey command from the checkpoint")]
+fn replay_recorded_journey_command(world: &mut CliWorld) {
+    let cleanup = ReplayMachineCleanup::new();
+    let id = world
+        .journey_checkpoint_id
+        .as_deref()
+        .expect("a checkpoint must be captured before replay");
+    successful_journey_command(&[
+        "machine",
+        "exec",
+        JOURNEY_MACHINE,
+        "--",
+        "/bin/touch",
+        REPLAY_MARKER,
+    ])
+    .expect("record input after checkpoint");
+    let replay =
+        successful_journey_command(&["machine", "replay", id, "--as", REPLAY_MACHINE, "--verbose"])
+            .expect("fork-boot checkpoint and replay recorded input");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert!(
+        combined.contains("replayed 1 step(s)"),
+        "replay did not report the expected recorded command: {combined}"
+    );
+    successful_journey_command(&["machine", "fs", "stat", REPLAY_MACHINE, REPLAY_MARKER])
+        .expect("the replayed command must create the marker in the fork");
+    successful_journey_command(&["machine", "exec", JOURNEY_MACHINE, "--", "/bin/true"])
+        .expect("replay must leave the source machine executing commands");
+    cleanup
+        .finish()
+        .expect("replayed machine must be removable");
 }
 
 #[given(expr = "the journey machine is running")]

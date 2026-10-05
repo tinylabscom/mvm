@@ -636,7 +636,7 @@ fixture = "mcp-tool-policy"
 [[command]]
 path = "pull"
 tier = "parse"
-reason = "fetches from a pack registry over the network and verification needs the manifest-verify build; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
+reason = "fetches from a pack registry over the network, so the outcome tracks the registry rather than mvm; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
 
 [[command]]
 path = "search"

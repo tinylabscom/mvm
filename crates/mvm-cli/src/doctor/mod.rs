@@ -47,10 +47,10 @@ pub use toolchain::{ZigbuildProbe, probe_zigbuild};
 #[serde(rename_all = "kebab-case")]
 pub enum DoctorWorkflow {
     /// CLI user running an existing command (`mvmctl run`,
-    /// `mvmctl up`, `mvmctl build`).
+    /// `mvmctl machine run`, `mvmctl build`).
     CliRun,
-    /// Python SDK consumer (`@mvm.app` decorator + `mvmctl
-    /// compile` / `up` / `invoke`).
+    /// Python SDK consumer (`@mvm.app` decorator + `mvmctl build
+    /// compile` / `mvmctl machine run`).
     PythonSdk,
     /// TypeScript / Node SDK consumer.
     TypescriptSdk,

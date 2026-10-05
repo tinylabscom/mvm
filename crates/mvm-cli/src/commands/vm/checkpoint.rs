@@ -15,7 +15,7 @@ use clap::Args as ClapArgs;
 use serde::Serialize;
 
 use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta};
-use mvm_core::config::vm_state_dir;
+use mvm_core::config::{machine_state_dir, vm_state_dir};
 use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
 use mvm_runtime::backend::AnyBackend;
@@ -141,7 +141,7 @@ pub(in crate::commands) enum CheckpointCmd {
         #[arg(long)]
         boot: bool,
         /// Hypervisor backend for `--boot` (fs_quick forks only).
-        /// Defaults to the same auto-detect order as `mvmctl up`.
+        /// Defaults to the same auto-detect order as `machine run`.
         #[arg(long, default_value = "firecracker")]
         hypervisor: String,
         /// vCPU count for the booted child (fs_quick `--boot` only).
@@ -236,6 +236,7 @@ pub(in crate::commands) fn run_checkpoint(_cli: &Cli, args: CheckpointArgs) -> R
             declared_secrets: &parse_declared_secrets(&secret)?,
             allow_secret_drop,
             json,
+            intent: ForkIntent::Ordinary,
         }),
         CheckpointCmd::Diff { a, b, json } => diff(&a, &b, json),
         CheckpointCmd::Verify { id, json } => lineage::verify(&id, json),
@@ -292,11 +293,17 @@ pub(in crate::commands) fn now_unix() -> u64 {
         .unwrap_or(0)
 }
 
+fn lock_machine_input_cursor(name: &str) -> Result<(mvm_core::util::atomic_io::FileLock, u64)> {
+    let dir = machine_state_dir(name);
+    let lock = input_journal::lock(&dir)?;
+    let cursor = input_journal::cursor(&dir)?;
+    Ok((lock, cursor))
+}
+
 fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     let rootfs = resolve_quiesced_vm_rootfs(name)?;
     let state_dir = vm_state_dir(name);
-    let _input_lock = input_journal::lock(&state_dir)?;
-    let input_cursor = input_journal::cursor(&state_dir)?;
+    let (_input_lock, input_cursor) = lock_machine_input_cursor(name)?;
     let runtime_overlay_version = runtime_contract_for_checkpoint(name)?;
     let store = CheckpointStore::open();
     let now = now_unix();
@@ -401,8 +408,7 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
         bail!("checkpoint --class vm-full requires a running VM; start '{name}' first");
     }
     let state_dir = vm_state_dir(name);
-    let _input_lock = input_journal::lock(&state_dir)?;
-    let input_cursor = input_journal::cursor(&state_dir)?;
+    let (_input_lock, input_cursor) = lock_machine_input_cursor(name)?;
     let store = CheckpointStore::open();
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
@@ -446,8 +452,7 @@ pub(in crate::commands) fn capture_vm_full_for_machine(
         bail!("machine fork requires a running VM; start '{name}' first");
     }
     let state_dir = vm_state_dir(name);
-    let _input_lock = input_journal::lock(&state_dir)?;
-    let input_cursor = input_journal::cursor(&state_dir)?;
+    let (_input_lock, input_cursor) = lock_machine_input_cursor(name)?;
     let store = CheckpointStore::open();
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
@@ -803,6 +808,13 @@ pub(in crate::commands) struct ForkCmdParams<'a> {
     pub declared_secrets: &'a [mvm_core::plan::SecretBinding],
     pub allow_secret_drop: bool,
     pub json: bool,
+    pub intent: ForkIntent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::commands) enum ForkIntent {
+    Ordinary,
+    Replay,
 }
 
 /// Parse `--secret` values into plan bindings.
@@ -849,6 +861,7 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
         declared_secrets,
         allow_secret_drop,
         json,
+        intent,
     } = p;
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
@@ -856,6 +869,9 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
     // restore through the vm_full fork arm (which auto-boots the child); fs_quick
     // is a rootfs-only clone that the operator can optionally boot with `--boot`.
     let parent = store.read_meta(&checkpoint)?;
+    if intent == ForkIntent::Replay && parent.class != CheckpointClass::VmFull {
+        bail!("machine replay requires a vm_full checkpoint");
+    }
     let bound_secrets =
         if declared_secrets.is_empty() || (parent.class == CheckpointClass::FsQuick && !boot) {
             declared_secrets.to_vec()
@@ -877,6 +893,7 @@ pub(in crate::commands) fn fork(p: ForkCmdParams<'_>) -> Result<()> {
             json,
             declared_secrets: &bound_secrets,
             allow_secret_drop,
+            intent,
         })
         .map(|_| ()),
         CheckpointClass::FsQuick => fork_fs_quick_arm(ForkFsQuickArmParams {
@@ -1461,6 +1478,38 @@ mod tests {
     use mvm_core::plan::{SecretBinding, SecretSource};
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
     use mvm_runtime::checkpoint::{CheckpointChainAnchor, verify_lineage};
+
+    #[test]
+    fn checkpoint_cursor_reads_the_machine_exec_journal() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let dir = machine_state_dir("cursor-source");
+        let pending = input_journal::begin_exec(&dir, &["/bin/true".into()]).expect("begin exec");
+        input_journal::finish_exec(&dir, pending, true).expect("finish exec");
+        assert_ne!(dir, vm_state_dir("cursor-source"));
+        let (_lock, cursor) = lock_machine_input_cursor("cursor-source").expect("cursor");
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn checkpoint_cursor_refuses_unfinished_machine_exec() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let dir = machine_state_dir("cursor-pending");
+        input_journal::begin_exec(&dir, &["/bin/true".into()]).expect("begin exec");
+        assert!(lock_machine_input_cursor("cursor-pending").is_err());
+    }
+
+    #[test]
+    fn checkpoint_cursor_is_zero_for_a_new_machine() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(home.path());
+        let (_lock, cursor) = lock_machine_input_cursor("cursor-empty").expect("cursor");
+        assert_eq!(cursor, 0);
+    }
 
     fn secret_binding(name: &str, address: &str) -> SecretBinding {
         SecretBinding {

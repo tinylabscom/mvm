@@ -78,7 +78,7 @@ pub(in crate::commands) enum AuditAction {
     Sessions(sessions::SessionsArgs),
     /// Asset content identities: recompute the canonical digest of a file
     /// or directory tree so it can be compared against the identities
-    /// recorded in a run's signed plan or audit chain — `mvmctl audit
+    /// recorded in a run's signed plan or audit chain — `mvmctl trust audit
     /// tail --chain` shows them; comparing digests is the whole check.
     Asset {
         #[command(subcommand)]
@@ -1184,8 +1184,8 @@ fn audit_tail_chain(tenant: &str, lines: usize, follow: bool) -> Result<()> {
     let path = audit_path_for_tenant(&dir, tenant);
     if !path.exists() {
         ui::info(&format!(
-            "No plan-64 audit chain found for tenant '{tenant}'. \
-             Events appear at {} after the next `mvmctl up`.",
+            "No audit chain found for tenant '{tenant}'. \
+             Events appear at {} after the next `mvmctl run` or `mvmctl machine run`.",
             path.display()
         ));
         return Ok(());

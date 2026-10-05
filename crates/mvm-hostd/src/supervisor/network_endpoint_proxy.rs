@@ -32,7 +32,7 @@ mod classify;
 mod forward;
 mod ingress;
 mod listen;
-mod pinned_dns;
+pub(crate) mod pinned_dns;
 mod pipeline;
 mod prepare;
 mod redaction;

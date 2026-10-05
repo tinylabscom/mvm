@@ -4,6 +4,24 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn machine_workspace_apply_verbs_are_discoverable() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["machine", "--help"])
+        .output()
+        .expect("run machine help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for verb in ["apply", "undo", "redo"] {
+        assert!(
+            stdout
+                .lines()
+                .any(|line| line.split_whitespace().next() == Some(verb)),
+            "machine help missing {verb}: {stdout}"
+        );
+    }
+}
+
+#[test]
 fn machine_check_artifact_help_names_bundle_verification_controls() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "check-artifact", "--help"])
@@ -277,6 +295,8 @@ fn why_help_lists_every_query_and_policy_source() {
     let help = String::from_utf8_lossy(&out.stdout);
     for flag in [
         "--host",
+        "--method",
+        "--request-path",
         "--path",
         "--tool",
         "--secret",
@@ -359,6 +379,41 @@ fn why_discovers_the_project_policy_from_a_nested_directory() {
     let answer: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(answer["allowed"], true);
     assert_eq!(answer["matched"], "network.allow = \"api.example.com:443\"");
+}
+
+#[test]
+fn why_routed_host_requires_request_context_and_reports_the_matching_rule() {
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("resolved.json");
+    std::fs::write(
+        &plan,
+        r#"{"policy":{"network":{"allow":["api.example.com:443"],"routes":[{"id":"api","host":"api.example.com","rules":[{"id":"read","method":"GET","path":"/public/**","outcome":"allow"}],"otherwise":"deny","intercept":true}]}}}"#,
+    )
+    .unwrap();
+    let query = |extra: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_mvmctl"));
+        command
+            .env("MVM_HOME", dir.path())
+            .env("HOME", dir.path())
+            .args(["why", "--host", "api.example.com", "--plan"])
+            .arg(&plan);
+        command.args(extra).arg("--json");
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(query(&[])["allowed"], false);
+    let allowed = query(&["--method", "GET", "--request-path", "/public/x"]);
+    assert_eq!(allowed["allowed"], true);
+    assert_eq!(allowed["matched"], "network.routes.api.read");
+    assert_eq!(
+        query(&["--method", "POST", "--request-path", "/public/x"])["allowed"],
+        false
+    );
 }
 
 /// `pack --help` advertises all five lifecycle subcommands.
@@ -1320,6 +1375,47 @@ fn allow_env_is_documented_on_run_and_proc_start() {
 }
 
 #[test]
+fn machine_run_help_documents_both_cold_build_flags() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["machine", "run", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("--no-build") && help.contains("Fail instead of building"),
+        "help must offer the fail-fast opt-in:\n{help}"
+    );
+    assert!(
+        help.contains("--build") && help.contains("Skip the first-run notice"),
+        "help must say `--build` only skips the notice:\n{help}"
+    );
+}
+
+#[test]
+fn machine_run_rejects_build_with_no_build() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args([
+            "machine",
+            "run",
+            "--image",
+            "alpine",
+            "--build",
+            "--no-build",
+        ])
+        .args(["--", "true"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("cannot be used with"), "stderr: {stderr}");
+}
+
+#[test]
 fn machine_run_refuses_persistent_environment_before_boot() {
     let tmp = tempfile::tempdir().unwrap();
     #[allow(deprecated)]
@@ -1860,8 +1956,12 @@ fn search_reads_a_file_registry_and_marks_installed_packs() {
     assert_eq!(rows[0]["installed"], false);
 }
 
+/// The staged bundle is not a Sigstore bundle, so the default build's verifier
+/// rejects it. The refusal must come from that check, not from a build with no
+/// verifier compiled in: a default build that cannot verify cannot get past
+/// the signed image set either.
 #[test]
-fn pull_reaches_signature_verification_and_fails_closed() {
+fn pull_refuses_a_pack_whose_signature_does_not_verify_and_installs_nothing() {
     let home = tempfile::tempdir().unwrap();
     let registry = tempfile::tempdir().unwrap();
     stage_pack_registry(registry.path());
@@ -1890,7 +1990,7 @@ accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/wor
         .expect("run mvmctl pull");
     assert!(
         !out.status.success(),
-        "pull must refuse: a default build cannot verify the signature"
+        "pull must refuse a pack whose signature does not verify"
     );
     let shown = format!(
         "{}{}",
@@ -1898,8 +1998,12 @@ accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/wor
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        shown.contains("manifest-verify") || shown.contains("signature"),
+        shown.contains("signature is invalid"),
         "the refusal must come from signature verification: {shown}"
+    );
+    assert!(
+        !shown.contains("manifest-verify feature disabled"),
+        "a default build must carry the verifier: {shown}"
     );
     assert!(
         !home.path().join("registry/packs.lock.toml").exists(),

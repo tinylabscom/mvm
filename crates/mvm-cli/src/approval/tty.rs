@@ -273,7 +273,85 @@ mod tests {
     use super::*;
     use mvm_contract::policy::approval::{ApprovalOutcome, ApprovalRequestId};
     use std::collections::VecDeque;
+    use std::io::Write;
+    use std::os::fd::FromRawFd;
     use std::sync::{Arc, Mutex};
+
+    fn pty_pair() -> (std::fs::File, ControllingTty) {
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: openpty initializes both descriptor out-parameters on success;
+        // null termios and winsize pointers request the system defaults.
+        let result = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+        assert_eq!(result, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: openpty returned two distinct, owned descriptors.
+        let master = unsafe { std::fs::File::from_raw_fd(master) };
+        // SAFETY: openpty returned two distinct, owned descriptors.
+        let file = unsafe { std::fs::File::from_raw_fd(slave) };
+        (master, ControllingTty { file })
+    }
+
+    #[test]
+    fn real_terminal_flush_discards_queued_type_ahead_before_polling() {
+        let (mut master, mut tty) = pty_pair();
+        master.write_all(b"y\n").expect("queue type-ahead");
+        let mut ready = libc::pollfd {
+            fd: tty.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: ready points to one valid pollfd and the slave is open.
+        assert_eq!(unsafe { libc::poll(&mut ready, 1, 1000) }, 1);
+        tty.discard_input().expect("flush queued input");
+        assert_eq!(
+            tty.read_line(Instant::now() + Duration::from_millis(20), 64)
+                .expect("poll after flush"),
+            None,
+        );
+        master.write_all(b"n\n").expect("queue fresh answer");
+        assert_eq!(
+            tty.read_line(Instant::now() + Duration::from_secs(1), 64)
+                .expect("read fresh answer")
+                .as_deref(),
+            Some("n"),
+        );
+    }
+
+    #[test]
+    fn real_terminal_poll_bounds_a_long_answer() {
+        let (mut master, mut tty) = pty_pair();
+        master
+            .write_all(format!("{}\n", "a".repeat(80)).as_bytes())
+            .expect("queue long answer");
+        assert_eq!(
+            tty.read_line(Instant::now() + Duration::from_secs(1), 64)
+                .expect("read bounded answer")
+                .as_deref(),
+            Some("a".repeat(64).as_str()),
+        );
+    }
+
+    #[test]
+    fn real_terminal_flush_refuses_a_non_terminal() {
+        let file = std::fs::File::open("/dev/null").expect("open non-terminal");
+        let mut tty = ControllingTty { file };
+        let error = tty
+            .discard_input()
+            .expect_err("non-terminal cannot flush")
+            .raw_os_error();
+        assert!(
+            matches!(error, Some(libc::ENOTTY | libc::ENODEV)),
+            "{error:?}"
+        );
+    }
 
     /// A scripted terminal. `typed_ahead` is what the operator (or anything
     /// else) typed before input was last discarded; `answers` arrive after.

@@ -94,7 +94,7 @@ pub enum SessionVmName<'a> {
 }
 
 impl SessionVmName<'_> {
-    fn resolve(self) -> String {
+    pub(crate) fn resolve(self) -> String {
         match self {
             Self::Exact(name) => name.to_string(),
             Self::Prefixed(prefix) => {

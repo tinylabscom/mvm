@@ -574,7 +574,7 @@ fn seed_from_default_cache(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::published_image_set::PublishedImageSet;
     use crate::published_image_set::fixture::ImageSetFixture;
@@ -642,6 +642,7 @@ mod tests {
             "crates/mvm-core/src",
             "crates/mvm-agentd/src",
             "crates/mvm-host-services/src",
+            "crates/mvm-setpriv/src",
         ] {
             std::fs::create_dir_all(root.join(rel)).unwrap();
             std::fs::write(root.join(rel).join("lib.rs"), "pub fn shared() {}\n").unwrap();
@@ -653,6 +654,7 @@ mod tests {
             "crates/mvm-core/Cargo.toml",
             "crates/mvm-agentd/Cargo.toml",
             "crates/mvm-host-services/Cargo.toml",
+            "crates/mvm-setpriv/Cargo.toml",
         ] {
             std::fs::write(root.join(rel), "[package]\n").unwrap();
         }
@@ -930,7 +932,9 @@ mod tests {
 
     /// The archive a well-formed release publishes: the image, the VERSION
     /// marker, and the derivation's own `sha256sum` manifest over both.
-    fn well_formed_archive(version: &str, libc: GuestLibc) -> Vec<u8> {
+    /// A sound sidecar archive for `libc` labelled `version`, as the image set
+    /// publishes it.
+    pub(crate) fn well_formed_archive(version: &str, libc: GuestLibc) -> Vec<u8> {
         let image = sidecar_ext4_bytes(libc);
         let version_text = format!("{version}\n").into_bytes();
         let manifest = format!(

@@ -7,11 +7,13 @@
 //!    even transitively. Lockfile-based so it catches a pull before code
 //!    review has to inspect `cargo tree`.
 //! 2. **Default-closure ban.** The deliberately-gated heavy deps
-//!    (`sigstore`, `opendal`, `pgp`, `aws-lc-rs`) were cut from the
-//!    shipped CLI and must stay out of `mvmctl`'s *default-feature*
-//!    dependency closure. They legitimately remain in `Cargo.lock` as
-//!    optional packages, so a lockfile-name check would false-positive;
-//!    instead we assert they are absent from the `cargo tree` closure.
+//!    (`sigstore`, `opendal`, `pgp`) were cut from the shipped CLI and
+//!    must stay out of `mvmctl`'s *default-feature* dependency closure.
+//!    They legitimately remain in `Cargo.lock` as optional packages, so a
+//!    lockfile-name check would false-positive; instead we assert they are
+//!    absent from the `cargo tree` closure. `aws-lc-rs` is no longer on the
+//!    list: the default build carries the image-set signature verifier, and
+//!    the sigstore-verify stack depends on it unconditionally.
 //!
 //! `tokio` staying out of `mvm-core` is covered by the separate
 //! `check-core-runtime-free` gate, not here.
@@ -25,8 +27,9 @@ const FORBIDDEN_SUBSTRINGS: &[&str] = &["mysql"];
 
 /// Banned from `mvmctl`'s default-feature closure. Exact package names —
 /// these are off-by-default-feature-only deps that must not ship in the
-/// stock CLI.
-const FORBIDDEN_IN_DEFAULT_CLOSURE: &[&str] = &["sigstore", "opendal", "pgp", "aws-lc-rs"];
+/// stock CLI. `sigstore` is the monolithic crate the modular sigstore-verify
+/// stack replaced, not that stack.
+const FORBIDDEN_IN_DEFAULT_CLOSURE: &[&str] = &["sigstore", "opendal", "pgp"];
 
 pub fn run(workspace: &Path) -> Result<()> {
     let mut failures: Vec<String> = Vec::new();
@@ -191,14 +194,10 @@ rustls v0.23.37
     }
 
     #[test]
-    fn closure_violations_bans_aws_lc_rs() {
-        // aws-lc-rs is absent from the default closure (the in-repo OCI client
-        // replaced oci-client which was the former entry point). This ban
-        // prevents it from creeping back.
-        let names = ["mvmctl", "rustls", "aws-lc-rs"];
-        assert_eq!(
-            closure_violations(&names, FORBIDDEN_IN_DEFAULT_CLOSURE),
-            vec!["aws-lc-rs"],
-        );
+    fn closure_violations_admit_the_image_set_verifier_stack() {
+        // The default build verifies the signed image set, so the modular
+        // verifier and the aws-lc it links are expected in the closure.
+        let names = ["mvmctl", "sigstore-verify", "sigstore-crypto", "aws-lc-rs"];
+        assert!(closure_violations(&names, FORBIDDEN_IN_DEFAULT_CLOSURE).is_empty());
     }
 }

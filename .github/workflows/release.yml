@@ -53,6 +53,13 @@ jobs:
       # evidence, so a macOS host that cannot boot a guest fails this workflow
       # here even though Extended CI tolerates it nightly.
       macos_blocks_on_unusable_host: true
+      # A release tests what its users get: this CLI against the image set
+      # images.lock pins, not a pair build of the tree's guest sources. The
+      # SDK sidecar and the dev default image are therefore adopted from that
+      # signed set whatever sources it was built from, and the lane fails if
+      # the set's signed compatibility excludes this CLI. Guest-source changes
+      # are pair-built and booted in the merge queue's guest-image-boot lane.
+      boot_pinned_images: true
 
   build:
     strategy:

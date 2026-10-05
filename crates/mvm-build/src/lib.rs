@@ -28,6 +28,9 @@ mod builder_host_binaries;
 /// The mvm sources a builder image's evaluation reads, shared by the Stage 0
 /// fingerprint and the local image cache key.
 pub mod builder_image_inputs;
+/// One flake build through a builder VM, as a request and a result, for a
+/// caller that wants the artifacts where it asked for them.
+pub mod builder_orchestrator;
 /// Reusable producer that turns real builder artifacts (`vmlinux` + `rootfs.ext4`)
 /// into a signed, cache-promotable Builder pack — the produce half of the
 /// attested-builder-pack path whose verify/materialize half lives in
@@ -169,11 +172,9 @@ pub mod builder_backend_select;
 /// its VM here).
 pub mod builder_health;
 
-/// Acquire the published SDK-sidecar disk for hosts that cannot build one.
-/// Fetches the per-arch, per-libc member of the signed image set, proves it
-/// against the verified root and its own manifest, and installs it under
-/// `~/.mvm/cache/image-set/<root>/sdk-sidecar/<member-version>/<arch>/<libc>/`
-/// for [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
+/// Which arm prepares an image that is otherwise pair-built from an image
+/// checkout: adopt the pinned set's verified members (when they were built
+/// from this tree, or unconditionally on request), or build locally.
 pub mod fetch_unchanged;
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
 /// baked into an OCI rootfs by [`oci_runtime_inject`].
@@ -193,6 +194,11 @@ pub mod release_signature;
 /// member from `~/.mvm/cache/image-set/<root>/runtime-overlay/`, or a source
 /// build from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
+/// Acquire the published SDK-sidecar disk for hosts that cannot build one.
+/// Fetches the per-arch, per-libc member of the signed image set, proves it
+/// against the verified root and its own manifest, and installs it under
+/// `~/.mvm/cache/image-set/<root>/sdk-sidecar/<member-version>/<arch>/<libc>/`
+/// for [`mvm_fs::sdk_sidecar::SdkSidecarResolver`] to pick up.
 pub mod sdk_sidecar;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.

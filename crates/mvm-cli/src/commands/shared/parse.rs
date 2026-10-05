@@ -118,7 +118,7 @@ pub fn parse_asset_spec(spec: &str) -> Result<AssetSpec> {
     if path.is_empty() {
         anyhow::bail!("invalid asset '{spec}' — empty host path; {ASSET_GRAMMAR_HINT}");
     }
-    Ok(AssetSpec {
+    Ok(AssetSpec::File {
         kind,
         host_path: path.to_string(),
     })
@@ -524,7 +524,7 @@ fn validate_host_path(host: &str, expect_dir: bool) -> Result<String> {
 }
 
 /// Parse-then-validate a single volume spec into a [`VmVolume`], the
-/// shared choke point for both `mvmctl up`/`run`.
+/// shared choke point for both `mvmctl run` and `mvmctl machine run`.
 ///
 /// Enforces, in order:
 /// - **Encryption fail-closed:** a `:enc` disk is refused with a clear
@@ -984,15 +984,31 @@ mod asset_spec_tests {
             ("other", mvm_contract::plan::AssetKind::Other),
         ] {
             let spec = parse_asset_spec(&format!("{token}:/data/file.bin")).expect("parse");
-            assert_eq!(spec.kind, want, "kind for {token}");
-            assert_eq!(spec.host_path, "/data/file.bin");
+            assert_eq!(
+                spec,
+                AssetSpec::File {
+                    kind: want,
+                    host_path: "/data/file.bin".to_string(),
+                },
+                "kind for {token}"
+            );
         }
+        assert!(
+            parse_asset_spec("registry_pack:/data/manifest.json").is_err(),
+            "the internal signed-pack identity cannot be forged with --asset"
+        );
     }
 
     #[test]
     fn kind_matching_is_case_insensitive() {
         let spec = parse_asset_spec("DATASET:/d").expect("parse");
-        assert_eq!(spec.kind, mvm_contract::plan::AssetKind::Dataset);
+        assert!(matches!(
+            spec,
+            AssetSpec::File {
+                kind: mvm_contract::plan::AssetKind::Dataset,
+                ..
+            }
+        ));
     }
 
     #[test]

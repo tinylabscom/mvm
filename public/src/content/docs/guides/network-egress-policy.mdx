@@ -115,6 +115,9 @@ sets it, because writing the flag is the grant — and the per-VM egress
 certificate then covers that host. A route with rules but no interception
 grant is never relayed opaquely with its rules unchecked: the connection is
 refused and recorded as `endpoint_rules_unenforceable`.
+Its `host.flow.denied` audit entry names the endpoint route and records
+`rule = not_evaluated`, since an opaque flow exposes no method or path from
+which to select a rule.
 
 A path the host cannot read unambiguously is refused, not matched: a `.` or
 `..` segment, an empty segment, a backslash, or a percent-encoded `/`, `\` or
@@ -131,6 +134,9 @@ Every decision — allow, deny or ask — is a `host.route.decided` entry in the
 chain-signed audit log, carrying the route id, the rule that decided (its `id`,
 `rule-N` by position, `otherwise` or `ambiguous_path`), the outcome, the
 destination and the method. The path is never recorded.
+An endpoint with routes refuses to start without its chain-signed audit
+recorder. If a decision cannot be written, the request is refused before it
+reaches the forward leg, including when its rule would otherwise allow it.
 
 ## Internal addresses
 
@@ -176,6 +182,11 @@ remedy for that reason. Here a run allowed only `api.github.com` also reaches
 for `example.com` twice, for the cloud metadata service, and for an address on
 a private network:
 
+The same live notices and exit summary apply when `machine run --name NAME
+-- COMMAND` runs a command after starting a persistent machine. The summary
+prints before the CLI returns the command's exit status, including a nonzero
+status. Detached and JSON-output starts do not print live notices.
+
 ```sh
 mvmctl run --image curlimages/curl:latest --allow-host api.github.com:443 -- sh -c 'curl -sS https://example.com; curl -sS https://example.com; curl -sS http://169.254.169.254/latest/meta-data/; curl -sS http://10.0.0.5:8080/'
 ```
@@ -203,6 +214,12 @@ The block at the end is the exit summary: every refused destination with how
 often it was refused, then the exact flags that admit the ones a grant can
 admit. The metadata service is listed and never offered; the private address is
 kept out of the allow command and named apart.
+
+`machine run --entrypoint` also watches the named machine before its admitted
+boot starts, so a baked entrypoint's refusals appear while it runs and in the
+summary before its exit status is returned. An `--attach` entrypoint call
+watches the running machine for that call. `--json` keeps these notices off
+stderr for callers consuming machine-readable output.
 
 A run with no outbound route at all — the default: no `--net`, no `--allow-host`,
 no `--allow-endpoint`, no `--peer`, and no `--secret` — starts no network endpoint. The guest has no

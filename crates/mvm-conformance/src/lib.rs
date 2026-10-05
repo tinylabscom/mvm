@@ -13,6 +13,7 @@ pub mod claims;
 /// scenario (`features/suites/s37_cve_containment/`).
 pub mod containment;
 pub mod doc_examples;
+pub mod journey;
 /// Same-page-merge confinement policy used by the warm-restore scenarios.
 pub mod page_merge;
 pub mod source_commands;

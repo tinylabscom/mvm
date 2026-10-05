@@ -20,7 +20,7 @@ The current [MCP protocol](https://modelcontextprotocol.io/specification/2026-07
 is the 2026-07-28 stateless model. Requests carry
 their protocol version and client capabilities in `_meta`, `server/discover`
 is mandatory, and stdio messages are newline-delimited JSON-RPC. Older clients
-still in use perform the 2025-11-25 `initialize` handshake.
+still in use perform the `initialize` handshake, at 2025-11-25 or 2025-06-18.
 
 ## Decision
 
@@ -40,7 +40,12 @@ advertise `exec` while their facade implementations return unsupported.
 The process transport is only `mvmctl ops mcp stdio`. There is no listener,
 HTTP transport, authentication subsystem, or orchestration service. The server
 implements current `server/discover`, `tools/list`, and `tools/call`, plus the
-legacy initialize response. Current requests are independently validated; no
+legacy initialize response. That response echoes a requested 2025-11-25 or
+2025-06-18 and answers any other requested version with 2025-11-25, as the MCP
+lifecycle prescribes, rather than refusing it; the server keeps no session, and
+every response it emits is valid under each of those versions. A request in a
+handshake session may carry `_meta` without a protocol version, such as a
+progress token, and that metadata is ignored. Current requests are independently validated; no
 authority or capability state is inherited from a prior request.
 
 Frames are bounded before allocation, output is bounded before emission,

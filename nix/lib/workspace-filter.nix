@@ -102,6 +102,13 @@ let
     ".claude"
     ".worktrees"
     ".playwright-mcp"
+    # Python interpreter and tool caches. Running the SDK tests writes them;
+    # no build reads them.
+    "__pycache__"
+    ".venv"
+    ".pytest_cache"
+    ".mypy_cache"
+    ".ruff_cache"
     # Secrets (host-side; the in-VM key path is ~/.mvm/keys).
     "keys"
   ];

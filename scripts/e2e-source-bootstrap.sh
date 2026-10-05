@@ -3,9 +3,10 @@
 #
 # The documented-surface release lane fetches the pinned, signed builder image,
 # because its scenarios exercise the CLI rather than the image. That leaves the
-# cold source path — Stage 0 building the builder image from the in-tree flake,
-# and an unembedded `mvmctl` handing the whole build to its embedded helper —
-# with no witness of its own. This is that witness, and nothing else:
+# cold source path — Stage 0 building the builder image from an mvm-images
+# checkout against this tree, and an unembedded `mvmctl` handing the whole build
+# to its embedded helper — with no witness of its own. This is that witness, and
+# nothing else:
 #
 #   1. build an unembedded and an embedded `mvmctl`;
 #   2. build the SDK sidecar through the unembedded one, against a cold home;
@@ -16,10 +17,15 @@
 # worth salvaging from a run whose bootstrap failed.
 #
 # Usage:
-#   MVM_E2E_HOME=/tmp/source-bootstrap scripts/e2e-source-bootstrap.sh
+#   MVM_E2E_HOME=/tmp/source-bootstrap MVM_IMAGES_DIR=/path/to/mvm-images \
+#     scripts/e2e-source-bootstrap.sh
 #
 # The home must be empty or absent: a warm cache would let a broken source
 # bootstrap pass on the strength of an image an earlier run produced.
+#
+# The image recipes live in tinylabscom/mvm-images. Name a checkout with
+# MVM_IMAGES_DIR, or keep one beside this checkout; without either there is
+# nothing to build from, and the witness says so before compiling anything.
 
 set -euo pipefail
 
@@ -41,11 +47,23 @@ if [[ -n "${MVM_BOOT_IMAGE:-}" && "${MVM_BOOT_IMAGE}" != "build" ]]; then
   exit 2
 fi
 export MVM_BOOT_IMAGE=build
+# A local builder-image build is opt-in, and `build` without the opt-in is
+# refused rather than answered with the published image. Building it locally
+# is the one thing this witness exists to prove.
+export MVM_ALLOW_LOCAL_BUILDER_BUILD=1
 
 if [[ -d "$HOME_DIR" ]] && [[ -n "$(ls -A "$HOME_DIR" 2>/dev/null)" ]]; then
   echo "!!! $HOME_DIR is not empty; a cold source bootstrap needs a cold home" >&2
   exit 2
 fi
+IMAGES_DIR="${MVM_IMAGES_DIR:-$REPO/../mvm-images}"
+if [[ ! -d "$IMAGES_DIR" ]]; then
+  echo "!!! no mvm-images checkout at $IMAGES_DIR; the builder image and SDK sidecar" >&2
+  echo "!!! are built from its recipes. Set MVM_IMAGES_DIR to a tinylabscom/mvm-images checkout." >&2
+  exit 2
+fi
+export MVM_IMAGES_DIR="$IMAGES_DIR"
+
 mkdir -p "$HOME_DIR"
 chmod 700 "$HOME_DIR"
 export MVM_HOME="$HOME_DIR"
@@ -56,6 +74,7 @@ trap 'echo; echo "!!! interrupted"; exit 130' INT TERM
 echo "==> cold source bootstrap"
 echo "    repo:  $REPO"
 echo "    home:  $HOME_DIR"
+echo "    images: $IMAGES_DIR"
 echo "    flake: $FLAKE"
 
 e2e_phase build

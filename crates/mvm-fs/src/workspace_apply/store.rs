@@ -20,7 +20,11 @@
 //!    (each write is a tmp file + atomic rename, so a torn file does not
 //!    exist; each delete went to `trash/` first) and journals `rollback`.
 //! 3. After `done`, before `commit`: the writes finished. Recovery moves the
-//!    apply to `committed/` and journals `commit`.
+//!    apply to `committed/` if needed and journals `commit`, including when
+//!    the directory moved before the process stopped.
+//! 4. After `commit`, before the required signed audit append settles: the
+//!    committed directory retains `signed-audit-pending`. The caller verifies
+//!    the signed chain and either seals the commit or restores its pre-images.
 //!
 //! `open` performs windows 1 and 3, which need no knowledge of the host
 //! tree. Window 2 is host-tree-shaped, so the caller runs
@@ -38,7 +42,7 @@ use sha2::{Digest, Sha256};
 
 use super::{
     ApplyError, ApplyPlan, FileOp, Manifest, ManifestAction, ManifestOp, OpAction, OpImage,
-    PlanParams, RelationKind, manifest_merkle_root, plan,
+    PlanParams, PreImageKind, RelationKind, manifest_merkle_root, plan, snapshot_merkle_root,
 };
 
 /// The durable record of one staged apply.
@@ -71,6 +75,12 @@ impl StagedApply {
     pub fn merkle_root(&self) -> &str {
         &self.manifest.merkle_root
     }
+
+    /// Root of the staged host pre-images, before any host-tree write.
+    #[must_use]
+    pub fn snapshot_merkle_root(&self) -> String {
+        snapshot_merkle_root(&self.manifest.ops)
+    }
 }
 
 /// One journal line.
@@ -98,7 +108,8 @@ pub enum JournalKind {
     Begin,
     /// The host writes are durable.
     Commit,
-    /// A begun apply was rolled back (crash recovery).
+    /// A begun apply was rolled back, or a committed apply was cancelled
+    /// because its signed audit entry could not be recorded.
     Rollback,
 }
 
@@ -118,8 +129,13 @@ impl ApplyStore {
         fs::create_dir_all(store.root.join("staging"))?;
         fs::create_dir_all(store.root.join("committed"))?;
         if let Some((id, true)) = store.pending_begin()? {
-            let manifest = store.read_staging_manifest(&id)?;
-            store.move_to_committed(&id)?;
+            let manifest = if store.committed_dir(&id).join("done").exists() {
+                store.committed_manifest(&id)?
+            } else {
+                let manifest = store.read_staging_manifest(&id)?;
+                store.move_to_committed(&id)?;
+                manifest
+            };
             store.journal(JournalKind::Commit, &id, Some(manifest.merkle_root), None)?;
         }
         store.sweep_orphans()?;
@@ -150,7 +166,10 @@ impl ApplyStore {
         live: &dyn crate::tree_diff::TreeSource,
         relation: Option<(String, RelationKind)>,
     ) -> Result<StagedApply, ApplyError> {
-        if self.pending_begin()?.is_some() {
+        if self.pending_begin()?.is_some()
+            || !self.pending_signed_audits()?.is_empty()
+            || !self.uncertain_signed_audits()?.is_empty()
+        {
             return Err(ApplyError::PendingApply);
         }
         if !plan.refused_protected.is_empty() || !plan.refused_unappliable.is_empty() {
@@ -213,6 +232,238 @@ impl ApplyStore {
         Ok(())
     }
 
+    /// Durably mark a staged apply as requiring a signed audit entry before
+    /// the host tree may be considered settled. The marker moves with the
+    /// staged directory through commit and survives a process crash.
+    pub fn arm_signed_audit(&self, staged: &StagedApply) -> Result<(), ApplyError> {
+        let dir = self.staging_dir(staged.id());
+        let manifest = self.read_staging_manifest(staged.id())?;
+        if manifest.merkle_root != staged.merkle_root() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has a different staged manifest root",
+                staged.id()
+            )));
+        }
+        atomic_write(&dir.join("signed-audit-pending"), staged.id().as_bytes())?;
+        sync_dir(&dir)
+    }
+
+    /// Committed applies whose signed entry still needs reconciliation.
+    /// Canceled commits are excluded by the journal, even if a crash left
+    /// their marker behind.
+    pub fn pending_signed_audits(&self) -> Result<Vec<StagedApply>, ApplyError> {
+        let mut pending = Vec::new();
+        for id in self.committed_order()? {
+            let dir = self.committed_dir(&id);
+            let marker = dir.join("signed-audit-pending");
+            let metadata = match marker.symlink_metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            if !metadata.file_type().is_file() {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {id} has a non-file signed-audit marker"
+                )));
+            }
+            if fs::read(&marker)? != id.as_bytes() {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {id} has an invalid signed-audit marker"
+                )));
+            }
+            pending.push(StagedApply {
+                manifest: self.committed_manifest(&id)?,
+            });
+        }
+        Ok(pending)
+    }
+
+    /// Clear the pending marker only after the matching signed entry exists.
+    /// A crash before the directory sync leaves a marker that recovery can
+    /// safely verify again.
+    pub fn seal_signed_audit(&self, staged: &StagedApply) -> Result<(), ApplyError> {
+        let dir = self.committed_dir(staged.id());
+        let marker = dir.join("signed-audit-pending");
+        if fs::read(&marker)? != staged.id().as_bytes() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has an invalid signed-audit marker",
+                staged.id()
+            )));
+        }
+        fs::remove_file(marker)?;
+        sync_dir(&dir)
+    }
+
+    /// A cancelled host apply whose signed append may nevertheless have landed.
+    /// The marker survives rollback and blocks new applies until the chain can
+    /// prove whether a compensating rollback entry is needed.
+    pub fn uncertain_signed_audits(&self) -> Result<Vec<StagedApply>, ApplyError> {
+        let mut uncertain = Vec::new();
+        for entry in fs::read_dir(self.root.join("committed"))? {
+            let entry = entry?;
+            if !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().into_owned();
+            let marker = entry.path().join("signed-audit-uncertain");
+            match marker.symlink_metadata() {
+                Ok(metadata) if metadata.file_type().is_file() => {}
+                Ok(_) => {
+                    return Err(ApplyError::Corrupt(format!(
+                        "apply {id} has a non-file uncertain-audit marker"
+                    )));
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
+            if fs::read(&marker)? != id.as_bytes() {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {id} has an invalid uncertain-audit marker"
+                )));
+            }
+            uncertain.push(StagedApply {
+                manifest: self.committed_manifest(&id)?,
+            });
+        }
+        uncertain.sort_by(|a, b| a.id().cmp(b.id()));
+        Ok(uncertain)
+    }
+
+    /// Restore host pre-images after an append whose outcome cannot be read.
+    /// The durable marker is written first, so recovery repeats an interrupted
+    /// rollback before it attempts any chain reconciliation.
+    pub fn rollback_unverifiable(
+        &self,
+        staged: &StagedApply,
+        source_dir: &Path,
+    ) -> Result<(), ApplyError> {
+        let committed = self.committed_manifest(staged.id())?;
+        if committed != staged.manifest {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} differs from its committed manifest",
+                staged.id()
+            )));
+        }
+        let rolled_back = self
+            .journal_read()?
+            .iter()
+            .any(|entry| entry.kind == JournalKind::Rollback && entry.apply == staged.id());
+        if !rolled_back && self.committed_order()?.last().map(String::as_str) != Some(staged.id()) {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} is not the latest committed apply; refusing audit rollback",
+                staged.id()
+            )));
+        }
+        let dir = self.committed_dir(staged.id());
+        let marker = dir.join("signed-audit-uncertain");
+        match marker.symlink_metadata() {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                atomic_write(&marker, staged.id().as_bytes())?;
+                sync_dir(&dir)?;
+            }
+            Ok(metadata) if metadata.file_type().is_file() => {
+                if fs::read(&marker)? != staged.id().as_bytes() {
+                    return Err(ApplyError::Corrupt(format!(
+                        "apply {} has an invalid uncertain-audit marker",
+                        staged.id()
+                    )));
+                }
+            }
+            Ok(_) => {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {} has a non-file uncertain-audit marker",
+                    staged.id()
+                )));
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if rolled_back {
+            return Ok(());
+        }
+        self.rollback_unsealed(staged, source_dir)
+    }
+
+    /// Clear an uncertain marker only after the signed chain has settled the
+    /// original apply entry and, if needed, its compensating rollback entry.
+    pub fn settle_uncertain_signed_audit(&self, staged: &StagedApply) -> Result<(), ApplyError> {
+        let rolled_back = self
+            .journal_read()?
+            .iter()
+            .any(|entry| entry.kind == JournalKind::Rollback && entry.apply == staged.id());
+        if !rolled_back {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has not restored its host pre-images",
+                staged.id()
+            )));
+        }
+        let dir = self.committed_dir(staged.id());
+        let uncertain = dir.join("signed-audit-uncertain");
+        if !uncertain.symlink_metadata()?.file_type().is_file() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has a non-file uncertain-audit marker",
+                staged.id()
+            )));
+        }
+        if fs::read(&uncertain)? != staged.id().as_bytes() {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} has an invalid uncertain-audit marker",
+                staged.id()
+            )));
+        }
+        let pending = dir.join("signed-audit-pending");
+        match pending.symlink_metadata() {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                if fs::read(&pending)? != staged.id().as_bytes() {
+                    return Err(ApplyError::Corrupt(format!(
+                        "apply {} has an invalid pending-audit marker",
+                        staged.id()
+                    )));
+                }
+                fs::remove_file(&pending)?;
+                sync_dir(&dir)?;
+            }
+            Ok(_) => {
+                return Err(ApplyError::Corrupt(format!(
+                    "apply {} has a non-file pending-audit marker",
+                    staged.id()
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        fs::remove_file(&uncertain)?;
+        sync_dir(&dir)
+    }
+
+    /// Restore a just-committed apply when its required signed audit append
+    /// fails. Only the newest commit may be cancelled: a later apply could
+    /// depend on these bytes. The cancellation remains in the journal while
+    /// the manifest and pre-image blobs remain available for inspection.
+    pub fn rollback_unsealed(
+        &self,
+        staged: &StagedApply,
+        source_dir: &Path,
+    ) -> Result<(), ApplyError> {
+        let latest = self.committed_order()?.pop();
+        if latest.as_deref() != Some(staged.id()) {
+            return Err(ApplyError::Corrupt(format!(
+                "apply {} is not the latest committed apply; refusing audit rollback",
+                staged.id()
+            )));
+        }
+        let dir = self.committed_dir(staged.id());
+        for op in staged.manifest.ops.iter().rev() {
+            self.rollback_op(op, source_dir, &dir)?;
+        }
+        sync_dir(source_dir)?;
+        self.journal(
+            JournalKind::Rollback,
+            staged.id(),
+            None,
+            Some("signed apply audit append failed; host pre-images restored".into()),
+        )
+    }
+
     /// Reverse the most recent committed, still-effective apply: stage an
     /// inverse apply — the original's pre-images become this one's
     /// post-images — and commit it. Returns the committed relation and root.
@@ -222,7 +473,7 @@ impl ApplyStore {
         };
         let manifest = self.committed_manifest(&target)?;
         let staged = self.stage(
-            inverse_plan(&manifest),
+            inverse_plan(&manifest)?,
             source_dir,
             &EmptySource,
             Some((target.clone(), RelationKind::Undoes)),
@@ -347,9 +598,16 @@ impl ApplyStore {
 
     fn committed_order(&self) -> Result<Vec<String>, ApplyError> {
         let journal = self.journal_read()?;
+        let cancelled: HashSet<&str> = journal
+            .iter()
+            .filter(|entry| entry.kind == JournalKind::Rollback)
+            .map(|entry| entry.apply.as_str())
+            .collect();
         let mut order: Vec<String> = journal
             .iter()
-            .filter(|e| e.kind == JournalKind::Commit)
+            .filter(|entry| {
+                entry.kind == JournalKind::Commit && !cancelled.contains(entry.apply.as_str())
+            })
             .map(|e| e.apply.clone())
             .collect();
         // A commit completed by recovery may appear twice; dedup, keep order.
@@ -380,7 +638,7 @@ impl ApplyStore {
         source_dir: &Path,
         live: &dyn crate::tree_diff::TreeSource,
     ) -> Result<ManifestOp, ApplyError> {
-        let pre = self.stage_pre(&op, source_dir)?;
+        let (pre, pre_kind) = self.stage_pre(&op, source_dir)?;
         let (action, post) = match (&op.action, op.post) {
             (OpAction::Remove, _) => (ManifestAction::Remove, None),
             (OpAction::WriteFile, Some(image)) => {
@@ -402,27 +660,43 @@ impl ApplyStore {
             path: op.path,
             action,
             pre,
+            pre_kind: Some(pre_kind),
             post,
         })
     }
 
     /// The pre-image from the host tree: the bytes undo restores. An absent
     /// host path stages no blob and records size zero.
-    fn stage_pre(&self, op: &FileOp, source_dir: &Path) -> Result<OpImage, ApplyError> {
+    fn stage_pre(
+        &self,
+        op: &FileOp,
+        source_dir: &Path,
+    ) -> Result<(OpImage, PreImageKind), ApplyError> {
         let full = super::host_path(source_dir, &op.path)?;
         let meta = match fs::symlink_metadata(&full) {
             Ok(meta) => meta,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(OpImage::default()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok((OpImage::default(), PreImageKind::Absent));
+            }
             Err(e) => return Err(e.into()),
         };
         if meta.file_type().is_symlink() {
             let target = fs::read_link(&full)?;
-            self.store_bytes(target.as_os_str().as_encoded_bytes())
+            let target = target.to_str().ok_or_else(|| {
+                ApplyError::UnsafePath(format!(
+                    "{}: a host symlink target is not UTF-8 and cannot be restored safely",
+                    op.path
+                ))
+            })?;
+            Ok((self.store_bytes(target.as_bytes())?, PreImageKind::Symlink))
         } else if meta.file_type().is_file() {
             let mut file = OpenOptions::new().read(true).open(&full)?;
             let mut sink = self.hashing_blob_sink()?;
             io::copy(&mut file, &mut sink)?;
-            self.finish_streaming_blob(sink, &op.path)
+            Ok((
+                self.finish_streaming_blob(sink, &op.path)?,
+                PreImageKind::File,
+            ))
         } else {
             Err(ApplyError::UnsafePath(format!(
                 "{}: the host path is neither a file nor a symlink; refusing to replace it",
@@ -625,7 +899,8 @@ impl ApplyStore {
             .collect();
         for id in begun {
             if !closed.contains(id) {
-                let done = self.staging_dir(id).join("done").exists();
+                let done = self.staging_dir(id).join("done").exists()
+                    || self.committed_dir(id).join("done").exists();
                 return Ok(Some((id.to_string(), done)));
             }
         }
@@ -701,18 +976,18 @@ impl ApplyStore {
         let full = super::host_path(source_dir, &op.path)?;
         match &op.action {
             ManifestAction::WriteFile | ManifestAction::WriteSymlink { .. } => {
-                match op.pre.sha256.as_deref() {
-                    // The apply created this path: remove it.
-                    None => remove_path(&full)?,
-                    // Restore the bytes the apply replaced.
-                    Some(sha) => {
+                match restored_pre_kind(op)? {
+                    PreImageKind::Absent => remove_path(&full)?,
+                    PreImageKind::File => {
+                        let sha = pre_image_sha(op)?;
                         self.verify_blob(sha, op.pre.size)?;
-                        if matches!(op.action, ManifestAction::WriteFile) {
-                            write_file_atomic(&full, &self.blob_path(sha), op.pre.size)?;
-                        } else {
-                            let target = fs::read_to_string(self.blob_path(sha))?;
-                            write_symlink_atomic(&full, &target)?;
-                        }
+                        write_file_atomic(&full, &self.blob_path(sha), op.pre.size)?;
+                    }
+                    PreImageKind::Symlink => {
+                        let sha = pre_image_sha(op)?;
+                        self.verify_blob(sha, op.pre.size)?;
+                        let target = fs::read_to_string(self.blob_path(sha))?;
+                        write_symlink_atomic(&full, &target)?;
                     }
                 }
             }
@@ -840,63 +1115,53 @@ fn now_secs() -> u64 {
 /// one's post-images, and each op reverses. Undo consults nothing but the
 /// manifest — the exclusions it recorded are the only ones in force, and a
 /// restore never rebuilds a default list.
-fn inverse_plan(manifest: &Manifest) -> ApplyPlan {
+fn inverse_plan(manifest: &Manifest) -> Result<ApplyPlan, ApplyError> {
     let mut plan = ApplyPlan {
         exclusion_patterns: manifest.exclusions.clone(),
         ..ApplyPlan::default()
     };
     for op in &manifest.ops {
-        let file_op = match &op.action {
-            ManifestAction::WriteFile => match op.pre.sha256.clone() {
-                Some(sha) => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::WriteFile,
-                    pre: OpImage::default(),
-                    post: Some(OpImage {
-                        sha256: Some(sha),
-                        size: op.pre.size,
-                    }),
+        let (action, post) = match restored_pre_kind(op)? {
+            PreImageKind::Absent => (OpAction::Remove, None),
+            PreImageKind::File => (OpAction::WriteFile, Some(op.pre.clone())),
+            PreImageKind::Symlink => (
+                OpAction::WriteSymlink {
+                    target: String::new(),
                 },
-                None => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::Remove,
-                    pre: OpImage::default(),
-                    post: None,
-                },
-            },
-            ManifestAction::WriteSymlink { .. } => match op.pre.sha256.clone() {
-                Some(sha) => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::WriteSymlink {
-                        target: String::new(),
-                    },
-                    pre: OpImage::default(),
-                    post: Some(OpImage {
-                        sha256: Some(sha),
-                        size: op.pre.size,
-                    }),
-                },
-                None => FileOp {
-                    path: op.path.clone(),
-                    action: OpAction::Remove,
-                    pre: OpImage::default(),
-                    post: None,
-                },
-            },
-            // The original removed the path; undo restores its pre-image.
-            ManifestAction::Remove => FileOp {
-                path: op.path.clone(),
-                action: OpAction::WriteFile,
-                pre: OpImage::default(),
-                post: Some(OpImage {
-                    sha256: op.pre.sha256.clone(),
-                    size: op.pre.size,
-                }),
-            },
+                Some(op.pre.clone()),
+            ),
         };
-        plan.ops.push(file_op);
+        plan.ops.push(FileOp {
+            path: op.path.clone(),
+            action,
+            pre: OpImage::default(),
+            post,
+        });
     }
-    plan
+    Ok(plan)
+}
+
+fn pre_image_sha(op: &ManifestOp) -> Result<&str, ApplyError> {
+    op.pre.sha256.as_deref().ok_or_else(|| {
+        ApplyError::Corrupt(format!("{}: a present pre-image has no digest", op.path))
+    })
+}
+
+fn restored_pre_kind(op: &ManifestOp) -> Result<PreImageKind, ApplyError> {
+    let kind = op.pre_kind.unwrap_or(match (&op.action, &op.pre.sha256) {
+        (_, None) => PreImageKind::Absent,
+        (ManifestAction::WriteSymlink { .. }, Some(_)) => PreImageKind::Symlink,
+        (ManifestAction::WriteFile | ManifestAction::Remove, Some(_)) => PreImageKind::File,
+    });
+    match (kind, op.pre.sha256.is_some()) {
+        (PreImageKind::Absent, false) | (PreImageKind::File | PreImageKind::Symlink, true) => {
+            Ok(kind)
+        }
+        _ => Err(ApplyError::Corrupt(format!(
+            "{}: the pre-image kind and digest disagree",
+            op.path
+        ))),
+    }
 }
 
 /// The forward re-application of a committed apply: its post-images, with

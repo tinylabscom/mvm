@@ -23,6 +23,9 @@ const ENDPOINT_BIN: &str = "crates/mvm-hostd/src/bin/mvm-network-endpoint.rs";
 const SPEC_MAP_RS: &str = "crates/mvm-vmm/src/host/spec_map.rs";
 const RUNNER_RS: &str = "crates/mvm-runtime/src/workload_runner/runner.rs";
 const LIVE_SNAPSHOT_RS: &str = "crates/mvm-runtime/src/vm/instance_snapshot.rs";
+const ROUTE_DECISION_OWNER: &str =
+    "crates/mvm-hostd/src/supervisor/network_endpoint_proxy/routing.rs";
+const ROUTE_DECISION_GATE: &str = "crates/mvm-vmm/src/vsock_egress_bridge/egress_gate.rs";
 
 const RUNNERS: &[(&str, &str)] = &[
     ("FcRunner", "FcDriver"),
@@ -160,11 +163,12 @@ pub fn run(workspace: &Path) -> Result<()> {
     check_retired_symbols(workspace)?;
     check_socket_owners(workspace)?;
     check_single_peer_resolver(workspace)?;
+    check_single_route_decider(workspace)?;
     check_flow_audit_labels(workspace)?;
     check_builder_egress(workspace)?;
     check_live_snapshot_device_setup(workspace)?;
     eprintln!(
-        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path or live snapshot device setup, one workload socket owner, one peer resolver, payload-free flow audit labels, and no builder egress but the vsock egress client"
+        "check-single-network-path: clean — one endpoint implementation, one NetworkFlow channel per backend, no retired L3/NIC path or live snapshot device setup, one workload socket owner, one peer resolver, one endpoint route decider, payload-free flow audit labels, and no builder egress but the vsock egress client"
     );
     Ok(())
 }
@@ -411,6 +415,45 @@ fn check_single_peer_resolver(workspace: &Path) -> Result<()> {
         bail!("check-single-network-path:\n  {}", violations.join("\n  "));
     }
     Ok(())
+}
+
+fn check_single_route_decider(workspace: &Path) -> Result<()> {
+    let gate = production_code(&read(workspace, ROUTE_DECISION_GATE)?);
+    if !gate.contains("pub fn decide_route(") {
+        bail!(
+            "check-single-network-path: {ROUTE_DECISION_GATE} must own the endpoint route decision"
+        );
+    }
+    let mut sources = Vec::new();
+    scan_path(workspace, &workspace.join("crates"), &mut |file, code| {
+        sources.push((file.to_string(), code.to_string()))
+    })?;
+    let violations = route_decider_violations(&sources);
+    if !violations.is_empty() {
+        bail!("check-single-network-path:\n  {}", violations.join("\n  "));
+    }
+    Ok(())
+}
+
+fn route_decider_violations(sources: &[(String, String)]) -> Vec<String> {
+    let mut owner_calls = 0;
+    let mut violations = Vec::new();
+    for (file, code) in sources {
+        let calls = code.matches(".decide_route(").count();
+        if file == ROUTE_DECISION_OWNER {
+            owner_calls += calls;
+        } else if calls > 0 {
+            violations.push(format!(
+                "{file} makes {calls} route decision(s) outside {ROUTE_DECISION_OWNER}"
+            ));
+        }
+    }
+    if owner_calls != 1 {
+        violations.push(format!(
+            "{ROUTE_DECISION_OWNER} must make exactly one endpoint route decision, found {owner_calls}"
+        ));
+    }
+    violations
 }
 
 /// Check the substitution proxy's files, already reduced to production code.
@@ -940,6 +983,33 @@ mod tests {
             format!("crates/mvm-hostd/src/supervisor/network_endpoint_proxy/{name}"),
             code.to_string(),
         )
+    }
+
+    #[test]
+    fn one_route_decision_at_the_endpoint_is_clean() {
+        let sources = [(ROUTE_DECISION_OWNER.into(), "gate.decide_route(a)".into())];
+        assert!(route_decider_violations(&sources).is_empty());
+    }
+
+    #[test]
+    fn a_second_route_decision_is_named() {
+        let sources = [
+            (ROUTE_DECISION_OWNER.into(), "gate.decide_route(a)".into()),
+            (
+                "crates/mvm-hostd/src/supervisor/other.rs".into(),
+                "gate.decide_route(b)".into(),
+            ),
+        ];
+        let violations = route_decider_violations(&sources);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("other.rs"));
+    }
+
+    #[test]
+    fn a_missing_route_decision_fails_closed() {
+        let violations = route_decider_violations(&[]);
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("found 0"));
     }
 
     #[test]

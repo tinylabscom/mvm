@@ -30,6 +30,18 @@ on:
         type: boolean
         required: false
         default: true
+      boot_pinned_images:
+        description: >-
+          Whether the SDK sidecar and the dev default image are adopted from
+          the pinned, signed image set (`MVM_FETCH_UNCHANGED_IMAGES=pinned`)
+          instead of pair-built from an mvm-images checkout at the pinned
+          commit. `release.yml` sets it: a release tests the new CLI against
+          the set `images.lock` pins, which is what its users boot, and a set
+          whose signed compatibility excludes the CLI fails the lane. Extended
+          CI leaves it false and keeps building both from the tree.
+        type: boolean
+        required: false
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -94,6 +106,10 @@ jobs:
       # unset, and QEMU can only reach a builder through Stage 0.
       MVM_BUILDER_BACKEND: firecracker
       MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
+      # `pinned` adopts the pinned set's SDK sidecar and dev default image and
+      # needs no image checkout; `1` pair-builds both from the checkout below
+      # unless the set was built from exactly this tree's sources.
+      MVM_FETCH_UNCHANGED_IMAGES: ${{ inputs.boot_pinned_images && 'pinned' || '1' }}
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/free-disk
@@ -116,10 +132,11 @@ jobs:
         with:
           key: e2e-docs-linux
 
-      # The SDK sidecar the service-plane scenarios load is built from this
-      # tree through the mvm-images recipe. It is checked out inside the
-      # workspace, not beside it, so no other step discovers it as an image
-      # checkout and every other image still comes from the pinned set.
+      # Unless the caller boots the pinned set, the SDK sidecar the
+      # service-plane scenarios load is built from this tree through the
+      # mvm-images recipe. It is checked out inside the workspace, not beside
+      # it, so no other step discovers it as an image checkout and every other
+      # image still comes from the pinned set.
       #
       # At the commit that produced the image set images.lock pins, never at
       # mvm-images `main`: this lane gates releases, and v0.18.0's failed after
@@ -127,12 +144,14 @@ jobs:
       # not parse yet. The pair's `main`s are compared by the non-blocking
       # `image-pair.yml` canary instead.
       - name: Resolve the mvm-images commit images.lock pins
+        if: ${{ !inputs.boot_pinned_images }}
         id: images-ref
         run: |
           ref="$(cargo run -q -p xtask -- image-source-ref)"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Check out mvm-images for the source-matched SDK sidecar
+        if: ${{ !inputs.boot_pinned_images }}
         uses: actions/checkout@v6
         with:
           repository: tinylabscom/mvm-images
@@ -305,6 +324,10 @@ jobs:
       # source artifact jobs run inside it under HVF.
       MVM_BUILDER_BACKEND: hvf
       MVM_E2E_IMAGES_DIR: ${{ github.workspace }}/.e2e-mvm-images
+      # `pinned` adopts the pinned set's SDK sidecar and dev default image and
+      # needs no image checkout; `1` pair-builds both from the checkout below
+      # unless the set was built from exactly this tree's sources.
+      MVM_FETCH_UNCHANGED_IMAGES: ${{ inputs.boot_pinned_images && 'pinned' || '1' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -322,10 +345,11 @@ jobs:
         with:
           key: e2e-docs-macos
 
-      # The SDK sidecar the service-plane scenarios load is built from this
-      # tree through the mvm-images recipe. It is checked out inside the
-      # workspace, not beside it, so no other step discovers it as an image
-      # checkout and every other image still comes from the pinned set.
+      # Unless the caller boots the pinned set, the SDK sidecar the
+      # service-plane scenarios load is built from this tree through the
+      # mvm-images recipe. It is checked out inside the workspace, not beside
+      # it, so no other step discovers it as an image checkout and every other
+      # image still comes from the pinned set.
       #
       # At the commit that produced the image set images.lock pins, never at
       # mvm-images `main`: this lane gates releases, and v0.18.0's failed after
@@ -333,12 +357,14 @@ jobs:
       # not parse yet. The pair's `main`s are compared by the non-blocking
       # `image-pair.yml` canary instead.
       - name: Resolve the mvm-images commit images.lock pins
+        if: ${{ !inputs.boot_pinned_images }}
         id: images-ref
         run: |
           ref="$(cargo run -q -p xtask -- image-source-ref)"
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
 
       - name: Check out mvm-images for the source-matched SDK sidecar
+        if: ${{ !inputs.boot_pinned_images }}
         uses: actions/checkout@v6
         with:
           repository: tinylabscom/mvm-images

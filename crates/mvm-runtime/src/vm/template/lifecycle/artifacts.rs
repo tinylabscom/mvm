@@ -282,7 +282,7 @@ fn template_artifacts_for_slot_revision_with_manifest(
 ///
 /// `vcpus` / `mem_mib` come from operator config defaults because
 /// the bundle manifest doesn't carry resources today (a future
-/// schema bump would let bundles declare them; for now `mvmctl up`
+/// schema bump would let bundles declare them; for now `mvmctl machine run`
 /// `--cpus` / `--memory` override). The CLI surfaces this as a
 /// "bundle X uses default resources" info line so users aren't
 /// surprised when no per-template defaults flow through.
@@ -328,7 +328,7 @@ pub(super) fn bundle_artifacts_for_sha(
     // wins when set (BUNDLE_SCHEMA_VERSION 2+ bundles ship this).
     // Falls back to operator config for v1 bundles or when the
     // publisher chose to omit. CLI `--cpus` / `--memory` still
-    // override both at `mvmctl up` time.
+    // override both at `mvmctl machine run` time.
     let user_cfg = mvm_core::user_config::load(None);
     let (vcpus_u32, mem_mib) = match installed.manifest.resources.as_ref() {
         Some(r) => (r.vcpus, r.mem_mib),

@@ -2,7 +2,7 @@
 //!
 //! The architectural rule (auto-memory: "image composition is
 //! transparent to the user") makes `BuildMode::Prod` the default
-//! for production-shape commands (`mvmctl up`/`run`/`start`/
+//! for production-shape commands (`mvmctl run`/`machine run`/`machine start`/
 //! `build`/`template build`). These flags are the documented escape
 //! hatches:
 //!

@@ -77,7 +77,7 @@ const LABEL_PREFIX: &str = "seal.";
 pub enum SealReason {
     /// The workload ran and its exit was reported.
     Exited,
-    /// The run failed between admission and a successful boot.
+    /// The run ended without a confirmed workload completion.
     Failed,
     /// A persistent machine was stopped by the operator.
     Stopped,

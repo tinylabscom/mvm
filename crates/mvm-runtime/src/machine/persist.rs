@@ -51,6 +51,17 @@ pub struct MachineSpec {
     /// image or a manifest slot. Mutually exclusive with `image`/`manifest`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub runtime_pack: bool,
+    /// Signed image pack selected when this machine was created. Every start
+    /// reopens it under current publisher trust before signing the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    /// Resolved tool mediation carried across stop/start, not reloaded from
+    /// a mutable policy path.
+    #[serde(
+        default,
+        skip_serializing_if = "mvm_contract::policy::tool_rules::ToolRules::is_empty"
+    )]
+    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     pub net: bool,
     pub allow_host: Vec<String>,
     /// Peer routes this machine may dial (`NAME:PORT=ADDR:PORT`), persisted so
@@ -268,6 +279,8 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.manifest == b.manifest
         && a.deployment == b.deployment
         && a.runtime_pack == b.runtime_pack
+        && a.registry_pack_image == b.registry_pack_image
+        && a.tools == b.tools
         && a.net == b.net
         && same_allow_host(&a.allow_host, &b.allow_host)
         && a.peer == b.peer
@@ -297,12 +310,16 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
         || current.manifest != desired.manifest
         || current.deployment != desired.deployment
         || current.runtime_pack != desired.runtime_pack
+        || current.registry_pack_image != desired.registry_pack_image
         || current.workload_dir != desired.workload_dir
     {
         changed.push("source");
     }
     if current.net != desired.net {
         changed.push("net");
+    }
+    if current.tools != desired.tools {
+        changed.push("tools");
     }
     if !same_allow_host(&current.allow_host, &desired.allow_host) {
         changed.push("allow-host");
@@ -489,6 +506,8 @@ mod tests {
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,
+            registry_pack_image: None,
+            tools: Default::default(),
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
@@ -808,6 +827,8 @@ mod tests {
             deployment: None,
             resolved_digest: None,
             runtime_pack: false,
+            registry_pack_image: None,
+            tools: Default::default(),
             net: false,
             allow_host: vec![],
             peer: Vec::new(),
@@ -919,6 +940,34 @@ mod tests {
         desired.runtime_pack = true;
         let changed = machine_config_diff(&current, &desired);
         assert!(changed.contains("source"), "changed: {changed}");
+    }
+
+    #[test]
+    fn pack_identity_and_tool_rules_survive_persistence_and_trigger_recreate() {
+        let old = spec_fixture("web");
+        let mut desired = old.clone();
+        desired.image = None;
+        desired.manifest = Some("built-slot".to_string());
+        desired.registry_pack_image = Some(
+            mvm_core::registry_pack::PackPin::new(
+                "runtime/python@1.1.0".parse().expect("reference"),
+                mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+            )
+            .expect("versioned pin"),
+        );
+        desired.tools.allow.push("python".to_string());
+        let encoded = serde_json::to_vec(&desired).expect("serialize machine spec");
+        let decoded: MachineSpec = serde_json::from_slice(&encoded).expect("deserialize spec");
+        assert_eq!(decoded, desired);
+        assert!(!machine_config_matches(&old, &decoded));
+        let changed = machine_config_diff(&old, &decoded);
+        assert!(changed.contains("source"), "{changed}");
+        assert!(changed.contains("tools"), "{changed}");
+
+        let legacy = serde_json::to_vec(&old).expect("serialize legacy-shaped spec");
+        let decoded: MachineSpec = serde_json::from_slice(&legacy).expect("default new fields");
+        assert!(decoded.registry_pack_image.is_none());
+        assert!(decoded.tools.is_empty());
     }
 
     #[test]

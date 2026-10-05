@@ -1,6 +1,6 @@
 //! `mvmctl bundle install <SOURCE>` — verify a `.mvmpkg` archive
 //! and extract it into the local bundle registry so subsequent
-//! `mvmctl up <bundle-sha256>` calls can launch from it.
+//! `mvmctl machine run --manifest <bundle-sha256>` calls can launch from it.
 //!
 //! Reuses the source-parsing + transport rules from
 //! [`super::fetch::BundleSource`] (local path, `https://` URL, or `oci://`

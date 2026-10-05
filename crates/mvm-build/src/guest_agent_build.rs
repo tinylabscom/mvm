@@ -479,6 +479,8 @@ pub fn sdk_cdylib_source_fingerprint(
             "crates/mvm-agentd/src",
             "crates/mvm-host-services/Cargo.toml",
             "crates/mvm-host-services/src",
+            "crates/mvm-setpriv/Cargo.toml",
+            "crates/mvm-setpriv/src",
         ],
     )?;
     Ok(hex::encode(hasher.finalize()))
@@ -519,6 +521,8 @@ fn compute_guest_source_fingerprint(workspace_root: &Path) -> Result<String, Gue
         "crates/mvm-core/src",
         "crates/mvm-agentd/Cargo.toml",
         "crates/mvm-agentd/src",
+        "crates/mvm-setpriv/Cargo.toml",
+        "crates/mvm-setpriv/src",
         "crates/mvm-build/src/guest_agent_build.rs",
     ] {
         let path = workspace_root.join(rel);
@@ -1515,6 +1519,7 @@ rust = "1.91.1"
         std::fs::create_dir_all(root.join("crates/mvm-contract/src")).unwrap();
         std::fs::create_dir_all(root.join("crates/mvm-core/src")).unwrap();
         std::fs::create_dir_all(root.join("crates/mvm-agentd/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/mvm-setpriv/src")).unwrap();
         std::fs::create_dir_all(root.join("crates/mvm-build/src")).unwrap();
         std::fs::write(root.join("Cargo.lock"), b"version = 4\n").unwrap();
         std::fs::write(root.join("Cargo.toml"), b"[workspace]\n").unwrap();
@@ -1532,6 +1537,12 @@ rust = "1.91.1"
         .unwrap();
         std::fs::write(root.join("crates/mvm-agentd/Cargo.toml"), b"[package]\n").unwrap();
         std::fs::write(root.join("crates/mvm-agentd/src/main.rs"), agent_body).unwrap();
+        std::fs::write(root.join("crates/mvm-setpriv/Cargo.toml"), b"[package]\n").unwrap();
+        std::fs::write(
+            root.join("crates/mvm-setpriv/src/lib.rs"),
+            b"pub fn drop_privileges() {}\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("crates/mvm-build/src/guest_agent_build.rs"),
             b"pub fn recipe() {}\n",
@@ -1785,6 +1796,45 @@ rust = "1.91.1"
         let after = compute_guest_source_fingerprint(root).expect("fingerprint after");
 
         assert_ne!(before, after);
+    }
+
+    /// The guest agent and the host-services cdylib both link `mvm-setpriv`,
+    /// so a setpriv-only edit changes the bytes of each. A fingerprint that
+    /// missed it would keep serving the cached agent and adopt a published
+    /// sidecar built without the edit.
+    #[test]
+    fn both_fingerprints_change_when_setpriv_changes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        make_fake_checkout(root, "pub fn guest() {}\n");
+        std::fs::create_dir_all(root.join("crates/mvm-host-services/src")).expect("mkdir");
+        std::fs::write(
+            root.join("crates/mvm-host-services/Cargo.toml"),
+            "[package]\n",
+        )
+        .expect("write host-services manifest");
+        std::fs::write(
+            root.join("crates/mvm-host-services/src/lib.rs"),
+            "pub fn call() {}\n",
+        )
+        .expect("write host-services src");
+
+        let guest_before = compute_guest_source_fingerprint(root).expect("guest before");
+        let cdylib_before = sdk_cdylib_source_fingerprint(root).expect("cdylib before");
+        std::fs::write(
+            root.join("crates/mvm-setpriv/src/lib.rs"),
+            "pub fn drop_privileges() { /* narrower */ }\n",
+        )
+        .expect("rewrite setpriv src");
+
+        assert_ne!(
+            guest_before,
+            compute_guest_source_fingerprint(root).expect("guest after")
+        );
+        assert_ne!(
+            cdylib_before,
+            sdk_cdylib_source_fingerprint(root).expect("cdylib after")
+        );
     }
 
     #[test]

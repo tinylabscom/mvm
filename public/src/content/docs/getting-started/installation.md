@@ -140,10 +140,13 @@ This is only for users who already choose to use Nix as an install
 frontend. It is not the beginner path, and mvm does not require Nix on
 the host for normal use.
 
-The repository root exposes a release binary pinned by archive hash. Its pin is
-updated by a pull request after a release passes the fresh-install smoke test;
-the update job verifies the release workflow's signature on the checksum
-manifest before taking any hash from it:
+The repository root exposes a release binary pinned by archive hash. The pin is
+bumped by hand and can trail the latest release; `nix/prebuilt-release.nix`
+names the version it installs. After a release passes the fresh-install smoke
+test, the release job takes the new archive hashes from the checksum manifest,
+having verified the release workflow's signature on it, and pushes them to a
+`chore/prebuilt-pin-<tag>` branch. It cannot open the pull request itself, so
+the pin moves when a maintainer opens one from that branch:
 
 ```bash
 nix run github:tinylabscom/mvm#prebuilt -- --version
@@ -229,9 +232,10 @@ There is no Docker or container backend on the runtime path. A `qemu`
 
 You don't need Nix on the host. On first build, mvm bootstraps or reuses a Linux builder VM, runs Nix evaluation and `nix build` inside it, and extracts the rootfs back. You run `mvmctl machine build` from the host; you do not need to enter a dev shell first. See [Builder VM](/guides/builder-vm/) for the full model.
 
-### First-Time Setup
+### First-Time Setup (optional)
 
-After installation, run host setup:
+Your first `mvmctl machine run` sets up what it needs, so this step is not
+required. To do that setup ahead of time instead:
 
 ```bash
 mvmctl bootstrap

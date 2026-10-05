@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use mvm_core::plan::{ExecutionPlan, HostShareGrant, ShareKind};
+use mvm_core::vm_backend::VmVolume;
 use mvm_hostd::audit::emitter::AuditEmitter;
 
 use super::AssetSpec;
@@ -65,6 +66,22 @@ impl<'a> InstructionSources<'a> {
     }
 }
 
+/// The ext4 images a boot attaches in place of host directories.
+///
+/// A `--mount` reaches the guest as a materialized image, not as the directory
+/// it was built from, so these are what the provenance scan has to read. Pass
+/// them to [`InstructionSources::with_mount_images`]: handed to
+/// [`InstructionSources::with_mount_roots`] instead, an image is a file root
+/// matched by its own name, which is never an instruction file's name, and the
+/// scan finds nothing in it.
+#[must_use]
+pub fn materialized_mount_images(volumes: &[VmVolume]) -> Vec<PathBuf> {
+    volumes
+        .iter()
+        .filter_map(|volume| volume.materialized_image.as_deref().map(PathBuf::from))
+        .collect()
+}
+
 /// The host paths this boot copies into the guest.
 ///
 /// Directory shares and materialized host-directory images are scanned.
@@ -90,7 +107,10 @@ fn boot_inputs(
             .map_or_else(Vec::new, <[PathBuf]>::to_vec),
         assets: assets
             .iter()
-            .map(|asset| PathBuf::from(&asset.host_path))
+            .filter_map(|asset| match asset {
+                AssetSpec::File { host_path, .. } => Some(PathBuf::from(host_path)),
+                AssetSpec::RegistryPack(_) => None,
+            })
             .collect(),
         workload_dir: sources.workload_dir.map(Path::to_path_buf),
     }
@@ -174,7 +194,7 @@ mod tests {
 
     #[test]
     fn directory_shares_assets_and_the_workload_are_scanned_and_disks_are_not() {
-        let assets = vec![AssetSpec {
+        let assets = vec![AssetSpec::File {
             kind: mvm_contract::plan::AssetKind::Prompt,
             host_path: "/assets/prompt".to_string(),
         }];
@@ -201,12 +221,24 @@ mod tests {
     }
 
     #[test]
+    fn a_pack_identity_is_not_mistaken_for_a_host_file_to_scan() {
+        let pin = mvm_core::registry_pack::PackPin::new(
+            "runtime/python@1.0.0".parse().expect("pack reference"),
+            mvm_core::packs::Sha256Hex::from_bytes(b"signed manifest"),
+        )
+        .expect("versioned pin");
+        let assets = vec![AssetSpec::RegistryPack(pin)];
+        let inputs = boot_inputs(&[], &assets, InstructionSources::default());
+        assert!(inputs.assets.is_empty());
+    }
+
+    #[test]
     fn explicit_mount_roots_override_admitted_share_paths() {
-        let assets = vec![AssetSpec {
+        let assets = vec![AssetSpec::File {
             kind: mvm_contract::plan::AssetKind::Prompt,
             host_path: "/assets/prompt".to_string(),
         }];
-        let materialized = vec![PathBuf::from("/state/mount-0.ext4")];
+        let materialized = vec![PathBuf::from("/state/mount-0")];
         let inputs = boot_inputs(
             &[share("/src/tree", ShareKind::DirShare)],
             &assets,
@@ -214,5 +246,26 @@ mod tests {
         );
         assert_eq!(inputs.mounts, materialized);
         assert_eq!(inputs.assets, vec![PathBuf::from("/assets/prompt")]);
+    }
+
+    #[test]
+    fn materialized_mount_images_are_the_attached_images_only() {
+        let volumes = vec![
+            VmVolume {
+                host: "/src/tree".to_string(),
+                guest: "/work".to_string(),
+                materialized_image: Some("/cache/mounts/key.ext4".to_string()),
+                ..Default::default()
+            },
+            VmVolume {
+                host: "/images/disk.ext4".to_string(),
+                guest: "/data".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            materialized_mount_images(&volumes),
+            vec![PathBuf::from("/cache/mounts/key.ext4")]
+        );
     }
 }

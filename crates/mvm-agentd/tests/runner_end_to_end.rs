@@ -5,8 +5,7 @@
 //! The fragment is a tiny shell script (not a real Python/Node
 //! interpreter) so the test runs on any host where `/bin/sh` exists —
 //! the runtime itself does not need a real Python interpreter to be
-//! exercised here. Real Python/Node dispatch is covered by
-//! `just real-mvm-check` against a generated function-runner artifact.
+//! exercised here. Real Python/Node dispatch is outside this test.
 
 use std::fs;
 use std::io::Write;

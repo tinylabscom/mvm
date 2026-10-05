@@ -7,7 +7,7 @@ set working-directory := "../.."
 # narrowing is what left the macOS default backend with no lane that boots a
 # guest at all.
 #
-# Sibling of `e2e-docs`: this one proves the ways in, that one proves the whole
+# Sibling of `e2e::docs`: this one proves the ways in, that one proves the whole
 # documented command surface. They overlap in the suite they drive; the split is
 # that this lane also exercises the in-process Rust library seam.
 #
@@ -16,11 +16,21 @@ set working-directory := "../.."
 launch:
     ./scripts/e2e-launch-modes.sh
 
+# Run the Firecracker live-parent fork witness (crates/mvm-runtime/tests/
+# fc_fork_live.rs, #[ignore]d: needs /dev/kvm) on a real Linux KVM host over
+# ssh. Idempotent — re-runs reuse the remote toolchain and image caches.
+# Extra args pass through as the boot-image tag, e.g.
+# `just e2e::live-fork-witness root@host boot-image/v0.1.5`.
+
+# Run the Firecracker live-parent fork witness on a remote KVM host
+live-fork-witness TARGET *ARGS:
+    ./scripts/live-fork-witness-remote.sh {{ TARGET }} {{ ARGS }}
+
 # Runs both live lanes in order, against one shared artifact home:
 #
-#   e2e-launch  the ways in — CLI verbs, both SDKs, and the in-process Rust
-#               library seam
-#   e2e-docs    the whole documented command surface, plus the machine journey
+#   launch  the ways in — CLI verbs, both SDKs, and the in-process Rust
+#           library seam
+#   docs    the whole documented command surface, plus the machine journey
 #
 # They overlap in the suite they drive, so this is the belt-and-braces run
 # rather than the quick one; reach for a single lane when iterating. Both sweep
@@ -31,13 +41,6 @@ launch:
 # scenario names a capability this host lacks, and a green suite is not full
 # coverage while any of them are nonzero.
 #
-# Run the Firecracker live-parent fork witness (crates/mvm-runtime/tests/
-# fc_fork_live.rs, #[ignore]d: needs /dev/kvm) on a real Linux KVM host over
-# ssh. Idempotent — re-runs reuse the remote toolchain and image caches.
-# Extra args pass through as the boot-image tag, e.g.
-# `just e2e::live-fork-witness root@host boot-image/v0.1.5`.
-live-fork-witness TARGET *ARGS:
-    ./scripts/live-fork-witness-remote.sh {{ TARGET }} {{ ARGS }}
 
 # Every live end-to-end lane, back to back
 all:
@@ -85,7 +88,7 @@ smoke-fresh-install VERSION="":
 docs-clean:
     ./scripts/e2e-documented-surface.sh --clean-only
 
-# `e2e-docs` records this for you on a clean run; this recipe is for
+# `e2e::docs` records this for you on a clean run; this recipe is for
 # re-recording from a log you kept. The lane is `macos-hvf` or
 # `linux-firecracker`, and the log is the full output of the run that earned it
 # — the recorder parses the `[Summary]` block out of it and refuses a run with

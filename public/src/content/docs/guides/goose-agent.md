@@ -107,8 +107,9 @@ an admitted VM. For VM-bound execution and its audit boundary, see
 [Agent tool contract](/guides/agent-tool-contract/).
 
 This setup was checked with Goose 1.52.0, which uses the stateless MCP
-protocol version `2026-07-28`. The server answers that form and an
-`initialize` for `2025-11-25`, and refuses an `initialize` naming any other.
+protocol version `2026-07-28`. The server answers that form, echoes an
+`initialize` for `2025-11-25` or `2025-06-18`, and answers an `initialize`
+naming any other version with `2025-11-25`.
 
 ## The signed agent pack
 

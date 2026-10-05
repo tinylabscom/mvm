@@ -304,6 +304,9 @@ impl CallOutcome {
 /// `streamed_input` once a streamed stdin has ended, and `call_finished` once
 /// the call has a terminal. Only the first two are required.
 pub trait CallObserver {
+    /// The call's VM has its final name, before admission or backend startup.
+    /// Observers can arm host-side evidence collection without racing boot.
+    fn vm_named(&mut self, _vm_name: &str) {}
     /// One chunk of the workload's own bytes, on the channel the guest sent it
     /// on, with how its recorded copy differed.
     fn output(&mut self, chunk: &ShownChunk);

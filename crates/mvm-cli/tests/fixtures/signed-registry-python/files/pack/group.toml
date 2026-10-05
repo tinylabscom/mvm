@@ -1,0 +1,11 @@
+description = "Package registries and common hosts for Python workloads, matching the maintained network presets."
+required = false
+
+[network]
+allow = [
+  "pypi.org:443",
+  "files.pythonhosted.org:443",
+  "github.com:443",
+  "api.github.com:443",
+  "objects.githubusercontent.com:443",
+]

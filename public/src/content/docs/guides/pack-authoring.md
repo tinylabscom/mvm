@@ -3,8 +3,9 @@ title: Author and publish a signed pack
 description: Write a policy pack as a group or a profile, check it locally, publish it through the mvm-templates signing workflow, and decide which publishers your hosts trust.
 ---
 
-A pack is a named, versioned, signed bundle of policy. It carries a policy
-group, a policy profile, or both, under a `namespace/name@version` reference,
+A pack is a named, versioned, signed bundle of policy and, optionally, a
+buildable workload image. It carries a policy group, a policy profile, or both,
+under a `namespace/name@version` reference,
 and `mvmctl` verifies its signature every time it is pulled and every time a
 policy that names it is loaded. The official registry is the
 [`mvm-templates`](https://github.com/tinylabscom/mvm-templates) repository.
@@ -40,9 +41,38 @@ description = "Node.js runtime policy: the npm registry, Node downloads, and Git
   same set plus `.`, up to 64 characters, and requires the last character to be
   a letter or digit too.
 
-Everything under `pack/` is the payload. `mvmctl` reads two files from it,
-`pack/group.toml` and `pack/profile.toml`. Any other file there is signed,
-verified and installed with the pack, and nothing reads it today.
+Everything under `pack/` is the signed payload. Policy loading reads
+`pack/group.toml` and `pack/profile.toml`; image-bearing packs additionally
+declare an `mvm.toml` and its neighboring Nix source and lock.
+
+## An image-bearing pack
+
+An optional `[image]` table in `pack.toml` names a signed workload manifest:
+
+```toml
+version = "1.1.0"
+description = "Python runtime policy and image"
+
+[image]
+manifest = "pack/image/mvm.toml"
+```
+
+The payload must include `pack/image/mvm.toml`, `pack/image/flake.nix`, and
+`pack/image/flake.lock`. The image manifest may contain only
+`schema_version`, `flake`, `profile`, and `name`; `flake = "."` (or no `flake`
+field) selects only the neighboring signed source. The publisher workflow
+and client refuse missing source files, unlisted payload, external flake
+selectors, and host-grant fields. An image source never authorizes a host
+directory share or a guest network device.
+
+When `run` or `machine run` names an installed image-bearing pack with
+`--policy` and no explicit boot source, the signed image is built and booted.
+The exact pack reference and manifest digest enter the signed execution plan
+and chain-signed audit record. Host admission reopens the installed pack under
+the current lock and publisher trust before boot. An explicit image, manifest,
+flake, deployment, or runtime source keeps its own boot-source precedence;
+the pack still contributes its policy. The separate `machine run --entrypoint`
+boot path refuses an image-bearing pack; use the ordinary machine run path.
 
 ## A group pack
 
@@ -61,9 +91,9 @@ allow = [
 ]
 ```
 
-A group pack is used by including it, in a profile's `[groups] include` or a
-project's `[policy] include`. It is not a profile: `--policy runtime/node` is
-refused, because the pack declares no `pack/profile.toml`.
+A group pack is used by including it in a profile's `[groups] include` or a
+project's `[policy] include`; `--policy runtime/node` also selects it directly
+as the root policy. It does not need a `pack/profile.toml` for that use.
 
 ## A profile pack
 
@@ -91,8 +121,8 @@ Three things in that file are worth copying:
   secret under exactly that name; a run without it stops before anything boots.
 - **It includes another pack by reference.** `runtime/node` resolves on the
   consumer's host from their own installed, verified copy. `mvmctl pull`
-  fetches one pack and does not follow these references, so say in the pack's
-  description which packs it composes.
+  follows pack references in the signed profile, verifying and pinning each
+  dependency under the consumer's publisher trust policy.
 - **Its secret binding is under `[overrides]`.** A top-level `[secrets]` or
   `[network]` table is the group form and does not parse in a profile.
 
@@ -106,6 +136,8 @@ yourself, plus one of its own:
   name that resolves from the consumer's policy directory, is refused.
 - **It cannot use an escape hatch.** An `env.readmit` entry in a pack is
   stripped with a note, never honoured.
+- **It cannot mount a host directory.** `shares.mount` entries in a pack are
+  stripped with a note; `shares.deny` may still narrow a share the user added.
 - **It cannot undo a deny.** Denies union across layers and beat any allow, a
   blocked network stays blocked, and resource values are ceilings.
 - **It cannot widen a stored secret.** A binding may only narrow the
@@ -124,9 +156,9 @@ mvmctl policy validate ./pack-sources/runtime/node/pack/group.toml
 mvmctl policy validate ./pack-sources/agent/codex/pack/profile.toml
 ```
 
-A profile that includes other packs resolves them from your own lockfile, so
-pull the published ones it names first; a pack it names that is not published
-yet has nothing to resolve against until it is. For a profile,
+A profile that includes other packs resolves them from your own lockfile.
+`mvmctl pull` fetches its published dependencies; a pack it names that is not
+published yet has nothing to resolve against until it is. For a profile,
 `mvmctl policy show` on the same path prints the merged result with the layer
 each line came from, which is the quickest way to see that it grants what you
 meant and nothing more. Add `--strict` to `validate` to turn every note into
@@ -278,10 +310,14 @@ The index is a small JSON document, and unknown fields in it are refused:
 
 ## Limits
 
-- A pack carries policy. It does not carry or select an image, and it installs
-  nothing in a guest.
-- `mvmctl pull` does not resolve the packs a profile includes. Each one is
-  pulled by name.
+- A pack always carries policy and may declare a signed workload image. A
+  policy-only pack installs nothing in a guest; an image-bearing pack selects
+  its image only when named by `--policy` and no explicit boot source
+  was supplied.
+- `mvmctl pull` follows signed profile dependencies. Cycles, conflicting
+  versions, more than 128 packs, or an unpublished dependency stop the pull.
+  Packs already installed before a later dependency fails remain pinned, but a run
+  cannot load a missing dependency.
 - A `[tools]` section in a pack composes like any other, and has the
   enforcement limits listed under
   [Not yet](/guides/policy-and-profiles/#not-yet).

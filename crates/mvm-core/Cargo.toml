@@ -58,8 +58,9 @@ zeroize.workspace = true
 rand.workspace = true
 # Opt-in cosign-keyless image verification (off by default). The modular
 # sigstore-verify stack checks bundles offline against an embedded trust root
-# — no rsa, no OIDC client, no async TUF fetch — so the default mvm-core build
-# stays runtime-free and `manifest-verify` pulls no tokio.
+# — no rsa, no OIDC client, no async TUF fetch. The default mvm-core build stays
+# runtime-free because the stack is optional; enabling it does pull tokio (see
+# the `manifest-verify` feature below).
 sigstore-verify = { version = "0.11", default-features = false, features = ["rustls"], optional = true }
 sigstore-trust-root = { version = "0.11", default-features = false, optional = true }
 sigstore-types = { version = "0.11", optional = true }
@@ -120,8 +121,10 @@ test-support = []
 hostd-transport = ["dep:tokio", "tokio/io-util"]
 # Cosign-keyless manifest verification via the modular sigstore-verify stack.
 # Verification is synchronous and offline (embedded trust root + the bundle's
-# inline transparency-log inclusion proof), so this feature pulls no tokio and
-# the runtime-free invariant holds with or without it.
+# inline transparency-log inclusion proof) and never calls an async API. The
+# stack still links tokio: sigstore-rekor, sigstore-tsa and sigstore-tuf depend
+# on a reqwest/hyper client unconditionally. The runtime-free invariant is about
+# the default build, which leaves this feature off.
 manifest-verify = [
     "dep:sigstore-verify",
     "dep:sigstore-trust-root",

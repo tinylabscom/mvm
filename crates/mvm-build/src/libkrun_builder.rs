@@ -1744,6 +1744,8 @@ const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
     "crates/mvm-agentd/src",
     "crates/mvm-hostd/Cargo.toml",
     "crates/mvm-hostd/src",
+    "crates/mvm-setpriv/Cargo.toml",
+    "crates/mvm-setpriv/src",
 ];
 
 /// File name for the captured rebuild log, written under `target_dir`

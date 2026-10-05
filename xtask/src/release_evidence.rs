@@ -397,8 +397,8 @@ pub fn check(workspace: &Path, lanes: &[String]) -> Result<()> {
         let path = evidence_path(workspace, lane);
         let Ok(text) = std::fs::read_to_string(&path) else {
             failures.push(format!(
-                "{lane}: no evidence at {}. Run `just e2e-docs` on a host that can boot this \
-                 backend, then `just record-e2e-evidence {lane}`.",
+                "{lane}: no evidence at {}. Run `just e2e::docs` on a host that can boot this \
+                 backend, then `just e2e::record-evidence {lane} <log>`.",
                 path.display()
             ));
             continue;

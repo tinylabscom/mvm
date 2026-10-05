@@ -64,7 +64,7 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -82,6 +82,9 @@ use crate::image_set::{
     select_member, select_workload_image, validate_structure,
 };
 use crate::packs::Sha256Hex;
+
+mod signer;
+pub use signer::ManifestSigner;
 
 /// Derive the key_id from a verifying-key's bytes.
 ///
@@ -1006,19 +1009,24 @@ pub fn ensure_safe_path(path: &str) -> Result<(), BundleVerifyError> {
 /// manifest is signed inside this function so the signature lines up
 /// exactly with the canonical bytes that get written.
 ///
+/// The signature is checked against `signer`'s verifying key before the
+/// archive is assembled. A signer that answers with the wrong bytes is a
+/// failed export here, not a bundle that installs nowhere.
+///
 /// Returns the full archive bytes as a `Vec<u8>` — the caller is
 /// responsible for writing them out. In-memory representation
 /// matches the on-disk archive byte-for-byte.
 pub fn write_bundle(
     manifest: &BundleManifest,
-    signing_key: &SigningKey,
+    signer: &dyn ManifestSigner,
     mut artifacts: Vec<(String, Vec<u8>)>,
 ) -> Result<Vec<u8>> {
     // Defensive: the manifest must declare the same key_id the
     // signing key would derive. Mismatch is a publisher bug, not a
     // verifier concern, but catching it at write-time stops bad
     // bundles from ever leaving the build host.
-    let derived = key_id_from_pubkey(&signing_key.verifying_key());
+    let verifying_key = signer.verifying_key();
+    let derived = key_id_from_pubkey(&verifying_key);
     anyhow::ensure!(
         manifest.key_id == derived,
         "manifest key_id ({}) does not match signing key derivation ({})",
@@ -1054,8 +1062,17 @@ pub fn write_bundle(
     }
 
     let manifest_bytes = canonical_manifest_bytes(manifest)?;
-    let sig: Signature = signing_key.sign(&manifest_bytes);
-    let sig_bytes = sig.to_bytes();
+    let sig_bytes = signer
+        .sign_manifest(&manifest_bytes)
+        .context("signing the bundle manifest")?;
+    verifying_key
+        .verify(&manifest_bytes, &Signature::from_bytes(&sig_bytes))
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "the signer returned a signature that does not verify under its own key {}: {e}",
+                derived.0
+            )
+        })?;
 
     let mut tar_buf = Cursor::new(Vec::<u8>::new());
     {
@@ -1464,7 +1481,7 @@ pub fn bundle_sha256(archive_bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
-    use ed25519_dalek::SigningKey;
+    use ed25519_dalek::{Signer, SigningKey};
     use rand::Rng;
     use std::collections::HashMap;
 
@@ -2301,6 +2318,79 @@ mod tests {
         let manifest = make_manifest(key_id_a, vec![]);
         let err = write_bundle(&manifest, &sk_b, vec![]).expect_err("rejects");
         assert!(format!("{err:#}").contains("does not match"));
+    }
+
+    /// A signer that keeps its key to itself and signs on request, the way a
+    /// KMS does. `answer` decides what it sends back.
+    struct RemoteSigner {
+        key: SigningKey,
+        answer: RemoteAnswer,
+    }
+
+    enum RemoteAnswer {
+        Honest,
+        /// A valid signature, but over other bytes.
+        WrongMessage,
+        /// The service refused or could not be reached.
+        Unavailable,
+    }
+
+    impl ManifestSigner for RemoteSigner {
+        fn verifying_key(&self) -> VerifyingKey {
+            self.key.verifying_key()
+        }
+
+        fn sign_manifest(&self, canonical_manifest: &[u8]) -> Result<[u8; 64]> {
+            match self.answer {
+                RemoteAnswer::Honest => Ok(self.key.sign(canonical_manifest).to_bytes()),
+                RemoteAnswer::WrongMessage => Ok(self.key.sign(b"something else").to_bytes()),
+                RemoteAnswer::Unavailable => anyhow::bail!("signing service unavailable"),
+            }
+        }
+    }
+
+    fn remote(answer: RemoteAnswer) -> RemoteSigner {
+        RemoteSigner {
+            key: fresh_key(),
+            answer,
+        }
+    }
+
+    #[test]
+    fn a_signer_that_never_hands_out_its_key_produces_a_verifiable_bundle() {
+        let signer = remote(RemoteAnswer::Honest);
+        let manifest = make_manifest(key_id_from_pubkey(&signer.verifying_key()), vec![]);
+
+        let archive = write_bundle(&manifest, &signer, vec![]).expect("sealed");
+
+        let store = trust(&signer.key);
+        let verified = read_and_verify_bundle(&archive, &store).expect("verifies");
+        assert_eq!(verified.key_id, manifest.key_id);
+    }
+
+    #[test]
+    fn a_signature_over_other_bytes_is_refused_at_write_time() {
+        let signer = remote(RemoteAnswer::WrongMessage);
+        let manifest = make_manifest(key_id_from_pubkey(&signer.verifying_key()), vec![]);
+
+        let err = write_bundle(&manifest, &signer, vec![]).expect_err("refused");
+
+        assert!(
+            format!("{err:#}").contains("does not verify under its own key"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn a_signer_that_fails_fails_the_write() {
+        let signer = remote(RemoteAnswer::Unavailable);
+        let manifest = make_manifest(key_id_from_pubkey(&signer.verifying_key()), vec![]);
+
+        let err = write_bundle(&manifest, &signer, vec![]).expect_err("refused");
+
+        let message = format!("{err:#}");
+        assert!(message.contains("signing the bundle manifest"), "{message}");
+        assert!(message.contains("signing service unavailable"), "{message}");
     }
 
     #[test]

@@ -19,6 +19,13 @@
 //! stored set rather than caching it; a token endpoint that stays unreachable
 //! leaves the store untouched and the loop gives up, after which resolution
 //! fails closed exactly as it does today.
+//!
+//! The client secret leaves the host only to an `https` token endpoint (checked
+//! when the bindings are discovered), only to a destination the VM's network
+//! policy admits (checked by the injected destination check before every
+//! exchange), and every outcome is reported to the injected
+//! [`OAuthRefreshObserver`], which the endpoint backs with its chain-signed
+//! audit recorder.
 
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
@@ -27,6 +34,7 @@ use anyhow::Context;
 use chrono::{DateTime, Duration, Utc};
 use mvm_core::crypto::secret_binding::{BindingStore, OAuthBindingMeta};
 use mvm_core::plan::{SecretBinding, SecretSource};
+use mvm_http::resolve::Resolve;
 use tracing::{info, warn};
 
 use super::resolver::{
@@ -43,7 +51,7 @@ const DEFAULT_ACCESS_TOKEN_POINTER: &str = "/access_token";
 const REFRESH_LEAD: Duration = Duration::seconds(60);
 
 /// Ceiling for one token-endpoint round trip.
-const EXCHANGE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
+pub(crate) const EXCHANGE_TIMEOUT: StdDuration = StdDuration::from_secs(15);
 
 /// Bound on a token response body. Token responses are small JSON documents;
 /// anything bigger is not one.
@@ -116,23 +124,144 @@ fn grant_body(scopes: &[String]) -> String {
     serializer.finish()
 }
 
+/// Refuse a token endpoint the client secret must not be sent to: anything but
+/// an absolute `https` URL naming a host. The grant carries the client secret
+/// as an HTTP Basic credential, so a cleartext endpoint would put it on the
+/// wire unprotected.
+pub(crate) fn require_https_token_url(token_url: &str) -> anyhow::Result<()> {
+    let url = url::Url::parse(token_url).context("token_url is not an absolute URL")?;
+    if url.scheme() != "https" {
+        anyhow::bail!(
+            "token_url scheme is `{}`; the client secret is only ever sent over https",
+            url.scheme()
+        );
+    }
+    if url.host_str().is_none_or(str::is_empty) {
+        anyhow::bail!("token_url names no host");
+    }
+    Ok(())
+}
+
+/// The host of a binding's token endpoint: the destination recorded in audit
+/// entries. Never the full URL — a path or query can carry anything.
+fn token_endpoint_host(token_url: &str) -> String {
+    url::Url::parse(token_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 /// How long to wait before proactively refreshing a token set with this
 /// expiry. Zero or negative means the exchange is already due.
 pub(crate) fn refresh_in(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> Duration {
     expires_at - OAUTH_REFRESH_SKEW - REFRESH_LEAD - now
 }
 
+/// The token endpoint's destination failed the injected destination check, so
+/// nothing was sent to it. Kept as its own type so the refresh loop can tell a
+/// policy refusal from a transport failure without reading error text.
+// allow(secret-debug): a host name and the destination check's error; never a credential
+#[derive(Debug, thiserror::Error)]
+#[error("token endpoint `{host}` was not admitted: {source}")]
+pub struct TokenEndpointNotAdmitted {
+    host: String,
+    #[source]
+    source: std::io::Error,
+}
+
+impl TokenEndpointNotAdmitted {
+    /// True when the check refused the destination by policy, as opposed to
+    /// failing to reach a decision at all.
+    #[must_use]
+    pub fn is_policy_denial(&self) -> bool {
+        self.source.kind() == std::io::ErrorKind::PermissionDenied
+    }
+}
+
+/// How the refresher reaches a token endpoint: the HTTP client it sends with,
+/// and optionally a check every destination must pass before anything is sent.
+///
+/// The check is separate from the client's resolver because a client routed
+/// through an upstream proxy hands name resolution to the proxy, so its
+/// resolver never sees the destination. Running the check first keeps the
+/// decision on this host whichever way the connection is made.
+#[derive(Clone)]
+pub struct TokenEndpointClient {
+    http: mvm_http::Client,
+    destination_check: Option<Arc<dyn Resolve>>,
+}
+
+impl TokenEndpointClient {
+    #[must_use]
+    pub fn new(http: mvm_http::Client) -> Self {
+        Self {
+            http,
+            destination_check: None,
+        }
+    }
+
+    /// Require every token endpoint to resolve through `check` before an
+    /// exchange is attempted. An error, or an empty answer, refuses it.
+    #[must_use]
+    pub fn with_destination_check(mut self, check: Arc<dyn Resolve>) -> Self {
+        self.destination_check = Some(check);
+        self
+    }
+
+    async fn admit(&self, token_url: &str) -> Result<(), TokenEndpointNotAdmitted> {
+        let Some(check) = &self.destination_check else {
+            return Ok(());
+        };
+        let refused = |host: &str, kind, message: &str| TokenEndpointNotAdmitted {
+            host: host.to_owned(),
+            source: std::io::Error::new(kind, message.to_owned()),
+        };
+        let url = url::Url::parse(token_url).map_err(|_| {
+            refused(
+                "",
+                std::io::ErrorKind::InvalidInput,
+                "token_url is not a URL",
+            )
+        })?;
+        let host = url.host_str().unwrap_or_default().to_owned();
+        let Some(port) = url.port_or_known_default() else {
+            return Err(refused(
+                &host,
+                std::io::ErrorKind::InvalidInput,
+                "token_url has no port",
+            ));
+        };
+        match check.resolve(host.clone(), port).await {
+            Ok(addrs) if addrs.is_empty() => Err(refused(
+                &host,
+                std::io::ErrorKind::PermissionDenied,
+                "no admitted address",
+            )),
+            Ok(_) => Ok(()),
+            Err(source) => Err(TokenEndpointNotAdmitted { host, source }),
+        }
+    }
+}
+
+impl From<mvm_http::Client> for TokenEndpointClient {
+    fn from(http: mvm_http::Client) -> Self {
+        Self::new(http)
+    }
+}
+
 /// POST the client-credentials grant to the binding's token endpoint and
-/// parse the token set out of the response. Any failure — unreachable
-/// endpoint, non-success status, unparseable body, no access token — is an
-/// error and writes nothing: the caller's fail-closed behavior is to leave
-/// the stored set alone.
+/// parse the token set out of the response. Any failure — a destination the
+/// client's check refuses, unreachable endpoint, non-success status,
+/// unparseable body, no access token — is an error and writes nothing: the
+/// caller's fail-closed behavior is to leave the stored set alone.
 pub async fn exchange_client_credentials(
-    http: &mvm_http::Client,
+    client: &TokenEndpointClient,
     meta: &OAuthBindingMeta,
     client_secret: &str,
 ) -> anyhow::Result<CapturedOAuthToken> {
-    let response = http
+    client.admit(&meta.token_url).await?;
+    let response = client
+        .http
         .post(&meta.token_url)
         .basic_auth(&meta.client_id, Some(client_secret))
         .header("content-type", "application/x-www-form-urlencoded")
@@ -155,6 +284,58 @@ pub async fn exchange_client_credentials(
         .ok_or_else(|| anyhow::anyhow!("token endpoint response carried no access token"))
 }
 
+/// True when `error` is a destination check's policy refusal.
+fn is_policy_denial(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<TokenEndpointNotAdmitted>()
+            .is_some_and(TokenEndpointNotAdmitted::is_policy_denial)
+    })
+}
+
+/// How one step of a refresh loop ended. Each variant has a fixed label, so
+/// the audit record of a refresh carries no error text — an error from a
+/// token endpoint can echo the credential it was sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthRefreshOutcome {
+    /// The exchange succeeded and the fresh token set was stored.
+    Refreshed,
+    /// An exchange attempt failed; the loop will retry.
+    Failed,
+    /// The network policy refused the token endpoint; nothing was sent.
+    PolicyDenied,
+    /// The loop gave up: retries exhausted, the stored set has no client
+    /// secret, the store stayed unreadable, or the policy refused the
+    /// endpoint.
+    Stopped,
+}
+
+impl OAuthRefreshOutcome {
+    /// The fixed label recorded in the chain.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Refreshed => "refreshed",
+            Self::Failed => "failed",
+            Self::PolicyDenied => "policy_denied",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// Told how each refresh step ended. The endpoint implements this over its
+/// chain-signed audit recorder; a failure to record is the observer's to log,
+/// never the loop's to act on.
+#[async_trait::async_trait]
+pub trait OAuthRefreshObserver: Send + Sync {
+    async fn refresh_outcome(
+        &self,
+        secret_name: &str,
+        destination: &str,
+        outcome: OAuthRefreshOutcome,
+    );
+}
+
 /// One OAuth-bound secret the endpoint should keep fresh: its store name and
 /// the non-secret flow metadata from its binding.
 #[derive(Debug, Clone)]
@@ -165,7 +346,8 @@ pub struct OAuthRefreshBinding {
 
 /// The OAuth-bound secrets of a plan, in plan order. Only `Keystore` sources
 /// resolve through the local stores; a `Keystore` secret without a recorded
-/// binding is an assembly error, matching `bound_hosts`.
+/// binding is an assembly error, matching `bound_hosts`, and so is an OAuth
+/// binding whose token endpoint is not `https`.
 pub fn discover_oauth_bindings(
     plan_secrets: &[SecretBinding],
     tenant: &str,
@@ -187,6 +369,9 @@ pub fn discover_oauth_bindings(
                 format!("secret `{address}` has no local binding for oauth refresh discovery")
             })?;
         if let Some(oauth) = meta.oauth {
+            require_https_token_url(&oauth.token_url).with_context(|| {
+                format!("secret `{address}` has an oauth token endpoint the refresher refuses")
+            })?;
             out.push(OAuthRefreshBinding {
                 name: address.clone(),
                 meta: oauth,
@@ -203,7 +388,7 @@ pub fn discover_oauth_bindings(
 /// already past the refusal skew.
 pub async fn refresh_once(
     resolver: &Arc<dyn SecretResolver>,
-    http: &mvm_http::Client,
+    client: &TokenEndpointClient,
     name: &str,
     meta: &OAuthBindingMeta,
 ) -> anyhow::Result<()> {
@@ -213,10 +398,62 @@ pub async fn refresh_once(
     let client_secret = token_set.client_secret.ok_or_else(|| {
         anyhow::anyhow!("stored oauth token set for `{name}` has no client secret; the client-credentials grant cannot be driven")
     })?;
-    let captured = exchange_client_credentials(http, meta, client_secret.expose_secret()).await?;
+    let captured = exchange_client_credentials(client, meta, client_secret.expose_secret()).await?;
+    require_schedulable_expiry(captured.expires_at, Utc::now())?;
     resolver
         .store_captured_oauth_token(name, captured)
         .with_context(|| format!("persisting refreshed oauth token set for `{name}`"))
+}
+
+/// Refuse an exchanged token whose next refresh would already be due.
+///
+/// Without an expiry the store keeps the previous one, and a lifetime inside
+/// the refusal skew plus the refresh lead leaves no time to refresh ahead of
+/// it. Either way resolution would go on refusing the stored set while the
+/// loop exchanged again at once, so the token is not stored.
+fn require_schedulable_expiry(
+    expires_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<()> {
+    let Some(expires_at) = expires_at else {
+        anyhow::bail!("token endpoint response carried no expiry (`expires_in` or `expires_at`)");
+    };
+    if refresh_in(expires_at, now) <= Duration::zero() {
+        anyhow::bail!(
+            "token endpoint issued a token whose expiry {expires_at} leaves no time to refresh it ahead of the {}s refusal skew",
+            OAUTH_REFRESH_SKEW.num_seconds()
+        );
+    }
+    Ok(())
+}
+
+/// Everything one refresh loop needs besides its binding. Cloned into each
+/// spawned loop.
+#[derive(Clone)]
+struct RefreshSettings {
+    resolver: Arc<dyn SecretResolver>,
+    client: TokenEndpointClient,
+    observer: Option<Arc<dyn OAuthRefreshObserver>>,
+    retry_interval: StdDuration,
+    max_failures: u32,
+}
+
+impl RefreshSettings {
+    async fn report(&self, secret_name: &str, destination: &str, outcome: OAuthRefreshOutcome) {
+        if let Some(observer) = &self.observer {
+            observer
+                .refresh_outcome(secret_name, destination, outcome)
+                .await;
+        }
+    }
+
+    /// The loop is ending without a fresh token set; `reason` is for the log
+    /// only, the chain records the fixed `stopped` label.
+    async fn stopped(&self, secret_name: &str, destination: &str, reason: &str) {
+        warn!(secret = %secret_name, reason, "oauth proactive refresh stopped; resolution fails closed once the token expires");
+        self.report(secret_name, destination, OAuthRefreshOutcome::Stopped)
+            .await;
+    }
 }
 
 /// Owns the proactive-refresh loops for every OAuth-bound secret of a VM.
@@ -224,31 +461,56 @@ pub async fn refresh_once(
 /// uses; `start` spawns one timer-driven loop per binding on the current
 /// runtime.
 pub struct OAuthRefreshDriver {
-    resolver: Arc<dyn SecretResolver>,
-    http: mvm_http::Client,
+    settings: RefreshSettings,
     bindings: Vec<OAuthRefreshBinding>,
-    retry_interval: StdDuration,
-    max_failures: u32,
 }
 
 impl OAuthRefreshDriver {
+    /// A driver with a default HTTP client, no destination check, and no
+    /// observer. The endpoint replaces all three before starting it.
     #[must_use]
     pub fn new(resolver: Arc<dyn SecretResolver>, bindings: Vec<OAuthRefreshBinding>) -> Self {
         Self {
-            resolver,
-            http: mvm_http::Client::new(),
+            settings: RefreshSettings {
+                resolver,
+                client: TokenEndpointClient::new(mvm_http::Client::new()),
+                observer: None,
+                retry_interval: RETRY_INTERVAL,
+                max_failures: MAX_CONSECUTIVE_FAILURES,
+            },
             bindings,
-            retry_interval: RETRY_INTERVAL,
-            max_failures: MAX_CONSECUTIVE_FAILURES,
         }
+    }
+
+    /// Send every exchange through `client`, keeping any destination check
+    /// already installed.
+    #[must_use]
+    pub fn with_http_client(mut self, client: mvm_http::Client) -> Self {
+        self.settings.client.http = client;
+        self
+    }
+
+    /// Refuse any token endpoint `check` does not resolve. See
+    /// [`TokenEndpointClient::with_destination_check`].
+    #[must_use]
+    pub fn with_destination_check(mut self, check: Arc<dyn Resolve>) -> Self {
+        self.settings.client = self.settings.client.with_destination_check(check);
+        self
+    }
+
+    /// Report every refresh outcome to `observer`.
+    #[must_use]
+    pub fn with_observer(mut self, observer: Arc<dyn OAuthRefreshObserver>) -> Self {
+        self.settings.observer = Some(observer);
+        self
     }
 
     /// Shrink the retry budget (tests exchange against a mock endpoint and
     /// must not sit through production backoffs).
     #[must_use]
     pub fn with_retry_policy(mut self, retry_interval: StdDuration, max_failures: u32) -> Self {
-        self.retry_interval = retry_interval;
-        self.max_failures = max_failures;
+        self.settings.retry_interval = retry_interval;
+        self.settings.max_failures = max_failures;
         self
     }
 
@@ -262,13 +524,16 @@ impl OAuthRefreshDriver {
     /// signal.
     pub fn start(self) {
         for binding in self.bindings {
-            tokio::spawn(refresh_loop(
-                Arc::clone(&self.resolver),
-                self.http.clone(),
-                binding,
-                self.retry_interval,
-                self.max_failures,
-            ));
+            tokio::spawn(refresh_loop(self.settings.clone(), binding));
+        }
+    }
+
+    /// Run every binding's loop in turn until each ends, so a test can
+    /// observe what a loop did without the detached tasks of `start`.
+    #[cfg(test)]
+    pub(crate) async fn run_to_completion(self) {
+        for binding in self.bindings {
+            refresh_loop(self.settings.clone(), binding).await;
         }
     }
 }
@@ -278,33 +543,44 @@ impl OAuthRefreshDriver {
 /// Timer-driven by construction: each pass reads the stored expiry (the store
 /// is externally owned, so it is re-read rather than trusted from memory),
 /// sleeps until the proactive deadline, exchanges, and re-arms from the new
-/// expiry. Any persistent failure leaves the stored set untouched and ends
-/// the loop — resolution then fails closed with `OAuthRefreshRequired`,
-/// matching a host that never had a refresher.
-async fn refresh_loop(
-    resolver: Arc<dyn SecretResolver>,
-    http: mvm_http::Client,
-    binding: OAuthRefreshBinding,
-    retry_interval: StdDuration,
-    max_failures: u32,
-) {
+/// expiry. A set already past its expiry — including the one `mvmctl secret
+/// set` authors — is exchanged at once. Any persistent failure leaves the
+/// stored set untouched and ends the loop — resolution then fails closed
+/// with `OAuthRefreshRequired`,
+/// matching a host that never had a refresher. A policy refusal ends it at
+/// once: the VM's admitted policy does not change while it runs, so a retry
+/// would be refused the same way.
+///
+/// Every exchange attempt, and the end of the loop, is reported to the
+/// observer.
+async fn refresh_loop(settings: RefreshSettings, binding: OAuthRefreshBinding) {
+    let destination = token_endpoint_host(&binding.meta.token_url);
     let mut failures = 0u32;
     loop {
-        let token_set = match resolver.oauth_token_set(&binding.name) {
+        let token_set = match settings.resolver.oauth_token_set(&binding.name) {
             Ok(token_set) => token_set,
             Err(error) => {
                 failures += 1;
-                if failures >= max_failures {
-                    warn!(secret = %binding.name, %error, "oauth token set unreadable; proactive refresh stopped");
+                if failures >= settings.max_failures {
+                    warn!(secret = %binding.name, %error, "oauth token set unreadable");
+                    settings
+                        .stopped(&binding.name, &destination, "token set unreadable")
+                        .await;
                     return;
                 }
                 warn!(secret = %binding.name, %error, "oauth token set unreadable; retrying");
-                tokio::time::sleep(retry_interval).await;
+                tokio::time::sleep(settings.retry_interval).await;
                 continue;
             }
         };
         if token_set.client_secret.is_none() {
-            warn!(secret = %binding.name, "stored oauth token set has no client secret; proactive refresh stopped");
+            settings
+                .stopped(
+                    &binding.name,
+                    &destination,
+                    "stored token set has no client secret",
+                )
+                .await;
             return;
         }
         let wait = refresh_in(token_set.expires_at, Utc::now());
@@ -313,23 +589,56 @@ async fn refresh_loop(
         {
             tokio::time::sleep(wait).await;
         }
-        if Utc::now() >= token_set.expires_at {
-            warn!(secret = %binding.name, expires_at = %token_set.expires_at, "oauth token expired before a refresh succeeded; resolution fails closed until an exchange lands");
-            return;
-        }
-        match refresh_once(&resolver, &http, &binding.name, &binding.meta).await {
+        // An expired set is due, not lost: the grant needs only the client
+        // secret. `require_schedulable_expiry` is what keeps a success from
+        // leaving the set due again, so this never exchanges back to back.
+        match refresh_once(
+            &settings.resolver,
+            &settings.client,
+            &binding.name,
+            &binding.meta,
+        )
+        .await
+        {
             Ok(()) => {
                 info!(secret = %binding.name, expires_at = %token_set.expires_at, "proactively refreshed oauth token set");
+                settings
+                    .report(&binding.name, &destination, OAuthRefreshOutcome::Refreshed)
+                    .await;
                 failures = 0;
+            }
+            Err(error) if is_policy_denial(&error) => {
+                warn!(secret = %binding.name, %error, "oauth token endpoint refused by the network policy");
+                settings
+                    .report(
+                        &binding.name,
+                        &destination,
+                        OAuthRefreshOutcome::PolicyDenied,
+                    )
+                    .await;
+                settings
+                    .stopped(
+                        &binding.name,
+                        &destination,
+                        "token endpoint refused by the network policy",
+                    )
+                    .await;
+                return;
             }
             Err(error) => {
                 failures += 1;
-                if failures >= max_failures {
-                    warn!(secret = %binding.name, %error, "oauth refresh failed; giving up, resolution fails closed");
+                settings
+                    .report(&binding.name, &destination, OAuthRefreshOutcome::Failed)
+                    .await;
+                if failures >= settings.max_failures {
+                    warn!(secret = %binding.name, %error, "oauth refresh failed");
+                    settings
+                        .stopped(&binding.name, &destination, "retries exhausted")
+                        .await;
                     return;
                 }
                 warn!(secret = %binding.name, %error, failures, "oauth refresh failed; retrying");
-                tokio::time::sleep(retry_interval).await;
+                tokio::time::sleep(settings.retry_interval).await;
             }
         }
     }
@@ -352,6 +661,8 @@ mod tests {
     use crate::keyholder::resolver::{
         LocalResolver, OAuthSecretString, OAuthTokenSet, ResolveError, SecretResolver,
     };
+    use crate::supervisor::audit::CapturingAuditSigner;
+    use crate::supervisor::audit_recorder::Recorder;
 
     fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {
         SecretRef {
@@ -539,6 +850,59 @@ mod tests {
         format!("http://{addr}/token")
     }
 
+    fn binding_for(token_url: &str) -> OAuthRefreshBinding {
+        OAuthRefreshBinding {
+            name: "oauth-secret".into(),
+            meta: oauth_meta(token_url),
+        }
+    }
+
+    /// A chain-signing recorder whose entries the test can read back.
+    fn capturing_recorder() -> (Arc<Recorder>, Arc<CapturingAuditSigner>) {
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(
+            signer.clone(),
+            mvm_core::plan::TenantId("local".into()),
+        ));
+        (recorder, signer)
+    }
+
+    /// The `outcome` labels of the `secret.oauth_refresh` entries, in order.
+    fn refresh_outcomes(signer: &CapturingAuditSigner) -> Vec<String> {
+        signer
+            .entries()
+            .iter()
+            .filter(|entry| entry.event == "secret.oauth_refresh")
+            .map(|entry| entry.labels["outcome"].clone())
+            .collect()
+    }
+
+    /// A loop over `fixture` that reports to `recorder` and retries fast.
+    fn audited_driver(fixture: &StoreFixture, recorder: Arc<Recorder>) -> OAuthRefreshDriver {
+        OAuthRefreshDriver::new(resolver_over(fixture), vec![])
+            .with_retry_policy(StdDuration::from_millis(10), 3)
+            .with_observer(recorder)
+    }
+
+    /// A destination check that refuses every destination with `kind`.
+    #[derive(Debug)]
+    struct RefusingCheck(std::io::ErrorKind);
+
+    impl Resolve for RefusingCheck {
+        fn resolve(
+            &self,
+            _host: String,
+            _port: u16,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>> + Send,
+            >,
+        > {
+            let kind = self.0;
+            Box::pin(async move { Err(std::io::Error::new(kind, "refused by the test check")) })
+        }
+    }
+
     // -- pure logic ------------------------------------------------------
 
     #[test]
@@ -618,6 +982,61 @@ mod tests {
         assert!(parse_token_response(None, &serde_json::json!({"token": 42})).is_none());
         assert!(parse_token_response(None, &serde_json::json!({"access_token": 7})).is_none());
         assert!(parse_token_response(None, &serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn require_https_token_url_accepts_only_absolute_https_with_a_host() {
+        require_https_token_url("https://auth.example.com/token").unwrap();
+        require_https_token_url("https://auth.example.com:8443/oauth/token?x=1").unwrap();
+        for refused in [
+            "http://auth.example.com/token",
+            "ftp://auth.example.com/token",
+            "/token",
+            "auth.example.com/token",
+            "",
+            "https://",
+            "https:",
+            "file:///etc/token",
+        ] {
+            assert!(
+                require_https_token_url(refused).is_err(),
+                "`{refused}` must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn token_endpoint_host_is_the_host_only() {
+        assert_eq!(
+            token_endpoint_host("https://auth.example.com:8443/oauth/token?client=x"),
+            "auth.example.com"
+        );
+        assert_eq!(token_endpoint_host("not a url"), "");
+    }
+
+    #[test]
+    fn discover_refuses_a_cleartext_token_endpoint_and_names_the_secret() {
+        let dir = tempdir().unwrap();
+        let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
+        bindings
+            .put(
+                "local",
+                "cleartext-secret",
+                &oauth_binding_meta("http://auth.example.com/token"),
+            )
+            .unwrap();
+        let plan = SecretBinding {
+            name: "API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "cleartext-secret".into(),
+            },
+            destinations: vec![],
+            approval_required: false,
+        };
+        let err = discover_oauth_bindings(&[plan], "local", &bindings).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("cleartext-secret"), "{message}");
+        assert!(message.contains("https"), "{message}");
     }
 
     #[test]
@@ -707,7 +1126,7 @@ mod tests {
 
         refresh_once(
             &resolver,
-            &mvm_http::Client::new(),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
             "oauth-secret",
             &oauth_meta(&token_url),
         )
@@ -764,7 +1183,7 @@ mod tests {
         let resolver = resolver_over(&fixture);
         let err = refresh_once(
             &resolver,
-            &mvm_http::Client::new(),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
             "oauth-secret",
             &oauth_meta(&token_url),
         )
@@ -794,7 +1213,7 @@ mod tests {
         let resolver = resolver_over(&fixture);
         let err = refresh_once(
             &resolver,
-            &mvm_http::Client::new(),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
             "oauth-secret",
             &oauth_meta(&token_url),
         )
@@ -817,7 +1236,7 @@ mod tests {
         let resolver = resolver_over(&fixture);
         let err = refresh_once(
             &resolver,
-            &mvm_http::Client::new(),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
             "oauth-secret",
             &oauth_meta(&token_url),
         )
@@ -834,7 +1253,7 @@ mod tests {
         let resolver = resolver_over(&fixture);
         let err = refresh_once(
             &resolver,
-            &mvm_http::Client::new(),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
             "oauth-secret",
             &oauth_meta(&token_url),
         )
@@ -850,10 +1269,74 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_refused_destination_is_never_contacted_and_reads_as_a_policy_denial() {
+        let (token_url, recorded) =
+            spawn_mock_token_server("200 OK", r#"{"access_token":"fresh-access-token"}"#);
+        let fixture = fixture(
+            &expired_token_set("stale-access-token", Some("the-client-secret")),
+            &token_url,
+        );
+        let resolver = resolver_over(&fixture);
+        let client = TokenEndpointClient::new(mvm_http::Client::new()).with_destination_check(
+            Arc::new(RefusingCheck(std::io::ErrorKind::PermissionDenied)),
+        );
+        let err = refresh_once(&resolver, &client, "oauth-secret", &oauth_meta(&token_url))
+            .await
+            .unwrap_err();
+        assert!(is_policy_denial(&err), "{err:#}");
+        assert!(
+            recorded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+        assert_eq!(
+            stored_token_set(&fixture).access_token.expose_secret(),
+            "stale-access-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_check_that_cannot_decide_still_blocks_but_is_not_a_policy_denial() {
+        let (token_url, recorded) =
+            spawn_mock_token_server("200 OK", r#"{"access_token":"fresh-access-token"}"#);
+        let fixture = fixture(
+            &expired_token_set("stale-access-token", Some("the-client-secret")),
+            &token_url,
+        );
+        let client = TokenEndpointClient::new(mvm_http::Client::new())
+            .with_destination_check(Arc::new(RefusingCheck(std::io::ErrorKind::Other)));
+        let err = refresh_once(
+            &resolver_over(&fixture),
+            &client,
+            "oauth-secret",
+            &oauth_meta(&token_url),
+        )
+        .await
+        .unwrap_err();
+        assert!(!is_policy_denial(&err), "{err:#}");
+        assert!(
+            recorded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_transport_failure_is_not_a_policy_denial() {
+        let err = anyhow::Error::new(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "a permission error from somewhere else",
+        ));
+        assert!(!is_policy_denial(&err));
+    }
+
     // -- the proactive loop ------------------------------------------------
 
     #[tokio::test]
-    async fn refresh_loop_heals_a_stale_set_and_rearms() {
+    async fn refresh_loop_heals_a_stale_set_rearms_and_records_the_refresh() {
         let (token_url, recorded) = spawn_mock_token_server(
             "200 OK",
             r#"{"access_token":"fresh-access-token","expires_in":3600}"#,
@@ -862,24 +1345,14 @@ mod tests {
             &expired_token_set("stale-access-token", Some("the-client-secret")),
             &token_url,
         );
-        let resolver = resolver_over(&fixture);
-        let driver = OAuthRefreshDriver::new(resolver, vec![])
-            .with_retry_policy(StdDuration::from_millis(10), 3);
+        let (recorder, signer) = capturing_recorder();
+        let driver = audited_driver(&fixture, recorder);
         // The loop re-arms after the exchange and sleeps toward the new
         // deadline; the timeout cancels that sleep — the assertions below
         // are what matters.
         let _ = tokio::time::timeout(
             StdDuration::from_secs(5),
-            refresh_loop(
-                driver.resolver,
-                driver.http,
-                OAuthRefreshBinding {
-                    name: "oauth-secret".into(),
-                    meta: oauth_meta(&token_url),
-                },
-                driver.retry_interval,
-                driver.max_failures,
-            ),
+            refresh_loop(driver.settings, binding_for(&token_url)),
         )
         .await;
         assert_eq!(
@@ -893,34 +1366,88 @@ mod tests {
                 .len(),
             1
         );
+        assert_eq!(refresh_outcomes(&signer), ["refreshed"]);
+        let entry = &signer.entries()[0];
+        assert_eq!(entry.labels["name"], "oauth-secret");
+        assert_eq!(entry.labels["destination"], "127.0.0.1");
+        // Metadata only: no credential, token, or URL reaches the chain.
+        let chain = serde_json::to_string(&signer.entries()).unwrap();
+        for leaked in ["the-client-secret", "fresh-access-token", "/token"] {
+            assert!(!chain.contains(leaked), "found `{leaked}` in {chain}");
+        }
     }
 
+    /// The client-credentials grant needs only the client secret, so a set
+    /// past its expiry is due, not lost. `mvmctl secret set --oauth-*` stores
+    /// exactly such a set; the first exchange has to fire at endpoint boot.
     #[tokio::test]
-    async fn refresh_loop_gives_up_on_an_expired_set_without_exchanging() {
-        let (token_url, recorded) =
-            spawn_mock_token_server("200 OK", r#"{"access_token":"fresh-access-token"}"#);
-        let mut token_set = expired_token_set("stale-access-token", Some("the-client-secret"));
-        token_set.expires_at = Utc::now() - Duration::seconds(5);
-        let fixture = fixture(&token_set, &token_url);
+    async fn refresh_loop_exchanges_an_authored_initial_set_at_once() {
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(&initial_token_set("the-client-secret"), &token_url);
         let resolver = resolver_over(&fixture);
-        refresh_loop(
-            resolver,
-            mvm_http::Client::new(),
-            OAuthRefreshBinding {
-                name: "oauth-secret".into(),
-                meta: oauth_meta(&token_url),
-            },
-            StdDuration::from_millis(10),
-            3,
+        let err = resolver
+            .resolve(&bearer_ref("oauth-secret", &["api.example.com"]))
+            .unwrap_err();
+        assert!(matches!(err, ResolveError::OAuthRefreshRequired { .. }));
+
+        let (recorder, signer) = capturing_recorder();
+        // The loop re-arms and sleeps toward the new deadline; the timeout
+        // cancels that sleep.
+        let _ = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            refresh_loop(
+                audited_driver(&fixture, recorder).settings,
+                binding_for(&token_url),
+            ),
         )
         .await;
-        // Expired is expired: no exchange can help, and none was attempted.
-        assert!(
+
+        assert_eq!(
             recorded
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .is_empty()
+                .len(),
+            1
         );
+        assert_eq!(refresh_outcomes(&signer), ["refreshed"]);
+        let secret = resolver
+            .resolve(&bearer_ref("oauth-secret", &["api.example.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"fresh-access-token");
+    }
+
+    /// A token the refresher cannot schedule ahead of the refusal skew is
+    /// refused rather than stored. Storing it would leave the old expiry in
+    /// place, so resolution would keep refusing while the loop exchanged
+    /// back to back.
+    #[tokio::test]
+    async fn refresh_once_refuses_a_token_it_cannot_schedule() {
+        for body in [
+            r#"{"access_token":"fresh-access-token"}"#,
+            r#"{"access_token":"fresh-access-token","expires_in":60}"#,
+        ] {
+            let (token_url, _recorded) = spawn_mock_token_server("200 OK", body);
+            let fixture = fixture(&initial_token_set("the-client-secret"), &token_url);
+            let err = refresh_once(
+                &resolver_over(&fixture),
+                &TokenEndpointClient::new(mvm_http::Client::new()),
+                "oauth-secret",
+                &oauth_meta(&token_url),
+            )
+            .await
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("expiry"), "{body}: {err:#}");
+            assert!(
+                stored_token_set(&fixture)
+                    .access_token
+                    .expose_secret()
+                    .is_empty(),
+                "{body}: nothing may be stored"
+            );
+        }
     }
 
     #[tokio::test]
@@ -931,16 +1458,10 @@ mod tests {
             &expired_token_set("stale-access-token", Some("the-client-secret")),
             &token_url,
         );
-        let resolver = resolver_over(&fixture);
+        let (recorder, signer) = capturing_recorder();
         refresh_loop(
-            resolver,
-            mvm_http::Client::new(),
-            OAuthRefreshBinding {
-                name: "oauth-secret".into(),
-                meta: oauth_meta(&token_url),
-            },
-            StdDuration::from_millis(10),
-            3,
+            audited_driver(&fixture, recorder).settings,
+            binding_for(&token_url),
         )
         .await;
         // Three attempts, then the loop ended fail-closed with the store
@@ -955,6 +1476,58 @@ mod tests {
         assert_eq!(
             stored_token_set(&fixture).access_token.expose_secret(),
             "stale-access-token"
+        );
+        // Every attempt is recorded, then the loop's end.
+        assert_eq!(
+            refresh_outcomes(&signer),
+            ["failed", "failed", "failed", "stopped"]
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_loop_stops_at_the_first_policy_denial() {
+        let (token_url, recorded) =
+            spawn_mock_token_server("200 OK", r#"{"access_token":"fresh-access-token"}"#);
+        let fixture = fixture(
+            &expired_token_set("stale-access-token", Some("the-client-secret")),
+            &token_url,
+        );
+        let (recorder, signer) = capturing_recorder();
+        let driver = audited_driver(&fixture, recorder).with_destination_check(Arc::new(
+            RefusingCheck(std::io::ErrorKind::PermissionDenied),
+        ));
+        refresh_loop(driver.settings, binding_for(&token_url)).await;
+        // The admitted policy does not change while the VM runs, so one
+        // refusal ends the loop instead of spending the retry budget.
+        assert!(
+            recorded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+        assert_eq!(refresh_outcomes(&signer), ["policy_denied", "stopped"]);
+    }
+
+    #[tokio::test]
+    async fn refresh_loop_without_an_observer_records_nothing_and_still_refreshes() {
+        let (token_url, _) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(
+            &expired_token_set("stale-access-token", Some("the-client-secret")),
+            &token_url,
+        );
+        let driver = OAuthRefreshDriver::new(resolver_over(&fixture), vec![])
+            .with_retry_policy(StdDuration::from_millis(10), 3);
+        let _ = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            refresh_loop(driver.settings, binding_for(&token_url)),
+        )
+        .await;
+        assert_eq!(
+            stored_token_set(&fixture).access_token.expose_secret(),
+            "fresh-access-token"
         );
     }
 }

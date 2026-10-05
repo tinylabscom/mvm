@@ -1,5 +1,5 @@
 //! Audit-chain emitter construction + policy-resolution audit hooks for
-//! `mvmctl up` admission — turning the resolved [audit] policy section
+//! boot admission — turning the resolved [audit] policy section
 //! into a chain-signed emitter, and the `plan.policy_resolved` /
 //! `plan.failed` event helpers admission wires around it.
 

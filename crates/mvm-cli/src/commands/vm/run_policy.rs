@@ -13,12 +13,84 @@
 
 use anyhow::{Context, Result};
 use mvm_client::policy_profiles::{
-    LaunchFlags, Platform, PolicySelection, PolicyStore, ProjectPolicy, ResolvedManifest, fold,
-    resolve,
+    LaunchFlags, Platform, PolicyRef, PolicySelection, PolicyStore, ProjectPolicy,
+    ResolvedManifest, fold, resolve,
 };
 
 use super::exec::RunArgs;
 use crate::ui;
+
+/// Select a verified pack's image only when the caller did not choose a boot
+/// source. The selected digest is rechecked during plan synthesis and at host
+/// admission; the image bytes themselves remain in the installed pack.
+pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
+    if args.image.is_some()
+        || args.manifest.is_some()
+        || args.flake.is_some()
+        || args.deployment.is_some()
+        || args.runtime_pack
+        || args.runtime.is_some()
+        || args.plan.is_some()
+    {
+        return Ok(());
+    }
+    let mut selected = None;
+    for raw in &args.policy {
+        let Ok(PolicyRef::Pack {
+            namespace,
+            name,
+            version,
+        }) = PolicyRef::parse(raw)
+        else {
+            continue;
+        };
+        let spelling = match version {
+            Some(version) => format!("{namespace}/{name}@{version}"),
+            None => format!("{namespace}/{name}"),
+        };
+        let reference: mvm_core::registry_pack::PackReference = spelling
+            .parse()
+            .with_context(|| format!("invalid registry pack reference {spelling}"))?;
+        let lock = mvm_core::registry_pack_store::load_pack_lockfile(
+            &mvm_core::config::pack_lockfile_path(),
+        )?;
+        let publisher = mvm_core::registry_pack_store::load_publisher_policy_or_official_default(
+            &mvm_core::config::registry_pack_publisher_policy_path(),
+        )?
+        .policy;
+        let (installed, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+            &mvm_core::config::registry_pack_cache_dir(),
+            &lock,
+            &publisher,
+            &reference,
+        )
+        .with_context(|| format!("verifying image-bearing policy pack {spelling}"))?;
+        let Some(image) = &verified.manifest().image else {
+            continue;
+        };
+        anyhow::ensure!(
+            selected.is_none(),
+            "more than one --policy pack declares an image; select an explicit boot source"
+        );
+        let manifest_path = installed.payload_root().join(&image.manifest);
+        let manifest = mvm_core::domain::manifest::Manifest::read_file(&manifest_path)
+            .context("reading verified pack image manifest")?;
+        let flake_dir = manifest_path
+            .parent()
+            .context("pack image manifest has no parent directory")?;
+        let pin = mvm_core::registry_pack::PackPin::new(
+            verified.manifest().reference.clone(),
+            verified.manifest_sha256().clone(),
+        )?;
+        selected = Some((flake_dir.display().to_string(), manifest.profile, pin));
+    }
+    if let Some((flake, profile, pin)) = selected {
+        args.flake = Some(flake);
+        args.flake_profile = Some(profile);
+        args.registry_pack_image = Some(pin);
+    }
+    Ok(())
+}
 
 /// The authored policy a launch runs under, if it names one.
 struct Selected {
@@ -181,11 +253,191 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_MANIFEST: &[u8] =
+        include_bytes!("../../../tests/fixtures/signed-registry-python/manifest.json");
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_BUNDLE: &[u8] =
+        include_bytes!("../../../tests/fixtures/signed-registry-python/manifest.sigstore.json");
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_GROUP: &[u8] =
+        include_bytes!("../../../tests/fixtures/signed-registry-python/files/pack/group.toml");
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_MVM: &[u8] =
+        include_bytes!("../../../tests/fixtures/signed-registry-python/files/pack/image/mvm.toml");
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_FLAKE: &[u8] =
+        include_bytes!("../../../tests/fixtures/signed-registry-python/files/pack/image/flake.nix");
+    #[cfg(feature = "manifest-verify")]
+    const PYTHON_LOCK: &[u8] = include_bytes!(
+        "../../../tests/fixtures/signed-registry-python/files/pack/image/flake.lock"
+    );
+
+    #[cfg(feature = "manifest-verify")]
+    fn install_signed_python_image(
+        home: &std::path::Path,
+    ) -> mvm_core::registry_pack::InstalledRegistryPack {
+        use mvm_core::registry_pack::{
+            PackAdoption, RegistryPackPublisher, RegistryPackPublisherPolicy,
+        };
+        use mvm_core::registry_pack_store::{adopt_install_and_pin, save_publisher_policy};
+
+        let publisher = RegistryPackPublisher::new(
+            "runtime",
+            "https://token.actions.githubusercontent.com",
+            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/feat/3716-python-image-pack".to_string()],
+        )
+        .expect("branch publisher identity");
+        let policy = RegistryPackPublisherPolicy::new(vec![publisher]).expect("publisher trust");
+        save_publisher_policy(
+            &mvm_core::config::registry_pack_publisher_policy_path(),
+            &policy,
+        )
+        .expect("save branch-only publisher trust");
+        let staged = home.join("staged-python-pack");
+        std::fs::create_dir_all(staged.join("pack/image")).expect("staged image directory");
+        for (path, bytes) in [
+            ("pack/group.toml", PYTHON_GROUP),
+            ("pack/image/mvm.toml", PYTHON_MVM),
+            ("pack/image/flake.nix", PYTHON_FLAKE),
+            ("pack/image/flake.lock", PYTHON_LOCK),
+        ] {
+            std::fs::write(staged.join(path), bytes).expect("stage signed payload bytes");
+        }
+        let reference = "runtime/python@1.1.0".parse().expect("pack reference");
+        adopt_install_and_pin(
+            &PackAdoption {
+                requested: &reference,
+                manifest_bytes: PYTHON_MANIFEST,
+                signature_bundle: PYTHON_BUNDLE,
+                publisher_policy: &policy,
+            },
+            &staged,
+            &mvm_core::config::registry_pack_cache_dir(),
+            &mvm_core::config::pack_lockfile_path(),
+        )
+        .expect("adopt a real signed image pack")
+    }
+
     fn isolated() -> (TestEnv, tempfile::TempDir) {
         let home = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
         (env, home)
+    }
+
+    #[test]
+    fn pack_image_selection_does_not_override_an_explicit_source() {
+        let (_env, _home) = isolated();
+        let mut args = RunArgs {
+            image: Some("alpine:3.20".into()),
+            policy: vec!["runtime/absent@1.0.0".into()],
+            ..RunArgs::default()
+        };
+        select_pack_image(&mut args).expect("explicit image wins without a pack lookup");
+        assert_eq!(args.image.as_deref(), Some("alpine:3.20"));
+        assert!(args.registry_pack_image.is_none());
+        assert!(args.flake.is_none());
+    }
+
+    #[test]
+    fn an_uninstalled_pack_cannot_be_selected_as_an_image_source() {
+        let (_env, _home) = isolated();
+        let mut args = RunArgs {
+            policy: vec!["runtime/absent@1.0.0".into()],
+            ..RunArgs::default()
+        };
+        let error = select_pack_image(&mut args).expect_err("unsigned source refused");
+        assert!(
+            format!("{error:#}").contains("verifying image-bearing policy pack"),
+            "{error:#}"
+        );
+        assert!(args.flake.is_none());
+        assert!(args.registry_pack_image.is_none());
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn a_real_signed_pack_selects_its_pinned_image_and_policy() {
+        let (_env, home) = isolated();
+        let installed = install_signed_python_image(home.path());
+        let mut args = RunArgs {
+            policy: vec!["runtime/python@1.1.0".into()],
+            ..RunArgs::default()
+        };
+        select_pack_image(&mut args).expect("verified image source");
+        assert_eq!(
+            args.flake.as_deref(),
+            Some(
+                installed
+                    .payload_root()
+                    .join("pack/image")
+                    .to_str()
+                    .expect("UTF-8 path")
+            )
+        );
+        assert_eq!(args.flake_profile.as_deref(), Some("default"));
+        let pin = args.registry_pack_image.as_ref().expect("signed plan pin");
+        assert_eq!(pin.reference().to_string(), "runtime/python@1.1.0");
+        assert_eq!(
+            pin.manifest_sha256().as_str(),
+            "d66ef0039e1d264433764793a64e082647442868c002d0b87ab5558037162ec7"
+        );
+        apply_run_policy(&mut args).expect("signed policy loads with image");
+        assert!(args.applied_policy.is_some());
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn a_project_composes_its_local_group_with_a_signed_pack_group() {
+        let (_env, home) = isolated();
+        install_signed_python_image(home.path());
+        let project = tempfile::tempdir().expect("project directory");
+        std::fs::write(
+            project.path().join("mvm.toml"),
+            "schema_version = 1\nflake = \".\"\nprofile = \"default\"\n[policy]\ninclude = [\"runtime/python@1.1.0\", \"./local.toml\"]\n",
+        )
+        .expect("project manifest");
+        std::fs::write(
+            project.path().join("local.toml"),
+            "[network]\nallow = [\"app.example:443\"]\ndeny = [\"pypi.org:443\"]\n",
+        )
+        .expect("local policy group");
+        let mut args = RunArgs {
+            manifest: Some(project.path().join("mvm.toml").display().to_string()),
+            ..RunArgs::default()
+        };
+        apply_run_policy(&mut args).expect("compose application and signed pack policies");
+        assert!(args.allow_host.contains(&"app.example:443".to_string()));
+        assert!(
+            args.allow_host
+                .contains(&"files.pythonhosted.org:443".to_string())
+        );
+        assert!(!args.allow_host.contains(&"pypi.org:443".to_string()));
+        let policy = args.applied_policy.expect("effective authored policy");
+        assert!(policy.network.deny.contains(&"pypi.org:443".to_string()));
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn a_tampered_signed_image_is_refused_before_source_selection() {
+        let (_env, home) = isolated();
+        let installed = install_signed_python_image(home.path());
+        let path = installed.payload_root().join("pack/image/mvm.toml");
+        let mut bytes = std::fs::read(&path).expect("read signed image manifest");
+        bytes[0] ^= 1;
+        std::fs::write(path, bytes).expect("tamper installed payload without changing length");
+        let mut args = RunArgs {
+            policy: vec!["runtime/python@1.1.0".into()],
+            ..RunArgs::default()
+        };
+        let error = select_pack_image(&mut args).expect_err("tamper refused");
+        assert!(
+            format!("{error:#}").contains("digest mismatch"),
+            "{error:#}"
+        );
+        assert!(args.flake.is_none());
+        assert!(args.registry_pack_image.is_none());
     }
 
     #[test]
