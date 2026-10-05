@@ -313,48 +313,12 @@ impl<'a> ExtensionAdmissionContext<'a> {
 /// synthesizing a plan. Keeping it separate lets callers emit a structured
 /// refusal audit entry when admission fails, binding the refusal to the
 /// plan that was refused.
+///
+/// `extension_ctx` carries the trust and revocation state a plan with
+/// extension bindings is re-verified under: every digest-pinned pack is
+/// checked again before signing. `None` refuses any plan that binds an
+/// extension.
 pub fn admit_plan_for_run(
-    plan: &ExecutionPlan,
-    clock: &dyn Clock,
-    ledger: &InMemoryNonceLedger,
-    host_signer_keys_dir: Option<&std::path::Path>,
-    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
-    posture: RunPosture,
-) -> Result<AdmittedPlan> {
-    admit_plan_for_run_inner(
-        plan,
-        clock,
-        ledger,
-        host_signer_keys_dir,
-        bundle_ctx,
-        None,
-        posture,
-    )
-}
-
-/// Admit a plan carrying optional extension bindings, re-verifying every
-/// digest-pinned pack under current trust and revocation state before signing.
-pub fn admit_plan_for_run_with_extensions(
-    plan: &ExecutionPlan,
-    clock: &dyn Clock,
-    ledger: &InMemoryNonceLedger,
-    host_signer_keys_dir: Option<&std::path::Path>,
-    bundle_ctx: Option<&BundleAdmissionContext<'_>>,
-    extension_ctx: &ExtensionAdmissionContext<'_>,
-    posture: RunPosture,
-) -> Result<AdmittedPlan> {
-    admit_plan_for_run_inner(
-        plan,
-        clock,
-        ledger,
-        host_signer_keys_dir,
-        bundle_ctx,
-        Some(extension_ctx),
-        posture,
-    )
-}
-
-fn admit_plan_for_run_inner(
     plan: &ExecutionPlan,
     clock: &dyn Clock,
     ledger: &InMemoryNonceLedger,
@@ -766,6 +730,7 @@ pub fn admit_for_run(
         ledger,
         host_signer_keys_dir,
         bundle_ctx,
+        None,
         posture,
     )
 }
@@ -2200,25 +2165,15 @@ pub fn admit_and_start(
     // anchor to; they propagate without a chain entry.
     let plan = synthesize_plan(params.synthesis).context("synthesizing plan")?;
 
-    let admitted_result = match params.extension_ctx {
-        Some(extension_ctx) => admit_plan_for_run_with_extensions(
-            &plan,
-            params.clock,
-            params.ledger,
-            params.host_signer_keys_dir,
-            params.bundle_ctx,
-            extension_ctx,
-            posture,
-        ),
-        None => admit_plan_for_run(
-            &plan,
-            params.clock,
-            params.ledger,
-            params.host_signer_keys_dir,
-            params.bundle_ctx,
-            posture,
-        ),
-    };
+    let admitted_result = admit_plan_for_run(
+        &plan,
+        params.clock,
+        params.ledger,
+        params.host_signer_keys_dir,
+        params.bundle_ctx,
+        params.extension_ctx,
+        posture,
+    );
     let admitted = match admitted_result {
         Ok(admitted) => admitted,
         Err(err) => {

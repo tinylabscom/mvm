@@ -289,24 +289,12 @@ impl HostAgentDaemon {
         }
     }
 
-    /// New daemon wired to a supervised resident signer helper. Registered VMs
+    /// Wire the daemon to a supervised resident signer helper. Registered VMs
     /// route `host.audit.v1` appends through this helper instead of a per-VM
     /// audit-signer process.
-    pub fn new_with_signer_helper(
-        tenant_id: impl Into<String>,
-        verifying_key: VerifyingKey,
-        signer_helper_uds_path: impl Into<PathBuf>,
-        max_frame_bytes: usize,
-    ) -> Self {
-        Self {
-            tenant_id: tenant_id.into(),
-            verifying_key,
-            signer_helper_uds_path: Some(signer_helper_uds_path.into()),
-            registration_journal: None,
-            max_frame_bytes,
-            vms: HashMap::new(),
-            registrations: HashMap::new(),
-        }
+    pub fn with_signer_helper(mut self, signer_helper_uds_path: impl Into<PathBuf>) -> Self {
+        self.signer_helper_uds_path = Some(signer_helper_uds_path.into());
+        self
     }
 
     /// Persist the live registration set to `path` after every successful
@@ -1243,7 +1231,7 @@ mod tests {
         let helper_task = start_helper(helper_sock.clone(), "local", key_path).await;
 
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
-        let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
+        let mut d = HostAgentDaemon::new("local", vk, 64 * 1024).with_signer_helper(&helper_sock);
         let mut reg_a = register(dir.path(), "vm-a", "local", None);
         reg_a.services_bindings = vec![ServiceId::parse("host.audit.v1").unwrap()];
         let sock_a = PathBuf::from(&reg_a.broker_listen_socket);
@@ -1290,7 +1278,7 @@ mod tests {
         let helper_task = start_helper(helper_sock.clone(), "local", key_path.clone()).await;
 
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
-        let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
+        let mut d = HostAgentDaemon::new("local", vk, 64 * 1024).with_signer_helper(&helper_sock);
         let mut reg = register(dir.path(), "vm-a", "local", None);
         reg.services_bindings = vec![ServiceId::parse("host.audit.v1").unwrap()];
         let sock = PathBuf::from(&reg.broker_listen_socket);
@@ -1348,12 +1336,8 @@ mod tests {
         // isn't running here).
         let dir = tempfile::tempdir().unwrap();
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
-        let d = HostAgentDaemon::new_with_signer_helper(
-            "local",
-            vk,
-            dir.path().join("helper.sock"),
-            64 * 1024,
-        );
+        let d = HostAgentDaemon::new("local", vk, 64 * 1024)
+            .with_signer_helper(dir.path().join("helper.sock"));
         let sink = d.health_audit_sink();
         sink.append("ghost", serde_json::json!({"event": "x"}))
             .unwrap();
@@ -1368,7 +1352,7 @@ mod tests {
         let helper_task = start_helper(helper_sock.clone(), "local", key_path).await;
 
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
-        let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
+        let mut d = HostAgentDaemon::new("local", vk, 64 * 1024).with_signer_helper(&helper_sock);
         let reg = register(dir.path(), "vm-a", "local", None);
         let chain = PathBuf::from(&reg.workload_chain_path);
         d.apply(&register_control(reg)).unwrap();
