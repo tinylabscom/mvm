@@ -736,6 +736,25 @@ opt-level = 3
 [profile.dev.package.tree-sitter-typescript]
 opt-level = 3
 
+# What goes to crates.io. `xtask publish-plan` publishes the shipped-
+# dependency closure of these roots, dependencies first, and
+# `xtask check-publish-readiness` holds the manifests to it: every member
+# outside the closure says `publish = false`.
+[workspace.metadata.mvm.publish]
+roots = ["mvm-client", "mvmctl"]
+
+# Crates in the closure that cannot be published yet. The plan withholds each
+# one and everything that depends on it. `out-of-crate-source` is verified by
+# the gate and must be removed once the crate stops reading outside its
+# directory; any other kind is a registry fact the offline gate cannot see.
+[workspace.metadata.mvm.publish.blocked.libkrun-sys]
+kind = "name-taken"
+reason = "the crates.io name libkrun-sys belongs to an unrelated project; the package needs a name of its own (the dependency key can stay libkrun-sys via `package =`)"
+
+[workspace.metadata.mvm.publish.blocked.mvm-cli]
+kind = "out-of-crate-source"
+reason = "build.rs compiles mvm-build sources through #[path] and reads the workspace Cargo.toml, and the CLI embeds uninstall.sh and nix/wrappers scripts; none of it is inside the packaged crate"
+
 [workspace.metadata.mvm.toolchain]
 # Pinned cross-compile toolchain for the embedded host-vm binaries
 # baked into mvmctl. Bump in lockstep across this file and CI to keep

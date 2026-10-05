@@ -2,7 +2,9 @@
 name = "mvm-client"
 version.workspace = true
 edition.workspace = true
+description = "The embedder-facing mvm client: local machine lifecycle, launch, inventory, and the MvmClient facade."
 license.workspace = true
+repository.workspace = true
 
 # The `MvmClient` facade users touch. The trait + DTOs + `MockBackend` + remote
 # `GatewayBackend` live in `mvm-core` behind its `client` feature (a proc-macro

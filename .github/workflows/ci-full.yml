@@ -384,6 +384,15 @@ jobs:
     with:
       dry_run: true
 
+  # Packages and build-verifies every crate the crates.io plan would upload,
+  # with no token, so a crate that stops being publishable is caught nightly
+  # rather than on the tag that tries to publish it.
+  crates-publish-dry-run:
+    name: crates.io publish dry-run
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-crates.yml
+
   # ── Lane: Apple (release-only) ────────────────────────────────────
   # macOS regressions surface here, on release-tag pushes only. The
   # PR-time lanes above run on Linux because macOS runners cost ~10×
