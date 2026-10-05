@@ -83,6 +83,18 @@ pub enum StageBootError {
     },
     #[error("reading {IMAGE_ABI_MARKER} from builder image {}: {detail}", .rootfs.display())]
     ImageUnreadable { rootfs: PathBuf, detail: String },
+    /// The image is fine; this process has nothing to boot it with.
+    #[error(
+        "builder image {} declares boot ABI {image}, so it carries no builder binaries and boots \
+         only with the builder boot payload, which this process does not have: only an mvmctl \
+         binary embeds one. Run the build through mvmctl, or boot a builder image that bakes its \
+         own binaries (ABI 0)",
+        .rootfs.display()
+    )]
+    NoBootPayload {
+        rootfs: PathBuf,
+        image: BuilderBootAbi,
+    },
 }
 
 /// Stage the boot for one builder VM whose state lives in `state_dir` and whose
@@ -142,8 +154,18 @@ fn stage_payload_boot(
 }
 
 /// Boot without a payload, which only an image that bakes its own init allows.
+///
+/// An image a payload could boot is refused for want of the payload, not for
+/// its ABI: the image is current, and saying "rebuild or refetch it" would send
+/// the caller after the wrong thing.
 fn baked_boot(rootfs: &Path) -> Result<BuilderBoot, StageBootError> {
     let abi = read_image_boot_abi(rootfs)?;
+    if !baked_only_abis().contains(abi) && payload_supported_abis().contains(abi) {
+        return Err(StageBootError::NoBootPayload {
+            rootfs: rootfs.to_path_buf(),
+            image: abi,
+        });
+    }
     check_image_abi(abi, baked_only_abis()).map_err(|source| StageBootError::Abi {
         rootfs: rootfs.to_path_buf(),
         source,
@@ -247,8 +269,25 @@ mod tests {
             read_image_boot_abi(&image).unwrap(),
             BuilderBootAbi::PAYLOAD
         );
-        let err = baked_boot(&image).unwrap_err().to_string();
-        assert!(err.contains("ABI 1") && err.contains("0..=0"), "{err}");
+        let err = baked_boot(&image).unwrap_err();
+        assert!(
+            matches!(err, StageBootError::NoBootPayload { image, .. } if image == BuilderBootAbi::PAYLOAD),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains("ABI 1"), "{message}");
+        assert!(message.contains("builder boot payload"), "{message}");
+        assert!(!message.contains("refetch"), "{message}");
+    }
+
+    /// An ABI no payload this build carries could boot either is still an ABI
+    /// mismatch, and still says to rebuild or refetch.
+    #[test]
+    fn without_a_payload_an_image_from_a_newer_abi_is_an_abi_refusal() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = image_with_marker(dir.path(), Some("99\n"));
+        let err = baked_boot(&image).unwrap_err();
+        assert!(matches!(err, StageBootError::Abi { .. }), "{err:?}");
     }
 
     /// A 16 MiB ext4 with the feature set a Nix-built builder image carries,

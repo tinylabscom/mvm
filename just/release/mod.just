@@ -1,19 +1,15 @@
 set working-directory := "../.."
 
 # ── Release ──────────────────────────────────────────────────────────────
-# Cut a release with automatic version bump (based on conventional commits)
-# Cut the next release (auto-detected version) via a PR. `main` is protected
-# (enforce_admins + merge queue), so the version bump lands through a PR — a
-# ── Release ──────────────────────────────────────────────────────────────
-# Cut a release with automatic or manual version bump (based on conventional commits).
-# Cut the next release (auto-detected version) via a PR. `main` is protected
-# (enforce_admins + merge queue), so the version bump lands through a PR — a
-# direct `git push` to main is rejected. After the PR merges, run
-
-# `just release::tag <version>` to publish.
+# `main` is protected (enforce_admins + merge queue), so the version bump lands
+# through a PR — a direct `git push` to main is rejected. After the PR merges,
+# run `just release::tag <version>` to publish.
+#
 # Usage: just release::pr [VERSION]
-#   VERSION: version string (e.g., "0.17.0") or "auto" (default, auto-detected)
+#   VERSION: version string (e.g., "0.17.0") or "auto" (default, auto-detected
+#            from conventional commits)
 
+# Open the release PR: version bump + changelog for the next release
 pr VERSION="auto":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -84,7 +80,12 @@ _prep VERSION:
     gh pr create --base main --head "$BRANCH" --title "release: v$V" \
         --body "Version bump + git-cliff changelog for v$V. Merge via the queue, then \`just release::tag $V\`."
     echo "==> Opened release PR for v$V. Merge it via the queue, then run: just release::tag $V"
-# which triggers the build + publish pipeline. Tags are not branch-protected.
+
+# Refuses unless origin/main already carries the bump, i.e. the release PR
+# merged. Pushing the tag triggers the build + publish pipeline. Tags are not
+# branch-protected.
+
+# Tag the merged release commit on origin/main and push the tag
 tag VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -114,11 +115,12 @@ deploy-guard:
 @version:
     awk '/^\[workspace\.package\]/{inpkg=1;next} /^\[/{inpkg=0} inpkg && /^version/{print $3;exit}' "{{ justfile_directory() }}/Cargo.toml" | tr -d '"'
 
-# Release the boot image train (`boot-image/v*`)
 # This creates and pushes a tag for the boot image release, which triggers
 # the release-boot-image.yml workflow to build and publish all microVM assets.
 # Usage: just release::image <version>
 #   version: The version tag (e.g., 1.2.3) - creates boot-image/v1.2.3
+
+# Release the boot image train (`boot-image/v*`)
 image VERSION:
     #!/usr/bin/env bash
     set -euo pipefail

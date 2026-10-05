@@ -162,7 +162,7 @@ pub struct AuditSignerHandle {
 
 /// Spawn the per-VM `mvm-audit-signer` moat. Hands it a JSON `SubprocessConfig`
 /// on stdin (chain JSONL + host-signer key + the UDS to bind), detaches it via
-/// `setsid` so it outlives `mvmctl up`, waits for it to bind the UDS, and
+/// `setsid` so it outlives the `mvmctl` that booted the VM, waits for it to bind the UDS, and
 /// writes `AUDIT_SIGNER_PID_FILE` for the stop path to reap.
 pub fn spawn_audit_signer(params: AuditSignerSpawnParams<'_>) -> Result<AuditSignerHandle> {
     spawn_audit_signer_with_timeout(params, AUDIT_SIGNER_READY_TIMEOUT)

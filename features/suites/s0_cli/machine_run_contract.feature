@@ -176,6 +176,22 @@ Feature: machine run request contract
     Then the command exits with code 0
     And the output contains "no VM will be booted"
 
+  Scenario Outline: machine run refuses interpreter startup variables across their families
+    When I run mvmctl with "machine run --image alpine --dry-run --env <name>=/tmp/override -- /bin/true" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "<name> (interpreter)"
+
+    Examples:
+      | name         |
+      | PERL5DB      |
+      | RUBYSHELL    |
+      | RUBY_VERSION |
+
+  Scenario: machine run re-admits one interpreter startup name without opening its family
+    When I run mvmctl with "machine run --image alpine --dry-run --env PERL5DB=/tmp/override --allow-env PERL5DB -- /bin/true" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "no VM will be booted"
+
   Scenario: machine run refuses a pattern as a re-admission
     When I run mvmctl with "machine run --image alpine --dry-run --env LD_PRELOAD=/tmp/hook.so --allow-env LD_* -- /bin/true" and an isolated mvm home
     Then the command exits with code 1

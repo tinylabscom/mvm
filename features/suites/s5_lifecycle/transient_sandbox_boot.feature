@@ -73,6 +73,13 @@ Feature: Transient sandbox boot
     Then the command exits with code 0
     And the output contains "Example Domain"
 
+  @live @tls_tunnel_client
+  Scenario: a persistent command reports blocked egress before returning its exit status
+    When I run mvmctl in an isolated live home with "machine run --name bdd-command-denial --image curlimages/curl:8.21.0 --allow-host example.com --timeout 180 -- curl -fsSL https://blocked.example"
+    Then the command exits with code 22
+    And the error output contains "egress blocked: blocked.example:443"
+    And the error output contains "egress denied: 1 destinations"
+
   @live
   Scenario: machine run removes the transient VM state directory on guest exit
     Given an isolated mvm home

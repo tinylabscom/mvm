@@ -186,6 +186,12 @@ mvmctl bootstrap      # host setup + builder VM, kernel, overlay, initramfs, gue
 mvmctl doctor         # diagnose host deps + the resolved builder/runtime backend
 ```
 
+`bootstrap` is optional: the first `machine run` acquires whatever it is
+missing on its own. A binary built from source builds those artifacts locally,
+which on a cold cache can take tens of minutes; it prints one notice before the
+first build, and later runs reuse the results. Scripts and CI that would rather
+fail than build pass `machine run --no-build` or set `MVM_COLD_BUILD=refuse`.
+
 `bootstrap` is safe to rerun. It verifies warm artifacts and only rebuilds or
 downloads what is missing or invalid. Official release binaries download
 published, verified artifacts and never infer a local build merely because the

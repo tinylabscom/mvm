@@ -9,6 +9,7 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 mvm-core = { workspace = true, features = ["client-remote", "provenance"] }
 mvm-agentd.workspace = true
 mvm-runtime = { workspace = true, default-features = false }
@@ -88,6 +89,8 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+# Secret-command tests read back a stored value through SecretStore::get.
+secrecy.workspace = true
 # The sidecar resolver proves an artifact's libc from its `DT_NEEDED`, so a
 # test that seeds a sidecar cache needs a real ELF object, not a stub.
 mvm-fs = { workspace = true, features = ["test-support"] }
@@ -169,10 +172,14 @@ release-artifact-bootstrap = []
 release-channel = ["mvm-build/release-channel", "mvm-client/release-channel", "manifest-verify"]
 custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
+# mvm-build is named so its tests agree with the verifier mvm-core compiles in;
+# without it a workspace build unifies the verifier into mvm-core while
+# mvm-build's tests still expect the refusal of a build that has none.
 manifest-verify = [
     "mvm-runtime/manifest-verify",
     "mvm-core/manifest-verify",
     "mvm-client/manifest-verify",
+    "mvm-build/manifest-verify",
 ]
 template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 # Forwards to `mvm-runtime/test-support` + `mvm-client/test-support`: the

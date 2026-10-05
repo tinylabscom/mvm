@@ -132,3 +132,40 @@ were not booted live here.
   `dumpe2fs` feature set now pins it. The three `run_build` tests that
   reached the seed without isolating `HOME` are hermetic, and
   `check-test-home-isolation` now flags that shape.
+
+## W12 measured acceptance (2026-10-02, Apple Silicon workstation)
+
+Method: one-line edit in `crates/mvm-core/src/lib.rs` (a file the old
+builder key's host-binary layer folded into — under the old key this moved
+the builder image fingerprint and forced a full Stage 0 rebuild), then
+`just embed --release` (`MVM_EMBED_FEATURES=embed-host-bins,dev`), then the
+documented flow in a scratch `MVM_HOME` (`mvmctl bootstrap`, then
+`mvmctl machine run --image alpine -- /bin/true`).
+
+Numbers (this workstation, under heavy parallel-session load — wall times
+are inflated; the acceptance criterion is qualitative):
+
+| Step | Wall time | What happened |
+|---|---:|---|
+| `just embed --release` (cold feature graph, then warm) | ~87 min cold pass; 12 min warm resume | plain cargo release build; no Nix, no Stage 0 |
+| `mvmctl bootstrap` — builder step | seconds | `Builder VM image source: fetched (image-set/v0.2.3), signature and digests verified` — the published ABI-1 builder image; **no Stage 0, no builder-image build** |
+| `mvmctl bootstrap` — one-time per-checkout source builds | libkrun helper 35m, guest runtime 34m, aarch64 overlay ~20m, initramfs 7m | cargo builds, cached for the checkout afterward |
+| `mvmctl machine run --image alpine -- /bin/true` | **26 s** | boot, exec, clean exit |
+
+Acceptance evidence:
+
+- The run log carries **0** Stage-0 markers and **0** nix-build lines.
+- `mvmctl doctor`: `image source: OK (verified-release — released image set
+  pinned by the image lock)`, `builder backend: OK (hvf)`, `builder
+  residency: OK (always-warm)`.
+- The pinned set is `image-set/v0.2.3`, whose signed manifest declares
+  `builder_boot_abi: 1` and `builder_cache_contract: 5`; the pinned consumer
+  is mvm v0.22.0, the first payload-capable release.
+
+Before (from the plan's design measurements and the bug report that opened
+this work): a daily `git pull` moved the old builder key on ~47% of days,
+and each move cost a 17-minute Stage 0 on the Firecracker builder — tens of
+minutes on a laptop (the original report: a 1h31m release build followed by
+`machine run` that never got past image preparation). After: the builder
+path is a verified download of the published image set, reused across
+edits; a full `machine run` from warm caches is 26 seconds.

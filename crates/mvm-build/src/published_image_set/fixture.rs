@@ -210,6 +210,15 @@ impl ImageSetFixture {
         self
     }
 
+    /// Declare `range` as the guest-agent protocol the set supports. The lock
+    /// [`Self::serve_from`] derives copies it, so only the host compatibility
+    /// check can refuse the set over it.
+    #[must_use]
+    pub fn with_guest_agent_protocol(mut self, range: mvm_core::image_set::ProtocolRange) -> Self {
+        self.manifest.compatibility.guest_agent_protocol = range;
+        self
+    }
+
     /// Serve `bytes` under `name` while the root keeps declaring whatever it
     /// declared before.
     #[must_use]

@@ -23,6 +23,7 @@ use std::path::Path;
 use crate::commands::DirShareSpec;
 use crate::ui;
 
+mod baked_entrypoint;
 mod either;
 /// Exit code the CLI returns when a guest command exceeds its `--timeout`.
 /// Matches GNU `timeout(1)` so scripts can branch on it.
@@ -38,6 +39,11 @@ mod transient;
 
 pub use launch_plan::load_launch_plan;
 
+use baked_entrypoint::{
+    baked_entrypoint_result, boots_baked_entrypoint, dispatch_baked_entrypoint,
+};
+#[cfg(test)]
+use baked_entrypoint::{baked_entrypoint_timeout_secs, dispatched_exit_status};
 use guest_run::{emit_guest_console_diagnostic, run_in_guest, run_wasm_module};
 pub(crate) use mvm_client::boot::{
     select_exec_backend, validate_image_egress_backend, validate_image_egress_backend_name,
@@ -536,104 +542,13 @@ pub fn run_with_posture(
         .map(|either| either.left().expect("streaming mode returns exit code"))
 }
 
-fn boots_baked_entrypoint(req: &ExecRequest) -> bool {
-    matches!(&req.target, ExecTarget::Inline { argv } if argv.is_empty())
-}
-
-/// Run the image's baked entrypoint and return the status it exited with.
-///
-/// This shape — `machine run --flake <dir>` with nothing after it — used to
-/// boot the VM and then only *wait*, polling `<state_dir>/workload.exit` for a
-/// code. Nothing ever wrote that file, because nothing ever ran the workload:
-/// the guest agent validates `/etc/mvm/entrypoint` at boot and has no
-/// autostart, and the one binary that reports to the workload-exit vsock port
-/// is exec'd only by the agent's detached-run reaper. So the guest booted,
-/// idled, and the host failed after the full wait window with "stopped without
-/// reporting its exit code" — a message describing a workload that had not
-/// started.
-///
-/// The mechanism it was written against was real and is gone: the image `/init`
-/// used to source the entrypoint, capture `$?`, and call `mvm-exit-report`.
-/// The universal initramfs made the agent PID 1 and took that `/init` with it.
-///
-/// Dispatching `RunEntrypoint` is how the rest of the CLI already runs a baked
-/// entrypoint — it is exactly what `machine run --entrypoint` does, on a guest
-/// handler that works — so this reuses that path rather than reintroducing an
-/// autostart in the guest to feed a file the host is polling.
-fn dispatch_baked_entrypoint(
-    vm_name: &str,
-    req: &ExecRequest,
-    sub: &mut crate::commands::vm::phase_timing::LaunchSubMarks,
-) -> Result<mvm_core::vm_backend::VmExitStatus> {
-    if !wait_for_agent_timed(vm_name, 30, sub) {
-        emit_guest_console_diagnostic(vm_name);
-        anyhow::bail!("guest agent did not become reachable within 30s");
-    }
-    use crate::commands::vm::invoke::{DispatchStdin, EntrypointDispatch, dispatch};
-    let code = dispatch(EntrypointDispatch {
-        vm_name,
-        stdin: DispatchStdin::OneShot(req.stdin.clone()),
-        // The same default the `--entrypoint` path applies to the same
-        // operation (`runtime.rs`: `args.run.timeout.unwrap_or(30)`), so the
-        // two spellings of "run this image's baked entrypoint" agree on how
-        // long it may take.
-        //
-        // Not 0. The agent reads this as a wall-clock ceiling and 0 means the
-        // wrapper has already exceeded it, not that it is unbounded — a live
-        // run with 0 came back `124: wrapper exceeded 0s timeout` before the
-        // workload could produce anything.
-        timeout_secs: baked_entrypoint_timeout_secs(req.timeout_secs),
-        session_id: None,
-    })
-    .with_context(|| format!("running the baked entrypoint in {vm_name}"))?;
-    Ok(dispatched_exit_status(code))
-}
-
-/// The wall-clock ceiling a baked entrypoint dispatch runs under.
-///
-/// Matches the `--entrypoint` path's default for the same operation
-/// (`runtime.rs`: `args.run.timeout.unwrap_or(30)`), so the two spellings of
-/// "run this image's baked entrypoint" cannot disagree about how long it may
-/// take.
-///
-/// Never 0: the agent reads this as a deadline the wrapper must finish inside,
-/// and 0 means it has already passed. A live run with 0 returned `124: wrapper
-/// exceeded 0s timeout` before the workload emitted anything.
-fn baked_entrypoint_timeout_secs(requested: Option<u64>) -> u64 {
-    requested.unwrap_or(30)
-}
-
-/// The exit status a dispatched entrypoint's code represents.
-///
-/// Always `Some`: a dispatch that returns at all returns a code, so this path
-/// can no longer produce `UNKNOWN`. That matters because `UNKNOWN` is what the
-/// old wait-only path yielded when nothing reported, and it is still the
-/// fail-closed signal [`baked_entrypoint_result`] refuses — which now means
-/// only "the dispatch itself failed", not "the workload was never started".
-fn dispatched_exit_status(code: i32) -> mvm_core::vm_backend::VmExitStatus {
-    mvm_core::vm_backend::VmExitStatus {
-        code: Some(code),
-        success: code == 0,
-    }
-}
-
-fn baked_entrypoint_result(
-    status: mvm_core::vm_backend::VmExitStatus,
-    capture: bool,
-    vm_name: &str,
-) -> Result<Either<i32, ExecOutput>> {
-    let code = status.code.with_context(|| {
-        format!("baked workload in {vm_name} stopped without reporting its exit code")
-    })?;
-    if capture {
-        Ok(Either::Right(ExecOutput {
-            exit_code: code,
-            stdout: String::new(),
-            stderr: String::new(),
-            phase_timing: None,
-        }))
-    } else {
-        Ok(Either::Left(code))
+fn reported_exit_code(
+    outcome: &Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)>,
+) -> Option<i32> {
+    match outcome {
+        Ok((Either::Left(code), _)) => Some(*code),
+        Ok((Either::Right(output), _)) => Some(output.exit_code),
+        Err(_) => None,
     }
 }
 
@@ -765,6 +680,8 @@ fn run_inner(
     } else {
         run_in_guest(&vm_name, &req, capture, timing, &mut sub_marks)
     };
+    let reported_exit_code = reported_exit_code(&run_outcome);
+    let workload_completed = run_outcome.is_ok();
     let t_command_done = timing.then(std::time::Instant::now);
     let (mut result, t_vsock_ready) = match run_outcome {
         Ok((either, vsock_ready)) => (Ok(either), vsock_ready),
@@ -791,7 +708,22 @@ fn run_inner(
     let _ = mvm_runtime::vm::reconcile::reap_orphan_state_dirs(Some(vm_name.as_str()));
 
     sub_marks.start(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
-    teardown_transient_vm(&backend, &vm_name, &requested_vm_name, &mut sub_marks);
+    let exit_audit = start_config.plan_json.as_deref().map(|signed_plan_json| {
+        mvm_client::launch::TransientExitAudit {
+            signed_plan_json,
+            vm_name: &vm_name,
+            backend: backend.name(),
+            exit_code: reported_exit_code,
+            completed: workload_completed,
+        }
+    });
+    teardown_transient_vm(
+        &backend,
+        &vm_name,
+        &requested_vm_name,
+        exit_audit,
+        &mut sub_marks,
+    );
     sub_marks.finish(crate::commands::vm::phase_timing::SubPhase::CleanupHandoff);
     let t_torn_down = timing.then(std::time::Instant::now);
 
@@ -1557,6 +1489,27 @@ mod tests {
         let result = baked_entrypoint_result(status, false, "vm-flake")
             .expect("reported exit code must be returned");
         assert_eq!(result.left(), Some(7));
+    }
+
+    #[test]
+    fn transient_audit_uses_only_a_reported_exit_code() {
+        let direct = Ok((Either::Left(7), None));
+        assert_eq!(reported_exit_code(&direct), Some(7));
+
+        let captured = Ok((
+            Either::Right(ExecOutput {
+                exit_code: 9,
+                stdout: String::new(),
+                stderr: String::new(),
+                phase_timing: None,
+            }),
+            None,
+        ));
+        assert_eq!(reported_exit_code(&captured), Some(9));
+
+        let failed: Result<(Either<i32, ExecOutput>, Option<std::time::Instant>)> =
+            Err(anyhow::anyhow!("dispatch failed"));
+        assert_eq!(reported_exit_code(&failed), None);
     }
 
     /// A dispatch that inherits no `--timeout` must not inherit a deadline it

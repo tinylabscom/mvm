@@ -171,6 +171,11 @@ still holds only a placeholder; the value is substituted after the approval,
 exactly as for any bound secret. `mvmctl secret ls` shows `approve=ask` on the
 binding.
 
+Admission captures `approve=ask` in the signed execution plan before launch.
+Changing local binding metadata after admission cannot remove that requirement:
+the endpoint refuses an unsigned new `ask` and still asks when the signed plan
+requires approval. A missing secret or binding refuses admission.
+
 Approval covers every supported injection position: a request header, a
 decoded Basic credential, a query-parameter value, or a URL-path segment. The
 endpoint locates the placeholder first, checks that its position matches the
@@ -185,7 +190,9 @@ be changed from the guest:
 - **Timeout.** A question not answered in 120 seconds is denied
   (`timed_out`), and the request is refused.
 - **Fail closed.** No broker listening, an unreachable socket, a malformed or
-  mismatched answer, a backend error — every one is a denial.
+  mismatched answer, a backend error, or an unavailable chain-signed audit
+  recorder — every one is a denial. A failed audit write refuses even an
+  approval already answered by a backend or held in session memory.
 - **Rate limit.** At most 10 questions per minute per VM reach a backend. The
   rest are denied without asking (`rate_limited`), so a workload cannot flood
   your terminal.
@@ -201,7 +208,8 @@ be changed from the guest:
   `approval.timed_out`. A request answered from a session approval is recorded
   as `approval.granted` with the reason `session_grant`. The request path is
   never recorded. The route decision itself is still a `host.route.decided`
-  entry.
+  entry. If the recorder is unavailable or a write fails, the endpoint cannot
+  produce that entry and refuses the approval with `audit_unavailable`.
 
 ## Limits
 
@@ -210,5 +218,7 @@ be changed from the guest:
   broker, so its questions are denied. `machine run --entrypoint -d` answers
   during the call and denies after it, while the machine keeps running. SDK
   embedders retain their per-machine callback brokers as described above.
-- Tool calls have an approval subject (`tool_call`) and the same supervisor,
-  but PS-13's live tool gate does not ask it yet.
+- Declared in-guest tool calls use the per-VM supervisor and its `tool_call`
+  approval subject. The local MCP tool gate asks the controlling terminal for
+  project-policy `ask` rules and chain-signs each decision; it refuses a call
+  when the audit chain is unavailable.

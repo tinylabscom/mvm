@@ -51,19 +51,25 @@ const ALLOWLIST: &[&str] = &[
     // feature took the whole ASN.1 stack with it, so the shipped closure now
     // carries no nom at all and this entry covers the fuzz tooling alone.
     "nom",
-    // sysinfo remains on the Windows 0.52 family while Tokio and current
-    // Windows support crates use the 0.53 target shims. These are host-only.
+    // The image-set signature verifier in the default build: sigstore-verify
+    // 0.11 is still on RustCrypto 0.10 while the workspace is on 0.11, and it
+    // brings an older rand/rand_core, ryu-js and aws-lc-rs's untrusted 0.7.
+    // See deny.toml's matching entry for the full audit.
+    "block-buffer",
+    "const-oid",
+    "cpufeatures",
+    "crypto-common",
+    "digest",
+    "rand",
+    "rand_core",
+    "ryu-js",
+    "sha2",
+    "signature",
+    "untrusted",
+    // sysinfo remains on an older Windows API family than Tokio and the
+    // current Windows support crates. These are host-only.
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {

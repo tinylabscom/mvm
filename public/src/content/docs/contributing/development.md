@@ -46,6 +46,19 @@ before payload or release builds; it installs the exact Zig and cargo-zigbuild
 pins used by this checkout. These shells do not build or publish images; that
 work belongs to `mvm-images`.
 
+The default shell is lean because first entry was slow when it carried the
+payload toolchain. Measured in October 2026 inside the builder VM, with builder
+image and payload preparation excluded:
+
+| Host | First entry, before → after | Repeat entry, before → after |
+| --- | --- | --- |
+| x86_64 Linux, Firecracker builder, shared Nix store | 354.58 s → 14.21 s | 1.29 s → 1.29 s |
+| Apple Silicon macOS, HVF builder, fresh guest store | 392.63 s → 245.43 s | 2.25 s → 1.50 s |
+
+"Before" fetched Zig 0.13 and 0.15, cargo-zigbuild and libclang on entry.
+`scripts/check-devshell-tiers.sh` keeps them out of the default shell and in
+`.#full`; the merge queue runs it in the Nix flake check lane.
+
 ```bash
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm

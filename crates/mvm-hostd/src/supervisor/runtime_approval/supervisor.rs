@@ -37,6 +37,7 @@ const REASON_TIMED_OUT: &str = "timed_out";
 const REASON_RATE_LIMITED: &str = "rate_limited";
 const REASON_ANSWER_MISMATCH: &str = "answer_mismatch";
 const REASON_LEDGER_REFUSED: &str = "ledger_refused";
+const REASON_AUDIT_UNAVAILABLE: &str = "audit_unavailable";
 
 /// A millisecond wall clock; a seam so tests can move time.
 pub type Clock = Arc<dyn Fn() -> u64 + Send + Sync>;
@@ -287,7 +288,12 @@ impl ApprovalSupervisor {
             .map_err(|_| ())
     }
 
-    fn respond(&self, request_id: &ApprovalRequestId, outcome: ApprovalOutcome, now: u64) {
+    fn respond(
+        &self,
+        request_id: &ApprovalRequestId,
+        outcome: ApprovalOutcome,
+        now: u64,
+    ) -> Result<(), ()> {
         let response = ApprovalResponse {
             approval_id: request_id.clone(),
             operator_id: OperatorId::parse(BROKER_OPERATOR).expect("constant operator id"),
@@ -298,7 +304,10 @@ impl ApprovalSupervisor {
         };
         let mut state = self.ledger.lock().unwrap_or_else(|p| p.into_inner());
         let Ledger { ledger, journal } = &mut *state;
-        let _ = ledger.respond(journal, response, now);
+        ledger
+            .respond(journal, response, now)
+            .map(|_| ())
+            .map_err(|_| ())
     }
 
     /// Close a request nobody answered: expired when its deadline has
@@ -311,16 +320,19 @@ impl ApprovalSupervisor {
         }
     }
 
-    async fn audit(&self, event: &str, labels: Vec<(String, String)>) {
+    async fn audit(&self, event: &str, labels: Vec<(String, String)>) -> Result<(), ()> {
         let Some(recorder) = &self.recorder else {
-            return;
+            tracing::warn!(event, "approval audit recorder unavailable");
+            return Err(());
         };
         if let Err(e) = recorder
             .record_unbound(EventCategory::Approval, event, labels)
             .await
         {
             tracing::warn!(error = %e, event, "approval audit emit failed");
+            return Err(());
         }
+        Ok(())
     }
 
     async fn deny(
@@ -335,8 +347,12 @@ impl ApprovalSupervisor {
             labels.push(("request_id".into(), id.to_string()));
         }
         labels.push(("reason".into(), reason.to_string()));
-        self.audit(event, labels).await;
-        ApprovalVerdict::Denied { reason }
+        match self.audit(event, labels).await {
+            Ok(()) => ApprovalVerdict::Denied { reason },
+            Err(()) => ApprovalVerdict::Denied {
+                reason: REASON_AUDIT_UNAVAILABLE,
+            },
+        }
     }
 }
 
@@ -439,8 +455,12 @@ impl RuntimeApprover for ApprovalSupervisor {
             let mut labels = subject_labels(subject);
             labels.push(("scope".into(), "session".into()));
             labels.push(("reason".into(), "session_grant".into()));
-            self.audit("approval.granted", labels).await;
-            return ApprovalVerdict::Approved;
+            return match self.audit("approval.granted", labels).await {
+                Ok(()) => ApprovalVerdict::Approved,
+                Err(()) => ApprovalVerdict::Denied {
+                    reason: REASON_AUDIT_UNAVAILABLE,
+                },
+            };
         }
         let Some(broker) = &self.broker else {
             return self
@@ -478,7 +498,12 @@ impl RuntimeApprover for ApprovalSupervisor {
         let mut labels = subject_labels(subject);
         labels.push(("request_id".into(), request_id.to_string()));
         labels.push(("expires_in_ms".into(), timeout_ms.to_string()));
-        self.audit("approval.requested", labels).await;
+        if self.audit("approval.requested", labels).await.is_err() {
+            self.close_unanswered(&request_id, now);
+            return ApprovalVerdict::Denied {
+                reason: REASON_AUDIT_UNAVAILABLE,
+            };
+        }
 
         let prompt = ApprovalPrompt {
             request_id: request_id.clone(),
@@ -527,25 +552,40 @@ impl ApprovalSupervisor {
         answer: &ApprovalAnswer,
         now: u64,
     ) -> ApprovalVerdict {
-        self.respond(request_id, answer.outcome, now);
+        if self.respond(request_id, answer.outcome, now).is_err() {
+            return self
+                .deny(
+                    Some(request_id),
+                    subject,
+                    "approval.denied",
+                    REASON_LEDGER_REFUSED,
+                )
+                .await;
+        }
         let mut labels = subject_labels(subject);
         labels.push(("request_id".into(), request_id.to_string()));
         labels.push(("reason".into(), answer.reason_label().to_string()));
         match answer.outcome {
             ApprovalOutcome::Approved => {
                 labels.push(("scope".into(), answer.scope.label().to_string()));
+                if self.audit("approval.granted", labels).await.is_err() {
+                    return ApprovalVerdict::Denied {
+                        reason: REASON_AUDIT_UNAVAILABLE,
+                    };
+                }
                 if answer.scope == ApprovalScope::Session {
                     self.remember(key, now);
                 }
-                self.audit("approval.granted", labels).await;
                 ApprovalVerdict::Approved
             }
-            ApprovalOutcome::Denied => {
-                self.audit("approval.denied", labels).await;
-                ApprovalVerdict::Denied {
+            ApprovalOutcome::Denied => match self.audit("approval.denied", labels).await {
+                Ok(()) => ApprovalVerdict::Denied {
                     reason: "approval_denied",
-                }
-            }
+                },
+                Err(()) => ApprovalVerdict::Denied {
+                    reason: REASON_AUDIT_UNAVAILABLE,
+                },
+            },
         }
     }
 

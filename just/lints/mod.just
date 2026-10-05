@@ -1,9 +1,9 @@
 set working-directory := "../.."
 
 # ── Model / Conformance gates ────────────────────────────────────────────
-# R1: the model is the single source. Verify model/*.toml, the generated
+# R1: the model is the single source.
 
-# CONFORMANCE.md, and the honesty/deferral meta-gates.
+# Verify model/*.toml, the generated CONFORMANCE.md, and the honesty/deferral gates
 model:
     cargo run -p xtask -- check-conformance
     cargo run -p xtask -- check-honesty
@@ -39,14 +39,16 @@ clippy:
 # stay out of `cargo nextest run --workspace` (nextest lists tests via `--list`,
 # which a `harness = false` target cannot answer), and `--all-targets` above
 # honors `required-features`, so nothing else builds it — a struct change
-
 # elsewhere in the workspace can break it unnoticed.
+
+# Run clippy over the cucumber conformance target (`--features bdd`)
 clippy-bdd:
     ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
-# ── Claim mutation testing ───────────────────────────────────────────────
-# Verify the committed mutation surface still matches the claims ledger.
 
+# ── Claim mutation testing ───────────────────────────────────────────────
 # Milliseconds, needs no cargo-mutants — this is the part CI runs per PR.
+
+# Verify the committed mutation surface still matches the claims ledger
 mutation-surface:
     cargo run -p xtask -- check-mutation-witnesses
 
@@ -60,14 +62,15 @@ mutation-surface:
 # its check removed, so it must not reach a real mvm state root — and that
 # confinement lives where cargo-mutants is actually spawned, so every
 # caller gets it rather than each one carrying its own copy. This recipe
-
 # had no wrapper at all until that landed, which is the failure mode.
+
+# Mutate the claim surface and ratchet survivors against the baseline (hours)
 mutation-witnesses:
     cargo run -p xtask -- check-mutation-witnesses --run
 
-# Re-pin the surface after a witness legitimately moved. Cheap, and keeps
-# the stated reasons on existing accepted misses. Add --run to also
+# Cheap, and keeps the stated reasons on existing accepted misses. Add --run to
+# also re-record the misses themselves (hours, and it discards those reasons).
 
-# re-record the misses themselves (hours, and it discards those reasons).
+# Re-pin the mutation surface after a witness legitimately moved
 mutation-repin:
     cargo run -p xtask -- check-mutation-witnesses --write-baseline

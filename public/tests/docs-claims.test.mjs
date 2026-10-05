@@ -103,6 +103,103 @@ test("Claude Code client guide keeps the MCP and guest boundaries distinct", () 
   assert.match(guide, /not a substitute for the chain-signed audit/);
 });
 
+// A profile takes its own policy under `[overrides]`; a top-level `[tools]`
+// table is the group form and does not parse there. A guide that shows the
+// group form for a file named by `[policy] profile` documents a server that
+// refuses to start.
+const readGuide = (name) =>
+  readFileSync(path.join(repo, "public/src/content/docs/guides", name), "utf8");
+
+for (const name of ["claude-code-mcp.md", "opencode-agent.md", "goose-agent.md"]) {
+  test(`${name} writes the MCP tool policy in the profile form`, () => {
+    const guide = readGuide(name);
+
+    assert.match(guide, /\[overrides\.tools\]\nallow = \["mvm\.machine\.list"\]/);
+    assert.doesNotMatch(guide, /^\[tools\]$/m);
+    assert.match(guide, /profile = "\.\/policy\/mcp-readonly\.toml"/);
+    assert.match(guide, /mvmctl ops mcp stdio/);
+    assert.match(guide, /Without any `\[tools\]`\s+section, the MCP adapter has no tool gate/);
+    assert.match(guide, /not a substitute for the chain-signed audit/);
+  });
+}
+
+const agentPacks = [
+  { file: "claude-code-mcp.md", pack: "agent/claude", secrets: ["anthropic"], needs: ["runtime/python"] },
+  { file: "codex-agent.md", pack: "agent/codex", secrets: ["openai"], needs: ["runtime/node"] },
+  { file: "pi-agent.md", pack: "agent/pi", secrets: ["anthropic"], needs: [] },
+  { file: "opencode-agent.md", pack: "agent/opencode", secrets: ["anthropic", "openai"], needs: [] },
+  { file: "goose-agent.md", pack: "agent/goose", secrets: ["anthropic", "openai"], needs: [] },
+];
+
+for (const { file, pack, secrets, needs } of agentPacks) {
+  test(`${file} documents the ${pack} pack without promising an image`, () => {
+    const guide = readGuide(file);
+    const sidebar = readFileSync(path.join(repo, "public/src/sidebar.ts"), "utf8");
+    const slug = file.replace(/\.md$/, "");
+
+    assert.match(sidebar, new RegExp(`slug: "guides/${slug}"`));
+    assert.match(guide, new RegExp(`mvmctl pull ${pack}\\n`));
+    assert.match(guide, new RegExp(`mvmctl run --policy ${pack} -- `));
+    // `pull` fetches one pack; a profile that includes another names it.
+    for (const dependency of needs) {
+      assert.match(guide, new RegExp(`mvmctl pull ${dependency}\\n`));
+    }
+    for (const secret of secrets) {
+      assert.match(guide, new RegExp(`mvmctl secret set ${secret} --provider ${secret}`));
+      assert.match(guide, new RegExp(`name = "${secret}"`));
+    }
+    assert.match(guide, /The pack is policy only\. It ships no image and installs nothing/);
+    assert.match(guide, /no published image or\s+template\s+does/);
+  });
+}
+
+test("client guides state which clients the MCP server can and cannot serve", () => {
+  const codex = readGuide("codex-agent.md");
+  const pi = readGuide("pi-agent.md");
+  const index = readGuide("ai-agent-integration.md");
+
+  // Codex opens with a protocol version the server refuses; the guide must
+  // say so rather than show a registration that lists no tools.
+  assert.match(codex, /`2025-06-18`/);
+  assert.match(codex, /No MVM tool is listed in a Codex\s+session/);
+  assert.match(codex, /Codex does not read `OPENAI_API_KEY`/);
+  assert.match(pi, /pi has no\s+MCP client/);
+  assert.match(pi, /--provider anthropic/);
+  for (const slug of ["claude-code-mcp", "codex-agent", "pi-agent", "opencode-agent", "goose-agent", "pack-authoring"]) {
+    assert.match(index, new RegExp(`\\(/guides/${slug}/\\)`));
+  }
+});
+
+test("pack authoring guide matches the registry layout and trust model", () => {
+  const guide = readGuide("pack-authoring.md");
+  const policy = readGuide("policy-and-profiles.md");
+  const registry = readFileSync(
+    path.join(repo, "crates/mvm-core/src/registry_pack.rs"),
+    "utf8",
+  );
+  const store = readFileSync(
+    path.join(repo, "crates/mvm-core/src/registry_pack_store.rs"),
+    "utf8",
+  );
+
+  // The signing identity and the two policy documents are constants in the
+  // client; the guide quotes them, so a change there has to reach the guide.
+  const identity = registry.match(/OFFICIAL_PACK_SIGNING_IDENTITY: &str =\s+"([^"]+)"/);
+  assert.ok(identity, "official pack signing identity constant not found");
+  assert.ok(guide.includes(identity[1]), "guide does not quote the official signing identity");
+  for (const document of ["pack/profile.toml", "pack/group.toml"]) {
+    assert.ok(store.includes(`"${document}"`), `${document} is no longer a pack policy document`);
+    assert.ok(guide.includes(`\`${document}\``), `guide does not name ${document}`);
+  }
+  assert.match(guide, /\$MVM_HOME\/registry\/publishers\.toml/);
+  assert.match(guide, /\$MVM_HOME\/registry\/packs\.lock\.toml/);
+  assert.match(guide, /A published version is immutable/);
+  assert.match(guide, /It cannot import local policy/);
+  assert.match(guide, /follows signed profile dependencies/);
+  assert.match(guide, /`--policy runtime\/node` also selects it directly/);
+  assert.match(policy, /each entry is a profile or a\s+group/);
+});
+
 test("every agent-sandbox capability links to a concrete feature page", () => {
   const index = readFileSync(
     path.join(repo, "public/src/content/docs/guides/index.md"),

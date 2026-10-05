@@ -54,13 +54,10 @@ pub(in crate::commands) enum VmCmd {
     Diff(diff::Args),
     /// Review and apply a machine's workspace changes back to the host
     /// directory, with a pre-apply snapshot and a journal
-    #[command(hide = true)]
     Apply(workspace_apply::ApplyArgs),
     /// Reverse the most recent reviewed apply on a workspace
-    #[command(hide = true)]
     Undo(workspace_apply::UndoArgs),
     /// Re-apply the most recent undone apply on a workspace
-    #[command(hide = true)]
     Redo(workspace_apply::RedoArgs),
     /// Re-run recorded input from a checkpoint's state, checkpointing
     /// each replayed step

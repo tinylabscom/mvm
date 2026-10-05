@@ -51,9 +51,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;
 use mvm_contract::merkle::merkle_root;
-use mvm_contract::verify::{
-    AuditVerifyError, PlanAuditEntry, SignedEnvelope, hash_line, verify_audit_chain_bytes,
-};
+use mvm_contract::verify::{PlanAuditEntry, SignedEnvelope, hash_line};
 use mvm_core::plan::ExecutionPlan;
 use serde::{Deserialize, Serialize};
 
@@ -79,7 +77,7 @@ const LABEL_PREFIX: &str = "seal.";
 pub enum SealReason {
     /// The workload ran and its exit was reported.
     Exited,
-    /// The run failed between admission and a successful boot.
+    /// The run ended without a confirmed workload completion.
     Failed,
     /// A persistent machine was stopped by the operator.
     Stopped,
@@ -789,34 +787,21 @@ pub fn verify_session(
 
 /// Every line of `tenant`'s chain, verified from genesis across the segment
 /// set, or the classified reason it does not verify.
+///
+/// The live `<tenant>.jsonl` is itself a member of the segment set, so a set
+/// that does not exist means there is no chain file to read either: that is
+/// reported as the set's own `NoChain`, not retried as a single-file read.
 pub fn read_lines_from_genesis(
     audit_dir: &Path,
     tenant: &str,
     vk: &VerifyingKey,
 ) -> Result<Vec<String>, (MismatchReason, String)> {
-    match read_verified_set(audit_dir, tenant, vk) {
-        Ok(segments) => Ok(segments
-            .iter()
-            .flat_map(|s| s.lines().into_iter().map(str::to_string))
-            .collect()),
-        Err(SegmentSetError::NoChain { .. }) => {
-            let path = crate::audit::emitter::audit_path_for_tenant(audit_dir, tenant);
-            let content = std::fs::read_to_string(&path).map_err(|e| {
-                (
-                    MismatchReason::Io,
-                    format!("reading audit chain {}: {e}", path.display()),
-                )
-            })?;
-            verify_audit_chain_bytes(&content, vk)
-                .map_err(|e| (classify_contract(&e), e.to_string()))?;
-            Ok(content
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(str::to_string)
-                .collect())
-        }
-        Err(error) => Err((classify_set(&error), error.to_string())),
-    }
+    let segments = read_verified_set(audit_dir, tenant, vk)
+        .map_err(|error| (classify_set(&error), error.to_string()))?;
+    Ok(segments
+        .iter()
+        .flat_map(|s| s.lines().into_iter().map(str::to_string))
+        .collect())
 }
 
 fn classify_set(error: &SegmentSetError) -> MismatchReason {
@@ -842,16 +827,6 @@ fn classify_file(error: &VerifyError) -> MismatchReason {
             MismatchReason::Signature
         }
         VerifyError::TruncatedTail { .. } => MismatchReason::TruncatedTail,
-    }
-}
-
-fn classify_contract(error: &AuditVerifyError) -> MismatchReason {
-    match error {
-        AuditVerifyError::Malformed { .. } => MismatchReason::Malformed,
-        AuditVerifyError::PrevHashMismatch { .. } => MismatchReason::ChainBreak,
-        AuditVerifyError::SignatureInvalid { .. }
-        | AuditVerifyError::EntryCanonicalMismatch { .. } => MismatchReason::Signature,
-        AuditVerifyError::KeyDecode(_) => MismatchReason::Io,
     }
 }
 

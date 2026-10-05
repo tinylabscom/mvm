@@ -382,7 +382,7 @@ fn ensure_persistent_host_bins() -> Result<PathBuf> {
 /// can outlive this command.
 fn start_hvf_persistent(workspace: PathBuf, memory_mib: u32) -> Result<SessionRecord> {
     let host_bin_dir = ensure_persistent_host_bins()?;
-    let image = crate::commands::build::driver_builder_image::resolve_driver_builder_image()
+    let image = mvm_runtime::builder_runner::resolve_driver_builder_image()
         .map_err(|e| anyhow::anyhow!(e))
         .context("resolving the hvf builder image for the persistent builder")?;
     let (kernel, rootfs, closure_nar) = (image.kernel, image.rootfs, image.closure_nar);

@@ -62,3 +62,10 @@ for the model-facing request and response boundary, and
 while its key stays on the host. Keep tool calls
 narrow: explicit files, explicit argv, explicit timeouts, explicit egress,
 and explicit retention.
+
+Each supported client has its own guide, covering its signed policy pack and,
+where the client can connect, the host-side MCP setup:
+[Claude Code](/guides/claude-code-mcp/), [Codex](/guides/codex-agent/),
+[pi](/guides/pi-agent/), [OpenCode](/guides/opencode-agent/) and
+[Goose](/guides/goose-agent/). To write a pack of your own, see
+[Author and publish a signed pack](/guides/pack-authoring/).

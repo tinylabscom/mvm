@@ -91,6 +91,7 @@ pub(in crate::commands) fn run_replay(
         declared_secrets: &[],
         allow_secret_drop: false,
         json: false,
+        intent: checkpoint::ForkIntent::Replay,
     })
     .with_context(|| format!("restoring checkpoint {:?} for replay", id.as_str()))?;
 

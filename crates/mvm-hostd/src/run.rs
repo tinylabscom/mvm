@@ -8,7 +8,7 @@
 //! plus any metadata-only secret bindings resolved by the caller, and hands
 //! the whole thing to [`admit_and_start`]. The
 //! backend never boots until the plan is signed, verified, inside its validity
-//! window, and non-replayed — the same gate `mvmctl up`/`run` go through.
+//! window, and non-replayed — the same gate `mvmctl run` and `mvmctl machine run` go through.
 //!
 //! Bundle pins, deps volumes, and per-destination redaction remain absent. The
 //! facade does carry typed secret references, which the client validates and
@@ -431,6 +431,7 @@ mod tests {
                     address: "openai".into(),
                 },
                 destinations: Vec::new(),
+                approval_required: false,
             }],
             secret_release: SecretReleasePolicy::PlanBound,
             signed_plan: None,

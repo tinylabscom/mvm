@@ -294,6 +294,11 @@ impl PublishedImageSet {
         Ok(())
     }
 
+    /// The `image-set/v*` release tag these members were published under.
+    pub fn release_tag(&self) -> &ReleaseTag {
+        &self.release_tag
+    }
+
     /// Fetch the dev (accessible) variant of the default workload into `dir`
     /// — the dev-slot install a pair build produces: kernel, rootfs, and the
     /// meta sidecar. Only `build_mode: dev` members are selected; sets that

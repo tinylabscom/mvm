@@ -257,7 +257,12 @@ pub fn resolve_launch_secrets(
     let declared = super::secrets::resolve_workload_secrets(workload_ir)?;
     let specs = merge_secret_specs(manifest.to_vec(), parse_run_secret_specs(flags)?)?;
     let bound = resolve_run_secret_specs(specs, tenant)?;
-    with_run_secret_flags(declared, &bound)
+    let resolved = with_run_secret_flags(declared, &bound)?;
+    if resolved.secrets.is_empty() {
+        return Ok(resolved);
+    }
+    let service = SecretService::local().context("opening the host secret service")?;
+    resolved.bind_approval(&service, tenant)
 }
 
 /// The plan bindings for one launch: what a workload declares, plus what
@@ -540,6 +545,47 @@ mod tests {
     }
 
     #[test]
+    fn admission_captures_secret_use_approval_in_the_plan_binding() {
+        let f = fixture();
+        bound(&f, "claude", Some("anthropic"), &["api.anthropic.com"]);
+        let refs = run_secret_refs(&f.service, "local", &[spec("claude")]).unwrap();
+        let lowered = ResolvedPlanSecrets::from_machine_refs(&refs)
+            .bind_approval(&f.service, "local")
+            .unwrap();
+        assert!(!lowered.secrets[0].approval_required);
+
+        let mut meta = f
+            .service
+            .metadata("local", "claude")
+            .unwrap()
+            .unwrap()
+            .binding
+            .unwrap();
+        meta.approve = crate::secret::SecretApproval::Ask;
+        f.service.bind("local", "claude", meta).unwrap();
+        let lowered = ResolvedPlanSecrets::from_machine_refs(&refs)
+            .bind_approval(&f.service, "local")
+            .unwrap();
+        assert!(lowered.secrets[0].approval_required);
+    }
+
+    #[test]
+    fn admission_refuses_to_sign_a_missing_secret_binding() {
+        let f = fixture();
+        let refs = vec![MachineSecretRef {
+            tenant: "local".into(),
+            name: "absent".into(),
+            placeholder_var: Some("API_KEY".into()),
+            guest_path: None,
+            destinations: Vec::new(),
+        }];
+        let error = ResolvedPlanSecrets::from_machine_refs(&refs)
+            .bind_approval(&f.service, "local")
+            .unwrap_err();
+        assert!(error.to_string().contains("absent"));
+    }
+
+    #[test]
     fn an_uncatalogued_binding_folds_the_secret_name_into_the_variable() {
         let f = fixture();
         bound(&f, "my-api_token", None, &["api.example.com"]);
@@ -622,6 +668,7 @@ mod tests {
                 address: "other".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }]);
         let err = with_run_secret_flags(declared, &refs).unwrap_err();
         assert!(format!("{err:#}").contains("ANTHROPIC_API_KEY"), "{err:#}");

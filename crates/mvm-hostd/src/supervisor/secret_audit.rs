@@ -10,6 +10,7 @@
 
 use mvm_contract::ir::AuthType;
 
+use crate::keyholder::{OAuthRefreshObserver, OAuthRefreshOutcome};
 use crate::supervisor::audit_recorder::{EventCategory, Recorder, RecorderError};
 use mvm_core::policy::RewriteProofRecord;
 
@@ -103,6 +104,49 @@ pub async fn emit_secret_forward_outcome(
             ],
         )
         .await
+}
+
+/// Emit `secret.oauth_refresh { name, destination, outcome }` — how one step of
+/// the host-side OAuth refresher ended for the secret `name`.
+///
+/// `destination` is the token endpoint's host, never its URL. `outcome` is a
+/// fixed label: no error text is recorded, because a token endpoint's error can
+/// echo the client secret it was sent. The client secret, the tokens, and the
+/// response body never reach either field (claim 13).
+pub async fn emit_secret_oauth_refresh(
+    recorder: &Recorder,
+    secret_name: &str,
+    destination: &str,
+    outcome: OAuthRefreshOutcome,
+) -> Result<(), RecorderError> {
+    recorder
+        .record_unbound(
+            EventCategory::Secret,
+            "secret.oauth_refresh",
+            [
+                ("name".to_string(), secret_name.to_string()),
+                ("destination".to_string(), destination.to_string()),
+                ("outcome".to_string(), outcome.label().to_string()),
+            ],
+        )
+        .await
+}
+
+/// The endpoint's refresher reports into the chain. Best-effort, like every
+/// other emit on the endpoint: a failed write is logged, never fatal to the
+/// refresh it describes.
+#[async_trait::async_trait]
+impl OAuthRefreshObserver for Recorder {
+    async fn refresh_outcome(
+        &self,
+        secret_name: &str,
+        destination: &str,
+        outcome: OAuthRefreshOutcome,
+    ) {
+        if let Err(e) = emit_secret_oauth_refresh(self, secret_name, destination, outcome).await {
+            tracing::warn!(error = %e, secret = %secret_name, "secret.oauth_refresh audit emit failed");
+        }
+    }
 }
 
 /// Emit `secret.redacted { destination, categories }` — the egress redactor
@@ -265,6 +309,21 @@ mod tests {
         assert_eq!(labels.len(), outcomes.len());
     }
 
+    /// Each refresh outcome has its own label, so the chain can tell a refresh
+    /// from a failed attempt, a policy refusal, and the loop giving up.
+    #[test]
+    fn every_oauth_refresh_outcome_has_a_distinct_label() {
+        let outcomes = [
+            OAuthRefreshOutcome::Refreshed,
+            OAuthRefreshOutcome::Failed,
+            OAuthRefreshOutcome::PolicyDenied,
+            OAuthRefreshOutcome::Stopped,
+        ];
+        let labels: std::collections::BTreeSet<&str> =
+            outcomes.iter().map(|outcome| outcome.label()).collect();
+        assert_eq!(labels.len(), outcomes.len());
+    }
+
     use super::*;
     use crate::supervisor::audit_file::{FileAuditSigner, verify_audit_chain};
     use ed25519_dalek::SigningKey;
@@ -321,6 +380,59 @@ mod tests {
         );
 
         assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_event_is_metadata_only_and_chain_verifies() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("audit.jsonl");
+        let (recorder, vk) = recorder_at(&file);
+
+        emit_secret_oauth_refresh(
+            &recorder,
+            "oauth-secret",
+            "auth.example.com",
+            OAuthRefreshOutcome::Refreshed,
+        )
+        .await
+        .unwrap();
+        // The observer impl writes the same entry.
+        recorder
+            .refresh_outcome(
+                "oauth-secret",
+                "auth.example.com",
+                OAuthRefreshOutcome::PolicyDenied,
+            )
+            .await;
+
+        let chain = std::fs::read_to_string(&file).unwrap();
+        let entries: Vec<serde_json::Value> = chain
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["entry"].clone())
+            .collect();
+        assert_eq!(entries.len(), 2);
+        for (entry, outcome) in entries.iter().zip(["refreshed", "policy_denied"]) {
+            assert_eq!(entry["event"], "secret.oauth_refresh");
+            assert_eq!(entry["labels"]["name"], "oauth-secret");
+            assert_eq!(entry["labels"]["destination"], "auth.example.com");
+            assert_eq!(entry["labels"]["outcome"], outcome);
+        }
+        // claim 13: no client secret, token, or token URL in the signed entry.
+        let payloads = entry_payloads(&chain);
+        for leaked in [
+            "the-client-secret",
+            "fresh-access-token",
+            "https://",
+            "/token",
+        ] {
+            assert!(
+                !payloads.contains(leaked),
+                "audit chain must carry metadata only, found `{leaked}`: {payloads}"
+            );
+        }
+
+        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 2);
     }
 
     #[tokio::test]

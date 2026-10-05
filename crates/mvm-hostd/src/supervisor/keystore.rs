@@ -140,6 +140,7 @@ mod tests {
                 address: "acme/api-token".to_string(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }
     }
 

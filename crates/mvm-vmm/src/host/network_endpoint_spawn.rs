@@ -1025,7 +1025,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
 /// file for the invoke path to inject (`HTTP_PROXY` + placeholder vars). The
 /// endpoint serves the guest→host substitution channel over `transport`.
 /// Detached via `setsid` so it outlives
-/// `mvmctl up`; the stop path reaps
+/// the `mvmctl` that booted the VM; the stop path reaps
 /// it via [`SUBST_PID_FILE`]. The real secret values never leave the endpoint's
 /// address space — only the opaque placeholders are persisted/handed out.
 pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result<()> {

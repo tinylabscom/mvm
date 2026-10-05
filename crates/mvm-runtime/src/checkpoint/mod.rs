@@ -1251,7 +1251,8 @@ fn clone_or_materialize_blob(
     }
 }
 
-fn materialized_source(
+/// Resolve a blob to contiguous bytes, rebuilding chunked data in caller-owned scratch.
+pub fn materialized_source(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
     name: &str,

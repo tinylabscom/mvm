@@ -762,30 +762,81 @@ fn the_source_bootstrap_witness_runs_the_cold_path_in_order() {
         script.contains("set -euo pipefail"),
         "every step must be fatal"
     );
+    let opt_in = script
+        .find("export MVM_ALLOW_LOCAL_BUILDER_BUILD=1")
+        .expect("the witness must opt into a local builder-image build, or `build` is refused");
+    assert!(
+        opt_in < script.find("\"$MVMCTL\" bootstrap").unwrap_or(0),
+        "the opt-in must be exported before the builder image is bootstrapped"
+    );
     assert!(
         !script.contains("|| true") && !script.contains("if ! "),
         "the source witness must not tolerate a failed step"
     );
 }
 
+/// The image recipes the witness builds from live in mvm-images, so the job
+/// has to hand it a checkout — at the commit that produced the pinned set.
+/// Without one, the first image the witness asks for is refused after the
+/// whole workspace has compiled.
+#[test]
+fn the_source_bootstrap_job_builds_from_the_pinned_images_checkout() {
+    let workflow = ci_full();
+    let job = job_block(&workflow, "source-bootstrap-linux");
+    let checkout_path = ".source-bootstrap-mvm-images";
+
+    assert_eq!(
+        field_after(job, "MVM_IMAGES_DIR:").as_deref(),
+        Some(format!("${{{{ github.workspace }}}}/{checkout_path}").as_str()),
+        "the witness must name the mvm-images checkout it builds from"
+    );
+    let resolve = job
+        .find("cargo run -q -p xtask -- image-source-ref")
+        .expect("the checkout ref must come from the image lock");
+    let checkout = job
+        .find("repository: tinylabscom/mvm-images")
+        .expect("the job must check out mvm-images");
+    let bootstrap = job
+        .find("run: just e2e::source-bootstrap")
+        .expect("the job must run the witness");
+    assert!(
+        job.contains("ref: ${{ steps.images-ref.outputs.ref }}")
+            && job.contains(&format!("path: {checkout_path}")),
+        "mvm-images must be checked out at the pinned commit, at the path MVM_IMAGES_DIR names"
+    );
+    assert!(
+        resolve < checkout && checkout < bootstrap,
+        "the pinned checkout must be in place before the witness runs"
+    );
+}
+
 /// A witness that is told to fetch, or handed a warm home, would pass on an
-/// image it did not build. Both refusals happen before anything is compiled.
+/// image it did not build; one with no image checkout cannot build at all.
+/// Every refusal happens before anything is compiled.
 #[cfg(unix)]
 #[test]
 fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
     let warm = tempfile::tempdir().expect("create warm home fixture");
     fs::write(warm.path().join("leftover"), b"x").expect("seed warm home");
     let cold = tempfile::tempdir().expect("create cold home fixture");
+    let missing_images = cold.path().join("no-mvm-images-here");
 
     let cases = [
-        ("a warm home", warm.path().to_path_buf(), None),
+        ("a warm home", warm.path().to_path_buf(), None, None),
         (
             "MVM_BOOT_IMAGE=fetch",
             cold.path().join("home"),
             Some("fetch"),
+            None,
+        ),
+        (
+            "no mvm-images checkout",
+            cold.path().join("home"),
+            None,
+            Some(missing_images.as_path()),
         ),
     ];
-    for (case, home, boot_image) in cases {
+    for (case, home, boot_image, images_dir) in cases {
         let mut command = Command::new("bash");
         command
             .arg("scripts/e2e-source-bootstrap.sh")
@@ -794,6 +845,9 @@ fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
         if let Some(value) = boot_image {
             command.env("MVM_BOOT_IMAGE", value);
         }
+        if let Some(dir) = images_dir {
+            command.env("MVM_IMAGES_DIR", dir);
+        }
         let output = command.output().expect("run the source bootstrap witness");
         assert_eq!(
             output.status.code(),
@@ -801,6 +855,12 @@ fn the_source_bootstrap_witness_refuses_to_prove_nothing() {
             "{case} must be refused before any build: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        if images_dir.is_some() {
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("no mvm-images checkout"),
+                "{case} must be refused for the missing checkout, not another reason"
+            );
+        }
     }
 }
 
@@ -1238,6 +1298,98 @@ fn documented_surface_jobs_install_the_sdk_codegen_runtime() {
             "{job} must pin the uv tool version"
         );
     }
+}
+
+/// A release boots the image set it pins; Extended CI keeps building from
+/// the tree. The release passes the input, both jobs translate it into the
+/// image-arm knob, the image checkout is skipped exactly when it is set, and
+/// the runner hands the knob to the two image verbs without demanding a
+/// checkout under `pinned`.
+#[test]
+fn the_release_lane_boots_the_pinned_image_set_and_the_nightly_builds_from_the_tree() {
+    let release =
+        fs::read_to_string(".github/workflows/release.yml").expect("read release workflow");
+    let call = job_block(&release, "e2e-docs");
+    assert!(
+        call.contains("boot_pinned_images: true"),
+        "the release must test the pinned image set its users boot"
+    );
+    let nightly =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    assert!(
+        !nightly.contains("boot_pinned_images"),
+        "Extended CI keeps pair-building the sidecar and dev image from the tree"
+    );
+
+    let workflow = extended_ci();
+    assert!(
+        workflow.contains("      boot_pinned_images:\n")
+            && workflow.contains("        default: false\n"),
+        "the input must exist and default off"
+    );
+    for job in ["e2e-docs-linux", "e2e-docs-macos"] {
+        let block = job_block(&workflow, job);
+        assert!(
+            block.contains(
+                "MVM_FETCH_UNCHANGED_IMAGES: ${{ inputs.boot_pinned_images && 'pinned' || '1' }}"
+            ),
+            "{job} must select the image arm from the input"
+        );
+        for step in [
+            "- name: Resolve the mvm-images commit images.lock pins\n        if: ${{ !inputs.boot_pinned_images }}",
+            "- name: Check out mvm-images for the source-matched SDK sidecar\n        if: ${{ !inputs.boot_pinned_images }}",
+        ] {
+            assert!(
+                block.contains(step),
+                "{job}: the image checkout must be skipped when the pinned set is booted"
+            );
+        }
+    }
+
+    let script = documented_surface_script();
+    assert!(
+        script.contains("E2E_FETCH_MODE=\"${MVM_FETCH_UNCHANGED_IMAGES:-1}\"")
+            && script.contains("unset MVM_FETCH_UNCHANGED_IMAGES"),
+        "the runner must take the knob from the job and keep it away from the scenarios"
+    );
+    assert!(
+        script.contains("if [[ \"$E2E_FETCH_MODE\" != pinned ]]; then"),
+        "only the pair-build arm may demand an image checkout"
+    );
+    for verb in [
+        "env \"${E2E_IMAGE_ENV[@]}\" \"$UNEMBEDDED_MVMCTL\" build sdk-sidecar build",
+        "env \"${E2E_IMAGE_ENV[@]}\" \"$MVMCTL\" image dev ensure",
+    ] {
+        assert!(
+            script.contains(verb),
+            "both image verbs must run under the chosen arm: {verb}"
+        );
+    }
+}
+
+/// An unrecognised arm stops the runner before it builds anything, rather than
+/// silently picking one.
+#[cfg(unix)]
+#[test]
+fn the_documented_surface_refuses_an_unknown_image_arm() {
+    let home = tempfile::tempdir().expect("create home fixture");
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(
+            "sed -n '/^E2E_FETCH_MODE=/,/^esac$/p' scripts/e2e-documented-surface.sh > \"$1\" \
+             && bash \"$1\"",
+        )
+        .arg("bash")
+        .arg(home.path().join("arm.sh"))
+        .env("MVM_FETCH_UNCHANGED_IMAGES", "pinnned")
+        .output()
+        .expect("run the arm selection");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("takes 1 or pinned"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

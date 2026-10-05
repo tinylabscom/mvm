@@ -5,6 +5,7 @@ use mvm_contract::policy::approval::ApprovalState;
 use mvm_core::plan::TenantId;
 
 use super::*;
+use crate::supervisor::audit::{AuditError, AuditSigner, NoopAuditSigner, PlanAuditEntry};
 use crate::supervisor::audit_file::FileAuditSigner;
 use crate::supervisor::runtime_approval::BrokerError;
 
@@ -110,6 +111,32 @@ fn events(chain: &str, event: &str) -> usize {
     chain.matches(&format!("\"event\":\"{event}\"")).count()
 }
 
+struct FailsAfter {
+    successful_emits: usize,
+    emits: AtomicUsize,
+}
+
+#[async_trait]
+impl AuditSigner for FailsAfter {
+    async fn sign_and_emit(&self, _entry: &PlanAuditEntry) -> Result<(), AuditError> {
+        let previous = self.emits.fetch_add(1, Ordering::SeqCst);
+        if previous >= self.successful_emits {
+            return Err(AuditError::NotWired);
+        }
+        Ok(())
+    }
+}
+
+fn fails_after(successful_emits: usize) -> Arc<Recorder> {
+    Arc::new(Recorder::new(
+        Arc::new(FailsAfter {
+            successful_emits,
+            emits: AtomicUsize::new(0),
+        }),
+        TenantId("approval-tenant".into()),
+    ))
+}
+
 #[tokio::test]
 async fn an_approval_is_granted_recorded_in_the_ledger_and_audited() {
     let broker = approve(ApprovalScope::Once);
@@ -134,6 +161,99 @@ async fn an_approval_is_granted_recorded_in_the_ledger_and_audited() {
         !chain.contains("/repos/o/r/issues"),
         "no path on the chain: {chain}"
     );
+}
+
+#[tokio::test]
+async fn missing_audit_recorder_refuses_approval_without_prompting() {
+    let broker = approve(ApprovalScope::Session);
+    let supervisor = ApprovalSupervisor::builder("no-audit")
+        .broker(broker.clone())
+        .build()
+        .unwrap();
+    for subject in [
+        egress("POST", "/x"),
+        ApprovalSubject::SecretUse {
+            secret: "token".into(),
+            destination: "api.example:443".into(),
+        },
+        ApprovalSubject::ToolCall {
+            tool: "shell".into(),
+        },
+    ] {
+        assert_eq!(
+            supervisor.decide(&subject).await,
+            ApprovalVerdict::Denied {
+                reason: REASON_AUDIT_UNAVAILABLE
+            }
+        );
+    }
+    assert_eq!(broker.asked.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn failing_audit_signer_refuses_approval_without_prompting() {
+    let broker = approve(ApprovalScope::Once);
+    let recorder = Arc::new(Recorder::new(
+        Arc::new(NoopAuditSigner),
+        TenantId("approval-tenant".into()),
+    ));
+    let supervisor = ApprovalSupervisor::builder("broken-audit")
+        .recorder(Some(recorder))
+        .broker(broker.clone())
+        .build()
+        .unwrap();
+    assert_eq!(
+        supervisor.decide(&egress("POST", "/x")).await,
+        ApprovalVerdict::Denied {
+            reason: REASON_AUDIT_UNAVAILABLE
+        }
+    );
+    assert_eq!(broker.asked.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_failed_grant_audit_refuses_and_does_not_cache_a_session_grant() {
+    let broker = approve(ApprovalScope::Session);
+    let supervisor = ApprovalSupervisor::builder("grant-audit-fails")
+        .recorder(Some(fails_after(1)))
+        .broker(broker.clone())
+        .build()
+        .unwrap();
+    assert_eq!(
+        supervisor.decide(&egress("POST", "/x")).await,
+        ApprovalVerdict::Denied {
+            reason: REASON_AUDIT_UNAVAILABLE
+        }
+    );
+    assert_eq!(broker.asked.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        supervisor.decide(&egress("POST", "/y")).await,
+        ApprovalVerdict::Denied {
+            reason: REASON_AUDIT_UNAVAILABLE
+        }
+    );
+    assert_eq!(broker.asked.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_failed_session_reuse_audit_refuses_without_a_new_prompt() {
+    let broker = approve(ApprovalScope::Session);
+    let supervisor = ApprovalSupervisor::builder("reuse-audit-fails")
+        .recorder(Some(fails_after(2)))
+        .broker(broker.clone())
+        .build()
+        .unwrap();
+    assert_eq!(
+        supervisor.decide(&egress("POST", "/x")).await,
+        ApprovalVerdict::Approved
+    );
+    assert_eq!(
+        supervisor.decide(&egress("POST", "/y")).await,
+        ApprovalVerdict::Denied {
+            reason: REASON_AUDIT_UNAVAILABLE
+        }
+    );
+    assert_eq!(broker.asked.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

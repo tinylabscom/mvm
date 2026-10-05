@@ -38,6 +38,11 @@ pub fn emit_mirror_event(entry: &PlanAuditEntry) {
 
 #[cfg(test)]
 mod tests {
+    // Each test below installs its subscriber per thread. The library tests
+    // share one process, and another thread can register the mirror's
+    // callsite while no subscriber wants it, caching "never" for every
+    // thread; the event is then filtered before this subscriber sees it. So
+    // every test rebuilds the interest cache once its subscriber is in place.
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
@@ -101,6 +106,7 @@ mod tests {
 
         let entry = sample_entry("plan.admitted");
         tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             emit_mirror_event(&entry);
         });
 
@@ -154,6 +160,7 @@ mod tests {
                 };
                 let subscriber = tracing_subscriber::registry().with(layer);
                 let guard = tracing::subscriber::set_default(subscriber);
+                tracing::callsite::rebuild_interest_cache();
                 signer.sign_and_emit(&entry).await.unwrap();
                 emit_mirror_event(&entry);
                 drop(guard);
@@ -207,6 +214,7 @@ mod tests {
         };
         let subscriber = tracing_subscriber::registry().with(layer);
         let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
 
         // Mirrors the production shape: `?` on the append, mirror only after.
         let entry = sample_entry("plan.admitted");
@@ -248,6 +256,7 @@ mod tests {
 
         let subscriber = tracing_subscriber::registry().with(PanicLayer);
         let result = tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 tokio::runtime::Builder::new_current_thread()
                     .enable_all()

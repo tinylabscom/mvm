@@ -78,6 +78,10 @@ pub struct PersistentImageStartParams<'a> {
     pub agent_verb: Vec<String>,
     /// Opaque commitment persisted with and admitted for this machine.
     pub caller_commitment: Option<mvm_core::plan::CallerCommitment>,
+    /// Publisher-verified image pack to bind on every start, if selected.
+    pub registry_pack_image: Option<mvm_core::registry_pack::PackPin>,
+    /// Resolved per-tool rules persisted with the machine.
+    pub tools: mvm_contract::policy::tool_rules::ToolRules,
     /// True when the caller will run a trailing `-- argv` command after boot
     /// (i.e. the machine is booted only to exec an ad-hoc command). An ad-hoc
     /// command issues the DevOnly `Exec` verb, so the admitted plan must NOT
@@ -197,6 +201,8 @@ pub fn start_persistent_oci_machine(
         kernel_path,
         agent_verb,
         caller_commitment,
+        registry_pack_image,
+        tools,
         has_ad_hoc_argv,
         grants,
         gpu,
@@ -302,9 +308,12 @@ pub fn start_persistent_oci_machine(
                     bundle_pin: None,
                     deps_volume: None,
                     shares: shares_from_volume_cfg(volumes),
-                    assets: Vec::new(),
+                    assets: registry_pack_image
+                        .into_iter()
+                        .map(crate::admission::AssetSpec::RegistryPack)
+                        .collect(),
                     redaction: mvm_core::policy::RedactionPolicy::default(),
-                    tools: Default::default(),
+                    tools,
                     network_policy: network_policy.clone(),
                     agent_verb_override: agent_verb.to_vec(),
                     // Persistent machines carrying a trailing argv run an ad-hoc Exec (DevOnly);
@@ -369,6 +378,13 @@ pub fn start_persistent_oci_machine(
     // computed correctly and reported to nobody. A failure here has already
     // stopped the VM, so the volume leases are released rather than committed.
     super::grants_report::report_enforced_grants(&admission, &started)?;
+    // File what this boot committed against the host budget before the volume
+    // leases commit: every later admission's committed-total check sums these
+    // per-VM records, and a boot that never wrote one was invisible to it.
+    // Fatal, like the grants step above — the VM stops rather than stay up as
+    // a machine the host's accounting never saw, and the uncommitted leases
+    // release with the rollback.
+    super::budget_charge::record_boot_charge(&admission, name, &started)?;
     prepared_volumes.commit();
     emit_launched(&admission, backend_name, true);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);

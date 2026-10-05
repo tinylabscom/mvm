@@ -367,6 +367,16 @@ impl EgressGate {
         self.routes.needs_inspection(host, port)
     }
 
+    /// The admitted route whose request rules make an opaque flow impossible
+    /// to decide. No rule id exists until the request can be read.
+    #[must_use]
+    pub fn inspection_route_id(&self, host: &str, port: u16) -> Option<&str> {
+        self.routes
+            .route_for(host, port)
+            .filter(|route| route.inspects())
+            .map(|route| route.id.as_str())
+    }
+
     /// Whether the plan grants terminating `host:port` to enforce its routes,
     /// independently of any secret bound there.
     #[must_use]
@@ -1110,6 +1120,39 @@ mod tests {
         }]);
         let gate = EgressGate::from_network_policy(&malformed, &pins, now);
         assert!(gate.decide_request("93.184.216.34:443").is_deny());
+    }
+
+    #[test]
+    fn inspection_route_id_names_only_a_route_that_needs_request_inspection() {
+        use mvm_contract::policy::routes::{EgressRoute, RouteOutcome};
+
+        let routes = RouteSet::new(vec![
+            EgressRoute {
+                id: "restricted".into(),
+                host: "api.example.com".into(),
+                port: 443,
+                rules: Vec::new(),
+                otherwise: RouteOutcome::Deny,
+                intercept: false,
+            },
+            EgressRoute {
+                id: "plain".into(),
+                host: "cdn.example.com".into(),
+                port: 443,
+                rules: Vec::new(),
+                otherwise: RouteOutcome::Allow,
+                intercept: false,
+            },
+        ])
+        .expect("valid routes");
+        let gate = EgressGate::default_deny().with_routes(routes);
+        assert_eq!(
+            gate.inspection_route_id("api.example.com", 443),
+            Some("restricted")
+        );
+        assert_eq!(gate.inspection_route_id("cdn.example.com", 443), None);
+        assert_eq!(gate.inspection_route_id("api.example.com", 80), None);
+        assert_eq!(gate.inspection_route_id("unknown.example.com", 443), None);
     }
 
     /// A bare allow-list naming one TCP host admits no UDP, port 53 included,

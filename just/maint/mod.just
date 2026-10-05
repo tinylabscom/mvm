@@ -109,12 +109,13 @@ clean: clean-dev-state
 clean-dev-state:
     #!/usr/bin/env bash
     # `scripts/dev-env.sh` points MVM_HOME, CARGO_TARGET_DIR *and* CARGO_HOME at
-    # `<repo>/.mvm-test`, so every `just dev-*` run accumulates VM images, a full
-    # build tree and a per-worktree cargo registry in one gitignored directory.
+    # `<repo>/.mvm-test`, so every run from a shell that sourced it accumulates VM
+    # images, a full build tree and a per-worktree cargo registry in one
+    # gitignored directory.
     # It is the largest thing a checkout owns and nothing used to sweep it:
     # `cargo clean` cleans `./target`, and `mvmctl env cleanup` only ever sees
     # whatever MVM_HOME points at in the shell that invokes it — which, outside
-    # `just dev-*`, is not this directory. Measured 2026-08-09: 65 GB in one
+    # such a shell, is not this directory. Measured 2026-08-09: 65 GB in one
     # worktree and 282 GB across a machine's worktrees, none of it reported by
     # any clean command.
     #
@@ -194,11 +195,11 @@ prune:
     echo "worktrees-prune: removed ${removed}; branches kept"
     fi
 
-# Reap leaked host-side helper subprocesses (broker/host-agent/signer/etc.)
-# older than N minutes (default 30). Backstop for the in-binary parent-death
-# watchdog; clears orphans from past test runs across worktrees. DRY_RUN=1 to
+# Backstop for the in-binary parent-death watchdog; clears orphans from past
+# test runs across worktrees. DRY_RUN=1 to preview, e.g.
+# `DRY_RUN=1 just maint::reap-helpers` or `just maint::reap-helpers 5`.
 
-# preview, e.g. `DRY_RUN=1 just maint::reap-helpers` or `just maint::reap-helpers 5`.
+# Reap leaked host-side helper subprocesses older than MINUTES (default 30)
 reap-helpers MINUTES="30":
     ./scripts/reap-helper-orphans.sh {{ MINUTES }}
 

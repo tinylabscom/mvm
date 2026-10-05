@@ -76,6 +76,9 @@ mvm-vmm.workspace = true
 # unconditional pure-Rust ext4 writer — the same path the CLI's `run --image`
 # uses. mvm-fs is already in the mvmctl closure via the CLI.
 mvm-build = { workspace = true, default-features = false }
+# Sealing built artifacts into a signed `.mvmpkg` (`bundle` module). Depends on
+# mvm-core alone, so the only crate this edge adds is mvm-bundler itself.
+mvm-bundler = { workspace = true }
 # OCI pull + hardened unpack for registry-ref resolution. Already in the mvmctl
 # closure (the CLI links it); mvm-fs carries no back-edge to this crate.
 mvm-fs = { workspace = true }

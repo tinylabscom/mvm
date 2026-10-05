@@ -210,13 +210,23 @@ pub(in crate::commands) fn enforce_accessible_gate(name: &str, force: bool) -> R
     }
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
+    let exit_code = run_for_exit(cli, args, cfg)?;
+    if exit_code != 0 {
+        mvm_observability::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// Return a command's status to callers that must finish host-side observation
+/// before propagating the guest exit code.
+pub(in crate::commands) fn run_for_exit(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<i32> {
     let name = &args.name;
     let command = args.command.as_deref();
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
     enforce_accessible_gate(name, args.force)?;
     if args.list {
-        return list_console_sessions(name);
+        return list_console_sessions(name).map(|()| 0);
     }
     // A console attach (one-shot exec or interactive PTY) is guest activity;
     // refresh idle tracking so an in-use session isn't idle-slept underneath
@@ -244,7 +254,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             None,
             emit_exec_event,
         )?;
-        finish_exec_terminal(terminal)
+        terminal_exit_code(terminal)
     } else {
         // Interactive PTY session
         let options = ConsoleSessionOptions::builder()
@@ -253,11 +263,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             .take_over(args.force)
             .detach_timeout_secs(args.detach_timeout)
             .build();
-        let exit_code = console_interactive(name, options)?;
-        if exit_code != 0 {
-            mvm_observability::exit(exit_code);
-        }
-        Ok(())
+        console_interactive(name, options)
     }
 }
 
@@ -314,16 +320,19 @@ fn emit_exec_event(event: &mvm_agentd::vsock::ExecEvent) {
 }
 
 fn finish_exec_terminal(terminal: mvm_agentd::vsock::ExecEvent) -> Result<()> {
+    let code = terminal_exit_code(terminal)?;
+    if code != 0 {
+        mvm_observability::exit(code);
+    }
+    Ok(())
+}
+
+fn terminal_exit_code(terminal: mvm_agentd::vsock::ExecEvent) -> Result<i32> {
     match terminal {
-        mvm_agentd::vsock::ExecEvent::Exit { code } => {
-            if code != 0 {
-                mvm_observability::exit(code);
-            }
-            Ok(())
-        }
+        mvm_agentd::vsock::ExecEvent::Exit { code } => Ok(code),
         mvm_agentd::vsock::ExecEvent::TimedOut => {
             eprintln!("{}", crate::exec::timeout_exit_message(None));
-            mvm_observability::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
+            Ok(crate::exec::EXEC_TIMEOUT_EXIT_CODE)
         }
         other => anyhow::bail!("unexpected terminal exec event: {other:?}"),
     }
@@ -1152,6 +1161,34 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<Cons
 #[cfg(test)]
 mod console_relay_tests {
     use super::*;
+
+    #[test]
+    fn command_exit_status_survives_for_host_cleanup() {
+        assert_eq!(
+            terminal_exit_code(mvm_agentd::vsock::ExecEvent::Exit { code: 0 })
+                .expect("successful command"),
+            0
+        );
+        assert_eq!(
+            terminal_exit_code(mvm_agentd::vsock::ExecEvent::Exit { code: 23 })
+                .expect("failed command still yields a status"),
+            23
+        );
+        assert_eq!(
+            terminal_exit_code(mvm_agentd::vsock::ExecEvent::TimedOut)
+                .expect("timeout still yields a status"),
+            crate::exec::EXEC_TIMEOUT_EXIT_CODE
+        );
+    }
+
+    #[test]
+    fn unexpected_terminal_event_fails_closed() {
+        let error = terminal_exit_code(mvm_agentd::vsock::ExecEvent::Stdout {
+            chunk: b"not terminal".to_vec(),
+        })
+        .expect_err("a nonterminal event must not become success");
+        assert!(format!("{error:#}").contains("unexpected terminal exec event"));
+    }
 
     #[test]
     fn session_options_compose_environment_and_argv() {

@@ -510,7 +510,7 @@ impl AnyBackend {
         }
     }
 
-    /// Isolation tier of this backend. Used by `mvmctl up` to refuse
+    /// Isolation tier of this backend. Used by `mvmctl machine run` to refuse
     /// silent Tier 2 downgrades on production-like launches, and by
     /// `mvmctl doctor` to surface what's actually running on the host.
     ///

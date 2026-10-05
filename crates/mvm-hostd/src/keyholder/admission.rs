@@ -43,6 +43,10 @@ pub enum AssembleError {
         "secret `{name}` has no local binding; run `mvmctl secret set {name} --host <h> --type <t>`"
     )]
     NoBinding { name: String },
+    /// A mutable binding now demands an approval the signed plan did not
+    /// authorize the endpoint to request or enforce.
+    #[error("secret `{name}` requires approval but its signed plan binding does not")]
+    UnsignedApproval { name: String },
     #[error(transparent)]
     Binding(#[from] anyhow::Error),
 }
@@ -70,6 +74,13 @@ pub fn assemble_registry(
             .ok_or_else(|| AssembleError::NoBinding {
                 name: address.clone(),
             })?;
+        if meta.approve == mvm_core::crypto::secret_binding::SecretApproval::Ask
+            && !b.approval_required
+        {
+            return Err(AssembleError::UnsignedApproval {
+                name: address.clone(),
+            });
+        }
         if !meta.inject.admits(meta.auth_type) {
             return Err(anyhow::anyhow!(
                 "secret {address:?} binding uses injection mode {} with incompatible authentication type {:?}",
@@ -120,6 +131,7 @@ mod tests {
                 address: address.into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }
     }
 
@@ -278,6 +290,33 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_ask_without_signed_approval_is_refused() {
+        let dir = tempdir().unwrap();
+        let store = store_with_two_hosts(dir.path());
+        let mut meta = store.get("local", "anthropic").unwrap().unwrap();
+        meta.approve = mvm_core::crypto::secret_binding::SecretApproval::Ask;
+        store.put("local", "anthropic", &meta).unwrap();
+
+        let binding = keystore_binding("ANTHROPIC_API_KEY", "anthropic");
+        let err = assemble_registry(&[binding], "local", &store)
+            .expect_err("mutable metadata cannot add an unsigned approval rule");
+        assert!(matches!(err, AssembleError::UnsignedApproval { name } if name == "anthropic"));
+    }
+
+    #[test]
+    fn a_signed_approval_requirement_admits_the_stored_ask() {
+        let dir = tempdir().unwrap();
+        let store = store_with_two_hosts(dir.path());
+        let mut meta = store.get("local", "anthropic").unwrap().unwrap();
+        meta.approve = mvm_core::crypto::secret_binding::SecretApproval::Ask;
+        store.put("local", "anthropic", &meta).unwrap();
+
+        let mut binding = keystore_binding("ANTHROPIC_API_KEY", "anthropic");
+        binding.approval_required = true;
+        assert!(assemble_registry(&[binding], "local", &store).is_ok());
+    }
+
+    #[test]
     fn two_bindings_mint_two_placeholders_each_valid_only_for_its_own_destination() {
         let dir = tempdir().unwrap();
         let store = store_with_two_hosts(dir.path());
@@ -334,6 +373,7 @@ mod tests {
                 path: "kv/x".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
         let (registry, handed) = assemble_registry(&plan, "local", &store).unwrap();
         assert!(handed.is_empty());

@@ -2347,6 +2347,19 @@ fn test_security_verb_is_unrecognized() {
 }
 
 #[test]
+fn test_image_dev_ensure_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "image", "dev", "ensure"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Image(image::Args {
+            action: ImageAction::Dev {
+                action: image::dev::DevAction::Ensure,
+            },
+        })
+    ));
+}
+
+#[test]
 fn test_image_ls_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "image", "ls", "--registry", "docker.io", "--json"])
         .unwrap();
@@ -5525,9 +5538,8 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "machine", "ls", "--all", "--json"
     ]));
-    // `mvmctl up` is retired; `run` survives hidden as the SDK transport and
-    // keeps its `--json` reservation. The user-facing machine-readable channel
-    // is `machine run --json`.
+    // `mvmctl up` is retired; `run` carries the SDK transport and keeps its
+    // `--json` reservation, as does `machine run --json`.
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "run", "--json", "--", "true"
     ]));
@@ -5660,6 +5672,27 @@ fn why_requires_exactly_one_subject_and_parses_policy_sources() {
     assert_eq!(args.profile, ["agent-apis"]);
     assert!(args.json);
 
+    let routed = Cli::try_parse_from([
+        "mvmctl",
+        "why",
+        "--host",
+        "api.example.com",
+        "--method",
+        "GET",
+        "--request-path",
+        "/public/status",
+    ])
+    .expect("routed host query must parse");
+    let Commands::Why(args) = routed.command else {
+        panic!("expected why command")
+    };
+    assert_eq!(args.method.as_deref(), Some("GET"));
+    assert_eq!(args.request_path.as_deref(), Some("/public/status"));
+    assert!(Cli::try_parse_from(["mvmctl", "why", "--host", "a.test", "--method", "GET"]).is_err());
+    assert!(
+        Cli::try_parse_from(["mvmctl", "why", "--tool", "read", "--request-path", "/x"]).is_err()
+    );
+
     assert!(Cli::try_parse_from(["mvmctl", "why"]).is_err());
     assert!(
         Cli::try_parse_from(["mvmctl", "why", "--host", "a.test", "--secret", "TOKEN"]).is_err()
@@ -5782,25 +5815,60 @@ fn infra_commands_still_invoke() {
     );
 }
 
+fn machine_run_cold_build_flag(extra: &[&str]) -> mvm_core::cold_build::BuildFlag {
+    let mut argv = vec!["mvmctl", "machine", "run", "--image", "alpine"];
+    argv.extend_from_slice(extra);
+    argv.extend_from_slice(&["--", "true"]);
+    match Cli::try_parse_from(argv).unwrap().command {
+        Commands::Machine(mg) => match mg.action {
+            machine::MachineAction::Run(args) => args.cold_build_flag(),
+            _ => panic!("Expected machine run"),
+        },
+        _ => panic!("Expected machine"),
+    }
+}
+
 #[test]
-fn machine_run_build_flag_opts_into_cold_source_builds() {
+fn machine_run_builds_cold_by_default_and_each_flag_selects_its_policy() {
+    use mvm_core::cold_build::BuildFlag;
+    assert_eq!(machine_run_cold_build_flag(&[]), BuildFlag::Unset);
+    assert_eq!(machine_run_cold_build_flag(&["--build"]), BuildFlag::Build);
+    assert_eq!(
+        machine_run_cold_build_flag(&["--no-build"]),
+        BuildFlag::NoBuild
+    );
     let command = cli_command();
     let run = command
         .find_subcommand("machine")
         .and_then(|machine| machine.find_subcommand("run"))
         .expect("machine run command must exist");
-    let build = run
-        .get_arguments()
-        .find(|arg| arg.get_id() == "build")
-        .expect("machine run must carry a --build flag");
-    let help = build
-        .get_long_help()
-        .or_else(|| build.get_help())
-        .map(|help| help.to_string())
-        .unwrap_or_default();
-    assert!(
-        help.contains("bootstrap"),
-        "--build help must point cold-cache runs at `mvmctl bootstrap`"
+    let help_of = |id: &str| {
+        run.get_arguments()
+            .find(|arg| arg.get_id() == id)
+            .and_then(|arg| arg.get_help())
+            .map(|help| help.to_string())
+            .unwrap_or_default()
+    };
+    assert!(help_of("build").contains("cold builds are the default"));
+    assert!(help_of("no_build").contains("Fail instead of building"));
+}
+
+#[test]
+fn machine_run_build_and_no_build_are_exclusive() {
+    let result = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine",
+        "--build",
+        "--no-build",
+        "--",
+        "true",
+    ]);
+    assert_eq!(
+        result.unwrap_err().kind(),
+        clap::error::ErrorKind::ArgumentConflict,
     );
 }
 

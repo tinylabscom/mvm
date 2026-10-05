@@ -46,6 +46,8 @@ pub mod admission;
 pub mod approval_broker;
 pub mod audit;
 pub mod boot;
+pub mod builder_bundle;
+pub mod bundle;
 pub mod connect;
 pub mod drive;
 pub mod entrypoint;
@@ -97,6 +99,9 @@ pub use boot::{
     ResumeBootLocalRequest, ResumeBootLocalRequestBuilder, StartedVm, backend_is_running,
     backend_kind_for, backend_stop_by_name, clamp_vcpus_for_backend, require_hypervisor_selectable,
     resume_and_boot_local, start_prepared,
+};
+pub use builder_bundle::{
+    BuilderBundleRequest, BuilderBundleResult, build_and_export_bundle, build_and_export_bundle_on,
 };
 pub use connect::{Target, connect};
 pub use drive::{DriveError, LocalDrive};

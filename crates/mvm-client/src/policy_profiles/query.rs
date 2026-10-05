@@ -7,6 +7,8 @@
 use std::path::{Path, PathBuf};
 
 use mvm_contract::policy::restricted_address::{RestrictedClass, classify};
+use mvm_contract::policy::routes::{RouteOutcome, RouteSet};
+use mvm_contract::policy::tool_rules::ToolDecision;
 use serde::Serialize;
 
 use super::merge::{ResolvedPolicy, canonical_allow, deny_covers, split_host_port};
@@ -15,6 +17,11 @@ use super::merge::{ResolvedPolicy, canonical_allow, deny_covers, split_host_port
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyQuery {
     Host(String),
+    Http {
+        host: String,
+        method: String,
+        path: String,
+    },
     Path(PathBuf),
     Tool(String),
     Secret(String),
@@ -77,6 +84,7 @@ impl PolicyAnswer {
 pub fn answer(resolved: &ResolvedPolicy, query: PolicyQuery) -> Result<PolicyAnswer, String> {
     match query {
         PolicyQuery::Host(value) => answer_host(resolved, &value),
+        PolicyQuery::Http { host, method, path } => answer_http(resolved, &host, &method, &path),
         PolicyQuery::Path(value) => Ok(answer_path(resolved, &value)),
         PolicyQuery::Tool(value) => Ok(answer_tool(resolved, &value)),
         PolicyQuery::Secret(value) => Ok(answer_secret(resolved, &value)),
@@ -84,6 +92,23 @@ pub fn answer(resolved: &ResolvedPolicy, query: PolicyQuery) -> Result<PolicyAns
 }
 
 fn answer_host(resolved: &ResolvedPolicy, raw: &str) -> Result<PolicyAnswer, String> {
+    answer_host_request(resolved, raw, None)
+}
+
+fn answer_http(
+    resolved: &ResolvedPolicy,
+    raw: &str,
+    method: &str,
+    path: &str,
+) -> Result<PolicyAnswer, String> {
+    answer_host_request(resolved, raw, Some((method, path)))
+}
+
+fn answer_host_request(
+    resolved: &ResolvedPolicy,
+    raw: &str,
+    request: Option<(&str, &str)>,
+) -> Result<PolicyAnswer, String> {
     if let Some((host, port)) = raw.trim().rsplit_once(':')
         && !host.is_empty()
         && port == "22"
@@ -133,26 +158,82 @@ fn answer_host(resolved: &ResolvedPolicy, raw: &str) -> Result<PolicyAnswer, Str
             Some(format!("network.deny = {rule:?}")),
         ));
     }
-    if let Some(rule) = network.allow.iter().find(|rule| *rule == &canonical) {
+    let allow_rule = network.allow.iter().find(|rule| *rule == &canonical);
+    let routes = RouteSet::new(network.routes.clone()).map_err(|error| error.to_string())?;
+    if let Some(route) = routes.route_for(host, port) {
+        if allow_rule.is_none() && route.host.starts_with("*.") {
+            return Ok(PolicyAnswer::deny(
+                "host",
+                canonical,
+                true,
+                "a wildcard route does not grant network access without an allow-list entry",
+                Some(format!("network.routes.{}", route.id)),
+            ));
+        }
+        if route.inspects() && !route.intercept {
+            return Ok(PolicyAnswer::deny(
+                "host",
+                canonical,
+                true,
+                "this route needs request inspection but does not grant interception; a runtime secret binding may separately permit termination",
+                Some(format!("network.routes.{}", route.id)),
+            ));
+        }
+        let decision = request.map(|(method, path)| route.decide(method, path));
+        let (outcome, label) = match decision {
+            Some(decision) => (
+                decision.outcome,
+                format!(
+                    "network.routes.{}.{}",
+                    route.id,
+                    decision.decided_by.label()
+                ),
+            ),
+            None if route.rules.is_empty() => (
+                route.otherwise,
+                format!("network.routes.{}.otherwise", route.id),
+            ),
+            None => {
+                return Ok(PolicyAnswer::deny(
+                    "host",
+                    canonical,
+                    true,
+                    "this route depends on HTTP method and path; query with both to determine a request outcome",
+                    Some(format!("network.routes.{}", route.id)),
+                ));
+            }
+        };
+        return Ok(match outcome {
+            RouteOutcome::Allow => PolicyAnswer::allow(
+                "host",
+                canonical,
+                true,
+                "the endpoint route allows this request",
+                Some(label),
+            ),
+            RouteOutcome::Deny => PolicyAnswer::deny(
+                "host",
+                canonical,
+                true,
+                "the endpoint route denies this request",
+                Some(label),
+            ),
+            RouteOutcome::Ask => PolicyAnswer::deny(
+                "host",
+                canonical,
+                true,
+                "the endpoint route requires runtime approval; the request is not pre-authorized",
+                Some(label),
+            ),
+        });
+    }
+    if let Some(rule) = allow_rule {
         return Ok(PolicyAnswer::allow(
             "host",
             canonical,
             true,
             "the network allow-list names this destination",
             Some(format!("network.allow = {rule:?}")),
-        ));
-    }
-    if let Some(route) = network
-        .routes
-        .iter()
-        .find(|route| route.host.eq_ignore_ascii_case(host) && route.port == port)
-    {
-        return Ok(PolicyAnswer::allow(
-            "host",
-            canonical,
-            true,
-            "an endpoint route names this destination",
-            Some(format!("network.routes.{}", route.id)),
         ));
     }
     let restricted = host
@@ -225,47 +306,45 @@ fn answer_path(resolved: &ResolvedPolicy, path: &Path) -> PolicyAnswer {
 
 fn answer_tool(resolved: &ResolvedPolicy, value: &str) -> PolicyAnswer {
     let tools = &resolved.policy.tools;
-    if tools.deny.iter().any(|tool| tool == value) {
-        return PolicyAnswer::deny(
+    let rules = tools.to_tool_rules();
+    let detail = tools.detail.get(value);
+    match rules.decide(value, None) {
+        ToolDecision::Allow => PolicyAnswer::allow(
             "tool",
             value.to_string(),
-            false,
-            "the resolved policy explicitly denies this tool; tool enforcement is not wired yet",
-            Some(format!("tools.deny = {value:?}")),
-        );
-    }
-    if tools.ask.iter().any(|tool| tool == value) {
-        return PolicyAnswer::allow(
+            true,
+            if rules.is_empty() {
+                "the tool dimension is not in use; calls are admitted by default"
+            } else if detail.is_some() {
+                "the tool is named, subject to its per-call restrictions"
+            } else {
+                "the resolved policy allows this tool"
+            },
+            tools
+                .allow
+                .iter()
+                .any(|tool| tool == value)
+                .then(|| format!("tools.allow = {value:?}")),
+        ),
+        ToolDecision::Ask => PolicyAnswer::deny(
             "tool",
             value.to_string(),
-            false,
-            "the resolved policy asks before every call of this tool; tool enforcement is not wired yet",
+            true,
+            "this tool requires runtime approval before each call; it is not pre-authorized",
             Some(format!("tools.ask = {value:?}")),
-        );
-    }
-    if tools.allow.iter().any(|tool| tool == value) {
-        let detail = tools.detail.get(value);
-        return PolicyAnswer::allow(
+        ),
+        ToolDecision::Deny(reason) => PolicyAnswer::deny(
             "tool",
             value.to_string(),
-            false,
-            "the resolved policy allows this tool, but tool enforcement is not wired yet",
-            Some(match detail {
-                None => format!("tools.allow = {value:?}"),
-                Some(detail) => format!(
-                    "tools.allow = {value:?}; detail argv={:?} routes={:?} secrets={:?}",
-                    detail.argv, detail.routes, detail.secrets
-                ),
-            }),
-        );
+            true,
+            reason,
+            tools
+                .deny
+                .iter()
+                .any(|tool| tool == value)
+                .then(|| format!("tools.deny = {value:?}")),
+        ),
     }
-    PolicyAnswer::deny(
-        "tool",
-        value.to_string(),
-        false,
-        "the resolved policy does not allow this tool; tool enforcement is not wired yet",
-        None,
-    )
 }
 
 fn answer_secret(resolved: &ResolvedPolicy, value: &str) -> PolicyAnswer {
@@ -408,7 +487,7 @@ mod tests {
         assert!(private.allowed);
         assert_eq!(private.matched.as_deref(), Some("shares.mount = \"/work\""));
         let tool = answer(&policy, PolicyQuery::Tool("read".into())).unwrap();
-        assert!(tool.allowed && !tool.enforced);
+        assert!(tool.allowed && tool.enforced);
         assert!(
             !answer(&policy, PolicyQuery::Tool("other".into()))
                 .unwrap()
@@ -424,5 +503,95 @@ mod tests {
                 .unwrap()
                 .allowed
         );
+    }
+
+    #[test]
+    fn tool_query_uses_runtime_decision_including_ask_and_opt_in_default() {
+        let empty = resolved(PolicyBody::default());
+        let default = answer(&empty, PolicyQuery::Tool("shell".into())).unwrap();
+        assert!(default.allowed && default.enforced);
+
+        let policy = resolved(PolicyBody {
+            tools: ToolsSection {
+                allow: vec!["read".into()],
+                ask: vec!["shell".into()],
+                deny: vec!["remove".into()],
+                ..ToolsSection::default()
+            },
+            ..PolicyBody::default()
+        });
+        let asked = answer(&policy, PolicyQuery::Tool("shell".into())).unwrap();
+        assert!(!asked.allowed && asked.enforced);
+        assert!(asked.reason.contains("approval"));
+        let denied = answer(&policy, PolicyQuery::Tool("remove".into())).unwrap();
+        assert!(!denied.allowed && denied.enforced);
+        let unknown = answer(&policy, PolicyQuery::Tool("unknown".into())).unwrap();
+        assert!(!unknown.allowed && unknown.enforced);
+    }
+
+    #[test]
+    fn routed_host_needs_request_context_and_uses_route_decision() {
+        use mvm_contract::policy::routes::{EgressRoute, EndpointRule, RouteOutcome};
+
+        let policy = resolved(PolicyBody {
+            network: NetworkSection {
+                allow: vec!["api.example.com:443".into()],
+                routes: vec![EgressRoute {
+                    id: "api".into(),
+                    host: "api.example.com".into(),
+                    port: 443,
+                    rules: vec![EndpointRule {
+                        id: Some("read".into()),
+                        method: Some("GET".into()),
+                        path: "/public/**".into(),
+                        outcome: RouteOutcome::Allow,
+                    }],
+                    otherwise: RouteOutcome::Deny,
+                    intercept: true,
+                }],
+                ..NetworkSection::default()
+            },
+            ..PolicyBody::default()
+        });
+        let host_only = answer(&policy, PolicyQuery::Host("api.example.com".into())).unwrap();
+        assert!(!host_only.allowed, "route decision needs method and path");
+        let allowed = answer(
+            &policy,
+            PolicyQuery::Http {
+                host: "api.example.com".into(),
+                method: "GET".into(),
+                path: "/public/x".into(),
+            },
+        )
+        .unwrap();
+        assert!(allowed.allowed);
+        assert_eq!(allowed.matched.as_deref(), Some("network.routes.api.read"));
+        let denied = answer(
+            &policy,
+            PolicyQuery::Http {
+                host: "api.example.com".into(),
+                method: "POST".into(),
+                path: "/public/x".into(),
+            },
+        )
+        .unwrap();
+        assert!(!denied.allowed);
+        assert_eq!(
+            denied.matched.as_deref(),
+            Some("network.routes.api.otherwise")
+        );
+
+        let mut ungranted = policy.clone();
+        ungranted.policy.network.routes[0].intercept = false;
+        let result = answer(
+            &ungranted,
+            PolicyQuery::Http {
+                host: "api.example.com".into(),
+                method: "GET".into(),
+                path: "/public/x".into(),
+            },
+        )
+        .unwrap();
+        assert!(!result.allowed, "an uninspectable route is not a grant");
     }
 }

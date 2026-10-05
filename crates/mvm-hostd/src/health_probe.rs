@@ -191,7 +191,7 @@ impl Restarter for MachineRestarter {
 /// The `mvmctl machine restart <vm_name>` command for `host`, refused for a
 /// library embedder, which never runs `mvmctl`.
 fn restart_command_for(host: &HostProcess, vm_name: &str) -> Result<Command, CliSpawnRefused> {
-    let mut command = Command::new(mvmctl_path_for(host)?);
+    let mut command = mvm_core::env_hygiene::helper_command(mvmctl_path_for(host)?);
     command.args(["machine", "restart", vm_name]);
     Ok(command)
 }
@@ -574,6 +574,8 @@ mod tests {
             manifest: None,
             deployment: None,
             runtime_pack: false,
+            registry_pack_image: None,
+            tools: Default::default(),
             resolved_digest: None,
             net: false,
             allow_host: vec![],

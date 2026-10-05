@@ -46,7 +46,7 @@ pub(crate) const VSOCK_SOCKET_TIMEOUT: Duration = Duration::from_secs(10);
 /// escalating to `SIGKILL`. Tight because libkrun's signal handling
 /// under `krun_start_enter` is empirically unreliable — when the
 /// supervisor is spawned via `std::process::Command` (the production
-/// `mvmctl up` path), SIGTERM often doesn't reach the in-supervisor
+/// `mvmctl machine run` path), SIGTERM often doesn't reach the in-supervisor
 /// `sigaction` handler before we escalate. The in-supervisor handler
 /// (see `libkrun_sys::install_shutdown_handler`) still helps the
 /// shell-stop case where SIGTERM is delivered cleanly (~200 ms); in

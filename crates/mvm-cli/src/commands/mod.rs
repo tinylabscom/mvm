@@ -702,71 +702,12 @@ fn declare_embedded_host_binaries() {
 fn declare_embedded_host_binaries() {}
 
 fn register_inhouse_builder() {
-    // Wire the driver-backed builder constructors so that
-    // `mvm_build::builder_backend_select` can create them when the resolved
-    // choice is HVF or Firecracker. This is a one-time registration at
-    // startup; `mvm-build` cannot reach `mvm-backends` or `mvm-cli` directly
-    // (dependency direction), so the CLI bridges the gap here. The two arms
-    // differ only in the driver and in how the image is resolved.
+    // `mvm-build` constructs the libkrun, QEMU and WebLinux builders itself but
+    // cannot name the HVF and Firecracker drivers, which live a layer up.
+    // `mvm-runtime` owns those constructors and their Stage 0; a library caller
+    // registers the same ones before it builds.
     #[cfg(feature = "builder-vm")]
-    mvm_build::builder_backend_select::register_driver_builders(Box::new(|choice| {
-        use mvm_build::builder_backend_select::BuilderBackendChoice as Choice;
-        use mvm_runtime::builder_runner::DriverBuilderVm;
-        type Boxed = Box<dyn mvm_build::builder_vm::BuilderVm>;
-        match choice {
-            Choice::Hvf => Some(
-                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
-                    |image| {
-                        Box::new(
-                            DriverBuilderVm::new(
-                                mvm_backends::driver::hvf::HvfDriver::new(),
-                                image.kernel,
-                                image.rootfs,
-                            )
-                            .with_closure_nar(image.closure_nar),
-                        ) as Boxed
-                    },
-                ),
-            ),
-            Choice::Firecracker => Some(
-                crate::commands::build::driver_builder_image::resolve_driver_builder_image().map(
-                    |image| {
-                        Box::new(
-                            DriverBuilderVm::new(
-                                mvm_backends::driver::fc::FcDriver::new(),
-                                image.kernel,
-                                image.rootfs,
-                            )
-                            .with_closure_nar(image.closure_nar),
-                        ) as Boxed
-                    },
-                ),
-            ),
-            Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
-        }
-    }));
-
-    // Stage 0 is a separate registration because it is a separate type: it
-    // runs in the window before a builder image exists, so unlike the builder
-    // above it resolves no image. `Stage0Vm` is generic over the driver, so
-    // each backend costs one line here rather than an implementation.
-    #[cfg(feature = "builder-vm")]
-    mvm_build::builder_backend_select::register_stage0_builders(Box::new(|choice| {
-        use mvm_build::builder_backend_select::BuilderBackendChoice as Choice;
-        use mvm_runtime::builder_runner::Stage0Vm;
-        type Boxed = Box<dyn mvm_build::builder_vm::BuilderVm>;
-        match choice {
-            Choice::Hvf => {
-                Some(Box::new(Stage0Vm::new(mvm_backends::driver::hvf::HvfDriver::new())) as Boxed)
-            }
-            Choice::Firecracker => {
-                Some(Box::new(Stage0Vm::new(mvm_backends::driver::fc::FcDriver::new())) as Boxed)
-            }
-            // libkrun, qemu and web-linux are resolved by `mvm-build` itself;
-            // it can name those without reaching up a layer.
-            Choice::Libkrun | Choice::Qemu | Choice::WebLinux => None,
-        }
-    }));
+    mvm_runtime::builder_runner::register_driver_backed_builders();
 
     // Stage 0's bootstrap kernel is pinned in source and verified in
     // `mvm-build`; this crate supplies only the transport. It has to be curl:

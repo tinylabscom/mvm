@@ -39,14 +39,16 @@ Ask one question of the resolved policy without booting anything:
 
 ```sh
 mvmctl why --host api.github.com:443
+mvmctl why --host api.github.com:443 --method GET --request-path /repos/org/project
 mvmctl why --path ./src
 mvmctl why --tool shell --profile agent-apis
 ```
 
 Without `--profile` or `--plan`, `why` discovers the current project's
-`mvm.toml`. Host, path and secret answers reflect enforced policy. Tool policy
-is authored ahead of its runtime mediation, so tool answers explicitly say
-that the rule is not enforced yet.
+`mvm.toml`. A routed host with method/path rules is not a blanket allow:
+pass both `--method` and `--request-path` to check one HTTP request. A tool
+marked `ask` needs runtime approval and is not pre-authorized; per-tool argv
+restrictions are evaluated when a call supplies argv, not by a name-only query.
 
 Not to be confused with `--profile restrictive|standard|dev|permissive`, the
 run's [security tier](/guides/policy-profiles/). That flag already existed, so
@@ -182,7 +184,7 @@ These are the security contract of composition:
 
 | Rule | Effect |
 | --- | --- |
-| Allows are unioned | Hosts, secrets, shares, env names and tools from every layer add up. |
+| Allows are unioned | Hosts, secrets, user-authored shares, env names and tools add up. A signed pack cannot add a host share. |
 | Tool `ask` sits between | `deny` beats `ask` beats `allow` for whole-tool decisions. |
 | Tool detail only narrows | A later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them; per-tool `deny` argv patterns union. |
 | Denies are unioned, and a deny beats an allow | Anything a deny covers is removed from the result, whichever layer allowed it. The note says which layer did what. |
@@ -190,6 +192,7 @@ These are the security contract of composition:
 | Required groups cannot be excluded | `groups.exclude` naming a required group that is already included is an error. |
 | Secret destinations only narrow | A later layer naming the same secret may list a subset of the hosts, never a host outside them. The launch then checks the result against the allow-list stored with `mvmctl secret set`, which no layer can widen. |
 | A share is writable only if every layer says so | Two different host sources for one guest path is an error. |
+| Signed packs cannot mount host directories | A pack's `shares.mount` entries are stripped with a note; `shares.deny` can still narrow a user-authored share. |
 | Resources are ceilings | The smallest value from any layer wins, and a flag cannot exceed it. |
 | Escape hatches are user-only | `env.readmit` (re-admitting a variable the hygiene denylist refuses) is honoured only in a profile from your policy directory or a path you pass. In a project or pack layer the entry is stripped with a note, never honoured. |
 | Signed packs cannot import local policy | A pack-authored `extends` or group include may name an unshadowed built-in or another installed, verified pack. A filesystem path or a name resolved from your policy directory is refused, so local files cannot silently become part of a signed pack's policy. |
@@ -230,9 +233,10 @@ include = ["policy/apis.toml"]  # extra groups
 `mvmctl generate template <name> <dir>` downloads the declared files with
 the rest of the template, copies them into the project, and writes a
 `[policy]` table into the generated `mvm.toml` referencing them. Every
-launch of the project then composes the template's policy the way it
-composes any project policy, and an explicit `--policy` composes on top —
-so the operator's file still wins the conflicts. Declared paths must stay
+launch of the project then composes the template's policy with any groups
+added to the generated `[policy] include` list. An explicit `--policy` replaces
+the project's `[policy]` table for that launch; list every policy you want in
+that invocation. Declared paths must stay
 inside the template directory, and generation refuses — naming the template
 and the file — when a declared policy file is missing or does not resolve,
 so a broken template fails at generation time, not on the first run.
@@ -310,19 +314,49 @@ installed content-addressed, and the exact manifest digest is pinned in a
 lockfile.
 
 An installed pack can carry its own policy documents — `pack/profile.toml`,
-`pack/group.toml`, or both — and you compose one exactly where its
+`pack/group.toml`, or both. A pack with a profile composes exactly where its
 reference sits in the `--policy` order:
 
 ```sh
-mvmctl run --policy runtime/python@1.2.3 --policy ./mine.toml -- make test
+mvmctl run --policy agent/claude@1.0.1 --policy ./mine.toml -- make test
 ```
+
+A pack with only a group, such as `runtime/python`, can be the root `--policy`
+reference or be included by a profile's `[groups] include = ["runtime/python"]`
+or a project's `[policy] include`.
+
+An application can compose a signed pack's policy with its own groups in
+`mvm.toml` without selecting the pack as its boot image:
+
+```toml
+[policy]
+include = ["runtime/python", "./policy/app.toml"]
+```
+
+Pull and pin the pack before launching the application. The installed pack is
+verified again when the policy loads; an application group can deny a host the
+pack allows, and that deny wins. A generated template can use the same
+`[policy]` table to expose its shipped policy to the application.
+
+`pull` follows pack references in the signed profile, verifying and pinning
+each dependency; `agent/claude` includes `runtime/python`.
+If a root pack also declares a signed workload image, `run` and `machine run`
+select that image when no explicit boot source was supplied. The image's
+`mvm.toml`, `flake.nix`, and `flake.lock` are verified as signed payload; the
+pack's exact version and manifest digest are bound into the execution plan
+and rechecked at host admission. An explicit source takes precedence and the
+pack contributes policy only.
+[Author and publish a signed pack](/guides/pack-authoring/) covers writing
+one, and the client guides under
+[AI agent integration](/guides/ai-agent-integration/) cover the published
+agent packs.
 
 A pack layer is verified every time it loads: the signature is re-checked
 against the publisher policy and the manifest digest against the lockfile,
 so a tampered cache entry cannot reopen what the pack denied. It composes
 under the same rules as every non-user layer — denies stick, resource
-bounds are ceilings, and an `env.readmit` escape hatch the pack carries is
-stripped with a note, never honoured.
+bounds are ceilings, and `env.readmit` and `shares.mount` entries the pack
+carries are stripped with notes, never honoured.
 
 Trust in the official registry is the default: with no publisher policy
 file, packs signed by the `mvm-templates` publish workflow verify in any
@@ -342,7 +376,7 @@ accept a signing identity for every namespace, and an exact
 | `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check the profiles a launch would compose, or a single profile or group file. `--strict` turns every note into an error, refuses the unenforced `[tools]` section, and checks each bound secret against the store. |
 | `mvmctl policy diff A B [--json]` | What each side allows or denies that the other does not. |
 | `mvmctl policy groups [--json]` | Built-in and user groups and profiles. |
-| `mvmctl why --host H[:P] \| --path P \| --tool T \| --secret S [--profile PROFILE... \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. Several profiles compose in order, the last taking precedence. |
+| `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --tool T \| --secret S [--profile PROFILE... \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. For routed hosts, include method and path to check the endpoint rule. Several profiles compose in order, the last taking precedence. |
 
 `--backend KIND` on `show`, `resolve`, `validate` and `diff` matches `[[when]]`
 blocks against a backend other than the host's default.
@@ -360,8 +394,9 @@ missing one.
 - `[tools]` whole-tool decisions are enforced by the gate `mvmctl ops mcp`
   binds: `deny` refuses before any backend work, `ask` puts every call to the
   terminal approver (fail-closed with no terminal), `allow` admits, and
-  anything unlisted fails closed. Every non-allow decision is a
-  `ToolGateDecision` local audit entry. Per-tool `argv`/`routes`/`secrets`
+  anything unlisted fails closed. Every decision is chain-signed to the host
+  audit before backend work; if that audit is unavailable, the gate refuses
+  the call. Per-tool `argv`/`routes`/`secrets`
   detail is not enforced at the MCP seam (its arguments are tool-specific
   JSON, not command lines or destinations). A declared, non-interactive
   `machine exec <name> --tool TOOL -- <cmd>...` checks the exact argv against

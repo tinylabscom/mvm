@@ -513,6 +513,7 @@ mod tests {
             schema_version: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
             reference: self::reference(reference),
             description: "Python runtime".to_string(),
+            image: None,
             files: vec![RegistryPackFile {
                 path: "pack/profile.toml".to_string(),
                 sha256: Sha256Hex::from_bytes(PROFILE),

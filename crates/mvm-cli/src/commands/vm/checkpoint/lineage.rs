@@ -55,6 +55,7 @@ struct RecordedCreation {
     digest: CheckpointDigest,
     /// The tenant whose chain the entry was signed into.
     tenant: String,
+    plan_id: String,
 }
 
 /// Namespace tag for a checkpoint-id key in [`SignedChainAnchor::recorded`].
@@ -70,6 +71,13 @@ fn anchor_key(namespace: &str, id: &str) -> String {
 }
 
 impl SignedChainAnchor {
+    /// Plan identity recorded by the verified creation entry for a checkpoint.
+    pub(super) fn checkpoint_plan_id(&self, meta: &CheckpointMeta) -> Result<Option<String>> {
+        Ok(self
+            .lookup(&anchor_key(CHECKPOINT_NS, meta.id.as_str()))?
+            .map(|recorded| recorded.plan_id))
+    }
+
     /// Construct an intentionally empty anchor for resident claims whose
     /// signed snapshot manifest is the publication witness. Saved-state
     /// restores must use [`Self::load`] and verify the full audit chain.
@@ -205,6 +213,7 @@ fn index_creation_digest(
             RecordedCreation {
                 digest: CheckpointDigest::parse(digest.clone())?,
                 tenant: envelope.entry.tenant.0.clone(),
+                plan_id: envelope.entry.plan_id.0.clone(),
             },
         );
     }
@@ -349,6 +358,32 @@ mod tests {
             "the tampered field must actually be present in the fixture"
         );
         std::fs::write(path, format!("{}\n", lines.join("\n"))).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_plan_identity_comes_only_from_a_verified_creation_entry() {
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.set("MVM_HOME", tmp.path());
+        seed_signed_chain("cp-plan-bound");
+
+        let anchor = SignedChainAnchor::load().expect("signed chain");
+        assert_eq!(
+            anchor
+                .checkpoint_plan_id(&meta("cp-plan-bound"))
+                .expect("plan identity"),
+            Some("plan-lineage-test".to_string())
+        );
+        assert_eq!(
+            anchor
+                .checkpoint_plan_id(&meta("cp-absent"))
+                .expect("absent plan identity"),
+            None
+        );
+
+        break_chain(&chain_path(tmp.path()));
+        let damaged = SignedChainAnchor::load().expect("damaged chain recorded");
+        assert!(damaged.checkpoint_plan_id(&meta("cp-plan-bound")).is_err());
     }
 
     /// The regression. A miss against a damaged ledger must not be reported as

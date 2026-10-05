@@ -38,7 +38,7 @@ provenance so admission can bind the files that are later booted.
 |---|---|
 | Pipeline | `pipeline`, `artifacts`, `run_image`, `packed_artifact` |
 | Acquisition | `artifact_acquisition`, `kernel_fetch`, `release_signature` |
-| Builder VM | `builder_vm`, `persistent_builder`, `builderd`, `builder_protocol` |
+| Builder VM | `builder_vm`, `builder_orchestrator`, `persistent_builder`, `builderd`, `builder_protocol` |
 | Guest images | `rootfs`, `initramfs`, `rootfs_inject`, `oci_runtime_inject` |
 | Toolchain | `nix`, `app_deps`, `embed_toolchain`, `guest_agent_build` |
 | Networking | `builder_route`, `egress_proxy`, `egress_readiness` |

@@ -40,6 +40,8 @@ a consumer's tracing subscriber.
 | `stream` | Captured output access |
 | `volume` | Volume lifecycle, leases, and snapshots |
 | `secret` | Secret-reference inputs and audit records |
+| `bundle` | Sealing built artifacts into a signed `.mvmpkg`, under the host key or a caller's |
+| `builder_bundle` | Building a flake in a builder VM and sealing the result into a `.mvmpkg` |
 | `audit` / `grants` / `readiness` | Evidence and lifecycle state |
 
 ## Features

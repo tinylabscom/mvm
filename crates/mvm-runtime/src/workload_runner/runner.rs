@@ -1726,6 +1726,7 @@ mod tests {
                 address: "test-key".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }
     }
 

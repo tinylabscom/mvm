@@ -1,6 +1,6 @@
 //! Host-side chain-signed audit emitter.
 //!
-//! Wraps `mvm_hostd::supervisor::FileAuditSigner` so `mvmctl up` can emit
+//! Wraps `mvm_hostd::supervisor::FileAuditSigner` so a boot can emit
 //! tamper-evident `plan.admitted` / `plan.launched` / `plan.failed`
 //! entries bound to the `AdmittedPlan`. The chain is signed under the
 //! host signer's keypair (the same Ed25519 key used for plan
@@ -18,10 +18,10 @@
 //! ## Async bridge
 //!
 //! `FileAuditSigner::sign_and_emit` is async because the trait is
-//! shared with the in-process supervisor path, but `mvmctl up` is
+//! shared with the in-process supervisor path, but the boot path is
 //! synchronous. We build a single-threaded tokio
 //! runtime per emit (mirrors `mvm-backend::libkrun::block_on`).
-//! Audit emission is rare (3 entries per `mvmctl up` invocation), so
+//! Audit emission is rare (3 entries per boot), so
 //! the runtime-construction overhead is negligible compared to the VM
 //! boot itself.
 //!
@@ -73,7 +73,7 @@ pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 
 mod session_events;
 mod workspace;
-pub use workspace::{WorkspaceMutationAudit, workspace_audit};
+pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
 pub mod checkpoint_audit;
 pub mod drive_audit;
@@ -805,6 +805,7 @@ impl AuditEmitter {
                 mvm_core::plan::AssetKind::Prompt => "prompt",
                 mvm_core::plan::AssetKind::Agent => "agent",
                 mvm_core::plan::AssetKind::Policy => "policy",
+                mvm_core::plan::AssetKind::RegistryPack => "registry_pack",
                 mvm_core::plan::AssetKind::ComputeEnvironment => "compute_environment",
                 mvm_core::plan::AssetKind::Other => "other",
             };
@@ -2657,7 +2658,11 @@ mod tests {
             rand::rng().fill_bytes(&mut seed);
             SigningKey::from_bytes(&seed)
         };
-        let emitter = AuditEmitter::new(key).expect("construct an emitter");
+        // `with_dir`, not `new`: `new` resolves the audit dir from the process
+        // environment, which other tests in this binary point at their own
+        // short-lived homes.
+        let emitter =
+            AuditEmitter::with_dir(key, &dir.path().join("audit")).expect("construct an emitter");
         // The default has to be observed too, or "always true" would pass.
         assert!(
             !emitter.decisions_enabled(),
@@ -3253,6 +3258,12 @@ mod asset_identities_emit_tests {
                 DIGEST64,
             )
             .expect("valid digest"),
+            mvm_core::plan::AssetIdentity::new(
+                mvm_core::plan::AssetKind::RegistryPack,
+                "runtime/python@1.0.0",
+                DIGEST64,
+            )
+            .expect("valid digest"),
         ];
         plan
     }
@@ -3272,7 +3283,7 @@ mod asset_identities_emit_tests {
         let entry = &envelope["entry"];
         assert_eq!(entry["event"], "plan.asset_identities");
         let labels = entry["labels"].as_object().expect("labels object");
-        assert_eq!(labels["asset_count"].as_str().expect("count"), "2");
+        assert_eq!(labels["asset_count"].as_str().expect("count"), "3");
         assert_eq!(
             labels["asset_0_kind"].as_str().expect("kind"),
             "compute_environment"
@@ -3282,6 +3293,15 @@ mod asset_identities_emit_tests {
         assert_eq!(labels["asset_1_kind"].as_str().expect("kind"), "dataset");
         assert_eq!(labels["asset_1_name"].as_str().expect("name"), "train-set");
         assert_eq!(labels["asset_1_digest"].as_str().expect("digest"), DIGEST64);
+        assert_eq!(
+            labels["asset_2_kind"].as_str().expect("kind"),
+            "registry_pack"
+        );
+        assert_eq!(
+            labels["asset_2_name"].as_str().expect("name"),
+            "runtime/python@1.0.0"
+        );
+        assert_eq!(labels["asset_2_digest"].as_str().expect("digest"), DIGEST64);
     }
 
     #[test]

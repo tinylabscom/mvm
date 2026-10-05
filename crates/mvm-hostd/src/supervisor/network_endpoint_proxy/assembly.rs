@@ -59,30 +59,22 @@ pub struct FromPlanInputs<'a> {
     pub egress_gate: Arc<mvm_runtime::vmm::egress_gate::EgressGate>,
 }
 
-/// The registry names of the plan's secrets whose binding asks for a
-/// run-time approval. A binding that cannot be read here already failed
-/// registry assembly, so it cannot be substituted either.
+/// The registry names of secrets whose signed plan requires an approval.
+/// Registry assembly separately refuses a stored `ask` absent from the plan.
 fn secrets_requiring_approval(
     plan_secrets: &[mvm_core::plan::SecretBinding],
-    tenant: &str,
-    bindings: &dyn crate::keyholder::BindingStore,
 ) -> std::collections::BTreeSet<String> {
     plan_secrets
         .iter()
-        .filter_map(|binding| match &binding.source {
-            mvm_core::plan::SecretSource::Keystore { address } => Some(address),
-            mvm_core::plan::SecretSource::External { .. } => None,
+        .filter_map(|binding| {
+            if !binding.approval_required {
+                return None;
+            }
+            match &binding.source {
+                mvm_core::plan::SecretSource::Keystore { address } => Some(address.clone()),
+                mvm_core::plan::SecretSource::External { .. } => None,
+            }
         })
-        .filter(|address| {
-            bindings
-                .get(tenant, address)
-                .ok()
-                .flatten()
-                .is_some_and(|meta| {
-                    meta.approve == mvm_core::crypto::secret_binding::SecretApproval::Ask
-                })
-        })
-        .cloned()
         .collect()
 }
 
@@ -308,7 +300,7 @@ impl SubstitutionService {
                 .with_proxy(proxy)
                 .with_gate_resolver(Arc::clone(&admitted), Arc::clone(&egress_gate)),
         );
-        let approval_required = secrets_requiring_approval(plan_secrets, tenant, bindings);
+        let approval_required = secrets_requiring_approval(plan_secrets);
         let oauth_capture_by_secret = oauth_capture_rules(plan_secrets, tenant, bindings);
         let mut service = Self::new(Arc::new(registry), resolver, forwarder, egress_gate)
             .with_admitted_addresses(admitted)
@@ -390,6 +382,33 @@ mod server_tests {
     use secrecy::SecretBox;
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    #[test]
+    fn approval_set_comes_only_from_keystore_bindings_in_the_signed_plan() {
+        let binding = |address: &str, approval_required| SecretBinding {
+            name: address.to_string(),
+            source: mvm_core::plan::SecretSource::Keystore {
+                address: address.to_string(),
+            },
+            destinations: Vec::new(),
+            approval_required,
+        };
+        let external = SecretBinding {
+            name: "external".into(),
+            source: mvm_core::plan::SecretSource::External {
+                provider: "vault".into(),
+                path: "kv/token".into(),
+            },
+            destinations: Vec::new(),
+            approval_required: true,
+        };
+        let required = secrets_requiring_approval(&[
+            binding("gated", true),
+            binding("plain", false),
+            external,
+        ]);
+        assert_eq!(required.into_iter().collect::<Vec<_>>(), ["gated"]);
+    }
 
     /// A service assembled the way the endpoint assembles one, under the
     /// default-deny gate an endpoint with no admitted policy carries, refuses a
@@ -483,8 +502,9 @@ mod server_tests {
                 address: "openai".into(),
             },
             destinations: Vec::new(),
+            approval_required: true,
         }];
-        let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
+        let (service, handed) = SubstitutionService::from_plan(FromPlanInputs {
             plan_secrets: &plan,
             tenant: "local",
             instance_id: "",
@@ -503,6 +523,7 @@ mod server_tests {
         assert_eq!(handed.len(), 1);
         assert_eq!(handed[0].0, "OPENAI_API_KEY");
         assert!(handed[0].1.as_str().starts_with("mvm-secret-"));
+        assert!(service.approval_required.contains("openai"));
     }
 
     #[test]
@@ -545,6 +566,7 @@ mod server_tests {
                 address: "openai".into(),
             },
             destinations: Vec::new(),
+            approval_required: false,
         }];
 
         // A policy that opts api.openai.com into entropy redaction. After

@@ -499,7 +499,48 @@ pub fn validate_binding_meta(
         (AuthType::Sigv4, Some(_)) => Ok(()),
         (_, Some(_)) => Err(invalid("sigv4 scope params are only valid for sigv4 auth")),
         (_, None) => Ok(()),
+    }?;
+    if let Some(oauth) = &meta.oauth {
+        validate_oauth_meta(oauth, &invalid)?;
     }
+    Ok(())
+}
+
+/// Structural checks on the OAuth flow metadata. The endpoints are the ones
+/// the host-side refresher dials and the browser consent flow will, so both
+/// must be absolute https URLs; the access-token pointer must be an absolute
+/// JSON pointer the response parser can walk.
+fn validate_oauth_meta(
+    oauth: &mvm_core::crypto::secret_binding::OAuthBindingMeta,
+    invalid: &impl Fn(&str) -> SecretServiceError,
+) -> Result<(), SecretServiceError> {
+    for (field, url) in [
+        ("authorization_url", oauth.authorization_url.as_str()),
+        ("token_url", oauth.token_url.as_str()),
+    ] {
+        let parsed = mvm_http::Url::parse(url)
+            .map_err(|_| invalid(&format!("oauth {field} `{url}` is not an absolute URL")))?;
+        if parsed.scheme() != "https" {
+            return Err(invalid(&format!("oauth {field} must be https")));
+        }
+        if parsed.host_str().is_none() {
+            return Err(invalid(&format!("oauth {field} `{url}` has no host")));
+        }
+    }
+    if oauth.client_id.trim().is_empty() {
+        return Err(invalid("oauth client_id is empty"));
+    }
+    if let Some(pointer) = &oauth.response_access_token_pointer
+        && !pointer.starts_with('/')
+    {
+        return Err(invalid(
+            "oauth response_access_token_pointer must be an absolute JSON pointer (start with `/`)",
+        ));
+    }
+    if oauth.scopes.iter().any(|scope| scope.trim().is_empty()) {
+        return Err(invalid("oauth scopes contain an empty entry"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -541,6 +582,10 @@ mod tests {
 
     fn audit_text(f: &Fixture) -> String {
         std::fs::read_to_string(&f.audit_path).unwrap_or_default()
+    }
+
+    fn bearer_fixture_meta() -> SecretBindingMeta {
+        bearer_binding(&["api.example.com"])
     }
 
     fn bearer_binding(hosts: &[&str]) -> SecretBindingMeta {
@@ -1107,6 +1152,65 @@ mod tests {
             oauth: None,
         };
         assert!(validate_binding_meta("local", "k", &incompatible).is_err());
+    }
+
+    fn oauth_meta() -> mvm_core::crypto::secret_binding::OAuthBindingMeta {
+        mvm_core::crypto::secret_binding::OAuthBindingMeta {
+            authorization_url: "https://auth.example.com/authorize".into(),
+            token_url: "https://auth.example.com/token".into(),
+            client_id: "public-client-id".into(),
+            scopes: vec!["scope-a".into()],
+            response_access_token_pointer: None,
+        }
+    }
+
+    #[test]
+    fn oauth_binding_with_https_endpoints_validates() {
+        let mut meta = bearer_fixture_meta();
+        meta.oauth = Some(oauth_meta());
+        validate_binding_meta("local", "oauth-secret", &meta).unwrap();
+        meta.oauth.as_mut().unwrap().response_access_token_pointer = Some("/data/token".into());
+        validate_binding_meta("local", "oauth-secret", &meta).unwrap();
+    }
+
+    #[test]
+    fn oauth_binding_rejects_non_https_and_relative_endpoints() {
+        for (field, url) in [
+            ("authorization_url", "http://auth.example.com/authorize"),
+            ("authorization_url", "/authorize"),
+            ("token_url", "http://auth.example.com/token"),
+            ("token_url", "ftp://auth.example.com/token"),
+        ] {
+            let mut meta = bearer_fixture_meta();
+            let mut oauth = oauth_meta();
+            if field == "authorization_url" {
+                oauth.authorization_url = url.into();
+            } else {
+                oauth.token_url = url.into();
+            }
+            meta.oauth = Some(oauth);
+            let err = validate_binding_meta("local", "oauth-secret", &meta).unwrap_err();
+            assert!(
+                format!("{err}").contains(field),
+                "{field}={url} should be rejected, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_binding_rejects_empty_client_id_scopes_and_relative_pointer() {
+        let mut no_client_id = oauth_meta();
+        no_client_id.client_id = String::new();
+        let mut empty_scope = oauth_meta();
+        empty_scope.scopes = vec!["scope-a".into(), String::new()];
+        let mut relative_pointer = oauth_meta();
+        relative_pointer.response_access_token_pointer = Some("data.token".into());
+        for oauth in [no_client_id, empty_scope, relative_pointer] {
+            let mut meta = bearer_fixture_meta();
+            meta.oauth = Some(oauth);
+            let err = validate_binding_meta("local", "oauth-secret", &meta).unwrap_err();
+            assert!(format!("{err}").contains("oauth"), "got: {err}");
+        }
     }
 
     // ── No-leak invariants across error surfaces ──────────────────────

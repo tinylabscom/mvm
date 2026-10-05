@@ -14,10 +14,12 @@ Feature: Workload lifecycle correctness
     Then the command exits with code 7
     And the isolated mvm home has no transient request state directories
 
-  @live
+  @live @ci_live
   Scenario: A transient run that succeeds still tears its state directory down
     Given an isolated mvm home
     When I run mvmctl in an isolated live home with "machine run --image alpine --timeout 120 -- /bin/echo mvm-bdd-teardown-ok"
     Then the command exits with code 0
     And the output contains "mvm-bdd-teardown-ok"
     And the isolated mvm home has no transient request state directories
+    When I run mvmctl in the isolated mvm home with "trust audit sessions"
+    Then the output contains "sealed (exit 0)"

@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use mvm_contract::ir::{App, Entrypoint, EnvValue, SecretMount, Workload};
 use mvm_core::plan::{SecretBinding, SecretReleasePolicy, SecretSource};
 
-use crate::secret::{MachineSecretRef, SecretService};
+use crate::secret::{MachineSecretRef, SecretApproval, SecretService};
 
 // allow(secret-debug): bindings contain provider addresses and guest-facing
 // names only. They are references, never secret values.
@@ -47,10 +47,30 @@ impl ResolvedPlanSecrets {
                             address: reference.name.clone(),
                         },
                         destinations: reference.destinations.clone(),
+                        approval_required: false,
                     })
             })
             .collect();
         Self::from_bindings(bindings)
+    }
+
+    /// Capture the current secret-use approval requirement before plan signing.
+    /// A missing secret or binding cannot be represented as an admitted plan.
+    pub fn bind_approval(mut self, service: &SecretService, tenant: &str) -> Result<Self> {
+        for binding in &mut self.secrets {
+            let SecretSource::Keystore { address } = &binding.source else {
+                continue;
+            };
+            let metadata = service
+                .metadata(tenant, address)
+                .with_context(|| format!("reading metadata for secret {address:?}"))?
+                .with_context(|| format!("secret {address:?} is missing"))?;
+            let stored = metadata
+                .binding
+                .with_context(|| format!("binding for secret {address:?} is missing"))?;
+            binding.approval_required = stored.approve == SecretApproval::Ask;
+        }
+        Ok(self)
     }
 }
 
@@ -87,7 +107,7 @@ pub fn resolve_machine_secrets(
     service
         .validate_for_admission("local", &references)
         .context("validating persistent-machine secret references")?;
-    Ok(ResolvedPlanSecrets::from_machine_refs(&references))
+    ResolvedPlanSecrets::from_machine_refs(&references).bind_approval(service, "local")
 }
 
 pub fn load_machine_secret_refs(machine: &str) -> Result<Vec<MachineSecretRef>> {
@@ -199,6 +219,7 @@ fn append_env_bindings(
                 address: reference.name.clone(),
             },
             destinations: reference.allowed_hosts.clone(),
+            approval_required: false,
         });
     }
 }

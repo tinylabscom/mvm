@@ -22,7 +22,7 @@ use mvm_core::vm_backend::{
 };
 use mvm_net::channel::GuestService;
 use mvm_vmm::host::hvf_supervisor::{HostDialSocket, HvfDisk, HvfSupervisorConfig};
-use mvm_vmm::hvf_handoff::{HANDOFF_ACCEPTED, HANDOFF_RESPONSE_MAX_BYTES, HvfHandoffRequest};
+use mvm_vmm::hvf_handoff::{HANDOFF_RESPONSE_MAX_BYTES, HandoffReply, HvfHandoffRequest};
 
 use crate::driver::hvf_process::{
     self as hvf_backend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path_verified,
@@ -674,28 +674,7 @@ impl VmmDriver for HvfDriver {
                     .to_bytes(),
             ),
         };
-        let socket = parent_dir.join("hvf-handoff.sock");
-        let mut stream = std::os::unix::net::UnixStream::connect(&socket).map_err(|e| {
-            StandbyError::ClaimFailed(format!(
-                "connect to HVF parent handoff socket {}: {e}",
-                socket.display()
-            ))
-        })?;
-        let mut payload = serde_json::to_vec(&request).map_err(|e| {
-            StandbyError::ClaimFailed(format!("serialize HVF handoff request: {e}"))
-        })?;
-        payload.push(b'\n');
-        stream
-            .write_all(&payload)
-            .map_err(|e| StandbyError::ClaimFailed(format!("send HVF handoff request: {e}")))?;
-        let response = read_handoff_response(&mut stream)
-            .map_err(|e| StandbyError::ClaimFailed(format!("read HVF handoff response: {e}")))?;
-        if response != HANDOFF_ACCEPTED {
-            return Err(StandbyError::ClaimFailed(format!(
-                "HVF parent rejected live handoff: {}",
-                String::from_utf8_lossy(&response).trim()
-            )));
-        }
+        request_live_handoff(&parent_dir.join("hvf-handoff.sock"), &request)?;
 
         link_child_state(child_dir, &parent_dir)
             .map_err(|e| StandbyError::ClaimFailed(format!("link live HVF child state: {e}")))?;
@@ -733,7 +712,57 @@ impl VmmDriver for HvfDriver {
     }
 }
 
-/// Read the parent's one-line handoff reply: `OK`, or `ERR <reason>`.
+/// How many times one claim asks a parent that answers `RETRY`. The parent
+/// says that only when no request reached it, so it is untouched and asking
+/// again is cheap; a parent that keeps saying it will not be won by asking more.
+const LIVE_HANDOFF_ATTEMPTS: usize = 2;
+
+/// Ask the paused parent listening at `socket` to become the child `request`
+/// names. A refusal is final; a `RETRY` is asked again, up to
+/// [`LIVE_HANDOFF_ATTEMPTS`] in all.
+fn request_live_handoff(socket: &Path, request: &HvfHandoffRequest) -> Result<(), StandbyError> {
+    // Serialized before connecting, so nothing stands between `connect` and
+    // the write the parent is waiting on.
+    let mut payload = serde_json::to_vec(request)
+        .map_err(|e| StandbyError::ClaimFailed(format!("serialize HVF handoff request: {e}")))?;
+    payload.push(b'\n');
+    let mut unread = String::new();
+    for _ in 0..LIVE_HANDOFF_ATTEMPTS {
+        match send_live_handoff(socket, &payload)? {
+            HandoffReply::Accepted => return Ok(()),
+            HandoffReply::Retry(reason) => unread = reason,
+            HandoffReply::Refused(reply) => {
+                return Err(StandbyError::ClaimFailed(format!(
+                    "HVF parent rejected live handoff: {reply}"
+                )));
+            }
+        }
+    }
+    Err(StandbyError::ClaimFailed(format!(
+        "HVF parent did not receive the live handoff request in \
+         {LIVE_HANDOFF_ATTEMPTS} attempts: {unread}"
+    )))
+}
+
+/// One connection to the parent's handoff socket: send the request, read the
+/// reply.
+fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, StandbyError> {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).map_err(|e| {
+        StandbyError::ClaimFailed(format!(
+            "connect to HVF parent handoff socket {}: {e}",
+            socket.display()
+        ))
+    })?;
+    stream
+        .write_all(payload)
+        .map_err(|e| StandbyError::ClaimFailed(format!("send HVF handoff request: {e}")))?;
+    let response = read_handoff_response(&mut stream)
+        .map_err(|e| StandbyError::ClaimFailed(format!("read HVF handoff response: {e}")))?;
+    Ok(HandoffReply::parse(&response))
+}
+
+/// Read the parent's one-line handoff reply: `OK`, `RETRY <reason>`, or
+/// `ERR <reason>`.
 ///
 /// Reads through the newline rather than a fixed length. A fixed three bytes
 /// fit `OK\n` and truncated every refusal to `ERR`, which left a failed claim
@@ -1258,6 +1287,135 @@ mod tests {
         let response = read_handoff_response(&mut stream).expect("read bounded reply");
         writer.join().expect("join handoff writer");
         assert_eq!(response.len(), HANDOFF_RESPONSE_MAX_BYTES);
+    }
+
+    fn handoff_request() -> HvfHandoffRequest {
+        HvfHandoffRequest {
+            child_vm_name: "child".to_string(),
+            parent_pid: 1,
+            channel_mask: 0,
+            signature: "00".repeat(64),
+        }
+    }
+
+    /// A stand-in parent that answers each claim connection with the next
+    /// scripted reply, then stops listening.
+    struct ScriptedParent {
+        _dir: tempfile::TempDir,
+        socket: PathBuf,
+        served: std::thread::JoinHandle<Vec<Vec<u8>>>,
+    }
+
+    impl ScriptedParent {
+        /// The request line each connection carried, once every reply is sent.
+        fn requests(self) -> Vec<Vec<u8>> {
+            self.served.join().expect("join scripted parent")
+        }
+    }
+
+    fn scripted_parent(replies: Vec<Vec<u8>>) -> Option<ScriptedParent> {
+        use std::io::BufRead;
+        let dir = tempfile::Builder::new()
+            .prefix("hvf")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
+        let socket = dir.path().join("hvf-handoff.sock");
+        let listener = mvm_vmm::test_support::bind_unix_listener(&socket)?;
+        let served = std::thread::spawn(move || {
+            replies
+                .into_iter()
+                .map(|reply| {
+                    let (stream, _) = listener.accept().expect("accept claim");
+                    let mut request = Vec::new();
+                    std::io::BufReader::new(&stream)
+                        .read_until(b'\n', &mut request)
+                        .expect("read claim");
+                    (&stream).write_all(&reply).expect("reply to claim");
+                    request
+                })
+                .collect()
+        });
+        Some(ScriptedParent {
+            _dir: dir,
+            socket,
+            served,
+        })
+    }
+
+    #[test]
+    fn an_accepting_parent_is_asked_once() {
+        let Some(parent) = scripted_parent(vec![mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED.to_vec()])
+        else {
+            return;
+        };
+        request_live_handoff(&parent.socket, &handoff_request())
+            .expect("an accepted handoff claims");
+
+        let requests = parent.requests();
+        let mut expected = serde_json::to_vec(&handoff_request()).expect("serialize request");
+        expected.push(b'\n');
+        assert_eq!(requests, vec![expected]);
+    }
+
+    /// The parent answers `RETRY` only when no request reached it, and is
+    /// still claimable, so the claim asks once more instead of failing.
+    #[test]
+    fn a_parent_that_never_read_the_request_is_asked_again() {
+        let Some(parent) = scripted_parent(vec![
+            mvm_vmm::hvf_handoff::retry_line("no handoff request arrived within 2s"),
+            mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED.to_vec(),
+        ]) else {
+            return;
+        };
+        request_live_handoff(&parent.socket, &handoff_request())
+            .expect("the second attempt is accepted");
+
+        let requests = parent.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1], "the same request is sent again");
+    }
+
+    #[test]
+    fn a_refused_handoff_is_not_asked_again() {
+        let Some(parent) = scripted_parent(vec![mvm_vmm::hvf_handoff::refusal_line(
+            "handoff signature rejected",
+        )]) else {
+            return;
+        };
+        let error = request_live_handoff(&parent.socket, &handoff_request())
+            .expect_err("a refusal fails the claim");
+
+        // Had the claim asked again, it would have found nothing listening
+        // and failed to connect instead.
+        assert_eq!(
+            error.to_string(),
+            "claim standby: HVF parent rejected live handoff: ERR handoff signature rejected"
+        );
+        assert_eq!(parent.requests().len(), 1);
+    }
+
+    #[test]
+    fn a_parent_that_keeps_asking_for_a_retry_is_given_up_on() {
+        let Some(parent) = scripted_parent(
+            (0..LIVE_HANDOFF_ATTEMPTS)
+                .map(|_| mvm_vmm::hvf_handoff::retry_line("no handoff request arrived"))
+                .collect(),
+        ) else {
+            return;
+        };
+        let error = request_live_handoff(&parent.socket, &handoff_request())
+            .expect_err("the retry budget is bounded");
+
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("did not receive the live handoff request in 2 attempts"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("no handoff request arrived"),
+            "{rendered}"
+        );
+        assert_eq!(parent.requests().len(), LIVE_HANDOFF_ATTEMPTS);
     }
 
     fn egress_port(uds: &str) -> VsockPort {

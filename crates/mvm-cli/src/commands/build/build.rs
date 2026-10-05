@@ -91,7 +91,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // volume only. We invalidate the cache index entries pointing at
     // the project's lockfile and short-circuit before the rootfs
     // build. The next install-pipeline run (`mvmctl build` without
-    // `--deps`, or `mvmctl up`) rebuilds the volume from scratch.
+    // `--deps`) rebuilds the volume from scratch.
     if args.deps {
         return invalidate_deps_cache(&args);
     }
@@ -596,7 +596,7 @@ fn audit_build_error(mode: &str, source: &str, err: &anyhow::Error) {
 /// next install-pipeline run rebuilds the volume from scratch. We
 /// deliberately do NOT spawn the builder VM here — that's the
 /// install pipeline's job, kicked off by the
-/// orchestrator on the next `mvmctl build` / `mvmctl up`.
+/// orchestrator on the next `mvmctl build`.
 ///
 /// Invalidation strategy: walk `<deps_volumes_dir>/index/`, read
 /// each `<lockfile_hash>` pointer's volume hash, and delete both
@@ -771,6 +771,16 @@ pub(in crate::commands) fn build_flake_to_slot(
     }
 
     let resolved = resolve_flake_ref(flake_ref)?;
+    // A flake slot may contain a sealed rootfs but no kernel of its own.
+    // Populate the verified workload-kernel cache before slot installation so
+    // it cannot fall back to the builder kernel, which lacks device-mapper.
+    if std::env::var("MVM_BUILD_STUB_OUTDIR")
+        .map(|value| value.trim().is_empty())
+        .unwrap_or(true)
+    {
+        crate::commands::env::builder_vm::ensure_workload_kernel()
+            .context("resolving the dm-verity-capable workload kernel for flake slot")?;
+    }
     let backend = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();

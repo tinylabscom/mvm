@@ -7,23 +7,26 @@
 //! `LD_PRELOAD`, `BASH_ENV` or a vault session token from whoever ran
 //! `mvmctl`, and nothing else would notice.
 //!
-//! The gate pins the spawn sites by name: each entry of [`HELPER_SPAWNS`]
+//! The gate pins the helper spawn sites by name: each entry of [`HELPER_SPAWNS`]
 //! is a file and the header of the function or `impl` block that starts the
 //! helper. Inside that body the production code must call `helper_command(`
 //! and must not call `Command::new(`. Comments, string literals and
 //! `#[cfg(test)]` items are blanked first, so neither a comment naming the
 //! constructor nor a test fixture spawning `sleep` can satisfy or trip it.
 //!
-//! What it does not do is discover a *new* helper spawn written somewhere
-//! else. Telling "starts a helper" from "runs `codesign`" needs to know what
-//! the program is, which a text gate cannot; a whole-tree ban on
-//! `Command::new` would fire on hundreds of tool invocations and be switched
-//! off rather than obeyed. A new helper spawn joins this list in the change
-//! that adds it.
+//! A whole-crate inventory also finds new raw `Command::new` constructors.
+//! Existing guest and tool launches form a pinned per-file baseline; adding
+//! another raw constructor fails until it is classified. A new host helper
+//! belongs in the named list and uses the filter. The inventory permits
+//! removing raw constructors without an inventory edit.
 
 use anyhow::{Result, bail};
+use regex::Regex;
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::OnceLock;
 
+use crate::fs_walk::for_each_file;
 use crate::rust_source::{blank_comments_and_strings, strip_cfg_test_items};
 
 /// The constructor every helper spawn goes through.
@@ -32,9 +35,124 @@ const SANITIZER: &str = "helper_command(";
 /// The unsanitized constructor a helper spawn must not use.
 const RAW: &str = "Command::new(";
 
+fn raw_constructor_count(code: &str) -> usize {
+    static RAW_CONSTRUCTOR: OnceLock<Regex> = OnceLock::new();
+    RAW_CONSTRUCTOR
+        .get_or_init(|| {
+            Regex::new(r"\bCommand\s*::\s*new\s*\(")
+                .expect("valid static raw process constructor expression")
+        })
+        .find_iter(code)
+        .count()
+}
+
+/// Existing raw constructors outside the named host-helper spawn seams.
+/// Counts pin every production file so a new raw launch, even in a new file,
+/// requires classification before the gate can pass.
+const EXISTING_RAW_COMMAND_COUNTS: &[(&str, usize)] = &[
+    ("crates/mvm-agentd/src/bin/mvm-builder-agent.rs", 1),
+    ("crates/mvm-agentd/src/bin/mvm-guest-agent/handlers.rs", 1),
+    ("crates/mvm-agentd/src/bin/mvm-guest-agent/health.rs", 1),
+    (
+        "crates/mvm-agentd/src/bin/mvm-guest-agent/interactive.rs",
+        2,
+    ),
+    ("crates/mvm-agentd/src/bin/mvm-oci-entrypoint.rs", 1),
+    ("crates/mvm-agentd/src/bin/mvm-runner.rs", 1),
+    ("crates/mvm-agentd/src/bin/mvm-seccomp-apply.rs", 1),
+    ("crates/mvm-agentd/src/builder_agent.rs", 1),
+    ("crates/mvm-agentd/src/builder_build.rs", 2),
+    ("crates/mvm-agentd/src/crng_reseed/helper.rs", 1),
+    ("crates/mvm-agentd/src/entrypoint.rs", 1),
+    ("crates/mvm-agentd/src/exec_stream.rs", 2),
+    ("crates/mvm-agentd/src/guest_bootstrap.rs", 5),
+    ("crates/mvm-agentd/src/guest_net.rs", 2),
+    ("crates/mvm-agentd/src/lifecycle_hooks.rs", 2),
+    ("crates/mvm-agentd/src/process_rpc.rs", 1),
+    ("crates/mvm-agentd/src/worker_pool.rs", 1),
+    ("crates/mvm-build/src/bin/mvm-host-vm-init.rs", 16),
+    ("crates/mvm-build/src/bin/mvm-host-vm-init/boot_stage.rs", 1),
+    (
+        "crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs",
+        4,
+    ),
+    ("crates/mvm-build/src/bin/mvm-host-vm-init/install.rs", 1),
+    ("crates/mvm-build/src/bin/mvm-host-vm-init/workload.rs", 1),
+    ("crates/mvm-build/src/bin/stage0-init.rs", 6),
+    ("crates/mvm-build/src/bin/stage0-init/kernel_emit.rs", 1),
+    ("crates/mvm-build/src/bin/stage0-init/store_gc.rs", 2),
+    ("crates/mvm-build/src/builder_vm_image.rs", 1),
+    ("crates/mvm-build/src/builder_vm_runtime.rs", 1),
+    ("crates/mvm-build/src/builder_vm_transport.rs", 1),
+    ("crates/mvm-build/src/builderd.rs", 2),
+    ("crates/mvm-build/src/embed_toolchain.rs", 8),
+    ("crates/mvm-build/src/guest_agent_build.rs", 3),
+    ("crates/mvm-build/src/image_source/build.rs", 2),
+    ("crates/mvm-build/src/image_source/git.rs", 1),
+    ("crates/mvm-build/src/libkrun_builder.rs", 2),
+    ("crates/mvm-build/src/provenance_mark.rs", 1),
+    ("crates/mvm-build/src/qemu_builder.rs", 3),
+    ("crates/mvm-build/src/runtime_overlay.rs", 1),
+    ("crates/mvm-build/src/stage0.rs", 1),
+    ("crates/mvm-capture/src/collect/package.rs", 3),
+    ("crates/mvm-capture/src/collect/trace.rs", 2),
+    ("crates/mvm-capture/src/verify.rs", 1),
+    ("crates/mvm-cli/src/bench/cold_launch_runner.rs", 1),
+    ("crates/mvm-cli/src/bootstrap.rs", 1),
+    ("crates/mvm-cli/src/commands/bootstrap.rs", 1),
+    ("crates/mvm-cli/src/commands/build/kernel.rs", 1),
+    ("crates/mvm-cli/src/commands/build/sandbox_record.rs", 1),
+    ("crates/mvm-cli/src/commands/deps/audit.rs", 2),
+    ("crates/mvm-cli/src/commands/env/artifact_verify.rs", 1),
+    ("crates/mvm-cli/src/commands/env/builder_vm/test_pair.rs", 1),
+    (
+        "crates/mvm-cli/src/commands/env/builder_vm/vm_helpers.rs",
+        1,
+    ),
+    ("crates/mvm-cli/src/commands/env/uninstall.rs", 1),
+    ("crates/mvm-cli/src/commands/image/trust.rs", 1),
+    ("crates/mvm-cli/src/commands/ops/config.rs", 1),
+    ("crates/mvm-cli/src/commands/vm/run_plan.rs", 1),
+    ("crates/mvm-cli/src/commands/vm/sdk_no_vm.rs", 1),
+    ("crates/mvm-cli/src/doctor/security_checks.rs", 6),
+    ("crates/mvm-cli/src/doctor/toolchain.rs", 1),
+    ("crates/mvm-cli/src/exec.rs", 1),
+    ("crates/mvm-cli/src/host_binaries/payload_build.rs", 2),
+    ("crates/mvm-cli/src/update.rs", 1),
+    ("crates/mvm-client/src/secret/source.rs", 1),
+    ("crates/mvm-core/src/crypto/key_rotation.rs", 1),
+    ("crates/mvm-core/src/env_hygiene.rs", 1),
+    ("crates/mvm-core/src/platform/platform.rs", 2),
+    ("crates/mvm-core/src/spawn_scope.rs", 3),
+    ("crates/mvm-fs/src/oci_to_rootfs/ext4.rs", 1),
+    ("crates/mvm-fs/src/oci_to_rootfs/verity.rs", 1),
+    ("crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs", 3),
+    ("crates/mvm-hostd/src/supervisor/firewall/linux_nft.rs", 1),
+    ("crates/mvm-runtime/examples/hvf-relay-egress.rs", 1),
+    ("crates/mvm-runtime/src/microvm/run_info.rs", 1),
+    ("crates/mvm-runtime/src/storage/backend.rs", 1),
+    (
+        "crates/mvm-runtime/src/storage/volume/encrypted_linux.rs",
+        7,
+    ),
+    ("crates/mvm-setpriv/src/lib.rs", 1),
+    ("crates/mvm-vmm/src/host/aux_bin.rs", 1),
+    ("crates/mvm-vmm/src/host/codesign.rs", 3),
+    ("crates/mvm-vmm/src/host/shell/exec.rs", 1),
+];
+
 /// `(file, header)`: the body opened by the first `{` after `header` starts a
 /// host helper process.
 const HELPER_SPAWNS: &[(&str, &str)] = &[
+    (
+        "crates/mvm-runtime/src/host_shell.rs",
+        "impl mvm_core::build_env::ShellEnvironment for HostShellEnvironment",
+    ),
+    ("crates/mvm-vmm/src/host/aux_bin.rs", "fn probe_contract("),
+    (
+        "crates/mvm-hostd/src/health_probe.rs",
+        "fn restart_command_for(",
+    ),
     (
         "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",
         "fn spawn_network_endpoint(",
@@ -132,21 +250,62 @@ pub fn run(workspace: &Path) -> Result<()> {
             failures.push(format!("{file} `{header}`: {problem}"));
         }
     }
+    let mut production = Vec::new();
+    for_each_file(
+        &workspace.join("crates"),
+        Some("rs"),
+        &mut |path, source| {
+            let relative = path.strip_prefix(workspace).unwrap_or(path);
+            let file = relative.to_string_lossy().replace('\\', "/");
+            if file.contains("/tests/") || file.ends_with("/tests.rs") {
+                return;
+            }
+            production.push((
+                file,
+                strip_cfg_test_items(&blank_comments_and_strings(source)),
+            ));
+        },
+    )?;
+    let sources: Vec<_> = production
+        .iter()
+        .map(|(file, code)| (file.as_str(), code.as_str()))
+        .collect();
+    failures.extend(unreviewed_raw_command_sites(&sources));
     if !failures.is_empty() {
         bail!(
-            "check-helper-env-hygiene: {} helper spawn site(s) bypass the environment filter:\n  {}\n\
-             Build the helper's command with `mvm_core::env_hygiene::helper_command(program)` so it \
-             does not inherit loader, shell, interpreter or password-manager session variables. \
-             If the spawn moved, update HELPER_SPAWNS in xtask/src/check_helper_env_hygiene.rs.",
+            "check-helper-env-hygiene: {} spawn-site or raw-constructor inventory violation(s):\n  {}\n\
+             Build host helpers with `mvm_core::env_hygiene::helper_command(program)`. \
+             Classify a changed raw tool launch before updating the inventory.",
             failures.len(),
             failures.join("\n  ")
         );
     }
     eprintln!(
-        "check-helper-env-hygiene: {} host helper spawn sites build their command through the environment filter",
-        HELPER_SPAWNS.len()
+        "check-helper-env-hygiene: {} host helper spawn sites use the filter; new raw constructors require review",
+        HELPER_SPAWNS.len(),
     );
     Ok(())
+}
+
+fn unreviewed_raw_command_sites(sources: &[(&str, &str)]) -> Vec<String> {
+    let reviewed: BTreeMap<_, _> = EXISTING_RAW_COMMAND_COUNTS.iter().copied().collect();
+    let mut actual = BTreeMap::new();
+    for &(file, code) in sources {
+        let count = raw_constructor_count(code);
+        if count > 0 {
+            actual.insert(file, count);
+        }
+    }
+    actual
+        .iter()
+        .filter(|(file, count)| **count > reviewed.get(**file).copied().unwrap_or(0))
+        .map(|(file, count)| {
+            format!(
+                "{file}: {count} raw process constructor(s), reviewed {:?}",
+                reviewed.get(file)
+            )
+        })
+        .collect()
 }
 
 /// Check one site: the production body after `header` calls the sanitizer and
@@ -154,7 +313,7 @@ pub fn run(workspace: &Path) -> Result<()> {
 fn check_site(raw: &str, header: &str) -> std::result::Result<(), String> {
     let production = strip_cfg_test_items(&blank_comments_and_strings(raw));
     let body = body_after(&production, header)?;
-    if body.contains(RAW) {
+    if raw_constructor_count(body) > 0 {
         return Err(format!("calls `{RAW}` instead of `{SANITIZER}`"));
     }
     if !body.contains(SANITIZER) {
@@ -213,6 +372,8 @@ mod tests {
                 .unwrap_err()
                 .contains("Command::new(")
         );
+        let spaced = "fn spawn_helper(bin: &Path) {\n    let _ = helper_command(bin);\n    let c = Command :: new (bin);\n}\n";
+        assert!(check_site(spaced, HEADER).is_err());
     }
 
     #[test]
@@ -248,6 +409,17 @@ mod tests {
     fn only_the_named_body_is_checked() {
         let src = "fn spawn_helper(bin: &Path) {\n    if x { helper_command(bin); }\n}\nfn run_codesign() { Command::new(\"codesign\"); }\n";
         assert_eq!(check_site(src, HEADER), Ok(()));
+    }
+
+    #[test]
+    fn a_new_raw_command_outside_the_pinned_sites_is_discovered() {
+        let production = [(
+            "crates/mvm-hostd/src/new_helper.rs",
+            "fn start() { Command :: new (helper).spawn(); }",
+        )];
+        let failures = unreviewed_raw_command_sites(&production);
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("new_helper.rs"));
     }
 
     #[test]

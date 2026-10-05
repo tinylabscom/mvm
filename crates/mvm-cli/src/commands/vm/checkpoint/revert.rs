@@ -290,6 +290,7 @@ fn revert_checkpoint(
         // declaration/drop flags describe the fresh child's capability.
         allow_secret_drop: false,
         json: opts.json,
+        intent: super::ForkIntent::Ordinary,
     })
     .with_context(|| format!("restoring checkpoint {:?}", target.id.as_str()))?;
 

@@ -131,6 +131,12 @@ pub mod stream_pump;
 /// proxy).
 pub mod substitution_client;
 
+/// Guest telemetry capture core: process-wide epoch/sequence identity, one
+/// non-waiting bounded emission path into the shared telemetry outbox, and a
+/// hand-rolled events-only `tracing` collector. Nothing installs the
+/// collector yet; wiring it into the agent binaries is a separate change.
+pub mod telemetry_capture;
+
 /// Guest side of the dedicated telemetry service (authenticated session per
 /// host connection on the reserved telemetry port).
 pub mod telemetry_service;

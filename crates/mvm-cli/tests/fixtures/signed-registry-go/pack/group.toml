@@ -1,0 +1,12 @@
+description = "Hosts a Go workload needs: the module proxy and checksum database, golang.org/x vanity imports, and GitHub (including codeload zips) for direct module fetches."
+
+[network]
+allow = [
+  "proxy.golang.org:443",
+  "sum.golang.org:443",
+  "index.golang.org:443",
+  "go.googlesource.com:443",
+  "github.com:443",
+  "api.github.com:443",
+  "codeload.github.com:443",
+]

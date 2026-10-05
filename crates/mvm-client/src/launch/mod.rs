@@ -9,6 +9,7 @@
 //! as metadata-only sidecars before any boot.
 
 pub mod boot_order;
+pub mod budget_charge;
 pub mod detached;
 pub mod grants_report;
 pub mod machine_start;
@@ -89,6 +90,16 @@ pub struct ExitReport {
     pub exit_code: Option<i32>,
 }
 
+/// The observed end of a CLI-owned transient run whose plan was already
+/// admitted before boot. A missing exit code is never represented as zero.
+pub struct TransientExitAudit<'a> {
+    pub signed_plan_json: &'a str,
+    pub vm_name: &'a str,
+    pub backend: &'a str,
+    pub exit_code: Option<i32>,
+    pub completed: bool,
+}
+
 /// Options for [`LocalBackend::remove_machine_with`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RemoveOptions {
@@ -128,6 +139,48 @@ fn build_audit_emitter() -> Option<AuditEmitter> {
             None
         }
     }
+}
+
+/// Record and seal a CLI-owned transient run before its state directory is
+/// removed. The signed envelope comes from the admitted launch configuration;
+/// an invalid signature cannot create an exit claim or a session seal.
+pub fn record_transient_exit(exit: TransientExitAudit<'_>) -> Result<()> {
+    let signed: mvm_core::plan::SignedExecutionPlan =
+        serde_json::from_str(exit.signed_plan_json).map_err(crate::local::backend_err)?;
+    let signer =
+        mvm_hostd::audit::host_keypair::load_or_init().map_err(crate::local::backend_err)?;
+    let signer_id = mvm_hostd::audit::host_keypair::host_signer_id();
+    let plan = mvm_core::plan::verify_plan(&signed, &[(signer_id.as_str(), &signer.verifying)])
+        .map_err(crate::local::backend_err)?;
+    let emitter = AuditEmitter::new(signer.signing)
+        .map(AuditEmitter::with_receipts)
+        .map_err(crate::local::backend_err)?;
+    let state_dir = vm_state_dir(exit.vm_name);
+    let mut usage = mvm_core::usage_capture::read_captured(&state_dir);
+    usage.host_state_bytes = mvm_core::usage_capture::host_state_bytes(&state_dir);
+    emitter
+        .emit_exited_with_capture(
+            &plan,
+            ExitRecord {
+                exit_code: exit.exit_code,
+                backend: exit.backend,
+                usage,
+            },
+        )
+        .map_err(crate::local::backend_err)?;
+    let reason = if exit.completed {
+        mvm_hostd::audit::session::SealReason::Exited
+    } else {
+        mvm_hostd::audit::session::SealReason::Failed
+    };
+    emitter
+        .seal_session(&plan, reason)
+        .map_err(crate::local::backend_err)?;
+    emitter
+        .publish_root(&plan.tenant.0)
+        .map_err(crate::local::backend_err)?;
+    mvm_hostd::audit::witness::flush_configured(emitter.audit_dir(), &plan.tenant.0);
+    Ok(())
 }
 
 /// Seal the session of a persistent machine that was just stopped, then publish
@@ -478,6 +531,8 @@ fn persisted_spec_from_request(request: &LaunchRequest, name: &str) -> mp::Machi
         deployment: None,
         resolved_digest: None,
         runtime_pack: false,
+        registry_pack_image: None,
+        tools: Default::default(),
         net: false,
         allow_host: vec![],
         peer: Vec::new(),
@@ -859,6 +914,19 @@ impl LocalBackend {
             })
             .collect();
 
+        let secret_refs = if transient {
+            request.secret_refs.clone()
+        } else {
+            crate::admission::secrets::load_machine_secret_refs(name)
+                .map_err(crate::local::backend_err)?
+        };
+        let secrets = if secret_refs.is_empty() {
+            crate::admission::secrets::ResolvedPlanSecrets::default()
+        } else {
+            crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(&secret_refs)
+                .bind_approval(self.secrets()?.as_ref(), LOCAL_TENANT)
+                .map_err(crate::local::backend_err)?
+        };
         let started = self
             .boot_admitted(BootParams {
                 name: name.to_string(),
@@ -881,15 +949,7 @@ impl LocalBackend {
                 grants: request.grants.clone(),
                 signed_plan: request.signed_plan.clone(),
                 assurance_campaign: request.assurance_campaign.clone(),
-                secrets: if transient {
-                    crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(
-                        &request.secret_refs,
-                    )
-                } else {
-                    let references = crate::admission::secrets::load_machine_secret_refs(name)
-                        .map_err(crate::local::backend_err)?;
-                    crate::admission::secrets::ResolvedPlanSecrets::from_machine_refs(&references)
-                },
+                secrets,
             })
             .await?;
         preparation.commit();

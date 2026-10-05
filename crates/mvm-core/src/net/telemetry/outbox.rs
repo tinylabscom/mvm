@@ -42,6 +42,14 @@ impl PreparedRecord {
     pub(super) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Test-only view of the canonical encoded bytes so consumer-crate tests
+    /// can decode and assert on drained records. Never a production API: the
+    /// worker sends prepared bytes through the transport seam instead.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn encoded_for_test(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl fmt::Debug for PreparedRecord {
@@ -274,6 +282,30 @@ impl Outbox {
         self.transport.add(record.len(), &self.overflow);
         self.transport_tail_unknown.store(true, Ordering::Relaxed);
     }
+
+    /// Test-only drain so consumer-crate tests can assert on queued records
+    /// without an authenticated transport session. Production draining stays
+    /// worker-only through the transport sender.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn take_for_test(&self) -> Result<Option<PreparedRecord>, RecordError> {
+        self.take()
+    }
+
+    /// Test-only hold of the admission lock, so consumer-crate tests can
+    /// witness that producers shed on contention instead of waiting. Dropping
+    /// the returned guard releases the queue.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold_queue_lock_for_test(&self) -> QueueLockHold<'_> {
+        QueueLockHold {
+            _guard: self.state.lock().expect("telemetry outbox test lock"),
+        }
+    }
+}
+
+/// Test-only handle keeping the queue's admission lock held until dropped.
+#[cfg(any(test, feature = "test-support"))]
+pub struct QueueLockHold<'a> {
+    _guard: std::sync::MutexGuard<'a, State>,
 }
 
 #[cfg(test)]

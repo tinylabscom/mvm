@@ -770,64 +770,138 @@ mod tests {
         assert_sync::<ReaderHandle>();
     }
 
+    /// A broker whose only reader sits `depth` records behind and never
+    /// drains, so every further ingest evicts exactly one of its records.
+    ///
+    /// The transcript writer has a fail-closed budget of zero, so every append
+    /// short-circuits before any I/O and what a burst times is redact -> chain
+    /// -> fan out. (The shipped ring would write every chunk and time the disk.)
+    struct SaturatedReader {
+        broker: StreamBroker,
+        reader: ReaderHandle,
+        depth: u64,
+        evicted: u64,
+        _dir: tempfile::TempDir,
+    }
+
+    impl SaturatedReader {
+        fn new(depth: u64) -> Self {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let writer = fail_closed_writer_at(
+                dir.path(),
+                "vm-a",
+                CaptureBounds {
+                    max_duration_secs: u64::MAX,
+                    max_bytes: 0,
+                    max_chunks: 0,
+                },
+            );
+            let mut broker = StreamBroker::new(
+                "vm-a",
+                writer,
+                StreamRedaction::curated(&RedactionPolicy::default()),
+            )
+            .with_reader_bounds(CaptureBounds {
+                max_chunks: depth,
+                ..DEFAULT_READER_BOUNDS
+            });
+            let reader = broker.subscribe();
+            for i in 0..depth {
+                broker.ingest(
+                    StreamSource::Entrypoint,
+                    StreamKind::Stdout,
+                    &i.to_le_bytes(),
+                );
+            }
+            assert_eq!(
+                reader.pending() as u64,
+                depth,
+                "the queue must sit at its bound, not grow"
+            );
+            assert_eq!(
+                reader.dropped_count(),
+                0,
+                "filling to the bound evicts nothing"
+            );
+            Self {
+                broker,
+                reader,
+                depth,
+                evicted: 0,
+                _dir: dir,
+            }
+        }
+
+        /// Ingest `count` records and return how long that took.
+        fn time_burst(&mut self, count: u32) -> Duration {
+            let started = Instant::now();
+            for i in 0..count {
+                self.broker.ingest(
+                    StreamSource::Entrypoint,
+                    StreamKind::Stdout,
+                    &i.to_le_bytes(),
+                );
+            }
+            let elapsed = started.elapsed();
+
+            self.evicted += u64::from(count);
+            assert_eq!(self.reader.pending() as u64, self.depth);
+            assert_eq!(
+                self.reader.dropped_count(),
+                self.evicted,
+                "every record in the burst must have evicted one"
+            );
+            elapsed
+        }
+    }
+
     #[test]
     fn fan_out_cost_does_not_grow_as_a_reader_falls_further_behind() {
         // The property the test above is really about, measured without the
         // transcript's per-chunk disk write dominating the number: eviction
         // must cost O(evicted), not O(queue). A full scan per drop turns one
         // stalled follower into quadratic work on the producer.
-        let dir = tempfile::tempdir().expect("tempdir");
-        // A fail-closed budget of zero: every append short-circuits before
-        // any I/O, so what is timed is redact -> chain -> fan out. (The
-        // shipped ring would happily write all 20k chunks and time the disk.)
-        let writer = fail_closed_writer_at(
-            dir.path(),
-            "vm-a",
-            CaptureBounds {
-                max_duration_secs: u64::MAX,
-                max_bytes: 0,
-                max_chunks: 0,
-            },
-        );
-        let mut b = StreamBroker::new(
-            "vm-a",
-            writer,
-            StreamRedaction::curated(&RedactionPolicy::default()),
-        );
-        let slow = b.subscribe();
+        //
+        // The same burst is timed against a reader a few records behind and
+        // one four shipped windows behind, 1024 times deeper. Every record
+        // evicts in both, so the only difference is how much backlog sits
+        // behind each eviction. A wall-clock bound measured the host as much
+        // as the code; a ratio of two runs on the same host does not, and the
+        // minimum over several interleaved bursts drops the ones another
+        // process slowed down.
+        const SLIGHTLY_BEHIND: u64 = 16;
+        const FAR_BEHIND: u64 = 4 * DEFAULT_READER_MAX_RECORDS;
+        const BURST: u32 = 2_048;
+        const TRIALS: usize = 5;
+        // Per-record work is constant today, so the ratio sits near 1. Work
+        // proportional to the backlog adds a per-eviction term 1024 times
+        // larger for the far reader: even the cheapest such scan, summing the
+        // queued payload lengths, pushed the ratio past 30.
+        const MAX_RATIO: u32 = 4;
 
-        for i in 0..10_000u32 {
-            b.ingest(
-                StreamSource::Entrypoint,
-                StreamKind::Stdout,
-                &i.to_le_bytes(),
-            );
+        let mut near_reader = SaturatedReader::new(SLIGHTLY_BEHIND);
+        let mut far_reader = SaturatedReader::new(FAR_BEHIND);
+        let mut near = Duration::MAX;
+        let mut far = Duration::MAX;
+        for _ in 0..TRIALS {
+            near = near.min(near_reader.time_burst(BURST));
+            far = far.min(far_reader.time_burst(BURST));
         }
-        assert_eq!(
-            slow.pending() as u64,
-            DEFAULT_READER_MAX_RECORDS,
-            "the queue must sit at its bound, not grow"
-        );
-
-        // Second burst: every single record now evicts, which is the worst
-        // case. Measured at ~17ms locally, so a second is a wide margin that
-        // still catches a return to per-eviction scanning.
-        let started = Instant::now();
-        for i in 0..10_000u32 {
-            b.ingest(
-                StreamSource::Entrypoint,
-                StreamKind::Stdout,
-                &i.to_le_bytes(),
-            );
-        }
-        let saturated = started.elapsed();
         assert!(
-            saturated < Duration::from_secs(1),
-            "eviction must not scale with queue depth (took {saturated:?})"
+            far < near * MAX_RATIO,
+            "eviction must not scale with queue depth: {BURST} evictions took \
+             {far:?} {FAR_BEHIND} records behind against {near:?} \
+             {SLIGHTLY_BEHIND} behind"
         );
-        assert_eq!(slow.pending() as u64, DEFAULT_READER_MAX_RECORDS);
-        b.drain_transcript();
-        assert_eq!(b.counters().persist_failures, 20_000);
+
+        for reader in [&mut near_reader, &mut far_reader] {
+            reader.broker.drain_transcript();
+            assert_eq!(
+                reader.broker.counters().persist_failures,
+                reader.depth + reader.evicted,
+                "the zero budget must have refused every append before any I/O"
+            );
+        }
     }
 
     #[test]

@@ -8,7 +8,8 @@ pub(super) mod address;
 pub(in crate::commands) mod build;
 pub(super) mod compile;
 #[cfg(feature = "builder-vm")]
-pub mod driver_builder_image;
+#[cfg(test)]
+mod driver_builder_live;
 pub(super) mod group;
 pub(super) mod guest_bins;
 /// Records an audited image-lineage node after a successful flake build, so

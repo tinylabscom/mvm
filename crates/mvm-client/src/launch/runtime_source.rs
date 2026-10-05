@@ -1,4 +1,4 @@
-//! Runtime-overlay attachment + status resolution for `mvmctl up` boots —
+//! Runtime-overlay attachment + status resolution for workload boots —
 //! the verity-sealed guest-binary overlay every workload backend consumes,
 //! and the audit label describing which source strategy actually landed.
 //!
@@ -487,9 +487,26 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
 
     match runtime_overlay_acquire_mode() {
         // Building the sidecar needs the builder VM, which must not be spawned
-        // implicitly inside a launch. Keep the fail-closed refusal, which
-        // names the binding and the explicit source-build command.
-        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => Err(cache_miss),
+        // implicitly inside a launch. A sidecar `build sdk-sidecar build`
+        // adopted from the pinned image set (`MVM_FETCH_UNCHANGED_IMAGES`) is
+        // filed under that set's root, not this CLI's version, so look there —
+        // a pure cache read, never the network. Otherwise keep the fail-closed
+        // refusal, which names the binding and the explicit source-build
+        // command.
+        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
+            if !pair_selected
+                && let Some(attached) = resolve_image_set_sidecar_attachment(
+                    services,
+                    &cache_root,
+                    &mvm_build::published_image_set::SetMemberCache::locked(),
+                    arch,
+                    libc,
+                )
+            {
+                return Ok(Some(attached));
+            }
+            Err(cache_miss)
+        }
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
             if pair_selected {
                 anyhow::bail!(
@@ -947,6 +964,46 @@ mod sdk_sidecar_host_resolution_tests {
             msg.contains("mvmctl build sdk-sidecar build"),
             "the refusal must still name the build that satisfies it: {msg}"
         );
+    }
+
+    /// A source checkout whose `build sdk-sidecar build` adopted the pinned
+    /// set's sidecars (`MVM_FETCH_UNCHANGED_IMAGES`) attaches them from the
+    /// set's member cache, for either libc, without the network. Without that
+    /// install the refusal above stands.
+    #[test]
+    fn a_source_checkout_host_attaches_a_sidecar_adopted_from_the_pinned_set() {
+        let member_version = "0.0.1-member";
+        for libc in [
+            mvm_contract::guest_libc::GuestLibc::Glibc,
+            mvm_contract::guest_libc::GuestLibc::Musl,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let arch = GuestArch::host();
+            let cache = dir.path().join("cache");
+            let set = mvm_build::published_image_set::SetMemberCache::locked();
+            seed_sidecar_variant(&set.cache_root(&cache), member_version, arch, libc);
+            set.record(
+                &cache,
+                mvm_core::image_set::ImageSetRole::SdkSidecar(libc),
+                mvm_core::image_set::MemberTarget::Arch(arch),
+                &mvm_build::published_image_set::MemberVersion::parse(member_version).unwrap(),
+            )
+            .unwrap();
+
+            let mut env = mvm_core::util::test_env::TestEnv::new();
+            env.isolate_mvm_home(dir.path());
+            env.set(
+                crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+                "build",
+            );
+            env.set("MVM_UPDATE_DOWNLOAD_URL", UNREACHABLE_BASE_URL);
+
+            let attached =
+                resolve_sdk_sidecar_attachment_for_host(&[svc("host.kv.v1")], libc, None)
+                    .unwrap_or_else(|e| panic!("the adopted {libc} member must attach: {e:#}"))
+                    .expect("a bound SDK service must attach the sidecar");
+            assert_eq!(attached.version, member_version);
+        }
     }
 
     /// The download-mode refusal has to read like the cache-miss one it

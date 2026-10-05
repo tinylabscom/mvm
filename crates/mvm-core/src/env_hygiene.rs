@@ -24,8 +24,8 @@
 //!   `CDPATH`, `GLOBIGNORE`, `SHELLOPTS`, `PS4` — run code or change parsing in
 //!   every shell the process starts.
 //! - **interpreter**: `PYTHONSTARTUP`, `PYTHONPATH`, `PYTHONHOME`,
-//!   `NODE_OPTIONS`, `NODE_PATH`, `PERL5LIB`, `PERL5OPT`, `PERLLIB`, `RUBYOPT`,
-//!   `RUBYLIB`, `GEM_*`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
+//!   `NODE_OPTIONS`, `NODE_PATH`, `PERL5*`, `PERLLIB`, `RUBY*`,
+//!   `GEM_*`, `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`,
 //!   `JDK_JAVA_OPTIONS`, `DOTNET_STARTUP_HOOKS`, `GOFLAGS` — load code into, or
 //!   change the flags of, every interpreter or toolchain run.
 //! - **password-manager session**: `OP_SERVICE_ACCOUNT_TOKEN`, `OP_CONNECT_*`,
@@ -109,11 +109,9 @@ const DENYLIST: &[(Matcher, EnvFamily)] = &[
     (Matcher::Exact("PYTHONHOME"), EnvFamily::Interpreter),
     (Matcher::Exact("NODE_OPTIONS"), EnvFamily::Interpreter),
     (Matcher::Exact("NODE_PATH"), EnvFamily::Interpreter),
-    (Matcher::Exact("PERL5LIB"), EnvFamily::Interpreter),
-    (Matcher::Exact("PERL5OPT"), EnvFamily::Interpreter),
+    (Matcher::Prefix("PERL5"), EnvFamily::Interpreter),
     (Matcher::Exact("PERLLIB"), EnvFamily::Interpreter),
-    (Matcher::Exact("RUBYOPT"), EnvFamily::Interpreter),
-    (Matcher::Exact("RUBYLIB"), EnvFamily::Interpreter),
+    (Matcher::Prefix("RUBY"), EnvFamily::Interpreter),
     (Matcher::Prefix("GEM_"), EnvFamily::Interpreter),
     (Matcher::Exact("JAVA_TOOL_OPTIONS"), EnvFamily::Interpreter),
     (Matcher::Exact("_JAVA_OPTIONS"), EnvFamily::Interpreter),
@@ -453,9 +451,14 @@ mod tests {
             "NODE_PATH",
             "PERL5LIB",
             "PERL5OPT",
+            "PERL5DB",
+            "PERL5SHELL",
             "PERLLIB",
             "RUBYOPT",
             "RUBYLIB",
+            "RUBYSHELL",
+            "RUBYPATH",
+            "RUBY_VERSION",
             "GEM_HOME",
             "GEM_PATH",
             "JAVA_TOOL_OPTIONS",
@@ -493,7 +496,6 @@ mod tests {
             "BASH",
             "PYTHONUNBUFFERED",
             "NODE_ENV",
-            "RUBY_VERSION",
             "GEMFILE",
             "OP_ACCOUNT",
             "BW_CLIENTID",
@@ -538,6 +540,23 @@ mod tests {
     }
 
     #[test]
+    fn interpreter_family_readmission_stays_exact() {
+        let filter = EnvFilter::new(EnvReadmit::from_names(["PERL5DB"]).expect("valid"));
+        assert_eq!(
+            filter.verdict("PERL5DB"),
+            EnvVerdict::Readmitted(EnvFamily::Interpreter)
+        );
+        assert_eq!(
+            filter.verdict("PERL5SHELL"),
+            EnvVerdict::Denied(EnvFamily::Interpreter)
+        );
+        assert_eq!(
+            filter.verdict("RUBYSHELL"),
+            EnvVerdict::Denied(EnvFamily::Interpreter)
+        );
+    }
+
+    #[test]
     fn pattern_readmission_is_refused() {
         for name in [
             "LD_*",
@@ -562,6 +581,8 @@ mod tests {
             "DYLD_",
             "BASH_FUNC_",
             "GEM_",
+            "PERL5",
+            "RUBY",
             "OP_CONNECT_",
             "OP_SESSION_",
         ] {

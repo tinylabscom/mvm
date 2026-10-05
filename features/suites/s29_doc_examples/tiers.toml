@@ -145,6 +145,11 @@ tier = "parse"
 reason = "check queries live release state and update downloads a signed release before replacing the cache; focused tests cover comparison, verification, and fail-closed behavior"
 
 [[command]]
+path = "image dev ensure"
+tier = "parse"
+reason = "fetches the signed development image release and replaces the local cache; focused tests cover selection, verification, and fetch-when-unchanged behavior"
+
+[[command]]
 path = "init"
 tier = "exec"
 
@@ -619,9 +624,19 @@ path = "policy"
 tier = "exec"
 
 [[command]]
+path = "policy show"
+tier = "exec"
+fixture = "mcp-tool-policy"
+
+[[command]]
+path = "policy validate"
+tier = "exec"
+fixture = "mcp-tool-policy"
+
+[[command]]
 path = "pull"
 tier = "parse"
-reason = "fetches from a pack registry over the network and verification needs the manifest-verify build; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
+reason = "fetches from a pack registry over the network, so the outcome tracks the registry rather than mvm; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
 
 [[command]]
 path = "search"
@@ -657,6 +672,7 @@ reason = "a long-lived watcher: it never exits on its own"
 [[command]]
 path = "why"
 tier = "exec"
+fixture = "mcp-tool-policy"
 
 [[planned]]
 path = "manifest push"
