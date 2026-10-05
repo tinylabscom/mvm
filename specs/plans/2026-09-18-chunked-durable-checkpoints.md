@@ -271,12 +271,28 @@ than a C4 source failure.
 
 ### C5 — Garbage collection
 
-- [ ] C5.1 `mvmctl cache prune` removes pool objects with `st_nlink == 1` and
+- [x] C5.1 `mvmctl cache prune` removes pool objects with `st_nlink == 1` and
       abandoned staging, after the existing checkpoint sweep, so objects freed
       by that sweep are reclaimed in the same run.
-- [ ] C5.2 Test: after removing one of two checkpoints that share objects, the
+- [x] C5.2 Test: after removing one of two checkpoints that share objects, the
       other still verifies and the prune reclaims only the objects nothing
       else links.
+
+**C5 notes.** The prune is `checkpoint::prune_unreferenced_content`
+(`checkpoint/gc.rs`). Beyond the two items above it removes two more kinds of
+garbage. C4's restore cache keeps one full-size materialization per index
+digest, which nothing ever removed; the prune deletes an entry whose index no
+stored checkpoint names, under the per-blob lock restore takes, and skips a
+blob whose lock a restore holds. An object a capture died while writing (a
+`.object-*` temporary) is removed once it is an hour old.
+
+A capture can link an object the prune is reclaiming. When the prune unlinks
+first, the capture's link fails with `ENOENT`, and the capture writes the
+object again. A capture that has just written an object links it from its
+staged temporary name, which shares the inode, so the second attempt cannot
+lose the same race. `captures_racing_a_prune_always_link_a_verified_object`
+runs a sweep in a loop against 200 captures and fails on the previous linking
+code.
 
 ### C6 — Audit anchoring
 
