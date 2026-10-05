@@ -6,11 +6,11 @@
 //! agent doesn't reach these directly; every call routes through the
 //! supervisor so:
 //!
-//! 1. **Allowlist enforcement** — the plan's
-//!    `tool_policy: PolicyRef` gates which tools are reachable.
-//!    Handled by [`crate::supervisor::tool_gate::ToolGate`] *before* calling
-//!    [`ToolRegistry::invoke`]; this substrate trusts its caller did
-//!    that.
+//! 1. **Allowlist enforcement** — the signed plan's tool rules gate
+//!    which tools are reachable. The caller decides them through
+//!    [`crate::supervisor::tool_decision::ToolDecisionGate`] *before*
+//!    calling [`ToolRegistry::invoke`]; this substrate trusts its caller
+//!    did that.
 //! 2. **Audit emission** — every successful or failed invoke fires
 //!    a chain-signed entry through the
 //!    `Recorder` under `EventCategory::Cmd` with
@@ -24,9 +24,8 @@
 //!
 //! ## What this module is NOT
 //!
-//! - Not a tool gate. [`crate::supervisor::tool_gate::ToolGate`] +
-//!   [`crate::supervisor::policy_tool_gate::PolicyToolGate`] decide
-//!   allow/deny; this module decides "given allow, what happens".
+//! - Not a tool gate. [`crate::supervisor::tool_decision::ToolDecisionGate`]
+//!   decides allow/deny; this module decides "given allow, what happens".
 //! - Not a transport. The agent vsock RPC is the consumer; it calls
 //!   [`ToolRegistry::invoke`] after the gate clears.
 //! - Not a place for per-tenant state. Tools are stateless from the
@@ -197,12 +196,11 @@ impl ToolRegistry {
     /// a `cmd.tool.<name>.<phase>` audit entry through the wired
     /// Recorder.
     ///
-    /// **Allowlist note**: This method does NOT consult any
-    /// `ToolPolicy`. The caller (the agent vsock handler) MUST have
-    /// already called
-    /// [`crate::supervisor::tool_gate::ToolGate::check`] and seen
-    /// `ToolDecision::Allow`. Skipping that step is a security bug
-    /// — the registry trusts its caller to gate access.
+    /// **Allowlist note**: This method does NOT consult the tool rules.
+    /// The caller MUST have already asked
+    /// [`crate::supervisor::tool_decision::ToolDecisionGate::decide`] and
+    /// been allowed. Skipping that step is a security bug — the registry
+    /// trusts its caller to gate access.
     pub async fn invoke(
         &self,
         name: &str,
