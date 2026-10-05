@@ -113,9 +113,17 @@ const fn kernel(name: &'static str, role: &'static str) -> OutputFile {
     }
 }
 
+/// Every file the builder-VM cache install reads
+/// ([`crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS`]) has to be listed
+/// here. A file the build script does not copy out is a file the set does not
+/// carry, and the install refuses the entry only after the build has run.
 const BUILDER_VM: TargetContract = TargetContract {
     files: &[
         kernel("vmlinux", "builder_vm"),
+        // The resolved configuration of that kernel. Boot refuses a builder
+        // cache without it: it is the evidence the kernel has no network
+        // devices.
+        file("kernel.config", "builder_vm", "text"),
         file("rootfs.ext4", "builder_vm", "ext4"),
         file("cmdline.txt", "builder_vm", "text"),
         file("manifest.json", "builder_vm", "json"),
@@ -1046,6 +1054,31 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The builder-vm set is installed into the builder-VM cache, which
+    /// requires every name in `BUILDER_VM_CACHE_ARTIFACTS`. A name the
+    /// contract leaves out is never copied out of the build, so the install
+    /// fails after a full builder-image build.
+    #[test]
+    fn the_builder_vm_contract_carries_every_file_the_cache_install_reads() {
+        let contract = contract_for(&target(ImageBuildRole::BuilderVm, "default")).unwrap();
+        for name in crate::cache_install::BUILDER_VM_CACHE_ARTIFACTS {
+            let carried = contract
+                .files
+                .iter()
+                .any(|file| file.name == *name && file.role == "builder_vm");
+            assert!(carried, "the builder-vm contract does not produce {name}");
+        }
+        let script = render_build_script(
+            &target(ImageBuildRole::BuilderVm, "default"),
+            GuestArch::X86_64,
+            contract,
+        );
+        assert!(
+            script.contains("'kernel.config'"),
+            "the build script copies the kernel config out of the Nix output:\n{script}"
+        );
     }
 
     #[test]

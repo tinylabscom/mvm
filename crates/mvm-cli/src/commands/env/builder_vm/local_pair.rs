@@ -506,6 +506,14 @@ mod tests {
             pair.mvm.parent().expect("tmp").join("cache"),
         );
         let contract = mvm_build::image_source::contract_for(&target).expect("builder-vm contract");
+        // The fixture stands in for a real build's output, so it may carry
+        // only what the contract makes a real build copy out. A fixture with
+        // an extra file would let the install pass here and fail on a real set.
+        let mut fixture_names: Vec<&str> = builder_vm_files().iter().map(|f| f.name).collect();
+        let mut contract_names: Vec<&str> = contract.files.iter().map(|f| f.name).collect();
+        fixture_names.sort_unstable();
+        contract_names.sort_unstable();
+        assert_eq!(fixture_names, contract_names);
         let ctx = mvm_build::image_source::EntryContext {
             images: &pair.images,
             mvm_checkout: &pair.mvm,
