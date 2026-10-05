@@ -36,6 +36,8 @@ mod install;
 mod push;
 mod registry;
 
+pub(in crate::commands) use install::settle_manifest_archive;
+
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
     #[command(subcommand)]

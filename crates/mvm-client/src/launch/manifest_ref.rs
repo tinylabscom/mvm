@@ -33,6 +33,23 @@ pub enum ManifestArgRef {
     },
 }
 
+/// File extension of a signed bundle archive.
+pub const BUNDLE_ARCHIVE_EXTENSION: &str = "mvmpkg";
+
+/// Whether `path` names a signed `.mvmpkg` bundle archive rather than a
+/// manifest file or directory.
+///
+/// The extension decides, and a directory is never an archive — so a project
+/// directory that happens to end in `.mvmpkg` still resolves as a manifest
+/// directory. The path need not exist: a missing archive is reported by
+/// whoever goes on to read it, naming the archive rather than an absent
+/// `mvm.toml`.
+pub fn is_bundle_archive(path: &std::path::Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext == BUNDLE_ARCHIVE_EXTENSION)
+        && !path.is_dir()
+}
+
 /// Resolve a `--manifest` argument to the manifest it names.
 ///
 /// User-supplied arguments are paths — a manifest file or the directory
@@ -41,8 +58,21 @@ pub enum ManifestArgRef {
 /// that internal shape resolves directly against the slot registry. Every
 /// other non-existent bare argument remains a missing-path error: name-keyed
 /// template slots are gone.
+///
+/// A `.mvmpkg` archive is refused here. Booting one means verifying it against
+/// the trust store and installing it into the bundle registry first, a side
+/// effect a resolver must not take on its own; the caller installs it and
+/// passes the bundle's sha256 instead.
 pub fn resolve_manifest_arg(arg: &str) -> Result<ManifestArgRef> {
     use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
+
+    if is_bundle_archive(std::path::Path::new(arg)) {
+        anyhow::bail!(
+            "{arg} is a signed bundle archive, not a manifest: install it with \
+             `mvmctl bundle install {arg}` and pass the bundle sha256 it prints, \
+             or give it to `mvmctl machine run --manifest`, which does both"
+        );
+    }
 
     // `<template>@<alias>` form. Aliases live in the
     // template-tags catalog; we resolve them up front so a typo
@@ -238,6 +268,44 @@ mod tests {
         let resolved = resolve_manifest_arg(&bundle_sha).expect("installed bundle must resolve");
 
         assert!(matches!(resolved, ManifestArgRef::Slot { slot_hash } if slot_hash == bundle_sha));
+    }
+
+    #[test]
+    fn a_bundle_archive_is_told_apart_from_a_manifest_and_a_hash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let archive = tmp.path().join("app.mvmpkg");
+        std::fs::write(&archive, b"archive").expect("write archive");
+        let project = tmp.path().join("project.mvmpkg");
+        std::fs::create_dir(&project).expect("create project dir");
+
+        assert!(is_bundle_archive(&archive));
+        assert!(
+            is_bundle_archive(&tmp.path().join("missing.mvmpkg")),
+            "a missing archive is still an archive, so its read names it"
+        );
+        assert!(
+            !is_bundle_archive(&project),
+            "a directory is a manifest directory whatever its name"
+        );
+        assert!(!is_bundle_archive(&tmp.path().join("mvm.toml")));
+        assert!(!is_bundle_archive(std::path::Path::new(&"e".repeat(64))));
+        assert!(!is_bundle_archive(&tmp.path().join("app.mvm")));
+    }
+
+    #[test]
+    fn a_bundle_archive_is_refused_rather_than_parsed_as_a_manifest() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let archive = tmp.path().join("app.mvmpkg");
+        std::fs::write(&archive, b"archive").expect("write archive");
+        let arg = archive.display().to_string();
+
+        let err = resolve_manifest_arg(&arg).expect_err("an archive is not a manifest");
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("signed bundle archive") && message.contains("bundle install"),
+            "the refusal must name the archive and the install step: {message}"
+        );
     }
 
     #[test]
