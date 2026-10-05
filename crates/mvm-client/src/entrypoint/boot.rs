@@ -82,6 +82,13 @@ pub struct AdmitInputs<'a> {
     /// mount reaches the guest under a plan that never admitted it, and the
     /// admitted-share check has nothing to compare it against.
     pub volumes: &'a [mvm_core::vm_backend::VmVolume],
+    /// The cached archive of the installed bundle `rootfs` and `kernel` were
+    /// resolved from, or `None` when they did not come from one.
+    ///
+    /// Admission pins it into the signed plan and refuses the boot when the
+    /// archive, or the extracted files beside it, no longer match what the
+    /// publisher signed.
+    pub bundle_archive: Option<&'a std::path::Path>,
 }
 
 /// Identity policy for a session-style VM boot.
@@ -217,6 +224,7 @@ pub fn boot_session_vm(
     let (spec, vmlinux, initrd, rootfs, rev) =
         mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot)
             .with_context(|| format!("Loading template '{slot}'"))?;
+    let bundle_archive = mvm_runtime::vm::template::lifecycle::installed_bundle_archive(slot)?;
     let backend = resolve_backend(backend_name)?;
     let vm_name = vm_name.resolve();
     let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
@@ -267,6 +275,7 @@ pub fn boot_session_vm(
         // no standalone assets.
         assets: &[],
         volumes: &start_config.volumes,
+        bundle_archive: bundle_archive.as_deref(),
     })?
     .context("refusing to boot an entrypoint VM without an admitted plan")?;
     start_config.tenant_id = Some(substrate.tenant_id);
