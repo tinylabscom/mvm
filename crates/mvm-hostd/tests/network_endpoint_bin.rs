@@ -1366,5 +1366,9 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
     assert!(audit.contains(&target), "{audit}");
     assert!(audit.contains("\"scope\":\"route\""), "{audit}");
     assert!(audit.contains("\"scope\":\"secret\""), "{audit}");
-    assert!(audit.contains(binding.as_str()), "{audit}");
+    assert!(audit.contains(&binding.audit_id()), "{audit}");
+    assert!(
+        !audit.contains(binding.as_str()),
+        "the chain must not carry a usable binding"
+    );
 }

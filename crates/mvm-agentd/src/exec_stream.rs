@@ -272,13 +272,14 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
             crate::tool_attribution::spawn_attributed(&mut builder, binding)
                 .map(|(child, registration)| (child, Some(registration)))
         }
-        // No egress client runs off Linux, so there is nothing to attribute.
+        // Attribution and the tool group exist only in a Linux guest. Running
+        // a bound command anywhere else would run it without either, so it
+        // is refused.
         #[cfg(not(any(target_os = "linux", test)))]
-        Leader::AttributedSession(_binding) => {
-            #[cfg(unix)]
-            builder.process_group(0);
-            builder.spawn().map(|child| (child, None::<()>))
-        }
+        Leader::AttributedSession(_binding) => Err::<(Child, Option<()>), _>(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "a bound tool invocation runs only in a Linux guest",
+        )),
     };
     let (mut child, _registration) = match spawned {
         Ok(spawned) => spawned,

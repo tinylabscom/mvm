@@ -186,7 +186,7 @@ impl ToolDecisionGate {
             ("reason".to_string(), reason.to_string()),
         ];
         if let Some(binding) = binding {
-            labels.push(("binding".to_string(), binding.to_string()));
+            labels.push(("binding_id".to_string(), binding.audit_id()));
         }
         self.recorder
             .record_unbound(EventCategory::Host, "host.tool.decision", labels)
@@ -310,7 +310,11 @@ mod tests {
         };
         assert_eq!(gate.tool_for(&binding).as_deref(), Some("gh"));
         let recorded = serde_json::to_string(&signer.entries()).expect("entries");
-        assert!(recorded.contains(binding.as_str()), "{recorded}");
+        assert!(recorded.contains(&binding.audit_id()), "{recorded}");
+        assert!(
+            !recorded.contains(binding.as_str()),
+            "the audit log must not carry a usable binding: {recorded}"
+        );
         gate.release(&binding);
         assert_eq!(gate.tool_for(&binding), None);
     }

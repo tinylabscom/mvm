@@ -2,10 +2,11 @@
 //!
 //! When the host admits a declared command whose tool owns routes or secrets,
 //! its decision carries a binding. The agent starts that command as the leader
-//! of a new session and records the session under the binding for as long as
-//! the leader runs. A process outside the session cannot join it — `setsid`
-//! only ever creates a session, and `setpgid` cannot cross one — and the
-//! session id cannot be reused while any member is alive.
+//! of a new session, in [`crate::guest_mount::TOOL_GID`], and records the
+//! session under the binding for as long as the leader runs. A process outside
+//! the session cannot join it — `setsid` only ever creates a session, and
+//! `setpgid` cannot cross one — and the session id cannot be reused while any
+//! member is alive.
 //!
 //! The egress client asks, for each loopback connection it accepts, which
 //! binding the connection belongs to. The agent finds the client socket in
@@ -16,12 +17,39 @@
 //! that has exited — answers no binding, and the endpoint treats the flow as
 //! belonging to no tool.
 //!
+//! What this holds against a workload process outside the session, which
+//! runs as the same uid:
+//!
+//! - It cannot open a connection that is attributed: the holders of its
+//!   socket are not in the session.
+//! - It cannot take over a session member. The tool group differs from the
+//!   workload's, and the kernel's ptrace access check compares gids, so
+//!   `ptrace`, `process_vm_readv`/`process_vm_writev`, `/proc/<pid>/mem` and
+//!   `pidfd_getfd` against a member are refused. Seccomp is not what refuses
+//!   them: the agent applies no filter to the processes it spawns, and
+//!   `/proc/<pid>/mem` is not a syscall a filter could name. Yama is not in
+//!   the guest kernel.
+//!
+//! What it does not hold, because the tool still shares the workload's uid:
+//!
+//! - Files. The tool reads the workload's home, working directory and any
+//!   workload-writable path, so a tool whose binary, libraries or
+//!   configuration live somewhere the workload can write runs what the
+//!   workload put there, with the tool's routes and secrets. A tool must be a
+//!   program from the read-only image whose behaviour such files cannot
+//!   redirect.
+//! - Signals. The workload can stop or kill a tool invocation.
+//!
+//! A separate tool uid would close both, and is not done.
+//!
 //! The question travels over an abstract-namespace socket the agent binds as
 //! PID 1 before any workload runs. The egress client accepts an answer only
 //! from a listener PID 1 created, and the agent answers only uid 0, which is
 //! what the egress client runs as on this boot path. A guest booted by another
 //! init has no such listener, so its flows are never attributed and tool
-//! routes and secrets stay refused.
+//! routes and secrets stay refused. The agent answers one question at a time,
+//! with a two-second deadline on each side, so a flood of proxy connections
+//! can delay attribution; a delayed answer is no answer, which refuses.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -73,19 +101,32 @@ impl Drop for Registration {
 /// The registry stays locked across the spawn, so a question about a
 /// connection the new command makes waits until its session is recorded
 /// rather than racing it.
+///
+/// The command runs in [`crate::guest_mount::TOOL_GID`], which the agent holds
+/// as its saved gid. An agent that does not hold it cannot start the command,
+/// so a bound invocation never runs where the workload could reach into it.
 pub fn spawn_attributed(
     command: &mut Command,
     binding: &ToolInvocationBinding,
 ) -> io::Result<(Child, Registration)> {
+    spawn_attributed_in_group(command, binding, crate::guest_mount::TOOL_GID)
+}
+
+fn spawn_attributed_in_group(
+    command: &mut Command,
+    binding: &ToolInvocationBinding,
+    gid: u32,
+) -> io::Result<(Child, Registration)> {
     use std::os::unix::process::CommandExt;
     // SAFETY: the hook runs in the forked child before exec and calls only
-    // `setsid`, which is async-signal-safe and allocates nothing.
+    // `setsid` and a gid change, which are async-signal-safe and allocate
+    // nothing.
     unsafe {
-        command.pre_exec(|| {
+        command.pre_exec(move || {
             if libc::setsid() < 0 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(())
+            assume_group(gid)
         });
     }
     let mut live = live();
@@ -104,6 +145,28 @@ pub fn spawn_attributed(
         }
     }
     Ok((child, Registration { session }))
+}
+
+/// Make `gid` the real, effective and saved group id. Unprivileged, this
+/// succeeds only for a gid the process already holds in one of the three.
+#[cfg(target_os = "linux")]
+fn assume_group(gid: u32) -> io::Result<()> {
+    // SAFETY: plain id values; no pointer contract.
+    if unsafe { libc::setresgid(gid, gid, gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Host test builds have no `setresgid`; `setgid` is the same check for a
+/// process that is not root.
+#[cfg(not(target_os = "linux"))]
+fn assume_group(gid: u32) -> io::Result<()> {
+    // SAFETY: a plain id value; no pointer contract.
+    if unsafe { libc::setgid(gid) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// The leader's start time, read from `/proc`. A host test build has no
@@ -267,20 +330,47 @@ impl ProcSource for Procfs {
     }
 
     fn fd_targets(&self, pid: u32) -> Vec<String> {
-        std::fs::read_dir(format!("/proc/{pid}/fd"))
-            .map(|entries| {
-                entries
-                    .filter_map(Result::ok)
-                    .filter_map(|entry| std::fs::read_link(entry.path()).ok())
-                    .filter_map(|target| target.to_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
+        // A tool invocation's descriptors are readable only with the tool
+        // group's credentials; a workload process's only without them. The
+        // agent holds the tool group as its saved gid, so this thread takes it
+        // as its filesystem gid for the second look and gives it back.
+        let found = read_fd_targets(pid);
+        if !found.is_empty() {
+            return found;
+        }
+        with_filesystem_gid(crate::guest_mount::TOOL_GID, || read_fd_targets(pid))
     }
 
     fn stat(&self, pid: u32) -> Option<String> {
         std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
     }
+}
+
+/// Every `/proc/<pid>/fd/*` link target this thread may read.
+#[cfg(target_os = "linux")]
+fn read_fd_targets(pid: u32) -> Vec<String> {
+    std::fs::read_dir(format!("/proc/{pid}/fd"))
+        .map(|entries| {
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .filter_map(|target| target.to_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Run `read` with `gid` as this thread's filesystem gid, then restore it.
+/// The filesystem gid is per thread, and the attribution listener answers on
+/// a thread of its own.
+#[cfg(target_os = "linux")]
+fn with_filesystem_gid<T>(gid: u32, read: impl FnOnce() -> T) -> T {
+    // SAFETY: plain id values; `setfsgid` returns the previous value.
+    let previous = unsafe { libc::setfsgid(gid) };
+    let result = read();
+    // SAFETY: as above, restoring the value just returned.
+    unsafe { libc::setfsgid(previous as libc::gid_t) };
+    result
 }
 
 /// One question from the egress client: the accepted connection's ends.
@@ -593,11 +683,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn an_agent_without_the_tool_group_cannot_start_a_bound_command() {
+        // SAFETY: getuid and getegid have no precondition.
+        let (uid, egid) = unsafe { (libc::getuid(), libc::getegid()) };
+        if uid == 0 || egid == crate::guest_mount::TOOL_GID {
+            return;
+        }
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        let refused = ToolInvocationBinding::from_random([0x77; 16]);
+        assert!(spawn_attributed(&mut command, &refused).is_err());
+        assert!(live().iter().all(|entry| entry.binding != refused));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn an_attributed_command_leads_its_own_session_until_it_is_waited_for() {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", "exit 0"]);
+        // SAFETY: getegid has no precondition.
+        let own_group = unsafe { libc::getegid() };
         let (mut child, registration) =
-            spawn_attributed(&mut command, &binding()).expect("spawn attributed");
+            spawn_attributed_in_group(&mut command, &binding(), own_group)
+                .expect("spawn attributed");
         let pid = child.id();
         assert!(
             live()

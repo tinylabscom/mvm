@@ -1153,10 +1153,14 @@ mod tests {
                     [3; 16],
                 ),
         };
-        for (reply, should_spawn) in [
-            (ToolCheckReply::Deny, false),
-            (ToolCheckReply::Allow, true),
-            (bound, true),
+        // A bound command runs only in a Linux guest and only in the tool
+        // group, which the dropped agent holds; this test process has
+        // neither, so the spawn must be refused rather than run the command
+        // where the workload could reach it.
+        for (reply, outcome) in [
+            (ToolCheckReply::Deny, Outcome::Denied),
+            (ToolCheckReply::Allow, Outcome::Spawned),
+            (bound, Outcome::SpawnRefused),
         ] {
             let dir = tempfile::tempdir().expect("temporary directory");
             let marker = dir.path().join("spawned");
@@ -1224,18 +1228,47 @@ mod tests {
             assert!(!marker.exists(), "command spawned before the decision");
             session.write(&mut host, &reply).expect("tool decision");
             let answer: GuestResponse = session.read(&mut host).expect("command answer");
-            if should_spawn {
-                assert!(matches!(
-                    answer,
-                    GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Exit { code: 0 })
-                ));
-                assert!(marker.exists(), "allowed command did not spawn");
-            } else {
-                assert!(matches!(answer, GuestResponse::Error { .. }));
-                assert!(!marker.exists(), "denied command spawned");
+            match outcome {
+                Outcome::Spawned => {
+                    assert!(matches!(
+                        answer,
+                        GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Exit { code: 0 })
+                    ));
+                    assert!(marker.exists(), "allowed command did not spawn");
+                }
+                Outcome::Denied => {
+                    assert!(matches!(answer, GuestResponse::Error { .. }));
+                    assert!(!marker.exists(), "denied command spawned");
+                }
+                Outcome::SpawnRefused => {
+                    let mut answer = answer;
+                    while matches!(
+                        answer,
+                        GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Stderr { .. })
+                    ) {
+                        answer = session.read(&mut host).expect("command answer");
+                    }
+                    assert!(
+                        matches!(
+                            answer,
+                            GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Exit {
+                                code: -1
+                            })
+                        ),
+                        "{answer:?}"
+                    );
+                    assert!(!marker.exists(), "bound command ran outside the tool group");
+                }
             }
             handle.join().expect("guest handler");
         }
+    }
+
+    /// What a mediated command's decision should lead to.
+    enum Outcome {
+        Spawned,
+        Denied,
+        SpawnRefused,
     }
 
     /// A control connection without the pinned host identity must fail during

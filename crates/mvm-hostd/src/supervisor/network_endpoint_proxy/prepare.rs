@@ -336,6 +336,9 @@ impl SubstitutionService {
         wire: WireRequest,
         attribution: &super::tool_scope::FlowAttribution,
     ) -> Result<PreparedFlow, WireResponse> {
+        // Re-resolved per request: a keep-alive flow outlives the invocation
+        // it was opened for, and a released binding attributes nothing.
+        let attribution = &self.attribute(attribution.binding().cloned());
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {

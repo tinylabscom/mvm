@@ -14,6 +14,7 @@ pub mod registry;
 mod resources;
 mod socket;
 mod tcp_relay;
+mod tool_binding;
 use socket::FlowSocket;
 mod udp_relay;
 mod wire;
@@ -148,6 +149,11 @@ pub struct FlowMuxSession {
     /// client that reconnects per request does not pay for a leaf each time.
     /// Shared per VM for the same reason the budget is.
     leaves: Arc<terminator::flow::LeafCache>,
+    /// TCP streams opened under a tool invocation's binding, with the target
+    /// they were opened to. When the binding is released the stream is torn
+    /// down at the guest's next frame for it, so a connection does not outlive
+    /// the invocation that was allowed to open it.
+    bound_streams: BTreeMap<u32, tool_binding::BoundStream>,
 }
 
 impl std::fmt::Debug for FlowMuxSession {
@@ -401,6 +407,7 @@ impl FlowMuxSession {
             rate_limiter: Arc::clone(&resources.rate_limiter),
             terminated_flows: Arc::clone(&resources.terminated_flows),
             leaves: Arc::clone(&resources.leaves),
+            bound_streams: BTreeMap::new(),
         })
     }
 
@@ -867,6 +874,11 @@ impl FlowMuxSession {
             }
 
             match self.gate.decide_udp_request(&target) {
+                EgressVerdict::Allow { .. } if self.udp_reaches_tool_route(ip, port) => {
+                    warn!(stream_id, %target, "FlowMux UDP datagram to a tool route refused");
+                    self.deny_udp_datagram(stream_id, ip, port, "tool_route_scope");
+                    return Ok(());
+                }
                 EgressVerdict::Allow { .. } => {}
                 EgressVerdict::Deny(reason) => {
                     warn!(stream_id, %target, %reason, "FlowMux UDP datagram denied");
@@ -955,6 +967,9 @@ impl FlowMuxSession {
     }
 
     fn handle_guest_data(&mut self, stream_id: u32, payload_len: u32) -> Result<(), FlowMuxError> {
+        if self.end_released_binding(stream_id)? {
+            return Ok(());
+        }
         let payload = self.frame_payload(payload_len).to_vec();
 
         let mut streams = lock_tcp_streams(&self.streams);
@@ -1006,6 +1021,9 @@ impl FlowMuxSession {
     }
 
     fn handle_guest_half_close(&mut self, stream_id: u32) -> Result<(), FlowMuxError> {
+        if self.end_released_binding(stream_id)? {
+            return Ok(());
+        }
         let mut streams = lock_tcp_streams(&self.streams);
         let Some(handle) = streams.get_mut(&stream_id) else {
             drop(streams);
@@ -1180,6 +1198,9 @@ impl FlowMuxSession {
                 "WindowUpdate payload must be 4 bytes".to_string(),
             ));
         }
+        if self.end_released_binding(stream_id)? {
+            return Ok(());
+        }
         let payload = self.frame_payload(payload_len);
         let delta = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
         lock_registry(&self.registry)
@@ -1228,6 +1249,7 @@ impl FlowMuxSession {
     /// and the relay checks the same flag under the session lock before each
     /// frame it sends (see [`wire::write_stream_frame_to`]).
     fn reset_host_stream(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
+        self.bound_streams.remove(&stream_id);
         let handle = lock_tcp_streams(&self.streams).remove(&stream_id);
         let _ = lock_registry(&self.registry).retire(stream_id);
         let Some(handle) = handle else {
@@ -1257,6 +1279,7 @@ impl FlowMuxSession {
     }
 
     fn remove_stream(&mut self, stream_id: u32) {
+        self.bound_streams.remove(&stream_id);
         if let Some(handle) = lock_tcp_streams(&self.streams).remove(&stream_id) {
             handle.retired.store(true, Ordering::Relaxed);
             let _ = handle.upstream.shutdown(std::net::Shutdown::Both);
@@ -2433,6 +2456,98 @@ mod tests {
         let audit = serde_json::to_string(&entries).expect("serialize audit");
         assert!(!audit.contains("read data"));
         assert!(!audit.contains("write data"));
+    }
+
+    /// A stream opened under an invocation's binding ends when the binding is
+    /// released, and a datagram to a tool's route is refused because no
+    /// datagram is ever one invocation's.
+    #[test]
+    fn a_released_binding_ends_its_streams_and_datagrams_never_use_a_tool_route() {
+        use crate::supervisor::audit::CapturingAuditSigner;
+        use crate::supervisor::network_endpoint_proxy::test_support::service_with_tool_gate;
+        use crate::supervisor::runtime_approval::NoApprovalBackend;
+        use crate::supervisor::tool_decision::{InvocationVerdict, ToolDecisionGate};
+        use mvm_contract::policy::tool_rules::{ToolRuleDetail, ToolRules};
+        use mvm_contract::protocol::network_flow::attribution::encode_open_tcp;
+        use mvm_core::plan::TenantId;
+
+        let echo = tcp_echo_server();
+        let target = format!("{}:{}", echo.ip(), echo.port());
+        let mut rules = ToolRules {
+            allow: vec!["fetch".into()],
+            ..ToolRules::default()
+        };
+        rules.detail.insert(
+            "fetch".into(),
+            ToolRuleDetail {
+                routes: vec![target.clone()],
+                ..Default::default()
+            },
+        );
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(signer.clone(), TenantId("local".into())));
+        let tool_gate = Arc::new(ToolDecisionGate::new(
+            rules,
+            Arc::new(NoApprovalBackend),
+            Arc::clone(&recorder),
+        ));
+        let binding = match tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(tool_gate.decide_invocation("fetch", "fetch it"))
+            .expect("audited decision")
+        {
+            InvocationVerdict::Allow {
+                binding: Some(binding),
+            } => binding,
+            other => panic!("expected a bound allow, got {other:?}"),
+        };
+        let (service, _dir) = service_with_tool_gate(Arc::clone(&tool_gate));
+        let gate = gate_allowing_addr(echo.ip(), echo.port(), Some(echo.port()));
+        let session_recorder = Arc::clone(&recorder);
+        let (mut guest, mut session, host) =
+            run_session_on_runtime(move |id, key, anchor, limits| {
+                FlowMuxAccept::new(id, key, anchor, limits, gate)
+                    .with_recorder(Some(session_recorder))
+                    .with_substitution(Some(service))
+            });
+
+        let bound = encode_open_tcp(&target, Some(&binding));
+        write_frame(&mut guest, &mut session, Opcode::OpenTcp, 1, &bound);
+        let (opcode, _, reason) = read_flowmux_frame(&mut guest, &mut session);
+        assert_eq!(
+            opcode,
+            Opcode::Opened,
+            "{}",
+            String::from_utf8_lossy(&reason)
+        );
+        // Credit grants may arrive between the frames a test cares about.
+        let next_frame = |guest: &mut UnixStream, session: &mut Session| loop {
+            let frame = read_flowmux_frame(guest, session);
+            if frame.0 != Opcode::WindowUpdate {
+                return frame;
+            }
+        };
+        write_frame(&mut guest, &mut session, Opcode::Data, 1, b"ping");
+        let (opcode, _, echoed) = next_frame(&mut guest, &mut session);
+        assert_eq!((opcode, echoed.as_slice()), (Opcode::Data, &b"ping"[..]));
+
+        tool_gate.release(&binding);
+        write_frame(&mut guest, &mut session, Opcode::Data, 1, b"after");
+        let (opcode, stream_id, _) = next_frame(&mut guest, &mut session);
+        assert_eq!((opcode, stream_id), (Opcode::Reset, 1));
+
+        write_frame(&mut guest, &mut session, Opcode::OpenUdp, 3, b"");
+        let (opcode, _, _) = next_frame(&mut guest, &mut session);
+        assert_eq!(opcode, Opcode::UdpOpened);
+        let mut datagram = encode_udp_addr(echo.ip(), echo.port());
+        datagram.extend_from_slice(b"hello");
+        write_frame(&mut guest, &mut session, Opcode::UdpSend, 3, &datagram);
+
+        drop(guest);
+        host.join().expect("host thread").expect("session");
+        let audit = serde_json::to_string(&signer.entries()).expect("entries");
+        assert!(audit.contains("tool_binding_released"), "{audit}");
+        assert!(audit.contains("tool_route_scope"), "{audit}");
     }
 
     #[test]

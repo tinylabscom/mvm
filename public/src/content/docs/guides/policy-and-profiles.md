@@ -416,8 +416,16 @@ missing one.
   in a tool's `secrets` is substituted only for that tool's invocations, and an
   invocation of a tool that declares secrets uses only those. The network
   policy must still admit each route. Every refusal is recorded as
-  `host.tool.scope_refused` with the route or secret and the rule. The binding
-  is released when the command exits.
+  `host.tool.scope_refused` with the route or secret and the rule; the audit
+  log carries a one-way identifier for the binding, never the binding. The
+  binding is released when the command exits, and the endpoint then ends any
+  connection still open under it. A UDP datagram is never an invocation's, so
+  one addressed to a tool's route is refused. DNS lookups of a tool's route
+  host are answered as usual: a name is not a connection, and the address it
+  returns is still a tool route when dialled.
+- A bound command runs in a group of its own while sharing the workload's
+  uid. The kernel's ptrace check compares groups, so a workload process cannot
+  attach to it, read or write its memory, or take its descriptors.
 - Named machines (`machine create --policy`, `machine run -d --policy`) record
   `[tools]`, routes and secrets included, in their spec and re-admit it on
   every start.
@@ -425,14 +433,20 @@ missing one.
 ## Not yet
 
 - A process the workload starts itself is not mediated: there are no
-  in-guest command shims, and a declared tool runs under the same uid as the
-  rest of the workload. A tool's routes and secrets are therefore withheld from
-  everything but a declared `machine exec --tool` invocation; a workload that
-  runs the same binary on its own gets neither. The same uid also means a
-  workload process able to trace a running tool invocation can act inside it.
-  Attribution needs the agent to be the guest's init (PID 1); a guest booted
+  in-guest command shims. A tool's routes and secrets are therefore withheld
+  from everything but a declared `machine exec --tool` invocation; a workload
+  that runs the same binary on its own gets neither.
+- A declared tool still runs under the workload's uid, so it shares the
+  workload's files and the workload can signal it. A tool whose binary,
+  libraries or configuration live anywhere the workload can write — its home,
+  its working directory, a writable path — runs what the workload put there,
+  with the tool's routes and secrets. Declare only tools from the read-only
+  image whose behaviour such files cannot redirect. A separate tool uid would
+  close this and is not built.
+- Attribution needs the agent to be the guest's init (PID 1); a guest booted
   by another init attributes nothing, so its tool routes and secrets stay
-  refused.
+  refused. The agent answers attribution questions one at a time, so a flood
+  of proxy connections can delay a tool's own; a late answer refuses.
 - Pack profiles require an installed, pinned, publisher-verified signed pack;
   use `mvmctl pull namespace/name` before selecting one.
 - Endpoint routes from a policy are refused on a persistent machine

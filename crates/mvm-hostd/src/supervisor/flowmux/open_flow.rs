@@ -238,6 +238,7 @@ impl FlowMuxSession {
 
         self.send_opened(stream_id)?;
         self.spawn_tcp_relay(stream_id, FlowSocket::from(upstream))?;
+        self.track_bound_stream(stream_id, flow);
         self.emit_audit(
             EventCategory::Host,
             "host.flow.allowed",
@@ -331,6 +332,7 @@ impl FlowMuxSession {
 
         self.send_opened(stream_id)?;
         self.spawn_tcp_relay(stream_id, FlowSocket::from(endpoint_side))?;
+        self.track_bound_stream(stream_id, flow);
         self.emit_audit(
             EventCategory::Host,
             "host.flow.allowed",
@@ -364,6 +366,20 @@ impl FlowMuxSession {
             };
         };
         runtime.block_on(service.enforce_tool_route(&flow.host, flow.port, &flow.attribution))
+    }
+
+    /// Remember a stream opened under an invocation's binding, so it ends
+    /// when the binding is released.
+    fn track_bound_stream(&mut self, stream_id: u32, flow: &AdmittedFlow) {
+        if let Some(binding) = flow.attribution.binding() {
+            self.bound_streams.insert(
+                stream_id,
+                super::tool_binding::BoundStream {
+                    binding: binding.clone(),
+                    target: flow.target.clone(),
+                },
+            );
+        }
     }
 
     /// Take a registry slot for an admitted flow. `Ok(false)` means the guest

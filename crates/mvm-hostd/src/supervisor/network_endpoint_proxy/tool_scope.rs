@@ -95,6 +95,38 @@ impl SubstitutionService {
             .is_some_and(|gate| gate.rules().declared_routes().next().is_some())
     }
 
+    /// How the declared tool routes bear on a flow to `host:port`, without
+    /// recording anything.
+    pub(crate) async fn tool_route_scope(
+        &self,
+        host: &str,
+        port: u16,
+        attribution: &FlowAttribution,
+    ) -> RouteScope {
+        let Some(gate) = self
+            .tool_gate
+            .as_ref()
+            .filter(|_| self.declares_tool_routes())
+        else {
+            return RouteScope::Unscoped;
+        };
+        let egress_gate = std::sync::Arc::clone(&self.egress_gate);
+        let rules = gate.rules().clone();
+        let lookup_host = host.to_string();
+        let Ok(hosts) = tokio::task::spawn_blocking(move || {
+            route_hosts(&egress_gate, &rules, &lookup_host, port)
+        })
+        .await
+        else {
+            return RouteScope::Refused {
+                route: None,
+                reason: "the tool route decision could not be run",
+            };
+        };
+        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
+        gate.rules().route_scope(attribution.tool(), &hosts, port)
+    }
+
     /// Refuse a flow to `host:port` the tool rules reserve for another tool,
     /// or that the flow's own tool does not declare.
     pub(crate) async fn enforce_tool_route(
@@ -103,30 +135,14 @@ impl SubstitutionService {
         port: u16,
         attribution: &FlowAttribution,
     ) -> Result<(), &'static str> {
-        let Some(gate) = self
-            .tool_gate
-            .as_ref()
-            .filter(|_| self.declares_tool_routes())
-        else {
-            return Ok(());
-        };
-        let egress_gate = std::sync::Arc::clone(&self.egress_gate);
-        let rules = gate.rules().clone();
-        let lookup_host = host.to_string();
-        let hosts = tokio::task::spawn_blocking(move || {
-            route_hosts(&egress_gate, &rules, &lookup_host, port)
-        })
-        .await
-        .map_err(|_| REASON_TOOL_ROUTE)?;
-        let hosts: Vec<&str> = hosts.iter().map(String::as_str).collect();
-        match gate.rules().route_scope(attribution.tool(), &hosts, port) {
+        match self.tool_route_scope(host, port, attribution).await {
             RouteScope::Unscoped | RouteScope::Owned { .. } => Ok(()),
             RouteScope::Refused { route, reason } => {
-                let mut labels = vec![
+                let labels = vec![
                     ("scope".to_string(), "route".to_string()),
                     ("tool_route".to_string(), route.unwrap_or_default()),
+                    ("destination".to_string(), format!("{host}:{port}")),
                 ];
-                labels.push(("destination".to_string(), format!("{host}:{port}")));
                 self.audit_tool_scope_refused(labels, reason, attribution)
                     .await;
                 Err(REASON_TOOL_ROUTE)
@@ -173,7 +189,7 @@ impl SubstitutionService {
         labels.push(("rule".to_string(), "tool_scope".to_string()));
         labels.push(("reason".to_string(), reason.to_string()));
         if let Some(binding) = attribution.binding() {
-            labels.push(("binding".to_string(), binding.to_string()));
+            labels.push(("binding_id".to_string(), binding.audit_id()));
         }
         if let Err(error) = recorder
             .record_unbound(EventCategory::Host, "host.tool.scope_refused", labels)
@@ -194,7 +210,9 @@ mod tests {
     use super::*;
     use crate::supervisor::audit::CapturingAuditSigner;
     use crate::supervisor::audit_recorder::Recorder;
-    use crate::supervisor::network_endpoint_proxy::test_support::service_with_tool_gate;
+    use crate::supervisor::network_endpoint_proxy::test_support::{
+        gate_admitting, service_with_gate,
+    };
     use crate::supervisor::runtime_approval::NoApprovalBackend;
     use crate::supervisor::tool_decision::{InvocationVerdict, ToolDecisionGate};
 
@@ -227,10 +245,15 @@ mod tests {
             Arc::new(NoApprovalBackend),
             Arc::clone(&recorder),
         ));
-        let (service, dir) = service_with_tool_gate(Arc::clone(&gate));
+        let (service, _, _, dir) = service_with_gate(
+            "secret-value",
+            &[],
+            gate_admitting(&[("api.github.com", 443), ("crates.io", 443)]),
+        );
         let service = Arc::try_unwrap(service)
             .map_err(|_| "shared")
             .expect("unshared service")
+            .with_tool_gate(Arc::clone(&gate))
             .with_shared_recorder(recorder);
         (Arc::new(service), gate, signer, dir)
     }
@@ -320,10 +343,38 @@ mod tests {
         assert!(recorded.contains(REASON_TOOL_SECRET) || recorded.contains("tool_scope"));
     }
 
+    #[tokio::test]
+    async fn a_request_on_a_flow_whose_binding_was_released_is_unattributed() {
+        let (service, gate, _signer, _dir) = scoped_service();
+        let binding = bound(&gate).await;
+        let opened = service.attribute(Some(binding.clone()));
+        let secrets = vec!["github".to_string()];
+        assert!(
+            service
+                .enforce_tool_secrets(&secrets, "api.github.com", &opened)
+                .await
+                .is_ok()
+        );
+        gate.release(&binding);
+        let wire = mvm_core::substitution_wire::WireRequest {
+            method: "GET".into(),
+            url: "https://api.github.com/user".into(),
+            headers: Vec::new(),
+            body_b64: String::new(),
+        };
+        match service.prepare_flow(wire, &opened).await {
+            Err(mvm_core::substitution_wire::WireResponse::Refused { message }) => {
+                assert!(message.contains(REASON_TOOL_ROUTE), "{message}");
+            }
+            Err(other) => panic!("expected a tool-scope refusal, got {other:?}"),
+            Ok(_) => panic!("a released binding still reached the tool's route"),
+        }
+    }
+
     #[test]
     fn a_literal_address_answers_to_a_route_host_that_resolves_to_it() {
         // The fixture gate pins the first named host to 192.0.2.1.
-        let gate = crate::supervisor::network_endpoint_proxy::test_support::gate_admitting(&[
+        let gate = gate_admitting(&[
             ("api.github.com", 443),
             ("192.0.2.1", 443),
             ("192.0.2.99", 443),

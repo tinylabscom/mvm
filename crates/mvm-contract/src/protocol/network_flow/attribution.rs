@@ -57,6 +57,23 @@ impl ToolInvocationBinding {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// What the audit log records for this binding: the first 64 bits of its
+    /// SHA-256, in hex. The binding itself is a capability for as long as it
+    /// is live, so the log carries an identifier that correlates entries
+    /// without being usable as one.
+    #[must_use]
+    pub fn audit_id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let digest = Sha256::digest(self.0.as_bytes());
+        let mut id = String::with_capacity(16);
+        for byte in &digest[..8] {
+            id.push(char::from(HEX[usize::from(byte >> 4)]));
+            id.push(char::from(HEX[usize::from(byte & 0x0f)]));
+        }
+        id
+    }
 }
 
 impl fmt::Debug for ToolInvocationBinding {
@@ -177,6 +194,17 @@ mod tests {
         assert!(ToolInvocationBinding::parse(&"ab".repeat(15)).is_none());
         assert!(ToolInvocationBinding::parse(&"zz".repeat(16)).is_none());
         assert!(serde_json::from_str::<ToolInvocationBinding>("\"nope\"").is_err());
+    }
+
+    #[test]
+    fn the_audit_id_is_a_short_one_way_digest() {
+        let binding = binding();
+        let id = binding.audit_id();
+        assert_eq!(id.len(), 16);
+        assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(!binding.as_str().contains(&id));
+        assert_eq!(id, binding.audit_id());
+        assert_ne!(id, ToolInvocationBinding::from_random([1; 16]).audit_id());
     }
 
     #[test]
