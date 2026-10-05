@@ -27,14 +27,14 @@ const SSH_PORT: u16 = 22;
 /// the generic `policy_denied` says nothing the remedy can rely on, so the
 /// address itself decides: a notice must never offer an allow for the
 /// metadata service because the recorded word was not specific enough.
-pub(in crate::commands) fn restricted_class(host: &str) -> Option<RestrictedClass> {
+pub fn restricted_class(host: &str) -> Option<RestrictedClass> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     classify_address(host.parse().ok()?)
 }
 
 /// What the host decided, in terms of what can be done about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) enum DenialKind {
+pub enum DenialKind {
     /// The network policy does not admit the destination.
     NotAllowed,
     /// A restricted address: never reachable, or denied unless a grant names
@@ -80,7 +80,7 @@ pub(in crate::commands) enum DenialKind {
 /// destination's port when it has one, and the route context an endpoint-rule
 /// refusal carries.
 #[derive(Debug, Clone, Default)]
-pub(in crate::commands) struct ReasonInputs<'a> {
+pub struct ReasonInputs<'a> {
     pub label: &'a str,
     /// The destination's host when it has one: an address literal there can
     /// make a generic refusal specific.
@@ -93,7 +93,7 @@ pub(in crate::commands) struct ReasonInputs<'a> {
 impl DenialKind {
     /// Classify a recorded reason. `None` for a label that records something
     /// other than a refusal.
-    pub(in crate::commands) fn classify(inputs: &ReasonInputs<'_>) -> Option<Self> {
+    pub fn classify(inputs: &ReasonInputs<'_>) -> Option<Self> {
         if NOT_A_DENIAL.contains(&inputs.label) {
             return None;
         }
@@ -136,7 +136,7 @@ impl DenialKind {
     }
 
     /// A few words on why, for the line that reports the refusal.
-    pub(in crate::commands) fn describe(&self) -> String {
+    pub fn describe(&self) -> String {
         match self {
             Self::NotAllowed => "not in the allow-list".into(),
             Self::Restricted(class) => class.describe().into(),
@@ -161,7 +161,7 @@ impl DenialKind {
     }
 
     /// What can be done about it, for the destination `subject` names.
-    pub(in crate::commands) fn remedy(&self, allow_target: Option<&str>) -> Remedy {
+    pub fn remedy(&self, allow_target: Option<&str>) -> Remedy {
         let flag = |target: &str| format!("--allow-host {target}");
         match self {
             Self::NotAllowed => match allow_target {
@@ -234,13 +234,13 @@ impl DenialKind {
 
     /// Whether the remedy is an allow-list entry the summary can collect into
     /// one re-run command.
-    pub(in crate::commands) fn is_plain_allow(&self) -> bool {
+    pub fn is_plain_allow(&self) -> bool {
         matches!(self, Self::NotAllowed)
     }
 
     /// Whether it is denied by default and admitted only by a grant naming
     /// the exact address — listed apart from the plain allows.
-    pub(in crate::commands) fn is_named_only(&self) -> bool {
+    pub fn is_named_only(&self) -> bool {
         matches!(self, Self::Restricted(class) if class.readmittable())
     }
 }
@@ -249,7 +249,7 @@ impl DenialKind {
 /// a `--json` denial record.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(in crate::commands) enum Remedy {
+pub enum Remedy {
     /// Admit it on the next run with this flag.
     AllowHost { flag: String },
     /// Denied by default; naming this exact destination admits it.
@@ -264,7 +264,7 @@ pub(in crate::commands) enum Remedy {
 
 impl Remedy {
     /// The remedy as it reads after the dash of a notice line.
-    pub(in crate::commands) fn render(&self, target_has_port: bool) -> String {
+    pub fn render(&self, target_has_port: bool) -> String {
         match self {
             Self::AllowHost { flag } if target_has_port => format!("allow with {flag}"),
             Self::AllowHost { flag } => {

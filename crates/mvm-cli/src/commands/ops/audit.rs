@@ -1192,7 +1192,7 @@ fn audit_tail_chain(tenant: &str, lines: usize, follow: bool) -> Result<()> {
     }
     // Opened before the backlog is printed so nothing appended while it
     // prints falls between the two.
-    let mut follower = super::super::vm::audit_follow::ChainFollower::from_end(path.clone());
+    let mut follower = mvm_client::audit::follow::ChainFollower::from_end(path.clone());
     print_last_n_chain_lines(&path, lines)?;
     if !follow {
         return Ok(());
@@ -1218,7 +1218,7 @@ fn print_last_n_chain_lines(path: &std::path::Path, n: usize) -> Result<()> {
 }
 
 fn print_chain_line(line: &str) {
-    use super::super::vm::audit_follow::{ChainLine, parse_chain_line};
+    use mvm_client::audit::follow::{ChainLine, parse_chain_line};
     match parse_chain_line(line) {
         ChainLine::Entry(entry) => {
             // Render the inner PlanAuditEntry as a single human-readable
