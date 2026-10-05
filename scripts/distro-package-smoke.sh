@@ -31,7 +31,11 @@ case "${package}" in
   *) fail "not a .deb or .rpm: ${package}" ;;
 esac
 
-[ "$(command -v mvmctl)" = /usr/bin/mvmctl ] || fail "mvmctl on PATH is $(command -v mvmctl || echo nothing)"
+# Compared by real path: Fedora merged /usr/sbin into /usr/bin and lists
+# /usr/sbin first on PATH, so the same file is found under either name.
+found="$(command -v mvmctl || true)"
+[ -n "${found}" ] && [ "$(readlink -f "${found}")" = "$(readlink -f /usr/bin/mvmctl)" ] \
+  || fail "mvmctl on PATH is ${found:-nothing}, not /usr/bin/mvmctl"
 reported="$(mvmctl --version)"
 case "${reported}" in
   *"${version}"*) ;;
