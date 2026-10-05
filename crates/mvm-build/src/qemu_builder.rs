@@ -555,7 +555,7 @@ fn stage_qemu_vsock_guest_modules(host_bins_dir: &Path) -> Result<(), BuilderVmE
         })?;
         let dst = dest_dir.join(module);
         if src.extension().is_some_and(|extension| extension == "zst") {
-            let output = Command::new("zstd")
+            let output = mvm_core::env_hygiene::helper_command("zstd")
                 .args(["--quiet", "--decompress", "--stdout"])
                 .arg(&src)
                 .output()
@@ -593,7 +593,7 @@ fn pack_ext4(src_dir: &Path, img: &Path, size: u64) -> Result<(), BuilderVmError
     std::fs::File::create(img)
         .and_then(|f| f.set_len(size))
         .map_err(|e| io_err("creating ext4 image", img, e))?;
-    let status = Command::new("mkfs.ext4")
+    let status = mvm_core::env_hygiene::helper_command("mkfs.ext4")
         .args(["-F", "-q", "-d"])
         .arg(src_dir)
         .arg(img)
@@ -622,7 +622,7 @@ fn extract_out_artifacts(out_img: &Path, dest: &Path) -> Result<(), BuilderVmErr
     std::fs::create_dir_all(&tmp).map_err(|e| io_err("creating extract dir", &tmp, e))?;
     for name in QEMU_STAGE0_OUT_ARTIFACT_NAMES {
         let from = tmp.join(name);
-        let status = Command::new("debugfs")
+        let status = mvm_core::env_hygiene::helper_command("debugfs")
             .arg("-R")
             .arg(debugfs_dump_request(name, &from))
             .arg(out_img)

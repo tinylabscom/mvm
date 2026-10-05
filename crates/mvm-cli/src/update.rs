@@ -364,7 +364,7 @@ fn is_writable(path: &Path) -> bool {
 /// Called before and after swapping the binary to prevent a defective release from
 /// bricking an installation.
 fn smoke_test_binary(bin: &Path) -> Result<()> {
-    let output = std::process::Command::new(bin)
+    let output = mvm_core::env_hygiene::helper_command(bin)
         .arg("--version")
         .output()
         .with_context(|| format!("Failed to execute smoke test for {}", bin.display()))?;

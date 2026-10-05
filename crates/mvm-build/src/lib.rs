@@ -74,6 +74,9 @@ pub mod egress_readiness;
 /// host payload. Shared with `crates/mvm-cli/build.rs`, which `#[path]`-includes
 /// it.
 pub mod embed_toolchain;
+// `embed_toolchain` starts its toolchain probes through `super::helper_command`,
+// which the build script provides over the same denylist.
+use mvm_core::env_hygiene::helper_command;
 /// Extract an FC-loadable ELF `vmlinux` from a published x86_64 bzImage.
 pub mod guest_elf;
 /// Which libc a materialized guest rootfs carries, observed while the tree is

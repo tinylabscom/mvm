@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 
 use mvm_vmm::host::aux_bin::{CliSpawn, HostProcess};
 use mvm_vmm::host::network_endpoint_spawn::{
@@ -425,7 +425,7 @@ fn resolve_network_endpoint_path() -> Result<PathBuf, BuilderVmError> {
     }
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut build = Command::new(cargo);
+    let mut build = mvm_core::env_hygiene::helper_command(cargo);
     build.current_dir(workspace_root).args([
         "build",
         "-p",

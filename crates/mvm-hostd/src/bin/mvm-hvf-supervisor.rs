@@ -29,7 +29,7 @@ const HVF_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn exe_has_hypervisor_entitlement(exe: &std::path::Path) -> bool {
-    std::process::Command::new("codesign")
+    mvm_core::env_hygiene::helper_command("codesign")
         .args(["-d", "--entitlements", "-", "--xml"])
         .arg(exe)
         .output()
@@ -92,7 +92,6 @@ fn record_signed_marker(exe: &std::path::Path) {
 fn ensure_self_signed() {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
-    use std::process::Command;
 
     if std::env::var("MVM_HVF_SIGNED").as_deref() == Ok("1") {
         return;
@@ -130,7 +129,7 @@ fn ensure_self_signed() {
         if std::fs::write(&ent, HVF_ENTITLEMENTS_PLIST).is_err() {
             return;
         }
-        let output = Command::new("codesign")
+        let output = mvm_core::env_hygiene::helper_command("codesign")
             .args(["--sign", "-", "--force", "--entitlements"])
             .arg(&ent)
             .arg(&exe)
@@ -151,7 +150,7 @@ fn ensure_self_signed() {
     }
     drop(lock);
 
-    let err = Command::new(&exe)
+    let err = mvm_core::env_hygiene::helper_command(&exe)
         .args(std::env::args_os().skip(1))
         .env("MVM_HVF_SIGNED", "1")
         .exec();

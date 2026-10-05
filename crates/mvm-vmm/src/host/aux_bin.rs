@@ -41,7 +41,7 @@ use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -531,7 +531,7 @@ impl RebuildPlan {
     /// on another build's lock, which would otherwise look like a hang.
     fn run(&self, env: &VerifyEnv, label: &str) -> Result<()> {
         let activity = crate::host::ui::activity::start(label);
-        let mut command = Command::new(&env.cargo);
+        let mut command = mvm_core::env_hygiene::helper_command(&env.cargo);
         command
             .args(&self.args)
             .current_dir(&self.root)
