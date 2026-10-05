@@ -328,8 +328,9 @@ The index is a small JSON document, and unknown fields in it are refused:
   versions, more than 128 packs, or an unpublished dependency stop the pull.
   Packs already installed before a later dependency fails remain pinned, but a run
   cannot load a missing dependency.
-- A `[tools]` section in a pack composes like any other, and has the
-  enforcement limits listed under
+- A `[tools]` section in a pack composes like any other, and is enforced as
+  [Tool privileges](/guides/policy-and-profiles/#tool-privileges) describes,
+  with the limits listed under
   [Not yet](/guides/policy-and-profiles/#not-yet).
 - The official registry signs on `main` only. A pack on a branch or in a fork
   has no signature the default trust policy accepts.

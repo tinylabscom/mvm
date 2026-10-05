@@ -657,14 +657,14 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           }
         },
         "routes": {
-          "description": "Destinations (`HOST[:PORT]`) this tool may reach through the one host egress gate. Composition narrows like secret destinations: a later layer may list a subset, never a destination outside them.",
+          "description": "Destinations (`HOST[:PORT]`) that belong to this tool. The network policy must still admit each one; only flows from a declared invocation of the tool may reach them, and its invocations may reach only these. Composition narrows like secret destinations: a later layer may list a subset, never a destination outside them.",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "secrets": {
-          "description": "Secret names bound to this tool; the binding is enforced where the secret is substituted. Composition narrows like `routes`.",
+          "description": "Stored secret names that belong to this tool: only flows from a declared invocation of it have them substituted, and its invocations may use only these. Composition narrows like `routes`.",
           "type": "array",
           "items": {
             "type": "string"
@@ -674,7 +674,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
       "additionalProperties": false
     },
     "ToolsSection": {
-      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls (the MCP tool-call gate and declared `machine exec --tool` invocations); declared commands also enforce `argv`. Scoped routes and secrets still need a trusted invocation binding at the endpoint, so strict validation refuses any nonempty `[tools]` section.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union.",
+      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls (the MCP tool-call gate and declared `machine exec --tool` invocations); declared commands also enforce `argv`. A tool's `routes` and `secrets` are enforced at the per-VM endpoint against flows attributed to an admitted invocation of that tool.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union.",
       "type": "object",
       "properties": {
         "allow": {

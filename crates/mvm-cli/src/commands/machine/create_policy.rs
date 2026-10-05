@@ -55,17 +55,6 @@ fn refuse_unrecordable(policy: &PolicyBody) -> Result<()> {
             );
         }
     }
-    refuse_unmediated_tool_scope(policy)
-}
-
-/// Scope cannot be claimed until a host-verifiable invocation is attached to
-/// endpoint traffic. Preserve a refusal for both persistent entry points.
-pub(super) fn refuse_unmediated_tool_scope(policy: &PolicyBody) -> Result<()> {
-    if policy.tools.to_tool_rules().has_endpoint_scope() {
-        bail!(
-            "the policy's tools.detail.routes or tools.detail.secrets cannot be enforced on a persistent machine yet"
-        );
-    }
     Ok(())
 }
 
@@ -236,14 +225,6 @@ mod tests {
             ("env", "[env]\ndeny = [\"DEBUG\"]\n"),
             ("env", "[env]\nreadmit = [\"LD_PRELOAD\"]\n"),
             (
-                "tools.detail.routes or tools.detail.secrets",
-                "[tools.detail.curl]\nroutes = [\"example.com:443\"]\n",
-            ),
-            (
-                "tools.detail.routes or tools.detail.secrets",
-                "[tools.detail.curl]\nsecrets = [\"token\"]\n",
-            ),
-            (
                 "network.routes",
                 "[[network.routes]]\nid = \"api\"\nhost = \"api.test\"\n",
             ),
@@ -254,7 +235,8 @@ mod tests {
         }
         assert!(refuse_unrecordable(&PolicyBody::default()).is_ok());
         let tools: PolicyBody = toml::from_str(
-            "[tools]\nallow = [\"curl\"]\n[tools.detail.curl]\nargv = [\"curl *\"]\n",
+            "[tools]\nallow = [\"curl\"]\n[tools.detail.curl]\nargv = [\"curl *\"]\n\
+             routes = [\"example.com:443\"]\nsecrets = [\"token\"]\n",
         )
         .expect("tool policy parses");
         assert!(refuse_unrecordable(&tools).is_ok());

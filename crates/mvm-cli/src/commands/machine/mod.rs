@@ -604,9 +604,6 @@ fn machine_run_spec(
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
     validate_machine_name(&name)?;
-    if let Some(policy) = args.run.applied_policy.as_ref() {
-        create_policy::refuse_unmediated_tool_scope(policy)?;
-    }
     let (image, manifest, deployment) = if let Some(path) = &args.run.deployment {
         let deployment = resolve_local_deployment(path)?;
         (None, None, Some(deployment.directory.display().to_string()))

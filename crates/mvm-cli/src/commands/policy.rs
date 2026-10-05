@@ -237,13 +237,6 @@ fn validate(args: ValidateArgs) -> Result<()> {
         None => resolve_target(&args.target)?,
     };
     let mut problems: Vec<String> = resolved.notes.clone();
-    if !resolved.policy.tools.is_empty() {
-        problems.push(
-            "the [tools] section is recorded but not enforced yet; nothing stops a tool it \
-             denies"
-                .to_string(),
-        );
-    }
     if args.strict {
         problems.extend(unknown_secrets(&resolved.policy)?);
     }

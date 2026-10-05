@@ -34,8 +34,9 @@ pub struct PlanPreview {
     pub readmitted_env: Vec<String>,
     /// Variables the workload may be handed, when the policy restricts them.
     pub env_allow: Vec<String>,
-    /// Tool privileges: recorded, not enforced.
-    pub tools_not_enforced: Vec<String>,
+    /// The tool rules the plan carries: whole-tool and argv decisions for
+    /// gated calls, and the routes and secrets each tool owns at the endpoint.
+    pub tools: mvm_contract::policy::tool_rules::ToolRules,
 }
 
 /// Preview `policy` under the operator's host configuration.
@@ -66,7 +67,7 @@ pub fn preview(policy: &PolicyBody, config: &MvmConfig) -> Result<PlanPreview> {
         mounts: folded.mounts,
         readmitted_env: folded.allow_env,
         env_allow: policy.env.allow.clone(),
-        tools_not_enforced: policy.tools.allow.clone(),
+        tools: policy.tools.to_tool_rules(),
     })
 }
 

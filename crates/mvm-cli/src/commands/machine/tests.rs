@@ -1098,7 +1098,7 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
 }
 
 #[test]
-fn run_spec_records_tool_rules_but_refuses_unmediated_scope() {
+fn run_spec_records_tool_rules_with_their_scope() {
     let mut args =
         parse_run(&["run", "--image", "alpine:3.20", "--name", "toolbox"]).expect("parse");
     args.run.applied_policy = Some(
@@ -1117,9 +1117,8 @@ fn run_spec_records_tool_rules_but_refuses_unmediated_scope() {
         )
         .expect("scoped route parses"),
     );
-    let error = machine_run_spec(&args, "toolbox".to_string(), None)
-        .expect_err("unmediated tool route must be refused");
-    assert!(error.to_string().contains("tools.detail.routes"));
+    let spec = machine_run_spec(&args, "toolbox".to_string(), None).expect("scoped spec");
+    assert_eq!(spec.tools.detail["git"].routes, ["example.com:443"]);
 }
 
 #[test]
