@@ -891,7 +891,7 @@ fn capture_vm_full_inner(
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
-    let object_pool = chunks::ObjectPool::new(store.root(), &Default::default())?;
+    let object_pool = chunks::ObjectPool::new(store.root(), &params.key_domain)?;
     let mut content = vec![
         chunks::chunk_blob(&object_pool, &content_dir, "rootfs.ext4", &rootfs_dst, true)?,
         chunks::chunk_blob(&object_pool, &content_dir, "memory.bin", &memory, false)?,
@@ -1072,6 +1072,7 @@ fn capture_vm_full_inner(
         .snapshot_id(snapshot_id)
         .grants(params.grants)
         .session(params.session)
+        .key_domain(params.key_domain)
         .build();
     staged.commit(&meta)?;
     Ok(meta)
@@ -1473,7 +1474,7 @@ pub fn capture_fs_quick(
         .context("cloning rootfs into checkpoint content")?;
 
     let name = file_name.to_string_lossy().into_owned();
-    let object_pool = chunks::ObjectPool::new(store.root(), &Default::default())?;
+    let object_pool = chunks::ObjectPool::new(store.root(), &params.key_domain)?;
     let mut content = vec![chunks::chunk_blob(
         &object_pool,
         &content_dir,
@@ -1499,6 +1500,7 @@ pub fn capture_fs_quick(
         .supervisor_config_digest(params.supervisor_config_digest)
         .runtime_overlay_version(params.runtime_overlay_version)
         .grants(params.grants)
+        .key_domain(params.key_domain)
         .build();
     staged.commit(&meta)?;
     Ok(meta)
@@ -1657,6 +1659,91 @@ mod tests {
         p
     }
 
+    fn capture_in_domain(
+        store: &CheckpointStore,
+        tmp: &Path,
+        id: &str,
+        domain: &mvm_core::checkpoint::CheckpointKeyDomain,
+    ) -> CheckpointMeta {
+        let source = tmp.join(id);
+        std::fs::create_dir_all(&source).unwrap();
+        let rootfs = source.join("rootfs.ext4");
+        std::fs::write(&rootfs, vec![0x6d; 3 * 1024 * 1024]).unwrap();
+        let params = CaptureFsQuickParams::builder()
+            .id(CheckpointId::new(id))
+            .vm_name(format!("{id}-vm"))
+            .rootfs(rootfs)
+            .supervisor_config_digest("d".into())
+            .created_unix(1)
+            .quiesced(true)
+            .key_domain(domain.clone())
+            .build()
+            .unwrap();
+        capture_fs_quick(store, params).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn stored_inodes(store: &CheckpointStore, meta: &CheckpointMeta) -> Vec<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt as _;
+        chunks::stored_chunk_paths(
+            &store.content_dir(&meta.id),
+            blob_named(meta, "rootfs.ext4"),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|path| {
+            let metadata = std::fs::metadata(path).unwrap();
+            (metadata.dev(), metadata.ino())
+        })
+        .collect()
+    }
+
+    /// The domain is the tenant the capture names. Identical memory captured by
+    /// two tenants lands in two pools and shares no stored object, while a
+    /// second capture by the same tenant still deduplicates against the first.
+    #[test]
+    #[cfg(unix)]
+    fn two_tenants_capturing_identical_bytes_share_no_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let a = mvm_core::checkpoint::CheckpointKeyDomain::tenant("tenant-a").unwrap();
+        let b = mvm_core::checkpoint::CheckpointKeyDomain::tenant("tenant-b").unwrap();
+        let first_a = capture_in_domain(&store, tmp.path(), "a1", &a);
+        let second_a = capture_in_domain(&store, tmp.path(), "a2", &a);
+        let first_b = capture_in_domain(&store, tmp.path(), "b1", &b);
+
+        assert_eq!(first_a.key_domain, a);
+        assert_eq!(first_b.key_domain, b);
+        assert_eq!(
+            store.read_meta(&first_b.id).unwrap().key_domain,
+            b,
+            "the domain is part of the sealed record"
+        );
+        assert_ne!(first_a.meta_digest, first_b.meta_digest);
+
+        let a_inodes = stored_inodes(&store, &first_a);
+        let b_inodes = stored_inodes(&store, &first_b);
+        assert_eq!(a_inodes.len(), 3);
+        assert_eq!(stored_inodes(&store, &second_a), a_inodes);
+        assert!(
+            a_inodes.iter().all(|inode| !b_inodes.contains(inode)),
+            "tenant-b must not share a stored object with tenant-a"
+        );
+        assert_ne!(
+            chunks::ObjectPool::new(store.root(), &a).unwrap().root(),
+            chunks::ObjectPool::new(store.root(), &b).unwrap().root()
+        );
+        verify_content(&store, &first_b).unwrap();
+    }
+
+    #[test]
+    fn a_capture_that_names_no_domain_is_filed_under_the_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        assert!(meta.key_domain.is_host());
+    }
+
     #[test]
     fn capture_refuses_when_not_quiesced() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1672,6 +1759,7 @@ mod tests {
             created_unix: 7,
             quiesced: false,
             grants: None,
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         };
         let err = capture_fs_quick(&store, params).unwrap_err();
         assert!(err.to_string().contains("quiesced"));
@@ -1691,6 +1779,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap()
@@ -1926,6 +2015,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap()
@@ -1968,6 +2058,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap();
@@ -2133,6 +2224,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2187,6 +2279,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2245,6 +2338,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2316,6 +2410,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2380,6 +2475,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2531,6 +2627,7 @@ mod tests {
             created_unix: 7,
             quiesced: true,
             grants: None,
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         };
         let meta = capture_fs_quick(&store, params).unwrap();
         let content_dir = store.content_dir(&meta.id);
@@ -2735,6 +2832,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2791,6 +2889,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -3085,6 +3184,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -3274,6 +3374,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )

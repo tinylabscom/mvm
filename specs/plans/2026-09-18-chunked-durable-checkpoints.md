@@ -343,13 +343,36 @@ rather than a directory.
 
 ### C7 — Key domains
 
-- [ ] C7.1 Resolve a capture's domain from its admitted plan's tenant, and the
+- [x] C7.1 Resolve a capture's domain from its admitted plan's tenant, and the
       host domain for a capture without one.
-- [ ] C7.2 Test: two tenants capturing identical memory share no inode and no
+- [x] C7.2 Test: two tenants capturing identical memory share no inode and no
       object name.
 - [ ] C7.3 When checkpoint encryption lands, key object names under the
       domain's key. Out of scope until then; tracked here so the pool layout
       does not have to change.
+
+**C7 notes.** Both capture parameter sets carry a `key_domain`, unset meaning
+the host. `mvmctl machine checkpoint create` (both classes) and the capture
+behind `mvmctl machine fork` read it off the VM's persisted plan, the same plan
+whose grants they already seal: a plan files the chunks under
+`tenant:<plan.tenant>`, a VM with no plan under the host, and a plan with an
+empty tenant is refused rather than filed under the host. A warm-pool factory
+parent stays in the host domain: it is captured with no plan, holds no
+tenant's data, and serves claims from every tenant the pool admits. The plan
+its `checkpoint.created` entry is recorded under is admitted after the capture,
+for host capacity rather than for a tenant. The domain was
+already part of `meta_digest`, so the chain binds it.
+
+"No object name" in C7.2 holds for the pool path, which includes the domain
+directory. The leaf name is still the plaintext digest, so two domains holding
+identical bytes have files with the same name in different directories. Making
+those differ means keying the name, which is C7.3 and waits for checkpoint
+encryption: without a secret key, a name derived from the domain and the
+digest hides nothing the digest does not. The tenant boundary today is the
+separate pool and the separate restore cache, and
+`two_tenants_capturing_identical_bytes_share_no_object` checks it: identical
+memory captured by two tenants shares no inode, while a second capture by the
+same tenant still shares every one.
 
 ### C8 — Retire the whole-blob layout
 
