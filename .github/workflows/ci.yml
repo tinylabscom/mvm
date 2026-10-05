@@ -1,10 +1,11 @@
 name: CI
 
 on:
-  # Pull requests run the same deterministic lint/test matrix that the merge
-  # queue runs. A PR must expose its own failures before admission; deferring
-  # them to the queue makes one bad entry poison every cumulative commit behind
-  # it. The queue adds integration-only Nix and published-image checks.
+  # Pull requests run bounded admission checks: policy/invariants, BDD, format,
+  # metadata, and focused regressions. The merge queue runs the complete
+  # platform/feature/test matrix against the exact integration commit. Running
+  # both full graphs at once exceeds the repository's hosted-runner budget and
+  # turns unacquired jobs into misleading queue failures.
   # Expensive platform, live-VM, OCI ratification, security, Windows, and
   # release artifact jobs live in release/manual workflows.
   pull_request:
@@ -213,7 +214,7 @@ jobs:
   lint-core:
     name: Lint core (fmt + clippy)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -535,7 +536,7 @@ jobs:
   lint-features:
     name: Lint feature coverage
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -667,7 +668,7 @@ jobs:
   lint-features-test-support:
     name: Lint feature coverage (test-support)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -729,7 +730,7 @@ jobs:
   lint-features-embed:
     name: Lint feature coverage (embed-host-bins)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -874,8 +875,9 @@ jobs:
       - uses: actions/checkout@v6
         if: github.event_name == 'pull_request'
 
-      # Keep these cheap admission checks explicit even though the full matrix
-      # below also runs on pull requests.
+      # Cheap admission checks complement policy, BDD, and focused regressions.
+      # The complete platform/feature matrix runs once, on the merge-group
+      # commit GitHub will actually merge.
       - name: PR admission smoke
         if: github.event_name == 'pull_request'
         run: |
@@ -928,15 +930,24 @@ jobs:
             echo "PR focused regressions did not match event/scope $EVENT_NAME/$SCOPE_CODE: $PREFLIGHT_RESULT"
             exit 1
           fi
+          case "$EVENT_NAME" in
+            pull_request) matrix_required=skipped ;;
+            merge_group|workflow_dispatch) matrix_required="$required" ;;
+            *) echo "Invalid event name: $EVENT_NAME"; exit 1 ;;
+          esac
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
-            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
-            if [ "$result" != "$required" ]; then
-              echo "A test lane did not match scope $SCOPE_CODE: $result"
+            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
+            if [ "$result" != "$matrix_required" ]; then
+              echo "A queue matrix lane did not match event/scope $EVENT_NAME/$SCOPE_CODE: $result"
               exit 1
             fi
           done
+          if [ "$BDD_RESULT" != "$required" ]; then
+            echo "BDD validation did not match scope $SCOPE_CODE: $BDD_RESULT"
+            exit 1
+          fi
           case "$EVENT_NAME" in
             pull_request) nix_required=skipped ;;
             merge_group|workflow_dispatch) nix_required=success ;;
@@ -959,7 +970,7 @@ jobs:
   test-workspace:
     name: Test workspace
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -1031,7 +1042,7 @@ jobs:
   test-workspace-aarch64:
     name: Test workspace (aarch64)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     # The only lane that executes mvm's aarch64 code paths. Everything else in
     # this workflow runs on x86_64, so arch-gated code compiles here for the
     # first time and its tests run for the first time. The sharpest example is
@@ -1113,7 +1124,7 @@ jobs:
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1159,7 +1170,7 @@ jobs:
   test-linux:
     name: Test Linux and conformance
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1195,7 +1206,7 @@ jobs:
   test-ebpf-telemetry:
     name: Test eBPF telemetry load/attach
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:

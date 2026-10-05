@@ -2,9 +2,8 @@
 //!
 //! CI is scope-reduced: the `scope` job classifies changed paths, lanes skip
 //! when out of scope, and this aggregate asserts each lane's result *matches*
-//! its scope. Pull requests and merge groups share the deterministic matrix;
-//! only integration checks such as Nix and published-image boot differ by
-//! event.
+//! its scope. Pull requests run bounded admission checks; merge groups own the
+//! complete platform/feature matrix against the exact integration commit.
 //!
 //! That is not hypothetical. A lane that lost its job-level `if:` once
 //! reported `success` on every run, while the aggregate still required
@@ -88,7 +87,7 @@ impl Verdict {
             code: "true",
             policy: "success",
             preflight: "success",
-            lanes: "success",
+            lanes: "skipped",
             bdd: "success",
             boot: "skipped",
             nix: "skipped",
@@ -116,6 +115,7 @@ impl Verdict {
         Self {
             event_name: "merge_group",
             preflight: "skipped",
+            lanes: "success",
             boot: "success",
             nix: "success",
             ..Self::in_scope()
@@ -189,7 +189,7 @@ fn a_fully_in_scope_green_run_is_admitted() {
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 11] = [
+    let cases: [(&str, Verdict); 12] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -209,10 +209,17 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             },
         ),
         (
-            "a test lane that skipped while in scope",
+            "a queue-only test lane that ran on a pull request",
+            Verdict {
+                lanes: "success",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "a queue test lane that skipped while in scope",
             Verdict {
                 lanes: "skipped",
-                ..Verdict::in_scope()
+                ..Verdict::queue_in_scope()
             },
         ),
         (

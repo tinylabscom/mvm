@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn pull_request_ci_runs_the_required_matrix_without_redundant_caches() {
+    fn pull_request_ci_runs_bounded_admission_without_redundant_caches() {
         let workflow = ci_workflow();
         assert!(
             job_body(&workflow, "lint").is_none(),
@@ -758,7 +758,7 @@ mod tests {
                 && test.contains("cargo fmt -- --check")
                 && test.contains("cargo metadata --locked --format-version 1 --no-deps")
                 && test.contains("name: Require every validation lane to pass"),
-            "pull requests must publish the required context after the full validation matrix"
+            "pull requests must publish the required context after bounded admission"
         );
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
@@ -782,15 +782,14 @@ mod tests {
             );
         }
 
-        // Deterministic failures must be exposed before queue admission. The
-        // merge group repeats these lanes against the exact integration commit;
-        // Nix and published-image boot remain integration-only below.
+        // The complete matrix runs once on the exact integration commit. PRs
+        // retain policy, BDD, formatting, metadata, and focused regression
+        // admission checks without competing with the queue for 16 runners.
         for lane in [
             "lint-core",
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
-            "bdd-conformance",
             "test-workspace",
             "test-workspace-aarch64",
             "test-release-witness",
@@ -799,9 +798,10 @@ mod tests {
         ] {
             let block = job_block(&workflow, lane);
             assert!(
-                block.contains("if: needs.scope.outputs.code == 'true'")
-                    && !block.contains("github.event_name != 'pull_request'"),
-                "{lane} must validate code pull requests before queue admission"
+                block.contains(
+                    "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
+                ),
+                "{lane} must run on integration commits without duplicating the full PR graph"
             );
         }
 
@@ -956,8 +956,10 @@ mod tests {
                 "{job} must depend on CI scope"
             );
             assert!(
-                block.contains("if: needs.scope.outputs.code == 'true'"),
-                "{job} must run for code changes and skip non-code diffs on every event"
+                block.contains(
+                    "if: github.event_name != 'pull_request' && needs.scope.outputs.code == 'true'"
+                ),
+                "{job} must run for queue code changes and skip PR/non-code work"
             );
         }
         // `cargo install --locked` pins the installed crate's own dependencies
@@ -1027,8 +1029,9 @@ mod tests {
         assert!(
             aggregate.contains("true) required=success")
                 && aggregate.contains("false) required=skipped")
-                && aggregate.contains(r#"if [ "$result" != "$required" ]"#),
-            "Test must require success or skip exactly as broad scope decided"
+                && aggregate.contains(r#"if [ "$result" != "$matrix_required" ]"#)
+                && aggregate.contains(r#"if [ "$BDD_RESULT" != "$required" ]"#),
+            "Test must apply event-specific queue and admission requirements"
         );
     }
 
