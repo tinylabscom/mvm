@@ -14,7 +14,7 @@ use serde_json::Value;
 
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
-    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer_with_prior_paths,
+    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer,
 };
 
 use super::cache::{find_image, layer_blob_path, load_index, read_verified_cache_file};
@@ -682,18 +682,18 @@ pub(super) fn unpack_layer_bytes(
     prior_layer_paths: &HashSet<PathBuf>,
 ) -> Result<UnpackReport> {
     let report = if is_gzip_layer(&layer.media_type) {
-        unpack_layer_with_prior_paths(
+        unpack_layer(
             GzDecoder::new(Cursor::new(bytes)),
             unpacked_root,
             &UnpackOptions::default(),
-            prior_layer_paths,
+            Some(prior_layer_paths),
         )
     } else {
-        unpack_layer_with_prior_paths(
+        unpack_layer(
             Cursor::new(bytes),
             unpacked_root,
             &UnpackOptions::default(),
-            prior_layer_paths,
+            Some(prior_layer_paths),
         )
     }?;
     if !report.refused.is_empty() {
@@ -1542,6 +1542,7 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
             builder.into_inner().unwrap().as_slice(),
             &unpacked,
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack");
         let mut owners = mvm_fs::ownership::OwnerTable::new();

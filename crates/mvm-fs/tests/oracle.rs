@@ -552,7 +552,7 @@ fn materialize_layer(layer: &[u8]) -> Vec<u8> {
     use mvm_fs::rootfs::{MaterializeOptions, build_ext4_pure};
 
     let root = tempfile::tempdir().unwrap();
-    let report = unpack_layer(layer, root.path(), &UnpackOptions::default()).unwrap();
+    let report = unpack_layer(layer, root.path(), &UnpackOptions::default(), None).unwrap();
     assert!(report.refused.is_empty(), "{:?}", report.refused);
     let mut owners = OwnerTable::new();
     owners.absorb(&report.ownership);
@@ -617,6 +617,7 @@ fn a_layer_cannot_own_the_files_the_runtime_injects() {
         hostile_layer(attacker).as_slice(),
         root_dir.path(),
         &UnpackOptions::default(),
+        None,
     )
     .unwrap();
     assert!(report.refused.is_empty(), "{:?}", report.refused);
@@ -677,7 +678,7 @@ fn layer_of(entries: Vec<tar::Header>) -> Vec<u8> {
 /// the owner its layer gave it.
 #[test]
 fn no_stacking_of_layers_can_own_a_claimed_path() {
-    use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer_with_prior_paths};
+    use mvm_fs::oci::unpack::{UnpackOptions, unpack_layer};
     use mvm_fs::ownership::{OwnerTable, RootOwnedPaths};
     use mvm_fs::rootfs::{MaterializeOptions, build_ext4_pure};
     use std::collections::HashSet;
@@ -709,11 +710,11 @@ fn no_stacking_of_layers_can_own_a_claimed_path() {
     let mut prior: HashSet<PathBuf> = HashSet::new();
     let mut owners = OwnerTable::new();
     for layer in &layers {
-        let report = unpack_layer_with_prior_paths(
+        let report = unpack_layer(
             layer.as_slice(),
             root_dir.path(),
             &UnpackOptions::default(),
-            &prior,
+            Some(&prior),
         )
         .unwrap();
         assert!(report.refused.is_empty(), "{:?}", report.refused);

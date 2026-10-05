@@ -24,7 +24,7 @@ use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
-    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer_with_prior_paths,
+    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer,
 };
 use mvm_runtime::AnyBackend;
 
@@ -1085,18 +1085,18 @@ fn unpack_one_layer(
 ) -> Result<UnpackReport> {
     let mt = &layer.media_type;
     let report = if mt.ends_with("+gzip") || mt.ends_with(".gzip") || mt.contains("tar.gzip") {
-        unpack_layer_with_prior_paths(
+        unpack_layer(
             GzDecoder::new(Cursor::new(bytes)),
             dest,
             &UnpackOptions::default(),
-            prior_layer_paths,
+            Some(prior_layer_paths),
         )
     } else {
-        unpack_layer_with_prior_paths(
+        unpack_layer(
             Cursor::new(bytes),
             dest,
             &UnpackOptions::default(),
-            prior_layer_paths,
+            Some(prior_layer_paths),
         )
     }
     .map_err(|e| backend_err(format!("unpack layer {}: {e}", layer.digest)))?;
