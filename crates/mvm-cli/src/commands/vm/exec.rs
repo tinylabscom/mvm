@@ -1324,7 +1324,7 @@ use receipt_verify::verify_run_receipt;
 
 impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
-        let policy = super::shared::resolve_run_network_policy_with_preset_and_peers(
+        let policy = super::shared::resolve_run_network_policy(
             args.net,
             args.network_preset,
             &args.allow_host,
