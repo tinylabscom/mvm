@@ -254,8 +254,8 @@ Two notes from experience:
   outright — build a params struct with a builder instead.
 - **Shape changes need rung 6.** Adding a field/variant/method to a shared type
   breaks Linux-gated test files that `cargo check --workspace` on macOS cannot
-  even see; skipping rung 6 surfaces later as a CI
-  `check-nextest-groups` failure that names neither the file nor the field.
+  even see; skipping rung 6 surfaces later, as a compile error in CI's
+  "Build workspace tests" job.
 
 ## What CI covers, and what it doesn't
 

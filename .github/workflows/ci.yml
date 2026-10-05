@@ -830,7 +830,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     # The queue aggregate only inspects `needs` results, so use the small,
     # fast-starting image. Pull requests still need the full image for the
     # admission smoke below.
@@ -871,7 +871,9 @@ jobs:
           FEATURES_RESULT: ${{ needs.lint-features.result }}
           FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
           FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
+          WORKSPACE_BUILD_RESULT: ${{ needs.test-workspace-build.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
+          WORKSPACE_EXTRAS_RESULT: ${{ needs.test-workspace-extras.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
@@ -915,7 +917,8 @@ jobs:
           fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
-            "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
+            "$WORKSPACE_BUILD_RESULT" "$WORKSPACE_RESULT" "$WORKSPACE_EXTRAS_RESULT" \
+            "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
             "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
@@ -943,23 +946,82 @@ jobs:
 
   test-workspace:
     name: Test workspace
-    needs: [scope]
+    needs: [scope, test-workspace-build]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     strategy:
       fail-fast: false
       matrix:
-        # The suite is the merge queue's long pole (~23 min end to end, most
-        # of it the shared compile). Two shards halve the test pass; each
-        # shard pays the compile once on its own runner, which rust-cache
-        # warms from the same key. Extras that must run exactly once
-        # (addon tests, doctests) stay on shard 1.
-        shard: [1, 2]
+        # Each shard runs a third of the suite out of the archive the build
+        # job compiled, so it pays no compile of its own. The pass is
+        # throughput-bound, not bound by one slow test (the slowest is under
+        # 40 s), so another shard trades about a minute of wall clock for one
+        # more runner's fixed setup.
+        shard: [1, 2, 3]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      # The checkout is not optional. Tests read fixtures, workflows and
+      # manifests out of the source tree at run time, and a few run `cargo
+      # tree` or `cargo metadata` against it.
+      - uses: actions/checkout@v6
+
+      # No free-disk: nothing is compiled here, and the extracted archive is a
+      # fraction of the target directory the build job holds.
+
+      # The toolchain the archive was built with. Tests that shell out to
+      # `cargo` resolve the absolute path rustc baked into `env!("CARGO")`.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      # Run-time tools the suite drives: `setfattr`/`getfattr` and
+      # `veritysetup`. `lld` because the workspace's cargo config links with
+      # it, and a few tests hand work to cargo.
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin lld
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Download the workspace test archive
+        uses: actions/download-artifact@v8
+        with:
+          name: workspace-tests
+          path: ${{ runner.temp }}
+
+      - name: Run tests
+        # Extracting into the checkout puts `target/` back at the path it was
+        # built at. That matters: `env!("CARGO_BIN_EXE_*")` and the other
+        # compile-time paths are absolute, and fifty-odd integration tests
+        # spawn their binary through them rather than through the variable
+        # nextest sets at run time.
+        run: |
+          cargo nextest run \
+            --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst" \
+            --workspace-remap "$GITHUB_WORKSPACE" \
+            --extract-to "$GITHUB_WORKSPACE" \
+            --partition hash:${{ matrix.shard }}/${{ strategy.job-total }}
+
+  test-workspace-build:
+    name: Build workspace tests
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    # Compiles every workspace test binary once and hands them to the
+    # `test-workspace` shards as a nextest archive. Each shard used to compile
+    # the whole graph on its own runner, which was three quarters of its wall
+    # clock and made the suite the long pole of every validation run.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
 
-      - uses: ./.github/actions/free-disk
+      # No free-disk. The hosted runner's root volume now starts with ~85 GB
+      # free, and the archive step prints what the build used, so the
+      # headroom stays visible.
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -977,30 +1039,81 @@ jobs:
         with:
           tool: nextest
 
-      - name: Build
-        run: cargo build --all-targets
+      - name: Build the workspace test archive
+        # The same target selection the suite has always run:
+        # `--workspace --all-targets`. The archive carries the test binaries,
+        # every other workspace binary (the helpers tests spawn), and the
+        # build-script output directories.
+        run: |
+          cargo nextest archive --workspace --all-targets \
+            --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst"
+          ls -lh "$RUNNER_TEMP/workspace-tests.tar.zst"
+          du -sh target
+          df -h /
+
+      - name: Upload the workspace test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests
+          path: ${{ runner.temp }}/workspace-tests.tar.zst
+          # Already zstd; a second compression pass costs time and saves
+          # nothing.
+          compression-level: 0
+          retention-days: 1
+          # A re-run of this job replaces the archive rather than failing on
+          # the name the first attempt took.
+          overwrite: true
+          if-no-files-found: error
 
       - name: Validate nextest override filters
+        # Lists against the target directory the archive step just filled, so
+        # it compiles only xtask. The listing itself is not free: each filter
+        # enumerates every test binary, which takes minutes, not seconds.
         run: cargo run -p xtask -- check-nextest-groups
+
+  test-workspace-extras:
+    name: Test workspace (doctests + feature suites)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    # Suites that run exactly once and need their own feature selection or
+    # their own compile, so they cannot come out of the shards' archive. They
+    # used to ride on shard 1 behind its compile; here they compile in
+    # parallel with the build job and stay off the critical path.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: xtask man-page tests
         # gen-man lives behind xtask's off-by-default `man` feature. It pulls
-        # mvm-cli and its build script, so exercise it on Test's already-warm
-        # test-profile graph instead of rebuilding that graph in Lint.
+        # mvm-cli and its build script, and the doctests below reuse most of
+        # that graph, so it runs here rather than as a second build in Lint.
         run: cargo nextest run -p xtask --features man
 
-      - name: Run tests
-        run: cargo nextest run --workspace --all-targets --partition hash:${{ matrix.shard }}/2
-
       # No separate `-p mvm-agentd --all-targets` run. It was a strict subset of
-      # the workspace run above — every test it ran, that run already ran, plus 21
+      # the workspace run — every test it ran, that run already ran, plus 21
       # more `flowmux` tests feature unification enables there — and nothing in
       # mvm-agentd is gated on a feature being *off*, so no test runs only under
       # per-package resolution. It cost ~41 recompiled crates and a second pass
       # over the same suite. The addons run below is different: `addons` is not
       # enabled by unification, and it runs 61 tests nothing else does.
       - name: Run addon/egress helper tests
-        if: matrix.shard == 1
         # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
         # mvm-egress-client) and their shared vsock session helper live behind
         # the off-by-default `addons` feature, so the default workspace run
@@ -1010,7 +1123,6 @@ jobs:
 
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
-        if: matrix.shard == 1
         run: cargo test --workspace --doc
 
   test-workspace-aarch64:
