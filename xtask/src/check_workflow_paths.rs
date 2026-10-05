@@ -913,11 +913,7 @@ mod tests {
         let scope = job_block(&ci, "scope");
         for expected in [
             "name: Enforce merge queue runner budget",
-            "targets_default",
-            "~DEFAULT_BRANCH",
-            "max_entries_to_build",
-            "max_entries_to_merge",
-            "Merge queue policy drifted",
+            "bash scripts/check-merge-queue-policy.sh",
             "MG_BASE_REF: ${{ github.event.merge_group.base_ref }}",
             "MG_HEAD: ${{ github.event.merge_group.head_sha }}",
             "PR_BASE: ${{ github.event.pull_request.base.sha }}",

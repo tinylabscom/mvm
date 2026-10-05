@@ -42,8 +42,12 @@ jobs:
       architecture: ${{ steps.validate.outputs.architecture }}
       guest_image: ${{ steps.validate.outputs.guest_image }}
     steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
       # This repository has a 20-job hosted-runner limit. One code-scoped
-      # merge-group run can allocate 16 runners after this job fans out; two
+      # merge-group run peaks at 14 runners after this job fans out; two
       # speculative builds therefore cannot fit even when no PR workflow is
       # active. GitHub eventually marks unacquired jobs cancelled, which the
       # required Test aggregate must (correctly) report as a failure.
@@ -58,6 +62,8 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
+          bash scripts/check-merge-queue-policy.test.sh
+
           rulesets="$RUNNER_TEMP/merge-queue-rulesets.json"
           gh api "repos/${REPO}/rulesets" > "$rulesets"
           matches=$(jq '[.[] | select(.name == "main merge queue" and .enforcement == "active")] | length' "$rulesets")
@@ -69,20 +75,7 @@ jobs:
 
           policy="$RUNNER_TEMP/merge-queue-policy.json"
           gh api "repos/${REPO}/rulesets/${ruleset_id}" > "$policy"
-          targets_default=$(jq -er '(.conditions.ref_name.include | index("~DEFAULT_BRANCH") != null) and (.conditions.ref_name.exclude | index("~DEFAULT_BRANCH") == null)' "$policy")
-          builds=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.max_entries_to_build' "$policy")
-          merge_max=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.max_entries_to_merge' "$policy")
-          wait=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.min_entries_to_merge_wait_minutes' "$policy")
-
-          if [ "$targets_default" != true ] || [ "$builds" != 1 ] || [ "$merge_max" != 1 ] || [ "$wait" != 0 ]; then
-            echo "::error::Merge queue policy drifted: targets_default=$targets_default max_entries_to_build=$builds max_entries_to_merge=$merge_max wait_minutes=$wait. Required: true/1/1/0."
-            echo "::error::Restore the 'main merge queue' ruleset before running CI."
-            exit 1
-          fi
-
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
+          bash scripts/check-merge-queue-policy.sh "$policy"
 
       - name: Classify changed paths
         id: decide
