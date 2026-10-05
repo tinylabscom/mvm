@@ -280,15 +280,50 @@ than a C4 source failure.
 
 ### C6 — Audit anchoring
 
-- [ ] C6.1 The chunked blob's `ContentBlob.sha256` is its index digest.
+- [x] C6.1 The chunked blob's `ContentBlob.sha256` is its index digest.
       `meta_digest`, `checkpoint.created`, `checkpoint.forked` and
       `verify_lineage` are unchanged.
-- [ ] C6.2 Tests: the existing lineage tests pass unmodified against chunked
+- [x] C6.2 Tests: the existing lineage tests pass unmodified against chunked
       checkpoints; editing an index after capture fails lineage verification.
-- [ ] C6.3 The snapshot store (`FsSnapshotStore`) and trusted-snapshot staging
+- [x] C6.3 The snapshot store (`FsSnapshotStore`) and trusted-snapshot staging
       in `capture_vm_full_inner` take a materialized content directory, so
       their signed manifests keep covering whole files. Decide whether they
       should move to indexes, and record the decision here.
+
+**C6 notes.** C2 already made `chunk_blob` return the index digest as the
+blob's address, so C6.1 needed no code. What was missing was a test that pins
+it and one that walks the attack it exists for.
+`a_chunked_blob_records_its_index_digest_as_the_content_address` checks the
+recorded address is the SHA-256 of the index file and differs from the
+whole-file digest. `an_index_replaced_after_capture_fails_lineage_against_the_chain`
+re-chunks different bytes into a captured checkpoint and re-seals the record
+one step at a time: the swapped index alone fails `verify_content`; the index
+plus the recorded address passes `verify_content` and fails `verify_lineage` on
+`meta_digest` drift; and a fully re-sealed record passes every local check and
+is refused only because the chain recorded a different `meta_digest` at
+capture. The audit entries carry `meta_digest`, not per-blob index digests:
+the record digest already covers every index digest, and a second label would
+be a second thing to keep consistent with nothing new to say.
+
+**C6.3 decision: the snapshot stores stay on materialized directories.** Their
+signed manifest digest is `content_manifest_digest(&meta.content)`, which is
+computed over the same index digests `meta_digest` covers, so the address they
+sign is already the chunked one; only the bytes they hold are whole files. The
+two paths use those bytes differently, and neither benefits from indexes:
+
+- `FsSnapshotStore` claims (`materialize_child_from_parent`) never trust the
+  whole files. They run `verify_content` on the chunks, and
+  `materialize_chunked_blobs` replaces each chunked blob in the claimed
+  directory with one rebuilt from the verified index. The snapshot's copy is a
+  starting point the claim overwrites, so storing indexes there would change
+  nothing a claim relies on.
+- The trusted backend exists so a warm claim can skip hashing entirely: the
+  platform seals the directory and materializes a read view no later writer can
+  modify. Indexes would put chunk reassembly and per-chunk hashing back on the
+  claim path, which is the latency that backend removes.
+
+Revisit this if a snapshot backend appears that can seal an object pool
+rather than a directory.
 
 ### C7 — Key domains
 
