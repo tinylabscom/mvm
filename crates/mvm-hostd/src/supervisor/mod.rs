@@ -125,6 +125,9 @@ pub mod transcript_sink;
 // libraries that open a fresh UDS connection per call.
 pub mod aggregate;
 pub mod services;
+/// Session idle-timeout enforcement: the shared reap decision and the
+/// supervisor-side watcher.
+pub mod session_expiry;
 pub mod ssrf_guard;
 pub mod state;
 pub mod tool_gate;

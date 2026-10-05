@@ -361,20 +361,28 @@ fn main() -> anyhow::Result<()> {
     // bearing boot with nowhere to record it is refused rather than booted
     // unbounded — same fail-closed posture as an unauditable kill.
     let _wall_clock = match cfg.pid_file.parent() {
-        Some(vm_state_dir) => match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
-            mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+        Some(vm_state_dir) => {
+            let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
                 plan_json: cfg.plan.as_ref(),
                 audit_dir: cfg.audit_dir.as_deref(),
                 signing_key_path: cfg.signing_key_path.as_deref(),
                 vm_state_dir,
-            },
-        ) {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("supervisor: refusing to boot a bounded workload it cannot audit: {e}");
-                std::process::exit(7);
-            }
-        },
+            };
+            let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(timer_inputs) {
+                Ok(guard) => guard,
+                Err(e) => {
+                    eprintln!(
+                        "supervisor: refusing to boot a bounded workload it cannot audit: {e}"
+                    );
+                    std::process::exit(7);
+                }
+            };
+            // A session's idle timeout, for the same reason as the wall clock:
+            // no client is left to enforce it once the one that started the
+            // session has exited.
+            mvm_hostd::supervisor::session_expiry::arm_for_supervisor(&timer_inputs);
+            guard
+        }
         None if cfg.plan.is_some() => {
             eprintln!(
                 "supervisor: refusing to boot a plan-bearing workload whose pid file {} has no \

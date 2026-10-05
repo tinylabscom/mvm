@@ -248,16 +248,16 @@ pub(in crate::commands) struct MachineRunArgs {
     /// Use CMD to check service health (exit 0 is healthy).
     #[arg(long, value_name = "CMD")]
     pub healthcheck: Option<String>,
-    /// Record check interval in seconds (not yet enforced).
+    /// Seconds between health checks.
     #[arg(long = "health-interval", default_value_t = 30)]
     pub health_interval: u32,
-    /// Record check timeout in seconds (not yet enforced).
+    /// Seconds a health check may run before it counts as failed.
     #[arg(long = "health-timeout", default_value_t = 5)]
     pub health_timeout: u32,
-    /// Record failures before unhealthy (not yet enforced).
+    /// Consecutive failed checks before the machine is unhealthy.
     #[arg(long = "health-retries", default_value_t = 3)]
     pub health_retries: u32,
-    /// Record the initial grace period (not yet enforced).
+    /// Seconds after start before failed checks count.
     #[arg(long = "health-start-period", default_value_t = 0)]
     pub health_start_period: u32,
     /// Attach the command to an interactive PTY.
