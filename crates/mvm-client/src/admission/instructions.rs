@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use mvm_core::plan::{ExecutionPlan, HostShareGrant, ShareKind};
+use mvm_core::vm_backend::VmVolume;
 use mvm_hostd::audit::emitter::AuditEmitter;
 
 use super::AssetSpec;
@@ -63,6 +64,22 @@ impl<'a> InstructionSources<'a> {
         self.mount_images = Some(images);
         self
     }
+}
+
+/// The ext4 images a boot attaches in place of host directories.
+///
+/// A `--mount` reaches the guest as a materialized image, not as the directory
+/// it was built from, so these are what the provenance scan has to read. Pass
+/// them to [`InstructionSources::with_mount_images`]: handed to
+/// [`InstructionSources::with_mount_roots`] instead, an image is a file root
+/// matched by its own name, which is never an instruction file's name, and the
+/// scan finds nothing in it.
+#[must_use]
+pub fn materialized_mount_images(volumes: &[VmVolume]) -> Vec<PathBuf> {
+    volumes
+        .iter()
+        .filter_map(|volume| volume.materialized_image.as_deref().map(PathBuf::from))
+        .collect()
 }
 
 /// The host paths this boot copies into the guest.
@@ -221,7 +238,7 @@ mod tests {
             kind: mvm_contract::plan::AssetKind::Prompt,
             host_path: "/assets/prompt".to_string(),
         }];
-        let materialized = vec![PathBuf::from("/state/mount-0.ext4")];
+        let materialized = vec![PathBuf::from("/state/mount-0")];
         let inputs = boot_inputs(
             &[share("/src/tree", ShareKind::DirShare)],
             &assets,
@@ -229,5 +246,26 @@ mod tests {
         );
         assert_eq!(inputs.mounts, materialized);
         assert_eq!(inputs.assets, vec![PathBuf::from("/assets/prompt")]);
+    }
+
+    #[test]
+    fn materialized_mount_images_are_the_attached_images_only() {
+        let volumes = vec![
+            VmVolume {
+                host: "/src/tree".to_string(),
+                guest: "/work".to_string(),
+                materialized_image: Some("/cache/mounts/key.ext4".to_string()),
+                ..Default::default()
+            },
+            VmVolume {
+                host: "/images/disk.ext4".to_string(),
+                guest: "/data".to_string(),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            materialized_mount_images(&volumes),
+            vec![PathBuf::from("/cache/mounts/key.ext4")]
+        );
     }
 }

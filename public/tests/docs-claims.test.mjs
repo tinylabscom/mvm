@@ -158,10 +158,11 @@ test("client guides state which clients the MCP server can and cannot serve", ()
   const pi = readGuide("pi-agent.md");
   const index = readGuide("ai-agent-integration.md");
 
-  // Codex opens with a protocol version the server refuses; the guide must
-  // say so rather than show a registration that lists no tools.
+  // Codex opens with an older protocol version than the other clients; the
+  // guide must name it and say the server answers it.
   assert.match(codex, /`2025-06-18`/);
-  assert.match(codex, /No MVM tool is listed in a Codex\s+session/);
+  assert.match(codex, /codex mcp add mvm -- mvmctl ops mcp stdio/);
+  assert.match(codex, /the MVM tools are listed under the\s+`mcp__mvm` namespace/);
   assert.match(codex, /Codex does not read `OPENAI_API_KEY`/);
   assert.match(pi, /pi has no\s+MCP client/);
   assert.match(pi, /--provider anthropic/);

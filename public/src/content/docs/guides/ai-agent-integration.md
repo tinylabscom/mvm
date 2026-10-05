@@ -14,7 +14,7 @@ the client can connect, the host-side MCP setup.
 | Client | Guide | Signed pack | Host-side MCP tools |
 | --- | --- | --- | --- |
 | Claude Code | [Claude Code with MVM tools](/guides/claude-code-mcp/) | `agent/claude` | Connects |
-| Codex | [Codex with MVM](/guides/codex-agent/) | `agent/codex` | Refused: Codex opens with a protocol version the server does not answer |
+| Codex | [Codex with MVM](/guides/codex-agent/) | `agent/codex` | Connects |
 | pi | [pi with MVM](/guides/pi-agent/) | `agent/pi` | None: pi has no MCP client |
 | OpenCode | [OpenCode with MVM](/guides/opencode-agent/) | `agent/opencode` | Connects |
 | Goose | [Goose with MVM](/guides/goose-agent/) | `agent/goose` | Connects |

@@ -25,9 +25,29 @@ use serde_json::{Map, Value, json};
 
 /// Current stateless MCP protocol version supported by this server.
 pub const CURRENT_PROTOCOL_VERSION: &str = "2026-07-28";
-/// Legacy handshake version retained for clients that have not moved to
-/// per-request discovery metadata yet.
+/// Newest `initialize` handshake version, for clients that have not moved to
+/// per-request discovery metadata yet. It is also the answer to a requested
+/// handshake version this server does not implement.
 pub const LEGACY_PROTOCOL_VERSION: &str = "2025-11-25";
+/// Every version an `initialize` is answered with, newest first.
+///
+/// The MCP lifecycle has the server echo a requested version it supports and
+/// otherwise answer with one it does, leaving the decision to disconnect with
+/// the client. So a request naming a version in this list gets that version
+/// back, and any other request gets [`LEGACY_PROTOCOL_VERSION`] rather than an
+/// error.
+///
+/// The server keeps no session, so nothing after `initialize` can depend on
+/// the version it agreed, and nothing needs to: every response is valid under
+/// each version listed. Tools carry only `name`, `description` and
+/// `inputSchema`; tool results carry `content`, `structuredContent` and
+/// `isError`, all defined since 2025-06-18; `serverInfo` carries only `name`
+/// and `version`; and no capability added after 2025-06-18 is advertised. The
+/// extra result fields of the stateless model (`resultType`, `ttlMs`,
+/// `cacheScope`) are permitted by every listed version's open `Result` shape.
+/// Revisions before 2025-06-18 are not listed because they have no
+/// `structuredContent`.
+pub const HANDSHAKE_PROTOCOL_VERSIONS: &[&str] = &[LEGACY_PROTOCOL_VERSION, "2025-06-18"];
 
 const CATALOG_TTL_MS: u64 = 300_000;
 const UNKNOWN_TOOL: &str = "unknown tool";
@@ -264,13 +284,8 @@ impl McpServer {
         }
 
         let meta = params.remove("_meta");
-        if method == "server/discover" && meta.is_none() {
-            return response_error(id, -32602, "server/discover requires request metadata");
-        }
-        if let Some(meta) = meta {
-            if let Err(message) = validate_current_meta(&meta) {
-                return response_error(id, -32602, message);
-            }
+        if let Err(message) = validate_request_meta(&method, meta.as_ref()) {
+            return response_error(id, -32602, message);
         }
 
         match method.as_str() {
@@ -692,16 +707,13 @@ fn legacy_initialize(id: Value, params: Map<String, Value>) -> String {
         Ok(request) => request,
         Err(message) => return response_error(id, -32602, &message),
     };
-    if request.protocol_version != LEGACY_PROTOCOL_VERSION {
-        return response_error(id, -32602, "unsupported legacy protocol version");
-    }
     if !request.capabilities.is_object() || !request.client_info.is_object() {
         return response_error(id, -32602, "invalid initialize capabilities or clientInfo");
     }
     response_result(
         id,
         json!({
-            "protocolVersion": LEGACY_PROTOCOL_VERSION,
+            "protocolVersion": negotiate_handshake_version(&request.protocol_version),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name":"mvm", "version":env!("CARGO_PKG_VERSION")},
             "instructions":"Drive machines through the MvmClient-backed tools."
@@ -709,30 +721,54 @@ fn legacy_initialize(id: Value, params: Map<String, Value>) -> String {
     )
 }
 
-fn validate_current_meta(meta: &Value) -> Result<(), &'static str> {
+/// The version to answer an `initialize` naming `requested` with.
+fn negotiate_handshake_version(requested: &str) -> &'static str {
+    HANDSHAKE_PROTOCOL_VERSIONS
+        .iter()
+        .copied()
+        .find(|supported| *supported == requested)
+        .unwrap_or(LEGACY_PROTOCOL_VERSION)
+}
+
+/// Check a request's `_meta`. A stateless request names its protocol version
+/// there and must name [`CURRENT_PROTOCOL_VERSION`]. A request in a session
+/// opened by `initialize` carries no version in `_meta`, but may carry other
+/// request metadata such as a progress token, which this server accepts and
+/// ignores. `server/discover` exists only in the stateless model, so it always
+/// needs the version.
+fn validate_request_meta(method: &str, meta: Option<&Value>) -> Result<(), &'static str> {
+    const DISCOVER_NEEDS_META: &str = "server/discover requires request metadata";
+    let Some(meta) = meta else {
+        return if method == "server/discover" {
+            Err(DISCOVER_NEEDS_META)
+        } else {
+            Ok(())
+        };
+    };
     let Some(meta) = meta.as_object() else {
         return Err("_meta must be an object");
     };
-    if meta
-        .get("io.modelcontextprotocol/protocolVersion")
-        .and_then(Value::as_str)
-        != Some(CURRENT_PROTOCOL_VERSION)
-    {
-        return Err("unsupported MCP protocol version");
+    match meta.get("io.modelcontextprotocol/protocolVersion") {
+        None if method == "server/discover" => Err(DISCOVER_NEEDS_META),
+        None => Ok(()),
+        Some(version) if version.as_str() != Some(CURRENT_PROTOCOL_VERSION) => {
+            Err("unsupported MCP protocol version")
+        }
+        Some(_) => meta
+            .get("io.modelcontextprotocol/clientCapabilities")
+            .is_some_and(Value::is_object)
+            .then_some(())
+            .ok_or("client capabilities metadata is required"),
     }
-    if !meta
-        .get("io.modelcontextprotocol/clientCapabilities")
-        .is_some_and(Value::is_object)
-    {
-        return Err("client capabilities metadata is required");
-    }
-    Ok(())
 }
 
 fn discover_result() -> Value {
+    let supported_versions: Vec<&str> = std::iter::once(CURRENT_PROTOCOL_VERSION)
+        .chain(HANDSHAKE_PROTOCOL_VERSIONS.iter().copied())
+        .collect();
     json!({
         "resultType":"complete",
-        "supportedVersions":[CURRENT_PROTOCOL_VERSION, LEGACY_PROTOCOL_VERSION],
+        "supportedVersions":supported_versions,
         "capabilities":{"tools":{}},
         "instructions":"Drive machines through the MvmClient-backed tools; unavailable facade operations are not advertised.",
         "ttlMs":CATALOG_TTL_MS,
