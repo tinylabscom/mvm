@@ -378,9 +378,7 @@ impl FlowMuxSession {
             reader: stream,
             writer: Arc::new(Mutex::new(writer)),
             session: Arc::new(Mutex::new(session)),
-            validator: Arc::new(Mutex::new(SessionValidator::new_with_ingress(
-                ingress_mappings,
-            ))),
+            validator: Arc::new(Mutex::new(SessionValidator::new(ingress_mappings))),
             registry: Arc::new(Mutex::new(StreamRegistry::with_budget(
                 limits,
                 Arc::clone(&resources.registry_budget),
