@@ -34,8 +34,9 @@ esac
 # Compared by real path: Fedora merged /usr/sbin into /usr/bin and lists
 # /usr/sbin first on PATH, so the same file is found under either name.
 found="$(command -v mvmctl || true)"
-[ -n "${found}" ] && [ "$(readlink -f "${found}")" = "$(readlink -f /usr/bin/mvmctl)" ] \
-  || fail "mvmctl on PATH is ${found:-nothing}, not /usr/bin/mvmctl"
+if [ -z "${found}" ] || [ "$(readlink -f "${found}")" != "$(readlink -f /usr/bin/mvmctl)" ]; then
+  fail "mvmctl on PATH is ${found:-nothing}, not /usr/bin/mvmctl"
+fi
 reported="$(mvmctl --version)"
 case "${reported}" in
   *"${version}"*) ;;

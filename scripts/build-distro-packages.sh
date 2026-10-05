@@ -39,8 +39,10 @@ case "${version}" in
   v*|"") echo "build-distro-packages: version must be bare, got '${version}'" >&2; exit 2 ;;
 esac
 [ -f "${tarball}" ] || { echo "build-distro-packages: ${tarball} not found" >&2; exit 1; }
-[ -f Cargo.toml ] && grep -q '^\[package\.metadata\.deb\]' Cargo.toml \
-  || { echo "build-distro-packages: run from the workspace root" >&2; exit 2; }
+if ! { [ -f Cargo.toml ] && grep -q '^\[package\.metadata\.deb\]' Cargo.toml; }; then
+  echo "build-distro-packages: run from the workspace root" >&2
+  exit 2
+fi
 
 stage="target/distro-pkg"
 unpack="$(mktemp -d)"
