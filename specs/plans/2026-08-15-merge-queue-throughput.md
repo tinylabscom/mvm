@@ -100,6 +100,13 @@ and then on the integrated merge-group commit.
       entry at a time, and merge one PR per group while the queue is stabilized.
       Keep all required and recommended verification; optimize lane internals,
       cache reuse, and runner admission rather than deleting coverage.
+- [x] Stop Extended CI from taking the merge queue's runners. On 2026-10-05 a
+      feature-branch dispatch held 15 jobs while a merge group's 13 waited, and
+      groups that take 22 minutes on an idle pool took 50-97. `ci-full.yml`
+      now runs one run at a time in a global concurrency group, and its jobs
+      run as five serial tracks with the live BDD matrix one leg at a time:
+      about five hosted runners instead of about 22. The SDK dry-run, whose
+      matrices live in the called publish workflows, runs last and alone.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
 - [ ] Land the workflow change through the merge queue. The live stabilization

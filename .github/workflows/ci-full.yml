@@ -14,20 +14,27 @@ on:
     - cron: "51 4 * * *"
   workflow_dispatch:
 
-# This workflow has no `pull_request` trigger, so there is no check panel to
-# keep free of superseded SHAs — the only thing cancellation could reach here
-# is a lane that has been running for hours. Keying on `ref` alone made that
-# worse rather than harmless: a scheduled run and an operator dispatch both
-# carry `refs/heads/main`, so they shared a group and killed each other. Four
-# consecutive Extended CI runs were cancelled that way, each reporting
-# `cancelled`, which reads as a red lane. The lane was not red; the
-# documented-surface e2e job had never been allowed to finish.
+# One Extended CI run at a time, across every ref and trigger. The
+# organization's hosted-runner pool is 20 concurrent jobs shared with the merge
+# queue, which needs about 15 for one group. Keying the group per dispatch let
+# operator runs on feature branches stack on top of the nightly and of each
+# other, each fanning out to twenty-odd jobs, and merge-group jobs waited for
+# runners behind them.
 #
-# Same shape as ci.yml: dispatches are keyed on their own run id so an operator
-# request never lands on top of the nightly, and the nightly is keyed on the
-# ref so only one runs at a time. Nothing in flight is cancelled.
+# Nothing in flight is cancelled. GitHub keeps at most one pending run per
+# group, though, so a run queued behind an in-flight one is replaced by any run
+# queued after it: two dispatches made while a third is running collapse into
+# the later one, and a nightly still waiting when a dispatch arrives is
+# displaced by that dispatch. That is the intended trade. A displaced run
+# concludes `cancelled` with no job verdicts, which security-lane-watch.yml
+# reports as nothing rather than as a red lane; re-dispatch on `main` if the
+# nightly's evidence is wanted that day.
+#
+# The group is a literal. Inside a workflow invoked through `workflow_call`,
+# `github.workflow` names the caller, so a called workflow keyed on it would
+# land in this group and wait forever on the run that called it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
+  group: extended-ci
   cancel-in-progress: false
 
 env:
@@ -52,11 +59,41 @@ env:
 #     unified `lint` job so the three share one runner, one cache,
 #     one toolchain install. Save ~3 min wall-clock + 2 runner-
 #     minutes per PR run.
+#
+# ── Runner budget ─────────────────────────────────────────────────────
+# GitHub-hosted jobs only; the self-hosted Mac in e2e-docs.yml costs the
+# shared pool nothing. Unordered, the jobs below started together and the SDK
+# dry-run's two five-leg matrices landed on top of them: about 22 hosted
+# runners at once, more than the whole pool. They now run as five tracks, each
+# holding one runner at a time:
+#
+#   1. e2e-docs                                         (~140 min, the pole)
+#   2. source-bootstrap-linux                           (40-105 min)
+#   3. no-kvm-prepare → bootstrap → build → smoke       (~60 min)
+#   4. bdd-live-warm-claim → bdd-live-readme, one leg at a time  (~90 min)
+#   5. apple → libkrun-macos → e2e → workload-spawn-smoke
+#      → crates-publish-dry-run                         (~45 min)
+#
+# That is five runners. A dispatched run reaches six while the crates dry-run
+# starts its BDD job beside its package job, and e2e-docs adds a short
+# evidence job when the Mac reports it cannot boot a guest.
+#
+# sdk-release-dry-run runs last, after every track, because its matrices are
+# declared in publish-pypi.yml and publish-npm.yml and cannot be capped from
+# here: it holds up to ten runners for about ten minutes, with nothing else
+# from this workflow beside it.
+#
+# A chained job runs under `!cancelled()`, which is false only when the run
+# itself is cancelled, so it runs whatever its predecessor concluded; ordering
+# decides when a lane starts, never whether it does. Cancelling the run still
+# stops every track, which `always()` would not.
 jobs:
 
 
   e2e:
     name: E2E Tests
+    needs: libkrun-macos
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -175,9 +212,16 @@ jobs:
   # unrelated pull requests.
   bdd-live-readme:
     name: BDD live ${{ matrix.witness }} (Linux, Firecracker)
+    # Last in its track: ci_live is the lane most likely to run to its
+    # timeout, and nothing should wait behind that.
+    needs: bdd-live-warm-claim
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # One witness at a time keeps this track to one hosted runner; see the
+      # runner budget above.
+      max-parallel: 1
       matrix:
         include:
           - witness: ci_live
@@ -384,8 +428,18 @@ jobs:
           retention-days: 14
 
 
+  # Runs alone, after every track: its matrices fan out to ten hosted runners
+  # and are declared in the called workflows, out of reach of `max-parallel`
+  # here.
   sdk-release-dry-run:
     name: SDK release dry-run
+    needs:
+      - e2e-docs
+      - source-bootstrap-linux
+      - no-kvm-smoke
+      - bdd-live-readme
+      - crates-publish-dry-run
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
       id-token: write
@@ -398,6 +452,8 @@ jobs:
   # rather than on the tag that tries to publish it.
   crates-publish-dry-run:
     name: crates.io publish dry-run
+    needs: workload-spawn-smoke-linux
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
     uses: ./.github/workflows/publish-crates.yml
@@ -463,6 +519,8 @@ jobs:
   # The lane catches everything before that boundary.
   libkrun-macos:
     name: libkrun (macOS Apple Silicon)
+    needs: apple
+    if: ${{ !cancelled() }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v6
@@ -541,6 +599,8 @@ jobs:
   # Plan 107 A4.5's live-KVM smoke on a nested-KVM runner — not this lane.
   workload-spawn-smoke-linux:
     name: Workload spawn smoke (Plan 107 A2.4)
+    needs: e2e
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
