@@ -229,7 +229,7 @@ impl LocalBackend {
                     Ok(summary) => summary,
                     Err(why) => {
                         return Err(refuse_resume(name, &why, || {
-                            backend.stop(&VmId(name.to_string()))
+                            backend.stop(&VmId(name.to_string())).map(|_timing| ())
                         }));
                     }
                 };
@@ -1303,7 +1303,7 @@ impl MvmClient for LocalBackend {
                 crate::launch::seal_stopped_session(&plan, &id.0);
             }
         }
-        result.map_err(backend_err)
+        result.map(|_timing| ()).map_err(backend_err)
     }
 
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
@@ -1657,7 +1657,11 @@ mod tests {
         let registry_path = mvm_runtime::vm::name_registry::registry_path();
         let mut registry = VmNameRegistry::default();
         registry
-            .register("vm-a", "/vms/vm-a", "default", None, 0)
+            .register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+                "vm-a",
+                "/vms/vm-a",
+                "default",
+            ))
             .expect("register");
         registry.save(&registry_path).expect("save registry");
 
@@ -1714,7 +1718,11 @@ mod tests {
         let registry_path = mvm_runtime::vm::name_registry::registry_path();
         let mut registry = VmNameRegistry::load(&registry_path).expect("registry");
         registry
-            .register(name, &format!("/vms/{name}"), "default", None, 0)
+            .register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+                name,
+                &format!("/vms/{name}"),
+                "default",
+            ))
             .expect("register");
         registry.save(&registry_path).expect("save registry");
         registry_path
@@ -2058,7 +2066,7 @@ mod tests {
         let mut tags = std::collections::BTreeMap::new();
         tags.insert("env".to_string(), "prod".to_string());
         registry
-            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
+            .register(mvm_runtime::vm::name_registry::RegisterParams {
                 name: "web",
                 vm_dir: "/tmp/web",
                 network: "default",
