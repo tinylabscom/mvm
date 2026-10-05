@@ -119,6 +119,11 @@ mod boot_stage;
 #[path = "mvm-host-vm-init/builder_hooks.rs"]
 mod builder_hooks;
 
+/// The single-shot job's contract outcome and the job-directory refusal.
+#[cfg(target_os = "linux")]
+#[path = "mvm-host-vm-init/job_outcome.rs"]
+mod job_outcome;
+
 /// Parse the exact device path emitted by `losetup --find --show`.
 ///
 /// Kept outside the Linux-only mount module so every host exercises the
@@ -1275,10 +1280,11 @@ mod linux {
     use std::time::Instant;
 
     use crate::boot_timings::BootTimings;
-    use mvm_build::builder_job_contract::{
-        CLASSIFY_WINDOW_BYTES, FailureCategory, NIX_STDERR_LOG, NIX_STDOUT_LOG, RESULT_FILE,
-        check_job_dir, classify_job_failure,
+    use crate::job_outcome::{
+        classify_failed_job, mirror_build_logs, mirror_host_visible_out_artifact,
+        refuse_unless_contract, write_result, write_setup_failure,
     };
+    use mvm_build::builder_job_contract::FailureCategory;
 
     /// Persistent Nix-store device — virtio-blk attached as
     /// `/dev/vdb` by `LibkrunBuilderVm` via its `extra_disks` entry.
@@ -1350,7 +1356,7 @@ mod linux {
     /// Per-job command staging dir (`/job/cmd.sh`, `/job/env`,
     /// `/job/result`). Mounted via virtio-fs from the host
     /// (`LibkrunBuilderVm` declares the `job` tag).
-    const JOB_DIR: &str = "/job";
+    pub(crate) const JOB_DIR: &str = "/job";
 
     /// Workspace bind from the host — the in-repo flake the user
     /// is building. Read-only from the guest's perspective: libkrun
@@ -1361,7 +1367,7 @@ mod linux {
     /// Artifact-extraction dir. The user's `cmd.sh` writes
     /// `vmlinux` + `rootfs.ext4` here; the host reads them back
     /// out after the VM powers off.
-    const OUT_DIR: &str = "/out";
+    pub(crate) const OUT_DIR: &str = "/out";
 
     /// Pre-cross-compiled host-vm binaries. `cmd.sh` exports
     /// `MVM_HOST_BIN_DIR=/mvm-bins` so the builder-vm flake installs
@@ -1392,7 +1398,7 @@ mod linux {
     /// (`krun_set_console_output`).
     const STDERR_TAIL_LINES: usize = 20;
 
-    fn append_init_breadcrumb(stage: &str, detail: &str) {
+    pub(crate) fn append_init_breadcrumb(stage: &str, detail: &str) {
         let mut persistent_targets = Vec::new();
         for candidate in [NIX_STORE_MOUNT, JOB_DIR, OUT_DIR] {
             let path = Path::new(candidate);
@@ -3813,82 +3819,6 @@ mod linux {
         };
         let tail_joined = tail.into_iter().collect::<Vec<_>>().join("\n");
         (exit_code, tail_joined)
-    }
-
-    /// Write `/job/result`, the job outcome the builder job contract
-    /// defines, and mirror it into `/out`. Rendered by hand rather than with
-    /// `serde_json`, which the init binary's size budget keeps out.
-    fn write_result(
-        exit_code: i32,
-        failure: Option<FailureCategory>,
-        stderr_tail: &str,
-        build_ms: Option<u64>,
-    ) {
-        let body =
-            crate::dispatch_response::job_outcome_json(exit_code, failure, stderr_tail, build_ms);
-        let path = format!("{JOB_DIR}/{RESULT_FILE}");
-        if let Err(e) = std::fs::write(&path, &body) {
-            eprintln!("mvm-host-vm-init: failed to write {path}: {e}");
-        }
-        mirror_host_visible_out_artifact(RESULT_FILE, &body);
-    }
-
-    /// A job that could not start because the boot around it failed. Nothing
-    /// the job asked for ran, so the failure is the builder's, not the build's.
-    fn write_setup_failure(detail: &str) {
-        write_result(2, Some(FailureCategory::Internal), detail, None);
-    }
-
-    /// Classify a failed single-shot job from the build log `cmd.sh`
-    /// redirected Nix's stderr into, falling back to the script's own tail.
-    fn classify_failed_job(script_tail: &str) -> FailureCategory {
-        let log = mvm_build::builder_vm_runtime::read_last_bytes_of(
-            Path::new(&format!("{JOB_DIR}/{NIX_STDERR_LOG}")),
-            CLASSIFY_WINDOW_BYTES as u64,
-        )
-        .ok();
-        classify_job_failure(log.as_deref(), script_tail)
-    }
-
-    /// Copy the build's stdout and stderr captures into `/out` beside the
-    /// result, so the host finds the logs where it finds the artifacts on every
-    /// transport. The disk transport copies them again when it tars `/out`;
-    /// a virtio-fs `/out` is the host's directory, and this is the only copy.
-    fn mirror_build_logs() {
-        for name in [NIX_STDERR_LOG, NIX_STDOUT_LOG] {
-            let src = format!("{JOB_DIR}/{name}");
-            if Path::new(&src).is_file() && Path::new(OUT_DIR).is_dir() {
-                let _ = std::fs::copy(&src, format!("{OUT_DIR}/{name}"));
-            }
-        }
-    }
-
-    /// Refuse to run a job directory staged under a job contract this init
-    /// does not speak. Returns the refusal, logged and breadcrumbed, for the
-    /// caller to report as the job's outcome; `None` when the directory may run.
-    fn refuse_unless_contract(job_dir: &str) -> Option<String> {
-        let refusal = check_job_dir(Path::new(job_dir)).err()?.to_string();
-        append_init_breadcrumb("job_contract_refused", &refusal);
-        eprintln!("mvm-host-vm-init: refusing {job_dir}: {refusal}");
-        Some(refusal)
-    }
-
-    pub(crate) fn mirror_artifact_into_dir(dir: &Path, file_name: &str, body: &str) {
-        if !dir.is_dir() {
-            return;
-        }
-        let path = dir.join(file_name);
-        if let Err(e) = std::fs::write(&path, body) {
-            eprintln!(
-                "mvm-host-vm-init: failed to mirror {} into {}: {e}",
-                file_name,
-                path.display()
-            );
-        }
-    }
-
-    fn mirror_host_visible_out_artifact(file_name: &str, body: &str) {
-        mirror_artifact_into_dir(Path::new(OUT_DIR), file_name, body);
     }
 
     /// Minimal JSON string escaper. Only handles the characters
