@@ -115,6 +115,28 @@ fn live_bdd_recipe_opts_in_and_selects_one_strict_witness() {
 }
 
 #[test]
+fn docs_bdd_recipe_selects_the_docs_features_and_refuses_an_empty_run() {
+    let bdd_mod = fs::read_to_string("just/bdd/mod.just").expect("read bdd module");
+    let recipe = bdd_mod
+        .split("\ndocs:\n")
+        .nth(1)
+        .expect("bdd module must define docs")
+        .split("\n\n")
+        .next()
+        .expect("docs recipe has a body");
+
+    assert!(recipe.contains("MVM_BDD_ONLY_TAG=docs"));
+    // Selection goes through the harness so capability gates still apply.
+    assert!(!recipe.contains("--tags"));
+    assert!(recipe.contains("--test doc_rust_examples"));
+    assert!(recipe.contains("cargo build --bin mvmctl --features user"));
+    assert!(
+        recipe.contains("scenarios? \\("),
+        "the recipe must fail when the tag selects no scenario"
+    );
+}
+
+#[test]
 fn fast_live_witness_executes_the_readme_persistent_machine_path() {
     let feature =
         fs::read_to_string("features/suites/s8_readme_contract/persistent_machine_live.feature")

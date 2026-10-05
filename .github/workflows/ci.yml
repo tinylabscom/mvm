@@ -43,6 +43,7 @@ jobs:
     runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-latest' }}
     outputs:
       code: ${{ steps.validate.outputs.code }}
+      docs: ${{ steps.validate.outputs.docs }}
       nix: ${{ steps.validate.outputs.nix }}
       architecture: ${{ steps.validate.outputs.architecture }}
       guest_image: ${{ steps.validate.outputs.guest_image }}
@@ -63,7 +64,7 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            for output in code nix architecture guest_image; do
+            for output in code docs nix architecture guest_image; do
               echo "${output}=true" >> "$GITHUB_OUTPUT"
             done
           }
@@ -136,6 +137,18 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # The documentation corpus the README-contract and documented-example
+          # scenarios read. Without its own scope a change confined to these
+          # files resolved code=false and merged without the suite that checks
+          # it. `documentation_files()` in
+          # crates/mvm-conformance/src/doc_examples.rs walks the same roots,
+          # and a test there fails when the two lists differ.
+          if grep -zE '^(README\.md$|AGENTS\.md$|public/src/content/docs/|crates/mvm-sdk/sdks/|examples/)' "$CHANGED_FILE" >/dev/null; then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs=false" >> "$GITHUB_OUTPUT"
+          fi
+
           if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|scripts/check-devshell-tiers\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|third_party/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "nix=true" >> "$GITHUB_OUTPUT"
           else
@@ -164,6 +177,7 @@ jobs:
         id: validate
         env:
           CODE: ${{ steps.decide.outputs.code }}
+          DOCS: ${{ steps.decide.outputs.docs }}
           NIX: ${{ steps.decide.outputs.nix }}
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
           GUEST_IMAGE: ${{ steps.decide.outputs.guest_image }}
@@ -177,6 +191,7 @@ jobs:
             esac
           }
           validate code "$CODE"
+          validate docs "$DOCS"
           validate nix "$NIX"
           validate architecture "$ARCHITECTURE"
           validate guest_image "$GUEST_IMAGE"
@@ -821,11 +836,18 @@ jobs:
   # contains `crates/mvm-cli/`, `tests/` contains `tests/machine-fixtures/`, and
   # both cover `features/` and the Justfile — so this widening admits exactly
   # the runs the Linux lane was already covering and no others.
+  #
+  # It also runs for `docs`, because the README contract and the
+  # documented-example suite read the documentation tree directly. When `code`
+  # is false nothing that compiles changed, so only those `@docs` features run;
+  # every other scenario would re-prove behaviour the change cannot affect.
   bdd-conformance:
     name: BDD conformance
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'merge_group'
     uses: ./.github/workflows/bdd.yml
+    with:
+      docs_only: ${{ needs.scope.outputs.code != 'true' }}
 
   test:
     name: Test
@@ -865,6 +887,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
+          SCOPE_DOCS: ${{ needs.scope.outputs.docs }}
           PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
@@ -900,6 +923,17 @@ jobs:
               ;;
             *) echo "Invalid event/scope: $EVENT_NAME/$SCOPE_CODE"; exit 1 ;;
           esac
+          # The BDD lane is the one lane `docs` also brings into scope. The
+          # merge queue reuses the PR's proof, so it skips there like the rest.
+          case "$SCOPE_DOCS" in
+            true|false) ;;
+            *) echo "Invalid docs scope: $SCOPE_DOCS"; exit 1 ;;
+          esac
+          case "$EVENT_NAME:$SCOPE_CODE:$SCOPE_DOCS" in
+            merge_group:*) bdd_required=skipped ;;
+            *:false:false) bdd_required=skipped ;;
+            *) bdd_required=success ;;
+          esac
           if [ "$POLICY_RESULT" != "$policy_required" ]; then
             echo "Policy lint did not match event $EVENT_NAME: $POLICY_RESULT"
             exit 1
@@ -916,12 +950,16 @@ jobs:
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
-            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
+            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
             fi
           done
+          if [ "$BDD_RESULT" != "$bdd_required" ]; then
+            echo "BDD conformance did not match scope code=$SCOPE_CODE docs=$SCOPE_DOCS: $BDD_RESULT"
+            exit 1
+          fi
           case "$EVENT_NAME" in
             pull_request|workflow_dispatch) nix_required=success ;;
             merge_group) nix_required=skipped ;;

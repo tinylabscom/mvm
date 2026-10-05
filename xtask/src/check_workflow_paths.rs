@@ -790,7 +790,6 @@ mod tests {
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
-            "bdd-conformance",
             "test-workspace",
             "test-workspace-aarch64",
             "test-release-witness",
@@ -899,12 +898,33 @@ mod tests {
             "bdd-conformance must still run the Gherkin suite"
         );
         // ...and it has to be reachable on every code run the Linux lane
-        // covers, including pull requests before queue admission.
+        // covers, including pull requests before queue admission, and on every
+        // change to the documentation its README and example features read.
+        // Like every other proof lane it reuses the PR's result in the queue.
+        let bdd = job_block(&workflow, "bdd-conformance");
         assert!(
-            job_block(&workflow, "bdd-conformance")
-                .contains("if: needs.scope.outputs.code == 'true'"),
-            "bdd-conformance must carry the broad code scope"
+            bdd.contains(
+                "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'merge_group'"
+            ),
+            "bdd-conformance must run for the code scope and the docs scope, before queue admission"
         );
+        // A docs-only change gets the documentation scenarios; anything that
+        // compiles still gets the whole suite.
+        assert!(
+            bdd.contains("docs_only: ${{ needs.scope.outputs.code != 'true' }}"),
+            "bdd-conformance must narrow to the documentation scenarios only when code is out of scope"
+        );
+        for expected in [
+            "docs_only:",
+            "default: false",
+            "if: ${{ !inputs.docs_only }}\n        run: just bdd::run",
+            "if: ${{ inputs.docs_only }}\n        run: just bdd::docs",
+        ] {
+            assert!(
+                bdd_workflow.contains(expected),
+                "bdd.yml must keep the full suite as its default and gate the docs path: {expected:?}"
+            );
+        }
     }
 
     #[test]
@@ -923,6 +943,7 @@ mod tests {
             "could not diff $BASE..$HEAD — running every lane to stay safe",
             "invalid or missing ${name} scope",
             "code=true",
+            "docs=true",
             "nix=true",
             "architecture=true",
             "just/",
@@ -1024,6 +1045,12 @@ mod tests {
         let aggregate = job_block(&ci, "test");
         assert!(aggregate.contains("needs.scope.result"));
         assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
+        assert!(aggregate.contains("SCOPE_DOCS: ${{ needs.scope.outputs.docs }}"));
+        assert!(
+            aggregate.contains("false:false) bdd_required=skipped")
+                && aggregate.contains(r#"if [ "$BDD_RESULT" != "$bdd_required" ]"#),
+            "Test must require the BDD lane whenever code or docs is in scope"
+        );
         assert!(
             aggregate.contains("merge_group:true|merge_group:false)")
                 && aggregate.contains("required=skipped")

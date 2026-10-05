@@ -25,6 +25,27 @@ run:
     just sdk::build-typescript
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 
+# The part of the suite a documentation-only change can affect: the `@docs`
+# features (README contract, documented examples) and the compiled Rust
+# examples. Skips xtask, the schema emitters and the TypeScript build, none of
+# which those features use; the TypeScript dependencies stay because the
+# typecheck scenario resolves the SDK from source against them. The summary
+# check fails a run that selected nothing, which is what a lost tag looks like.
+
+# Run only the BDD scenarios that read the documentation
+docs:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build --bin mvmctl --features user
+    just sdk::install-typescript
+    log="$(mktemp)"
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_ONLY_TAG=docs \
+      ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --test doc_rust_examples --features bdd 2>&1 | tee "$log"
+    if ! grep -Eq '^[1-9][0-9]* scenarios? \(' "$log"; then
+      echo "no @docs scenario ran; the documentation features lost their tag" >&2
+      exit 1
+    fi
+
 # KVM-backed live witnesses, selected independently so a second cold boot does
 # not consume the existing lifecycle lane's timeout budget.
 
