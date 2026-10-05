@@ -8,8 +8,16 @@ use sha2::{Digest as _, Sha256};
 
 pub(super) const CHUNK_SIZE: usize = 1024 * 1024;
 pub(super) const MEMBERSHIP_DIR: &str = ".chunks";
-const OBJECTS_DIR: &str = ".objects";
-const MATERIALIZATIONS_DIR: &str = ".materialized";
+pub(super) const OBJECTS_DIR: &str = ".objects";
+pub(super) const MATERIALIZATIONS_DIR: &str = ".materialized";
+/// Prefix of an object being written, before it is linked under its digest.
+pub(super) const OBJECT_TEMP_PREFIX: &str = ".object-";
+/// Prefix of a materialization being staged, before it is renamed into place.
+pub(super) const MATERIALIZATION_TEMP_PREFIX: &str = ".materialized-";
+/// How many times a capture links a pool object that a concurrent prune
+/// reclaims under it before giving up. The second attempt writes the object
+/// itself, which no prune can take, so the bound is never reached in practice.
+const VANISHED_OBJECT_ATTEMPTS: usize = 3;
 const CACHED_BLOB_FILE: &str = "blob";
 const CACHED_INDEX_FILE: &str = "index.json";
 
@@ -395,7 +403,7 @@ fn ensure_materialization_cache_dirs(
     create_private_dir_durable(&blob_root, &domain_root)
 }
 
-fn materialization_blob_cache_root(
+pub(super) fn materialization_blob_cache_root(
     store_root: &Path,
     domain: &CheckpointKeyDomain,
     blob_name: &str,
@@ -659,7 +667,7 @@ fn publish_cached_materialization(
         })?;
     }
     let staged = tempfile::Builder::new()
-        .prefix(".materialized-")
+        .prefix(MATERIALIZATION_TEMP_PREFIX)
         .tempdir_in(cache_root)
         .with_context(|| {
             format!(
@@ -871,6 +879,25 @@ pub(super) struct ObjectPool {
     root: PathBuf,
 }
 
+/// A pool object ready to be linked into a checkpoint.
+enum PoolObject {
+    /// Already in the pool. A prune may still reclaim it before the link.
+    Existing(PathBuf),
+    /// Just published from this staged file, which shares its inode. Linking
+    /// from the staged name cannot race a prune: that name keeps the link
+    /// count above one until it is dropped, after the checkpoint's own link.
+    Written(tempfile::NamedTempFile),
+}
+
+impl PoolObject {
+    fn link_source(&self) -> &Path {
+        match self {
+            Self::Existing(path) => path,
+            Self::Written(staged) => staged.path(),
+        }
+    }
+}
+
 impl ObjectPool {
     pub(super) fn new(store_root: &Path, domain: &CheckpointKeyDomain) -> Result<Self> {
         let objects = store_root.join(OBJECTS_DIR);
@@ -902,7 +929,6 @@ impl ObjectPool {
         }
 
         let digest = ChunkDigest::from_bytes(bytes);
-        let object = self.ensure_object(&digest, bytes)?;
         let membership = membership_path(checkpoint_content, &digest);
         let membership_parent = membership
             .parent()
@@ -913,25 +939,42 @@ impl ObjectPool {
                 membership_parent.display()
             )
         })?;
-        match std::fs::hard_link(&object, &membership) {
-            Ok(()) => mvm_core::atomic_io::sync_dir(membership_parent)?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.verify_object(&membership, &digest)?;
-            }
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "linking checkpoint object {} into {}",
-                        object.display(),
-                        membership.display()
-                    )
-                });
+        // A prune reclaims a pool object whose only link is the pool's own,
+        // which is the state of an object no stored checkpoint uses any more
+        // until this link lands. Writing it again is the whole recovery: the
+        // bytes are in hand, and a freshly written object cannot vanish.
+        for _ in 0..VANISHED_OBJECT_ATTEMPTS {
+            let object = self.ensure_object(&digest, bytes)?;
+            match std::fs::hard_link(object.link_source(), &membership) {
+                Ok(()) => {
+                    mvm_core::atomic_io::sync_dir(membership_parent)?;
+                    return Ok(ChunkEntry::Object(digest));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    self.verify_object(&membership, &digest)?;
+                    return Ok(ChunkEntry::Object(digest));
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "linking checkpoint object {} into {}",
+                            object.link_source().display(),
+                            membership.display()
+                        )
+                    });
+                }
             }
         }
-        Ok(ChunkEntry::Object(digest))
+        anyhow::bail!(
+            "checkpoint object {} was reclaimed by a concurrent prune on each of \
+             {VANISHED_OBJECT_ATTEMPTS} attempts to link it into {}",
+            digest.as_str(),
+            membership.display()
+        )
     }
 
-    fn ensure_object(&self, digest: &ChunkDigest, bytes: &[u8]) -> Result<PathBuf> {
+    fn ensure_object(&self, digest: &ChunkDigest, bytes: &[u8]) -> Result<PoolObject> {
         let path = self.object_path(digest);
         let parent = path
             .parent()
@@ -939,13 +982,12 @@ impl ObjectPool {
         create_private_dir_durable(parent, &self.root)
             .with_context(|| format!("creating checkpoint object shard {}", parent.display()))?;
 
-        if path.exists() {
-            self.verify_object(&path, digest)?;
-            return Ok(path);
+        if self.object_is_present(&path, digest)? {
+            return Ok(PoolObject::Existing(path));
         }
 
         let mut staged = tempfile::Builder::new()
-            .prefix(".object-")
+            .prefix(OBJECT_TEMP_PREFIX)
             .tempfile_in(parent)
             .with_context(|| format!("staging checkpoint object in {}", parent.display()))?;
         staged
@@ -962,16 +1004,37 @@ impl ObjectPool {
             .with_context(|| format!("syncing checkpoint object mode {}", digest.as_str()))?;
 
         match std::fs::hard_link(staged.path(), &path) {
-            Ok(()) => mvm_core::atomic_io::sync_dir(parent)?,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                self.verify_object(&path, digest)?;
+            Ok(()) => {
+                mvm_core::atomic_io::sync_dir(parent)?;
+                Ok(PoolObject::Written(staged))
             }
+            // Another capture published the same digest first. Absent again by
+            // now means a prune took it; the caller's link reports that.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                self.object_is_present(&path, digest)?;
+                Ok(PoolObject::Existing(path))
+            }
+            Err(error) => Err(error)
+                .with_context(|| format!("publishing checkpoint object {}", path.display())),
+        }
+    }
+
+    /// Whether the pool holds `digest` at `path`. A pool entry that exists
+    /// with the wrong bytes is an error, never a reason to overwrite it.
+    fn object_is_present(&self, path: &Path, digest: &ChunkDigest) -> Result<bool> {
+        match std::fs::symlink_metadata(path) {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(error) => {
                 return Err(error)
-                    .with_context(|| format!("publishing checkpoint object {}", path.display()));
+                    .with_context(|| format!("reading checkpoint object {}", path.display()));
             }
         }
-        Ok(path)
+        match self.verify_object(path, digest) {
+            Ok(()) => Ok(true),
+            Err(error) if is_not_found(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn verify_object(&self, path: &Path, digest: &ChunkDigest) -> Result<()> {
@@ -996,6 +1059,14 @@ impl ObjectPool {
     pub(super) fn object_path(&self, digest: &ChunkDigest) -> PathBuf {
         self.root.join(&digest.as_str()[..2]).join(digest.as_str())
     }
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 fn create_private_dir_durable(path: &Path, parent: &Path) -> Result<()> {

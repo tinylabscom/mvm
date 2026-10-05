@@ -14,6 +14,7 @@ use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 mod chunks;
 #[cfg(test)]
 mod durability_tests;
+mod gc;
 mod params;
 mod restore_content;
 mod retention;
@@ -28,6 +29,7 @@ use restore_content::{
     content_with_load_memory_digest, reseed_forked_identity_drive, validate_fork_verity_binding,
 };
 
+pub use gc::{ContentPruneReport, prune_unreferenced_content};
 pub use retention::{
     Retention, RetentionCut, RetentionVerdict, dependent_children, direct_retention,
     retention_verdicts,
