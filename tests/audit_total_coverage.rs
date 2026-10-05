@@ -926,6 +926,10 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // pin; `pack registry rm` records the pin and entry it dropped.
         "RegistryPackPin",
         "RegistryPackRemove",
+        // Secret-service entries: the recorder emits `secret.<action>`
+        // for the action the service names, and a consent run names
+        // `oauth_login` whatever its outcome.
+        "secret.oauth_login",
     ];
 
     let mut failures: Vec<(String, &'static str)> = Vec::new();
