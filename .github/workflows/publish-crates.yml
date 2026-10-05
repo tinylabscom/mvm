@@ -1,11 +1,19 @@
 name: Publish to crates.io
 
+# The crates and their order come from the manifests, not from this file:
+# `xtask publish-plan` prints the shipped-dependency closure of the roots in
+# [workspace.metadata.mvm.publish], dependencies first, minus the crates
+# declared blocked and everything above them (it says which, and why).
+#
+# release.yml dispatches this with dry_run=false on every tag push, because a
+# GITHUB_TOKEN-raised release event starts no downstream workflow. A dry run
+# needs no token: it packages and build-verifies the whole plan with
+# `cargo package`, which resolves the plan's crates against each other
+# instead of against crates.io, so it works before any of them is published.
+# It runs on pull requests that change the publish machinery and nightly from
+# Extended CI.
+
 on:
-  # The `release: published` auto-trigger is intentionally disabled: crates.io
-  # publishing of this workspace isn't wired yet (scripts/deploy-guard.sh is
-  # absent and not every workspace crate is publish-ready), so a release tag
-  # would fail this workflow on every cut. Publish manually via workflow_dispatch
-  # once the deploy guard + dependency-ordered publish are built out.
   workflow_dispatch:
     inputs:
       tag:
@@ -13,36 +21,84 @@ on:
         required: true
         type: string
       dry_run:
-        description: "Run cargo publish --dry-run instead of actually publishing"
+        description: "Package and verify only; upload nothing"
         required: true
         default: true
         type: boolean
+  workflow_call:
+    inputs:
+      tag:
+        description: "Git tag to dry-run against; empty packages the checked-out tree"
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - .github/workflows/publish-crates.yml
+      - scripts/deploy-guard.sh
+      - xtask/src/publish_plan.rs
 
 env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: publish-crates
+  group: publish-crates-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
   cancel-in-progress: false
 
 jobs:
   bdd:
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
     uses: ./.github/workflows/bdd.yml
 
-  publish:
-    needs: [bdd]
+  # Token-free: every crate in the plan is packaged exactly as it would be
+  # uploaded and built from the packaged sources, so a crate that reads a file
+  # outside its directory or lost a dependency's version fails here.
+  package:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      TAG_NAME: ${{ inputs.tag }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check out the tag
+        if: ${{ inputs.tag != '' }}
+        run: |
+          git fetch --tags --force
+          git checkout --quiet "refs/tags/${TAG_NAME}"
+
+      - name: Run the deploy guard
+        run: bash scripts/deploy-guard.sh "${TAG_NAME}"
+
+      - name: Package and verify the publish plan
+        run: |
+          set -euo pipefail
+          mapfile -t crates < <(cargo run --quiet --package xtask -- publish-plan)
+          [ "${#crates[@]}" -gt 0 ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
+          args=()
+          for crate in "${crates[@]}"; do args+=(--package "${crate}"); done
+          cargo package "${args[@]}"
+          ls -la target/package/*.crate
+
+  publish:
+    needs: [bdd, package]
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
-      TAG_NAME: ${{ inputs.tag || github.ref_name }}
-      DRY_RUN: ${{ inputs.dry_run || 'false' }}
+      TAG_NAME: ${{ inputs.tag }}
     steps:
       - name: Check token
         run: |
           if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
-            echo "Missing CRATES_IO_TOKEN secret."
+            echo "::error::Missing CRATES_IO_TOKEN secret."
             exit 1
           fi
 
@@ -51,95 +107,43 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Ensure tag exists locally
+      - name: Check out the tag
         run: |
           git fetch --tags --force
-          if ! git rev-parse --verify --quiet "refs/tags/${TAG_NAME}"; then
-            echo "Tag ${TAG_NAME} not found"
-            exit 1
-          fi
-          git checkout "refs/tags/${TAG_NAME}"
+          git checkout --quiet "refs/tags/${TAG_NAME}"
 
-      - name: Install Rust toolchain (nightly)
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Run the deploy guard
+        run: bash scripts/deploy-guard.sh "${TAG_NAME}"
 
-      - name: Run Deploy Guard
-        shell: bash
-        run: |
-          chmod +x scripts/deploy-guard.sh
-          ./scripts/deploy-guard.sh
-
-      - name: Publish crates in dependency order
-        shell: bash
+      # Idempotent: a version already on crates.io is skipped, so a run that
+      # stopped part way is finished by dispatching it again. `cargo publish`
+      # waits until each crate is in the index before returning, so the next
+      # crate in the plan can resolve it.
+      - name: Publish the plan in dependency order
         run: |
           set -euo pipefail
-
-          if [ "${DRY_RUN}" = "true" ]; then
-            echo "Running dry-run publishes (no crates will be uploaded)"
-            PUBLISH_FLAG="--dry-run"
-          else
-            PUBLISH_FLAG=""
-          fi
-
-          # Publish in dependency order: leaf crates first, the mvmctl
-          # binary (the workspace root package) last.
-          CRATES=(
-            mvm-core
-            mvm-build
-            mvm-cli
-            mvmctl
-          )
-
-          # Read [package].version from a crate's Cargo.toml. Falls back to the
-          # workspace version (for crates that use version.workspace = true).
-          crate_target_version() {
-            local crate="$1"
-            local cargo_toml="crates/${crate}/Cargo.toml"
-            if [ "$crate" = "mvmctl" ]; then
-              cargo_toml="Cargo.toml"
-            fi
-            local pkg_version
-            pkg_version=$(awk '/^\[package\]/{p=1; next} /^\[/{p=0} p && /^version *= */{
-              gsub(/^version *= *"|".*$/, ""); print; exit }' "$cargo_toml")
-            if [ -n "$pkg_version" ]; then
-              echo "$pkg_version"
-              return
-            fi
-            grep -A 5 '^\[workspace\.package\]' Cargo.toml | grep '^version' | head -1 | cut -d '"' -f 2
+          version="${TAG_NAME#v}"
+          mapfile -t crates < <(cargo run --quiet --package xtask -- publish-plan)
+          [ "${#crates[@]}" -gt 0 ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
+          published() {
+            curl -fsS -A "mvm-publish-crates (https://github.com/${GITHUB_REPOSITORY})" \
+              "https://crates.io/api/v1/crates/$1/${version}" >/dev/null 2>&1
           }
-
-          # True if exact version is already published — makes this loop
-          # idempotent so a partial run (mvm onwards left to do) can
-          # be resumed by re-dispatching without "already exists" failures.
-          # crates.io rejects empty User-Agent with 403, so set one explicitly.
-          crate_already_published() {
-            local crate="$1" wanted="$2"
-            local response
-            response=$(curl -fsSL \
-              -A "mvm-publish-crates (https://github.com/${GITHUB_REPOSITORY:-tinylabscom/mvm})" \
-              "https://crates.io/api/v1/crates/${crate}/${wanted}" 2>/dev/null || true)
-            [ -n "$response" ] && echo "$response" | grep -q "\"num\":\"${wanted}\""
-          }
-
-          for CRATE in "${CRATES[@]}"; do
-            echo "::group::Publishing ${CRATE}"
-            TARGET_VERSION=$(crate_target_version "$CRATE")
-            if [ -z "${PUBLISH_FLAG}" ] && crate_already_published "$CRATE" "$TARGET_VERSION"; then
-              echo "${CRATE} ${TARGET_VERSION} already on crates.io — skipping"
-              echo "::endgroup::"
+          for crate in "${crates[@]}"; do
+            if published "${crate}"; then
+              echo "${crate} ${version} is already on crates.io; skipping"
               continue
             fi
-            cargo publish -p "${CRATE}" ${PUBLISH_FLAG}
+            echo "::group::cargo publish ${crate} ${version}"
+            cargo publish --package "${crate}"
             echo "::endgroup::"
-
-            # Give crates.io index a moment to catch up so dependents can publish.
-            if [ -z "${PUBLISH_FLAG}" ]; then
-              sleep 20
-            fi
           done
 
       - name: Summary
         if: always()
         run: |
-          echo "Published crates from tag ${TAG_NAME}."
-          echo "Dry run: ${DRY_RUN}"
+          {
+            echo "### crates.io publish of ${TAG_NAME}"
+            echo
+            cargo run --quiet --package xtask -- publish-plan 2>&1 | sed 's/^/    /'
+          } >> "${GITHUB_STEP_SUMMARY}"
