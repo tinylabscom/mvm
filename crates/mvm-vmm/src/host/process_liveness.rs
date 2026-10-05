@@ -17,13 +17,12 @@ pub const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "hvf.pid", "fc.pid", "qemu.
 /// the process is absent. The cheap half of the live-vs-orphan discrimination
 /// (see module docs); the heavier argv/ppid sweep stays in `cache prune`.
 /// Whether a process ID currently identifies a live or permission-protected
-/// process.
+/// process. A zombie (exited, not yet reaped) is not live on any platform.
 pub fn pid_is_alive(pid: i32) -> bool {
     if pid <= 1 {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    if macos_process_is_zombie(pid) {
+    if process_is_zombie(pid) {
         return false;
     }
     // SAFETY: kill with signal 0 performs only a permission/existence
@@ -39,16 +38,50 @@ fn kill_zero_reports_alive(result: i32, error: Option<i32>) -> bool {
     result == 0 || error == Some(libc::EPERM)
 }
 
+/// Whether `pid` has exited and is waiting to be reaped.
+///
+/// `kill(pid, 0)` succeeds on a zombie, but a zombie runs nothing and holds no
+/// resources a caller could be waiting on. A process that was re-parented when
+/// its launcher exited stays a zombie until its new parent reaps it, so an
+/// exit observer verifying a detached supervisor's death, or anyone checking
+/// that a keeper went away, would otherwise read it as alive for as long as
+/// that takes. `false` whenever the state cannot be read; `kill` then decides.
+#[cfg(target_os = "linux")]
+fn process_is_zombie(pid: i32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| proc_stat_state(&stat))
+        .is_some_and(|state| matches!(state, 'Z' | 'X'))
+}
+
+/// The state letter of a `/proc/<pid>/stat` line. It follows the command name,
+/// which is parenthesised and may itself contain spaces and parentheses, so the
+/// field is found after the last `)`.
+#[cfg(any(target_os = "linux", test))]
+fn proc_stat_state(stat: &str) -> Option<char> {
+    let (_, after_comm) = stat.rsplit_once(')')?;
+    after_comm.trim_start().chars().next()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_is_zombie(_pid: i32) -> bool {
+    false
+}
+
 #[cfg(target_os = "macos")]
-fn macos_process_is_zombie(pid: i32) -> bool {
+fn process_is_zombie(pid: i32) -> bool {
     let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    // A non-zero `arg` asks `PROC_PIDTBSDINFO` to look among zombies too. With
+    // zero the kernel searches only live processes and fails with `ESRCH` on
+    // exactly the zombie this function exists to find.
+    const INCLUDE_ZOMBIES: u64 = 1;
     // SAFETY: `proc_pidinfo` fills the initialized buffer when the returned
     // byte count matches its size. The PID was validated by the caller.
     let bytes = unsafe {
         libc::proc_pidinfo(
             pid,
             libc::PROC_PIDTBSDINFO,
-            0,
+            INCLUDE_ZOMBIES,
             info.as_mut_ptr().cast(),
             std::mem::size_of::<libc::proc_bsdinfo>() as i32,
         )
@@ -393,6 +426,42 @@ mod tests {
             without_deleted_marker(PathBuf::from("/usr/bin/mvm-host-agent")),
             PathBuf::from("/usr/bin/mvm-host-agent"),
         );
+    }
+
+    #[test]
+    fn proc_stat_state_reads_the_field_after_the_command_name() {
+        assert_eq!(proc_stat_state("42 (sleep) S 1 42 42 0"), Some('S'));
+        assert_eq!(proc_stat_state("42 (a) b) Z 1 42 42 0"), Some('Z'));
+        assert_eq!(proc_stat_state("42 (x y) R 1"), Some('R'));
+        assert_eq!(proc_stat_state("42 (truncated"), None);
+        assert_eq!(proc_stat_state("42 (sleep)"), None);
+    }
+
+    /// An exited child nobody has reaped yet is a zombie: `kill(pid, 0)` still
+    /// succeeds on it, and the liveness probe must not.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn an_exited_but_unreaped_child_is_not_alive() {
+        let (mut child, pid) = spawn_sleep();
+        assert!(pid_is_alive(pid), "a running child is alive");
+        // SAFETY: signalling the child this test spawned and has not reaped,
+        // so its pid cannot have been recycled.
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pid_is_alive(pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let reported_alive = pid_is_alive(pid);
+        // SAFETY: kill with signal 0 performs only an existence check.
+        let still_in_the_process_table = unsafe { libc::kill(pid, 0) } == 0;
+        child.wait().expect("reap the child");
+        assert!(
+            still_in_the_process_table,
+            "the child must still be unreaped, or this checks nothing"
+        );
+        assert!(!reported_alive, "a zombie is not a live process");
     }
 
     #[test]

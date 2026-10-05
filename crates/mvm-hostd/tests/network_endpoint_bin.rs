@@ -717,11 +717,16 @@ exit 1"#,
 /// Whether anything is listening on the endpoint's host connector, polled
 /// until it matches `expected` or five seconds pass.
 fn connector_serving_settles_to(connector: &std::path::Path, expected: bool) -> bool {
+    settles_to(expected, || UnixStream::connect(connector).is_ok())
+}
+
+/// `probe`, polled until it matches `expected` or five seconds pass.
+fn settles_to(expected: bool, probe: impl Fn() -> bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        let serving = UnixStream::connect(connector).is_ok();
-        if serving == expected || std::time::Instant::now() >= deadline {
-            return serving;
+        let observed = probe();
+        if observed == expected || std::time::Instant::now() >= deadline {
+            return observed;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -785,8 +790,11 @@ fn a_kept_endpoint_serves_after_its_launcher_exits_until_its_vm_stops() {
         !connector_serving_settles_to(&connector, false),
         "a stopped VM's endpoint must stop serving"
     );
+    // The connector closes when the endpoint dies, which is before the keeper
+    // has reaped it and exited in turn.
+    let keeper_alive = || mvm_vmm::host::process_liveness::pid_is_alive(keeper);
     assert!(
-        !mvm_vmm::host::process_liveness::pid_is_alive(keeper),
+        !settles_to(false, keeper_alive),
         "the keeper exits with its endpoint"
     );
 }
