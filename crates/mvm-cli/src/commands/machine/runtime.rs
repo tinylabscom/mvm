@@ -637,7 +637,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -671,7 +671,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
     }
 }

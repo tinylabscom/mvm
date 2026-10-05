@@ -502,20 +502,14 @@ pub struct ExecOutput {
 ///
 /// Used where a caller needs the output as data; the CLI's interactive
 /// `mvmctl exec` keeps using [`run`] (streaming) so human ergonomics
-/// don't regress.
-pub fn run_captured(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<ExecOutput> {
-    run_inner(req, /* capture = */ true, admit, None)
-        .map(|either| either.right().expect("capture mode returns ExecOutput"))
-}
-
-/// Like [`run_captured`], but also reports the resolved boot posture into
-/// `posture` so the command layer can chain-audit it (`plan.boot_posture`).
-pub fn run_captured_with_posture(
+/// don't regress. `posture`, when supplied, receives the resolved boot
+/// posture so the command layer can chain-audit it (`plan.boot_posture`).
+pub fn run_captured(
     req: ExecRequest,
     admit: Option<&SessionAdmit<'_>>,
-    posture: &PostureSink,
+    posture: Option<&PostureSink>,
 ) -> Result<ExecOutput> {
-    run_inner(req, /* capture = */ true, admit, Some(posture))
+    run_inner(req, /* capture = */ true, admit, posture)
         .map(|either| either.right().expect("capture mode returns ExecOutput"))
 }
 
@@ -523,20 +517,15 @@ pub fn run_captured_with_posture(
 ///
 /// Returns the guest command's exit code. On orchestrator failure (boot,
 /// agent unreachable, vsock error), returns an error; the VM is torn down
-/// best-effort before returning.
-pub fn run(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<i32> {
-    run_inner(req, /* capture = */ false, admit, None)
-        .map(|either| either.left().expect("streaming mode returns exit code"))
-}
-
-/// Like [`run`], but also reports the resolved boot posture into `posture` so
-/// the command layer can chain-audit it (`plan.boot_posture`).
-pub fn run_with_posture(
+/// best-effort before returning. `posture`, when supplied, receives the
+/// resolved boot posture so the command layer can chain-audit it
+/// (`plan.boot_posture`).
+pub fn run(
     req: ExecRequest,
     admit: Option<&SessionAdmit<'_>>,
-    posture: &PostureSink,
+    posture: Option<&PostureSink>,
 ) -> Result<i32> {
-    run_inner(req, /* capture = */ false, admit, Some(posture))
+    run_inner(req, /* capture = */ false, admit, posture)
         .map(|either| either.left().expect("streaming mode returns exit code"))
 }
 

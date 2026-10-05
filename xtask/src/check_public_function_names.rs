@@ -5,7 +5,7 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const MAX_SIBLING_PAIRS: usize = 41;
+const MAX_SIBLING_PAIRS: usize = 31;
 const CLEARED_MODULES: &[&str] = &[
     "crates/mvm-build/src/builder_backend_select.rs",
     "crates/mvm-build/src/builder_vm_runtime.rs",
@@ -13,7 +13,15 @@ const CLEARED_MODULES: &[&str] = &[
     "crates/mvm-build/src/pipeline/build.rs",
     "crates/mvm-build/src/pipeline/orchestrator.rs",
     "crates/mvm-build/src/rootfs.rs",
+    "crates/mvm-cli/src/commands/deps/audit.rs",
+    "crates/mvm-cli/src/commands/env/builder_vm/vm_helpers.rs",
+    "crates/mvm-cli/src/commands/machine/prewarm.rs",
     "crates/mvm-cli/src/commands/vm/console.rs",
+    "crates/mvm-cli/src/commands/vm/exec.rs",
+    "crates/mvm-cli/src/commands/vm/exec/preflight.rs",
+    "crates/mvm-cli/src/commands/vm/fs.rs",
+    "crates/mvm-cli/src/config_watcher.rs",
+    "crates/mvm-cli/src/exec.rs",
     "crates/mvm-contract/src/policy/network_policy.rs",
     "crates/mvm-fs/src/ext4/mod.rs",
     "crates/mvm-observability/src/logging.rs",
