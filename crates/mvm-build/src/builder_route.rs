@@ -309,7 +309,7 @@ mod tests {
 #[cfg(test)]
 mod io_tests {
     use super::*;
-    use crate::builderd::{OpExecResult, OpExecutor, serve_connection_with_executor};
+    use crate::builderd::{OpExecResult, OpExecutor, serve_connection};
     use crate::builderd_client::builderd_control_socket_path;
     use std::os::unix::net::UnixListener;
     use std::path::Path;
@@ -353,7 +353,7 @@ mod io_tests {
         };
         thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
-                let _ = serve_connection_with_executor(&mut stream, &FakeExec { exit, stdout });
+                let _ = serve_connection(&mut stream, Some(&FakeExec { exit, stdout }));
                 return true;
             }
             false

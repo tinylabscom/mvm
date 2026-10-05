@@ -199,7 +199,7 @@ Instead, §11 provides a controlled benchmark harness that can be run later in a
 
 Based on code inspection and the existing warm-cache mechanism, these are the likely ranked contributors when a user perceives `mvmctl build` as slow:
 
-1. **Cold builder VM boot / persistent builder not warm** — single-shot path boots a full Linux VM before any Nix work. *Evidence:* `dev_build_via_builder_vm_uncached` routes through `try_resolve_builder_backend_with_override` and boots a VM; Plan 265 warm-pool work is explicitly aimed at reducing this.
+1. **Cold builder VM boot / persistent builder not warm** — single-shot path boots a full Linux VM before any Nix work. *Evidence:* `dev_build_via_builder_vm_uncached` routes through `try_resolve_builder_backend` and boots a VM; Plan 265 warm-pool work is explicitly aimed at reducing this.
 2. **Nix evaluation and lock resolution** — even when the store has the output, `nix build` must evaluate the flake and lockfile. *Evidence:* `build_cache.rs` was introduced precisely because "the cache key is the nix revision, and the revision is only knowable after the eval."
 3. **Closure copy from `/nix/store` to `~/.mvm/dev/builds/<hash>/`** — `copy_dev_artifacts` copies bytes; the repository already tracks `artifact_sizes` and GCs stale entries, suggesting this is non-trivial.
 4. **Rootfs materialization / ext4 creation** — the pure writer removes `mkfs` but still serializes the whole tree.
