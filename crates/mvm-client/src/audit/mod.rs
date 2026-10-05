@@ -33,6 +33,7 @@
 //! which is the silent narrowing rotation must not introduce.
 
 mod event;
+pub mod follow;
 mod normalize;
 mod sanitize;
 
