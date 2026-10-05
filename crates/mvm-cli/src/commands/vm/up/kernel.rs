@@ -45,7 +45,6 @@ fn resolve_workload_kernel_with(
     }
     // A selected checkout is the fallback's source too: the pair's
     // `default-tenant` set carries the workload kernel.
-    #[cfg(feature = "builder-vm")]
     if let Some(checkout) = selected_checkout()? {
         return Ok(
             crate::commands::env::builder_vm::ensure_pair_workload_kernel(
@@ -56,8 +55,6 @@ fn resolve_workload_kernel_with(
             .to_string(),
         );
     }
-    #[cfg(not(feature = "builder-vm"))]
-    let _ = selected_checkout;
     let cache_dir = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host().to_string();
     let fallback = mvm_build::kernel_fetch::cached_kernel_path(&cache_dir, &arch, "workload");
@@ -89,24 +86,12 @@ pub(super) fn resolve_pinned_kernel(
     resolve_pinned_kernel_with(cache_dir, arch, source_checkout, download_published_kernel)
 }
 
-#[cfg(feature = "builder-vm")]
 fn download_published_kernel(
     arch: &str,
     variant: &str,
     dest: &std::path::Path,
 ) -> anyhow::Result<()> {
     crate::update::download_kernel(arch, variant, dest)
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn download_published_kernel(
-    _arch: &str,
-    _variant: &str,
-    _dest: &std::path::Path,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "kernel-pin: downloading published workload kernels requires mvm-cli's builder-vm feature"
-    )
 }
 
 #[tracing::instrument(skip_all, fields(arch, source_checkout))]
@@ -157,7 +142,6 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     };
     // A selected checkout pins to the pair's kernel: the same
     // `workload_kernel` member the default image boots.
-    #[cfg(feature = "builder-vm")]
     if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
         return Ok(Some(
             crate::commands::env::builder_vm::ensure_pair_workload_kernel(
@@ -373,7 +357,6 @@ mod resolve_pinned_kernel_tests {
 
     /// Under a selected checkout the kernel-less-image fallback answers from
     /// the pair's `default-tenant` set, not the in-tree cache or a download.
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn the_kernel_less_fallback_and_the_pin_answer_from_the_pair_under_a_selector() {
         use mvm_core::util::test_env::TestEnv;

@@ -89,14 +89,12 @@ pub(super) fn builder_store_check() -> Check {
 /// builder-egress line as an affirmation. The builder VM locks egress on
 /// the deps-install arm (proxy-uid-only, fail-closed) and opens it for
 /// flake-build fetches — a fixed design, not a runtime decision.
-#[cfg(feature = "builder-vm")]
 const BUILDER_EGRESS_POSTURE: &str = "egress is locked on the deps-install arm (proxy-uid-only, fail-closed) \
      and open for flake-build fetches";
 
 /// Map a parsed network-bootstrap outcome to its `Check` body.
 /// Pure so the classification → report mapping is unit-testable without
 /// touching the filesystem.
-#[cfg(feature = "builder-vm")]
 fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBootstrap) -> Check {
     use mvm_build::guest_net::BuilderNetBootstrap;
     // The check name is already "builder egress", and the renderer prints
@@ -141,7 +139,6 @@ fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBo
 /// Reads the libkrun dev VM's host-side `console.log` at the fixed
 /// `mvm-dev` state dir. When the VM hasn't booted yet the file is absent and
 /// the check reports that cleanly.
-#[cfg(feature = "builder-vm")]
 pub(super) fn builder_egress_check() -> Check {
     let log_path = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
     let Ok(contents) = std::fs::read_to_string(&log_path) else {
@@ -154,18 +151,6 @@ pub(super) fn builder_egress_check() -> Check {
     };
     let outcome = mvm_build::guest_net::classify_builder_net_bootstrap(&contents);
     builder_egress_check_from_outcome(outcome)
-}
-
-/// Stub when the `builder-vm` feature is off — a CLI built without builder
-/// support never boots a builder VM.
-#[cfg(not(feature = "builder-vm"))]
-pub(super) fn builder_egress_check() -> Check {
-    Check {
-        name: "builder egress",
-        category: "platform",
-        ok: true,
-        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
-    }
 }
 
 /// Probe timeout for the resident builder-daemon readiness check. Short
@@ -228,7 +213,6 @@ pub(super) fn builderd_daemon_check() -> Check {
 /// operator to infer it from the backend line plus the separate egress check.
 /// It also marks the remaining guest-NIC-based paths as legacy/unsupported for
 /// the production vsock-only architecture.
-#[cfg(feature = "builder-vm")]
 pub(super) fn builder_transport_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::BuilderBackendChoice;
     let choice = mvm_build::builder_backend_select::resolve_choice();
@@ -262,16 +246,6 @@ pub(super) fn builder_transport_check(plat: Platform) -> Check {
     }
 }
 
-#[cfg(not(feature = "builder-vm"))]
-pub(super) fn builder_transport_check(_plat: Platform) -> Check {
-    Check {
-        name: "builder transport",
-        category: "platform",
-        ok: true,
-        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
-    }
-}
-
 /// Surface which builder-VM backend the selection layer resolves to
 /// on this host, plus the override source if any.
 ///
@@ -284,7 +258,6 @@ pub(super) fn builder_transport_check(_plat: Platform) -> Check {
 ///
 /// The check is informational — it never fails. libkrun appears only when an
 /// explicit development override selects it.
-#[cfg(feature = "builder-vm")]
 pub(super) fn builder_backend_check(plat: Platform) -> Check {
     builder_backend_check_for(
         plat,
@@ -293,7 +266,6 @@ pub(super) fn builder_backend_check(plat: Platform) -> Check {
     )
 }
 
-#[cfg(feature = "builder-vm")]
 fn builder_backend_check_for(
     plat: Platform,
     is_macos_apple_silicon: bool,
@@ -448,7 +420,6 @@ fn boot_image_acquisition_check_with(pair_selected: Option<String>, source_build
 ///
 /// Read from each backend's own `capabilities()`, so this table cannot
 /// disagree with what the backend will do.
-#[cfg(feature = "builder-vm")]
 pub(super) fn builder_capabilities_check() -> Check {
     use mvm_build::builder_backend_select::{BuilderBackendChoice, declared_capabilities};
 
@@ -478,32 +449,8 @@ pub(super) fn builder_capabilities_check() -> Check {
     }
 }
 
-#[cfg(feature = "builder-vm")]
 fn yes_no(v: bool) -> &'static str {
     if v { "yes" } else { "no" }
-}
-
-/// Stub when `builder-vm` is off, matching `builder_backend_check`.
-#[cfg(not(feature = "builder-vm"))]
-pub(super) fn builder_capabilities_check() -> Check {
-    Check {
-        name: "builder capabilities",
-        category: "platform",
-        ok: true,
-        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
-    }
-}
-
-/// Stub when `builder-vm` feature is off (CLI built without the
-/// builder support — e.g. dependency-light packaging).
-#[cfg(not(feature = "builder-vm"))]
-pub(super) fn builder_backend_check(_plat: Platform) -> Check {
-    Check {
-        name: "builder backend",
-        category: "platform",
-        ok: true,
-        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
-    }
 }
 
 /// Informational check: the residency policy's effect on builder routing
@@ -513,7 +460,6 @@ pub(super) fn builder_backend_check(_plat: Platform) -> Check {
 /// `MVM_RESIDENCY` and the session state is a best-effort filesystem probe.
 /// The two axes together let an operator understand what `mvmctl build image`
 /// will do before invoking it.
-#[cfg(feature = "builder-vm")]
 pub(super) fn builder_residency_check() -> Check {
     let (policy, _source) = mvm_core::residency::resolve_residency();
     let routing = if policy.allows_persistent_builder() {
@@ -539,12 +485,10 @@ pub(super) fn builder_residency_check() -> Check {
 /// builder; the libkrun builder has no memory snapshot, so no builder VM
 /// carries a resumable snapshot today. Always `false` until some builder
 /// grows one.
-#[cfg(feature = "builder-vm")]
 fn builder_parked_snapshot_present(_vms_root: &std::path::Path) -> bool {
     false
 }
 
-#[cfg(feature = "builder-vm")]
 fn builder_residency_session_summary(
     kind: mvm_core::residency::ResidencyKind,
     persistent_active: bool,
@@ -558,17 +502,6 @@ fn builder_residency_session_summary(
         _ if persistent_active => "persistent builder active",
         _ if parked_snapshot_present => "parked snapshot present",
         _ => "no persistent builder",
-    }
-}
-
-/// Stub when the `builder-vm` feature is off.
-#[cfg(not(feature = "builder-vm"))]
-pub(super) fn builder_residency_check() -> Check {
-    Check {
-        name: "builder residency",
-        category: "platform",
-        ok: true,
-        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
     }
 }
 
@@ -625,7 +558,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_egress_lease_is_ok_and_names_ip() {
         use mvm_build::guest_net::BuilderNetBootstrap;
@@ -640,7 +572,6 @@ mod tests {
         assert!(c.info.contains("fail-closed"), "posture appended");
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_egress_static_fallback_is_ok_but_degraded() {
         use mvm_build::guest_net::BuilderNetBootstrap;
@@ -652,7 +583,6 @@ mod tests {
         assert!(c.info.contains("degraded but reachable"));
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_egress_failed_is_not_ok() {
         use mvm_build::guest_net::BuilderNetBootstrap;
@@ -662,7 +592,6 @@ mod tests {
         assert!(c.info.contains("can't fetch"));
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_egress_unknown_is_ok() {
         use mvm_build::guest_net::BuilderNetBootstrap;
@@ -671,7 +600,6 @@ mod tests {
         assert!(c.info.contains("not yet recorded"));
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_egress_check_reports_no_vm_when_console_log_absent() {
         // With MVM_HOME pointed at an empty dir there is no
@@ -685,7 +613,6 @@ mod tests {
         assert!(c.info.contains("no builder VM yet"));
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_egress_check_classifies_a_fixture_console_log() {
         let scratch = tempfile::tempdir().unwrap();
@@ -798,7 +725,6 @@ mod tests {
         handle.join().expect("server thread");
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_transport_check_reports_hvf_as_vsock_only() {
         let mut env = TestEnv::new();
@@ -811,7 +737,6 @@ mod tests {
         assert!(c.info.contains("no builder guest NIC"), "got {:?}", c.info);
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_transport_check_reports_libkrun_as_legacy_guest_network() {
         let mut env = TestEnv::new();
@@ -826,7 +751,6 @@ mod tests {
         assert!(c.info.contains("libkrun"), "got {:?}", c.info);
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_transport_check_marks_qemu_as_unsupported_legacy() {
         let mut env = TestEnv::new();
@@ -840,7 +764,6 @@ mod tests {
     /// The report follows the supplied platform policy without introducing an
     /// automatic libkrun dependency. On aarch64, the macOS fixture also keeps
     /// this check distinct from the live platform on Linux CI.
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_backend_check_uses_platform_policy_without_libkrun_default() {
         let mut env = TestEnv::new();
@@ -864,7 +787,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_backend_check_reports_qemu_below_the_hvf_os_floor() {
         let mut env = TestEnv::new();
@@ -878,7 +800,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "linux", feature = "builder-vm"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn builder_backend_check_linux_reports_firecracker_auto_detected() {
         let mut env = TestEnv::new();
@@ -961,7 +883,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "linux", feature = "builder-vm"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn builder_backend_check_linux_honors_env_override() {
         let mut env = TestEnv::new();
@@ -989,7 +911,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "linux", feature = "builder-vm"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn builder_backend_check_linux_libkrun_override_no_longer_reports_a_rootfs_gap() {
         let mut env = TestEnv::new();
@@ -1017,7 +939,7 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "linux", feature = "builder-vm"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn builder_backend_check_linux_surfaces_linux_builder_vm_env() {
         // When MVM_LINUX_BUILDER_VM=1 is set, the builder-backend line
@@ -1042,20 +964,6 @@ mod tests {
         );
     }
 
-    #[cfg(not(feature = "builder-vm"))]
-    #[test]
-    fn builder_backend_check_stub_when_feature_off() {
-        let c = builder_backend_check(Platform::LinuxNative);
-        assert!(c.ok);
-        assert_eq!(c.name, "builder backend");
-        assert!(
-            c.info.contains("n/a"),
-            "stub should mention n/a; got: {}",
-            c.info
-        );
-    }
-
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_residency_check_reports_policy_and_session_state() {
         let c = builder_residency_check();
@@ -1076,7 +984,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_residency_session_summary_names_parked_snapshot_state() {
         use mvm_core::residency::ResidencyKind;

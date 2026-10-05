@@ -236,7 +236,6 @@ impl Commands {
             Commands::Bootstrap(_) => "bootstrap",
             Commands::BuilderVmBootstrap(_) => "__builder-vm-bootstrap",
             Commands::BuilderEgressSupervisor(_) => "__builder-egress-supervisor",
-            #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(_) => "__builder-shell-job",
             Commands::Explain(_) => "explain",
             Commands::Why(_) => "why",
@@ -285,7 +284,6 @@ impl Commands {
             Commands::Capture(a) => a.action.verb_name(),
             Commands::Artifact(_) => "artifact",
             Commands::SeccompAudit(_) => "seccomp-audit",
-            #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(_) => "persistent-builder",
             Commands::QemuVsockBridge(_) => "__qemu-vsock-bridge",
         }

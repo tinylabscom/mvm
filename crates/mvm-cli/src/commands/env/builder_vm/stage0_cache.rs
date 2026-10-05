@@ -1,18 +1,15 @@
 use super::*;
 
-#[cfg(any(feature = "builder-vm", test))]
 static ACTIVE_STAGE0_BUILDS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 /// Held for the lifetime of an in-process Stage 0 build. The inner file lock
 /// serializes the shared store; the process-local count lets Ctrl-C explain
 /// exactly what was interrupted without probing another process's lock.
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) struct Stage0LockGuard {
     _lock: std::fs::File,
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 impl Drop for Stage0LockGuard {
     fn drop(&mut self) {
         ACTIVE_STAGE0_BUILDS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -20,12 +17,7 @@ impl Drop for Stage0LockGuard {
 }
 
 pub(in crate::commands) fn stage0_active_in_process() -> bool {
-    #[cfg(any(feature = "builder-vm", test))]
-    {
-        ACTIVE_STAGE0_BUILDS.load(std::sync::atomic::Ordering::SeqCst) > 0
-    }
-    #[cfg(not(any(feature = "builder-vm", test)))]
-    false
+    ACTIVE_STAGE0_BUILDS.load(std::sync::atomic::Ordering::SeqCst) > 0
 }
 
 /// RAII advisory lock at `<cache parent>/stage0.lock` (for the builder image,
@@ -40,14 +32,12 @@ pub(in crate::commands) fn stage0_active_in_process() -> bool {
 ///
 /// `out_dir` is the per-arch cache dir (e.g. `.../builder-vm/aarch64`);
 /// the lock file is its sibling `stage0.lock`.
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) fn acquire_stage0_lock(out_dir: &str, what: &str) -> Result<Stage0LockGuard> {
     acquire_stage0_lock_within(out_dir, what, stage0_lock_wait())
 }
 
 /// [`acquire_stage0_lock`] with an explicit wait budget, so tests can drive
 /// both the queueing and the refusal without the production hour.
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) fn acquire_stage0_lock_within(
     out_dir: &str,
     what: &str,
@@ -346,7 +336,6 @@ fn stage0_dir_size_bytes(path: &std::path::Path) -> u64 {
     mvm_core::disk_usage::tree_bytes(path)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum BuilderVmSourceCacheStatus {
     Hit,
@@ -360,7 +349,6 @@ pub(super) enum BuilderVmSourceCacheStatus {
     ProvenanceMismatch,
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 impl BuilderVmSourceCacheStatus {
     pub(super) fn is_ready(self) -> bool {
         self == Self::Hit
@@ -390,7 +378,6 @@ pub(super) fn builder_vm_source_cache_status(
     cache_status(dir, expected_fingerprint, STAGE0_SOURCE_KIND)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 fn cache_status(
     dir: &std::path::Path,
     expected_fingerprint: &str,
@@ -444,17 +431,14 @@ pub(super) fn builder_vm_source_cache_ready(
 
 /// Whether a cache installed from a local image pair is ready under
 /// `expected_fingerprint`.
-#[cfg(feature = "builder-vm")]
 pub(super) fn local_pair_cache_ready(dir: &std::path::Path, expected_fingerprint: &str) -> bool {
     cache_ready(dir, expected_fingerprint, LOCAL_PAIR_SOURCE_KIND)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 fn cache_ready(dir: &std::path::Path, expected_fingerprint: &str, source_kind: &str) -> bool {
     cache_status(dir, expected_fingerprint, source_kind).is_ready()
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_source_fingerprint_matches(
     dir: &std::path::Path,
     expected_fingerprint: &str,
@@ -464,7 +448,6 @@ fn builder_vm_source_fingerprint_matches(
         .unwrap_or(false)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) fn write_builder_vm_source_fingerprint(
     dir: &std::path::Path,
     source_fingerprint: &str,
@@ -478,7 +461,6 @@ pub(super) fn write_builder_vm_source_fingerprint(
 
 // Both helpers below are reached only from the builder-VM bootstrap paths;
 // the readiness check consults the shared verifier directly.
-#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_artifact_digest_manifest(dir: &std::path::Path) -> Result<String> {
     mvm_build::cache_install::digest_manifest(
         dir,
@@ -489,7 +471,6 @@ fn builder_vm_artifact_digest_manifest(dir: &std::path::Path) -> Result<String> 
 
 /// Whole-directory verdict collapsed to a bool, for the callers that only need
 /// "is this dir self-consistent" and have their own error to raise.
-#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_artifact_digest_manifest_matches(dir: &std::path::Path) -> bool {
     matches!(
         mvm_build::cache_install::verify_digest_manifest(
@@ -501,7 +482,6 @@ fn builder_vm_artifact_digest_manifest_matches(dir: &std::path::Path) -> bool {
     )
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) fn write_builder_vm_artifact_digest_manifest(dir: &std::path::Path) -> Result<()> {
     let manifest = builder_vm_artifact_digest_manifest(dir)?;
     std::fs::write(dir.join(BUILDER_VM_ARTIFACT_DIGEST_FILE), manifest)
@@ -531,10 +511,8 @@ struct BuilderVmSourceCacheProvenance {
 pub(super) const STAGE0_SOURCE_KIND: &str = "source_checkout_stage0";
 /// Provenance `source_kind` for a cache installed from a local image pair's
 /// `builder-vm` target; the fingerprint names both checkout identities.
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) const LOCAL_PAIR_SOURCE_KIND: &str = "local_pair";
 
-#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_source_cache_provenance(
     dir: &std::path::Path,
     source_fingerprint: &str,
@@ -572,7 +550,6 @@ fn builder_vm_artifact_names_present(dir: &std::path::Path) -> Result<Vec<String
     Ok(names)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 fn builder_vm_source_cache_provenance_matches(
     dir: &std::path::Path,
     expected_fingerprint: &str,
@@ -590,7 +567,6 @@ fn builder_vm_source_cache_provenance_matches(
         .unwrap_or(false)
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 fn write_cache_provenance(
     dir: &std::path::Path,
     source_fingerprint: &str,
@@ -615,7 +591,6 @@ pub(super) fn write_builder_vm_source_cache_provenance(
 /// Write the full cache-sidecar set for a cache installed from a local image
 /// pair. The format is the Stage 0 sidecar format with the `local_pair`
 /// provenance kind; the readiness check is [`local_pair_cache_ready`].
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) fn write_local_pair_cache_sidecars(
     dir: &std::path::Path,
     source_fingerprint: &str,
@@ -655,7 +630,6 @@ pub(super) fn promote_builder_vm_stage0_cache(
 
 /// Promote a builder-VM cache staged from a local image pair's `builder-vm`
 /// target, validating the same sidecar set Stage 0 promotion does.
-#[cfg(any(feature = "builder-vm", test))]
 pub(super) fn promote_local_pair_cache(
     staging_dir: &std::path::Path,
     final_dir: &std::path::Path,
@@ -669,7 +643,6 @@ pub(super) fn promote_local_pair_cache(
     )
 }
 
-#[cfg(any(feature = "builder-vm", test))]
 fn promote_source_cache(
     staging_dir: &std::path::Path,
     final_dir: &std::path::Path,

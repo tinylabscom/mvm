@@ -172,7 +172,6 @@ pub(crate) fn staged_contract_files(
 /// to answer. The pair's kernel is that answer; without this seed a
 /// kernel-less mkGuest image (the common shape) falls through to the builder
 /// kernel the moment a checkout is selected.
-#[cfg(feature = "builder-vm")]
 pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
     let Some(checkout) = super::bootstrap::selected_local_checkout()? else {
         return Ok(());

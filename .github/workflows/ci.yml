@@ -617,7 +617,7 @@ jobs:
       - name: release artifact acquisition contract
         run: |
           cargo check -p mvm-cli --features release-artifact-bootstrap --lib
-          cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify,builder-vm --lib
+          cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib
           cargo test -p mvm-build --features release-channel --lib \
             artifact_acquisition
           cargo test -p mvm-build --features release-channel --lib \
@@ -628,7 +628,7 @@ jobs:
           cargo test -p mvm-build --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
-      - name: In-process pure-mkfs materialize tests
+      - name: In-process pure ext4 materialize tests
         run: cargo test -p mvm-build --lib rootfs::tests::pure
 
   # Split out of `lint-features`, which was 35 minutes and the critical path for
