@@ -1572,7 +1572,9 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // paths are exercised by tests/cli.rs against a file:// registry. Image
 // `dev ensure` likewise needs a signed release endpoint; its selection,
 // verification, and fetch-when-unchanged behavior have focused CLI tests.
-const PARSE_TIER_PIN: usize = 78;
+// `build guest-bins` cross-compiles every guest binary for both guest
+// architectures; its archive and verification logic have unit tests.
+const PARSE_TIER_PIN: usize = 79;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {
