@@ -481,6 +481,11 @@ impl ApplyStore {
     /// Reverse the most recent committed, still-effective apply: stage an
     /// inverse apply — the original's pre-images become this one's
     /// post-images — and commit it. Returns the committed relation and root.
+    ///
+    /// Test-only: it commits with no signed audit entry. Production undo goes
+    /// through the signed engine in `mvm_client::workspace_apply`, which
+    /// stages with [`Self::stage_undo`].
+    #[cfg(test)]
     pub fn undo_latest(&self, source_dir: &Path) -> Result<Option<AppliedRelation>, ApplyError> {
         self.commit_staged(self.stage_undo(source_dir)?, source_dir)
     }
@@ -489,6 +494,9 @@ impl ApplyStore {
     /// is still the newest effective apply (anything applied since changed
     /// the tree the undo restored, so redo would clobber it). Returns
     /// the committed relation and root.
+    ///
+    /// Test-only, for the same reason as [`Self::undo_latest`].
+    #[cfg(test)]
     pub fn redo_latest(&self, source_dir: &Path) -> Result<Option<AppliedRelation>, ApplyError> {
         self.commit_staged(self.stage_redo(source_dir)?, source_dir)
     }
@@ -542,6 +550,7 @@ impl ApplyStore {
         .map(Some)
     }
 
+    #[cfg(test)]
     fn commit_staged(
         &self,
         staged: Option<StagedApply>,
