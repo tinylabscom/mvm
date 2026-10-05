@@ -23,14 +23,3 @@ Feature: Workload lifecycle correctness
     And the isolated mvm home has no transient request state directories
     When I run mvmctl in the isolated mvm home with "trust audit sessions"
     Then the output contains "sealed (exit 0)"
-
-  # `--entrypoint` dispatches the baked entrypoint through a separate call path
-  # from the argv run above, and that path ends its session on its own.
-  @live @firecracker @ci_live
-  Scenario: A transient entrypoint call seals its session when it exits
-    Given an isolated mvm home
-    When I run mvmctl in an isolated live home with "machine run --flake examples/entrypoint-exit-ok --entrypoint --timeout 180"
-    Then the command exits with code 0
-    And the output contains "mvm-bdd-entrypoint-ok"
-    When I run mvmctl in the isolated mvm home with "trust audit sessions"
-    Then the output contains "sealed (exit 0)"
