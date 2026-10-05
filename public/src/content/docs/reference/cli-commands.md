@@ -993,6 +993,22 @@ rather than re-extracted. An unsigned, tampered, or unknown-publisher archive
 is refused with the verifier's error before anything boots, and nothing is
 written to the registry.
 
+A bundle sealed with `bundle export --posture` bounds every launch of it. Before
+boot, the run reads the installed bundle's manifest and checks its signature
+against the trust store again, without re-hashing the artifacts. It then refuses
+a launch that asks for more than the posture allows:
+
+- a network policy that reaches off the host (`--net`, `--allow-host`, `--peer`)
+  when the bundle allows no egress;
+- a `--volume` when the bundle allows no volumes;
+- an interactive, ad-hoc command, or `--profile dev` run of a `sealed-prod`
+  bundle.
+
+The refusal is recorded as `plan.failed` with class `bundle-posture-exceeded`.
+The posture never grants anything: a bundle that allows egress still boots
+deny-all unless the launch asks for egress. A manifest edited on disk after
+install fails the signature check and refuses the boot.
+
 The archive is taken through `--manifest` rather than as a positional argument.
 `machine run` already reads its trailing positionals as the guest command, so
 `mvmctl machine run ./app.mvmpkg` would mean "run the program `./app.mvmpkg`",

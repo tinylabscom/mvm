@@ -673,6 +673,15 @@ pub(in crate::commands) fn run_secure_with_source(
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
     let admit_workload_dir = local_workload_dir(args.flake.as_deref(), args.manifest.as_deref());
+    // A run of an installed bundle is bounded by the posture its publisher
+    // signed. Read before boot, from the verified manifest; admission refuses
+    // a launch that asks for more.
+    let admit_bundle_posture = args
+        .manifest
+        .as_deref()
+        .map(mvm_runtime::vm::template::lifecycle::installed_bundle_posture)
+        .transpose()?
+        .flatten();
     // The audit substrate carries no emitter, so stash the AdmissionContext here
     // as the closure runs (during boot) and emit launched/failed after `run`
     // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
@@ -729,6 +738,7 @@ pub(in crate::commands) fn run_secure_with_source(
             audit_dir: None,
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: admit_bundle_posture,
             deps_volume: None,
             // The grants come from the launch config's own volume list, so the
             // plan names exactly what the backend will mount and every

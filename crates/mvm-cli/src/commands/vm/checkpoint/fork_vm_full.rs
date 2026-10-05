@@ -375,6 +375,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             audit_dir: None,
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),

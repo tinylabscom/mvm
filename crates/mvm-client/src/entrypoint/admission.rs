@@ -134,6 +134,7 @@ impl EntrypointAdmission {
             audit_dir: None,
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
             assets: assets.to_vec(),

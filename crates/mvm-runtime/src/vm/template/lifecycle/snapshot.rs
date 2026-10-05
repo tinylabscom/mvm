@@ -142,10 +142,7 @@ pub fn template_artifacts_for_boot(
 /// Reuses the same slot-or-bundle decision `template_artifacts_dispatched`
 /// makes, so the gate cannot drift from what actually gets resolved.
 pub fn installed_bundle_arch(id_or_slot: &str) -> Result<Option<String>> {
-    if !is_slot_hash_dirname(id_or_slot) {
-        return Ok(None);
-    }
-    if std::path::Path::new(&slot_dir(id_or_slot)).exists() {
+    if !names_installed_bundle(id_or_slot) {
         return Ok(None);
     }
     let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
@@ -155,6 +152,33 @@ pub fn installed_bundle_arch(id_or_slot: &str) -> Result<Option<String>> {
     Ok(registry
         .find(id_or_slot)?
         .map(|installed| installed.manifest.arch))
+}
+
+/// Whether `id_or_slot` resolves to an installed bundle rather than a template
+/// slot: a 64-hex key with no slot directory. A slot wins over a bundle with
+/// the same key, as it does in [`template_artifacts_dispatched`].
+fn names_installed_bundle(id_or_slot: &str) -> bool {
+    is_slot_hash_dirname(id_or_slot) && !std::path::Path::new(&slot_dir(id_or_slot)).exists()
+}
+
+/// The signed security posture of the installed bundle `id_or_slot` names.
+///
+/// `None` when the key is a template slot, names no installed bundle, or the
+/// bundle declares no posture. The manifest is verified against the local
+/// trust store before its posture is believed, so a posture edited on disk
+/// after install refuses the boot rather than widening it.
+pub fn installed_bundle_posture(
+    id_or_slot: &str,
+) -> Result<Option<mvm_core::plan::BundleSecurityPosture>> {
+    if !names_installed_bundle(id_or_slot) {
+        return Ok(None);
+    }
+    let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
+    let trust = mvm_core::plan::FsTrustStore::default_path()?;
+    let manifest = registry
+        .verified_manifest(id_or_slot, &trust)
+        .map_err(|e| anyhow::anyhow!("installed bundle {id_or_slot}: {e}"))?;
+    Ok(manifest.and_then(|manifest| manifest.security_posture().copied()))
 }
 
 /// The declared arch of an installed bundle, for the *export* path, which
@@ -410,5 +434,80 @@ mod tests {
             Some(other_arch()),
             "export must carry the source bundle's arch, not this host's"
         );
+    }
+
+    /// The run path learns a bundle's posture from the installed archive's
+    /// signed manifest, verified against the trust store under `MVM_HOME`.
+    #[test]
+    fn installed_bundle_posture_reads_the_signed_declaration() {
+        use mvm_core::plan::bundle::{
+            ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleMember,
+            BundleRegistry, BundleSecurityPosture, FsTrustStore, key_id_from_pubkey, sha256_hex,
+            write_bundle,
+        };
+        use mvm_core::security::AgentProfile;
+
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let key = ed25519_dalek::SigningKey::from_bytes(&[5; 32]);
+        let key_id = key_id_from_pubkey(&key.verifying_key());
+        let trusted = tmp.path().join("trusted-publishers");
+        std::fs::create_dir_all(&trusted).unwrap();
+        std::fs::write(
+            trusted.join(format!("{}.pub", key_id.0)),
+            key.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        let posture = BundleSecurityPosture {
+            profile: AgentProfile::Dev,
+            verity_protected: false,
+            requires_auth: true,
+            allows_volumes: false,
+            allows_egress: false,
+        };
+        let kernel = b"kernel".to_vec();
+        let manifest = BundleManifest {
+            schema_version: BUNDLE_SCHEMA_VERSION,
+            publisher: "test".to_string(),
+            key_id,
+            arch: mvm_core::arch::GuestArch::host().to_string(),
+            kernel_version: None,
+            profile: None,
+            workload_label: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            labels: Default::default(),
+            artifacts: vec![BundleArtifact {
+                name: "vmlinux".to_string(),
+                role: ArtifactRole::Kernel,
+                path: "artifacts/vmlinux".to_string(),
+                sha256: sha256_hex(&kernel),
+                size_bytes: kernel.len() as u64,
+            }],
+            members: vec![BundleMember::SecurityPosture(posture)],
+            verity: None,
+            resources: None,
+        };
+        let archive = write_bundle(
+            &manifest,
+            &key,
+            vec![("artifacts/vmlinux".to_string(), kernel)],
+        )
+        .unwrap();
+        let installed = BundleRegistry::default_path()
+            .unwrap()
+            .install(&archive, &FsTrustStore::default_path().unwrap(), false)
+            .expect("install");
+
+        assert_eq!(
+            installed_bundle_posture(&installed.sha256).unwrap(),
+            Some(posture)
+        );
+        assert_eq!(installed_bundle_posture(&"ab".repeat(32)).unwrap(), None);
+        assert_eq!(installed_bundle_posture("not-a-key").unwrap(), None);
     }
 }
