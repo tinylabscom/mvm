@@ -884,6 +884,7 @@ fn every_endpoint_thread_serves_under_confinement() {
 
     let mut child = Command::new(BIN)
         .env("MVM_HOME", dir.path().join("mvm-home"))
+        .env("HOME", dir.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(std::fs::File::create(&log).unwrap()))
