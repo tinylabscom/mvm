@@ -8,6 +8,7 @@
 //! `handle_proc_wait` sleep-poll loop (the in-repo streaming idiom — mvm-guest
 //! has no `libc::poll` usage).
 use crate::vsock::ExecEvent;
+use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
 use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -135,9 +136,41 @@ pub fn stream_exec_argv<F: FnMut(ExecEvent)>(
     argv: &[String],
     stdin_data: Option<&str>,
     timeout_secs: Option<u64>,
+    emit: F,
+) -> ExecEvent {
+    stream_exec_mediated(
+        MediatedCommand {
+            argv,
+            stdin: stdin_data,
+            timeout_secs,
+            env: &[],
+            binding: None,
+        },
+        emit,
+    )
+}
+
+/// A declared command as the agent starts it once the host has allowed it.
+#[derive(Debug, Clone, Copy)]
+pub struct MediatedCommand<'a> {
+    /// Spawned directly, never through a shell.
+    pub argv: &'a [String],
+    pub stdin: Option<&'a str>,
+    pub timeout_secs: Option<u64>,
+    /// Host-provisioned variables applied over the workload environment.
+    pub env: &'a [(String, String)],
+    /// When the host bound the invocation, the command leads a session of its
+    /// own whose loopback egress is attributed to this binding while it runs.
+    pub binding: Option<&'a ToolInvocationBinding>,
+}
+
+/// Run a declared command with the streaming, cap, timeout and teardown of
+/// [`stream_exec`].
+pub fn stream_exec_mediated<F: FnMut(ExecEvent)>(
+    command: MediatedCommand<'_>,
     mut emit: F,
 ) -> ExecEvent {
-    let Some((program, args)) = argv.split_first() else {
+    let Some((program, args)) = command.argv.split_first() else {
         emit(ExecEvent::Stderr {
             chunk: b"empty declared command argv".to_vec(),
         });
@@ -151,8 +184,33 @@ pub fn stream_exec_argv<F: FnMut(ExecEvent)>(
     }
     let environment = resolve_exec_environment();
     let mut builder = Command::new(program);
-    builder.args(args);
-    stream_command_with_environment(builder, stdin_data, timeout_secs, &environment, emit)
+    builder.args(args).envs(
+        command
+            .env
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str())),
+    );
+    let leader = match command.binding {
+        Some(binding) => Leader::AttributedSession(binding),
+        None => Leader::ProcessGroup,
+    };
+    stream_command_with_environment(
+        builder,
+        leader,
+        command.stdin,
+        command.timeout_secs,
+        &environment,
+        emit,
+    )
+}
+
+/// How the streamed child is made the leader of what teardown kills.
+#[derive(Debug, Clone, Copy)]
+enum Leader<'a> {
+    /// A new process group in the agent's session.
+    ProcessGroup,
+    /// A new session, attributed to a host binding while the child runs.
+    AttributedSession(&'a ToolInvocationBinding),
 }
 
 fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
@@ -164,19 +222,34 @@ fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
 ) -> ExecEvent {
     let mut builder = Command::new("/bin/sh");
     builder.arg("-c").arg(command);
-    stream_command_with_environment(builder, stdin_data, timeout_secs, environment, emit)
+    stream_command_with_environment(
+        builder,
+        Leader::ProcessGroup,
+        stdin_data,
+        timeout_secs,
+        environment,
+        emit,
+    )
 }
 
 fn stream_command_with_environment<F: FnMut(ExecEvent)>(
     mut builder: Command,
+    leader: Leader<'_>,
     stdin_data: Option<&str>,
     timeout_secs: Option<u64>,
     environment: &crate::workload_env::WorkloadEnvironment,
     mut emit: F,
 ) -> ExecEvent {
+    // Variables already set on the builder are the caller's and win over
+    // the resolved workload environment.
+    let provisioned: Vec<(std::ffi::OsString, std::ffi::OsString)> = builder
+        .get_envs()
+        .filter_map(|(key, value)| Some((key.to_owned(), value?.to_owned())))
+        .collect();
     builder
         .env_clear()
         .envs(environment.vars())
+        .envs(provisioned)
         .current_dir(environment.working_dir())
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
@@ -185,11 +258,30 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    #[cfg(unix)]
-    builder.process_group(0);
     crate::fd_hygiene::configure_close_fds(&mut builder, 3, None);
-    let mut child = match builder.spawn() {
-        Ok(c) => c,
+    // Held until the child has been waited for: dropping it ends the
+    // attribution of the child's session.
+    let spawned = match leader {
+        Leader::ProcessGroup => {
+            #[cfg(unix)]
+            builder.process_group(0);
+            builder.spawn().map(|child| (child, None))
+        }
+        #[cfg(any(target_os = "linux", test))]
+        Leader::AttributedSession(binding) => {
+            crate::tool_attribution::spawn_attributed(&mut builder, binding)
+                .map(|(child, registration)| (child, Some(registration)))
+        }
+        // No egress client runs off Linux, so there is nothing to attribute.
+        #[cfg(not(any(target_os = "linux", test)))]
+        Leader::AttributedSession(_binding) => {
+            #[cfg(unix)]
+            builder.process_group(0);
+            builder.spawn().map(|child| (child, None::<()>))
+        }
+    };
+    let (mut child, _registration) = match spawned {
+        Ok(spawned) => spawned,
         Err(e) => {
             emit(ExecEvent::Stderr {
                 chunk: format!("failed to spawn: {e}").into_bytes(),

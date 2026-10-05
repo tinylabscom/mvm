@@ -536,6 +536,11 @@ pub struct MediatedExecCall {
     pub argv: Vec<String>,
     pub stdin: Option<String>,
     pub timeout_secs: Option<u64>,
+    /// Host-provisioned variables applied over the workload environment: the
+    /// egress proxy, the CA bundle, and secret placeholders. Never part of
+    /// the decided command line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for MediatedExecCall {
@@ -546,6 +551,7 @@ impl std::fmt::Debug for MediatedExecCall {
             .field("argv", &"[redacted]")
             .field("stdin", &"[redacted]")
             .field("timeout_secs", &self.timeout_secs)
+            .field("env", &"[redacted]")
             .finish()
     }
 }
@@ -721,6 +727,7 @@ mod tests {
             argv: vec!["git".to_string(), "status; rm -rf /".to_string()],
             stdin: None,
             timeout_secs: Some(5),
+            env: Vec::new(),
         };
         let question = call.tool_check().expect("valid call");
         assert_eq!(question.tool, "git");
@@ -762,6 +769,7 @@ mod tests {
                 argv: vec!["echo".to_string(), "ok".to_string()],
                 stdin: None,
                 timeout_secs: Some(10),
+                env: Vec::new(),
             }),
             GuestRequest::DriveOpen {
                 program_id: mvm_contract::grants::DriveProgramId::parse("agent").unwrap(),
@@ -1387,6 +1395,7 @@ mod tests {
                     argv: vec!["echo".to_string(), "ok".to_string()],
                     stdin: None,
                     timeout_secs: None,
+                    env: Vec::new(),
                 }),
                 "mediated-exec",
             ),

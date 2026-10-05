@@ -288,6 +288,7 @@ mod tests {
                 argv: vec!["echo".into(), "ok".into()],
                 stdin: None,
                 timeout_secs: None,
+                env: Vec::new(),
             }),
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
@@ -530,6 +531,7 @@ mod tests {
                 argv: vec!["echo".into(), "ok".into()],
                 stdin: None,
                 timeout_secs: None,
+                env: Vec::new(),
             }),
             GuestRequest::ConsoleOpen {
                 cols: 80,

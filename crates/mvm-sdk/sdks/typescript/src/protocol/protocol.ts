@@ -1055,6 +1055,10 @@ tag: string
  */
 export interface MediatedExecCall {
 argv: string[]
+/**
+ * Host-provisioned variables applied over the workload environment: the egress proxy, the CA bundle, and secret placeholders. Never part of the decided command line.
+ */
+env?: [string, string][]
 stdin?: (string | null)
 timeout_secs?: (number | null)
 tool: string

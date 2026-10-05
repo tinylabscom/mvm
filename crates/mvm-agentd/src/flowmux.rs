@@ -164,8 +164,9 @@ struct InboundUdpDatagram {
 enum ClientRequest {
     /// Open a TCP flow.
     OpenTcp {
-        /// Destination requested by the guest.
-        target: String,
+        /// The encoded `OpenTcp` payload: the destination, and the invocation
+        /// binding when the flow is attributed to one.
+        payload: Vec<u8>,
         /// Guest-allocated stream ID.
         stream_id: u32,
         /// Channel back to the caller.

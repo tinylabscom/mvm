@@ -388,16 +388,20 @@ fn handle_client(
                     .read::<ToolCheckReply>(&mut file)
                     .map_err(std::io::Error::other)
             });
-            if !matches!(decision, Ok(ToolCheckReply::Allow)) {
-                send_authenticated_response(
-                    &mut file,
-                    &mut session,
-                    &GuestResponse::Error {
-                        message: "declared tool invocation denied".to_string(),
-                    },
-                );
-                return;
-            }
+            let binding = match decision {
+                Ok(ToolCheckReply::Allow) => None,
+                Ok(ToolCheckReply::AllowBound { binding }) => Some(binding),
+                Ok(ToolCheckReply::Deny) | Err(_) => {
+                    send_authenticated_response(
+                        &mut file,
+                        &mut session,
+                        &GuestResponse::Error {
+                            message: "declared tool invocation denied".to_string(),
+                        },
+                    );
+                    return;
+                }
+            };
             let resp = {
                 let mut sink = AuthenticatedWriter::new(&mut file, &mut session);
                 let mut ctx = HandlerCtx {
@@ -409,9 +413,13 @@ fn handle_client(
                 };
                 handle_mediated_exec(
                     &mut ctx,
-                    &call.argv,
-                    call.stdin.as_deref(),
-                    call.timeout_secs,
+                    mvm_agentd::exec_stream::MediatedCommand {
+                        argv: &call.argv,
+                        stdin: call.stdin.as_deref(),
+                        timeout_secs: call.timeout_secs,
+                        env: &call.env,
+                        binding: binding.as_ref(),
+                    },
                 )
             };
             send_authenticated_response(&mut file, &mut session, &resp);
@@ -913,6 +921,22 @@ fn main() {
     // PID 1 must activate synchronously. `apply_activation` changes Linux
     // credentials and capability sets, which are per-thread at the kernel
     // boundary; no background or request thread may exist before it returns.
+    // Bound as PID 1 before any workload code can run, so nothing else holds
+    // the name; served only once activation has dropped privilege.
+    #[cfg(target_os = "linux")]
+    let attribution_listener = init::is_pid1()
+        .then(|| {
+            mvm_agentd::tool_attribution::bind_listener()
+                .map_err(|error| {
+                    eprintln!(
+                        "mvm-guest-agent: tool attribution unavailable, so tool routes and \
+                         secrets stay refused: {error}"
+                    );
+                })
+                .ok()
+        })
+        .flatten();
+
     if init::is_pid1() && serve_until_activated(&listener, &server) {
         init::start_orphan_reaper();
     }
@@ -920,6 +944,11 @@ fn main() {
     if !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         let monitor_state = Arc::clone(&state);
         std::thread::spawn(move || monitoring_loop(monitor_state));
+
+        #[cfg(target_os = "linux")]
+        if let Some(listener) = attribution_listener {
+            std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
+        }
 
         // Defer integration and probe scans to background threads, but only
         // after PID-1 activation has completed its privilege transition.
@@ -1118,8 +1147,17 @@ mod tests {
         if current_uid() == Some(0) {
             return;
         }
-        for (reply, should_spawn) in [(ToolCheckReply::Deny, false), (ToolCheckReply::Allow, true)]
-        {
+        let bound = ToolCheckReply::AllowBound {
+            binding:
+                mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random(
+                    [3; 16],
+                ),
+        };
+        for (reply, should_spawn) in [
+            (ToolCheckReply::Deny, false),
+            (ToolCheckReply::Allow, true),
+            (bound, true),
+        ] {
             let dir = tempfile::tempdir().expect("temporary directory");
             let marker = dir.path().join("spawned");
             let call = mvm_agentd::vsock::MediatedExecCall {
@@ -1127,6 +1165,7 @@ mod tests {
                 argv: vec!["/usr/bin/touch".to_string(), marker.display().to_string()],
                 stdin: None,
                 timeout_secs: Some(5),
+                env: Vec::new(),
             };
             let invocation = call.tool_check().expect("valid tool call");
             let (mut host, guest) = UnixStream::pair().expect("unix stream pair");

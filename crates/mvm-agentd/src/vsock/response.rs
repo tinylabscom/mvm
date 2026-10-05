@@ -450,11 +450,18 @@ pub enum ResponseKind {
 
 /// Host answer to a paused declared-command invocation. This is read only
 /// while a `MediatedExec` is waiting; it is not a standalone guest verb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCheckReply {
     /// The host gate admitted and audited this invocation.
     Allow,
+    /// Admitted, and the tool owns routes or secrets: the guest starts the
+    /// command in a session of its own and attributes that session's flows to
+    /// this binding while the command runs.
+    AllowBound {
+        /// The host-minted binding for this invocation.
+        binding: mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding,
+    },
     /// The host gate refused it, or could not obtain an audited decision.
     Deny,
 }

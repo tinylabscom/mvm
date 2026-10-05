@@ -24,6 +24,7 @@
 //! about who authenticated the session, or about what a payload means; those
 //! belong to the endpoint that carries it.
 
+pub mod attribution;
 pub mod frame;
 pub mod hello;
 pub mod limits;

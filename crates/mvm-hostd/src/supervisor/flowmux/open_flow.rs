@@ -20,8 +20,9 @@ use super::tcp_relay::connect_first_admitted;
 use super::wire::{lock_registry, parse_host_port};
 use super::{FlowMuxError, FlowMuxSession, registry};
 use crate::supervisor::audit_recorder::EventCategory;
-use crate::supervisor::network_endpoint_proxy::TerminationMode;
+use crate::supervisor::network_endpoint_proxy::{FlowAttribution, TerminationMode};
 use crate::supervisor::terminator;
+use mvm_contract::protocol::network_flow::attribution::decode_open_tcp;
 
 /// One `OpenTcp` the claim-10 gate admitted: what the guest named, and what
 /// the gate decided about it. Carried between admission and whichever way the
@@ -41,6 +42,9 @@ struct AdmittedFlow {
     /// The admitted port, which the gate may have chosen rather than taken
     /// from the target.
     port: u16,
+    /// The tool invocation the guest attributed the flow to, resolved
+    /// against this endpoint's live bindings.
+    attribution: FlowAttribution,
 }
 
 impl AdmittedFlow {
@@ -97,6 +101,14 @@ impl FlowMuxSession {
         let Some(flow) = self.admit_open_tcp(stream_id, payload_len)? else {
             return Ok(());
         };
+        if let Err(reason) = self.enforce_tool_route(&flow) {
+            self.send_refused(
+                stream_id,
+                "destination belongs to a tool this flow is not an invocation of",
+            )?;
+            self.deny_flow(stream_id, &flow, reason);
+            return Ok(());
+        }
 
         let termination = if flow.may_terminate() {
             self.substitution
@@ -141,18 +153,18 @@ impl FlowMuxSession {
         stream_id: u32,
         payload_len: u32,
     ) -> Result<Option<AdmittedFlow>, FlowMuxError> {
-        if payload_len == 0 || payload_len > 256 {
-            self.send_refused(stream_id, "OpenTcp target missing or too long")?;
-            return Ok(None);
-        }
-
-        let target = match std::str::from_utf8(self.frame_payload(payload_len)) {
-            Ok(s) => s.to_string(),
-            Err(_) => {
-                self.send_refused(stream_id, "OpenTcp target is not UTF-8")?;
+        let (target, binding) = match decode_open_tcp(self.frame_payload(payload_len)) {
+            Ok((target, binding)) => (target.to_string(), binding),
+            Err(error) => {
+                self.send_refused(stream_id, &error.to_string())?;
                 return Ok(None);
             }
         };
+        let attribution = self
+            .substitution
+            .as_ref()
+            .map(|service| service.attribute(binding))
+            .unwrap_or_default();
 
         let (host, requested_port) = match parse_host_port(&target) {
             Ok((host, port)) => (host.to_string(), port),
@@ -178,6 +190,7 @@ impl FlowMuxSession {
             route: decision.route,
             ips: Vec::new(),
             port: requested_port,
+            attribution,
         };
         match decision.verdict {
             EgressVerdict::Allow { ips, port } => {
@@ -277,6 +290,7 @@ impl FlowMuxSession {
             .leaves(Arc::clone(&self.leaves))
             .authority(&flow.host, flow.port)
             .mode(mode)
+            .attribution(flow.attribution.clone())
             .build()
         {
             Ok(terminated) => terminated,
@@ -333,6 +347,23 @@ impl FlowMuxSession {
             ]),
         );
         Ok(())
+    }
+
+    /// Refuse an admitted flow to a destination the tool rules reserve for a
+    /// tool this flow is not an invocation of. Fails closed when the rules
+    /// declare routes and the decision cannot be run.
+    fn enforce_tool_route(&self, flow: &AdmittedFlow) -> Result<(), &'static str> {
+        let Some(service) = &self.substitution else {
+            return Ok(());
+        };
+        let Some(runtime) = &self.runtime_handle else {
+            return if service.declares_tool_routes() {
+                Err("tool_route_unavailable")
+            } else {
+                Ok(())
+            };
+        };
+        runtime.block_on(service.enforce_tool_route(&flow.host, flow.port, &flow.attribution))
     }
 
     /// Take a registry slot for an admitted flow. `Ok(false)` means the guest

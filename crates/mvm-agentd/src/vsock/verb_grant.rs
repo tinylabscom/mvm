@@ -757,6 +757,7 @@ mod tests {
             argv: vec!["echo".into(), "allowed".into()],
             stdin: None,
             timeout_secs: None,
+            env: Vec::new(),
         });
         assert!(enforce_verb_grant(&mediated, Some(&grant)).is_none());
         assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
@@ -794,6 +795,7 @@ mod tests {
             argv: vec!["echo".into()],
             stdin: None,
             timeout_secs: None,
+            env: Vec::new(),
         });
         assert!(matches!(
             enforce_verb_grant(&mediated, Some(&grant)),
