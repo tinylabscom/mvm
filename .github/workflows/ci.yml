@@ -58,21 +58,24 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          ruleset_id=$(gh api "repos/${REPO}/rulesets" \
-            --jq '[.[] | select(.name == "main merge queue" and .enforcement == "active")][0].id')
-          if [ -z "$ruleset_id" ] || [ "$ruleset_id" = null ]; then
-            echo "::error::Active 'main merge queue' ruleset not found."
+          rulesets="$RUNNER_TEMP/merge-queue-rulesets.json"
+          gh api "repos/${REPO}/rulesets" > "$rulesets"
+          matches=$(jq '[.[] | select(.name == "main merge queue" and .enforcement == "active")] | length' "$rulesets")
+          if [ "$matches" != 1 ]; then
+            echo "::error::Expected exactly one active 'main merge queue' ruleset; found $matches."
             exit 1
           fi
+          ruleset_id=$(jq -er '[.[] | select(.name == "main merge queue" and .enforcement == "active")][0].id' "$rulesets")
 
           policy="$RUNNER_TEMP/merge-queue-policy.json"
           gh api "repos/${REPO}/rulesets/${ruleset_id}" > "$policy"
+          targets_default=$(jq -er '(.conditions.ref_name.include | index("~DEFAULT_BRANCH") != null) and (.conditions.ref_name.exclude | index("~DEFAULT_BRANCH") == null)' "$policy")
           builds=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.max_entries_to_build' "$policy")
           merge_max=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.max_entries_to_merge' "$policy")
           wait=$(jq -er '.rules[] | select(.type == "merge_queue") | .parameters.min_entries_to_merge_wait_minutes' "$policy")
 
-          if [ "$builds" != 1 ] || [ "$merge_max" != 1 ] || [ "$wait" != 0 ]; then
-            echo "::error::Merge queue exceeds the hosted-runner budget: max_entries_to_build=$builds max_entries_to_merge=$merge_max wait_minutes=$wait. Required: 1/1/0."
+          if [ "$targets_default" != true ] || [ "$builds" != 1 ] || [ "$merge_max" != 1 ] || [ "$wait" != 0 ]; then
+            echo "::error::Merge queue policy drifted: targets_default=$targets_default max_entries_to_build=$builds max_entries_to_merge=$merge_max wait_minutes=$wait. Required: true/1/1/0."
             echo "::error::Restore the 'main merge queue' ruleset before running CI."
             exit 1
           fi

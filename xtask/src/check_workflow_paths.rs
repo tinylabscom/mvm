@@ -913,9 +913,11 @@ mod tests {
         let scope = job_block(&ci, "scope");
         for expected in [
             "name: Enforce merge queue runner budget",
+            "targets_default",
+            "~DEFAULT_BRANCH",
             "max_entries_to_build",
             "max_entries_to_merge",
-            "Merge queue exceeds the hosted-runner budget",
+            "Merge queue policy drifted",
             "MG_BASE_REF: ${{ github.event.merge_group.base_ref }}",
             "MG_HEAD: ${{ github.event.merge_group.head_sha }}",
             "PR_BASE: ${{ github.event.pull_request.base.sha }}",
