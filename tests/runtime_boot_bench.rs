@@ -566,7 +566,7 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
     let stop_started = Instant::now();
     let stop_result = backend.stop(&id);
     let stop = match stop_result {
-        Ok(()) => Some(stop_started.elapsed()),
+        Ok(_timing) => Some(stop_started.elapsed()),
         Err(e) => {
             eprintln!("[runtime_boot_bench] warning: failed to stop {name}: {e}");
             None

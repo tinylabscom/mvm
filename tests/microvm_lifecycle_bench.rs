@@ -283,7 +283,7 @@ fn stop_batch(backend: Arc<AnyBackend>, started: Vec<StartedVm>) -> Result<Vec<S
             let backend = Arc::clone(&backend);
             handles.push(scope.spawn(move || {
                 let started_at = Instant::now();
-                let result = backend.stop_with_timing(&vm.id);
+                let result = backend.stop(&vm.id);
                 let hvf_shutdown_timing = read_hvf_shutdown_timing(&vm.id);
                 (vm.id, started_at.elapsed(), result, hvf_shutdown_timing)
             }));

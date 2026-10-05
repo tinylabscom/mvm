@@ -587,7 +587,7 @@ fn stop_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -
     match mvm_runtime::backend::AnyBackend::for_started_vm(child_vm_name) {
         Some(backend) => match backend.stop(&mvm_core::vm_backend::VmId(child_vm_name.to_string()))
         {
-            Ok(()) => error.context(format!(
+            Ok(_timing) => error.context(format!(
                 "stopped forked child '{child_vm_name}' after restore completion failure"
             )),
             Err(stop_error) => error.context(format!(
