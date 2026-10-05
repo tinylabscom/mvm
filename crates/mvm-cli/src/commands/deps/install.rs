@@ -132,7 +132,7 @@ fn install_in_builder(spec: &InstallSpec) -> Result<mvm_build::app_deps::Install
     // Linux host binaries cannot bootstrap a builder VM. It already carries the
     // exact rebuild instruction; routed through the panicking path a reader saw
     // a Rust backtrace and "CLI thread exited unexpectedly" instead.
-    let driver = mvm_build::builder_backend_select::try_resolve_builder_backend_with_override(None)
+    let driver = mvm_build::builder_backend_select::try_resolve_builder_backend(None)
         .context("resolving the builder backend for the dependency install")?;
     let install_driver = mvm_build::app_deps::BuilderInstallDriver::new(driver.as_ref());
     mvm_build::app_deps::install_app_deps(spec, Some(&install_driver))

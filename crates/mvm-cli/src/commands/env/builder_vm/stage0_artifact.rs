@@ -77,7 +77,7 @@ impl<'a> Stage0ArtifactBuild<'a> {
         })?;
 
         use mvm_build::builder_backend_select as bbs;
-        let selected = bbs::resolve_choice();
+        let selected = bbs::resolve_choice(None);
         let explicit = bbs::resolve_env_override().is_some();
         bbs::run_with_builder_fallback(selected, explicit, |choice| {
             bbs::resolve_stage0_backend_for_choice(choice, self.verbose).run_stage0(

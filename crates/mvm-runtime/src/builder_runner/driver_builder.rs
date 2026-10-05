@@ -23,8 +23,8 @@ use mvm_build::builder_vm::{
 };
 use mvm_build::builder_vm_image::unique_job_id;
 use mvm_build::builder_vm_runtime::{
-    acquire_nix_store_image_lock, finalize_flake_job, read_job_result_with_diagnostics,
-    shell_job_exit_error, stage_job_dir, stage_shell_job_dir,
+    acquire_nix_store_image_lock, finalize_flake_job, read_job_result, shell_job_exit_error,
+    stage_job_dir, stage_shell_job_dir,
 };
 
 use super::runner::{BuilderBuild, BuilderRunner};
@@ -134,7 +134,7 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
         }
 
         let vm_state_dir = mvm_core::config::vm_state_dir(&name);
-        let result = read_job_result_with_diagnostics(&outcome.output_dir, &vm_state_dir)?;
+        let result = read_job_result(&outcome.output_dir, &vm_state_dir)?;
         if result.exit_code != 0 {
             return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
         }

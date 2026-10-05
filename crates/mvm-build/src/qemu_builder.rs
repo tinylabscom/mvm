@@ -944,8 +944,8 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     use crate::builder_disk_transport::InputTree;
     use crate::builder_vm::{BuilderVmImage, DEFAULT_NIX_STORE_MIB, host_arch_tag};
     use crate::builder_vm_runtime::{
-        acquire_nix_store_image_lock, builder_vm_timeout, read_job_result_with_diagnostics,
-        shell_job_exit_error, stage_filtered_work_input, stage_shell_job_dir,
+        acquire_nix_store_image_lock, builder_vm_timeout, read_job_result, shell_job_exit_error,
+        stage_filtered_work_input, stage_shell_job_dir,
     };
     use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -1147,12 +1147,12 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
 
     // The guest wrote its artifacts onto the output disk rather than into a
     // shared `/out`, so the host has to extract before anything reads them —
-    // `read_job_result_with_diagnostics` looks for `result` in `job_dir`, which
+    // `read_job_result` looks for `result` in `job_dir`, which
     // the extraction populates.
     extract_builder_transport_output(&output_disk, &job.artifact_out, &job_dir)?;
     drop(work_staging);
 
-    let result = read_job_result_with_diagnostics(&job_dir, &vm_state_dir)?;
+    let result = read_job_result(&job_dir, &vm_state_dir)?;
     if result.exit_code != 0 {
         return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
     }

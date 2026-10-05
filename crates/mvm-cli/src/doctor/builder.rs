@@ -231,7 +231,7 @@ pub(super) fn builderd_daemon_check() -> Check {
 #[cfg(feature = "builder-vm")]
 pub(super) fn builder_transport_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::BuilderBackendChoice;
-    let choice = mvm_build::builder_backend_select::resolve_choice();
+    let choice = mvm_build::builder_backend_select::resolve_choice(None);
     let info = match choice {
         BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => {
             "vsock-only host/guest transport; no builder guest NIC, no DHCP or gateway bootstrap"
@@ -751,9 +751,9 @@ mod tests {
         };
         let handle = std::thread::spawn(move || {
             let (mut conn, _addr) = listener.accept().expect("accept");
-            mvm_build::builderd::serve_connection_with_executor(
+            mvm_build::builderd::serve_connection(
                 &mut conn,
-                &mvm_build::builderd::CommandExecutor,
+                Some(&mvm_build::builderd::CommandExecutor),
             )
             .expect("serve");
         });
@@ -786,9 +786,9 @@ mod tests {
         };
         let handle = std::thread::spawn(move || {
             let (mut conn, _addr) = listener.accept().expect("accept");
-            mvm_build::builderd::serve_connection_with_executor(
+            mvm_build::builderd::serve_connection(
                 &mut conn,
-                &mvm_build::builderd::CommandExecutor,
+                Some(&mvm_build::builderd::CommandExecutor),
             )
             .expect("serve");
         });

@@ -782,7 +782,7 @@ pub struct JobResult {
 /// always a guest crash mid-build); malformed JSON →
 /// [`BuilderVmError::ExtractionFailed`] (host couldn't extract the
 /// result, regardless of whether the build succeeded).
-pub fn read_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
+fn parse_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
     let path = job_dir.join("result");
     let body = std::fs::read_to_string(&path).map_err(|e| {
         BuilderVmError::NixBuildFailed(format!(
@@ -807,11 +807,8 @@ pub fn read_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
 /// Surfacing the VM state dir plus whatever `console.log` /
 /// `supervisor.{stdout,stderr}.log` captured keeps the next operator run from
 /// starting at a bare ENOENT.
-pub fn read_job_result_with_diagnostics(
-    job_dir: &Path,
-    vm_state_dir: &Path,
-) -> Result<JobResult, BuilderVmError> {
-    match read_job_result(job_dir) {
+pub fn read_job_result(job_dir: &Path, vm_state_dir: &Path) -> Result<JobResult, BuilderVmError> {
+    match parse_job_result(job_dir) {
         Ok(result) => Ok(result),
         Err(BuilderVmError::NixBuildFailed(message)) => {
             Err(BuilderVmError::NixBuildFailed(format!(
@@ -1225,9 +1222,9 @@ fn read_flake_job_result(job_dir: &Path, artifact_out: &Path) -> Result<JobResul
     // combinations can lose one share's final write during power-off, so accept
     // the mirror only when the primary file is absent. A malformed primary
     // remains a hard failure and cannot be hidden by the mirror.
-    match read_job_result(job_dir) {
+    match parse_job_result(job_dir) {
         Ok(result) => Ok(result),
-        Err(BuilderVmError::NixBuildFailed(primary)) => match read_job_result(artifact_out) {
+        Err(BuilderVmError::NixBuildFailed(primary)) => match parse_job_result(artifact_out) {
             Ok(result) => Ok(result),
             Err(BuilderVmError::NixBuildFailed(_)) => Err(BuilderVmError::NixBuildFailed(format!(
                 "{primary}; mirrored result was also absent at {}",
@@ -1553,7 +1550,7 @@ mod tests {
     }
 
     #[test]
-    fn read_job_result_parses_well_formed_json() {
+    fn parse_job_result_parses_well_formed_json() {
         let scratch = tempfile::TempDir::new().unwrap();
         let job_dir = scratch.path().to_path_buf();
         std::fs::write(
@@ -1561,33 +1558,33 @@ mod tests {
             r#"{"exit_code":0,"stderr_tail":"hello"}"#,
         )
         .unwrap();
-        let r = read_job_result(&job_dir).unwrap();
+        let r = parse_job_result(&job_dir).unwrap();
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stderr_tail, "hello");
     }
 
     #[test]
-    fn read_job_result_defaults_stderr_tail_when_absent() {
+    fn parse_job_result_defaults_stderr_tail_when_absent() {
         // `#[serde(default)]` on stderr_tail. A guest that
         // exited before writing stderr_tail (rare, but possible
         // under panic) still parses cleanly.
         let scratch = tempfile::TempDir::new().unwrap();
         let job_dir = scratch.path().to_path_buf();
         std::fs::write(job_dir.join("result"), r#"{"exit_code":2}"#).unwrap();
-        let r = read_job_result(&job_dir).unwrap();
+        let r = parse_job_result(&job_dir).unwrap();
         assert_eq!(r.exit_code, 2);
         assert_eq!(r.stderr_tail, "");
     }
 
     #[test]
-    fn read_job_result_errors_when_missing() {
+    fn parse_job_result_errors_when_missing() {
         let scratch = tempfile::TempDir::new().unwrap();
-        let err = read_job_result(scratch.path()).unwrap_err();
+        let err = parse_job_result(scratch.path()).unwrap_err();
         assert!(matches!(err, BuilderVmError::NixBuildFailed(_)));
     }
 
     #[test]
-    fn read_job_result_with_diagnostics_includes_vm_logs_on_missing_result() {
+    fn read_job_result_includes_vm_logs_on_missing_result() {
         let scratch = tempfile::TempDir::new().unwrap();
         let vm_state_dir = scratch.path().join("vm-state");
         let persistent_store_image = scratch.path().join("nix-store.img");
@@ -1615,7 +1612,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = read_job_result_with_diagnostics(scratch.path(), &vm_state_dir).unwrap_err();
+        let err = read_job_result(scratch.path(), &vm_state_dir).unwrap_err();
         let msg = match err {
             BuilderVmError::NixBuildFailed(msg) => msg,
             other => panic!("expected NixBuildFailed, got {other:?}"),
@@ -1652,14 +1649,14 @@ mod tests {
     }
 
     #[test]
-    fn read_job_result_errors_on_malformed_json() {
+    fn parse_job_result_errors_on_malformed_json() {
         // New coverage relative to the libkrun-side tests: the
         // ExtractionFailed arm wasn't exercised before. Pinning it
         // here means a future change to the error mapping (e.g.
         // collapsing both arms) breaks visibly.
         let scratch = tempfile::TempDir::new().unwrap();
         std::fs::write(scratch.path().join("result"), "{not valid json").unwrap();
-        let err = read_job_result(scratch.path()).unwrap_err();
+        let err = parse_job_result(scratch.path()).unwrap_err();
         assert!(matches!(err, BuilderVmError::ExtractionFailed(_)));
     }
 
