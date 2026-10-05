@@ -239,6 +239,9 @@ pub enum CliSpawn {
     /// Running `mvmctl machine restart` for a workload that failed its
     /// healthcheck.
     HealthRestart,
+    /// Running `mvmctl machine session reap` for a session that sat idle past
+    /// its timeout.
+    SessionReap,
     /// Resolving `mvmctl` as a per-VM host helper, named by its path-override
     /// environment variable.
     HostHelper {
@@ -265,6 +268,9 @@ impl CliSpawn {
             Self::HealthRestart => {
                 "restarting an unhealthy workload would run `mvmctl machine restart`".to_string()
             }
+            Self::SessionReap => {
+                "reaping an idle session would run `mvmctl machine session reap`".to_string()
+            }
             Self::HostHelper { env_var } => {
                 format!("the host helper overridden by {env_var} is `mvmctl` itself")
             }
@@ -279,6 +285,7 @@ impl CliSpawn {
                 "Bootstrap this host with `mvmctl bootstrap` first, then retry."
             }
             Self::HealthRestart => "Restart it with `mvmctl machine restart`.",
+            Self::SessionReap => "Reap it with `mvmctl machine session reap`.",
             Self::HostHelper { .. } => "Run this workload through `mvmctl` instead.",
         }
     }

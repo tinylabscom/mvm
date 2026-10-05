@@ -367,6 +367,7 @@ fn main() -> anyhow::Result<()> {
                 audit_dir: cfg.audit_dir.as_deref(),
                 signing_key_path: cfg.signing_key_path.as_deref(),
                 vm_state_dir,
+                pid_file: &cfg.pid_file,
             };
             let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(timer_inputs) {
                 Ok(guard) => guard,
@@ -393,6 +394,15 @@ fn main() -> anyhow::Result<()> {
         }
         None => None,
     };
+
+    // A resident standby parent boots with no plan, so nothing above armed
+    // anything. If a claim hands it to a child, that child's plan arrives with
+    // the handoff and its bounds are armed then, exactly as at a cold boot.
+    let handoff_accepted = (cfg.plan.is_none() && cfg.handoff_socket.is_some()).then(|| {
+        let (sender, accepted) = std::sync::mpsc::channel();
+        mvm_hostd::supervisor::claimed_child::arm_on_handoff(accepted, cfg.pid_file.clone());
+        sender
+    });
 
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
@@ -441,6 +451,7 @@ fn main() -> anyhow::Result<()> {
                 handoff_socket: cfg.handoff_socket.clone(),
                 handoff_root: cfg.handoff_root.clone(),
                 handoff_verify_key: cfg.handoff_verify_key.clone(),
+                handoff_accepted,
             })
             .build(),
     );

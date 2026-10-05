@@ -340,6 +340,16 @@ pub enum AnyBackend {
     WebLinux(WebLinuxBackend),
 }
 
+/// The catalog entry whose state-dir marker `name` carries, if any.
+fn started_vm_descriptor(name: &str) -> Option<&'static catalog::BackendDescriptor> {
+    let dir = mvm_core::config::vm_state_dir(name);
+    catalog::started_vm_probe_descriptors()
+        .into_iter()
+        .filter_map(|descriptor| descriptor.marker_file)
+        .find(|marker_file| dir.join(marker_file).is_file())
+        .and_then(catalog::descriptor_for_marker_file)
+}
+
 impl AnyBackend {
     /// Create the default backend (Firecracker).
     pub fn default_backend() -> Self {
@@ -431,13 +441,13 @@ impl AnyBackend {
     /// the HVF marker — same supervisor, same lifecycle). Callers fall back
     /// to the platform default in that case.
     pub fn for_started_vm(name: &str) -> Option<Self> {
-        let dir = mvm_core::config::vm_state_dir(name);
-        catalog::started_vm_probe_descriptors()
-            .into_iter()
-            .filter_map(|descriptor| descriptor.marker_file)
-            .find(|marker_file| dir.join(marker_file).is_file())
-            .and_then(catalog::descriptor_for_marker_file)
-            .map(|descriptor| descriptor.instantiate())
+        started_vm_descriptor(name).map(|descriptor| descriptor.instantiate())
+    }
+
+    /// The kind of backend that started `name`, read off the same marker
+    /// [`Self::for_started_vm`] dispatches on, without instantiating it.
+    pub fn started_vm_kind(name: &str) -> Option<BackendKind> {
+        started_vm_descriptor(name).map(|descriptor| descriptor.kind)
     }
 
     /// Aggregate the running-VM listing across every backend that can be
@@ -1345,6 +1355,18 @@ mod tests {
             "fc.pid → Firecracker"
         );
         assert!(none.is_none(), "no marker → None");
+
+        // The kind is read off the same marker, without building a backend.
+        assert_eq!(AnyBackend::started_vm_kind("q1"), Some(BackendKind::Qemu));
+        assert_eq!(
+            AnyBackend::started_vm_kind("l1"),
+            Some(BackendKind::Libkrun)
+        );
+        assert_eq!(
+            AnyBackend::started_vm_kind("f1"),
+            Some(BackendKind::Firecracker)
+        );
+        assert_eq!(AnyBackend::started_vm_kind("does-not-exist"), None);
     }
 
     #[test]

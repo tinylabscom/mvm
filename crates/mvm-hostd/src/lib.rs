@@ -48,6 +48,9 @@ pub mod framing;
 pub mod health_probe;
 /// Idle-registration self-termination logic for the `mvm-host-agent` worker.
 pub mod host_agent_idle;
+/// Session idle-timeout enforcement by the host agent, for the backends with
+/// no per-VM supervisor.
+pub mod host_agent_sessions;
 pub mod host_signer;
 pub mod jailer;
 /// Secret keyholder — the `SecretRef` → credential boundary: the

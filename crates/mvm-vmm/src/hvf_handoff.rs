@@ -12,9 +12,29 @@ pub struct HvfHandoffRequest {
     pub parent_pid: u32,
     /// Presence bits for authorized child channels; paths remain supervisor-derived.
     pub channel_mask: u8,
-    /// Ed25519 signature over the protocol domain, parent PID, and child name.
+    /// The signed `ExecutionPlan` the child was admitted under, as the claim
+    /// carried it. The parent booted with no plan, so this is how the process
+    /// that now owns the child learns the bounds it has to enforce.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_plan: Option<String>,
+    /// Ed25519 signature over the protocol domain, parent PID, channel mask,
+    /// child name and admitted plan.
     pub signature: String,
 }
+
+/// What a parent learned from a handoff it accepted: who it now is, and the
+/// plan that child was admitted under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AcceptedHandoff {
+    /// The child the parent became.
+    pub child_vm_name: String,
+    /// The child's admitted plan, when the claim carried one.
+    pub admitted_plan: Option<String>,
+}
+
+/// Where a parent publishes the handoff it accepted, for the supervisor that
+/// owns it. Sent at most once: a parent becomes one child.
+pub type HandoffAcceptedSender = std::sync::mpsc::Sender<AcceptedHandoff>;
 
 /// Domain separator for the host-authorized live handoff signature.
 pub const HVF_HANDOFF_PROTOCOL_DOMAIN: &[u8] = b"mvm-hvf-live-handoff-v1";
@@ -101,23 +121,85 @@ impl HandoffReply {
 
 impl HvfHandoffRequest {
     /// Build the canonical bytes signed by the host identity for one claim.
-    pub fn signing_message(parent_pid: u32, child_vm_name: &str, channel_mask: u8) -> Vec<u8> {
+    ///
+    /// The admitted plan is bound when present, so a request cannot carry a
+    /// plan the host did not authorize for this child. A request without one
+    /// signs exactly the bytes it did before plans were carried.
+    pub fn signing_message(
+        parent_pid: u32,
+        child_vm_name: &str,
+        channel_mask: u8,
+        admitted_plan: Option<&str>,
+    ) -> Vec<u8> {
         let name = child_vm_name.as_bytes();
         let name_len = u32::try_from(name.len()).expect("VM name fits protocol length");
-        let mut message =
-            Vec::with_capacity(HVF_HANDOFF_PROTOCOL_DOMAIN.len() + 4 + 4 + 1 + name.len());
+        let plan = admitted_plan.map(str::as_bytes).unwrap_or_default();
+        let mut message = Vec::with_capacity(
+            HVF_HANDOFF_PROTOCOL_DOMAIN.len() + 4 + 4 + 1 + name.len() + 8 + plan.len(),
+        );
         message.extend_from_slice(HVF_HANDOFF_PROTOCOL_DOMAIN);
         message.extend_from_slice(&parent_pid.to_be_bytes());
         message.push(channel_mask);
         message.extend_from_slice(&name_len.to_be_bytes());
         message.extend_from_slice(name);
+        if admitted_plan.is_some() {
+            message.extend_from_slice(&(plan.len() as u64).to_be_bytes());
+            message.extend_from_slice(plan);
+        }
         message
+    }
+
+    /// The bytes this request's signature has to cover.
+    #[must_use]
+    pub fn message(&self) -> Vec<u8> {
+        Self::signing_message(
+            self.parent_pid,
+            &self.child_vm_name,
+            self.channel_mask,
+            self.admitted_plan.as_deref(),
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_signature_binds_the_admitted_plan_and_a_planless_request_is_unchanged() {
+        let planless = HvfHandoffRequest::signing_message(42, "child", 0b0011, None);
+        let with_plan = HvfHandoffRequest::signing_message(42, "child", 0b0011, Some("{}"));
+        let other_plan = HvfHandoffRequest::signing_message(42, "child", 0b0011, Some("{ }"));
+        let empty_plan = HvfHandoffRequest::signing_message(42, "child", 0b0011, Some(""));
+        assert_ne!(planless, with_plan);
+        assert_ne!(with_plan, other_plan);
+        assert_ne!(planless, empty_plan, "an empty plan is still a plan");
+        assert!(
+            planless.ends_with(b"child"),
+            "a request without a plan signs what it always did"
+        );
+    }
+
+    #[test]
+    fn a_planless_request_keeps_its_wire_shape() {
+        let request = HvfHandoffRequest {
+            child_vm_name: "child".into(),
+            parent_pid: 42,
+            channel_mask: 0,
+            admitted_plan: None,
+            signature: "00".into(),
+        };
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(!wire.contains("admitted_plan"), "{wire}");
+        assert_eq!(
+            serde_json::from_str::<HvfHandoffRequest>(&wire).unwrap(),
+            request
+        );
+        assert_eq!(
+            request.message(),
+            HvfHandoffRequest::signing_message(42, "child", 0, None)
+        );
+    }
 
     #[test]
     fn a_refusal_carries_its_reason_on_one_line() {

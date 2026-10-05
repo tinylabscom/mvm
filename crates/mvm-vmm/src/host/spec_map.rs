@@ -330,9 +330,15 @@ pub fn workload_device_spec(config: &VmStartConfig, cmdline: &str, console_log: 
 /// the supervisor's read of `resources.timeouts.exec_secs`; this only makes one
 /// enforceable.
 fn workload_plan_binding(config: &VmStartConfig) -> Option<PlanBinding> {
-    let plan_json = serde_json::from_str(config.plan_json.as_deref()?).ok()?;
+    plan_binding_for(config.plan_json.as_deref()?)
+}
+
+/// The binding a supervisor enforces `plan_json` under: the plan, and the
+/// audit chain and host key its enforcement is recorded with. One derivation,
+/// whether the plan reaches the supervisor at boot or at a warm claim.
+pub fn plan_binding_for(plan_json: &str) -> Option<PlanBinding> {
     Some(PlanBinding {
-        plan_json,
+        plan_json: serde_json::from_str(plan_json).ok()?,
         audit_dir: mvm_core::config::mvm_audit_dir(),
         signing_key_path: mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_KEY_FILE),
     })

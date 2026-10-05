@@ -47,14 +47,21 @@ pub trait WorkloadKiller: Send + 'static {
 }
 
 /// The killer the per-VM supervisor binaries use: record the timeout as the
-/// workload's exit code, then end this process.
+/// workload's exit code, release the VM's host state, then end this process.
 ///
 /// Ending the process *is* the kill on the backends that have a supervisor: the
 /// supervisor owns the VMM in-process, so its exit tears the guest down. The
 /// exit code is the conventional `timeout(1)` value, so a caller reading
 /// `workload.exit` sees a deadline rather than an unexplained failure.
+///
+/// Before it exits it releases what the `stop` path would have: the VM's host
+/// helpers and its pid file. A client that stops a VM does that after the VMM
+/// is gone; a supervisor that stops its own guest is the only process left to
+/// do it, and skipping it left a state dir recording a pid nothing answered to
+/// and helpers serving a VM that no longer existed.
 pub struct SupervisorExitKiller {
     vm_state_dir: std::path::PathBuf,
+    pid_file: std::path::PathBuf,
 }
 
 /// Exit code recorded for a workload its wall-clock bound stopped. Matches
@@ -62,18 +69,40 @@ pub struct SupervisorExitKiller {
 pub const TIMEOUT_EXIT_CODE: i32 = 124;
 
 impl SupervisorExitKiller {
+    /// A killer for the VM whose state lives in `vm_state_dir` and whose
+    /// supervisor recorded its pid in `pid_file`.
     #[must_use]
-    pub fn new(vm_state_dir: std::path::PathBuf) -> Self {
-        Self { vm_state_dir }
+    pub fn new(vm_state_dir: std::path::PathBuf, pid_file: std::path::PathBuf) -> Self {
+        Self {
+            vm_state_dir,
+            pid_file,
+        }
+    }
+
+    /// Record the timeout exit code and release the VM's host state, leaving
+    /// only the process exit. Split out of [`WorkloadKiller::kill`] because the
+    /// exit cannot run in a test.
+    fn record_and_release(&self) {
+        let path = mvm_core::exit_capture::exit_file_path(&self.vm_state_dir);
+        if let Err(err) = std::fs::write(&path, TIMEOUT_EXIT_CODE.to_string()) {
+            tracing::warn!(error = %err, path = %path.display(), "recording the wall-clock timeout exit code failed");
+        }
+        match self.vm_state_dir.file_name().and_then(|name| name.to_str()) {
+            Some(vm_name) => {
+                mvm_vmm::host::vm_helpers::reap_vm_host_helpers(&self.vm_state_dir, vm_name);
+            }
+            None => tracing::warn!(
+                state_dir = %self.vm_state_dir.display(),
+                "the VM state dir names no VM; its host helpers are left to the stop path"
+            ),
+        }
+        let _ = std::fs::remove_file(&self.pid_file);
     }
 }
 
 impl WorkloadKiller for SupervisorExitKiller {
     fn kill(&self) {
-        let path = mvm_core::exit_capture::exit_file_path(&self.vm_state_dir);
-        if let Err(err) = std::fs::write(&path, TIMEOUT_EXIT_CODE.to_string()) {
-            tracing::warn!(error = %err, path = %path.display(), "recording the wall-clock timeout exit code failed");
-        }
+        self.record_and_release();
         std::process::exit(TIMEOUT_EXIT_CODE);
     }
 }
@@ -193,6 +222,16 @@ pub struct SupervisorTimerInputs<'a> {
     pub signing_key_path: Option<&'a std::path::Path>,
     /// Per-VM state dir; the timeout exit code is recorded here.
     pub vm_state_dir: &'a std::path::Path,
+    /// The supervisor's own pid file, removed when it stops its guest.
+    pub pid_file: &'a std::path::Path,
+}
+
+impl SupervisorTimerInputs<'_> {
+    /// The killer a bound this supervisor enforces stops its guest with.
+    #[must_use]
+    pub fn exit_killer(&self) -> SupervisorExitKiller {
+        SupervisorExitKiller::new(self.vm_state_dir.to_path_buf(), self.pid_file.to_path_buf())
+    }
 }
 
 /// Decode what the launch path actually put on `plan_json`.
@@ -275,7 +314,7 @@ pub fn arm_for_supervisor(
     let emitter = supervisor_emitter(&inputs)
         .context("a plan with a wall-clock bound needs an audit chain to record its kill")?;
 
-    let killer = Box::new(SupervisorExitKiller::new(inputs.vm_state_dir.to_path_buf()));
+    let killer = Box::new(inputs.exit_killer());
     let timer = WallClockTimer::for_plan(Arc::new(plan), emitter, killer)
         .expect("a nonzero exec_secs always yields a timer");
     tracing::info!(
@@ -336,6 +375,7 @@ mod tests {
             audit_dir: Some(audit_dir.as_path()),
             signing_key_path: Some(keys_dir.join("host-signer.ed25519").as_path()),
             vm_state_dir: dir.path(),
+            pid_file: &dir.path().join("vm.pid"),
         })
         .expect("a signed plan carrying a bound must arm, not refuse the boot");
 
@@ -360,6 +400,7 @@ mod tests {
             audit_dir: None,
             signing_key_path: None,
             vm_state_dir: dir.path(),
+            pid_file: &dir.path().join("vm.pid"),
         })
         .expect("an unbounded signed plan is not an error");
         assert!(guard.is_none());
@@ -378,10 +419,50 @@ mod tests {
                 audit_dir: None,
                 signing_key_path: None,
                 vm_state_dir: dir.path(),
+                pid_file: &dir.path().join("vm.pid"),
             })
             .is_err(),
             "an unreadable bound must refuse, not silently run unbounded"
         );
+    }
+
+    /// A supervisor that stops its own guest leaves what a `stop` would: the
+    /// exit code it recorded, and no pid file or host helper outliving the VM.
+    #[test]
+    fn a_supervisor_stop_releases_the_vms_host_state_like_the_stop_path() {
+        let root = tempfile::tempdir().unwrap();
+        let state_dir = root.path().join("vm-stopped-by-its-supervisor");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid_file = state_dir.join("vm.pid");
+        std::fs::write(&pid_file, std::process::id().to_string()).unwrap();
+        let mut endpoint = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a stand-in endpoint");
+        let endpoint_pid_file =
+            state_dir.join(mvm_vmm::host::network_endpoint_spawn::SUBST_PID_FILE);
+        std::fs::write(&endpoint_pid_file, endpoint.id().to_string()).unwrap();
+
+        SupervisorTimerInputs {
+            plan_json: None,
+            audit_dir: None,
+            signing_key_path: None,
+            vm_state_dir: &state_dir,
+            pid_file: &pid_file,
+        }
+        .exit_killer()
+        .record_and_release();
+
+        assert_eq!(
+            std::fs::read_to_string(mvm_core::exit_capture::exit_file_path(&state_dir)).unwrap(),
+            TIMEOUT_EXIT_CODE.to_string()
+        );
+        assert!(!pid_file.exists(), "no pid file names a VM that is gone");
+        assert!(
+            !endpoint.wait().unwrap().success(),
+            "the VM's endpoint is stopped with it"
+        );
+        assert!(!endpoint_pid_file.exists());
     }
 
     fn emitter(dir: &std::path::Path) -> Arc<AuditEmitter> {

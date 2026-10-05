@@ -191,19 +191,24 @@ impl Restarter for MachineRestarter {
 /// The `mvmctl machine restart <vm_name>` command for `host`, refused for a
 /// library embedder, which never runs `mvmctl`.
 fn restart_command_for(host: &HostProcess, vm_name: &str) -> Result<Command, CliSpawnRefused> {
-    let mut command = mvm_core::env_hygiene::helper_command(mvmctl_path_for(host)?);
+    let mut command = mvmctl_command_for(host, CliSpawn::HealthRestart)?;
     command.args(["machine", "restart", vm_name]);
     Ok(command)
 }
 
-/// Resolve the `mvmctl` binary to run for a restart: prefer the one in the
-/// host binary directory (this daemon and `mvmctl` ship side by side), falling
-/// back to a bare `mvmctl` resolved via `PATH` when it is not there.
-fn mvmctl_path_for(host: &HostProcess) -> Result<PathBuf, CliSpawnRefused> {
-    host.refuse_cli_spawn(CliSpawn::HealthRestart)?;
-    Ok(host
-        .binary_named(CLI_BIN)
-        .unwrap_or_else(|| PathBuf::from(CLI_BIN)))
+/// An `mvmctl` command the daemon runs for `spawn`, refused for a library
+/// embedder. Prefers the `mvmctl` in the host binary directory (this daemon
+/// and `mvmctl` ship side by side), falling back to a bare `mvmctl` resolved
+/// via `PATH` when it is not there.
+pub(crate) fn mvmctl_command_for(
+    host: &HostProcess,
+    spawn: CliSpawn,
+) -> Result<Command, CliSpawnRefused> {
+    host.refuse_cli_spawn(spawn)?;
+    Ok(mvm_core::env_hygiene::helper_command(
+        host.binary_named(CLI_BIN)
+            .unwrap_or_else(|| PathBuf::from(CLI_BIN)),
+    ))
 }
 
 /// Current wall clock in unix seconds, saturating to 0 before the epoch.

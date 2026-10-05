@@ -2,11 +2,12 @@
 //!
 //! A detached host-agent worker (setsid, ppid=1) leaks when its VMs are gone
 //! and the CLI that would ordinarily reap it dies abnormally. This module
-//! implements the decision logic: once zero VM registrations have persisted for
-//! the configured idle timeout the worker exits with [`IDLE_SHUTDOWN_EXIT_CODE`]
+//! implements the decision logic: once zero VM registrations and zero watched
+//! sessions have persisted for the configured idle timeout the worker exits with [`IDLE_SHUTDOWN_EXIT_CODE`]
 //! so the wrapper can tear down the tree rather than restart it.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -73,7 +74,8 @@ pub fn is_idle_shutdown(code: Option<i32>) -> bool {
 }
 
 /// Watcher task that calls `process::exit(IDLE_SHUTDOWN_EXIT_CODE)` once the
-/// daemon has had zero VM registrations for `timeout`.
+/// daemon has had no work for `timeout`: zero VM registrations and zero
+/// sessions it watches (see [`run_session_watcher`]).
 ///
 /// Spawn this as a sibling task alongside the daemon's main serve loop. If
 /// `timeout` is `None` (idle-exit disabled) the function returns immediately
@@ -82,20 +84,25 @@ pub fn is_idle_shutdown(code: Option<i32>) -> bool {
 /// The lock over `daemon` is held only for the `registration_count()` read and
 /// is dropped before every sleep, so it never serialises against broker request
 /// handling.
-pub async fn run_idle_watcher(daemon: Arc<Mutex<HostAgentDaemon>>, timeout: Option<Duration>) {
+pub async fn run_idle_watcher(
+    daemon: Arc<Mutex<HostAgentDaemon>>,
+    watched_sessions: Arc<AtomicUsize>,
+    timeout: Option<Duration>,
+) {
     let Some(timeout) = timeout else {
         return;
     };
     const PROBE: Duration = Duration::from_millis(500);
     let mut zero_since: Option<Instant> = None;
     loop {
-        let count = {
+        let registrations = {
             let mut daemon = daemon.lock().await;
             if let Err(error) = daemon.reap_dead_registrations() {
                 tracing::warn!(%error, "dead host-agent registration reap failed");
             }
             daemon.registration_count()
         };
+        let count = registrations + watched_sessions.load(Ordering::Relaxed);
         if count > 0 {
             zero_since = None;
         } else if zero_since.is_none() {
@@ -105,6 +112,55 @@ pub async fn run_idle_watcher(daemon: Arc<Mutex<HostAgentDaemon>>, timeout: Opti
             std::process::exit(IDLE_SHUTDOWN_EXIT_CODE);
         }
         tokio::time::sleep(PROBE).await;
+    }
+}
+
+/// Sibling watcher that enforces the idle timeout of this tenant's sessions on
+/// the backends with no per-VM supervisor, and publishes how many it watches
+/// into `watched_sessions` for [`run_idle_watcher`].
+///
+/// The session store is files on disk, so each pass runs inside
+/// `spawn_blocking`; the watcher is moved in and back out so its record of the
+/// last sweep survives.
+pub async fn run_session_watcher(tenant: String, watched_sessions: Arc<AtomicUsize>) {
+    use crate::host_agent_sessions::{CliSessionReaper, SessionSweepWatcher, TenantSessions};
+
+    const PROBE: Duration = Duration::from_secs(2);
+    let mut ticker = tokio::time::interval(PROBE);
+    let mut watcher = Some(SessionSweepWatcher::new(
+        TenantSessions::new(tenant),
+        CliSessionReaper,
+    ));
+    loop {
+        ticker.tick().await;
+        let Some(current) = watcher.take() else {
+            return;
+        };
+        let pass = tokio::task::spawn_blocking(move || {
+            let mut current = current;
+            let watched = match mvm_core::session::list_sessions() {
+                Ok(records) => current.step(&records, chrono::Utc::now()),
+                Err(error) => {
+                    tracing::warn!(%error, "session watcher: could not list sessions");
+                    0
+                }
+            };
+            (current, watched)
+        })
+        .await;
+        match pass {
+            Ok((current, watched)) => {
+                watched_sessions.store(watched, Ordering::Relaxed);
+                watcher = Some(current);
+            }
+            Err(error) => {
+                // Stop counting what is no longer watched, so the agent can
+                // still idle out; the client sweep remains for those sessions.
+                tracing::warn!(%error, "session watcher pass failed; no longer watching sessions");
+                watched_sessions.store(0, Ordering::Relaxed);
+                return;
+            }
+        }
     }
 }
 

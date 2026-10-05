@@ -63,6 +63,7 @@ pub struct MockChildFork {
     pub child_vm_name: String,
     pub genid: GenerationToken,
     pub channels: Vec<VsockPort>,
+    pub admitted_plan: Option<String>,
 }
 
 /// Hypervisor-free `VmmDriver` test double.
@@ -341,6 +342,7 @@ impl VmmDriver for MockDriver {
             child_vm_name: req.child_vm_name.to_string(),
             genid: req.genid.clone(),
             channels: req.channels.to_vec(),
+            admitted_plan: req.admitted_plan.map(str::to_string),
         });
         Ok(())
     }

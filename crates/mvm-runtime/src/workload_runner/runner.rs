@@ -49,7 +49,7 @@ use crate::workload_runner::standby_boot::{factory_parent_config, factory_parent
 use mvm_vmm::host::cmdline;
 use mvm_vmm::host::egress_shared::{decode_plan_secrets_from_state, plan_stream_retention};
 use mvm_vmm::host::network_endpoint_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, reap_network_endpoint, spawn_network_endpoint,
+    EndpointTransport, SubstitutionSpawnParams, spawn_network_endpoint,
 };
 use mvm_vmm::host::spec_map::{WorkloadSpecInputs, workload_spec, workload_vsock_ports};
 use mvm_vmm::post_restore::PostRestoreOutcome;
@@ -782,6 +782,9 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             // from a start config the claim supplied, which is not what was
             // checked.
             cpu_grant: plan.grants.as_ref().and_then(|grants| grants.cpu),
+            // The same admitted plan `claim_plan` decoded the bindings above
+            // from, so the bounds the child's owner arms are the ones checked.
+            admitted_plan: Some(&claim.plan_json),
         };
         let forked = if preloaded_child_name.is_some() {
             self.driver.resume_preloaded_child(&fork_request)
@@ -4366,6 +4369,8 @@ mod tests {
         broker: Option<RecordedBroker>,
         cold_vm: String,
         child: VmId,
+        /// The signed plan the claim admitted the child under.
+        claim_plan_json: String,
         /// Held so the assertions resolve the same `MVM_HOME` the run did.
         /// Declaration order is drop order: the home dir goes, then the env is
         /// restored, then the lock is released.
@@ -4446,10 +4451,25 @@ mod tests {
             broker: runner.broker.seen.lock().unwrap().take(),
             cold_vm,
             child,
+            claim_plan_json: claim.plan_json.clone(),
             _home: home,
             _env: env,
             _lock: lock,
         }
+    }
+
+    /// The fork carries the plan the claim admitted, so a driver whose child
+    /// is owned by a supervisor can hand it the bounds to enforce. A resident
+    /// parent booted with none of its own.
+    #[test]
+    fn claim_hands_the_fork_the_plan_the_child_was_admitted_under() {
+        let run = cold_boot_then_claim();
+        let forks = run.driver.forked_children();
+        assert_eq!(forks.len(), 1, "exactly one child fork");
+        assert_eq!(
+            forks[0].admitted_plan.as_deref(),
+            Some(run.claim_plan_json.as_str())
+        );
     }
 
     /// A claimed child must reach the same host-side channels a cold-booted

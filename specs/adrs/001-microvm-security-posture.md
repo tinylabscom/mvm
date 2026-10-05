@@ -370,7 +370,14 @@ not paraphrase this row without them.
    bind the pool rather than the claim. `bind_spawn` wraps a `Command` and
    this tree has no post-spawn attach, so on those two paths a claimed child's
    CPU bound is a ledger entry and not a `cpu.max`. Wall clock is likewise not
-   re-armed on a restored or claimed child, per limit 2.
+   re-armed on a restored child, per limit 2. A claimed child is different: it
+   has an admitted plan of its own, and on HVF the resident handoff carries
+   that plan, bound into the handoff signature, to the supervisor the child
+   inherits. That supervisor arms the plan's wall-clock bound and session idle
+   watcher as a cold boot would, and stops the child rather than run it
+   unbounded if the bound cannot be audited
+   (`fn:a_claimed_child_with_a_bound_gets_the_timer_a_cold_boot_would`).
+   Firecracker's claim paths have no supervisor to arm one, per limit 2.
 5. **The budget is not a precise cliff. (OPEN, by choice.)** Two admissions
    racing each other can both read the same total and both be admitted,
    overshooting by one boot; closing that needs a host-wide lock held across
