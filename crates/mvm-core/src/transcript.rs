@@ -767,16 +767,15 @@ pub fn export(
 }
 
 /// Load the host transcript key-encryption key from `keys_dir`, creating it
-/// (mode 0600) on first use. Every per-capture data key is wrapped under this
-/// KEK so payloads stay unreadable without host access.
+/// (mode 0600, in a 0700 directory) on first use. Every per-capture data key
+/// is wrapped under this KEK so payloads stay unreadable without host access.
+///
+/// Concurrent first uses agree on one KEK: whichever process links its key
+/// into place first wins, and every other caller returns that key rather
+/// than the one it minted.
 pub fn load_or_init_kek(keys_dir: &Path) -> std::io::Result<aead::Key> {
-    if let Some(kek) = load_kek(keys_dir)? {
-        return Ok(kek);
-    }
-    let kek = aead::Key::random();
-    std::fs::create_dir_all(keys_dir)?;
-    kek.persist(&keys_dir.join(TRANSCRIPT_KEK_FILENAME), 0o600)?;
-    Ok(kek)
+    crate::config::create_private_dir(keys_dir)?;
+    aead::Key::load_or_create(&keys_dir.join(TRANSCRIPT_KEK_FILENAME))
 }
 
 /// Load the host transcript KEK if it exists, without creating one.
@@ -784,9 +783,7 @@ pub fn load_or_init_kek(keys_dir: &Path) -> std::io::Result<aead::Key> {
 /// The read-only half of [`load_or_init_kek`], for a caller that only wants to
 /// *open* a capture. Minting a KEK from a read path is worse than failing:
 /// every existing capture's wrapped data key was sealed under the old one, so
-/// the new key turns a missing-key problem into a permanent decrypt failure —
-/// and a second process minting concurrently makes it non-deterministic which
-/// one wins.
+/// the new key turns a missing-key problem into a permanent decrypt failure.
 pub fn load_kek(keys_dir: &Path) -> std::io::Result<Option<aead::Key>> {
     let path = keys_dir.join(TRANSCRIPT_KEK_FILENAME);
     match std::fs::metadata(&path) {
@@ -1538,6 +1535,39 @@ mod tests {
             export(&manifest, dir.path(), &fixed_key(9)).unwrap_err(),
             TranscriptError::Decrypt { .. }
         ));
+    }
+
+    /// Captures started together on a fresh host must all wrap their data
+    /// keys under the KEK that ends up on disk; otherwise a capture sealed by
+    /// the losing minter can never be opened again.
+    #[test]
+    fn concurrent_first_kek_uses_all_get_the_persisted_kek() {
+        use std::sync::{Arc, Barrier};
+        const THREADS: usize = 12;
+        let dir = tempfile::tempdir().unwrap();
+        let keys = dir.path().join("keys");
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let data = aead::Key::from_bytes([3u8; 32]);
+        let wrapped: Vec<String> = (0..THREADS)
+            .map(|_| {
+                let (keys, barrier) = (keys.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_or_init_kek(&keys).unwrap()
+                })
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| wrap_data_key(&h.join().unwrap(), &data))
+            .collect();
+
+        let persisted = load_kek(&keys).unwrap().expect("KEK on disk");
+        for w in &wrapped {
+            assert!(
+                unwrap_data_key(&persisted, w).is_ok(),
+                "a caller wrapped under a KEK that is not the persisted one"
+            );
+        }
     }
 
     #[test]
