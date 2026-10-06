@@ -857,7 +857,7 @@ mod tests {
         for expected in [
             "permissions:",
             "actions: write",
-            "runs-on: ubuntu-slim",
+            "runs-on: ubuntu-latest",
             "timeout-minutes: 90",
             "actions/workflows/workspace-shard.yml/dispatches",
             "candidates=(github)",
