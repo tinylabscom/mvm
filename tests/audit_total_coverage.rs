@@ -397,6 +397,12 @@ const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
     ("park", AuditPosture::Emits("session.parked")),
     ("resume", AuditPosture::Emits("session.resumed")),
     ("renew", AuditPosture::Emits("session.renewed")),
+    // Fork-boots a session checkpoint and re-delivers its recorded prompts,
+    // each as a chain-signed `agent.prompt_delivered` entry.
+    (
+        "replay",
+        AuditPosture::Emits("CheckpointForked+agent.prompt_delivered"),
+    ),
 ];
 
 const PROC_SUB: &[(&str, AuditPosture)] = &[

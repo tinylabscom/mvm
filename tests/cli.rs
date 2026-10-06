@@ -1405,6 +1405,37 @@ fn machine_prompt_is_listed_and_documents_its_session_and_step_flags() {
 }
 
 #[test]
+fn agent_session_replay_documents_its_checkpoint_fork_and_dry_run_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args(["agent-session", "replay", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--from <CHECKPOINT>",
+        "--as <NAME>",
+        "--dry-run",
+        "--timeout <SECS>",
+    ] {
+        assert!(stdout.contains(flag), "{flag} missing: {stdout}");
+    }
+}
+
+#[test]
+fn agent_session_replay_of_an_unknown_session_fails_without_forking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args(["agent-session", "replay", "no-such-session", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no-such-session"), "stderr: {stderr}");
+}
+
+#[test]
 fn machine_run_help_documents_both_cold_build_flags() {
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")

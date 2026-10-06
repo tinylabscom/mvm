@@ -734,5 +734,7 @@ pub fn outcome_label(terminal: &CallTerminal) -> String {
     }
 }
 
+pub mod replay;
+
 #[cfg(test)]
 mod tests;
