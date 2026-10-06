@@ -1410,7 +1410,7 @@ mod host_signer_pubkey_config_tests {
 // pulling in VMM selection + start dispatch.
 
 #[cfg(test)]
-mod admit_plan_tests {
+pub(crate) mod admit_plan_tests {
     use super::*;
     use std::io::Write;
 
@@ -1930,7 +1930,7 @@ mod admit_plan_tests {
 
     /// Admit a real plan whose chain is written to `audit_dir`. The signer,
     /// chain and plan are the production ones; only where they live is injected.
-    fn admitted_into(
+    pub(crate) fn admitted_into(
         keys_dir: &std::path::Path,
         audit_dir: &std::path::Path,
         vm_name: &str,
