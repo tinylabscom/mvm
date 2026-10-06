@@ -66,7 +66,9 @@ pub(crate) const CONFINED_ROLE_SYSCALLS: &[(&str, libc::c_long)] = &[
     // Audit segment rotation renames the full active segment aside. The
     // Landlock grant on the audit dir already carries `Refer` for it; without
     // the syscall the endpoint dies the first time its log reaches the
-    // rotation threshold.
+    // rotation threshold. The embedded telemetry collector relies on the same
+    // row: it replaces its status snapshot by writing a temp file and renaming
+    // it over the old one, confined by Landlock to the VM state dir.
     ("rename", libc::SYS_rename),
     // arch divergence: x86_64 keeps `stat` / `lstat` as their own
     // syscalls; aarch64 folds both into `fstatat` (see aarch64 block).
@@ -407,7 +409,8 @@ mod tests {
         // musl's `open` on x86_64 — omitting it SIGSYS-killed every released
         // endpoint when its first guest authenticated.
         assert!(syscall_name_to_nr("open").is_some());
-        // Audit segment rotation.
+        // Audit segment rotation, and the embedded telemetry collector's
+        // status-snapshot replace after the endpoint confines itself.
         assert!(syscall_name_to_nr("rename").is_some());
     }
 
