@@ -52,6 +52,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Keep the queue singleton and immediate. Wider speculative builds caused
+      # unrelated entries to inherit failures and conflicts; a wait or batch
+      # recreates the same misleading red queue even though merge-group CI is
+      # now lightweight.
+      - name: Enforce merge queue policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          bash scripts/check-merge-queue-policy.test.sh
+
+          rulesets="$RUNNER_TEMP/merge-queue-rulesets.json"
+          gh api "repos/${REPO}/rulesets" > "$rulesets"
+          matches=$(jq '[.[] | select(.name == "main merge queue" and .enforcement == "active")] | length' "$rulesets")
+          if [ "$matches" != 1 ]; then
+            echo "::error::Expected exactly one active 'main merge queue' ruleset; found $matches."
+            exit 1
+          fi
+          ruleset_id=$(jq -er '[.[] | select(.name == "main merge queue" and .enforcement == "active")][0].id' "$rulesets")
+
+          policy="$RUNNER_TEMP/merge-queue-policy.json"
+          gh api "repos/${REPO}/rulesets/${ruleset_id}" > "$policy"
+          bash scripts/check-merge-queue-policy.sh "$policy"
+
       - name: Classify changed paths
         id: decide
         env:
@@ -983,73 +1008,109 @@ jobs:
     name: Test workspace
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    permissions:
+      actions: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        # The suite is the merge queue's long pole (~23 min end to end, most
-        # of it the shared compile). Two shards halve the test pass; each
-        # shard pays the compile once on its own runner, which rust-cache
-        # warms from the same key. Extras that must run exactly once
-        # (addon tests, doctests) stay on shard 1.
+        # Each broker races one shard across eligible runner pools. The worker
+        # that actually starts first owns the shard; its queued sibling is
+        # cancelled. A matrix in this workflow cannot provide that semantic,
+        # because Actions waits for every matrix child, including the loser.
         shard: [1, 2]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - name: Run shard on the first available runner
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
+          SHARD: ${{ matrix.shard }}
+          ALLOW_SELF_HOSTED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
 
-      - uses: ./.github/actions/free-disk
+          api="https://api.github.com/repos/$REPOSITORY"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json")
+          correlation="${RUN_ID}-${RUN_ATTEMPT}-${SHARD}"
+          candidates=(github)
+          if [ "$ALLOW_SELF_HOSTED" = true ]; then
+            candidates+=(hetzner)
+          fi
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-08-25
+          run_ids=()
+          cleanup() {
+            for run_id in "${run_ids[@]}"; do
+              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
+            done
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
 
-      - uses: ./.github/actions/apt-deps
-        with:
-          packages: attr cryptsetup-bin lld
+          for candidate in "${candidates[@]}"; do
+            curl -fsS -X POST "${auth[@]}" \
+              "$api/actions/workflows/workspace-shard.yml/dispatches" \
+              -d "$(jq -nc \
+                --arg ref "$COMMIT_SHA" \
+                --arg shard "$SHARD" \
+                --arg runner "$candidate" \
+                --arg correlation "$correlation" \
+                '{ref:"main",inputs:{commit_sha:$ref,shard:$shard,runner_kind:$runner,correlation:$correlation}}')"
+          done
 
-      - uses: ./.github/actions/rust-cache
+          winner=
+          deadline=$((SECONDS + 600))
+          while [ -z "$winner" ] && [ "$SECONDS" -lt "$deadline" ]; do
+            runs="$(curl -fsS "${auth[@]}" \
+              "$api/actions/workflows/workspace-shard.yml/runs?event=workflow_dispatch&per_page=50")"
+            mapfile -t run_ids < <(
+              jq -r --arg marker "$correlation" \
+                '.workflow_runs[] | select(.display_title | contains($marker)) | .id' \
+                <<<"$runs"
+            )
+            winner="$(jq -r --arg marker "$correlation" '
+              [.workflow_runs[]
+               | select(.display_title | contains($marker))
+               | select(.status == "in_progress" or .status == "completed")]
+              | sort_by(.run_started_at)
+              | first
+              | .id // empty
+            ' <<<"$runs")"
+            [ -n "$winner" ] || sleep 3
+          done
+          if [ -z "$winner" ]; then
+            echo "::error::no workspace shard candidate started within 10 minutes" >&2
+            exit 1
+          fi
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
+          for run_id in "${run_ids[@]}"; do
+            if [ "$run_id" != "$winner" ]; then
+              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
+            fi
+          done
+          run_ids=("$winner")
 
-      - name: Build
-        run: cargo build --all-targets
-
-      - name: Validate nextest override filters
-        run: cargo run -p xtask -- check-nextest-groups
-
-      - name: xtask man-page tests
-        # gen-man lives behind xtask's off-by-default `man` feature. It pulls
-        # mvm-cli and its build script, so exercise it on Test's already-warm
-        # test-profile graph instead of rebuilding that graph in Lint.
-        run: cargo nextest run -p xtask --features man
-
-      - name: Run tests
-        run: cargo nextest run --workspace --all-targets --partition hash:${{ matrix.shard }}/2
-
-      # No separate `-p mvm-agentd --all-targets` run. It was a strict subset of
-      # the workspace run above — every test it ran, that run already ran, plus 21
-      # more `flowmux` tests feature unification enables there — and nothing in
-      # mvm-agentd is gated on a feature being *off*, so no test runs only under
-      # per-package resolution. It cost ~41 recompiled crates and a second pass
-      # over the same suite. The addons run below is different: `addons` is not
-      # enabled by unification, and it runs 61 tests nothing else does.
-      - name: Run addon/egress helper tests
-        if: matrix.shard == 1
-        # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
-        # mvm-egress-client) and their shared vsock session helper live behind
-        # the off-by-default `addons` feature, so the default workspace run
-        # skips their tests. Run mvm-agentd with the feature on so they stay
-        # exercised on every integrated code change.
-        run: cargo nextest run -p mvm-agentd --features addons
-
-      - name: Run doctests
-        # nextest does not run doctests; gate them separately.
-        if: matrix.shard == 1
-        run: cargo test --workspace --doc
+          while :; do
+            run="$(curl -fsS "${auth[@]}" "$api/actions/runs/$winner")"
+            status="$(jq -r .status <<<"$run")"
+            if [ "$status" = completed ]; then
+              conclusion="$(jq -r .conclusion <<<"$run")"
+              url="$(jq -r .html_url <<<"$run")"
+              echo "workspace shard $SHARD completed on $(jq -r .display_title <<<"$run"): $url"
+              run_ids=()
+              if [ "$conclusion" != success ]; then
+                echo "::error::workspace shard $SHARD concluded $conclusion" >&2
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 5
+          done
 
   test-workspace-aarch64:
     name: Test workspace (aarch64)

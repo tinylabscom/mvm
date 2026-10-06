@@ -70,7 +70,7 @@
 //!   (test pre-creates `~/.mvm/instances/<name>/snapshot/` so the
 //!   bail-when-missing branch doesn't short-circuit the emit)
 //! - `mvmctl machine snapshot ls` → **no** audit entry
-//! - `mvmctl audit tail` / `audit verify` / `audit show <id>` →
+//! - `mvmctl trust audit tail` / `audit verify` / `audit show <id>` →
 //!   **no** audit entry (the `AUDIT` leaves are all ReadOnly)
 //! - `mvmctl attest status` / `attest export` → **no** audit
 //!   entry (the `ATTEST` leaves are all ReadOnly)
@@ -1502,7 +1502,7 @@ fn audit_tail_does_not_emit_local_audit_entry() {
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl audit tail failed: stderr={}",
+        "mvmctl trust audit tail failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -1533,7 +1533,7 @@ fn audit_verify_does_not_emit_local_audit_entry() {
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl audit verify failed: stderr={}",
+        "mvmctl trust audit verify failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -2077,7 +2077,7 @@ fn audit_show_does_not_emit_local_audit_entry() {
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl audit show failed: stderr={}",
+        "mvmctl trust audit show failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Focused tests for verify-release-assets.sh: a release whose binary archives,
-# combined checksum manifest and SBOM are complete and signed verifies; one
-# with a missing signature, a drifted digest, an unlisted archive or a missing
-# packaged binary fails closed. Runs the real script (no --cosign, no
+# distro packages, combined checksum manifest and SBOM are complete and signed
+# verifies; one with a missing signature, a drifted digest, an unlisted
+# archive or package, a missing or duplicated package, or a missing packaged
+# binary fails closed. Runs the real script (no --cosign, no
 # --expect-version, so the OIDC/host-version checks are skipped) against
 # fixtures built here. No network, no cosign.
 set -euo pipefail
@@ -23,8 +24,20 @@ bins_for() {
   esac
 }
 
-# Build a fully-valid release-assets dir (every tarball/manifest/SBOM check
-# passes). Echoes the dir path.
+# Signed, listed distro packages for a Linux target, the way the release
+# publishes them. Contents are placeholders: the verifier checks presence,
+# signature bundle and manifest digest, not the payload.
+add_packages() {
+  local dir="$1" deb_arch="$2" rpm_arch="$3"
+  for pkg in "mvmctl_0.0.0-1_${deb_arch}.deb" "mvmctl-0.0.0-1.${rpm_arch}.rpm"; do
+    printf '%s\n' "$pkg" > "$dir/$pkg"
+    printf 'bundle\n' > "$dir/$pkg.bundle"
+    echo "$(sha256_of "$dir/$pkg")  $pkg" >> "$dir/checksums-sha256.txt"
+  done
+}
+
+# Build a fully-valid release-assets dir (every tarball/package/manifest/SBOM
+# check passes). Echoes the dir path.
 build_valid_fixture() {
   local dir; dir="$(mktemp -d)"
   : > "$dir/checksums-sha256.txt"
@@ -36,6 +49,8 @@ build_valid_fixture() {
     printf 'bundle\n' > "$dir/mvmctl-$t.tar.gz.bundle"
     echo "$(sha256_of "$dir/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$dir/checksums-sha256.txt"
   done
+  add_packages "$dir" amd64 x86_64
+  add_packages "$dir" arm64 aarch64
   printf 'bundle\n' > "$dir/checksums-sha256.txt.bundle"
   printf '{"sbom":true}\n' > "$dir/sbom.cdx.json"
   printf 'bundle\n' > "$dir/sbom.cdx.json.bundle"
@@ -105,7 +120,35 @@ mv "$d/.c.tmp" "$d/checksums-sha256.txt"
 if run "$d"; then bad "an archive missing a required binary must fail"; else ok "an archive missing a required binary fails closed"; fi
 rm -rf "$d"
 
-# 8. Every binary the verifier REQUIRES must be one release.yml actually
+# 8. A Linux target without its .deb → fail closed.
+d="$(build_valid_fixture)"
+rm -f "$d"/mvmctl_*_arm64.deb "$d"/mvmctl_*_arm64.deb.bundle
+if run "$d"; then bad "a missing .deb must fail"; else ok "a missing .deb fails closed"; fi
+rm -rf "$d"
+
+# 9. A package without its signature bundle → fail closed.
+d="$(build_valid_fixture)"
+rm -f "$d"/mvmctl-*.x86_64.rpm.bundle
+if run "$d"; then bad "an unsigned .rpm must fail"; else ok "an unsigned .rpm fails closed"; fi
+rm -rf "$d"
+
+# 10. A package the signed manifest does not list → fail closed.
+d="$(build_valid_fixture)"
+grep -v '_amd64.deb' "$d/checksums-sha256.txt" > "$d/.c.tmp"
+mv "$d/.c.tmp" "$d/checksums-sha256.txt"
+if run "$d"; then bad "an unlisted .deb must fail"; else ok "an unlisted .deb fails closed"; fi
+rm -rf "$d"
+
+# 11. Two packages for one architecture → fail closed: a user cannot tell
+# which one the release meant.
+d="$(build_valid_fixture)"
+printf 'other\n' > "$d/mvmctl_0.0.1-1_amd64.deb"
+printf 'bundle\n' > "$d/mvmctl_0.0.1-1_amd64.deb.bundle"
+echo "$(sha256_of "$d/mvmctl_0.0.1-1_amd64.deb")  mvmctl_0.0.1-1_amd64.deb" >> "$d/checksums-sha256.txt"
+if run "$d"; then bad "two .debs for one arch must fail"; else ok "two .debs for one arch fail closed"; fi
+rm -rf "$d"
+
+# 12. Every binary the verifier REQUIRES must be one release.yml actually
 # bundles. The fixtures above cannot catch a stale name: build_valid_fixture
 # creates whatever bins_for names, so a required-but-unbuilt binary verifies
 # green here and fails only at release time. Compare against the workflow.

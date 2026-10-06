@@ -797,9 +797,13 @@ mod tests {
             "test-ebpf-telemetry",
         ] {
             let block = job_block(&workflow, lane);
+            let job_if = block
+                .lines()
+                .find(|line| line.starts_with("    if:"))
+                .expect("scoped CI lane must have a job-level if");
             assert!(
-                block.contains("if: needs.scope.outputs.code == 'true'")
-                    && !block.contains("github.event_name != 'pull_request'"),
+                job_if.contains("needs.scope.outputs.code == 'true'")
+                    && !job_if.contains("github.event_name != 'pull_request'"),
                 "{lane} must validate code pull requests before queue admission"
             );
         }
@@ -849,10 +853,38 @@ mod tests {
 
         let test_workspace = job_block(&workflow, "test-workspace");
         assert!(!test_workspace.contains("uses: actions/cache@v5"));
-        assert!(test_workspace.contains("cargo nextest run -p xtask --features man"));
+        for expected in [
+            "permissions:",
+            "actions: write",
+            "runs-on: ubuntu-slim",
+            "ALLOW_SELF_HOSTED:",
+            "actions/workflows/workspace-shard.yml/dispatches",
+            "candidates=(github)",
+            "candidates+=(hetzner)",
+            "actions/runs/$run_id/cancel",
+        ] {
+            assert!(
+                test_workspace.contains(expected),
+                "workspace runner broker must contain {expected:?}"
+            );
+        }
+        let workspace_worker = self::workflow("workspace-shard.yml");
+        for expected in [
+            "fromJSON('[\"self-hosted\",\"Linux\",\"X64\",\"mvm\",\"hetzner\",\"kvm\"]')",
+            "if: inputs.runner_kind == 'github'",
+            "if: inputs.runner_kind == 'hetzner'",
+            "key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}",
+            "cargo nextest run -p xtask --features man",
+            "cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2",
+        ] {
+            assert!(
+                workspace_worker.contains(expected),
+                "workspace shard worker must contain {expected:?}"
+            );
+        }
         let test_linux = job_block(&workflow, "test-linux");
         assert!(test_linux.contains("bash scripts/ci-linux-coverage.sh"));
-        assert!(!test_workspace.contains("ci-linux-coverage.sh"));
+        assert!(!workspace_worker.contains("ci-linux-coverage.sh"));
 
         let linux_coverage = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -932,6 +964,8 @@ mod tests {
         let ci = ci_workflow();
         let scope = job_block(&ci, "scope");
         for expected in [
+            "name: Enforce merge queue policy",
+            "bash scripts/check-merge-queue-policy.sh",
             "MG_BASE_REF: ${{ github.event.merge_group.base_ref }}",
             "MG_HEAD: ${{ github.event.merge_group.head_sha }}",
             "PR_BASE: ${{ github.event.pull_request.base.sha }}",
@@ -1563,6 +1597,10 @@ mod tests {
         assert!(warm.contains("--out-link \"$RUNNER_TEMP/nix-cache-warm\""));
         assert!(warm.contains("Build Nix outputs to populate the binary cache"));
         assert!(warm.contains("save: \"true\""));
+        let hetzner = job_block(&warm, "warm-hetzner");
+        assert!(hetzner.contains("runs-on: [self-hosted, Linux, X64, mvm, hetzner, kvm]"));
+        assert!(hetzner.contains("key: hetzner-workspace"));
+        assert!(hetzner.contains("cargo build --all-targets"));
         assert!(warm.contains("key: test-support"));
         assert!(warm.contains("Warm test-support feature tests"));
 

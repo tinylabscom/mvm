@@ -9,7 +9,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use mvm_core::checkpoint::{CheckpointMeta, ContentBlob, DeviceAnchors};
 
-use super::{chunks, sha256_file_hex};
+use super::sha256_file_hex;
 
 /// Replace a forked child's cloned FlowMux identity drive with a freshly minted
 /// one so the child never boots on the parent's signing key.
@@ -44,19 +44,14 @@ pub(super) fn reseed_forked_identity_drive(child_vm_name: &str, child_dir: &Path
 /// index address always mismatches. The materialization already verified those
 /// bytes against the chain-bound index, so substitute the whole-file digest of
 /// the verified material for the memory blob; every other entry is untouched.
-/// A whole (unchunked) memory blob already records its own digest and is left
-/// alone.
 pub(super) fn content_with_load_memory_digest(
     content: &[ContentBlob],
-    content_dir: &Path,
     materialized_memory: &Path,
 ) -> Result<Vec<ContentBlob>> {
     content
         .iter()
         .map(|blob| {
-            if blob.name == mvm_core::checkpoint::MEMORY_BLOB
-                && chunks::is_chunked_blob(content_dir, blob)
-            {
+            if blob.name == mvm_core::checkpoint::MEMORY_BLOB {
                 Ok(ContentBlob {
                     name: blob.name.clone(),
                     sha256: sha256_file_hex(materialized_memory)?,
