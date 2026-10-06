@@ -29,7 +29,7 @@ env = { PYTHONPATH = "crates/mvm-sdk/sdks/python" }
 [[command]]
 path = "build guest-bins"
 tier = "parse"
-reason = "cross-compiles every guest binary for both guest architectures with the pinned zig toolchain, which takes minutes and needs that toolchain installed; its packaging and verification have focused unit tests"
+reason = "cross-compiles every guest artifact for both guest architectures with the pinned zig toolchain, which takes minutes and needs that toolchain installed; its packaging and verification have focused unit tests"
 
 [[command]]
 path = "build kernel build"
