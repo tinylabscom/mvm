@@ -11,13 +11,17 @@
  * 1. `MVM_HOSTLIB_PATH`, the library file itself. Set and missing is an
  *    error, never a reason to keep looking: an explicit path that silently
  *    falls through would load some other build than the one named.
- * 2. Packaged with the SDK, in `native/` under the package root (the
- *    directory above the one holding this compiled module, so `dist/../native`
- *    for the published layout and `src/../native` for a source checkout).
- * 3. Beside `mvmctl` on `PATH` (the release ships them side by side; the
+ * 2. In `native/` under the package root (the directory above the one
+ *    holding this compiled module, so `dist/../native` or `src/../native`).
+ *    The published package does not use it; it is where a source checkout
+ *    or a hand-assembled package puts the library.
+ * 3. The platform package for this host, `@runmvm/mvm-<os>-<cpu>[-<libc>]`
+ *    (see `_platform.ts`), which npm installs as an optional dependency of
+ *    the published package.
+ * 4. Beside `mvmctl` on `PATH` (the release ships them side by side; the
  *    binary is located, never run), including beside the real file after
  *    resolving symlinks.
- * 4. Otherwise {@link MvmTransportError}, naming all three.
+ * 5. Otherwise {@link MvmTransportError}, naming all of them.
  *
  * Before the first call the binding tells the library which ABI it was built
  * for, and the library refuses every call until that succeeds, so a binding
@@ -39,6 +43,7 @@ import {
   STATUS_OK as OK,
 } from "./_errors/types.js";
 import { ABI_MAJOR, ABI_MINOR } from "./hostabi/methods.js";
+import { detectLibc, type Libc, platformPackageFor, platformPackageName } from "./_platform.js";
 
 /** Environment variable naming the library file; the registry owns the name. */
 export const LIB_PATH_ENV = MVM_HOSTLIB_PATH_ENV;
@@ -63,6 +68,15 @@ export interface PathSeams {
   /** Resolve symlinks; defaults to `fs.realpathSync`. */
   realpath?: (p: string) => string;
   platform?: string;
+  /** CPU architecture, as `process.arch` names it; defaults to this host's. */
+  arch?: string;
+  /** The C library on Linux; defaults to the one this process runs on. */
+  libc?: Libc;
+  /**
+   * The directory of an installed package, or `null` when it is not
+   * installed; defaults to Node's resolution from this module.
+   */
+  resolvePackage?: (name: string) => string | null;
   /** The package root holding `native/`; defaults to this module's. */
   packageRoot?: string;
 }
@@ -76,6 +90,31 @@ function defaultPackageRoot(): string {
 export function packagedLibraryPath(seams: PathSeams = {}): string {
   const root = seams.packageRoot ?? defaultPackageRoot();
   return path.join(root, "native", libraryFileName(seams.platform ?? process.platform));
+}
+
+function defaultResolvePackage(name: string): string | null {
+  try {
+    const require = createRequire(import.meta.url);
+    return path.dirname(require.resolve(`${name}/package.json`));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The library inside this host's installed platform package, or `null` when
+ * no package is published for the host or none is installed.
+ */
+export function platformPackageLibraryPath(seams: PathSeams = {}): string | null {
+  const platform = seams.platform ?? process.platform;
+  const pkg = platformPackageFor(
+    platform,
+    seams.arch ?? process.arch,
+    seams.libc ?? detectLibc(platform),
+  );
+  if (pkg === undefined) return null;
+  const dir = (seams.resolvePackage ?? defaultResolvePackage)(platformPackageName(pkg));
+  return dir === null ? null : path.join(dir, libraryFileName(platform));
 }
 
 function defaultWhich(bin: string): string | null {
@@ -98,6 +137,8 @@ export function candidatePaths(seams: PathSeams = {}): string[] {
   const explicit = env[LIB_PATH_ENV];
   if (explicit) return [explicit];
   const paths = [packagedLibraryPath(seams)];
+  const fromPlatformPackage = platformPackageLibraryPath(seams);
+  if (fromPlatformPackage !== null) paths.push(fromPlatformPackage);
   const found = which("mvmctl");
   if (!found) return paths;
   const name = libraryFileName(platform);
@@ -138,6 +179,7 @@ export function resolveLibraryPath(seams: PathSeams = {}): string {
   throw new MvmTransportError(
     `the host library ${libraryFileName(seams.platform ?? process.platform)} was not found: ` +
       `set ${LIB_PATH_ENV} to its path, ship it in the SDK package's native/ directory, ` +
+      `install the platform package for this host, ` +
       `or install it beside mvmctl on PATH (looked in: ${candidates.join(", ")})`,
   );
 }

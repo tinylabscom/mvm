@@ -583,6 +583,20 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             }
 
+            // Checkpoint content GC, after the sweep so chunks only the swept
+            // checkpoints used are reclaimed in the same run: pool objects no
+            // checkpoint links, staging a dead capture left, and cached restore
+            // images whose checkpoint is gone.
+            match mvm_runtime::checkpoint::prune_unreferenced_content(&ckpt_store, dry_run) {
+                Ok(report) if !report.is_empty() => {
+                    ui::info(&checkpoint_content_prune_report(&report, dry_run));
+                    removed += report.entries();
+                    freed += report.bytes();
+                }
+                Ok(_) => {}
+                Err(e) => ui::warn(&format!("checkpoint content sweep failed: {e:#}")),
+            }
+
             // Expired-pack sweep: an attested pack whose trust metadata expired
             // is never instant-launch-eligible, so reclaiming it is always safe.
             // Valid-but-unused (LRU) pack reclamation is a separate concern and
@@ -962,6 +976,27 @@ pub(super) fn sweep_untagged_checkpoints(
         }
     }
     Ok(removed)
+}
+
+/// One line summarizing the checkpoint content GC, split out so the wording is
+/// testable without a checkpoint store.
+fn checkpoint_content_prune_report(
+    report: &mvm_runtime::checkpoint::ContentPruneReport,
+    dry_run: bool,
+) -> String {
+    let verb = if dry_run {
+        "(dry-run) Would reclaim"
+    } else {
+        "Reclaimed"
+    };
+    format!(
+        "{verb} {} checkpoint chunk object(s), {} cached restore image(s) and {} abandoned \
+         capture(s) ({}).",
+        report.objects,
+        report.materializations,
+        report.abandoned_staging,
+        human_bytes(report.bytes()),
+    )
 }
 
 /// The note `cache prune` prints for a checkpoint it kept, or `None` for the
@@ -1382,6 +1417,62 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(present(&store, "old-tagged"));
         assert!(!present(&store, "old-untagged"));
+    }
+
+    /// The content GC runs after the sweep, so the chunks of a checkpoint the
+    /// sweep just removed are reclaimed in the same prune.
+    #[test]
+    fn content_gc_after_the_sweep_reclaims_the_swept_checkpoints_chunks() {
+        use ckpt_fixture::*;
+        use mvm_runtime::checkpoint::{
+            CaptureFsQuickParams, capture_fs_quick, prune_unreferenced_content,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, vec![0x5a; 2 * 1024 * 1024]).unwrap();
+        let params = CaptureFsQuickParams::builder()
+            .id(mvm_core::checkpoint::CheckpointId::new("old-untagged"))
+            .vm_name("vm".into())
+            .rootfs(rootfs)
+            .supervisor_config_digest("d".into())
+            .created_unix(AGED)
+            .quiesced(true)
+            .build()
+            .unwrap();
+        capture_fs_quick(&store, params).unwrap();
+
+        assert_eq!(
+            super::sweep_untagged_checkpoints(&store, SWEEP_NOW, 1, &Default::default()).unwrap(),
+            1
+        );
+        let report = prune_unreferenced_content(&store, false).unwrap();
+
+        assert_eq!(report.objects, 1, "both chunks share one object");
+        assert_eq!(report.object_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn checkpoint_content_prune_report_reflects_dry_run() {
+        let report = mvm_runtime::checkpoint::ContentPruneReport {
+            abandoned_staging: 1,
+            objects: 3,
+            object_bytes: 3 * 1024 * 1024,
+            materializations: 2,
+            materialization_bytes: 1024 * 1024,
+        };
+        assert_eq!(
+            super::checkpoint_content_prune_report(&report, true),
+            format!(
+                "(dry-run) Would reclaim 3 checkpoint chunk object(s), 2 cached restore image(s) \
+                 and 1 abandoned capture(s) ({}).",
+                super::human_bytes(4 * 1024 * 1024)
+            )
+        );
+        assert!(super::checkpoint_content_prune_report(&report, false).starts_with("Reclaimed 3 "));
+        assert_eq!(report.entries(), 6);
+        assert_eq!(report.bytes(), 4 * 1024 * 1024);
     }
 
     #[test]

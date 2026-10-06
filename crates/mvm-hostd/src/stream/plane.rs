@@ -1459,7 +1459,7 @@ mod tests {
     }
 
     /// A host process that started a workload and then exited without ever
-    /// stopping it: `machine run -d`, `up`, or a foreground run whose caller
+    /// stopping it: `machine run -d`, or a foreground run whose caller
     /// detached. The plane goes with the process; the VM and its capture
     /// directory stay.
     fn detached_start(vm: &str, console: &Path, output: &[u8]) {

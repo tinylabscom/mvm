@@ -78,4 +78,7 @@ pub mod supervisor;
 pub mod telemetry_collector;
 #[cfg(test)]
 mod test_fixtures;
+/// Keeps a per-VM endpoint alive for exactly as long as its VM, for machines
+/// that outlive the `mvmctl` that started them.
+pub mod vm_lifetime;
 pub mod workload_env;

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use mvm_contract::builder::BuilderError;
-use mvm_core::checkpoint::{CheckpointDigest, CheckpointId, SessionBinding};
+use mvm_core::checkpoint::{CheckpointDigest, CheckpointId, CheckpointKeyDomain, SessionBinding};
 
 /// Inputs for an `fs_quick` capture. Grouped into a struct so the call site
 /// reads clearly and we never thread a long positional argument list.
@@ -30,6 +30,10 @@ pub struct CaptureFsQuickParams {
     /// CPU or wall clock — but still no egress, since an absent egress grant is
     /// deny-all.
     pub grants: Option<mvm_contract::grants::Grants>,
+    /// Whose object pool the captured chunks go into: the tenant whose plan
+    /// the VM was admitted under, or the host for a VM that has none. Chunks
+    /// are deduplicated only within one domain.
+    pub key_domain: CheckpointKeyDomain,
 }
 
 impl CaptureFsQuickParams {
@@ -54,6 +58,7 @@ pub struct CaptureFsQuickParamsBuilder {
     created_unix: Option<u64>,
     quiesced: Option<bool>,
     grants: Option<mvm_contract::grants::Grants>,
+    key_domain: CheckpointKeyDomain,
 }
 
 impl CaptureFsQuickParamsBuilder {
@@ -70,6 +75,7 @@ impl CaptureFsQuickParamsBuilder {
             created_unix: None,
             quiesced: None,
             grants: None,
+            key_domain: CheckpointKeyDomain::host(),
         }
     }
 
@@ -139,6 +145,13 @@ impl CaptureFsQuickParamsBuilder {
         self
     }
 
+    /// Set `key_domain`. Unset means the host's own domain.
+    #[must_use]
+    pub fn key_domain(mut self, key_domain: CheckpointKeyDomain) -> Self {
+        self.key_domain = key_domain;
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<CaptureFsQuickParams, BuilderError> {
         Ok(CaptureFsQuickParams {
@@ -164,6 +177,7 @@ impl CaptureFsQuickParamsBuilder {
                 .quiesced
                 .ok_or(BuilderError::missing("CaptureFsQuickParams", "quiesced"))?,
             grants: self.grants,
+            key_domain: self.key_domain,
         })
     }
 }
@@ -403,6 +417,9 @@ pub struct CaptureVmFullParams {
     /// Writable volume images cloned in the same pause window as memory and
     /// rootfs, so the checkpoint freezes the workspace with the machine.
     pub workspace_volumes: Vec<WorkspaceVolume>,
+    /// Whose object pool the captured chunks go into. See
+    /// [`CaptureFsQuickParams::key_domain`].
+    pub key_domain: CheckpointKeyDomain,
 }
 
 impl CaptureVmFullParams {
@@ -430,6 +447,7 @@ pub struct CaptureVmFullParamsBuilder {
     parent: Option<CheckpointDigest>,
     session: Option<SessionBinding>,
     workspace_volumes: Vec<WorkspaceVolume>,
+    key_domain: CheckpointKeyDomain,
 }
 
 impl CaptureVmFullParamsBuilder {
@@ -449,6 +467,7 @@ impl CaptureVmFullParamsBuilder {
             parent: None,
             session: None,
             workspace_volumes: Vec::new(),
+            key_domain: CheckpointKeyDomain::host(),
         }
     }
 
@@ -542,6 +561,13 @@ impl CaptureVmFullParamsBuilder {
         self
     }
 
+    /// Set `key_domain`. Unset means the host's own domain.
+    #[must_use]
+    pub fn key_domain(mut self, key_domain: CheckpointKeyDomain) -> Self {
+        self.key_domain = key_domain;
+        self
+    }
+
     /// Finish, or name the first required field left unset.
     pub fn build(self) -> Result<CaptureVmFullParams, BuilderError> {
         Ok(CaptureVmFullParams {
@@ -568,6 +594,7 @@ impl CaptureVmFullParamsBuilder {
             parent: self.parent,
             session: self.session,
             workspace_volumes: self.workspace_volumes,
+            key_domain: self.key_domain,
         })
     }
 }

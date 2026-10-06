@@ -5,6 +5,8 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Guest GPU shim internals, composed into the runtime overlay by mvm-images.
+publish = false
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true

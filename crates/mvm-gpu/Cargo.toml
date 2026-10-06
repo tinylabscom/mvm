@@ -5,6 +5,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# A host binary shipped in the release tarball, not a library anyone builds
+# against; nothing in the crates.io publish set depends on it.
+publish = false
 repository.workspace = true
 homepage.workspace = true
 authors.workspace = true

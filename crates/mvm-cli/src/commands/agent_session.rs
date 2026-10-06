@@ -1510,6 +1510,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap()

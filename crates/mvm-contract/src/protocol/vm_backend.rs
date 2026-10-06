@@ -305,13 +305,13 @@ pub enum VmStatus {
 ///
 /// The VM survives the calling process. Use for:
 ///
-///   - `mvmctl up` (background "up + run" model — the CLI returns,
-///     the VM keeps running).
+///   - `mvmctl machine run -d` (the CLI returns, the VM keeps
+///     running).
 ///   - Production agents (mvmd) that boot VMs and immediately move on.
 ///   - CI fixtures that boot once and run several phases against the
 ///     same long-lived VM.
 ///
-/// Once detached, only `mvmctl down` (or the equivalent
+/// Once detached, only `mvmctl machine stop` (or the equivalent
 /// `VmBackend::stop` call) terminates the VM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StartMode {
@@ -1847,13 +1847,13 @@ mod tests {
         let err = WarmStartError::Unsupported {
             requested: SnapshotCapability::LiveMemory,
             available: SnapshotCapability::DiskOnly,
-            hint: "use `mvmctl up` for a cold boot".to_string(),
+            hint: "use `mvmctl machine run` for a cold boot".to_string(),
         };
         let msg = err.to_string();
         // Display names both tiers and surfaces the recovery action.
         assert!(msg.contains("live-memory"), "{msg}");
         assert!(msg.contains("disk-only"), "{msg}");
-        assert!(msg.contains("mvmctl up"), "{msg}");
+        assert!(msg.contains("mvmctl machine run"), "{msg}");
         // It's a real core error so callers can `?`/box it.
         let _: &dyn core::error::Error = &err;
     }

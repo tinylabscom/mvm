@@ -139,7 +139,7 @@ fn run_live_mode(args: &RunArgs) -> Result<()> {
         ),
     }
 
-    let mut cmd = std::process::Command::new(&interpreter);
+    let mut cmd = crate::commands::build::sandbox_record::user_script_command(&interpreter);
     // Deno's default sandbox refuses the filesystem and native library
     // loading the SDK needs, so opt out explicitly. The same opt-out lives
     // in `auto_exec_record_script`.

@@ -934,11 +934,11 @@ fn main() {
             std::thread::spawn(move || init_probes(&bs, &s));
         }
 
-        // The telemetry listener spawns a thread, so it belongs in this
-        // post-activation zone with the other background workers; boot
-        // readiness is already served by the control plane above and never
-        // waits on it.
-        telemetry::spawn_telemetry_listener();
+        // Telemetry initializes in this post-activation zone: the capture
+        // subscriber installs and the listener thread spawns here, with boot
+        // readiness already served by the control plane above and never
+        // waiting on either.
+        telemetry::init_telemetry();
     }
 
     // Port forwarders are started on-demand via StartPortForward requests

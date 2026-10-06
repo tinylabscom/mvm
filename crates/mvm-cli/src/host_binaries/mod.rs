@@ -27,3 +27,6 @@ pub mod source;
 // `payload_build` names the toolchain module as `super::embed_toolchain`, which
 // the build script declares by path and `mvmctl` takes from `mvm-build`.
 use mvm_build::embed_toolchain;
+// Likewise `super::helper_command`, the environment-filtered constructor for
+// the toolchain processes `payload_build` starts.
+use mvm_core::env_hygiene::helper_command;

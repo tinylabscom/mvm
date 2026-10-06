@@ -140,7 +140,15 @@ fn execute(args: Args) -> Result<()> {
         })
         .flatten();
     let shown = open_and_show(&args);
-    super::egress_denials::finish_and_summarize(denials);
+    // Following a machine is not admitting it, so the review is pointed at
+    // `mvmctl explain` rather than at a manifest this process cannot know.
+    super::egress_denials::finish_and_summarize(
+        denials,
+        &super::denial_review::ReviewOffer::new(
+            &args.name,
+            super::denial_review::ReviewSource::admitted_elsewhere(),
+        ),
+    );
     shown
 }
 

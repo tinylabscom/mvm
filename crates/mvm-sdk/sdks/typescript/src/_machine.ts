@@ -24,14 +24,26 @@ import {
   MACHINE_INSPECT,
   MACHINE_INVENTORY,
   MACHINE_LOGS,
+  MACHINE_PAUSE,
+  MACHINE_RECONFIGURE,
+  MACHINE_RESUME,
   MACHINE_RM,
   MACHINE_RUN,
+  MACHINE_SET_TTL,
   MACHINE_START,
   MACHINE_STOP,
 } from "./hostabi/methods.js";
 
 /** A machine as the library reports it (`id`, `name`, `status`, `backend`, …). */
 export type MachineState = Record<string, unknown>;
+
+/** What {@link Machine.pause} sealed: `epoch`, `vmstate_len` and `mem_len`,
+ *  all zero on a backend that pauses its vCPUs in place. */
+export type MachinePauseOutcome = Record<string, unknown>;
+
+/** What {@link Machine.resume} restored, including `reseed`: whether the guest
+ *  reseeded its random state. */
+export type MachineResumeOutcome = Record<string, unknown>;
 
 /** One entry of the host-wide machine inventory (`name`, `build_mode`, `status`, …). */
 export type MachineInventoryRecord = Record<string, unknown>;
@@ -109,6 +121,24 @@ export interface MachineExecOptions {
   /** Working directory for the process. */
   cwd?: string;
   env?: Record<string, string>;
+}
+
+export interface MachinePauseOptions {
+  /** Wait for the workload to signal that it is primed before sealing, and
+   *  refuse rather than seal a half-warmed snapshot when it does not. */
+  primedBarrier?: boolean;
+  /** Seconds to wait for that signal; the library's default when absent. */
+  primedTimeout?: number;
+}
+
+export interface MachineResumeOptions {
+  /** Resume from live memory, which a backend without that tier refuses. */
+  warm?: boolean;
+}
+
+export interface MachineReconfigureOptions {
+  cpus?: number;
+  memoryMib?: number;
 }
 
 export interface MachineLogsOptions {
@@ -357,6 +387,49 @@ export class Machine {
 
   inspect(): MachineState {
     return call(MACHINE_INSPECT, { id: this.name }) as MachineState;
+  }
+
+  /** Pause this machine, sealing a snapshot where its backend uses one. */
+  pause(options: MachinePauseOptions = {}): MachinePauseOutcome {
+    const request: Record<string, unknown> = { id: this.name };
+    if (options.primedBarrier !== undefined) {
+      if (typeof options.primedBarrier !== "boolean") throw new TypeError("primedBarrier must be a boolean");
+      if (options.primedBarrier) request.primed_barrier = true;
+    }
+    if (options.primedTimeout !== undefined) {
+      request.primed_timeout_secs = requireCount(options.primedTimeout, "primedTimeout");
+    }
+    return call(MACHINE_PAUSE, request) as MachinePauseOutcome;
+  }
+
+  /** Resume this paused machine. A snapshot older than the newest one sealed
+   *  is refused, as is a resume whose guest did not reseed. */
+  resume(options: MachineResumeOptions = {}): MachineResumeOutcome {
+    const request: Record<string, unknown> = { id: this.name };
+    if (options.warm !== undefined) {
+      if (typeof options.warm !== "boolean") throw new TypeError("warm must be a boolean");
+      if (options.warm) request.warm = true;
+    }
+    return call(MACHINE_RESUME, request) as MachineResumeOutcome;
+  }
+
+  /** Change this machine's CPU count or memory, leaving whatever is not given
+   *  as it is, and relaunch it if it is running. */
+  reconfigure(options: MachineReconfigureOptions): MachineState {
+    if (options.cpus === undefined && options.memoryMib === undefined) {
+      throw new TypeError("reconfigure needs cpus or memoryMib");
+    }
+    const request: Record<string, unknown> = { id: this.name };
+    if (options.cpus !== undefined) request.cpus = requireCount(options.cpus, "cpus");
+    if (options.memoryMib !== undefined) request.memory_mib = requireCount(options.memoryMib, "memoryMib");
+    return call(MACHINE_RECONFIGURE, request) as MachineState;
+  }
+
+  /** Set when the idle reaper removes this machine, as an RFC 3339 timestamp,
+   *  or clear it with `null`. */
+  setTtl(expiresAt: string | null): void {
+    const value = expiresAt === null ? null : requireString(expiresAt, "expiresAt");
+    call(MACHINE_SET_TTL, { id: this.name, expires_at: value });
   }
 
   /** Stop the machine and remove its definition, reporting rather than

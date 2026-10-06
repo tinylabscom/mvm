@@ -4,7 +4,7 @@
 //! with registration against one resident `mvm-host-agent` daemon per tenant:
 //!
 //! - [`ensure_host_agent_daemon`] lazily spawns the tenant's daemon (idempotent
-//!   under a `flock`, so concurrent `up`s converge on one) and returns its
+//!   under a `flock`, so concurrent boots converge on one) and returns its
 //!   control socket.
 //! - [`register_vm`] / [`deregister_vm`] sign a control message with the host
 //!   key and send it over that socket — the daemon binds/unbinds the VM's
@@ -37,7 +37,7 @@ pub const DAEMON_PID_FILE: &str = "daemon.pid";
 /// Executable name of the per-tenant host-agent daemon. A PID recorded in
 /// [`DAEMON_PID_FILE`] belongs to the daemon only while it runs this binary.
 pub const HOST_AGENT_BIN: &str = "mvm-host-agent";
-/// Spawn lock so concurrent `up`s converge on one daemon.
+/// Spawn lock so concurrent boots converge on one daemon.
 const SPAWN_LOCK: &str = "spawn.lock";
 /// How long the daemon gets to bind its control socket before the spawn fails.
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -140,7 +140,7 @@ pub fn load_host_signing_key() -> Result<[u8; 32]> {
 /// Ensure the per-tenant host-agent daemon is running and return its control
 /// socket. Idempotent: if the daemon is already up (live pid + bound socket),
 /// returns immediately; otherwise spawns it under an exclusive `flock` so two
-/// concurrent `up`s can't both spawn one.
+/// concurrent boots can't both spawn one.
 pub fn ensure_host_agent_daemon(tenant: &str) -> Result<PathBuf> {
     let dir = mvm_core::config::host_agent_dir(tenant);
     std::fs::create_dir_all(&dir)
@@ -538,7 +538,7 @@ impl Drop for HostAgentServicesGuard {
 
 /// Whether the host-agent daemon path is selected. **Default: enabled** — the
 /// per-tenant daemon is the default for an admitted libkrun/hvf workload, so
-/// `host.audit.v1` is available on a plain `up` (no `MVM_GATEWAY_BRIDGE`).
+/// `host.audit.v1` is available on a plain boot (no `MVM_GATEWAY_BRIDGE`).
 /// `MVM_HOST_AGENT_DAEMON=0` is the opt-out escape hatch back to the per-VM
 /// broker fork during the transition; the fork is removed once the daemon path
 /// has soaked. Any value other than `0` leaves the daemon on.

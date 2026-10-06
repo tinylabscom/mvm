@@ -1651,7 +1651,6 @@ certificate_oidc_issuer = "https://token.actions.githubusercontent.com"
         );
     }
 
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn resolve_run_image_reseals_cached_rootfs_when_verity_sidecars_are_missing() {
         let tmp = tempfile::tempdir().expect("tempdir");

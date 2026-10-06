@@ -438,11 +438,9 @@ fn remove_transient_state_dir(staging_dir: &str) {
             // and left for the next convergence pass / manual cleanup.
             #[cfg(target_os = "linux")]
             {
-                let quoted = mvm_runtime::shell::shell_quote(staging_dir);
-                match std::process::Command::new("bash")
-                    .args(["-c", &format!("sudo rm -rf {quoted}")])
-                    .output()
-                {
+                // Argv, not a shell: no shell startup file runs, and the
+                // helper seam strips what the child would otherwise inherit.
+                match mvm_runtime::shell::run_host("sudo", &["rm", "-rf", "--", staging_dir]) {
                     Ok(output) if output.status.success() => {}
                     Ok(output) => {
                         tracing::debug!(
@@ -1350,6 +1348,14 @@ pub fn resolve_launch(
     // snapshot restore is unavailable for workload admission.
     let t_admission = std::time::Instant::now();
     sub.start(SubPhase::AdmitPlan);
+    // A run resolved from an installed bundle boots its extracted files;
+    // admission pins the bundle and checks those files against what was signed.
+    let bundle_archive = image
+        .template_id
+        .as_deref()
+        .map(mvm_runtime::vm::template::lifecycle::installed_bundle_archive)
+        .transpose()?
+        .flatten();
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(AdmitInputs {
             rootfs: std::path::Path::new(&image.rootfs),
@@ -1361,6 +1367,7 @@ pub fn resolve_launch(
             sdk_sidecar: sdk_sidecar.as_ref(),
             assets: shape.assets,
             volumes: &start_config.volumes,
+            bundle_archive: bundle_archive.as_deref(),
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);

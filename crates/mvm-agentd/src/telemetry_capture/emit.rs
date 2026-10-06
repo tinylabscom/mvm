@@ -77,6 +77,43 @@ impl CaptureState {
     }
 }
 
+impl CaptureState {
+    /// Build and prepare one record outside the queue, spending a sequence
+    /// number like any other attempt. For the session plane's own records —
+    /// the coverage announcement and loss summaries — which must reach the
+    /// host even when the data queue is saturated, so they ride the
+    /// transport's reserved direct path instead of an offer. A record that
+    /// cannot be built is counted as a rejected attempt and yields `None`.
+    pub fn prepare_direct(
+        &self,
+        source: SourceKind,
+        producer: ProducerId,
+        body: RecordBody,
+    ) -> Option<PreparedRecord> {
+        let sequence = self.next_sequence(producer);
+        let Some((epoch, monotonic_ns)) = self.identity_now() else {
+            self.shed(producer, ShedReason::Unavailable, 0);
+            return None;
+        };
+        let prepared = TelemetryRecord::builder()
+            .epoch(epoch)
+            .producer(producer.number())
+            .sequence(sequence)
+            .monotonic_ns(monotonic_ns)
+            .source(source)
+            .body(body)
+            .build()
+            .and_then(|record| PreparedRecord::new(&record));
+        match prepared {
+            Ok(prepared) => Some(prepared),
+            Err(_) => {
+                self.shed(producer, ShedReason::Rejected, 0);
+                None
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, mpsc};

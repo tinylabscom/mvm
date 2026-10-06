@@ -27,6 +27,15 @@ verification, signing, publication, and lifecycle of MVM's system-image train:
 - Stage 0 seed inputs; and
 - the QEMU/WebAssembly smoke pack currently published with boot images.
 
+*Note 2026-10-05:* the image boundary decided in
+[#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054) narrows this
+list. `mvm-images` keeps the Linux layer: kernels, base root filesystems with
+no mvm binaries and no mvm `/init`, the builder image and the Stage 0 seeds.
+The universal runtime overlay, the SDK sidecars and the initramfs leave the
+image set; `mvmctl` assembles them from a guest-runtime asset each CLI release
+ships, and `mvm-images` drops its `mvm` flake input. The list above describes
+what the image set carries until those workstreams land.
+
 The `mvm` repository consumes an immutable, signed image-set manifest pinned by
 digest. Runtime and release CI fetch the pinned set by default. Source builds
 remain available as an explicit development and reproducibility path, including
@@ -405,6 +414,13 @@ settings, the no-publish workflow boundary, and validation are recorded in
       before boot. Defined and negatively tested, and `verify_image_set`
       refuses a non-overlapping range when given the host's; no acquisition
       path consumes an image set yet, so the before-boot refusal is wired in W6.
+      *Note 2026-10-05:* under the image boundary in
+      [#4100](https://github.com/tinylabscom/mvm/issues/4100), the
+      `guest_agent_protocol` range in the set's compatibility section is
+      replaced by a base-image contract version the base root filesystem
+      declares and `mvmctl` checks before boot
+      ([#4105](https://github.com/tinylabscom/mvm/issues/4105)); the guest
+      agent then ships with the CLI that speaks its protocol.
 - [x] Include source commits, Nix inputs, SBOM references, sizes, and digests.
 - [x] Add offline verification tooling that needs only the manifest, bundle,
       and artifacts (plus the lock that pins them): `mvmctl image boot verify`.
@@ -937,12 +953,14 @@ That is not a fresh-clone measurement because the local database includes extra
 refs and worktrees; W9 must measure the remote branch/tag surface independently
 before deciding to rewrite anything.
 
-- [ ] After W8 and the compatibility window, inventory the largest blobs
+- [x] After W8 and the compatibility window, inventory the largest blobs
       reachable from the remote default branch and published tags; distinguish
       image/build artifacts from normal source and measure fresh full and
-      blobless clone sizes.
-- [ ] Record a go/no-go decision with an explicit minimum worthwhile reduction;
+      blobless clone sizes. (Measured 2026-10-04 at `main` `87049c024`; see
+      the decision below.)
+- [x] Record a go/no-go decision with an explicit minimum worthwhile reduction;
       prefer documented partial/blobless clones if a rewrite would save little.
+      (No-go; the blobless clone is documented in the contributor guide.)
 - [ ] If approved, freeze merges, create and verify a permanent read-only
       archival mirror/object bundle, and publish an old-to-new commit mapping.
 - [ ] Use a reviewed `git filter-repo` path policy that removes only confirmed
@@ -960,6 +978,46 @@ separately approves the destructive rewrite and the archive, mapping, recovery
 instructions, provenance checks, and before/after clone measurements are all
 public and verified. No history rewrite is performed merely as a side effect of
 moving the image sources.
+
+**Decision (2026-10-04): no rewrite.** Measured against fresh clones of
+`https://github.com/tinylabscom/mvm` at `main` `87049c024`, not the local
+object database:
+
+| Clone | Pack | `.git` | Wall time (two samples) |
+|---|---|---|---|
+| full (`git clone --no-local`) | 214.3 MiB, 102,875 objects | 229 MiB | 50 s, 293 s |
+| blobless (`--filter=blob:none`) | 29.5 MiB, 61,054 objects | 32 MiB | 17 s, 69 s |
+| shallow (`--depth 1`) | 17.0 MiB, 4,737 objects | 18 MiB | 8 s, 21 s |
+
+The wall times vary with the network and a host load average of 190–310; the
+byte counts are the stable measurement. `git gc` leaves the full clone at
+214.3 MiB.
+
+The 5.4 GiB figure above was the local database, not the repository. Main plus
+the 29 tags that carry a GitHub release reach 43,053 blobs, 195.7 MiB packed.
+Of that, 148.2 MiB is one path: the `target-warn/` build directory, committed
+in `cad9d890b` (2026-08-15), deleted in `e13a5cdb6` (2026-09-09), and in
+the history of every later commit. Its largest blob is a 44.3 MiB `.rmeta`.
+Image sources are not a factor: `nix/images/`, deleted in the W8 cutover, is
+0.3 MiB packed across all its history, and no kernel or rootfs image was ever
+committed. Removing `target-warn/` with
+`git filter-repo --path target-warn/ --invert-paths` on a throwaway copy of
+main and every tag takes the gc'd pack from 209.8 MiB to 59.1 MiB, a saving of
+150.7 MiB (72%). Nothing else in history is worth filtering.
+
+The minimum worthwhile reduction is 1 GiB off a fresh full clone. The cost of
+a rewrite does not scale with the bytes it removes: it would give new commit
+IDs to the roughly 1,030 commits on main since `cad9d890b` and to the 8
+published releases cut after it (`v0.18.0-rc.1`, `v0.18.0-rc.2`, `v0.18.3`,
+`v0.22.0`, `boot-image/v0.1.0` and `v0.1.3`–`v0.1.5`), invalidate the
+signatures and build-provenance attestations that name those source commits,
+and strand every open branch, worktree and fork. GitHub would still keep the
+old objects reachable from its read-only pull-request refs. At the throughput
+measured here, 151 MiB costs between half a minute and three and a half
+minutes on a first clone, and a blobless clone is already half the size the
+rewritten full clone would be: it fetches an old `target-warn/` blob only when
+a commit from that window is checked out. The remaining W9 boxes apply only if
+an owner overrides this decision with a separate approval.
 
 ## Test matrix
 

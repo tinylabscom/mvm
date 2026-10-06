@@ -34,7 +34,10 @@ use clap::{Args as ClapArgs, ValueEnum};
 
 use mvm_contract::ir::{Entrypoint, Workload};
 use mvm_core::user_config::MvmConfig;
-use mvm_sdk::compile::{compile, compile_archive, is_archive_output};
+use mvm_sdk::compile::{
+    PinnedMvmRevision, compile, compile_archive, compile_archive_pinned, compile_pinned,
+    is_archive_output,
+};
 use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
 
 use super::Cli;
@@ -84,6 +87,10 @@ pub(in crate::commands) struct Args {
     )]
     pub out: PathBuf,
 
+    /// Pin the generated flake's mvm input to an exact commit for publishing.
+    #[arg(long = "mvm-revision", value_name = "COMMIT")]
+    pub mvm_revision: Option<String>,
+
     /// Explicit mode. `record` is the default for `mvmctl build compile`.
     #[arg(long = "mode", value_enum)]
     pub mode: Option<Mode>,
@@ -121,6 +128,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         );
     }
 
+    let pinned_revision = args
+        .mvm_revision
+        .as_deref()
+        .map(PinnedMvmRevision::parse)
+        .transpose()
+        .map_err(|error| anyhow::anyhow!(error))?;
     let loaded = load_workload(&args)?;
     let workload = loaded.workload;
     for finding in &loaded.findings {
@@ -136,12 +149,18 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let manifest_dir = resolve_manifest_dir(&args)?;
 
     if is_archive_output(&args.out) {
-        compile_archive(&workload, &args.out, &manifest_dir)
-            .with_context(|| format!("compile to archive {}", args.out.display()))?;
+        match pinned_revision.as_ref() {
+            Some(revision) => compile_archive_pinned(&workload, &args.out, &manifest_dir, revision),
+            None => compile_archive(&workload, &args.out, &manifest_dir),
+        }
+        .with_context(|| format!("compile to archive {}", args.out.display()))?;
         eprintln!("compiled archive: {}", args.out.display());
     } else {
-        compile(&workload, &args.out, &manifest_dir)
-            .with_context(|| format!("compile to directory {}", args.out.display()))?;
+        match pinned_revision.as_ref() {
+            Some(revision) => compile_pinned(&workload, &args.out, &manifest_dir, revision),
+            None => compile(&workload, &args.out, &manifest_dir),
+        }
+        .with_context(|| format!("compile to directory {}", args.out.display()))?;
         eprintln!("compiled directory: {}", args.out.display());
     }
     warn_node_deps(&workload, &manifest_dir);
@@ -397,6 +416,7 @@ mod tests {
             from_recording: None,
             recording_sha256: None,
             out: PathBuf::from("./out"),
+            mvm_revision: None,
             mode: None,
             prod: false,
             dev: false,

@@ -155,26 +155,61 @@ pub fn record_transient_exit(exit: TransientExitAudit<'_>) -> Result<()> {
     let emitter = AuditEmitter::new(signer.signing)
         .map(AuditEmitter::with_receipts)
         .map_err(crate::local::backend_err)?;
-    let state_dir = vm_state_dir(exit.vm_name);
+    seal_transient_end(
+        &emitter,
+        &plan,
+        TransientEnd {
+            vm_name: exit.vm_name,
+            backend: exit.backend,
+            exit_code: exit.exit_code,
+            completed: exit.completed,
+        },
+    )
+}
+
+/// How a transient run whose VM has already been stopped ended.
+pub(crate) struct TransientEnd<'a> {
+    pub(crate) vm_name: &'a str,
+    pub(crate) backend: &'a str,
+    /// The observed exit code; `None` when none was observed, never zero.
+    pub(crate) exit_code: Option<i32>,
+    /// Whether the workload ran to an exit, as opposed to a failed dispatch.
+    pub(crate) completed: bool,
+}
+
+/// Close a transient run's session under its admitted `plan`: `plan.exited`
+/// with the observed exit and captured usage, then the seal (`exited`, or
+/// `failed` for a run that did not complete), then the closing root.
+///
+/// Each step runs only if the one before it was written, so a failure leaves
+/// the session `UNSEALED` rather than sealed over a missing exit record. The
+/// caller stops the VM first: sealing a session whose VM may still be running
+/// would close a narrative the guest can still extend.
+pub(crate) fn seal_transient_end(
+    emitter: &AuditEmitter,
+    plan: &ExecutionPlan,
+    end: TransientEnd<'_>,
+) -> Result<()> {
+    let state_dir = vm_state_dir(end.vm_name);
     let mut usage = mvm_core::usage_capture::read_captured(&state_dir);
     usage.host_state_bytes = mvm_core::usage_capture::host_state_bytes(&state_dir);
     emitter
         .emit_exited_with_capture(
-            &plan,
+            plan,
             ExitRecord {
-                exit_code: exit.exit_code,
-                backend: exit.backend,
+                exit_code: end.exit_code,
+                backend: end.backend,
                 usage,
             },
         )
         .map_err(crate::local::backend_err)?;
-    let reason = if exit.completed {
+    let reason = if end.completed {
         mvm_hostd::audit::session::SealReason::Exited
     } else {
         mvm_hostd::audit::session::SealReason::Failed
     };
     emitter
-        .seal_session(&plan, reason)
+        .seal_session(plan, reason)
         .map_err(crate::local::backend_err)?;
     emitter
         .publish_root(&plan.tenant.0)
@@ -191,16 +226,12 @@ pub(crate) fn seal_stopped_session(plan: &mvm_core::plan::ExecutionPlan, machine
     let Some(emitter) = build_audit_emitter() else {
         return;
     };
-    if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Stopped) {
+    if let Err(e) = mvm_hostd::supervisor::session_expiry::seal_stopped_session(&emitter, plan) {
         tracing::warn!(
             error = %format!("{e:#}"),
             machine,
             "could not seal the stopped machine's session"
         );
-        return;
-    }
-    if let Err(e) = emitter.publish_root(&plan.tenant.0) {
-        tracing::warn!(error = %format!("{e:#}"), machine, "could not publish an audit root at stop");
     }
 }
 

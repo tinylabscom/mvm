@@ -7,9 +7,8 @@
 //!   key (creating one if none exists) and writes JSON to `FILE` or
 //!   stdout. The report carries the boot measurement, a fresh random
 //!   nonce, the identity public key, and an optional hardware
-//!   measurement when a feature-gated provider is wired in and
-//!   answers `measure()` (v0 providers return `NotYetImplemented`, so
-//!   v0 reports carry `hw_measurement: None`).
+//!   measurement when the caller folds one in. `export` does not, so
+//!   its reports carry `hw_measurement: None`.
 //!
 //! - `mvmctl attest verify <REPORT> [--trust KEYFILE] [--trust-self]`
 //!   Reads `REPORT` (file path), validates the Ed25519 signature
@@ -177,23 +176,17 @@ fn status_at(identity_dir: &std::path::Path) -> Result<()> {
     println!("identity.public_path = {}", key.public_path.display());
     println!();
     println!("hardware providers:");
-    for kind in [
-        mvm_core::crypto::attestation::HwProviderKind::Tpm2,
-        mvm_core::crypto::attestation::HwProviderKind::SevSnp,
-        mvm_core::crypto::attestation::HwProviderKind::Tdx,
-        mvm_core::crypto::attestation::HwProviderKind::AppleDeviceAttestation,
-    ] {
-        let state = if kind.compiled_in() {
-            "compiled (stub returns NotYetImplemented)"
-        } else {
-            "not compiled (rebuild with feature flag to enable)"
-        };
-        println!(
-            "  {:<8} feature={:<22}  {state}",
-            kind.as_str(),
-            kind.cargo_feature()
-        );
-    }
+    let kind = mvm_core::crypto::attestation::HwProviderKind::Tpm2;
+    let state = if kind.compiled_in() {
+        "compiled"
+    } else {
+        "not compiled (rebuild with feature flag to enable)"
+    };
+    println!(
+        "  {:<8} feature={:<22}  {state}",
+        kind.as_str(),
+        kind.cargo_feature()
+    );
     Ok(())
 }
 

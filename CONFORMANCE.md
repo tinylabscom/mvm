@@ -53,7 +53,7 @@ The three honesty levels (R2):
 
 | ID | Level | Statement | Witnesses |
 | --- | --- | --- | --- |
-| `MVM-SEC-09` | `build` | Every published bundle is content-addressed and re-verified | `fn:read_and_verify_bundle`, `fn:verify_plan_bundle` |
+| `MVM-SEC-09` | `build` | Every published bundle is content-addressed and re-verified | `fn:read_and_verify_bundle`, `fn:verify_plan_bundle`, `fn:an_installed_rootfs_changed_after_install_is_refused_at_admission`, `fn:every_installed_artifact_is_checked_not_only_the_ones_the_plan_pins` |
 
 ## cumulative_ledger
 

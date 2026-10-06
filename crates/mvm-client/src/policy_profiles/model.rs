@@ -33,7 +33,7 @@ pub struct PolicyBody {
     /// Environment variables the workload may be handed.
     #[serde(default, skip_serializing_if = "EnvSection::is_empty")]
     pub env: EnvSection,
-    /// Per-tool privileges. Recorded, not yet enforced.
+    /// Per-tool privileges. Command decisions are enforced; endpoint scope is pending.
     #[serde(default, skip_serializing_if = "ToolsSection::is_empty")]
     pub tools: ToolsSection,
     /// Resource bounds.
@@ -183,9 +183,10 @@ impl EnvSection {
 
 /// `[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny`
 /// decisions are enforced at the seams the host controls (the MCP tool-call
-/// gate and declared `machine exec --tool` invocations); per-tool `argv` /
-/// `routes` / `secrets` detail is not fully enforced yet, so
-/// `mvmctl policy validate --strict` refuses a policy that relies on it.
+/// gate and declared `machine exec --tool` invocations); declared commands
+/// also enforce `argv`. Scoped routes and secrets still need a trusted
+/// invocation binding at the endpoint, so strict validation refuses any
+/// nonempty `[tools]` section.
 ///
 /// Composition only narrows. Whole-tool lists union (`deny` beats `ask`
 /// beats `allow`); per-tool detail is first-defined-then-narrowed: a later

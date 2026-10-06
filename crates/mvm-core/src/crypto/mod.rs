@@ -1,6 +1,7 @@
 pub mod aead;
 pub mod attestation;
 pub mod command_gate;
+pub mod ed25519_keypair;
 // Per-VM name-constrained egress CA for transparent https substitution.
 // Gated so the runtime-free default build skips `rcgen`.
 #[cfg(feature = "egress-ca")]

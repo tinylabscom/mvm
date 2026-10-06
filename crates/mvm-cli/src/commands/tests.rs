@@ -124,7 +124,7 @@ fn collect_help_width_violations(
     path.pop();
 }
 
-// Group module aliases — give tests short names (`cleanup`, `up`, etc.) that
+// Group module aliases — give tests short names (`cleanup`, `compile`, etc.) that
 // follow the dispatcher's naming, regardless of which group they live in.
 use super::agent_session;
 use super::build::build;
@@ -477,7 +477,6 @@ fn internal_builder_egress_supervisor_command_is_hidden_but_parseable() {
 }
 
 #[test]
-#[cfg(feature = "builder-vm")]
 fn internal_builder_shell_job_command_is_hidden_but_parseable() {
     let cli = Cli::try_parse_from(["mvmctl", "__builder-shell-job", "--script", "/tmp/dummy.sh"])
         .unwrap();
@@ -1028,6 +1027,36 @@ fn build_sdk_sidecar_subcommand_parses() {
     assert!(
         matches!(bg.action, build_group::BuildCmd::SdkSidecar(_)),
         "expected sdk-sidecar build command"
+    );
+}
+
+#[test]
+fn build_guest_bins_subcommand_parses_repeated_arches() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "build",
+        "guest-bins",
+        "--out",
+        "/tmp/guest-bins",
+        "--arch",
+        "aarch64",
+        "--arch",
+        "amd64",
+    ])
+    .expect("guest-bins build command must parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group");
+    };
+    let build_group::BuildCmd::GuestBins(args) = bg.action else {
+        panic!("expected guest-bins build command");
+    };
+    assert_eq!(args.out, std::path::PathBuf::from("/tmp/guest-bins"));
+    assert_eq!(
+        args.arches,
+        vec![
+            mvm_core::arch::GuestArch::Aarch64,
+            mvm_core::arch::GuestArch::X86_64
+        ]
     );
 }
 
@@ -5171,6 +5200,30 @@ fn test_compile_default_no_from_flags_leaves_them_none() {
         }
         _ => panic!("Expected Compile command"),
     }
+}
+
+#[test]
+fn build_compile_accepts_an_explicit_publish_revision() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "build",
+        "compile",
+        "--from-ir",
+        "/tmp/ir.json",
+        "--mvm-revision",
+        "4e65b221744885e536ec91a3f2948cdc508dcb49",
+    ])
+    .expect("parse pinned compile");
+    let Commands::Build(group) = cli.command else {
+        panic!("expected build group");
+    };
+    let build_group::BuildCmd::Compile(args) = group.action else {
+        panic!("expected compile command");
+    };
+    assert_eq!(
+        args.mvm_revision.as_deref(),
+        Some("4e65b221744885e536ec91a3f2948cdc508dcb49")
+    );
 }
 
 // ── `--builder` global flag ──

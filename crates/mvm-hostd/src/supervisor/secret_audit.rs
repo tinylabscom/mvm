@@ -6,7 +6,7 @@
 //! set is fixed and value-free, so a chain reader (or a leaked chain file)
 //! learns *where* a secret went, never *what* it is. The entries ride the same
 //! chain-signed stream as the claim-8 plan events, so `verify_audit_chain`
-//! (surfaced by `mvmctl audit verify`) detects any tampering.
+//! (surfaced by `mvmctl trust audit verify`) detects any tampering.
 
 use mvm_contract::ir::AuthType;
 

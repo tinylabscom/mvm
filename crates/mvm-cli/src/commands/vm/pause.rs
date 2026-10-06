@@ -5,9 +5,9 @@
 //! `resume_machine`. The facade owns the snapshot machinery — the seal/verify
 //! round-trip (including the replay refusal that gates every resume), the
 //! `fc.paused` marker, the name-registry flags, the guest PostRestore signal,
-//! and the `WorkloadWake` and `ResumeRefused` audit entries, so a resume from
-//! any client surface records them. The CLI keeps only the success line and the
-//! `WorkloadSleep` audit entry.
+//! and the `WorkloadSleep`, `WorkloadWake` and `ResumeRefused` audit entries,
+//! so a pause or resume from any client surface records them. The CLI keeps
+//! only the success line.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
@@ -89,9 +89,6 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
     println!(
         "{}: paused (epoch {}, vmstate {} B, mem {} B)",
         args.name, outcome.epoch, outcome.vmstate_len, outcome.mem_len
-    );
-    mvm_core::audit_emit!(WorkloadSleep, vm: &args.name, "epoch={} vmstate={} mem={}",
-        outcome.epoch, outcome.vmstate_len, outcome.mem_len
     );
     Ok(())
 }

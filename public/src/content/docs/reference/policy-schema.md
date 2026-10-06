@@ -407,7 +407,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           ]
         },
         "tools": {
-          "description": "Per-tool privileges. Recorded, not yet enforced.",
+          "description": "Per-tool privileges. Command decisions are enforced; endpoint scope is pending.",
           "allOf": [
             {
               "$ref": "#/definitions/ToolsSection"
@@ -674,7 +674,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
       "additionalProperties": false
     },
     "ToolsSection": {
-      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls (the MCP tool-call gate and declared `machine exec --tool` invocations); per-tool `argv` / `routes` / `secrets` detail is not fully enforced yet, so `mvmctl policy validate --strict` refuses a policy that relies on it.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union.",
+      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls (the MCP tool-call gate and declared `machine exec --tool` invocations); declared commands also enforce `argv`. Scoped routes and secrets still need a trusted invocation binding at the endpoint, so strict validation refuses any nonempty `[tools]` section.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union.",
       "type": "object",
       "properties": {
         "allow": {

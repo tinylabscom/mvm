@@ -1986,7 +1986,7 @@ fn build_supervisor_in_workspace(
         );
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd = Command::new(cargo);
+    let mut cmd = mvm_core::env_hygiene::helper_command(cargo);
     cmd.current_dir(workspace_root)
         .env("CARGO_TARGET_DIR", target_dir)
         .args([
@@ -2120,7 +2120,7 @@ fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, Build
     }
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
+    let status = mvm_core::env_hygiene::helper_command(cargo)
         .current_dir(&workspace_root)
         .args([
             "build",
