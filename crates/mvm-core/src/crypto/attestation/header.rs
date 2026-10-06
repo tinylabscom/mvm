@@ -72,9 +72,9 @@ pub struct AttestationBody {
     pub identity_pubkey_hex: String,
     /// Per-report random nonce. Hex-encoded; `NONCE_BYTES` raw bytes.
     pub nonce_hex: String,
-    /// Optional hardware measurement (TPM2 / SEV-SNP / TDX). v0 keeps
-    /// this `None` unless a feature-gated provider's `measure()` is
-    /// invoked by the caller and folded into the body.
+    /// Optional hardware measurement (TPM2). `None` unless the caller
+    /// invokes the feature-gated provider's `measure()` and folds the
+    /// result into the body.
     pub hw_measurement: Option<HwMeasurement>,
 }
 

@@ -83,6 +83,7 @@ fn params(id: &str) -> CaptureVmFullParams {
         parent: None,
         session: None,
         workspace_volumes: Vec::new(),
+        key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
     }
 }
 

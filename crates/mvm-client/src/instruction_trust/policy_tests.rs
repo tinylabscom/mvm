@@ -514,3 +514,27 @@ fn the_signing_workflow_triggers_on_every_default_include() {
         );
     }
 }
+
+/// Other repositories copy the caller workflow out of the guide, so its
+/// trigger list drifting from `DEFAULT_INCLUDES` would leave their edits
+/// unsigned in the same way.
+#[test]
+fn the_documented_caller_workflow_triggers_on_every_default_include() {
+    let guide = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../public/src/content/docs/guides/instruction-provenance.md"),
+    )
+    .expect("the instruction-provenance guide exists");
+    let caller = guide
+        .split("```yaml\n")
+        .skip(1)
+        .filter_map(|block| block.split("```").next())
+        .find(|block| block.contains("uses: tinylabscom/mvm/.github/actions/sign-instructions@"))
+        .expect("the guide carries a caller workflow for the signing action");
+    for pattern in DEFAULT_INCLUDES {
+        assert!(
+            caller.contains(&format!("- \"{pattern}\"")),
+            "the guide's caller workflow push paths must include {pattern}"
+        );
+    }
+}

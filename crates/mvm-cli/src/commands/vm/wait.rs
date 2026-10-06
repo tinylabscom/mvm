@@ -208,8 +208,8 @@ fn print_timing(label: &str, ms: Option<u64>) {
 // Shared fetcher
 // ============================================================================
 
-/// Single readiness round-trip over vsock. Used by `wait`,
-/// `boot-report`, and `up --timings`.
+/// Single readiness round-trip over vsock. Used by `machine wait` and
+/// `machine boot-report`.
 pub(crate) fn fetch_readiness(vm_name: &str) -> Result<ReadinessReport> {
     // The vsock round-trip lives in `mvm_client::readiness` so the CLI and
     // the host library poll the guest through one implementation.

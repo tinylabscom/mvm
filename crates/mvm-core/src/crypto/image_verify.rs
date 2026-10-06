@@ -249,7 +249,7 @@ pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
 ///
 /// Admission re-hashes the rootfs on every boot to bind the plan's image
 /// digest (claim 8). For an immutable cached image that hundreds-of-MB hash is
-/// identical every time, and re-reading it each boot dominates `up`. Keying on
+/// identical every time, and re-reading it each boot dominates the boot. Keying on
 /// size+mtime keeps the cache sound: any rewrite of the file (different
 /// content) moves its mtime and forces a re-hash, so a stale digest can never
 /// be admitted. A read-only cache dir simply means the next boot re-hashes.

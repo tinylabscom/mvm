@@ -1,6 +1,5 @@
 use super::*;
 use mvm_build::boot_image_select::{self, BootImageAcquisition};
-#[cfg(feature = "builder-vm")]
 use mvm_core::image_set::WorkloadImageProfile;
 
 pub(crate) fn ensure_default_microvm_image(
@@ -43,7 +42,6 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     // `default-tenant` set carries the workload kernel, built from the
     // checkout it names. An unusable configured path is an error here,
     // never a quiet fall-through to a download.
-    #[cfg(feature = "builder-vm")]
     if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
         let path = super::local_pair::ensure_pair_workload_kernel(
             &checkout,
@@ -53,13 +51,6 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
         assert_workload_kernel_supports_verity(&path)?;
         ui::info(&format!("Workload kernel: pair-built at {path}"));
         return Ok(path);
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    if mvm_build::image_source::configured_images_dir().is_some() {
-        anyhow::bail!(
-            "{} names a local image checkout, but this mvmctl was built without the              `builder-vm` feature and cannot build the workload kernel from it",
-            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
-        );
     }
 
     // Only an image checkout can compile the kernel, and a selected one has
@@ -166,7 +157,6 @@ fn acquire_workload_kernel(
             download_workload_kernel(arch, dest)?;
             Ok(("downloaded", dest.display().to_string()))
         }
-        #[cfg(feature = "builder-vm")]
         KernelSource::Auto => match download_workload_kernel(arch, dest) {
             Ok(()) => Ok(("downloaded", dest.display().to_string())),
             Err(download_error) if source_checkout => {
@@ -180,14 +170,8 @@ fn acquire_workload_kernel(
     }
 }
 
-#[cfg(feature = "builder-vm")]
 fn workload_kernel_source(source_checkout: bool) -> KernelSource {
     resolve_kernel_source().unwrap_or_else(|| default_workload_kernel_source(source_checkout))
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn workload_kernel_source(source_checkout: bool) -> KernelSource {
-    default_workload_kernel_source(source_checkout)
 }
 
 pub(super) fn default_workload_kernel_source(source_checkout: bool) -> KernelSource {
@@ -207,7 +191,6 @@ pub(super) fn default_workload_kernel_source_for(
     }
 }
 
-#[cfg(feature = "builder-vm")]
 fn build_local_workload_kernel() -> Result<String> {
     // `build_kernel_via_stage0` announces itself with a live status line.
     let path = build_kernel_via_stage0(KernelVariant::Workload, false)
@@ -219,13 +202,6 @@ fn build_local_workload_kernel() -> Result<String> {
         "Workload kernel built and cached. Future machine runs will skip this step: {path}"
     ));
     Ok(path)
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn build_local_workload_kernel() -> Result<String> {
-    anyhow::bail!(
-        "building the workload kernel requires the builder-vm feature; use a release binary or set MVM_KERNEL_SOURCE=download"
-    )
 }
 
 pub(super) fn workload_config_carries_dm_verity(config: &str) -> Option<bool> {
@@ -318,7 +294,6 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
     // now, and the fetch arm is refused rather than silently overriding the
     // selector. An invalid configured path is an error here, never a quiet
     // fall-through to the published set.
-    #[cfg(feature = "builder-vm")]
     if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
         if boot_image_select::resolve_env_override() == Some(BootImageAcquisition::Fetch) {
             anyhow::bail!(
@@ -333,13 +308,6 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
             cache_dir,
             DefaultMicrovmVariant::Prod,
             WorkloadImageProfile::DefaultTenant,
-        );
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    if mvm_build::image_source::configured_images_dir().is_some() {
-        anyhow::bail!(
-            "{} names a local image checkout, but this mvmctl was built without the              `builder-vm` feature and cannot build the default image from it",
-            mvm_build::image_source::MVM_IMAGES_DIR_ENV,
         );
     }
     if required.iter().all(|p| std::path::Path::new(p).exists()) {
@@ -374,14 +342,8 @@ fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)
 ///
 /// The same predicate the acquisition path has always used, named so the
 /// selector reads as policy applied to a fact rather than re-deriving the fact.
-#[cfg(feature = "builder-vm")]
 fn source_checkout_available() -> bool {
     super::images_built_from_source()
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn source_checkout_available() -> bool {
-    false
 }
 
 /// A forced local build with nothing to build from is refused, not quietly
@@ -400,14 +362,12 @@ fn refuse_build_without_a_checkout() -> anyhow::Error {
 
 /// The dev default image: the writable variant of the default image,
 /// built from the selected image checkout's `default-tenant.dev` target.
-#[cfg(feature = "builder-vm")]
 fn ensure_default_microvm_dev_image(cache_dir: &str) -> Result<(String, String)> {
     dev_image_from(super::bootstrap::selected_local_checkout()?, cache_dir)
 }
 
 /// The local cache slot holding the dev default image
 /// (`<mvm home>/cache/default-microvm/dev`).
-#[cfg(feature = "builder-vm")]
 pub(crate) fn dev_default_image_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_core::config::default_microvm_cache_dir())
         .join(DefaultMicrovmVariant::Dev.cache_subdir())
@@ -416,7 +376,6 @@ pub(crate) fn dev_default_image_cache_dir() -> std::path::PathBuf {
 /// Build the dev image from `checkout`, or answer from a cache a previous
 /// build left. Without a checkout and without a cache there is nothing to
 /// build it from: the released set publishes the sealed image only.
-#[cfg(feature = "builder-vm")]
 pub(crate) fn dev_image_from(
     checkout: Option<mvm_build::image_source::LocalImageCheckout>,
     cache_dir: &str,
@@ -448,7 +407,6 @@ pub(crate) fn dev_image_from(
 ///
 /// The variant picks the checkout's attribute: `default` for the sealed
 /// image, `dev` for the writable one.
-#[cfg(feature = "builder-vm")]
 fn ensure_pair_workload_image(
     checkout: &mvm_build::image_source::LocalImageCheckout,
     cache_dir: &str,
@@ -520,17 +478,12 @@ fn ensure_pair_workload_image(
 /// The pair fingerprint a cache dir was installed under, when it was
 /// installed from a pair. Anything else — an in-tree build, a fetched
 /// prebuilt — is not a pair answer and returns `None`.
-#[cfg(any(feature = "builder-vm", test))]
 fn installed_pair_fingerprint(cache_dir: &std::path::Path) -> Option<String> {
     let sidecar = mvm_build::builder_vm::GuestSidecar::read_from_dir(cache_dir).ok()??;
     (sidecar.source == "local-pair").then_some(sidecar.image_tag)
 }
 
 /// The two boot-image variants the cache can hold.
-///
-/// Deliberately not gated on the `builder-vm` feature: a binary that cannot
-/// *build* an image still has to read, fetch, and report on one, and the
-/// variant's required output set is the same either way.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(in crate::commands) enum DefaultMicrovmVariant {
     Dev,
@@ -546,7 +499,6 @@ impl DefaultMicrovmVariant {
         }
     }
 
-    #[cfg(feature = "builder-vm")]
     pub(super) fn attr(self) -> &'static str {
         match self {
             DefaultMicrovmVariant::Dev => "dev",
@@ -567,15 +519,6 @@ impl DefaultMicrovmVariant {
             ],
         }
     }
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn ensure_default_microvm_dev_image(_cache_dir: &str) -> Result<(String, String)> {
-    anyhow::bail!(
-        "dev mode builds the default image from an image checkout via the builder VM, but \
-         this mvmctl was built without the `builder-vm` feature. Use `--prod` (downloads \
-         the published image), or pass a `--flake`."
-    )
 }
 
 fn download_default_microvm_image(
@@ -600,7 +543,7 @@ fn download_default_microvm_image(
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod pair_default_image_tests {
     use super::*;
     use crate::commands::env::builder_vm::test_pair::{Pair, produced_sidecar};

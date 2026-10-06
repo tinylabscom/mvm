@@ -271,34 +271,108 @@ than a C4 source failure.
 
 ### C5 — Garbage collection
 
-- [ ] C5.1 `mvmctl cache prune` removes pool objects with `st_nlink == 1` and
+- [x] C5.1 `mvmctl cache prune` removes pool objects with `st_nlink == 1` and
       abandoned staging, after the existing checkpoint sweep, so objects freed
       by that sweep are reclaimed in the same run.
-- [ ] C5.2 Test: after removing one of two checkpoints that share objects, the
+- [x] C5.2 Test: after removing one of two checkpoints that share objects, the
       other still verifies and the prune reclaims only the objects nothing
       else links.
 
+**C5 notes.** The prune is `checkpoint::prune_unreferenced_content`
+(`checkpoint/gc.rs`). Beyond the two items above it removes two more kinds of
+garbage. C4's restore cache keeps one full-size materialization per index
+digest, which nothing ever removed; the prune deletes an entry whose index no
+stored checkpoint names, under the per-blob lock restore takes, and skips a
+blob whose lock a restore holds. An object a capture died while writing (a
+`.object-*` temporary) is removed once it is an hour old.
+
+A capture can link an object the prune is reclaiming. When the prune unlinks
+first, the capture's link fails with `ENOENT`, and the capture writes the
+object again. A capture that has just written an object links it from its
+staged temporary name, which shares the inode, so the second attempt cannot
+lose the same race. `captures_racing_a_prune_always_link_a_verified_object`
+runs a sweep in a loop against 200 captures and fails on the previous linking
+code.
+
 ### C6 — Audit anchoring
 
-- [ ] C6.1 The chunked blob's `ContentBlob.sha256` is its index digest.
+- [x] C6.1 The chunked blob's `ContentBlob.sha256` is its index digest.
       `meta_digest`, `checkpoint.created`, `checkpoint.forked` and
       `verify_lineage` are unchanged.
-- [ ] C6.2 Tests: the existing lineage tests pass unmodified against chunked
+- [x] C6.2 Tests: the existing lineage tests pass unmodified against chunked
       checkpoints; editing an index after capture fails lineage verification.
-- [ ] C6.3 The snapshot store (`FsSnapshotStore`) and trusted-snapshot staging
+- [x] C6.3 The snapshot store (`FsSnapshotStore`) and trusted-snapshot staging
       in `capture_vm_full_inner` take a materialized content directory, so
       their signed manifests keep covering whole files. Decide whether they
       should move to indexes, and record the decision here.
 
+**C6 notes.** C2 already made `chunk_blob` return the index digest as the
+blob's address, so C6.1 needed no code. What was missing was a test that pins
+it and one that walks the attack it exists for.
+`a_chunked_blob_records_its_index_digest_as_the_content_address` checks the
+recorded address is the SHA-256 of the index file and differs from the
+whole-file digest. `an_index_replaced_after_capture_fails_lineage_against_the_chain`
+re-chunks different bytes into a captured checkpoint and re-seals the record
+one step at a time: the swapped index alone fails `verify_content`; the index
+plus the recorded address passes `verify_content` and fails `verify_lineage` on
+`meta_digest` drift; and a fully re-sealed record passes every local check and
+is refused only because the chain recorded a different `meta_digest` at
+capture. The audit entries carry `meta_digest`, not per-blob index digests:
+the record digest already covers every index digest, and a second label would
+be a second thing to keep consistent with nothing new to say.
+
+**C6.3 decision: the snapshot stores stay on materialized directories.** Their
+signed manifest digest is `content_manifest_digest(&meta.content)`, which is
+computed over the same index digests `meta_digest` covers, so the address they
+sign is already the chunked one; only the bytes they hold are whole files. The
+two paths use those bytes differently, and neither benefits from indexes:
+
+- `FsSnapshotStore` claims (`materialize_child_from_parent`) never trust the
+  whole files. They run `verify_content` on the chunks, and
+  `materialize_chunked_blobs` replaces each chunked blob in the claimed
+  directory with one rebuilt from the verified index. The snapshot's copy is a
+  starting point the claim overwrites, so storing indexes there would change
+  nothing a claim relies on.
+- The trusted backend exists so a warm claim can skip hashing entirely: the
+  platform seals the directory and materializes a read view no later writer can
+  modify. Indexes would put chunk reassembly and per-chunk hashing back on the
+  claim path, which is the latency that backend removes.
+
+Revisit this if a snapshot backend appears that can seal an object pool
+rather than a directory.
+
 ### C7 — Key domains
 
-- [ ] C7.1 Resolve a capture's domain from its admitted plan's tenant, and the
+- [x] C7.1 Resolve a capture's domain from its admitted plan's tenant, and the
       host domain for a capture without one.
-- [ ] C7.2 Test: two tenants capturing identical memory share no inode and no
+- [x] C7.2 Test: two tenants capturing identical memory share no inode and no
       object name.
 - [ ] C7.3 When checkpoint encryption lands, key object names under the
       domain's key. Out of scope until then; tracked here so the pool layout
       does not have to change.
+
+**C7 notes.** Both capture parameter sets carry a `key_domain`, unset meaning
+the host. `mvmctl machine checkpoint create` (both classes) and the capture
+behind `mvmctl machine fork` read it off the VM's persisted plan, the same plan
+whose grants they already seal: a plan files the chunks under
+`tenant:<plan.tenant>`, a VM with no plan under the host, and a plan with an
+empty tenant is refused rather than filed under the host. A warm-pool factory
+parent stays in the host domain: it is captured with no plan, holds no
+tenant's data, and serves claims from every tenant the pool admits. The plan
+its `checkpoint.created` entry is recorded under is admitted after the capture,
+for host capacity rather than for a tenant. The domain was
+already part of `meta_digest`, so the chain binds it.
+
+"No object name" in C7.2 holds for the pool path, which includes the domain
+directory. The leaf name is still the plaintext digest, so two domains holding
+identical bytes have files with the same name in different directories. Making
+those differ means keying the name, which is C7.3 and waits for checkpoint
+encryption: without a secret key, a name derived from the domain and the
+digest hides nothing the digest does not. The tenant boundary today is the
+separate pool and the separate restore cache, and
+`two_tenants_capturing_identical_bytes_share_no_object` checks it: identical
+memory captured by two tenants shares no inode, while a second capture by the
+same tenant still shares every one.
 
 ### C8 — Retire the whole-blob layout
 

@@ -25,18 +25,17 @@ run:
     just sdk::build-typescript
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" ./scripts/cargo-fast.sh test -p mvm-conformance --test conformance --features bdd
 
-# KVM-backed merge-queue witness for the cheap documented machine lifecycle.
-# The tag selector keeps registry/build-heavy live scenarios in their dedicated
-# witness lanes while proving that the public commands operate a real guest.
+# KVM-backed live witnesses, selected independently so a second cold boot does
+# not consume the existing lifecycle lane's timeout budget.
 
-# Run the merge-queue subset of live BDD scenarios on a KVM host
-live-ci:
+# Run one tagged subset of live BDD scenarios on a KVM host
+live-ci TAG="ci_live":
     # `embed-host-bins` because these scenarios boot real microVMs: `MVM_BDD_LIVE=1`
     # admits the `@live` set, which reaches the builder VM. Without the payload
     # mvmctl refuses at bootstrap. The hermetic `just bdd::run` lane skips those
     # scenarios and so deliberately does not pay the cross-compile.
     cargo build --bin mvmctl --features user,embed-host-bins
-    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_ONLY_TAG=ci_live cargo test -p mvm-conformance --test conformance --features bdd
+    CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_ONLY_TAG={{ TAG }} MVM_BDD_STRICT_SKIPS=1 MVM_BDD_ALLOWED_SKIPS=outside-selected-tag cargo test -p mvm-conformance --test conformance --features bdd
 
 # Nightly KVM witness for the one scenario that runs a warm claim end to end:
 # warm a parent, claim it, and require the child's run to be anchored in the

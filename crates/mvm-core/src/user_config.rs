@@ -28,16 +28,6 @@ pub struct MvmConfig {
     pub catalog_url: Option<String>,
     /// Optional mvmd endpoint used by `mvmctl deploy` after local recording.
     pub mvmd_url: Option<String>,
-    /// Maximum wall-clock seconds `mvmctl up` waits for every guest
-    /// integration's readiness probe to flip to `Active` before giving
-    /// up and leaving `InstanceReadiness` at `ServicesStarting {
-    /// pending }`. VMs with no integrations
-    /// transition to `ServicesReady` immediately; this only matters
-    /// for VMs that declare `after_start.sh` health hooks.
-    ///
-    /// Default: 30 seconds. Override via the `MVM_SERVICES_HEALTH_TIMEOUT_SECS`
-    /// environment variable when ad-hoc tuning beats a config edit.
-    pub services_health_timeout_secs: u64,
     /// Ceiling on the CPU share any workload on this host may be granted,
     /// in thousandths of one host core. `None` = unbounded in this dimension.
     ///
@@ -211,19 +201,6 @@ impl MvmConfig {
             .map(|signer| Ok((signer.signer_id.clone(), signer.verifying_key()?)))
             .collect()
     }
-
-    /// Resolve the effective services-health timeout, honoring an
-    /// `MVM_SERVICES_HEALTH_TIMEOUT_SECS` env-var override over the
-    /// config field. Env-var takes precedence so a single shell
-    /// session can stretch the wait without persisting a change.
-    pub fn effective_services_health_timeout_secs(&self) -> u64 {
-        if let Ok(raw) = std::env::var("MVM_SERVICES_HEALTH_TIMEOUT_SECS")
-            && let Ok(n) = raw.trim().parse::<u64>()
-        {
-            return n;
-        }
-        self.services_health_timeout_secs
-    }
 }
 
 impl Default for MvmConfig {
@@ -238,7 +215,6 @@ impl Default for MvmConfig {
             metrics_port: None,
             catalog_url: None,
             mvmd_url: None,
-            services_health_timeout_secs: 30,
             // Unset by default: a single-user host is not multi-tenant, and a
             // ceiling invented here would refuse legitimate local runs while
             // protecting nobody. An operator who shares the host sets them.
@@ -435,31 +411,6 @@ mod tests {
         assert_eq!(cfg.default_memory_mib, 512);
         assert!(cfg.log_format.is_none());
         assert!(cfg.metrics_port.is_none());
-        // Default: 30 s services-health wait.
-        assert_eq!(cfg.services_health_timeout_secs, 30);
-    }
-
-    #[test]
-    fn test_effective_services_health_timeout_honors_env_var_override() {
-        let mut env = TestEnv::new();
-
-        // Clean slate: with no override, the config field wins.
-        env.remove("MVM_SERVICES_HEALTH_TIMEOUT_SECS");
-        let cfg = MvmConfig {
-            services_health_timeout_secs: 7,
-            ..MvmConfig::default()
-        };
-        assert_eq!(cfg.effective_services_health_timeout_secs(), 7);
-
-        // With a valid override, the env-var value wins.
-        env.set("MVM_SERVICES_HEALTH_TIMEOUT_SECS", "120");
-        assert_eq!(cfg.effective_services_health_timeout_secs(), 120);
-
-        // Garbage in the env var falls back to the config field
-        // rather than panicking — operator typos do not break boot.
-        env.set("MVM_SERVICES_HEALTH_TIMEOUT_SECS", "not-a-number");
-        assert_eq!(cfg.effective_services_health_timeout_secs(), 7);
-        // `env` restores the original value on drop.
     }
 
     #[test]
@@ -475,7 +426,20 @@ mod tests {
         "#;
         let cfg: MvmConfig = toml::from_str(partial).unwrap();
         assert_eq!(cfg.dev_vm_cpus, 4);
-        assert_eq!(cfg.services_health_timeout_secs, 30);
+        assert!(cfg.metrics_port.is_none());
+    }
+
+    #[test]
+    fn a_config_written_with_the_retired_services_health_key_still_loads() {
+        // `services_health_timeout_secs` was a config key nothing read. An
+        // operator's config.toml may still carry it, and dropping the field
+        // must not turn that file into a load error.
+        let written = r#"
+            default_cpus = 3
+            services_health_timeout_secs = 45
+        "#;
+        let cfg: MvmConfig = toml::from_str(written).unwrap();
+        assert_eq!(cfg.default_cpus, 3);
     }
 
     #[test]
@@ -500,7 +464,7 @@ mod tests {
     #[test]
     fn canonical_config_path_is_nested_under_config_dir() {
         let home = tempfile::tempdir().unwrap();
-        let mut env = crate::util::test_env::TestEnv::new();
+        let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
         assert_eq!(config_path(), home.path().join("config/config.toml"));
     }

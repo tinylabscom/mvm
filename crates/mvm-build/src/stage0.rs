@@ -30,7 +30,6 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
@@ -456,7 +455,7 @@ fn extract_nix_store_tarball(tarball: &Path, nix_dir: &Path) -> Result<()> {
 }
 
 fn extract_nix_store_tarball_with_native_tar(tarball: &Path, nix_dir: &Path) -> Result<()> {
-    let output = Command::new("tar")
+    let output = mvm_core::env_hygiene::helper_command("tar")
         .arg("-xJf")
         .arg(tarball)
         .arg("-C")

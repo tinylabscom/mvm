@@ -455,17 +455,6 @@ anyhow.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-foundation = { version = "0.3", features = ["NSRunLoop", "NSDate", "NSAutoreleasePool"] }
 
-[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
-# Apple Silicon uses the in-house HVF backend by default on macOS 26+.
-# Keep builder orchestration available without linking optional libkrun FFI;
-# the standard source and release builds never enable the native bindings.
-mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"] }
-
-[target.'cfg(all(target_os = "macos", target_arch = "x86_64"))'.dependencies]
-# Intel uses HVF directly. Retain builder orchestration while leaving the
-# arm64-only libkrun firmware and FFI feature out of the dependency graph.
-mvm-cli = { workspace = true, default-features = false, features = ["builder-vm"] }
-
 [dev-dependencies]
 mvm-contract.workspace = true
 hex.workspace = true
@@ -509,8 +498,8 @@ mvm-client.workspace = true
 # There are exactly two: what the **host machine runs** to host sandboxes
 # (`host`), and what a **user runs** to drive them (`user`). Every capability
 # folds into one of the two; the individual pass-through flags that used to sit
-# here (builder-vm, pure-mkfs, custom-dns, manifest-verify, dev-watch,
-# contributor-bootstrap) are GONE — inlined below. `dev` is the host+user union
+# here (custom-dns, manifest-verify, dev-watch, contributor-bootstrap) are
+# GONE — inlined below. `dev` is the host+user union
 # (a contributor laptop is both). The only other root features are internal
 # knobs that cannot be unconditional and are NOT consumer-facing product
 # surfaces: the optional libkrun C-lib test integration, the
@@ -530,8 +519,6 @@ mvm-client.workspace = true
 # already carries through `user`. mvmd depends on `mvm-core` and `mvm-client`
 # directly, so nothing here reaches it.
 default = [
-    "mvm-cli/builder-vm",
-    "mvm-cli/pure-mkfs",
     "mvm-cli/manifest-verify",
 ]
 
@@ -540,8 +527,6 @@ default = [
 # trait); the standard product paths never enable libkrun. Superset of `default`
 # plus the full host networking + hostd IPC.
 host = [
-    "mvm-cli/builder-vm",
-    "mvm-cli/pure-mkfs",
     "mvm-cli/manifest-verify",
     "mvm-cli/custom-dns",
     "mvm-core/hostd-transport",
@@ -735,6 +720,25 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.tree-sitter-typescript]
 opt-level = 3
+
+# What goes to crates.io. `xtask publish-plan` publishes the shipped-
+# dependency closure of these roots, dependencies first, and
+# `xtask check-publish-readiness` holds the manifests to it: every member
+# outside the closure says `publish = false`.
+[workspace.metadata.mvm.publish]
+roots = ["mvm-client", "mvmctl"]
+
+# Crates in the closure that cannot be published yet. The plan withholds each
+# one and everything that depends on it. `out-of-crate-source` is verified by
+# the gate and must be removed once the crate stops reading outside its
+# directory; any other kind is a registry fact the offline gate cannot see.
+[workspace.metadata.mvm.publish.blocked.libkrun-sys]
+kind = "name-taken"
+reason = "the crates.io name libkrun-sys belongs to an unrelated project; the package needs a name of its own (the dependency key can stay libkrun-sys via `package =`)"
+
+[workspace.metadata.mvm.publish.blocked.mvm-cli]
+kind = "out-of-crate-source"
+reason = "build.rs compiles mvm-build sources through #[path] and reads the workspace Cargo.toml, and the CLI embeds uninstall.sh and nix/wrappers scripts; none of it is inside the packaged crate"
 
 [workspace.metadata.mvm.toolchain]
 # Pinned cross-compile toolchain for the embedded host-vm binaries

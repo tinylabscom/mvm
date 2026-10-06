@@ -6,9 +6,8 @@
 //!   refuse-on-loose-perms; mirrors the host signer pattern).
 //! - [`header`]   — `AttestationBody` + `AttestationReport`,
 //!   `sign_report` / `verify_report`.
-//! - [`provider`] — feature-gated TPM2 / SEV-SNP / TDX stubs behind a
-//!   `HwAttestationProvider` trait. Real hardware bring-up is not yet
-//!   sequenced.
+//! - [`provider`] — the `HwAttestationProvider` trait and its one
+//!   implementation, TPM2, behind the `attestation-tpm2` feature.
 //!
 //! Re-exports below collapse the module path so callers can write
 //! `use crate::crypto::attestation::{IdentityKey, sign_report, ...}`.

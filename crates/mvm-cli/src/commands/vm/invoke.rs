@@ -27,6 +27,7 @@ use mvm_client::entrypoint::{
 pub(crate) use mvm_client::entrypoint::{DispatchStdin, EntrypointDispatch};
 use mvm_hostd::stream::ShownChunk;
 
+use super::denial_review::{ReviewOffer, ReviewSource};
 use crate::ui;
 
 /// One baked-entrypoint call, decoupled from clap so the `machine run`
@@ -89,6 +90,10 @@ pub(in crate::commands) struct EntrypointCall {
     pub attach: bool,
     /// Whether this terminal invocation may print host denial notices.
     pub show_denials: bool,
+    /// Where the boot's policy came from, for reviewing its refusals once the
+    /// call ends. An `attach` dispatches into a machine another invocation
+    /// admitted, and ignores it.
+    pub review_source: ReviewSource,
     /// Resolved egress policy for the transient entrypoint boot (from `--net` /
     /// `--allow-host`). Threaded onto the admitted plan and shared vsock
     /// endpoint so a baked entrypoint enforces egress identically to the
@@ -175,22 +180,15 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
             "entrypoint: dispatching into running workload '{}'",
             call.source
         ));
-        let denials = call
-            .show_denials
-            .then(|| {
-                super::egress_denials::watch_machine(
-                    &call.source,
-                    super::egress_denials::Live::Notices,
-                )
-            })
-            .flatten();
+        let mut denials = CallDenials::new(call.show_denials, ReviewSource::admitted_elsewhere());
+        denials.arm(&call.source);
         let outcome = dispatch(EntrypointDispatch {
             vm_name: &call.source,
             stdin: DispatchStdin::OneShot(call.stdin.prologue()),
             timeout_secs: call.timeout,
             session_id: None,
         });
-        super::egress_denials::finish_and_summarize(denials);
+        denials.finish();
         let exit_code = outcome?;
         if exit_code != 0 {
             mvm_observability::exit(exit_code);
@@ -243,7 +241,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         .map_or(SessionVmName::Prefixed("invoke"), SessionVmName::Exact);
 
     let mut out = CallOutput::inherited();
-    out.watch_denials = call.show_denials;
+    out.denials = CallDenials::new(call.show_denials, call.review_source);
     let outcome = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
         mvm_client::entrypoint::run_entrypoint_call(
             mvm_client::entrypoint::EntrypointCall {
@@ -546,8 +544,50 @@ struct CallOutput<'a> {
     /// Answers the endpoint's `ask` decisions while the call runs. A machine
     /// kept alive past the call has no one to ask, and its asks deny.
     approvals: Option<mvm_client::approval_broker::ApprovalServer>,
-    watch_denials: bool,
-    denials: Option<super::egress_denials::DenialWatch>,
+    denials: CallDenials,
+}
+
+/// A call's egress refusals: watched from the moment its machine is named,
+/// summarized when it ends, and offered for review against the manifest its
+/// boot was admitted under.
+#[derive(Default)]
+struct CallDenials {
+    /// Where the boot's policy came from; `None` when refusals are not shown.
+    source: Option<ReviewSource>,
+    watch: Option<super::egress_denials::DenialWatch>,
+    review: Option<ReviewOffer>,
+}
+
+impl CallDenials {
+    fn new(show: bool, source: ReviewSource) -> Self {
+        Self {
+            source: show.then_some(source),
+            ..Self::default()
+        }
+    }
+
+    /// Start watching `vm_name`, if refusals are shown.
+    fn arm(&mut self, vm_name: &str) {
+        self.review = self.review_for(vm_name);
+        if self.review.is_some() {
+            self.watch =
+                super::egress_denials::watch_machine(vm_name, super::egress_denials::Live::Notices);
+        }
+    }
+
+    /// How `vm_name`'s refusals are offered for review, if they are shown.
+    fn review_for(&self, vm_name: &str) -> Option<ReviewOffer> {
+        self.source
+            .clone()
+            .map(|source| ReviewOffer::new(vm_name, source))
+    }
+
+    /// Stop watching, print the summary, and offer the review.
+    fn finish(&mut self) {
+        if let Some(review) = self.review.take() {
+            super::egress_denials::finish_and_summarize(self.watch.take(), &review);
+        }
+    }
 }
 
 impl CallOutput<'static> {
@@ -556,15 +596,14 @@ impl CallOutput<'static> {
             sinks: EventSinks::inherited(),
             divergence: RecordedDivergence::default(),
             approvals: None,
-            watch_denials: false,
-            denials: None,
+            denials: CallDenials::default(),
         }
     }
 }
 
 impl CallOutput<'_> {
     fn finish_denials(&mut self) {
-        super::egress_denials::finish_and_summarize(self.denials.take());
+        self.denials.finish();
     }
 
     /// Tell the caller, on stderr, how what an operator can read back differs
@@ -593,10 +632,7 @@ impl CallOutput<'_> {
 
 impl CallObserver for CallOutput<'_> {
     fn vm_named(&mut self, vm_name: &str) {
-        if self.watch_denials {
-            self.denials =
-                super::egress_denials::watch_machine(vm_name, super::egress_denials::Live::Notices);
-        }
+        self.denials.arm(vm_name);
     }
 
     fn output(&mut self, chunk: &ShownChunk) {
@@ -662,17 +698,57 @@ mod denial_observation_tests {
     fn entrypoint_name_arms_a_watch_only_for_human_output() {
         let mut quiet = CallOutput::inherited();
         quiet.vm_named("entrypoint-quiet");
-        assert!(quiet.denials.is_none());
+        assert!(quiet.denials.watch.is_none());
+        assert!(quiet.denials.review.is_none());
 
         let mut env = TestEnv::new();
         let home = tempfile::tempdir().expect("isolated home");
         env.isolate_mvm_home(home.path());
         let mut human = CallOutput::inherited();
-        human.watch_denials = true;
+        human.denials = CallDenials::new(true, ReviewSource::admitted_elsewhere());
         human.vm_named("entrypoint-human");
-        assert!(human.denials.is_some());
+        assert!(human.denials.watch.is_some());
         human.finish_denials();
-        assert!(human.denials.is_none());
+        assert!(human.denials.watch.is_none());
+    }
+
+    /// The refusals a booted call summarizes are offered against the manifest
+    /// that boot was admitted under, by the name its machine was given.
+    #[test]
+    fn a_booted_call_offers_its_refusals_against_its_admitted_manifest() {
+        let manifest = ReviewSource::Manifest("/project/mvm.toml".into());
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
+        let mut out = CallOutput::inherited();
+        out.denials = CallDenials::new(true, manifest.clone());
+        out.vm_named("invoke-7");
+        assert_eq!(
+            out.denials.review,
+            Some(ReviewOffer::new("invoke-7", manifest))
+        );
+    }
+
+    /// `--json` shows no refusals, so it neither watches nor offers a review.
+    #[test]
+    fn a_machine_readable_call_offers_no_review() {
+        let denials = CallDenials::new(false, ReviewSource::Manifest("/p/mvm.toml".into()));
+        assert_eq!(denials.review_for("invoke-8"), None);
+    }
+
+    /// An attach dispatches into a machine another invocation admitted, so
+    /// its refusals are pointed at `mvmctl explain` rather than at a manifest
+    /// this process cannot know.
+    #[test]
+    fn an_attached_call_offers_its_refusals_as_admitted_elsewhere() {
+        let denials = CallDenials::new(true, ReviewSource::admitted_elsewhere());
+        assert_eq!(
+            denials.review_for("already-running"),
+            Some(ReviewOffer::new(
+                "already-running",
+                ReviewSource::admitted_elsewhere()
+            ))
+        );
     }
 }
 
@@ -850,8 +926,7 @@ mod streaming_tests {
             },
             divergence: RecordedDivergence::default(),
             approvals: None,
-            watch_denials: false,
-            denials: None,
+            denials: Default::default(),
         }
     }
 
@@ -978,8 +1053,7 @@ mod streaming_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
-                watch_denials: false,
-                denials: None,
+                denials: Default::default(),
             };
             for chunk in [&b"first"[..], &b"second"[..]] {
                 write_entrypoint_event(
@@ -1018,8 +1092,7 @@ mod streaming_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
-                watch_denials: false,
-                denials: None,
+                denials: Default::default(),
             };
             let mut capture = uncaptured();
             write_entrypoint_event(&EntrypointEvent::Exit { code: 0 }, &mut capture, &mut sinks);
@@ -1130,8 +1203,7 @@ mod captured_tests {
                     },
                     divergence: RecordedDivergence::default(),
                     approvals: None,
-                    watch_denials: false,
-                    denials: None,
+                    denials: Default::default(),
                 };
                 for event in events {
                     write_entrypoint_event(event, &mut capture, &mut sinks);
@@ -1340,8 +1412,7 @@ mod captured_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
-                watch_denials: false,
-                denials: None,
+                denials: Default::default(),
             };
             write_entrypoint_event(&stdout(b"before"), &mut capture, &mut sinks);
             plane.release(vm); // a teardown racing this call
@@ -1811,6 +1882,7 @@ mod streamed_stdin_tests {
             r#fn: None,
             attach: true,
             show_denials: true,
+            review_source: ReviewSource::admitted_elsewhere(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             hypervisor: None,
         }
@@ -1838,8 +1910,7 @@ mod streamed_stdin_tests {
                 },
                 divergence: RecordedDivergence::default(),
                 approvals: None,
-                watch_denials: false,
-                denials: None,
+                denials: CallDenials::default(),
             };
             report_streamed_stdin("call-vm", &mut sinks, report);
         }

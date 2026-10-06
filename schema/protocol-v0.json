@@ -1602,7 +1602,7 @@
           ]
         },
         {
-          "description": "`ReadinessStatus` returns `GuestResponse::ReadinessStatusReport(ReadinessReport)`. `mvmctl wait` / `mvmctl boot-report` require this capability.",
+          "description": "`ReadinessStatus` returns `GuestResponse::ReadinessStatusReport(ReadinessReport)`. `mvmctl machine wait` / `mvmctl machine boot-report` require this capability.",
           "type": "string",
           "enum": [
             "readiness"
@@ -2390,7 +2390,7 @@
           ]
         },
         {
-          "description": "Query structured readiness across every guest subsystem (control plane, entrypoint, warm pool, integrations, probes, volumes) plus per-phase boot timings.\n\nProd-safe — the response carries no secrets and reveals only state the host already chose to provision (via image config / drop-in files). Designed to be the verb that responds first after vsock bind, so a host can begin streaming progress UX before entrypoint validation or warm-pool warmup finish.\n\nDistinct from `EntrypointStatus` (which is entrypoint-only and returns a flat `EntrypointStatusReport`): `ReadinessStatus` reports the *full* boot phase set with `ComponentState` per component, and is intended to be polled (`mvmctl wait`).",
+          "description": "Query structured readiness across every guest subsystem (control plane, entrypoint, warm pool, integrations, probes, volumes) plus per-phase boot timings.\n\nProd-safe — the response carries no secrets and reveals only state the host already chose to provision (via image config / drop-in files). Designed to be the verb that responds first after vsock bind, so a host can begin streaming progress UX before entrypoint validation or warm-pool warmup finish.\n\nDistinct from `EntrypointStatus` (which is entrypoint-only and returns a flat `EntrypointStatusReport`): `ReadinessStatus` reports the *full* boot phase set with `ComponentState` per component, and is intended to be polled (`mvmctl machine wait`).",
           "type": "string",
           "enum": [
             "ReadinessStatus"
@@ -4620,7 +4620,7 @@
       ]
     },
     "ReadinessReport": {
-      "description": "Snapshot of agent readiness at the moment of a `ReadinessStatus` call.\n\nUsed by host callers (`mvmctl wait`, `mvmctl up --timings`, `mvmctl doctor`) to distinguish:\n\n- \"control plane is up, workload not yet warm\" → invoke would block; the host can stream progress to the user - \"entrypoint validation failed\" → invoke would fail fast with a typed error; the host can surface the validation message - \"optional subsystem failed\" → invoke is still safe; the host surfaces a warning\n\n`Default` composes the `Default` impls of each field — every component is `Disabled`, the profile is `SealedProd`, all timings are `None`. Tests and fixtures can construct partial reports with `..Default::default()`.",
+      "description": "Snapshot of agent readiness at the moment of a `ReadinessStatus` call.\n\nUsed by host callers (`mvmctl machine wait`, `mvmctl machine boot-report`) to distinguish:\n\n- \"control plane is up, workload not yet warm\" → invoke would block; the host can stream progress to the user - \"entrypoint validation failed\" → invoke would fail fast with a typed error; the host can surface the validation message - \"optional subsystem failed\" → invoke is still safe; the host surfaces a warning\n\n`Default` composes the `Default` impls of each field — every component is `Disabled`, the profile is `SealedProd`, all timings are `None`. Tests and fixtures can construct partial reports with `..Default::default()`.",
       "type": "object",
       "required": [
         "boot_millis",

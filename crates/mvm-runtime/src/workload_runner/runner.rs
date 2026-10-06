@@ -154,7 +154,7 @@ impl BrokerGuard {
 /// something" problem — and, like the ordinary `VmBackend` methods this
 /// trait's two calls sit beside, `start`/`stop` are independent entry points
 /// keyed by `vm_name` rather than a value threaded between them: a `start`
-/// during `up` and the matching `stop` commonly run in different process
+/// during `machine run -d` and the matching `machine stop` commonly run in different process
 /// invocations against the same disk-backed VM state, so nothing here can
 /// rely on an in-process object outliving the call that created it.
 ///
@@ -1002,6 +1002,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             parent: None,
             session: None,
             workspace_volumes: Vec::new(),
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         };
         let trusted_backend = if cfg!(all(feature = "trusted-apfs", target_os = "macos"))
             && std::env::var("MVM_HVF_ENABLE_TRUSTED_SNAPSHOT").as_deref() == Ok("1")
@@ -3804,6 +3805,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap();

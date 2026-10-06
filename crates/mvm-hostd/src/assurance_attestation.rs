@@ -264,10 +264,10 @@ mod tests {
 
     #[test]
     fn wrong_provider_and_unenrolled_root_fail_closed() {
-        let mut wrong_provider = verification();
-        wrong_provider.provider = HwProviderKind::SevSnp;
+        let tpm2_quote = verification();
+        assert_eq!(tpm2_quote.provider, HwProviderKind::Tpm2);
         assert!(
-            validate_verification(&wrong_provider, &digest(1), &AttestationMode::Tpm2, 20, 10,)
+            validate_verification(&tpm2_quote, &digest(1), &AttestationMode::SevSnp, 20, 10)
                 .is_err()
         );
 

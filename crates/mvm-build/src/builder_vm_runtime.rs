@@ -26,7 +26,6 @@
 //!   HVF's `SupervisorConfig`)
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -999,7 +998,7 @@ fn locate_debugfs() -> Option<PathBuf> {
 }
 
 fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<String>, String> {
-    let output = Command::new(debugfs)
+    let output = mvm_core::env_hygiene::helper_command(debugfs)
         .args(["-R", &format!("cat {guest_path}")])
         .arg(image)
         .output()

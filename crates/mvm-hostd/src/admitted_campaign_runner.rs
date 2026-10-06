@@ -108,6 +108,14 @@ impl<B, E> LifecycleAdmittedCampaignRunner<B, E> {
     fn session_state_root(&self) -> PathBuf {
         self.state_root.join("agent-sessions")
     }
+
+    /// Where the key that seals recorded prompt requests lives. It sits under
+    /// the provider's own root for the same reason the history does: a
+    /// provider restarted under a different `HOME` or `MVM_HOME` must still be
+    /// able to decrypt what it recorded.
+    fn replay_keys_dir(&self) -> PathBuf {
+        self.state_root.join("keys")
+    }
 }
 
 impl<B, E> AdmittedCampaignRunner for LifecycleAdmittedCampaignRunner<B, E>
@@ -162,6 +170,7 @@ where
             })?;
             let adapter = AssurancePromptAdapter::open_at(
                 &self.session_state_root(),
+                &self.replay_keys_dir(),
                 &boot.started.vm_id.0,
                 &input,
                 boot.now_unix_ms,
@@ -573,6 +582,8 @@ mod tests {
         (request, session)
     }
 
+    /// Boots onto the mock backend, which keeps its VM directory and signer
+    /// under `MVM_HOME`; a test booting through it holds `isolated_mvm_home`.
     struct FixtureBooter {
         audit_root: PathBuf,
         mismatch_trial: bool,
@@ -906,6 +917,7 @@ mod tests {
 
     #[test]
     fn admitted_lifecycle_dispatches_cleans_up_and_returns_host_evidence() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -939,7 +951,41 @@ mod tests {
     }
 
     #[test]
+    fn the_replay_key_lives_under_the_provider_state_root() {
+        // The ambient home is a scratch directory, so a key minted there
+        // instead of under the provider's root shows up as a file.
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
+        let state = tempfile::tempdir().expect("state root");
+        let audit = tempfile::tempdir().expect("audit root");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runner = LifecycleAdmittedCampaignRunner::new(
+            state.path(),
+            FixtureBooter {
+                audit_root: audit.path().to_path_buf(),
+                mismatch_trial: false,
+                fail_cleanup: false,
+                attested: false,
+            },
+            FixtureExecutor {
+                calls: Arc::clone(&calls),
+            },
+        )
+        .expect("runner");
+        let (request, session) = joined_input();
+        runner.run(&request, &[session]).expect("admitted run");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let kek = mvm_core::transcript::TRANSCRIPT_KEK_FILENAME;
+        assert!(state.path().join("keys").join(kek).is_file());
+        assert!(
+            !mvm_core::config::mvm_keys_dir().join(kek).exists(),
+            "the provider must not seal its replay inputs under the ambient home"
+        );
+    }
+
+    #[test]
     fn only_runtime_verified_attestation_can_make_host_evidence_true() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -985,6 +1031,7 @@ mod tests {
 
     #[test]
     fn configured_attestation_without_runtime_verifier_is_inconclusive() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let runner = LifecycleAdmittedCampaignRunner::new(
@@ -1012,6 +1059,7 @@ mod tests {
 
     #[test]
     fn dev_test_runtime_is_always_non_certifying() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let runner = LifecycleAdmittedCampaignRunner::new(
@@ -1036,6 +1084,7 @@ mod tests {
 
     #[test]
     fn admitted_boot_identity_mismatch_refuses_before_dispatch() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1062,6 +1111,7 @@ mod tests {
 
     #[test]
     fn expired_admitted_grant_never_dispatches() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1089,6 +1139,7 @@ mod tests {
 
     #[test]
     fn revoked_admitted_session_refuses_before_dispatch() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1115,6 +1166,7 @@ mod tests {
 
     #[test]
     fn guest_crash_is_cleaned_up_and_returns_explicitly_missing_dispatch() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let runner = LifecycleAdmittedCampaignRunner::new(
@@ -1138,6 +1190,7 @@ mod tests {
 
     #[test]
     fn cleanup_failure_cannot_promote_complete_observer_evidence() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -1164,6 +1217,7 @@ mod tests {
 
     #[test]
     fn admitted_deadline_cancels_once_and_remains_inconclusive() {
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let state = tempfile::tempdir().expect("state root");
         let audit = tempfile::tempdir().expect("audit root");
         let executor = DeadlineExecutor::new();

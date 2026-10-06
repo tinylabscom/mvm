@@ -398,7 +398,7 @@ impl NetworkPolicy {
     /// by the always-on mandatory-deny. It exists as one named, greppable
     /// constructor so every broad-egress grant is auditable and can never
     /// be confused with a workload policy. **Never** use it for a workload
-    /// (`mvmctl run`/`up`/`invoke`): those default to `deny_all`.
+    /// (`mvmctl run`, `mvmctl machine run`): those default to `deny_all`.
     pub fn trusted_build_egress() -> Self {
         Self::unrestricted()
     }
@@ -603,12 +603,10 @@ impl Default for NetworkPolicy {
     /// network destinations). The default is now `deny_all` so the safe
     /// posture is the one workloads get without opting in.
     ///
-    /// Migration shape: `mvmctl up` callers who relied on the old
-    /// default get a warning if they explicitly pass
-    /// `--network-preset unrestricted`. Template authors who want
-    /// open egress declare it in the template's
-    /// `default_network_policy`. The escape hatch is named, never
-    /// silent.
+    /// A workload that needs egress asks for it by name:
+    /// `--network-preset` or `--allow-host` on `mvmctl machine run`.
+    /// That flag refuses the `unrestricted` preset outright, so open
+    /// egress is never what a workload gets by accident.
     fn default() -> Self {
         Self::deny_all()
     }
@@ -1125,10 +1123,8 @@ mod tests {
     fn policy_default_is_deny_all() {
         // claim 10: the safe default is deny-all. Workloads
         // that need network access opt in explicitly via
-        // `--network-preset` or a template's
-        // `default_network_policy`. The escape hatch is
-        // `--network-preset unrestricted`, which mvmctl warns about
-        // at launch.
+        // `--network-preset` or `--allow-host`, and the run path refuses
+        // the `unrestricted` preset.
         let default = NetworkPolicy::default();
         assert!(!default.is_unrestricted());
         let rules = default
