@@ -132,6 +132,10 @@ pub const GATES: &[Gate] = &[
         "check-single-display-path",
         crate::check_single_display_path::run,
     ),
+    (
+        "check-single-workspace-write-path",
+        crate::check_single_workspace_write_path::run,
+    ),
     ("check-no-virtio-fs", crate::check_no_virtio_fs::run),
     (
         "check-single-workload-env",
