@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mvm_client::approval_broker::display_safe;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use super::egress_denials::{DenialTally, DeniedDestination};
@@ -172,7 +172,7 @@ impl ReviewOffer {
 }
 
 /// A command a machine-readable run summary can present for later review.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(in crate::commands) struct JsonReviewPointer {
     pub run: String,
     pub command: String,

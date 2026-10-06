@@ -27,6 +27,9 @@ pub(super) struct RunJsonSummary {
     /// remedy. Always present; empty when nothing was refused.
     #[serde(default)]
     pub(super) egress_denials: Vec<crate::commands::vm::egress_denials::DeniedDestination>,
+    /// The exact command for reviewing grantable refusals after this JSON run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) egress_review: Option<crate::commands::vm::denial_review::JsonReviewPointer>,
     /// `none` when the run could reach no network at all — no egress grant,
     /// no secret — so no refusal could have been recorded; else `granted`.
     #[serde(default)]
@@ -105,6 +108,7 @@ impl RunJsonSummary {
             phase_timing: output.phase_timing.clone(),
             receipt_path,
             egress_denials: Vec::new(),
+            egress_review: None,
             network: String::new(),
         }
     }
@@ -121,6 +125,14 @@ impl RunJsonSummary {
         denials: Vec<crate::commands::vm::egress_denials::DeniedDestination>,
     ) -> Self {
         self.egress_denials = denials;
+        self
+    }
+
+    pub(super) fn with_egress_review(
+        mut self,
+        review: Option<crate::commands::vm::denial_review::JsonReviewPointer>,
+    ) -> Self {
+        self.egress_review = review;
         self
     }
 }
