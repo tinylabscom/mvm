@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 const ONESHOT_PY: &str = include_str!("../../../../../nix/wrappers/python/oneshot.py");
 const ONESHOT_MJS: &str = include_str!("../../../../../nix/wrappers/node/oneshot.mjs");
@@ -122,7 +122,7 @@ fn run_wrapper(args: &Args, stdin_bytes: Vec<u8>) -> Result<i32> {
         ),
     };
 
-    let mut cmd = Command::new(interpreter);
+    let mut cmd = mvm_core::env_hygiene::helper_command(interpreter);
     cmd.arg(&wrapper_path);
     cmd.env("MVM_WRAPPER_CONFIG_PATH", &wrapper_json_path);
     match cfg.language {

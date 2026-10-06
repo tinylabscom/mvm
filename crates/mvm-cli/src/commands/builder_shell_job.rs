@@ -61,7 +61,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
         extra_disks: Vec::new(),
     };
 
-    let choice = resolve_choice();
+    let choice = resolve_choice(None);
     admit_source_builder_image(choice, || {
         crate::commands::env::builder_vm::bootstrap_tool_builder_vm_image()
     })?;

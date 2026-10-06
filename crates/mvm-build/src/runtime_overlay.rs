@@ -1100,7 +1100,7 @@ pub(crate) fn verify_file_sha256(
 /// expectations stay uniform across the three downloaders
 /// (dev image, builder VM image, runtime overlay).
 pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlayError> {
-    let output = std::process::Command::new("curl")
+    let output = mvm_core::env_hygiene::helper_command("curl")
         .args(["-fSL", "--silent", "--show-error", "-o"])
         .arg(dest)
         .arg(url)

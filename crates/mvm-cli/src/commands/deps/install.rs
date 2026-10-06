@@ -124,7 +124,6 @@ pub(super) fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
-#[cfg(feature = "builder-vm")]
 fn install_in_builder(spec: &InstallSpec) -> Result<mvm_build::app_deps::InstallResult> {
     // The fallible resolver, deliberately. The infallible one panics when the
     // registered constructor returns an error, and on the hvf arm that error is
@@ -132,16 +131,11 @@ fn install_in_builder(spec: &InstallSpec) -> Result<mvm_build::app_deps::Install
     // Linux host binaries cannot bootstrap a builder VM. It already carries the
     // exact rebuild instruction; routed through the panicking path a reader saw
     // a Rust backtrace and "CLI thread exited unexpectedly" instead.
-    let driver = mvm_build::builder_backend_select::try_resolve_builder_backend_with_override(None)
+    let driver = mvm_build::builder_backend_select::try_resolve_builder_backend(None)
         .context("resolving the builder backend for the dependency install")?;
     let install_driver = mvm_build::app_deps::BuilderInstallDriver::new(driver.as_ref());
     mvm_build::app_deps::install_app_deps(spec, Some(&install_driver))
         .context("installing declared dependencies in the builder environment")
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn install_in_builder(_spec: &InstallSpec) -> Result<mvm_build::app_deps::InstallResult> {
-    bail!("mvmctl deps install requires the builder-vm feature")
 }
 
 fn existing_path(path: &Path, label: &str) -> Result<PathBuf> {
@@ -174,23 +168,5 @@ mod tests {
         fs::write(&file, b"data").unwrap();
         let error = existing_directory(&file, "source root").unwrap_err();
         assert!(error.to_string().contains("not a directory"));
-    }
-
-    #[cfg(not(feature = "builder-vm"))]
-    #[test]
-    fn install_reports_missing_builder_feature() {
-        let spec = InstallSpec {
-            lockfile: PathBuf::from("Cargo.lock"),
-            source_root: PathBuf::from("."),
-            language: Language::Python,
-            gate: GateLevel::Dev,
-            cache_root_override: None,
-        };
-        let error = install_in_builder(&spec).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("requires the builder-vm feature")
-        );
     }
 }

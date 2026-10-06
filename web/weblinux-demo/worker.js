@@ -80,6 +80,51 @@ async function loadCompressedWasm() {
   return new Response(decompressed).arrayBuffer();
 }
 
+async function loadPreloadData() {
+  const manifestResponse = await fetch(`${baseUrl}pack.data.parts.json`);
+  if (!manifestResponse.ok) {
+    throw new Error(
+      `failed to load preload manifest (${manifestResponse.status})`,
+    );
+  }
+
+  const manifest = await manifestResponse.json();
+  if (
+    !Number.isSafeInteger(manifest.size) ||
+    manifest.size <= 0 ||
+    !Array.isArray(manifest.parts) ||
+    manifest.parts.length === 0 ||
+    manifest.parts.some(
+      (part) =>
+        typeof part !== "string" || !/^pack\.data\.part-\d{3}$/.test(part),
+    )
+  ) {
+    throw new Error("invalid preload manifest");
+  }
+
+  const data = new Uint8Array(manifest.size);
+  let offset = 0;
+  for (const part of manifest.parts) {
+    const response = await fetch(`${baseUrl}${part}`);
+    if (!response.ok) {
+      throw new Error(`failed to load preload part ${part} (${response.status})`);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (offset + bytes.byteLength > data.byteLength) {
+      throw new Error(`preload part ${part} exceeds declared size`);
+    }
+    data.set(bytes, offset);
+    offset += bytes.byteLength;
+  }
+
+  if (offset !== data.byteLength) {
+    throw new Error(
+      `preload parts total ${offset} bytes, expected ${data.byteLength}`,
+    );
+  }
+  return data.buffer;
+}
+
 // Minimal xterm.js-shaped object that lets xterm-pty's Master route output to
 // the UI and accept injected input from the main thread.
 function createFakeTerminal() {
@@ -141,6 +186,16 @@ self.onmessage = async (event) => {
 
   try {
     postStatus("loading support scripts");
+    const preloadData = await loadPreloadData();
+    self.Module = self.Module || {};
+    self.Module.getPreloadedPackage = (name, size) => {
+      if (name !== "pack.data" || size !== preloadData.byteLength) {
+        throw new Error(
+          `unexpected preload request ${name} (${size} bytes)`,
+        );
+      }
+      return preloadData;
+    };
     self.importScripts(`${baseUrl}xterm-pty.js`, `${baseUrl}pack.js`);
 
     postStatus("preload manifest loaded");

@@ -23,10 +23,16 @@ use std::io::{Read, Write};
 use std::os::fd::{FromRawFd, RawFd};
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, OnceLock};
 
 use mvm_agentd::flowmux_sync::{load_guest_signing_key, load_host_anchor};
-use mvm_agentd::telemetry_service::{SessionEnd, serve_telemetry_connection};
-use mvm_core::protocol::telemetry::TELEMETRY_PORT;
+use mvm_agentd::telemetry_capture::session::serve_capture_session;
+use mvm_agentd::telemetry_capture::{AgentSubscriber, CaptureState, ProducerId};
+use mvm_agentd::telemetry_service::SessionEnd;
+use mvm_core::net::telemetry::outbox::Outbox;
+use mvm_core::protocol::telemetry::{
+    CoverageState, MAX_RECORD_BYTES, RecordBody, SourceKind, TELEMETRY_PORT,
+};
 
 use crate::globals::SHUTDOWN_REQUESTED;
 use crate::transport::{accept_vsock, bind_vsock_listener, unix_transport_selected};
@@ -46,11 +52,44 @@ fn telemetry_asserted(cmdline: &str) -> bool {
         .any(|tok| tok == TELEMETRY_CMDLINE_TOKEN)
 }
 
-/// Spawn the telemetry accept thread. Must be called only after PID-1
-/// activation: the thread is created here, and activation's credential
-/// transition is per-thread at the kernel boundary.
-pub(crate) fn spawn_telemetry_listener() {
-    // Opt-in: an unreadable cmdline asserts nothing, so nothing spawns.
+/// The agent's capture queue: slots × the record ceiling. 128 slots (4 MiB,
+/// paid at construction) — half the contract's 256-slot ceiling, sized for
+/// diagnostics rather than stdio floods.
+const CAPTURE_RECORDS: usize = 128;
+
+/// The process capture state, present only on telemetry-asserted boots.
+static CAPTURE: OnceLock<Arc<CaptureState>> = OnceLock::new();
+
+/// One agent-diagnostics coverage emission; the record is queued and rides
+/// the next session. A shed is already counted by the capture state.
+fn emit_coverage(state: &CaptureState, coverage: CoverageState, code: &str) {
+    let Ok(code) = code.try_into() else { return };
+    let _ = state.emit(
+        SourceKind::GuestAgent,
+        ProducerId::AgentDiagnostics,
+        RecordBody::Coverage {
+            state: coverage,
+            code,
+        },
+    );
+}
+
+/// Emit the clean-stop coverage mark, if capture is live. Called from the
+/// shutdown path: one non-waiting offer, never a join or flush.
+pub(crate) fn emit_stopped() {
+    if let Some(state) = CAPTURE.get() {
+        emit_coverage(state, CoverageState::Stopped, "guest-agent");
+    }
+}
+
+/// Initialize guest telemetry: install the capture subscriber and spawn the
+/// accept thread. Must be called only after PID-1 activation — a thread is
+/// created here, and activation's credential transition is per-thread at the
+/// kernel boundary. The subscriber installs before the listener spawns, so
+/// no session can observe a half-initialized capture path.
+pub(crate) fn init_telemetry() {
+    // Opt-in: an unreadable cmdline asserts nothing, so nothing installs
+    // and nothing spawns — a non-provisioned boot runs byte-identically.
     let asserted = std::fs::read_to_string("/proc/cmdline")
         .map(|cmdline| telemetry_asserted(&cmdline))
         .unwrap_or(false);
@@ -61,17 +100,38 @@ pub(crate) fn spawn_telemetry_listener() {
         // Container tier: no vsock, no telemetry listener (module docs).
         return;
     }
-    std::thread::spawn(|| {
+    let Ok(outbox) = Outbox::new(CAPTURE_RECORDS, CAPTURE_RECORDS * MAX_RECORD_BYTES) else {
+        eprintln!("mvm-guest-agent: telemetry capture queue construction failed");
+        return;
+    };
+    let Ok(state) = CaptureState::new(Arc::new(outbox)) else {
+        eprintln!("mvm-guest-agent: telemetry capture state construction failed");
+        return;
+    };
+    let state = Arc::new(state);
+    if CAPTURE.set(Arc::clone(&state)).is_err() {
+        return;
+    }
+    // Diagnostics emitted from here on are captured; the tracing-core-only
+    // subscriber keeps the sealed closure unchanged. An install failure
+    // (another global subscriber — impossible in this bin) leaves the agent
+    // exactly as before: emitting into the void, listener still serving.
+    if tracing::subscriber::set_global_default(AgentSubscriber::new(Arc::clone(&state))).is_err() {
+        eprintln!("mvm-guest-agent: telemetry subscriber install failed");
+    }
+    emit_coverage(&state, CoverageState::Started, "guest-agent");
+    std::thread::spawn(move || {
         let fd = match bind_vsock_listener(TELEMETRY_PORT) {
             Ok(fd) => fd,
             Err(e) => {
                 eprintln!(
                     "mvm-guest-agent: telemetry listener bind failed (port {TELEMETRY_PORT}): {e}"
                 );
+                emit_coverage(&state, CoverageState::Degraded, "listener-bind-failed");
                 return;
             }
         };
-        accept_loop(fd);
+        accept_loop(fd, &state);
     });
 }
 
@@ -80,7 +140,7 @@ pub(crate) fn spawn_telemetry_listener() {
 /// host ends the old session by closing it, which returns the loop here.
 /// Serving inline bounds this plane to one thread and one connection by
 /// construction.
-fn accept_loop(listener_fd: RawFd) {
+fn accept_loop(listener_fd: RawFd, capture: &CaptureState) {
     loop {
         if SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
             return;
@@ -91,9 +151,41 @@ fn accept_loop(listener_fd: RawFd) {
         // SAFETY: `cfd` is the just-accepted connection fd, owned here for
         // the session's lifetime and closed on drop.
         let mut stream = unsafe { std::fs::File::from_raw_fd(cfd) };
-        if serve_accepted(&mut stream, Path::new(KEY_DIR)) == Some(SessionEnd::Failed) {
+        // The liveness probe needs bounded reads, but only after the
+        // handshake — installed earlier the timeout races a slow dialer
+        // and fails the session spuriously (session module docs). The
+        // serve hook runs it at exactly the right moment.
+        let bound = |stream: &mut std::fs::File| {
+            use std::os::fd::AsRawFd as _;
+            set_read_timeout(stream.as_raw_fd());
+        };
+        if serve_accepted(&mut stream, Path::new(KEY_DIR), capture, bound)
+            == Some(SessionEnd::Failed)
+        {
             eprintln!("mvm-guest-agent: telemetry session failed");
         }
+    }
+}
+
+/// Bound reads on the accepted connection so the session's peer probe can
+/// distinguish an idle live host from a dead one. Best-effort: a socket that
+/// refuses the option still serves, with peer death observed at the next
+/// write instead.
+fn set_read_timeout(fd: RawFd) {
+    let timeout = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 25_000,
+    };
+    // SAFETY: fd is the just-accepted connection; the timeval is a local,
+    // correctly-sized value read once by the kernel.
+    unsafe {
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVTIMEO,
+            &timeout as *const libc::timeval as *const libc::c_void,
+            std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+        );
     }
 }
 
@@ -102,7 +194,12 @@ fn accept_loop(listener_fd: RawFd) {
 /// the connection was dropped before any handshake byte; the listener keeps
 /// serving either way. Split from [`accept_loop`] so a test can drive it
 /// over a socket pair with keys in a temp directory.
-fn serve_accepted<S: Read + Write>(stream: &mut S, key_dir: &Path) -> Option<SessionEnd> {
+fn serve_accepted<S: Read + Write>(
+    stream: &mut S,
+    key_dir: &Path,
+    capture: &CaptureState,
+    bound_reads: impl FnOnce(&mut S),
+) -> Option<SessionEnd> {
     let signing_key = match load_guest_signing_key(key_dir) {
         Ok(key) => key,
         Err(e) => {
@@ -117,7 +214,14 @@ fn serve_accepted<S: Read + Write>(stream: &mut S, key_dir: &Path) -> Option<Ses
             return None;
         }
     };
-    Some(serve_telemetry_connection(stream, signing_key, &anchor))
+    Some(serve_capture_session(
+        stream,
+        signing_key,
+        &anchor,
+        capture,
+        &SHUTDOWN_REQUESTED,
+        bound_reads,
+    ))
 }
 
 #[cfg(test)]
@@ -141,6 +245,19 @@ mod tests {
         assert!(!telemetry_asserted("mvm.telemetry=0"));
         assert!(!telemetry_asserted("mvm.telemetry=11"));
         assert!(!telemetry_asserted("xmvm.telemetry=1"));
+    }
+
+    fn test_capture() -> CaptureState {
+        let outbox = Arc::new(Outbox::new(8, 8 * MAX_RECORD_BYTES).unwrap());
+        CaptureState::new(outbox).unwrap()
+    }
+
+    /// The probe contract: reads become bounded after the handshake, via
+    /// the serve hook.
+    fn bound(stream: &mut UnixStream) {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(10)))
+            .unwrap();
     }
 
     fn provision_keys(dir: &Path) -> (SigningKey, SigningKey) {
@@ -188,7 +305,8 @@ mod tests {
         let (guest_key, anchor_key) = provision_keys(dir.path());
         let (mut guest, host) = UnixStream::pair().unwrap();
         let collector = host_side(host, anchor_key, guest_key.verifying_key());
-        let end = serve_accepted(&mut guest, dir.path());
+        let capture = test_capture();
+        let end = serve_accepted(&mut guest, dir.path(), &capture, bound);
         assert_eq!(end, Some(SessionEnd::PeerClosed));
         let record = collector.join().unwrap().expect("coverage record");
         match *record.body() {
@@ -204,7 +322,10 @@ mod tests {
     fn a_connection_before_keys_exist_is_dropped_without_a_handshake_byte() {
         let dir = tempfile::tempdir().unwrap();
         let (mut guest, mut host) = UnixStream::pair().unwrap();
-        assert_eq!(serve_accepted(&mut guest, dir.path()), None);
+        assert_eq!(
+            serve_accepted(&mut guest, dir.path(), &test_capture(), bound),
+            None
+        );
         drop(guest);
         // The guest side wrote nothing before dropping: the host's first
         // read is clean EOF, not a partial handshake.
@@ -222,7 +343,10 @@ mod tests {
         )
         .unwrap();
         let (mut guest, mut host) = UnixStream::pair().unwrap();
-        assert_eq!(serve_accepted(&mut guest, dir.path()), None);
+        assert_eq!(
+            serve_accepted(&mut guest, dir.path(), &test_capture(), bound),
+            None
+        );
         drop(guest);
         let mut buf = [0u8; 1];
         assert_eq!(host.read(&mut buf).unwrap(), 0);
@@ -234,6 +358,9 @@ mod tests {
         std::fs::write(dir.path().join(GUEST_SIGNING_KEY_FILE), b"short").unwrap();
         std::fs::write(dir.path().join(HOST_SIGNER_PUB_FILE), [22u8; 32]).unwrap();
         let (mut guest, _host) = UnixStream::pair().unwrap();
-        assert_eq!(serve_accepted(&mut guest, dir.path()), None);
+        assert_eq!(
+            serve_accepted(&mut guest, dir.path(), &test_capture(), bound),
+            None
+        );
     }
 }

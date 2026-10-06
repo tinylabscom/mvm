@@ -299,7 +299,7 @@ fn locate_debugfs() -> Option<std::path::PathBuf> {
 /// `debugfs -R "cat <guest_path>" <image>`; `Ok(None)` when the guest
 /// path is absent from the image.
 fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<String>> {
-    let output = std::process::Command::new(debugfs)
+    let output = mvm_core::env_hygiene::helper_command(debugfs)
         .args(["-R", &format!("cat {guest_path}")])
         .arg(image)
         .output()

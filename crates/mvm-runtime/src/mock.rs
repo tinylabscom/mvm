@@ -144,6 +144,7 @@ impl MockBackend {
                 created_unix: mvm_core::time::now_unix_secs(),
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .map_err(|e| StandbyError::SpawnFailed(format!("capture mock standby parent: {e}")))?;

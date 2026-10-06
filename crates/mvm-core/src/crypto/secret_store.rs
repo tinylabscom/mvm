@@ -46,8 +46,7 @@
 //!   service handles fleets.
 
 use std::fs;
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -189,25 +188,11 @@ impl SecretStore for FileSecretStore {
     fn put(&self, tenant: &str, name: &str, value: &SecretBox<String>) -> Result<()> {
         self.ensure_tenant_dir(tenant)?;
         let path = self.secret_path(tenant, name)?;
-        let tmp = path.with_extension("tmp");
-        {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)
-                .with_context(|| format!("creating {}", tmp.display()))?;
-            let key = self.load_or_init_key()?;
-            let encoded =
-                encrypt_file_secret(value.expose_secret().as_bytes(), key.expose_secret())
-                    .context("encrypting secret for file store")?;
-            f.write_all(&encoded)
-                .with_context(|| format!("writing {}", tmp.display()))?;
-            f.sync_all().ok();
-        }
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("atomic rename {} → {}", tmp.display(), path.display()))?;
+        let key = self.load_or_init_key()?;
+        let encoded = encrypt_file_secret(value.expose_secret().as_bytes(), key.expose_secret())
+            .context("encrypting secret for file store")?;
+        crate::atomic_io::write_private(&path, &encoded)
+            .with_context(|| format!("writing secret {}", path.display()))?;
         Ok(())
     }
 
@@ -323,21 +308,15 @@ fn file_store_keyring_entry(user: &str) -> Result<keyring::Entry> {
     }
 }
 
+/// Load the file-backed store key, minting it on first use.
+///
+/// Concurrent first uses agree on one key: the key file is published whole
+/// and without replacing an existing one, and every caller reads back what is
+/// on disk. A process that loses that race never encrypts a secret under a
+/// key nobody else can find.
 fn load_or_init_file_key(path: &Path) -> Result<SecretBox<Vec<u8>>> {
-    match fs::metadata(path) {
-        Ok(meta) => {
-            let mode = meta.permissions().mode() & 0o777;
-            if mode != 0o600 {
-                anyhow::bail!(
-                    "secret-store key {} has mode 0{mode:o}; require 0600",
-                    path.display()
-                );
-            }
-            let key = fs::read(path)
-                .with_context(|| format!("reading secret-store key {}", path.display()))?;
-            validate_file_store_key_len(&key)?;
-            Ok(SecretBox::new(Box::new(key)))
-        }
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)
@@ -345,23 +324,37 @@ fn load_or_init_file_key(path: &Path) -> Result<SecretBox<Vec<u8>>> {
                 fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
                     .with_context(|| format!("chmod 0700 {}", parent.display()))?;
             }
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("stat secret-store key {}", path.display()));
+        }
+    }
+    crate::atomic_io::load_or_create_private(
+        path,
+        || {
             let mut key = Zeroizing::new(vec![0u8; snapshot_crypto::KEY_SIZE]);
             rand::rng().fill_bytes(&mut key);
-            {
-                let mut f = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(path)
-                    .with_context(|| format!("creating secret-store key {}", path.display()))?;
-                f.write_all(&key)
-                    .with_context(|| format!("writing secret-store key {}", path.display()))?;
-                f.sync_all().ok();
-            }
-            Ok(SecretBox::new(Box::new(key.to_vec())))
-        }
-        Err(e) => Err(e).with_context(|| format!("stat secret-store key {}", path.display())),
+            key
+        },
+        load_file_key,
+    )
+}
+
+/// Read an existing store key, refusing one anyone but the owner can read.
+fn load_file_key(path: &Path) -> Result<SecretBox<Vec<u8>>> {
+    let meta =
+        fs::metadata(path).with_context(|| format!("stat secret-store key {}", path.display()))?;
+    let mode = meta.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        anyhow::bail!(
+            "secret-store key {} has mode 0{mode:o}; require 0600",
+            path.display()
+        );
     }
+    let key =
+        fs::read(path).with_context(|| format!("reading secret-store key {}", path.display()))?;
+    validate_file_store_key_len(&key)?;
+    Ok(SecretBox::new(Box::new(key)))
 }
 
 fn validate_file_store_key_len(key: &[u8]) -> Result<()> {
@@ -478,23 +471,9 @@ impl KeyringSecretStore {
             fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
                 .with_context(|| format!("chmod 0700 {}", parent.display()))?;
         }
-        let tmp = path.with_extension("json.tmp");
         let json = serde_json::to_vec_pretty(names).context("serialize index")?;
-        {
-            let mut f = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp)
-                .with_context(|| format!("creating {}", tmp.display()))?;
-            f.write_all(&json)
-                .with_context(|| format!("writing {}", tmp.display()))?;
-            f.sync_all().ok();
-        }
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("atomic rename {} → {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::atomic_io::write_private(&path, &json)
+            .with_context(|| format!("writing {}", path.display()))
     }
 }
 

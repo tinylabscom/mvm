@@ -46,7 +46,7 @@ pub enum L4Decision {
     Allow,
     /// No rule matched; default-deny fired. The `reason` carries a
     /// human-readable explanation suitable for the audit sink and
-    /// for the operator's `mvmctl audit tail` output.
+    /// for the operator's `mvmctl trust audit tail` output.
     Deny { reason: String },
 }
 

@@ -330,7 +330,7 @@ fn run_veritysetup_format(
         .veritysetup_binary
         .as_deref()
         .unwrap_or_else(|| Path::new("veritysetup"));
-    let mut cmd = std::process::Command::new(binary);
+    let mut cmd = mvm_core::env_hygiene::helper_command(binary);
     cmd.arg("format")
         .arg(format!("--data-block-size={}", options.data_block_size))
         .arg(format!("--hash-block-size={}", options.hash_block_size))

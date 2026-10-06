@@ -24,7 +24,7 @@ use crate::ui;
 ///
 /// Security-relevant outcomes (everything except `network`, which is
 /// operational) also emit a `LocalAuditKind::ImageVerifyFailed` event
-/// so `mvmctl audit tail` shows the rejection. The counter is the
+/// so `mvmctl trust audit tail` shows the rejection. The counter is the
 /// alerting channel; the audit line is the forensics channel.
 #[cfg(test)]
 pub(super) fn bump_verify_outcome(outcome: &str) {
@@ -289,7 +289,7 @@ fn download_to(url: &str, dest: &std::path::Path) -> Result<()> {
 
 /// Download a file from a URL using curl, resuming a partial `dest`.
 pub(crate) fn download_file(url: &str, dest: &str) -> Result<()> {
-    let status = std::process::Command::new("curl")
+    let status = mvm_core::env_hygiene::helper_command("curl")
         .args(curl_download_args(dest, url))
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

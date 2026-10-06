@@ -53,6 +53,20 @@ fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("substitution-endpoint");
+    // A machine that outlives its launcher gets a keeper between the two: this
+    // same binary, started with the VM's state directory, running the real
+    // endpoint as its child for as long as the VM runs. The keeper never reads
+    // stdin, so the endpoint below receives the launcher's config untouched.
+    if let Some(vm_state_dir) = mvm_hostd::vm_lifetime::requested_vm_state_dir(std::env::args_os())?
+    {
+        let endpoint = mvm_core::env_hygiene::helper_command(
+            std::env::current_exe().context("locating the endpoint binary to keep")?,
+        );
+        std::process::exit(mvm_hostd::vm_lifetime::keep_endpoint_for_vm(
+            endpoint,
+            &vm_state_dir,
+        ));
+    }
     // This process holds the workload's secrets in the clear; a backend that
     // died must not leave it serving as an orphan. Exit the instant the parent
     // is gone (macOS / SIGKILL gap the spawn-side attach misses).
@@ -169,6 +183,22 @@ fn main() -> Result<()> {
     );
 
     runtime.block_on(async move {
+        // The embedded telemetry collector starts after confinement so its
+        // threads inherit the confined policy; its state-dir grant is part
+        // of the confinement spec. It lives and dies with this process —
+        // nothing here stops or joins it. A collector that cannot start costs
+        // this VM its telemetry, never its egress: the ready handshake has
+        // already gone out and the guest is booting against this process.
+        let _telemetry = cfg.telemetry.as_ref().and_then(|telemetry| {
+            mvm_hostd::telemetry_collector::start_embedded(&cfg.instance_id, telemetry)
+                .inspect_err(|error| {
+                    warn!(
+                        error = format!("{error:#}"),
+                        "embedded telemetry collector did not start; serving without it"
+                    );
+                })
+                .ok()
+        });
         serve(
             ServeParams::builder()
                 .cfg(&cfg)
@@ -566,6 +596,7 @@ fn confine_endpoint(cfg: &EndpointConfig, runtime: &tokio::runtime::Handle) -> R
         resolver_uds_path(cfg),
     )
     .with_session_marker_parent(session_marker_parent)
+    .with_telemetry_state(cfg.telemetry.as_ref().map(|t| t.state_dir.as_path()))
     .with_approval_socket_parent(
         cfg.approval_socket
             .as_deref()
@@ -1271,6 +1302,7 @@ mod tests {
 
     fn uds_cfg() -> EndpointConfig {
         EndpointConfig {
+            telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
             secrets: Vec::new(),
@@ -1310,6 +1342,7 @@ mod tests {
     /// matter — this test never spawns or serves.
     fn config_with_resolver(resolver: ResolverBackend) -> EndpointConfig {
         EndpointConfig {
+            telemetry: None,
             tenant_id: "acme".into(),
             instance_id: "test".into(),
             secrets: vec![],
@@ -1797,6 +1830,7 @@ mod tests {
         let host_key = [1u8; 32];
         let guest_key = [2u8; 32];
         let cfg = EndpointConfig {
+            telemetry: None,
             tenant_id: "tenant".into(),
             instance_id: "test".into(),
             secrets: Vec::new(),

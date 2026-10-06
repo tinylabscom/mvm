@@ -51,6 +51,28 @@ cp "$SCRIPT_DIR/worker.js" "$DEST_DIR/worker.js"
 # behavior.
 gzip -9 -n "$DEST_DIR/qemu-system-x86_64.wasm"
 
+# Emscripten's preload bundle can also exceed the Worker's 25 MiB static-asset
+# limit as the guest image grows. Split it into deterministic 20 MiB parts and
+# publish a manifest that the worker uses to reconstruct the original
+# ArrayBuffer before loading pack.js. The original is deliberately removed so a
+# deployment can never accidentally include the oversized file as well.
+PACK_DATA="$DEST_DIR/pack.data"
+PACK_PART_PREFIX="pack.data.part-"
+PACK_PART_BYTES=$((20 * 1024 * 1024))
+PACK_DATA_SIZE="$(wc -c < "$PACK_DATA" | tr -d '[:space:]')"
+split -b "$PACK_PART_BYTES" -d -a 3 "$PACK_DATA" "$DEST_DIR/$PACK_PART_PREFIX"
+rm "$PACK_DATA"
+
+{
+  printf '{"size":%s,"parts":[' "$PACK_DATA_SIZE"
+  separator=""
+  for part in "$DEST_DIR"/"$PACK_PART_PREFIX"*; do
+    printf '%s"%s"' "$separator" "$(basename "$part")"
+    separator=","
+  done
+  printf ']}\n'
+} > "$DEST_DIR/pack.data.parts.json"
+
 # The standalone index.html is also kept in the destination so the demo can
 # be served directly (e.g. with web/weblinux-demo/serve.py) without Astro.
 # Astro's src/pages/demo/weblinux.astro renders the same HTML with COOP/COEP

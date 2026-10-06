@@ -114,7 +114,6 @@ fn builder_vm_artifact_names_match_release_workflow() {
     assert_eq!(n.checksums, "builder-vm-x86_64-checksums-sha256.txt");
 }
 
-#[cfg(feature = "builder-vm")]
 #[test]
 fn first_nameserver_from_resolv_conf_ignores_comments_and_invalid_lines() {
     let body = "\
@@ -130,14 +129,12 @@ nameserver 10.0.0.3
     );
 }
 
-#[cfg(feature = "builder-vm")]
 #[test]
 fn first_nameserver_from_resolv_conf_none_when_absent() {
     let body = "search example.internal\noptions timeout:1\n";
     assert_eq!(bootstrap::first_nameserver_from_resolv_conf(body), None);
 }
 
-#[cfg(feature = "builder-vm")]
 #[test]
 fn stage0_build_conf_contents_emits_workspace_archive_offline_and_overrides() {
     let with_workspace = bootstrap::stage0_build_conf_contents(
