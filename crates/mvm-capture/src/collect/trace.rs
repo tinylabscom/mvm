@@ -113,7 +113,7 @@ fn read_limited(path: &Path, max_bytes: u64) -> std::io::Result<Vec<u8>> {
 fn build_trace_command(command: &[String], output_path: &Path, max_seconds: u64) -> Command {
     let has_timeout = which::which("timeout").is_ok();
     if has_timeout {
-        let mut cmd = Command::new("timeout");
+        let mut cmd = mvm_core::env_hygiene::helper_command("timeout");
         cmd.arg("--signal=KILL")
             .arg("--kill-after=1s")
             .arg(format!("{}", max_seconds))
@@ -129,7 +129,7 @@ fn build_trace_command(command: &[String], output_path: &Path, max_seconds: u64)
             .args(command);
         cmd
     } else {
-        let mut cmd = Command::new("strace");
+        let mut cmd = mvm_core::env_hygiene::helper_command("strace");
         cmd.arg("-f")
             .arg("-e")
             .arg("trace=openat,open,connect,execve,execveat")

@@ -195,6 +195,7 @@ pub const GATES: &[Gate] = &[
         crate::check_image_reproducibility::run,
     ),
     ("check-closure-budget", crate::check_closure_budget::run),
+    ("check-publish-readiness", crate::publish_plan::run_check),
     (
         "check-workspace-dep-inheritance",
         crate::check_workspace_dep_inheritance::run,

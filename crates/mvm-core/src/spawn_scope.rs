@@ -650,7 +650,7 @@ pub fn bind_spawn(
 /// checking before handing it over. [`bind_spawn`] is that caller.
 fn wrap_checked(cmd: Command, launcher: &Path, scope_id: &str, limits: &ScopeLimits) -> Command {
     let prefix = scope_prefix(launcher, scope_id, limits);
-    let mut wrapped = Command::new(&prefix[0]);
+    let mut wrapped = crate::env_hygiene::helper_command(&prefix[0]);
     wrapped.args(&prefix[1..]);
     wrapped.arg(cmd.get_program());
     wrapped.args(cmd.get_args());
@@ -709,7 +709,7 @@ fn await_detached_launcher_within(
         if probe_launcher_comm(proc_root, pid, &mut LauncherComm::default()).ok()
             == Some(LauncherProbe::Launching)
         {
-            let _ = Command::new("kill")
+            let _ = crate::env_hygiene::helper_command("kill")
                 .args(["-KILL", &pid.to_string()])
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -1007,7 +1007,7 @@ impl ScopeProbe {
     /// `systemctl --user show <unit> -p <property>…`, as its `Key=value` lines,
     /// bounded by [`SCOPE_QUERY_TIMEOUT`].
     fn systemctl_show(&self, unit: &str, properties: &[&str]) -> Option<String> {
-        let mut cmd = Command::new(&self.systemctl);
+        let mut cmd = crate::env_hygiene::helper_command(&self.systemctl);
         cmd.args(["--user", "show", unit]);
         for property in properties {
             cmd.args(["-p", property]);

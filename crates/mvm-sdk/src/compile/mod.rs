@@ -59,8 +59,11 @@ pub use flake::build_flake_nix;
 pub use func_describe::{FuncDescribeError, describe_function, resolve_module_path};
 pub use hooks::merge_hooks;
 pub use launch::{ARTIFACT_FORMAT_VERSION, FLAKE_ATTRIBUTE, TOOLCHAIN_VERSION, build_launch_json};
-pub use mvm_pin::{default_mvm_flake_url, resolved_mvm_flake_url};
-pub use orchestrator::{CompileError, compile, compile_archive, is_archive_output};
+pub use mvm_pin::{PinnedMvmRevision, default_mvm_flake_url, resolved_mvm_flake_url};
+pub use orchestrator::{
+    CompileError, compile, compile_archive, compile_archive_pinned, compile_pinned,
+    is_archive_output,
+};
 pub use reachability::{
     Language, NODE_EXTS, PYTHON_EXTS, ReachabilityError, detect_language, discover_node_reachable,
     discover_python_reachable,

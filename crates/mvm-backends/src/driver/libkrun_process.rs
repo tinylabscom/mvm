@@ -380,8 +380,8 @@ pub fn build_workload_krun_context(
         .with_console_output(vm_console_log(&config.name).display().to_string());
     krun = attach_workload_rootfs(krun, config);
 
-    // A dev-accessible managed machine (`machine run -t` / `machine shell` /
-    // `up --console`) pre-opens the interactive-console data range. libkrun
+    // A dev-accessible managed machine (`machine run -t` / `machine shell`)
+    // pre-opens the interactive-console data range. libkrun
     // binds one host UDS listener per registered port (`listen=true`, host
     // dials → guest's vsock server), so the agent's dynamic
     // `CONSOLE_PORT_BASE + session_id` data port is unreachable unless it was

@@ -63,10 +63,11 @@ pub(in crate::commands) enum Cmd {
     /// console — the underlying microVM is held warm by the session.
     /// Refused on prod-mode sessions.
     Console(ConsoleArgs),
-    /// Reap idle sessions: tear down the VM and mark each record
-    /// `state = Reaped`. Most session verbs already do an opportunistic
-    /// reap before their own work; this verb is for cron / explicit
-    /// cleanup. Idempotent.
+    /// Reap idle sessions: tear down the VM, mark each record
+    /// `state = Reaped`, and seal its audit chain. The per-VM supervisor
+    /// does this on its own on libkrun and HVF, and most session verbs
+    /// sweep before their own work; this verb is for an explicit sweep on
+    /// the backends with no supervisor. Idempotent.
     Reap(ReapArgs),
 }
 
@@ -191,10 +192,7 @@ pub(in crate::commands) struct StartArgs {
     /// Memory for the booted VM (MiB). Default 512.
     #[arg(long, default_value = "512")]
     pub memory_mib: u32,
-    /// Idle timeout (seconds) baked into the session record. Reapers
-    /// (when implemented) consult this value; a follow-up
-    /// `session set-timeout` call can update it. Default 300 (5
-    /// minutes).
+    /// Seconds the session may sit idle before it is stopped.
     #[arg(long, default_value_t = mvm_core::session::DEFAULT_IDLE_TIMEOUT_SECS)]
     pub idle_timeout: u64,
     /// Tear the session down automatically after the next attach

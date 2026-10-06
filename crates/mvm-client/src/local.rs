@@ -1327,26 +1327,30 @@ impl MvmClient for LocalBackend {
                 .map_err(|e| backend_err(format!("primed barrier for VM {name:?}: {e:#}")))?;
         }
 
-        if !Self::uses_sealed_snapshot(&backend) {
+        let outcome = if Self::uses_sealed_snapshot(&backend) {
+            let io = self.snapshot_io_for(&backend, name)?;
+            let sidecar = pause_and_seal(name, &*io)
+                .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
+            write_fc_paused_marker(name)?;
+            set_registry_paused(name, true)?;
+            PauseOutcome {
+                epoch: sidecar.epoch,
+                vmstate_len: sidecar.vmstate_len,
+                mem_len: sidecar.mem_len,
+            }
+        } else {
             backend
                 .pause(&VmId(name.clone()))
                 .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
             set_registry_paused(name, true)?;
-            return Ok(PauseOutcome::default());
-        }
-
-        let io = self.snapshot_io_for(&backend, name)?;
-        let sidecar = pause_and_seal(name, &*io)
-            .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
-
-        write_fc_paused_marker(name)?;
-        set_registry_paused(name, true)?;
-
-        Ok(PauseOutcome {
-            epoch: sidecar.epoch,
-            vmstate_len: sidecar.vmstate_len,
-            mem_len: sidecar.mem_len,
-        })
+            PauseOutcome::default()
+        };
+        // Recorded here, like the resume's `WorkloadWake`, so a pause from any
+        // surface leaves the same entry.
+        mvm_core::audit_emit!(WorkloadSleep, vm: name, "epoch={} vmstate={} mem={}",
+            outcome.epoch, outcome.vmstate_len, outcome.mem_len
+        );
+        Ok(outcome)
     }
 
     async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
@@ -1372,7 +1376,13 @@ impl MvmClient for LocalBackend {
     }
 
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
-        set_machine_expiry(&id.0, expires_at)
+        let detail = match &expires_at {
+            Some(at) => format!("expires_at={at}"),
+            None => "expires_at=cleared".to_string(),
+        };
+        set_machine_expiry(&id.0, expires_at)?;
+        mvm_core::audit_emit!(VmTtlSet, vm: &id.0, "{detail}");
+        Ok(())
     }
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
@@ -2624,6 +2634,44 @@ mod tests {
         be.resume_machine(&id, ResumeOpts::default())
             .await
             .expect("resume verifies the sealed envelope and restores");
+
+        // The client records both halves, so a pause from any surface is
+        // audited exactly as a resume is.
+        let log = audit_log();
+        assert!(log.contains("\"workload_sleep\""), "{log}");
+        assert!(
+            log.contains(&format!("epoch={} vmstate=", outcome.epoch)),
+            "{log}"
+        );
+        assert!(log.contains("\"workload_wake\""), "{log}");
+    }
+
+    /// Setting or clearing a TTL is recorded by the client, so a TTL set
+    /// through the host library is audited like one set by the CLI; an
+    /// unregistered machine changes nothing and records nothing.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn set_ttl_records_the_expiry_it_set_and_cleared() {
+        let _data = IsolatedDataDir::new();
+        register("vm-ttl");
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("vm-ttl".into());
+
+        be.set_ttl(&id, Some("2030-01-02T03:04:05Z".into()))
+            .await
+            .expect("a registered machine takes a TTL");
+        be.set_ttl(&id, None).await.expect("and drops it");
+        let log = audit_log();
+        assert_eq!(log.matches("\"vm_ttl_set\"").count(), 2, "{log}");
+        assert!(log.contains("expires_at=2030-01-02T03:04:05Z"), "{log}");
+        assert!(log.contains("expires_at=cleared"), "{log}");
+
+        let missing = be
+            .set_ttl(&MachineId("vm-absent".into()), None)
+            .await
+            .expect_err("an unregistered machine is refused");
+        assert!(matches!(missing, MvmError::NotFound { .. }), "{missing:?}");
+        assert_eq!(audit_log().matches("\"vm_ttl_set\"").count(), 2);
     }
 
     /// A plain resume restores only a machine the registry records as paused,

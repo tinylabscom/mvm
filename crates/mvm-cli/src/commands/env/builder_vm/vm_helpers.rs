@@ -383,7 +383,7 @@ impl ProcSnapshot {
         mvm_core::launch_trace::record_process_table_scan();
         let mut parents = std::collections::HashMap::new();
         let mut cmds = Vec::new();
-        let Ok(out) = std::process::Command::new("ps")
+        let Ok(out) = mvm_core::env_hygiene::helper_command("ps")
             .args(["-axww", "-o", "pid=,ppid=,command="])
             .output()
         else {

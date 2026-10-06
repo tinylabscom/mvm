@@ -146,10 +146,9 @@ pub enum BundleMember {
 /// Old (`schema_version = 1`) bundles deserialise with `None` and
 /// the template loader defaults to operator config.
 ///
-/// Both fields are advisory: `mvmctl up --cpus / --memory`
-/// overrides them. The point is to let a bundle ship with sensible
-/// resource expectations baked in so dev-laptop users don't have
-/// to remember the right values.
+/// Both fields are advisory. Nothing reads them back at boot today:
+/// the boot's own `--cpus` / `--memory` (or their defaults) decide.
+/// They record what the publisher expected the workload to need.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BundleResources {
@@ -224,9 +223,8 @@ pub struct BundleManifest {
     pub verity: Option<VerityInfo>,
     /// Advisory resource expectations recorded by the publisher at
     /// build time. `Some(...)` in v2+ bundles; `None` for v1
-    /// bundles (handled via `#[serde(default)]`). The template
-    /// loader uses these to set defaults when `mvmctl up` doesn't
-    /// pass `--cpus` / `--memory` explicitly. The claim-9 re-verify
+    /// bundles (handled via `#[serde(default)]`). No boot path reads
+    /// them as defaults today. The claim-9 re-verify
     /// still re-hashes the field as part of the manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<BundleResources>,

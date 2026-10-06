@@ -1,0 +1,5 @@
+[overrides.tools]
+allow = ["shell"]
+
+[overrides.tools.detail.shell]
+argv = ["sh -c *"]

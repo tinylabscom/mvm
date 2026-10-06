@@ -130,12 +130,8 @@ manifest-verify = [
     "dep:sigstore-trust-root",
     "dep:sigstore-types",
 ]
-# Hardware attestation provider stubs — each enables
-# the corresponding `crypto::attestation::provider` impl.
+# TPM2 hardware attestation provider (`crypto::attestation::tpm2`). Linux only.
 attestation-tpm2 = ["dep:tss-esapi"]
-attestation-sev-snp = []
-attestation-tdx = []
-attestation-apple-device = []
 # Derive `schemars::JsonSchema` on the protocol types the
 # host↔guest RPC surface embeds (`AgentProfile`, `BackpressureReason`), so
 # `mvm-agentd`'s `emit_protocol_schema` bin can emit the protocol schema.

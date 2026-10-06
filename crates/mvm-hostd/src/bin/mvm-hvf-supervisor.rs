@@ -29,7 +29,7 @@ const HVF_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn exe_has_hypervisor_entitlement(exe: &std::path::Path) -> bool {
-    std::process::Command::new("codesign")
+    mvm_core::env_hygiene::helper_command("codesign")
         .args(["-d", "--entitlements", "-", "--xml"])
         .arg(exe)
         .output()
@@ -92,7 +92,6 @@ fn record_signed_marker(exe: &std::path::Path) {
 fn ensure_self_signed() {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
-    use std::process::Command;
 
     if std::env::var("MVM_HVF_SIGNED").as_deref() == Ok("1") {
         return;
@@ -130,7 +129,7 @@ fn ensure_self_signed() {
         if std::fs::write(&ent, HVF_ENTITLEMENTS_PLIST).is_err() {
             return;
         }
-        let output = Command::new("codesign")
+        let output = mvm_core::env_hygiene::helper_command("codesign")
             .args(["--sign", "-", "--force", "--entitlements"])
             .arg(&ent)
             .arg(&exe)
@@ -151,7 +150,7 @@ fn ensure_self_signed() {
     }
     drop(lock);
 
-    let err = Command::new(&exe)
+    let err = mvm_core::env_hygiene::helper_command(&exe)
         .args(std::env::args_os().skip(1))
         .env("MVM_HVF_SIGNED", "1")
         .exec();
@@ -362,20 +361,28 @@ fn main() -> anyhow::Result<()> {
     // bearing boot with nowhere to record it is refused rather than booted
     // unbounded — same fail-closed posture as an unauditable kill.
     let _wall_clock = match cfg.pid_file.parent() {
-        Some(vm_state_dir) => match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
-            mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+        Some(vm_state_dir) => {
+            let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
                 plan_json: cfg.plan.as_ref(),
                 audit_dir: cfg.audit_dir.as_deref(),
                 signing_key_path: cfg.signing_key_path.as_deref(),
                 vm_state_dir,
-            },
-        ) {
-            Ok(guard) => guard,
-            Err(e) => {
-                eprintln!("supervisor: refusing to boot a bounded workload it cannot audit: {e}");
-                std::process::exit(7);
-            }
-        },
+            };
+            let guard = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(timer_inputs) {
+                Ok(guard) => guard,
+                Err(e) => {
+                    eprintln!(
+                        "supervisor: refusing to boot a bounded workload it cannot audit: {e}"
+                    );
+                    std::process::exit(7);
+                }
+            };
+            // A session's idle timeout, for the same reason as the wall clock:
+            // no client is left to enforce it once the one that started the
+            // session has exited.
+            mvm_hostd::supervisor::session_expiry::arm_for_supervisor(&timer_inputs);
+            guard
+        }
         None if cfg.plan.is_some() => {
             eprintln!(
                 "supervisor: refusing to boot a plan-bearing workload whose pid file {} has no \
@@ -531,6 +538,8 @@ fn spawn_owned_builder_endpoint(
         mvm_vmm::host::network_endpoint_spawn::SubstitutionSpawnParams {
             vm_name: &endpoint.vm_name,
             state_dir: &endpoint.state_dir,
+            // This supervisor is the builder VM, so its own life is the VM's.
+            lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Launcher,
             tenant: "builder",
             secrets: &[],
             redaction: &mvm_core::policy::RedactionPolicy::default(),

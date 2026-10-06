@@ -133,6 +133,20 @@ fn run_linux(args: Args) -> Result<()> {
         .iter()
         .map(|s| std::ffi::CString::new(s.as_str()).context("command argument contains a NUL byte"))
         .collect::<anyhow::Result<_>>()?;
+    // The audited command is a host process this one starts, so it gets the
+    // environment every helper gets: this process's, less the denied
+    // variables. Built before the fork, because the child may not allocate.
+    let envp_c: Vec<std::ffi::CString> =
+        mvm_core::env_hygiene::filtered_env(&mvm_core::env_hygiene::EnvReadmit::none())
+            .into_iter()
+            .map(|(name, value)| {
+                use std::os::unix::ffi::OsStringExt;
+                let mut pair = name.into_vec();
+                pair.push(b'=');
+                pair.extend(value.into_vec());
+                std::ffi::CString::new(pair).context("environment entry contains a NUL byte")
+            })
+            .collect::<anyhow::Result<_>>()?;
 
     // We fork manually instead of using std::process::Command so the child can
     // stop itself with SIGSTOP immediately after PTRACE_TRACEME, before the
@@ -150,9 +164,9 @@ fn run_linux(args: Args) -> Result<()> {
                 // Do not leak unrelated file descriptors into the audited command.
                 close_non_stdio_fds();
                 nix::sys::signal::raise(Signal::SIGSTOP).context("raise(SIGSTOP) failed")?;
-                match nix::unistd::execvp(&program_c, &argv_c) {
+                match nix::unistd::execvpe(&program_c, &argv_c, &envp_c) {
                     Ok(never) => match never {},
-                    Err(error) => Err(error).context("execvp failed"),
+                    Err(error) => Err(error).context("execvpe failed"),
                 }
             })() {
                 eprintln!("mvmctl seccomp-audit (child): {e:#}");

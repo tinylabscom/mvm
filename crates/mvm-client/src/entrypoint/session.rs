@@ -237,16 +237,23 @@ pub fn kill_session(raw_id: &str) -> Result<SessionRecord> {
     Ok(record)
 }
 
-/// Tear down every session whose idle timeout has lapsed and mark it
-/// `Reaped`, returning the ids reaped.
+/// Tear down every session whose idle timeout has lapsed, mark it `Reaped`,
+/// and seal its audit chain, returning the ids reaped.
 ///
-/// Best-effort throughout: one session's failure never stops the sweep. Each
-/// candidate is re-read before it is reaped, so a record that changed state in
-/// between (a call bumped it, another process killed it) is left for the next
-/// sweep.
+/// The per-VM supervisor enforces the same timeout on its own on the backends
+/// that have one; this sweep is what catches the rest when a session verb
+/// runs. Both claim a session through
+/// [`mvm_hostd::supervisor::session_expiry::claim_expired_session`], so a
+/// session is reaped and audited once whichever notices first.
+///
+/// The record is marked before the VM is torn down, as [`kill_session`]
+/// does: a call in flight that loses its connection then reads why.
+///
+/// Best-effort throughout: one session's failure never stops the sweep.
 #[must_use]
 pub fn reap_expired_sessions() -> Vec<SessionId> {
-    let candidates = match session::list_expired_session_ids(chrono::Utc::now()) {
+    let now = chrono::Utc::now();
+    let candidates = match session::list_expired_session_ids(now) {
         Ok(ids) => ids,
         Err(e) => {
             tracing::warn!(err = %e, "reap: failed to list candidates");
@@ -255,32 +262,22 @@ pub fn reap_expired_sessions() -> Vec<SessionId> {
     };
     let mut reaped = Vec::new();
     for id in candidates {
-        let record = match session::read_session(&id) {
-            Ok(Some(r)) if r.state == SessionState::Running => r,
-            Ok(_) => continue,
+        let record = match mvm_hostd::supervisor::session_expiry::claim_expired_session(&id, now) {
+            Ok(Some(record)) => record,
+            Ok(None) => continue,
             Err(e) => {
-                tracing::warn!(session = %id, err = %e, "reap: skip unreadable record");
+                tracing::warn!(session = %id, err = %e, "reap: could not claim session");
                 continue;
             }
         };
+        // Read before the teardown: the plan lives in the state dir it removes.
+        let plan = mvm_hostd::audit::plan_persist::read_plan(&record.vm_name).ok();
         tear_down_session_vm(SessionVm {
             vm_name: record.vm_name.clone(),
         });
-        if let Err(e) = session::update_session(&id, |r| {
-            r.state = SessionState::Reaped;
-            Ok(())
-        }) {
-            tracing::warn!(session = %id, err = %e, "reap: failed to mark Reaped");
-            continue;
+        if let Some(plan) = plan {
+            crate::launch::seal_stopped_session(&plan, &record.vm_name);
         }
-        audit_emit(
-            LocalAuditKind::SessionReap,
-            Some(&record.vm_name),
-            Some(&format!(
-                "session={id},idle_timeout_secs={}",
-                record.idle_timeout_secs
-            )),
-        );
         forget_call_lock(&id);
         reaped.push(id);
     }
@@ -510,6 +507,32 @@ mod tests {
             session_info(fresh.id.as_str()).expect("read").state,
             SessionState::Running
         );
+    }
+
+    #[test]
+    fn reaping_seals_the_expired_sessions_audit_chain_like_a_stop() {
+        let _home = isolated();
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+        let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(signer.signing).expect("chain");
+        emitter.emit_admitted(&plan, "host:test").expect("admitted");
+        emitter.emit_launched(&plan, "mock").expect("launched");
+
+        let mut stale = SessionRecord::new_running("vm-sealed", "wl", SessionMode::Prod);
+        stale.idle_timeout_secs = 60;
+        stale.started_at = (chrono::Utc::now() - chrono::Duration::seconds(900))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        session::write_session(&stale).expect("write");
+        mvm_hostd::audit::plan_persist::write_plan("vm-sealed", &plan).expect("persist plan");
+
+        assert_eq!(reap_expired_sessions(), vec![stale.id.clone()]);
+        let chain = std::fs::read_to_string(mvm_hostd::audit::emitter::audit_path_for_tenant(
+            &mvm_core::config::mvm_audit_dir(),
+            &plan.tenant.0,
+        ))
+        .expect("chain");
+        assert!(chain.contains("session.sealed"), "got: {chain}");
+        assert!(chain.contains("\"stopped\""), "got: {chain}");
     }
 
     #[test]

@@ -36,7 +36,6 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use mvm_sdk::compile::deps_audit::{
     FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeManifest, reseal_volume,
@@ -126,7 +125,7 @@ fn run_pip_audit(content_dir: &Path) -> Result<Vec<u8>> {
     // Re-audit against the venv at content_dir. pip-audit's
     // `--path <dir>` mode points it at an existing environment;
     // the deps volume's `content/` is exactly that.
-    let output = Command::new(&pip_audit)
+    let output = mvm_core::env_hygiene::helper_command(&pip_audit)
         .arg("--format=json")
         .arg("--path")
         .arg(content_dir)
@@ -158,7 +157,7 @@ fn run_pnpm_audit(content_dir: &Path) -> Result<Vec<u8>> {
     // back to content_dir and let pnpm complain — better than a
     // silent miss.
     let project = content_dir.parent().unwrap_or(content_dir);
-    let output = Command::new(&pnpm)
+    let output = mvm_core::env_hygiene::helper_command(&pnpm)
         .arg("audit")
         .arg("--json")
         .current_dir(project)

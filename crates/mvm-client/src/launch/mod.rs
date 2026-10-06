@@ -191,16 +191,12 @@ pub(crate) fn seal_stopped_session(plan: &mvm_core::plan::ExecutionPlan, machine
     let Some(emitter) = build_audit_emitter() else {
         return;
     };
-    if let Err(e) = emitter.seal_session(plan, mvm_hostd::audit::session::SealReason::Stopped) {
+    if let Err(e) = mvm_hostd::supervisor::session_expiry::seal_stopped_session(&emitter, plan) {
         tracing::warn!(
             error = %format!("{e:#}"),
             machine,
             "could not seal the stopped machine's session"
         );
-        return;
-    }
-    if let Err(e) = emitter.publish_root(&plan.tenant.0) {
-        tracing::warn!(error = %format!("{e:#}"), machine, "could not publish an audit root at stop");
     }
 }
 

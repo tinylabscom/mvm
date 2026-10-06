@@ -2252,6 +2252,11 @@ mod tests {
         // is the wrong type. Driving `admit_for_run` here keeps the fixture
         // shortcut the other tests use from drifting away from what admission
         // actually mints, and shows default-deny surviving the real path.
+        //
+        // Admission reads the grant ceiling and host budget from the host
+        // config under `MVM_HOME`, so this test has to own that home for the
+        // duration: other tests point it at hosts configured to refuse.
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let keys = tempfile::tempdir().expect("scratch keys dir");
         let vm = unique_vm("vm-real-admission");
 

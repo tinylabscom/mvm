@@ -62,7 +62,7 @@ mod default_microvm_tests {
     }
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod default_microvm_variant_tests {
     use super::DefaultMicrovmVariant;
 
@@ -814,7 +814,7 @@ mod reap_orphans_tests {
     }
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod heartbeat_tests {
     use super::format_compile_start;
 

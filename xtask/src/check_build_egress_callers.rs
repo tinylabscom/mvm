@@ -7,7 +7,7 @@
 //! and the constructor is deliberately one named, greppable symbol so every
 //! broad-egress grant is auditable.
 //!
-//! Its doc says: **never use it for a workload** (`mvmctl run`/`up`/`invoke`),
+//! Its doc says: **never use it for a workload** (`mvmctl run`, `mvmctl machine run`),
 //! which default to `deny_all`. That sentence is the whole of claim 10 for this
 //! constructor — and until this gate, nothing enforced it. A future workload
 //! path could call it and turn off default-deny egress with every test green,

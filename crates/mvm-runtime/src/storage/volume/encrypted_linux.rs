@@ -120,7 +120,7 @@ impl StorageProvider for EncryptedStorage {
         let mapper = Self::mapper_name(name);
 
         // luksOpen — a wrong DEK fails the keyslot here and surfaces as Err.
-        let mut open = Command::new("cryptsetup");
+        let mut open = mvm_core::env_hygiene::helper_command("cryptsetup");
         open.arg("luksOpen")
             .arg(handle.backing_path())
             .arg(&mapper)
@@ -135,7 +135,7 @@ impl StorageProvider for EncryptedStorage {
             let _ = close_mapper(&mapper);
             return Err(e.into());
         }
-        let mut mount = Command::new("mount");
+        let mut mount = mvm_core::env_hygiene::helper_command("mount");
         mount.arg(Self::mapper_dev(name)).arg(&mnt);
         if let Err(e) = check(mount, "mount") {
             let _ = close_mapper(&mapper);
@@ -148,7 +148,7 @@ impl StorageProvider for EncryptedStorage {
         // host_path is the mountpoint; the name recovers the mapper node. Always
         // attempt the luksClose even if umount failed, so a stuck mount doesn't
         // strand the mapper open.
-        let mut umount = Command::new("umount");
+        let mut umount = mvm_core::env_hygiene::helper_command("umount");
         umount.arg(attached.host_path());
         let umount_result = check(umount, "umount");
         let close_result = close_mapper(&Self::mapper_name(attached.name()));
@@ -163,7 +163,7 @@ impl EncryptedStorage {
     fn format_image(&self, name: &VolumeName, image: &Path) -> Result<(), VolumeError> {
         let key_file = write_key_tempfile(&self.key[..])?;
 
-        let mut format = Command::new("cryptsetup");
+        let mut format = mvm_core::env_hygiene::helper_command("cryptsetup");
         format
             .arg("luksFormat")
             .arg("--type")
@@ -177,7 +177,7 @@ impl EncryptedStorage {
         check(format, "cryptsetup luksFormat")?;
 
         let mapper = Self::mapper_name(name);
-        let mut open = Command::new("cryptsetup");
+        let mut open = mvm_core::env_hygiene::helper_command("cryptsetup");
         open.arg("luksOpen")
             .arg(image)
             .arg(&mapper)
@@ -188,7 +188,7 @@ impl EncryptedStorage {
         check(open, "cryptsetup luksOpen")?;
 
         // mkfs on the opened mapper; close unconditionally afterwards.
-        let mut mkfs = Command::new("mkfs.ext4");
+        let mut mkfs = mvm_core::env_hygiene::helper_command("mkfs.ext4");
         mkfs.arg("-q").arg(Self::mapper_dev(name));
         let mkfs_result = check(mkfs, "mkfs.ext4");
         let close_result = close_mapper(&mapper);
@@ -199,7 +199,7 @@ impl EncryptedStorage {
 /// Close a `/dev/mapper` LUKS node. Separate fn so attach's rollback path and
 /// detach share one definition.
 fn close_mapper(mapper: &str) -> Result<(), VolumeError> {
-    let mut close = Command::new("cryptsetup");
+    let mut close = mvm_core::env_hygiene::helper_command("cryptsetup");
     close.arg("luksClose").arg(mapper);
     check(close, "cryptsetup luksClose")
 }

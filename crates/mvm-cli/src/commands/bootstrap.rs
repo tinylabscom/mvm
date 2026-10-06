@@ -12,7 +12,7 @@
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use mvm_core::user_config::MvmConfig;
 
@@ -60,7 +60,7 @@ fn run_builder_egress_supervisor_inner(
     arm_parent_death: impl FnOnce(),
 ) -> Result<()> {
     arm_parent_death();
-    let status = Command::new(&args.endpoint)
+    let status = mvm_core::env_hygiene::helper_command(&args.endpoint)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
