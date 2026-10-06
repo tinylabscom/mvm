@@ -227,6 +227,8 @@ const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
+    ("info", AuditPosture::ReadOnly),
+    ("verify", AuditPosture::ReadOnly),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
     ("download", AuditPosture::ReadOnly),
