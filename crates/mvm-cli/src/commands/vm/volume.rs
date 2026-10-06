@@ -410,7 +410,7 @@ fn mount_with_service(
             volume_service.require_host_encryption(fingerprint.source())?;
             let image = cache.lookup(fingerprint)?.resolve()?;
             let attachment_image = if rw {
-                image.writable_copy(&host_snapshot_image(vm_name, volume_name))?
+                image.writable_image(&host_snapshot_image(vm_name, volume_name))?
             } else {
                 image.path().to_path_buf()
             };
@@ -619,7 +619,7 @@ fn refresh_registered_host_snapshots_using(
         let attachment_image = if attachment.access.is_read_only() {
             cached.path().to_path_buf()
         } else {
-            cached.writable_copy(&host_snapshot_image(vm_name, &attachment.volume))?
+            cached.writable_image(&host_snapshot_image(vm_name, &attachment.volume))?
         };
         let size_mib = image_size_mib(&attachment_image)?;
         volume_service.refresh_ad_hoc_snapshot_attachment(

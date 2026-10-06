@@ -27,6 +27,15 @@ verification, signing, publication, and lifecycle of MVM's system-image train:
 - Stage 0 seed inputs; and
 - the QEMU/WebAssembly smoke pack currently published with boot images.
 
+*Note 2026-10-05:* the image boundary decided in
+[#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054) narrows this
+list. `mvm-images` keeps the Linux layer: kernels, base root filesystems with
+no mvm binaries and no mvm `/init`, the builder image and the Stage 0 seeds.
+The universal runtime overlay, the SDK sidecars and the initramfs leave the
+image set; `mvmctl` assembles them from a guest-runtime asset each CLI release
+ships, and `mvm-images` drops its `mvm` flake input. The list above describes
+what the image set carries until those workstreams land.
+
 The `mvm` repository consumes an immutable, signed image-set manifest pinned by
 digest. Runtime and release CI fetch the pinned set by default. Source builds
 remain available as an explicit development and reproducibility path, including
@@ -405,6 +414,13 @@ settings, the no-publish workflow boundary, and validation are recorded in
       before boot. Defined and negatively tested, and `verify_image_set`
       refuses a non-overlapping range when given the host's; no acquisition
       path consumes an image set yet, so the before-boot refusal is wired in W6.
+      *Note 2026-10-05:* under the image boundary in
+      [#4100](https://github.com/tinylabscom/mvm/issues/4100), the
+      `guest_agent_protocol` range in the set's compatibility section is
+      replaced by a base-image contract version the base root filesystem
+      declares and `mvmctl` checks before boot
+      ([#4105](https://github.com/tinylabscom/mvm/issues/4105)); the guest
+      agent then ships with the CLI that speaks its protocol.
 - [x] Include source commits, Nix inputs, SBOM references, sizes, and digests.
 - [x] Add offline verification tooling that needs only the manifest, bundle,
       and artifacts (plus the lock that pins them): `mvmctl image boot verify`.

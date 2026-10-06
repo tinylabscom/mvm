@@ -4,6 +4,34 @@
 
 Accepted
 
+**Amended 2026-10-05 by ADR-054**
+(`specs/adrs/054-image-boundary-linux-layer.md`,
+[#4100](https://github.com/tinylabscom/mvm/issues/4100)). Three statements
+below are narrowed; the seed, the builder boot payload and the builder trust
+model are unchanged.
+
+- *"Every artifact `mvmctl` produces ... is built by running Nix inside a
+  VM"* holds for images. mvm's guest runtime (the guest agent and helpers,
+  the initramfs agent, `mvm-setpriv`, `libmvm_host_services.so`, the GPU
+  shims) is cargo-zigbuild output from the pinned toolchain, assembled into
+  the runtime overlay, initramfs and SDK sidecar on the host by the pure-Rust
+  ext4 writer: the mechanism this ADR already uses for the builder binaries.
+  In a source checkout `mvmctl` already compiles the overlay's guest binaries
+  that way on first use. A release binary never invokes cargo: today it
+  fetches those pieces from the image set, and under ADR-054 from its own
+  release.
+- *"No separate release artifacts for Linux binaries"* stops holding for the
+  guest runtime. It becomes one signed CLI release asset, version-locked to
+  the CLI and fetched through the CLI-train verifier
+  ([#4103](https://github.com/tinylabscom/mvm/issues/4103)). The builder
+  binaries stay embedded in `mvmctl`.
+- *The builder image's key folding mvm source* has one remaining term today:
+  the ABI 1 image still bakes `mvm-setpriv`, which `mvm-images` compiles from
+  mvm's source and `mvm-host-vm-init` runs from `/sbin`. Builder boot ABI 2
+  ([#4107](https://github.com/tinylabscom/mvm/issues/4107)) carries it in the
+  boot payload instead, after which the builder image contains no mvm binary
+  and its cache key folds no mvm source.
+
 ## Context
 
 Every artifact `mvmctl` produces — a workload rootfs, a kernel, a template —

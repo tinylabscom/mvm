@@ -82,6 +82,13 @@ pub struct AdmitInputs<'a> {
     /// mount reaches the guest under a plan that never admitted it, and the
     /// admitted-share check has nothing to compare it against.
     pub volumes: &'a [mvm_core::vm_backend::VmVolume],
+    /// The cached archive of the installed bundle `rootfs` and `kernel` were
+    /// resolved from, or `None` when they did not come from one.
+    ///
+    /// Admission pins it into the signed plan and refuses the boot when the
+    /// archive, or the extracted files beside it, no longer match what the
+    /// publisher signed.
+    pub bundle_archive: Option<&'a std::path::Path>,
 }
 
 /// Identity policy for a session-style VM boot.
@@ -217,6 +224,7 @@ pub fn boot_session_vm(
     let (spec, vmlinux, initrd, rootfs, rev) =
         mvm_runtime::vm::template::lifecycle::template_artifacts_for_boot(slot)
             .with_context(|| format!("Loading template '{slot}'"))?;
+    let bundle_archive = mvm_runtime::vm::template::lifecycle::installed_bundle_archive(slot)?;
     let backend = resolve_backend(backend_name)?;
     let vm_name = vm_name.resolve();
     let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
@@ -267,6 +275,7 @@ pub fn boot_session_vm(
         // no standalone assets.
         assets: &[],
         volumes: &start_config.volumes,
+        bundle_archive: bundle_archive.as_deref(),
     })?
     .context("refusing to boot an entrypoint VM without an admitted plan")?;
     start_config.tenant_id = Some(substrate.tenant_id);
@@ -309,13 +318,23 @@ pub fn boot_session_vm(
 /// mismatch) is logged rather than returned, because the reaper calls this
 /// where nobody is waiting for an error.
 pub fn tear_down_session_vm(vm: SessionVm) {
+    if let Err(e) = stop_session_vm(&vm) {
+        tracing::warn!(vm = %vm.vm_name, err = %e, "session VM teardown failed");
+    }
+}
+
+/// Stop a session VM, reporting whether the stop took. A caller that records
+/// the end of the VM's session needs to know: a VM that may still be running
+/// is not one whose session can be sealed.
+///
+/// # Errors
+/// The backend refused or failed the stop.
+pub(crate) fn stop_session_vm(vm: &SessionVm) -> Result<()> {
     // The marker in the VM's state dir names the backend that actually
     // launched it. Falling back to the host default would send the stop to
     // the wrong VMM and leave the guest running.
     let backend = AnyBackend::for_started_vm(&vm.vm_name).unwrap_or_else(AnyBackend::auto_select);
-    if let Err(e) = backend.stop(&VmId(vm.vm_name.clone())) {
-        tracing::warn!(vm = %vm.vm_name, err = %e, "session VM teardown failed");
-    }
+    backend.stop(&VmId(vm.vm_name.clone()))
 }
 
 #[cfg(test)]
