@@ -44,6 +44,14 @@ merge-group runs, jobs started 4.7 minutes after the workflow at the median and
 80-87 minutes. The same expensive matrix ran first on the pull-request commit
 and then on the integrated merge-group commit.
 
+On 2026-10-05, the queue had 40 entries and the live ruleset had drifted back
+to two speculative builds. One code-scoped merge-group run peaked around 14
+hosted runners, so two groups requested roughly 28 against the organization's
+20-runner limit before pull-request workflows were counted. GitHub marked jobs
+it could not acquire after repeated attempts as cancelled; the required
+aggregate correctly surfaced those infrastructure cancellations as `Checks
+failed` on #4048, #4051, and #4044. The tests themselves were not the failure.
+
 ## Work
 
 - [x] Add structural regression coverage for scope-first scheduling,
@@ -72,11 +80,11 @@ and then on the integrated merge-group commit.
       every merge. It remains in `ci-full.yml` (nightly + manual dispatch) so
       the path is still exercised, and the structural tests assert it no longer
       blocks the `Test` aggregate.
-- [x] Trial compile-free pull-request admission with the expensive matrix only
-      on the integrated merge-group commit. Reverted after deterministic policy
-      and BDD failures repeatedly reached the queue and contaminated entries
-      behind them; code PRs now run the complete deterministic matrix before
-      admission and the merge group remains the final integration witness.
+- [x] Run the complete deterministic proof before queue admission, including
+      platform, feature, workspace, architecture, release, Linux, eBPF, Nix,
+      boot, policy, and BDD verification. Keep merge-group execution to
+      fail-closed scope classification and the required aggregate so the queue
+      does not allocate a second copy of the full graph.
 - [x] Trial two speculative entries building. Returned to one during reliability
       stabilization: GitHub may build later entries on cumulative speculative
       heads, so a failure in front can still make unrelated entries appear red.
@@ -93,13 +101,19 @@ and then on the integrated merge-group commit.
       merge refs; only the trusted main warmer writes a reusable cache.
 - [x] Add a bounded PR preflight: run the real policy/invariant lane before
       queue admission, ShellCheck changed scripts, and execute the embedded
-      helper recipe regression. The focused checks remain alongside the restored
-      full PR matrix, and the merge-group matrix remains authoritative for the
-      exact integration commit.
+      helper recipe regression. These checks now sit inside the complete PR
+      proof; the singleton merge group verifies the synthetic commit's scope and
+      required aggregate without repeating every lane.
 - [x] Require the stable `Test` context against current `main`, build one queue
       entry at a time, and merge one PR per group while the queue is stabilized.
       Keep all required and recommended verification; optimize lane internals,
       cache reuse, and runner admission rather than deleting coverage.
+- [x] Fail in the scope job before fan-out when the live queue ruleset exceeds
+      the `1/1/0` build/merge/wait runner budget.
+- [ ] Replace the broad `code` boolean with dependency-aware component scopes
+      derived from the workspace graph. Each specialized lane should run for its
+      owning component and reverse dependencies, failing closed on unknown paths.
+      This is the safe route to more queue throughput without deleting checks.
 - [ ] Run formatting, workspace check, the complete workspace test suite, and
       Linux all-target Clippy.
 - [ ] Land the workflow change through the merge queue. The live stabilization
@@ -117,7 +131,8 @@ and then on the integrated merge-group commit.
   which validates lint, policy, architecture, test, boot and scoped Nix results.
 - Paid plan changes, organization runner creation, and billing changes are not
   repository operations and require an organization owner.
-- Speculative width is not increased to four on the current 20-job pool: the
-  2026-08-11 incident proved that configuration can time out valid checks and
-  create self-amplifying work. Width may rise only after consolidation
-  measurements or an owner-provided capacity increase.
+- Speculative width stays at one on the current 20-job pool. The 2026-10-05
+  incident demonstrated that width two already exceeds capacity for code-scoped
+  groups and turns unacquired runners into self-amplifying queue failures. Width
+  may rise only after dependency-aware fan-out reduces the measured peak or an
+  owner provides more capacity.

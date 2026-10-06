@@ -13,7 +13,7 @@
 //! - **`~/.mvm/audit/secrets.jsonl`** — operator `mvmctl secret`
 //!   CRUD audit. Ad-hoc JSON shape.
 //! - **`~/.mvm/log/audit.jsonl`** — legacy LocalAudit stream
-//!   (`mvmctl audit tail` defaults to this).
+//!   (`mvmctl trust audit tail` defaults to this).
 //!
 //! This module unifies them through a typed [`EventCategory`] taxonomy
 //! and a [`Recorder`] that wraps an [`crate::supervisor::AuditSigner`] +
@@ -24,7 +24,7 @@
 //!
 //! ## Categories (12)
 //!
-//! The comprehensive audit catalog (the `mvmctl audit tail` `cat`
+//! The comprehensive audit catalog (the `mvmctl trust audit tail` `cat`
 //! filter):
 //!
 //! | Category | Examples | Plan-bound? |
@@ -84,7 +84,7 @@ pub enum EventCategory {
     /// Supervisor / mvm-hostd lifecycle. `host.<verb>`.
     Host,
     /// Meta-events about the audit stream itself. `audit.<verb>`.
-    /// Used by `mvmctl audit verify` results, chain-rotation
+    /// Used by `mvmctl trust audit verify` results, chain-rotation
     /// announcements, etc.
     Audit,
     /// Policy-gated DNS decisions. `dns.<verdict>`.

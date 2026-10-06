@@ -513,13 +513,15 @@ fn the_release_attests_build_provenance_for_the_signed_tarballs() {
 
     let step: String = workflow[attest..]
         .lines()
-        .take(4)
+        .take(7)
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        step.contains("subject-path: artifacts/*.tar.gz"),
-        "provenance must cover the same tarballs the signing loop signs directly, found:\n{step}"
-    );
+    for subject in ["artifacts/*.tar.gz", "artifacts/*.deb", "artifacts/*.rpm"] {
+        assert!(
+            step.contains(subject),
+            "provenance must cover {subject}, which the signing loop signs directly, found:\n{step}"
+        );
+    }
 
     let publish = workflow
         .find("gh release create")
@@ -567,6 +569,71 @@ fn the_combined_checksum_manifest_is_signed_and_its_bundle_attached() {
     assert!(
         assets.contains(&format!("{manifest}.bundle")),
         "{manifest}.bundle must be attached to the release, or the verifier 404s"
+    );
+}
+
+/// The .deb and .rpm are release assets on the same footing as the tarballs:
+/// built from the tarballs this run produced, installed and run before the
+/// release job may publish, signed directly, listed in the signed manifest,
+/// and published with their signature bundles.
+///
+/// A package step that rebuilt the binaries would ship bytes no tarball
+/// digest vouches for; a package left out of the signing loop or the asset
+/// list would publish an artifact that installs and cannot be verified.
+#[test]
+fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
+    let workflow = release_workflow();
+
+    let job = job_block(&workflow, "distro-packages");
+    assert!(
+        job.contains("needs: build")
+            && job.contains("uses: ./.github/workflows/distro-packages.yml")
+            && job.contains("tarballs: build"),
+        "the release must package the tarballs its own build job produced:\n{job}"
+    );
+
+    let sign_loop = workflow
+        .split("- name: Sign release tarballs")
+        .nth(1)
+        .expect("release.yml must have a signing step")
+        .split("done")
+        .next()
+        .expect("the signing loop is non-empty");
+    let assets = workflow
+        .split("assets=(")
+        .nth(1)
+        .expect("release.yml must list release assets")
+        .split(')')
+        .next()
+        .expect("the asset list is non-empty");
+    for package in ["artifacts/*.deb", "artifacts/*.rpm"] {
+        assert!(
+            sign_loop.contains(package),
+            "{package} must be cosign-signed"
+        );
+        assert!(
+            assets.contains(package) && assets.contains(&format!("{package}.bundle")),
+            "{package} and its bundle must be attached to the release"
+        );
+    }
+
+    let packages = fs::read_to_string(".github/workflows/distro-packages.yml")
+        .expect("distro-packages.yml must exist");
+    assert!(
+        packages.contains("bash scripts/build-distro-packages.sh")
+            && !packages.contains("cargo build")
+            && !packages.contains("cargo zigbuild"),
+        "distro-packages.yml must package the tarballs, never rebuild the binaries"
+    );
+    assert!(
+        packages.contains("sh /scripts/distro-package-smoke.sh"),
+        "every package must be installed and run before it is published"
+    );
+    let script = fs::read_to_string("scripts/build-distro-packages.sh")
+        .expect("scripts/build-distro-packages.sh must exist");
+    assert!(
+        script.contains("--no-build") && script.contains("--no-strip"),
+        "cargo-deb must neither build nor strip: the packaged bytes are the tarball's"
     );
 }
 

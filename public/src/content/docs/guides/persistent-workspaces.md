@@ -147,7 +147,10 @@ mvmctl machine volume mount agent-sandbox \
 With `--rw` the machine gets a private copy of the snapshot image. The guest
 writes into that copy and never into the source directory, and a source
 directory whose contents change replaces the copy — discarding the guest's
-writes — at the next start. Use `--rw` only for trusted workflows:
+writes — at the next start. The copy holds the same tree as the snapshot plus
+4 GiB of free space and 65,536 free inodes for the guest to grow into. The
+image file is sparse, so the free space takes no host disk until the guest
+writes it. Use `--rw` only for trusted workflows:
 
 ```sh
 mvmctl machine volume mount agent-sandbox \
