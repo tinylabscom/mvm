@@ -36,6 +36,7 @@ use self::policy::{
 
 pub mod agent_verbs;
 mod audit;
+mod bundle_binding;
 pub mod entrypoint_resolve;
 pub mod instructions;
 pub mod policy;
@@ -127,8 +128,12 @@ pub struct AdmitPlanForBootParams<'a> {
     /// Optional path to a `.mvmpkg` bundle archive. When set, the
     /// archive is read + verified at admit time, the resulting
     /// `PlanArtifact` is embedded into the plan, and the supervisor's
-    /// admit path re-verifies on every launch. Production callers
-    /// thread `args.bundle_pin`; tests pass `None`.
+    /// admit path re-verifies on every launch. Once the plan is
+    /// admitted, the boot's root filesystem and kernel must be the
+    /// ones the bundle signed, and an installed copy beside the archive
+    /// must still match it; a mismatch is refused and recorded as
+    /// `plan.failed`. Boots resolved from an installed bundle
+    /// (`--manifest <bundle-sha256>`) set it to the registry archive.
     pub bundle_pin: Option<&'a std::path::Path>,
     /// Optional deps-volume binding from the app-deps install pipeline.
     /// No boot path supplies one today. When `Some`, the
@@ -448,7 +453,7 @@ pub fn admit_plan_for_boot_with_ingress(
         .backend_kind
         .and_then(mvm_core::image_set::BackendImageSupport::for_backend);
     let bundle_host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
-    let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images) =
+    let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images, pinned_bundle) =
         match p.bundle_pin {
             Some(path) => {
                 let bytes = std::fs::read(path)
@@ -494,9 +499,20 @@ pub fn admit_plan_for_boot_with_ingress(
                 // the caller supplied the path, so we already have the
                 // bytes; no need to walk the FS registry again.
                 let resolver = InMemoryBundleResolver::new(bytes);
-                (Some(pin), Some(resolver), Some(trust), has_embedded_images)
+                let pinned = bundle_binding::PinnedBundle {
+                    archive: path,
+                    sha256: pin.bundle_sha256.clone(),
+                    signed: verified.manifest,
+                };
+                (
+                    Some(pin),
+                    Some(resolver),
+                    Some(trust),
+                    has_embedded_images,
+                    Some(pinned),
+                )
             }
-            None => (None, None, None, false),
+            None => (None, None, None, false, None),
         };
 
     // Pin the kernel alongside the image. Through the shared digest cache, the
@@ -871,12 +887,27 @@ pub fn admit_plan_for_boot_with_ingress(
         tracing::warn!(error = %e, "audit emit_egress_destinations failed (non-fatal)");
     }
 
-    Ok(AdmissionContext {
+    let context = AdmissionContext {
         admitted,
         emitter,
         policy_bundle,
         host_signer_public_path: signer.public_path,
-    })
+    };
+
+    // The archive verified before synthesis; what remains is whether this boot
+    // runs it. Checked once the plan is admitted, so a refusal is recorded
+    // against the plan that pinned the bundle.
+    if let Some(pinned) = &pinned_bundle
+        && let Err(err) = pinned.check_boot(bundle_binding::BootDigests {
+            rootfs_sha256: &sha,
+            kernel_sha256: kernel_sha256.as_deref(),
+        })
+    {
+        emit_failed(&context, bundle_binding::BUNDLE_VERIFY_CLASS, &err);
+        return Err(err);
+    }
+
+    Ok(context)
 }
 
 /// Resolve a local deployment record only when it sits beside the exact
@@ -1375,7 +1406,7 @@ mod host_signer_pubkey_config_tests {
 // pulling in VMM selection + start dispatch.
 
 #[cfg(test)]
-mod admit_plan_tests {
+pub(crate) mod admit_plan_tests {
     use super::*;
     use std::io::Write;
 
@@ -1895,7 +1926,7 @@ mod admit_plan_tests {
 
     /// Admit a real plan whose chain is written to `audit_dir`. The signer,
     /// chain and plan are the production ones; only where they live is injected.
-    fn admitted_into(
+    pub(crate) fn admitted_into(
         keys_dir: &std::path::Path,
         audit_dir: &std::path::Path,
         vm_name: &str,

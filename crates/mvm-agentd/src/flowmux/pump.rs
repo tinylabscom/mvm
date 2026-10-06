@@ -646,7 +646,16 @@ where
         Ok(())
     }
 
+    /// Reset a stream this side has finished with, and forget it.
+    ///
+    /// Forgetting is what keeps the reset the last frame the guest sends for
+    /// the stream. The host retires a stream on the guest's `Reset`, and a
+    /// frame naming it afterwards ends the session. Data the host sent before
+    /// the reset reached it is still on its way here; were the stream still
+    /// held when that data arrived, the guest would return credit for it —
+    /// and every other flow on the session would fail mid-request.
     async fn send_reset(&mut self, stream_id: u32, reason: &str) -> Result<(), FlowMuxError> {
+        self.tcp_streams.remove(&stream_id);
         self.write_frame(Opcode::Reset, stream_id, reason.as_bytes())
             .await
     }

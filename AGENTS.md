@@ -46,6 +46,18 @@ not performed automatically. Operator-facing knobs:
   `build` request without `MVM_ALLOW_LOCAL_BUILDER_BUILD` is refused rather
   than silently falling back.
 
+**Image boundary.** Today the signed image set from `mvm-images` carries the
+builder image, kernels, base workload root filesystems and Stage 0 seeds, and
+also the runtime overlay, SDK sidecars and initramfs, which `mvm-images`
+compiles from this tree through its `mvm` flake input. The maintainer decided
+on 2026-10-05 to narrow that ([#4100](https://github.com/tinylabscom/mvm/issues/4100),
+ADR-054): `mvm-images` builds only the Linux layer and stops reading this
+tree, and the guest runtime ships as a signed asset with each `mvmctl` release,
+from which `mvmctl` assembles the overlay, initramfs and sidecar. Until the
+workstreams under #4100 land, write and test against today's behaviour, and do
+not add new guest-runtime work to `mvm-images` or a new dependency on its
+`mvm` input.
+
 Owner-approved exceptions (unchanged):
 
 - **Lima as a test-environment KVM provider only** — a virtual `/dev/kvm` for
@@ -63,8 +75,9 @@ Owner-approved exceptions (unchanged):
 the host so worktrees do not deadlock on shared builder state. Tests needing
 Linux (vsock, jailer/seccomp, dm-verity, network namespaces, `/dev/kvm`,
 `/proc/net`) are gated `#[cfg(target_os = "linux")]` and only those sub-targets
-run inside the builder VM. `mvmctl` via `cargo run` (`build`, `up`, `down`,
-`logs`, `ls`) runs inside the builder VM (explicit `wasm` target excepted).
+run inside the builder VM. `mvmctl` via `cargo run` (`build`, `machine run`,
+`machine stop`, `machine logs`, `machine ls`) runs inside the builder VM
+(explicit `wasm` target excepted).
 
 **Disposable GCP KVM test host.** Linux/KVM E2E tests that cannot run on the
 builder VM or GitHub-hosted runners have one repository-owned remote lifecycle.
@@ -187,15 +200,26 @@ in CI (`MVM_SKIP_CLIPPY=1` bypasses the clippy pass).
 
 Developing the binaries that run inside a microVM — agent, egress client,
 protocol crates — happens entirely in this repository. A guest-binary-only
-change must never require an `mvm-images` checkout, edit, or release: the
-dev-tier build arms rebuild and boot the new binaries from this checkout, and
-image assembly consumes them without a recipe change. `mvm-images` is entered
-deliberately, only for image-definition work (packages, kernels, roles), and
-even then this repo stays the front door (`bin/dev build image-set`). The
-acceptance test is the one-clone bootstrap: a contributor who clones only
-`mvm` and follows the quickstart never needs to know the image repository
-exists. The repo split has a queue-wall tripwire: keep it under 20 minutes,
-or re-open the topology decision.
+change must never require an `mvm-images` checkout, edit, or release. Today
+the dev-tier build arms rebuild the runtime overlay and the initramfs from
+this checkout on the host; the SDK sidecar is the gap, since it still builds
+only from an `mvm-images` checkout, and the published image set still carries
+copies of all three built from the `mvm` input. The image boundary in
+[#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054) makes the
+rule true by construction: every guest piece ships with `mvmctl`, and
+`mvm-images` has no `mvm` input to change. `mvm-images` is entered
+deliberately, only for Linux-layer work (packages, kernels, the builder image,
+base root filesystems), and even then this repo stays the front door
+(`bin/dev build image-set`). The acceptance test is the one-clone bootstrap: a
+contributor who clones only `mvm` and follows the quickstart never needs to
+know the image repository exists.
+
+The queue-wall tripwire this rule used to carry (keep the merge-group wall
+under 20 minutes or re-open the repo split) assumed the merge queue builds
+images. Under the boundary it builds none: the lanes that still build guest
+pieces through `mvm-images` move to the pinned base set with a tree-built
+guest runtime under [#4108](https://github.com/tinylabscom/mvm/issues/4108),
+which measures the wall before and after over at least ten merge-group runs.
 
 ## Definition of Done
 

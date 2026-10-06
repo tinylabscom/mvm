@@ -1,8 +1,7 @@
 //! `mvmctl manifest` — registry / inspection / object-storage operations
 //! on built manifest slots.
 //!
-//! Top-level user-facing verbs (`init`, `build`, `up`, `run`, `exec`)
-//! handle the everyday flow. This module hosts the less-common ops:
+//! The everyday flow goes through `init`, `build`, and `machine run`. This module hosts the less-common ops:
 //! listing built slots, showing a slot's metadata, removing a slot,
 //! pushing/pulling artifacts via the registry, and pruning orphans.
 

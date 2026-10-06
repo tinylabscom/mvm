@@ -54,8 +54,6 @@ fn check_linux_package_manager() -> Result<()> {
 /// users follow today.
 #[cfg(target_os = "windows")]
 pub fn bootstrap_wsl2() -> Result<()> {
-    use std::process::Command;
-
     if which::which("wsl").is_err() {
         anyhow::bail!(
             "WSL is not installed on this Windows host.\n\
@@ -69,7 +67,7 @@ pub fn bootstrap_wsl2() -> Result<()> {
     // `wsl --status` returns 0 if WSL2 is configured and at least one
     // distro is registered. We don't parse the output — exit code is
     // sufficient signal for the bootstrap path.
-    let status = Command::new("wsl")
+    let status = mvm_core::env_hygiene::helper_command("wsl")
         .arg("--status")
         .status()
         .map_err(|e| anyhow::anyhow!("could not invoke wsl: {e}"))?;

@@ -34,6 +34,8 @@ pub(in crate::commands) use tally::{DenialTally, DeniedDestination};
 pub(in crate::commands) use watch::{DenialWatch, Live, WatchTarget, print_summary};
 
 use super::audit_chain::{audit_path_for_tenant, default_audit_dir};
+use super::audit_follow::{ChainLine, parse_chain_line};
+use super::denial_review::ReviewOffer;
 use super::host_notices::{NoticeSink, Stderr};
 
 /// The tenant a local run is admitted under, and so the chain its endpoint
@@ -66,12 +68,43 @@ pub(in crate::commands) fn watch_machine(vm_name: &str, live: Live) -> Option<De
     }))
 }
 
-/// Finish a watch, if one was running, and print its exit summary. Returns
-/// what it saw.
-pub(in crate::commands) fn finish_and_summarize(watch: Option<DenialWatch>) -> DenialTally {
+/// Finish a watch, if one was running, print its exit summary, and offer its
+/// grantable refusals for review — in place when `review` names the project
+/// manifest the run was admitted under and there is a terminal, otherwise as
+/// the `mvmctl explain` command that reviews them later. Returns what it saw.
+pub(in crate::commands) fn finish_and_summarize(
+    watch: Option<DenialWatch>,
+    review: &ReviewOffer,
+) -> DenialTally {
     let tally = watch.map(DenialWatch::finish).unwrap_or_default();
-    print_summary(&tally, &Stderr);
+    super::denial_review::summarize_and_offer(&tally, review);
     tally
+}
+
+/// The plan id of the latest admission of machine `vm_name` in the local
+/// chain: the run `mvmctl explain` should be pointed at. `None` when the chain
+/// cannot be read or records no admission under that name.
+pub(in crate::commands) fn latest_admission(vm_name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(local_chain()?).ok()?;
+    let entries = text
+        .lines()
+        .filter_map(|line| match parse_chain_line(line) {
+            ChainLine::Entry(entry) => Some(*entry),
+            ChainLine::Foreign(_) => None,
+        });
+    latest_admission_in(entries, vm_name)
+}
+
+/// An admission records the machine's name as its `image_name`.
+fn latest_admission_in(
+    entries: impl IntoIterator<Item = PlanAuditEntry>,
+    vm_name: &str,
+) -> Option<String> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.event == "plan.admitted" && entry.image_name == vm_name)
+        .max_by_key(|entry| entry.timestamp)
+        .map(|entry| entry.plan_id.0)
 }
 
 /// A watch that starts once the machine's name exists.
@@ -209,6 +242,29 @@ mod tests {
             None,
         );
         assert_eq!(open.destinations().len(), 2);
+    }
+
+    fn admitted(ts: &str, vm: &str, plan: &str) -> PlanAuditEntry {
+        PlanAuditEntry {
+            image_name: vm.into(),
+            plan_id: mvm_core::plan::PlanId(plan.into()),
+            ..at(entry("plan.admitted", &[]), ts)
+        }
+    }
+
+    #[test]
+    fn the_run_explain_is_pointed_at_is_the_machines_latest_admission() {
+        let entries = [
+            admitted("2026-09-26T10:00:00Z", "vm-a", "plan-old"),
+            admitted("2026-09-26T10:00:05Z", "vm-b", "plan-other"),
+            refused("2026-09-26T10:00:06Z", "vm-a", "api.example:443"),
+            admitted("2026-09-26T10:00:07Z", "vm-a", "plan-new"),
+        ];
+        assert_eq!(
+            latest_admission_in(entries.clone(), "vm-a").as_deref(),
+            Some("plan-new")
+        );
+        assert_eq!(latest_admission_in(entries, "vm-c"), None);
     }
 
     #[test]

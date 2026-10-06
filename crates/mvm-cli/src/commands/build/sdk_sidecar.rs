@@ -5,11 +5,8 @@
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
-#[cfg(feature = "builder-vm")]
 use crate::ui;
-#[cfg(feature = "builder-vm")]
 use mvm_contract::guest_libc::GuestLibc;
-#[cfg(feature = "builder-vm")]
 use mvm_core::arch::GuestArch;
 use mvm_core::user_config::MvmConfig;
 
@@ -37,7 +34,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// Build both libc variants from the pair's `runtime-overlay` sidecar targets
 /// and install them into the version-matched cache, stamped with the pair
 /// identity so launches under this pair trust them.
-#[cfg(feature = "builder-vm")]
 fn build_pair_sidecars(checkout: &mvm_build::image_source::LocalImageCheckout) -> Result<()> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
@@ -64,7 +60,6 @@ fn build_pair_sidecars(checkout: &mvm_build::image_source::LocalImageCheckout) -
 /// pair identity. The entry's files carry the producer's manifest names, so
 /// this goes through the same staging install the launch path uses rather
 /// than handing the entry directory to the fixed-layout installer.
-#[cfg(feature = "builder-vm")]
 fn install_pair_sidecar(
     build: &mvm_build::image_source::PairBuild,
     cache_root: &std::path::Path,
@@ -85,20 +80,7 @@ fn install_pair_sidecar(
 }
 
 fn run_build() -> Result<()> {
-    #[cfg(feature = "builder-vm")]
-    return build_from(crate::commands::env::builder_vm::selected_local_checkout()?.as_ref());
-
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        if mvm_build::image_source::configured_images_dir().is_some() {
-            anyhow::bail!(
-                "{} names an image checkout, but building the SDK sidecar from it requires \
-                 the `builder-vm` feature; rebuild the binary with that feature enabled",
-                mvm_build::image_source::MVM_IMAGES_DIR_ENV,
-            );
-        }
-        Err(sidecar_needs_a_checkout())
-    }
+    build_from(crate::commands::env::builder_vm::selected_local_checkout()?.as_ref())
 }
 
 /// Build both libc variants from the selected checkout — or, when the caller
@@ -107,7 +89,6 @@ fn run_build() -> Result<()> {
 /// tree's sources, under `pinned` whatever they were built from. Without
 /// either there is nothing to build from: the sidecars are image-set members,
 /// and image construction lives in `mvm-images`.
-#[cfg(feature = "builder-vm")]
 fn build_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) -> Result<()> {
     use mvm_build::fetch_unchanged::{self as fetch, ArmRequest, FetchMode, PinnedMembers};
     let request = ArmRequest::for_host(PinnedMembers::SdkSidecars);
@@ -130,7 +111,6 @@ fn build_from(checkout: Option<&mvm_build::image_source::LocalImageCheckout>) ->
 /// Install both libc variants from the verified set. A failure is final: the
 /// verified bytes were asked for and refused, which must not silently fall
 /// back to a local build.
-#[cfg(feature = "builder-vm")]
 fn adopt_sidecars(
     set: &mvm_build::published_image_set::PublishedImageSet,
     arch: GuestArch,
@@ -153,7 +133,7 @@ fn sidecar_needs_a_checkout() -> anyhow::Error {
     mvm_build::image_source::ImageConstructionRefused::new("the SDK sidecar").into()
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

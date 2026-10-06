@@ -12,13 +12,16 @@ use mvm_fs::trusted_snapshot::TrustedSnapshotBackend;
 use crate::lineage::{LineageAnchor, LineageGraph, LineageRecord};
 
 mod chunks;
+mod diff;
 #[cfg(test)]
 mod durability_tests;
+mod gc;
 mod params;
 mod restore_content;
 mod retention;
 mod staging;
 
+pub use diff::{BlobDelta, BlobStatus, CheckpointDiff, LineageRelation, diff_checkpoints};
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
     CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness, WorkspaceVolume,
@@ -28,6 +31,7 @@ use restore_content::{
     content_with_load_memory_digest, reseed_forked_identity_drive, validate_fork_verity_binding,
 };
 
+pub use gc::{ContentPruneReport, prune_unreferenced_content};
 pub use retention::{
     Retention, RetentionCut, RetentionVerdict, dependent_children, direct_retention,
     retention_verdicts,
@@ -159,15 +163,15 @@ pub fn verify_content(store: &CheckpointStore, meta: &CheckpointMeta) -> Result<
     verify_content_except(store, meta, &[])
 }
 
-/// Digest of the contiguous bytes a named blob materializes to. Whole-file
-/// checkpoints carry it directly; chunked checkpoints retain it in the
-/// authenticated index so callers can bind an admitted image without rereading
-/// a multi-gigabyte rootfs.
+/// Digest of the contiguous bytes a chunked blob materializes to, retained in
+/// its authenticated index so callers can bind an admitted image without
+/// rereading a multi-gigabyte rootfs.
 pub fn materialized_blob_sha256(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
     name: &str,
 ) -> Result<String> {
+    chunks::ensure_chunked_layout(&store.content_dir(&meta.id), meta)?;
     let blob = meta
         .content
         .iter()
@@ -213,9 +217,9 @@ pub fn materialize_chunked_blobs(
 
 /// Materialize every checkpoint blob into `destination_dir`.
 ///
-/// Chunked blobs are rebuilt from their authenticated indexes; legacy and
-/// intentionally small whole-file blobs are cloned through the normal CoW
-/// path. All blob names are validated before any destination is changed.
+/// Chunked blobs are rebuilt from their authenticated indexes; the small
+/// blobs a capture keeps whole are cloned through the normal CoW path. All
+/// blob names, and the layout, are checked before any destination is changed.
 pub fn materialize_checkpoint_blobs(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
@@ -224,6 +228,7 @@ pub fn materialize_checkpoint_blobs(
     for blob in &meta.content {
         chunks::validate_blob_name(&blob.name)?;
     }
+    chunks::ensure_chunked_layout(&store.content_dir(&meta.id), meta)?;
 
     std::fs::create_dir_all(destination_dir).with_context(|| {
         format!(
@@ -262,6 +267,7 @@ fn verify_content_except(
     deferred: &[&str],
 ) -> Result<()> {
     let dir = store.content_dir(&meta.id);
+    chunks::ensure_chunked_layout(&dir, meta)?;
     let tasks: Vec<_> = meta
         .content
         .iter()
@@ -658,7 +664,6 @@ pub fn fork_vm_full(
     // admitted to 1.5 cores would restore with no quota at all.
     let content = content_with_load_memory_digest(
         &parent.content,
-        &store.content_dir(&parent.id),
         &params.dest_dir.join(mvm_core::checkpoint::MEMORY_BLOB),
     )?;
     restore.restore(&RestoredChild {
@@ -889,7 +894,7 @@ fn capture_vm_full_inner(
     captured?;
     resumed.context("resuming VM after vm_full capture")?;
 
-    let object_pool = chunks::ObjectPool::new(store.root(), &Default::default())?;
+    let object_pool = chunks::ObjectPool::new(store.root(), &params.key_domain)?;
     let mut content = vec![
         chunks::chunk_blob(&object_pool, &content_dir, "rootfs.ext4", &rootfs_dst, true)?,
         chunks::chunk_blob(&object_pool, &content_dir, "memory.bin", &memory, false)?,
@@ -1070,6 +1075,7 @@ fn capture_vm_full_inner(
         .snapshot_id(snapshot_id)
         .grants(params.grants)
         .session(params.session)
+        .key_domain(params.key_domain)
         .build();
     staged.commit(&meta)?;
     Ok(meta)
@@ -1197,8 +1203,12 @@ pub fn restore_checkpoint(
             meta.id
         );
     }
-    verify_content_except(store, &meta, restore.verifies_on_load())?;
+    // The record names the blobs, so it is authenticated before anything it
+    // names is read: an edited or unaudited record is refused without hashing
+    // a multi-gigabyte memory image, and for that reason rather than for
+    // whatever its blobs happen to look like.
     verify_checkpoint_against_chain(anchor, &meta)?;
+    verify_content_except(store, &meta, restore.verifies_on_load())?;
     ensure_same_tenant(anchor, &meta, &params.tenant)?;
     let materialized = tempfile::Builder::new()
         .prefix(".restore-")
@@ -1215,7 +1225,7 @@ pub fn restore_checkpoint(
     let stored_config = dir.join(SUPERVISOR_CONFIG_FILE_NAME);
     let config_src = stored_config.is_file().then_some(stored_config.as_path());
 
-    let content = content_with_load_memory_digest(&meta.content, &dir, &memory)?;
+    let content = content_with_load_memory_digest(&meta.content, &memory)?;
     restore.restore(
         &params.target_vm,
         &rootfs,
@@ -1251,7 +1261,7 @@ fn clone_or_materialize_blob(
     }
 }
 
-/// Resolve a blob to contiguous bytes, rebuilding chunked data in caller-owned scratch.
+/// Rebuild a chunked blob as one contiguous file in caller-owned scratch.
 pub fn materialized_source(
     store: &CheckpointStore,
     meta: &CheckpointMeta,
@@ -1259,14 +1269,12 @@ pub fn materialized_source(
     scratch: &Path,
 ) -> Result<PathBuf> {
     let content_dir = store.content_dir(&meta.id);
+    chunks::ensure_chunked_layout(&content_dir, meta)?;
     let blob = meta
         .content
         .iter()
         .find(|blob| blob.name == name)
         .with_context(|| format!("checkpoint '{}' has no {name} blob", meta.id))?;
-    if !chunks::is_chunked_blob(&content_dir, blob) {
-        return Ok(content_dir.join(name));
-    }
     let destination = scratch.join(name);
     chunks::materialize_blob_cached(
         store.root(),
@@ -1333,119 +1341,6 @@ fn copy_guest_sidecars_if_present(
     Ok(blobs)
 }
 
-/// How blob `name` differs between two checkpoints (B relative to A).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BlobStatus {
-    Unchanged,
-    Changed,
-    AddedInB,
-    RemovedFromB,
-}
-
-/// Per-blob delta keyed by content-manifest name.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct BlobDelta {
-    pub name: String,
-    pub status: BlobStatus,
-    pub sha_a: Option<String>,
-    pub sha_b: Option<String>,
-}
-
-/// Lineage relationship between the two checkpoints.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LineageRelation {
-    BChildOfA,
-    AChildOfB,
-    Same,
-    Unrelated,
-}
-
-/// Structured metadata + manifest diff of two checkpoints (B relative to A).
-/// Byte content is never read — a blob sha256 mismatch is the change signal.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct CheckpointDiff {
-    pub a_id: CheckpointId,
-    pub b_id: CheckpointId,
-    pub class_a: CheckpointClass,
-    pub class_b: CheckpointClass,
-    pub vm_name_a: String,
-    pub vm_name_b: String,
-    pub tag_a: Option<String>,
-    pub tag_b: Option<String>,
-    pub created_unix_a: u64,
-    pub created_unix_b: u64,
-    pub supervisor_config_digest_same: bool,
-    pub lineage: LineageRelation,
-    pub blobs: Vec<BlobDelta>,
-}
-
-/// Compare two checkpoint metadata records. Pure — no store/disk access.
-pub fn diff_checkpoints(a: &CheckpointMeta, b: &CheckpointMeta) -> CheckpointDiff {
-    // Lineage is a hash-link: B is A's child iff B's parent digest is A's
-    // content-address, not iff it names A's (mutable) id.
-    let lineage = if a.id == b.id {
-        LineageRelation::Same
-    } else if b.parent.as_ref() == Some(&a.meta_digest) {
-        LineageRelation::BChildOfA
-    } else if a.parent.as_ref() == Some(&b.meta_digest) {
-        LineageRelation::AChildOfB
-    } else {
-        LineageRelation::Unrelated
-    };
-
-    let mut names: Vec<&str> = a.content.iter().map(|x| x.name.as_str()).collect();
-    for blob in &b.content {
-        if !names.contains(&blob.name.as_str()) {
-            names.push(blob.name.as_str());
-        }
-    }
-    names.sort_unstable();
-    let sha_in = |m: &CheckpointMeta, name: &str| -> Option<String> {
-        m.content
-            .iter()
-            .find(|x| x.name == name)
-            .map(|x| x.sha256.clone())
-    };
-    let blobs = names
-        .iter()
-        .map(|name| {
-            let sa = sha_in(a, name);
-            let sb = sha_in(b, name);
-            let status = match (&sa, &sb) {
-                (Some(x), Some(y)) if x == y => BlobStatus::Unchanged,
-                (Some(_), Some(_)) => BlobStatus::Changed,
-                (Some(_), None) => BlobStatus::RemovedFromB,
-                (None, Some(_)) => BlobStatus::AddedInB,
-                (None, None) => unreachable!("name came from one of the two manifests"),
-            };
-            BlobDelta {
-                name: name.to_string(),
-                status,
-                sha_a: sa,
-                sha_b: sb,
-            }
-        })
-        .collect();
-
-    CheckpointDiff {
-        a_id: a.id.clone(),
-        b_id: b.id.clone(),
-        class_a: a.class,
-        class_b: b.class,
-        vm_name_a: a.vm_name.clone(),
-        vm_name_b: b.vm_name.clone(),
-        tag_a: a.tag.clone(),
-        tag_b: b.tag.clone(),
-        created_unix_a: a.created_unix,
-        created_unix_b: b.created_unix,
-        supervisor_config_digest_same: a.supervisor_config_digest == b.supervisor_config_digest,
-        lineage,
-        blobs,
-    }
-}
-
 /// Freeze a quiesced VM's rootfs into an immutable fs_quick checkpoint via APFS
 /// copy-on-write. Returns the persisted metadata. Audit binding is the caller's
 /// responsibility (it owns the ExecutionPlan + signer).
@@ -1471,7 +1366,7 @@ pub fn capture_fs_quick(
         .context("cloning rootfs into checkpoint content")?;
 
     let name = file_name.to_string_lossy().into_owned();
-    let object_pool = chunks::ObjectPool::new(store.root(), &Default::default())?;
+    let object_pool = chunks::ObjectPool::new(store.root(), &params.key_domain)?;
     let mut content = vec![chunks::chunk_blob(
         &object_pool,
         &content_dir,
@@ -1497,6 +1392,7 @@ pub fn capture_fs_quick(
         .supervisor_config_digest(params.supervisor_config_digest)
         .runtime_overlay_version(params.runtime_overlay_version)
         .grants(params.grants)
+        .key_domain(params.key_domain)
         .build();
     staged.commit(&meta)?;
     Ok(meta)
@@ -1655,6 +1551,91 @@ mod tests {
         p
     }
 
+    fn capture_in_domain(
+        store: &CheckpointStore,
+        tmp: &Path,
+        id: &str,
+        domain: &mvm_core::checkpoint::CheckpointKeyDomain,
+    ) -> CheckpointMeta {
+        let source = tmp.join(id);
+        std::fs::create_dir_all(&source).unwrap();
+        let rootfs = source.join("rootfs.ext4");
+        std::fs::write(&rootfs, vec![0x6d; 3 * 1024 * 1024]).unwrap();
+        let params = CaptureFsQuickParams::builder()
+            .id(CheckpointId::new(id))
+            .vm_name(format!("{id}-vm"))
+            .rootfs(rootfs)
+            .supervisor_config_digest("d".into())
+            .created_unix(1)
+            .quiesced(true)
+            .key_domain(domain.clone())
+            .build()
+            .unwrap();
+        capture_fs_quick(store, params).unwrap()
+    }
+
+    #[cfg(unix)]
+    fn stored_inodes(store: &CheckpointStore, meta: &CheckpointMeta) -> Vec<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt as _;
+        chunks::stored_chunk_paths(
+            &store.content_dir(&meta.id),
+            blob_named(meta, "rootfs.ext4"),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|path| {
+            let metadata = std::fs::metadata(path).unwrap();
+            (metadata.dev(), metadata.ino())
+        })
+        .collect()
+    }
+
+    /// The domain is the tenant the capture names. Identical memory captured by
+    /// two tenants lands in two pools and shares no stored object, while a
+    /// second capture by the same tenant still deduplicates against the first.
+    #[test]
+    #[cfg(unix)]
+    fn two_tenants_capturing_identical_bytes_share_no_object() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let a = mvm_core::checkpoint::CheckpointKeyDomain::tenant("tenant-a").unwrap();
+        let b = mvm_core::checkpoint::CheckpointKeyDomain::tenant("tenant-b").unwrap();
+        let first_a = capture_in_domain(&store, tmp.path(), "a1", &a);
+        let second_a = capture_in_domain(&store, tmp.path(), "a2", &a);
+        let first_b = capture_in_domain(&store, tmp.path(), "b1", &b);
+
+        assert_eq!(first_a.key_domain, a);
+        assert_eq!(first_b.key_domain, b);
+        assert_eq!(
+            store.read_meta(&first_b.id).unwrap().key_domain,
+            b,
+            "the domain is part of the sealed record"
+        );
+        assert_ne!(first_a.meta_digest, first_b.meta_digest);
+
+        let a_inodes = stored_inodes(&store, &first_a);
+        let b_inodes = stored_inodes(&store, &first_b);
+        assert_eq!(a_inodes.len(), 3);
+        assert_eq!(stored_inodes(&store, &second_a), a_inodes);
+        assert!(
+            a_inodes.iter().all(|inode| !b_inodes.contains(inode)),
+            "tenant-b must not share a stored object with tenant-a"
+        );
+        assert_ne!(
+            chunks::ObjectPool::new(store.root(), &a).unwrap().root(),
+            chunks::ObjectPool::new(store.root(), &b).unwrap().root()
+        );
+        verify_content(&store, &first_b).unwrap();
+    }
+
+    #[test]
+    fn a_capture_that_names_no_domain_is_filed_under_the_host() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        assert!(meta.key_domain.is_host());
+    }
+
     #[test]
     fn capture_refuses_when_not_quiesced() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1670,6 +1651,7 @@ mod tests {
             created_unix: 7,
             quiesced: false,
             grants: None,
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         };
         let err = capture_fs_quick(&store, params).unwrap_err();
         assert!(err.to_string().contains("quiesced"));
@@ -1689,6 +1671,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap()
@@ -1924,6 +1907,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap()
@@ -1966,6 +1950,7 @@ mod tests {
                 created_unix: 1,
                 quiesced: true,
                 grants: None,
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
         )
         .unwrap();
@@ -2131,6 +2116,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2185,6 +2171,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2243,6 +2230,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2314,6 +2302,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2378,6 +2367,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2529,6 +2519,7 @@ mod tests {
             created_unix: 7,
             quiesced: true,
             grants: None,
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         };
         let meta = capture_fs_quick(&store, params).unwrap();
         let content_dir = store.content_dir(&meta.id);
@@ -2547,112 +2538,6 @@ mod tests {
         assert_eq!(meta.tag.as_deref(), Some("gold"));
         assert_eq!(meta.runtime_overlay_version.as_deref(), Some("0.17.0"));
         assert_eq!(store.read_meta(&meta.id).unwrap(), meta);
-    }
-
-    fn fs_quick_meta(
-        id: &str,
-        vm: &str,
-        parent: Option<CheckpointDigest>,
-        rootfs_sha: &str,
-    ) -> CheckpointMeta {
-        CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, vm)
-            .parent(parent)
-            .content(vec![ContentBlob {
-                name: "rootfs.ext4".into(),
-                sha256: rootfs_sha.into(),
-            }])
-            .supervisor_config_digest("cfg")
-            .created_unix(10)
-            .build()
-    }
-
-    #[test]
-    fn diff_identical_metas_has_no_changes() {
-        let a = fs_quick_meta("a", "vm", None, "aaaa");
-        let b = fs_quick_meta("b", "vm", None, "aaaa");
-        let d = diff_checkpoints(&a, &b);
-        assert!(d.blobs.iter().all(|x| x.status == BlobStatus::Unchanged));
-        assert!(d.supervisor_config_digest_same);
-        assert_eq!(d.lineage, LineageRelation::Unrelated);
-    }
-
-    #[test]
-    fn diff_detects_changed_blob() {
-        let a = fs_quick_meta("a", "vm", None, "aaaa");
-        let b = fs_quick_meta("b", "vm", None, "bbbb");
-        let d = diff_checkpoints(&a, &b);
-        let rootfs = d.blobs.iter().find(|x| x.name == "rootfs.ext4").unwrap();
-        assert_eq!(rootfs.status, BlobStatus::Changed);
-        assert_eq!(rootfs.sha_a.as_deref(), Some("aaaa"));
-        assert_eq!(rootfs.sha_b.as_deref(), Some("bbbb"));
-    }
-
-    #[test]
-    fn diff_detects_added_and_removed_blobs_cross_class() {
-        let a = fs_quick_meta("a", "vm", None, "aaaa");
-        let b = CheckpointMeta::builder(CheckpointId::new("b"), CheckpointClass::VmFull, "vm")
-            .content(vec![
-                ContentBlob {
-                    name: "rootfs.ext4".into(),
-                    sha256: "aaaa".into(),
-                },
-                ContentBlob {
-                    name: "memory.bin".into(),
-                    sha256: "mmmm".into(),
-                },
-                ContentBlob {
-                    name: "machine-id".into(),
-                    sha256: "iiii".into(),
-                },
-            ])
-            .supervisor_config_digest("cfg")
-            .created_unix(11)
-            .build();
-        let d = diff_checkpoints(&a, &b);
-        assert_eq!(
-            d.blobs
-                .iter()
-                .find(|x| x.name == "memory.bin")
-                .unwrap()
-                .status,
-            BlobStatus::AddedInB
-        );
-        assert_eq!(
-            d.blobs
-                .iter()
-                .find(|x| x.name == "rootfs.ext4")
-                .unwrap()
-                .status,
-            BlobStatus::Unchanged
-        );
-        assert_eq!(d.class_a, CheckpointClass::FsQuick);
-        assert_eq!(d.class_b, CheckpointClass::VmFull);
-        let d2 = diff_checkpoints(&b, &a);
-        assert_eq!(
-            d2.blobs
-                .iter()
-                .find(|x| x.name == "memory.bin")
-                .unwrap()
-                .status,
-            BlobStatus::RemovedFromB
-        );
-    }
-
-    #[test]
-    fn diff_detects_child_lineage() {
-        let a = fs_quick_meta("parent", "vm", None, "aaaa");
-        let b = fs_quick_meta("child", "vm", Some(a.meta_digest.clone()), "aaaa");
-        assert_eq!(diff_checkpoints(&a, &b).lineage, LineageRelation::BChildOfA);
-        assert_eq!(diff_checkpoints(&b, &a).lineage, LineageRelation::AChildOfB);
-    }
-
-    #[test]
-    fn checkpoint_diff_serializes() {
-        let a = fs_quick_meta("a", "vm", None, "aaaa");
-        let b = fs_quick_meta("b", "vm", None, "bbbb");
-        let json = serde_json::to_string(&diff_checkpoints(&a, &b)).unwrap();
-        assert!(json.contains("rootfs.ext4"));
-        assert!(json.contains("changed"));
     }
 
     // ── capture_vm_full: no machine-id sidecar + extra_content ────────────────
@@ -2733,6 +2618,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -2789,6 +2675,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -3083,6 +2970,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -3272,6 +3160,7 @@ mod tests {
                 parent: None,
                 session: None,
                 workspace_volumes: Vec::new(),
+                key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
             },
             &ctl,
         )
@@ -3321,7 +3210,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));
         let meta = seed_fc_vm_full_checkpoint(&store, tmp.path(), "mem-digest");
-        let dir = store.content_dir(&meta.id);
         let scratch = tmp.path().join("scratch");
         std::fs::create_dir_all(&scratch).unwrap();
         let memory = materialized_source(&store, &meta, "memory.bin", &scratch).unwrap();
@@ -3339,7 +3227,7 @@ mod tests {
             "the recorded content-address is the chunk index address, not the bytes"
         );
 
-        let corrected = content_with_load_memory_digest(&meta.content, &dir, &memory).unwrap();
+        let corrected = content_with_load_memory_digest(&meta.content, &memory).unwrap();
         let corrected_mem = corrected.iter().find(|b| b.name == "memory.bin").unwrap();
         assert_eq!(
             corrected_mem.sha256, whole_file,
@@ -3962,6 +3850,203 @@ mod tests {
         tamper_first_stored_chunk(&store, &parent, "rootfs.ext4");
         assert!(verify_content(&store, &parent).is_err());
         assert_eq!(parent.meta_digest, parent.compute_meta_digest());
+    }
+
+    /// A chunked blob's recorded content-address is the SHA-256 of its index
+    /// file, not of the bytes it materializes to. `meta_digest` covers that
+    /// address, so the chain's one digest anchors every chunk through it.
+    #[test]
+    fn a_chunked_blob_records_its_index_digest_as_the_content_address() {
+        use sha2::Digest as _;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let blob = blob_named(&meta, "rootfs.ext4");
+        let index = std::fs::read(chunks::index_path(
+            &store.content_dir(&meta.id),
+            "rootfs.ext4",
+        ))
+        .unwrap();
+
+        assert_eq!(blob.sha256, hex::encode(sha2::Sha256::digest(&index)));
+        assert_ne!(
+            blob.sha256,
+            materialized_blob_sha256(&store, &meta, "rootfs.ext4").unwrap(),
+            "the whole-file digest lives inside the index, not in the record"
+        );
+    }
+
+    /// Replace a chunked blob's index after capture, then re-seal the record
+    /// around it step by step. Each step defeats one more local check; the
+    /// digest the chain recorded at capture refuses the last one.
+    #[test]
+    fn an_index_replaced_after_capture_fails_lineage_against_the_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let captured = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        let chain = DisagreeingAnchor(captured.meta_digest.clone());
+        verify_content(&store, &captured).unwrap();
+        verify_lineage(&store, &captured.id, &chain).unwrap();
+
+        // Re-chunk different bytes into the checkpoint, which rewrites its
+        // index and links the new objects beside the old ones.
+        let content_dir = store.content_dir(&captured.id);
+        let substitute = tmp.path().join("substitute.ext4");
+        std::fs::write(&substitute, b"substituted-ext4-bytes").unwrap();
+        let pool = chunks::ObjectPool::new(store.root(), &captured.key_domain).unwrap();
+        let replaced =
+            chunks::chunk_blob(&pool, &content_dir, "rootfs.ext4", &substitute, true).unwrap();
+        assert_ne!(replaced.sha256, blob_named(&captured, "rootfs.ext4").sha256);
+
+        // The index alone: the record still names the captured index.
+        let err = verify_content(&store, &captured).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("index failed integrity"),
+            "expected an index integrity refusal, got: {err:#}"
+        );
+
+        // The index and the recorded address: the record's own digest drifts.
+        let mut edited = captured.clone();
+        edited.content[0] = replaced;
+        store.write_meta(&edited).unwrap();
+        verify_content(&store, &edited).unwrap();
+        let err = verify_lineage(&store, &captured.id, &chain).unwrap_err();
+        assert!(
+            err.to_string().contains("meta_digest drift"),
+            "expected meta_digest drift, got: {err}"
+        );
+
+        // Everything local re-sealed: only the chain still disagrees.
+        edited.meta_digest = edited.compute_meta_digest();
+        store.write_meta(&edited).unwrap();
+        verify_content(&store, &edited).unwrap();
+        assert_eq!(edited.meta_digest, edited.compute_meta_digest());
+        let err = verify_lineage(&store, &captured.id, &chain).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("does not match the signed audit chain"),
+            "expected a chain mismatch, got: {err}"
+        );
+    }
+
+    // ── the retired whole-blob layout ───────────────────────────────────────
+
+    /// Rewrite `name` of a captured checkpoint into the layout captures used
+    /// before chunking: the whole file in the content directory, no index, and
+    /// a record re-sealed around the file's own digest.
+    fn rewrite_as_whole_blob(
+        store: &CheckpointStore,
+        meta: &CheckpointMeta,
+        name: &str,
+    ) -> CheckpointMeta {
+        let content_dir = store.content_dir(&meta.id);
+        let whole = content_dir.join(name);
+        chunks::materialize_blob(&content_dir, blob_named(meta, name), &whole).unwrap();
+        std::fs::remove_file(chunks::index_path(&content_dir, name)).unwrap();
+        let mut rewritten = meta.clone();
+        for blob in &mut rewritten.content {
+            if blob.name == name {
+                blob.sha256 = sha256_file_hex(&whole).unwrap();
+            }
+        }
+        rewritten.meta_digest = rewritten.compute_meta_digest();
+        store.write_meta(&rewritten).unwrap();
+        rewritten
+    }
+
+    fn assert_whole_blob_refusal(error: anyhow::Error, meta: &CheckpointMeta, name: &str) {
+        let message = format!("{error:#}");
+        assert!(
+            message.contains(&format!(
+                "checkpoint '{}' stores {name} as one whole file",
+                meta.id
+            )) && message.contains("capture the machine again"),
+            "expected the whole-blob refusal for {name}, got: {message}"
+        );
+    }
+
+    #[test]
+    fn a_whole_blob_fs_quick_checkpoint_is_refused_by_every_reader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let captured = seed_fs_quick_checkpoint(&store, tmp.path(), "old");
+        let old = rewrite_as_whole_blob(&store, &captured, "rootfs.ext4");
+
+        assert_whole_blob_refusal(
+            verify_content(&store, &old).unwrap_err(),
+            &old,
+            "rootfs.ext4",
+        );
+        assert_whole_blob_refusal(
+            materialize_checkpoint_blobs(&store, &old, &tmp.path().join("child")).unwrap_err(),
+            &old,
+            "rootfs.ext4",
+        );
+        assert!(
+            !tmp.path().join("child").exists(),
+            "nothing is materialized from a refused checkpoint"
+        );
+        assert_whole_blob_refusal(
+            materialized_blob_sha256(&store, &old, "rootfs.ext4").unwrap_err(),
+            &old,
+            "rootfs.ext4",
+        );
+        let fork = fork_checkpoint(
+            &store,
+            ForkParams {
+                checkpoint: old.id.clone(),
+                child_id: CheckpointId::new("child"),
+                child_vm_name: "childvm".into(),
+                dest_dir: tmp.path().join("childvm-state"),
+                created_unix: 2,
+                parent_liveness: ForkParentLiveness::MustBeStopped,
+                child_plan_json: None,
+                child_tenant_id: None,
+            },
+            &AgreeingAnchor,
+        );
+        assert_whole_blob_refusal(fork.unwrap_err(), &old, "rootfs.ext4");
+
+        // Removal is how a user gets rid of one, so it must keep working.
+        store.remove(&old.id).unwrap();
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_whole_blob_memory_image_is_refused_by_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let captured = seed_fc_vm_full_checkpoint(&store, tmp.path(), "old-vm");
+        let old = rewrite_as_whole_blob(&store, &captured, mvm_core::checkpoint::MEMORY_BLOB);
+
+        let scratch = tmp.path().join("scratch");
+        std::fs::create_dir_all(&scratch).unwrap();
+        assert_whole_blob_refusal(
+            materialized_source(&store, &old, "rootfs.ext4", &scratch).unwrap_err(),
+            &old,
+            "memory.bin",
+        );
+        assert_whole_blob_refusal(
+            verify_content_except(&store, &old, &[mvm_core::checkpoint::MEMORY_BLOB]).unwrap_err(),
+            &old,
+            "memory.bin",
+        );
+    }
+
+    #[test]
+    fn a_missing_chunked_blob_is_reported_missing_not_as_the_old_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let meta = seed_fs_quick_checkpoint(&store, tmp.path(), "p1");
+        std::fs::remove_file(chunks::index_path(
+            &store.content_dir(&meta.id),
+            "rootfs.ext4",
+        ))
+        .unwrap();
+
+        let message = format!("{:#}", verify_content(&store, &meta).unwrap_err());
+        assert!(!message.contains("whole file"), "{message}");
     }
 
     // ── chain-anchored verification (the signed-chain leg) ───────────────────

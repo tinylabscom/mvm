@@ -34,6 +34,15 @@ closes.
 - Image construction lives entirely in `mvm-images`. What remains in `mvm`
   is the in-tree producer vestige (`nix/images`, its release machinery, and
   the build arms that still know how to invoke it) — that is W8's target.
+- *Note 2026-10-05:* "image construction lives entirely in `mvm-images`" is
+  narrowed by the image boundary decided in
+  [#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054).
+  `mvm-images` keeps the Linux layer (kernels, base root filesystems, the
+  builder image, Stage 0 seeds). The runtime overlay, SDK sidecars and
+  initramfs become pieces `mvmctl` assembles from a guest-runtime asset each
+  CLI release ships, and the guest-image-boot lane stops building from an
+  `mvm-images` checkout
+  ([#4108](https://github.com/tinylabscom/mvm/issues/4108)).
 
 ## W7 — dual-publish compatibility window
 

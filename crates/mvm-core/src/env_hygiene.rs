@@ -45,105 +45,10 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::process::Command;
 
-/// Why a variable is on the denylist.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum EnvFamily {
-    /// Dynamic-loader control (`LD_*`, `DYLD_*`).
-    Loader,
-    /// Shell startup and parsing control.
-    Shell,
-    /// Interpreter and toolchain startup control.
-    Interpreter,
-    /// A password-manager session or service-account token.
-    SessionToken,
-}
+mod denylist;
 
-impl EnvFamily {
-    /// Short human label, used in refusals and logs.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Loader => "loader",
-            Self::Shell => "shell",
-            Self::Interpreter => "interpreter",
-            Self::SessionToken => "password-manager session",
-        }
-    }
-}
-
-impl fmt::Display for EnvFamily {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.label())
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum Matcher {
-    Exact(&'static str),
-    Prefix(&'static str),
-}
-
-impl Matcher {
-    fn matches(self, name: &str) -> bool {
-        match self {
-            Self::Exact(exact) => name == exact,
-            Self::Prefix(prefix) => name.starts_with(prefix),
-        }
-    }
-}
-
-const DENYLIST: &[(Matcher, EnvFamily)] = &[
-    (Matcher::Prefix("LD_"), EnvFamily::Loader),
-    (Matcher::Prefix("DYLD_"), EnvFamily::Loader),
-    (Matcher::Exact("BASH_ENV"), EnvFamily::Shell),
-    (Matcher::Exact("ENV"), EnvFamily::Shell),
-    (Matcher::Prefix("BASH_FUNC_"), EnvFamily::Shell),
-    (Matcher::Exact("PROMPT_COMMAND"), EnvFamily::Shell),
-    (Matcher::Exact("IFS"), EnvFamily::Shell),
-    (Matcher::Exact("CDPATH"), EnvFamily::Shell),
-    (Matcher::Exact("GLOBIGNORE"), EnvFamily::Shell),
-    (Matcher::Exact("SHELLOPTS"), EnvFamily::Shell),
-    (Matcher::Exact("PS4"), EnvFamily::Shell),
-    (Matcher::Exact("PYTHONSTARTUP"), EnvFamily::Interpreter),
-    (Matcher::Exact("PYTHONPATH"), EnvFamily::Interpreter),
-    (Matcher::Exact("PYTHONHOME"), EnvFamily::Interpreter),
-    (Matcher::Exact("NODE_OPTIONS"), EnvFamily::Interpreter),
-    (Matcher::Exact("NODE_PATH"), EnvFamily::Interpreter),
-    (Matcher::Prefix("PERL5"), EnvFamily::Interpreter),
-    (Matcher::Exact("PERLLIB"), EnvFamily::Interpreter),
-    (Matcher::Prefix("RUBY"), EnvFamily::Interpreter),
-    (Matcher::Prefix("GEM_"), EnvFamily::Interpreter),
-    (Matcher::Exact("JAVA_TOOL_OPTIONS"), EnvFamily::Interpreter),
-    (Matcher::Exact("_JAVA_OPTIONS"), EnvFamily::Interpreter),
-    (Matcher::Exact("JDK_JAVA_OPTIONS"), EnvFamily::Interpreter),
-    (
-        Matcher::Exact("DOTNET_STARTUP_HOOKS"),
-        EnvFamily::Interpreter,
-    ),
-    (Matcher::Exact("GOFLAGS"), EnvFamily::Interpreter),
-    (
-        Matcher::Exact("OP_SERVICE_ACCOUNT_TOKEN"),
-        EnvFamily::SessionToken,
-    ),
-    (Matcher::Prefix("OP_CONNECT_"), EnvFamily::SessionToken),
-    (Matcher::Prefix("OP_SESSION_"), EnvFamily::SessionToken),
-    (Matcher::Exact("BW_SESSION"), EnvFamily::SessionToken),
-];
-
-/// The family `name` is denied under, or `None` when it is not denied.
-#[must_use]
-pub fn classify(name: &str) -> Option<EnvFamily> {
-    DENYLIST
-        .iter()
-        .find(|(matcher, _)| matcher.matches(name))
-        .map(|(_, family)| *family)
-}
-
-fn is_family_prefix(name: &str) -> bool {
-    DENYLIST
-        .iter()
-        .any(|(matcher, _)| matches!(matcher, Matcher::Prefix(prefix) if *prefix == name))
-}
+use denylist::is_family_prefix;
+pub use denylist::{EnvFamily, classify};
 
 /// A re-admission that was refused.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -359,9 +264,42 @@ impl EnvFilter {
 /// arrived unasked.
 #[must_use]
 pub fn helper_command(program: impl AsRef<OsStr>) -> Command {
+    helper_command_with(program, &EnvReadmit::none())
+}
+
+/// [`helper_command`] keeping the inherited variables `readmit` names exactly,
+/// for a child that cannot work without one of them: a password-manager CLI
+/// needs its own session token, a user's script its own module search path.
+#[must_use]
+pub fn helper_command_with(program: impl AsRef<OsStr>, readmit: &EnvReadmit) -> Command {
     let mut command = Command::new(program);
-    scrub_command(&mut command, &EnvReadmit::none());
+    scrub_command(&mut command, readmit);
     command
+}
+
+/// This process's environment without its denied variables, other than those
+/// in `readmit`, for a child started by a direct `exec` rather than through a
+/// [`Command`].
+#[must_use]
+pub fn filtered_env(readmit: &EnvReadmit) -> Vec<(OsString, OsString)> {
+    without_denied(std::env::vars_os(), readmit)
+}
+
+/// [`filtered_env`] over an explicit environment, so it is testable without
+/// touching this process's own.
+pub fn without_denied<I>(env: I, readmit: &EnvReadmit) -> Vec<(OsString, OsString)>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let filter = EnvFilter::new(readmit.clone());
+    env.into_iter()
+        .filter(|(name, _)| {
+            !matches!(
+                filter.verdict(&name.to_string_lossy()),
+                EnvVerdict::Denied(_)
+            )
+        })
+        .collect()
 }
 
 /// Remove from `command` every denied variable it would inherit from this
@@ -667,6 +605,23 @@ mod tests {
         assert!(command.get_envs().any(|(name, value)| {
             name == "DYLD_FALLBACK_LIBRARY_PATH" && value == Some(OsStr::new("/opt/homebrew/lib"))
         }));
+    }
+
+    #[test]
+    fn without_denied_drops_denied_names_and_keeps_the_rest() {
+        let env = [
+            ("BASH_ENV", "/tmp/rc"),
+            ("PATH", "/usr/bin"),
+            ("PERL5DB", "x"),
+            ("PYTHONPATH", "/lib"),
+        ]
+        .map(|(name, value)| (OsString::from(name), OsString::from(value)));
+        let readmit = EnvReadmit::from_names(["PYTHONPATH"]).expect("valid");
+        let kept: Vec<_> = without_denied(env, &readmit)
+            .into_iter()
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(kept, vec!["PATH", "PYTHONPATH"]);
     }
 
     #[test]

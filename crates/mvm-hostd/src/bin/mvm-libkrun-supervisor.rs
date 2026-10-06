@@ -59,7 +59,7 @@ use mvm_core::plan::NonceStore;
 // A prelaunched **pool** standby legitimately blocks a long time waiting to be claimed —
 // it's the warm pool's whole point. Its lifetime is bounded by the pool reaper TTL
 // (`mvmctl cache prune`, ~30 min), NOT a short self-timeout; a 30s value
-// made standbys self-exit before a later `up` could claim them. The per-conn read timeout
+// made standbys self-exit before a later boot could claim them. The per-conn read timeout
 // (set on the accepted stream) still caps a connected-but-silent peer, so DoS protection is
 // unaffected. Keep this aligned with the reaper TTL.
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -286,20 +286,22 @@ fn dispatch_config(mut cfg: SupervisorConfig) -> ExitCode {
     // exits the process when the guest powers off — so a timer here is the one
     // that can still fire when `mvmctl` is long gone. Held to the end of the
     // scope: dropping the guard stands the timer down.
-    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(
-        mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
-            plan_json: cfg.plan.as_ref(),
-            audit_dir: cfg.audit_dir.as_deref(),
-            signing_key_path: cfg.signing_key_path.as_deref(),
-            vm_state_dir: std::path::Path::new(&cfg.vm_state_dir),
-        },
-    ) {
+    let timer_inputs = mvm_hostd::supervisor::wall_clock::SupervisorTimerInputs {
+        plan_json: cfg.plan.as_ref(),
+        audit_dir: cfg.audit_dir.as_deref(),
+        signing_key_path: cfg.signing_key_path.as_deref(),
+        vm_state_dir: std::path::Path::new(&cfg.vm_state_dir),
+    };
+    let _wall_clock = match mvm_hostd::supervisor::wall_clock::arm_for_supervisor(timer_inputs) {
         Ok(guard) => guard,
         Err(e) => {
             eprintln!("supervisor: refusing to boot a bounded workload it cannot audit: {e}");
             return ExitCode::from(7);
         }
     };
+    // A session's idle timeout, for the same reason: no client is left to
+    // enforce it once the one that started the session has exited.
+    mvm_hostd::supervisor::session_expiry::arm_for_supervisor(&timer_inputs);
 
     // Registered here rather than at the top of `main`: everything above this
     // line refuses to boot, and a refusal has no consumption worth recording.

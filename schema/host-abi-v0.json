@@ -1789,6 +1789,301 @@
       "title": "LogsOpenRequest",
       "type": "object"
     },
+    "MachinePauseReply": {
+      "additionalProperties": false,
+      "description": "The outcome of a successful `pause_machine`. A sealed-snapshot backend reports its replay epoch and artifact lengths; a backend-native vCPU pause reports zeroes because it creates no sealed artifacts. Plain data the caller renders in its success line, and the detail of the `WorkloadSleep` entry the local backend writes to its local audit log.",
+      "properties": {
+        "epoch": {
+          "description": "Monotonic replay-defence counter stamped into the sealed envelope; a resume refuses any snapshot whose epoch is below the high-water mark. Zero for a backend-native pause that creates no sealed snapshot.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mem_len": {
+          "description": "Length in bytes of the sealed `mem.bin`; zero for backend-native pause.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "vmstate_len": {
+          "description": "Length in bytes of the sealed `vmstate.bin`; zero for backend-native pause.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "epoch",
+        "mem_len",
+        "vmstate_len"
+      ],
+      "title": "PauseOutcome",
+      "type": "object"
+    },
+    "MachinePauseRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.pause` request.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "primed_barrier": {
+          "default": false,
+          "description": "Wait for the workload to signal that it is primed before sealing, and refuse rather than seal when it does not signal in time.",
+          "type": "boolean"
+        },
+        "primed_timeout_secs": {
+          "default": null,
+          "description": "Seconds to wait for that signal. Defaults to the client's own default.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "PauseRequest",
+      "type": "object"
+    },
+    "MachineReconfigureReply": {
+      "additionalProperties": false,
+      "description": "A machine's observed runtime state — the shared listing/inspect record. Every field is REST-satisfiable plain data (no host handles, no paths, no keys), so the same struct crosses the gateway wire. New fields carry `#[serde(default)]` so an older serialized record still deserializes.",
+      "properties": {
+        "auto_resume": {
+          "default": true,
+          "description": "Whether connecting auto-resumes a sleeping machine.",
+          "type": "boolean"
+        },
+        "backend": {
+          "default": "",
+          "description": "Backend that owns this machine (e.g. `\"firecracker\"`, `\"hvf\"`, `\"libkrun\"`). Empty when unknown.",
+          "type": "string"
+        },
+        "cpus": {
+          "default": 0,
+          "description": "vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expires_at": {
+          "default": null,
+          "description": "RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller (presentation) decision, not modeled here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flake_ref": {
+          "default": null,
+          "description": "Original flake reference, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "guest_ip": {
+          "default": null,
+          "description": "Guest IP, when networking is configured.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/definitions/MachineId"
+        },
+        "last_readiness_change_at": {
+          "default": null,
+          "description": "RFC 3339 timestamp of the last `readiness` change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "memory_mib": {
+          "default": 0,
+          "description": "Guest memory in MiB. `0` when unknown.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "default": [],
+          "description": "Active host:guest port forwardings.",
+          "items": {
+            "$ref": "#/definitions/PortMapping"
+          },
+          "type": "array"
+        },
+        "profile": {
+          "default": null,
+          "description": "Flake profile name, when built from a profile.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "readiness": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InstanceReadiness"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Finer-grained host-observed readiness, when tracked."
+        },
+        "revision": {
+          "default": null,
+          "description": "Nix store revision hash, when known.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/MachineStatus"
+        },
+        "status_detail": {
+          "default": null,
+          "description": "Free-text detail for a non-happy `status` — e.g. the reason behind [`MachineStatus::Failed`]. `None` when the status needs no elaboration. Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tags": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Caller-supplied metadata tags.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "status"
+      ],
+      "title": "MachineState",
+      "type": "object"
+    },
+    "MachineReconfigureRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.reconfigure` request: a patch, so an absent field keeps its current value.",
+      "properties": {
+        "allow_host": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "cpus": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "memory_mib": {
+          "default": null,
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "net": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ReconfigurePatchRequest",
+      "type": "object"
+    },
+    "MachineResumeReply": {
+      "additionalProperties": false,
+      "description": "What a `resume_machine` did — the detail the caller renders in its success line, and the detail of the `WorkloadWake` entry the local backend writes to its local audit log, at parity with [`PauseOutcome`]. Plain data, REST-satisfiable.",
+      "properties": {
+        "epoch": {
+          "default": 0,
+          "description": "The verified snapshot's epoch (plain resume). `0` for a warm resume or backend-native vCPU resume, neither of which restores a sealed snapshot.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "mem_len": {
+          "default": 0,
+          "description": "Length in bytes of the restored `mem.bin` (plain resume); `0` for warm.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "reseed": {
+          "default": null,
+          "description": "Whether the guest rotated its VMGenID and reseeded its kernel generator. `Some` for a warm resume and for a plain resume that restored a sealed snapshot into a guest with an agent; `None` when nothing asked the guest to reseed (a backend-native vCPU resume, or the hermetic mock). A resume whose guest did not reseed is refused rather than reported here.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vmstate_len": {
+          "default": 0,
+          "description": "Length in bytes of the restored `vmstate.bin` (plain resume); `0` for warm.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "title": "ResumeOutcome",
+      "type": "object"
+    },
+    "MachineResumeRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.resume` request.",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "warm": {
+          "default": false,
+          "description": "Resume through the backend's live-memory warm-start path, which a disk-only backend refuses.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "ResumeRequest",
+      "type": "object"
+    },
     "MachineRmReply": {
       "title": "Empty",
       "type": "object"
@@ -1964,6 +2259,32 @@
         }
       },
       "title": "RunRequest",
+      "type": "object"
+    },
+    "MachineSetTtlReply": {
+      "title": "Empty",
+      "type": "object"
+    },
+    "MachineSetTtlRequest": {
+      "additionalProperties": false,
+      "description": "A `machine.set_ttl` request.",
+      "properties": {
+        "expires_at": {
+          "default": null,
+          "description": "When the reaper may remove the machine, as RFC 3339. `null` clears it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "SetTtlRequest",
       "type": "object"
     },
     "MachineStartReply": {
@@ -3262,6 +3583,57 @@
       "title": "MachineLogsStreamOpen",
       "type": "object"
     },
+    "machine_pause": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachinePauseReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachinePauseRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachinePause",
+      "type": "object"
+    },
+    "machine_reconfigure": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineReconfigureReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineReconfigureRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineReconfigure",
+      "type": "object"
+    },
+    "machine_resume": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineResumeReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineResumeRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineResume",
+      "type": "object"
+    },
     "machine_rm": {
       "additionalProperties": false,
       "properties": {
@@ -3294,6 +3666,23 @@
         "reply"
       ],
       "title": "MachineRun",
+      "type": "object"
+    },
+    "machine_set_ttl": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/MachineSetTtlReply"
+        },
+        "request": {
+          "$ref": "#/definitions/MachineSetTtlRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "MachineSetTtl",
       "type": "object"
     },
     "machine_start": {
@@ -3412,7 +3801,11 @@
     "machine_logs_stream_close",
     "machine_logs_stream_next",
     "machine_logs_stream_open",
+    "machine_pause",
+    "machine_reconfigure",
+    "machine_resume",
     "machine_run",
+    "machine_set_ttl",
     "machine_start",
     "machine_stop",
     "session_call",

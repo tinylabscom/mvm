@@ -97,7 +97,7 @@ fn env_is_set(name: &str) -> bool {
 
 fn run_script(args: &Args) -> Result<()> {
     let exe = std::env::current_exe().context("locating this mvmctl binary")?;
-    let status = std::process::Command::new("sh")
+    let status = mvm_core::env_hygiene::helper_command("sh")
         .arg("-c")
         .arg(UNINSTALL_SCRIPT)
         .arg("uninstall.sh")

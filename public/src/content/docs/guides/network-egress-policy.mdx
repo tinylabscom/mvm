@@ -275,21 +275,36 @@ mvmctl explain agent-sandbox
 ```
 
 When a foreground run ends with grantable denials and an operator has a
-controlling terminal, mvm opens a Grant / Skip review. Grant only stages the
+controlling terminal, mvm opens a Grant / Skip review. That covers `run`,
+`machine run -- <command>` (transient or `--name`), the attached output of a
+persistent `machine run`, and `machine run --entrypoint`. Grant only stages the
 destination: mvm then shows the exact `[network].allow_hosts` additions and
 asks separately before atomically updating the project's `mvm.toml`. Skipping,
 cancelling, a missing terminal, and every non-grantable refusal leave the file
 unchanged. Metadata, loopback, link-local, SSH and operational failures are
 never offered as grants.
 
-Detached and background work uses the durable audit record instead:
+The review edits only the manifest the run was admitted under. When a
+`machine run` lane has no terminal, or its run has no project manifest this
+invocation admitted it under — no `mvm.toml` beside the flake, a policy from a
+verified pack or `--plan`, an `--attach`, or a machine that was already
+running — it does not prompt. The exit summary ends with the command that opens
+the same review later instead:
+
+```text
+[mvm] no terminal to review these refusals on; to grant any of them later, run:
+[mvm]   mvmctl explain 3f2b9c1e-7a44-4d0e-9b61-2c8f0e5a7d13 --review --project /work/agent/mvm.toml
+```
+
+Detached and background work uses the durable audit record the same way:
 
 ```sh
 mvmctl explain agent-sandbox --review
 ```
 
-The audit chain must verify before the review opens. Use `--project DIR` when
-the policy file is not in the current project.
+The audit chain must verify before the review opens. Use `--project PATH`, a
+project directory or its manifest file, when the policy file is not in the
+current project.
 
 This is observation only. The per-VM network endpoint is still the only place
 an egress decision is made; the notices read what it recorded and change

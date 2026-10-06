@@ -46,10 +46,12 @@
 #
 #   - `mvmctl build --deps examples/python/hello-app-with-deps/` ⇒
 #     real builder VM round-trip. Needs Plan 72 cutover.
-#   - `mvmctl up --prod examples/python/hello-app-with-deps/` ⇒
+#   - `mvmctl machine run --prod examples/python/hello-app-with-deps/` ⇒
 #     supervisor admission claim 9 enforcement against a real volume.
-#     Needs a working microVM backend with `/dev/kvm` and (Apple
-#     Silicon) libkrun, which GitHub macOS runners don't expose.
+#     No boot path puts a deps volume into the plan yet, so a live run
+#     has no volume for admission to verify. Once one does, it still
+#     needs a working microVM backend, which GitHub macOS runners don't
+#     expose.
 #
 # Both are documented as manual smoke in
 # `examples/python/hello-app-with-deps/README.md`.

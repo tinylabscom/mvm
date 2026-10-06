@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 4,
+  "abi_minor": 5,
   "methods": [
     {
       "classification": "prod_safe",
@@ -76,9 +76,33 @@
     },
     {
       "classification": "prod_safe",
+      "key": "machine_pause",
+      "name": "machine.pause",
+      "summary": "Pauses a running machine, sealing a snapshot where the backend uses one."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_reconfigure",
+      "name": "machine.reconfigure",
+      "summary": "Patches a machine's resources and relaunches it when running."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_resume",
+      "name": "machine.resume",
+      "summary": "Resumes a paused machine, refusing a replayed snapshot."
+    },
+    {
+      "classification": "prod_safe",
       "key": "machine_run",
       "name": "machine.run",
       "summary": "Boots a machine through the admitted local launch."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_set_ttl",
+      "name": "machine.set_ttl",
+      "summary": "Sets or clears the time the idle reaper removes a machine at."
     },
     {
       "classification": "prod_safe",

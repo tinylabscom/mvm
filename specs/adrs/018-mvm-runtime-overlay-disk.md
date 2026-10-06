@@ -4,6 +4,55 @@
 
 Accepted.
 
+**Amended 2026-10-05.** Parts of the Decision below had gone stale before
+ADR-054 (`specs/adrs/054-image-boundary-linux-layer.md`) moved the overlay's
+source; this note corrects them against the code and is right where the two
+disagree. The rest of the Decision is kept as written.
+
+- **Root hashes travel in the activation message, not on the kernel
+  command line.** Every workload backend boots the universal initramfs. Its
+  static agent runs as PID 1 and receives the rootfs and runtime-overlay
+  verity parameters (data device, hash device, root hash) in
+  `ActivateEnvironment` over vsock;
+  `crates/mvm-runtime/src/microvm/activation.rs` builds that message on the
+  host. The agent sets up and checks both verity devices, mounts the overlay
+  at `/mvm/runtime`, and pivots in-process. The `mvm.roothash=` /
+  `mvm.runtime_roothash=` command-line builder left in the libkrun process
+  driver has no caller. `mkGuest`'s `/init` still runs for dev boots and for
+  the chained builder boot, and reads its own command-line tokens.
+- **There is no `mvm-verity-init`.** The initramfs agent took over its job of
+  checking verity before anything beyond the initramfs is mounted, and no
+  binary of that name is built. The name survives only in source comments
+  that describe the verity parameters.
+- **There is no in-tree overlay or sidecar flake.** The in-tree image flakes
+  were deleted when image construction moved to `mvm-images`, so the
+  `nix build` command in the sidecar paragraph no longer exists. Today the
+  overlay and the glibc and musl sidecars are members of the signed image
+  set this build pins: a release build fetches them through the image-set
+  member fetch
+  (`mvm_build::sdk_sidecar`, `mvm_build::runtime_overlay`), checked against
+  the digests the verified root declares. The set's root is what is signed,
+  under the `mvm-images` release workflow identity; the per-archive
+  `.sha256` file and per-archive signature this ADR describes are not how
+  either is authenticated now. A source checkout builds the overlay on the
+  host (`mvm_build::runtime_overlay::build_runtime_overlay_from_guest_binaries`),
+  but the sidecar has no host build path: `mvmctl build sdk-sidecar build`
+  builds it from a selected `mvm-images` checkout in the builder VM, and a
+  selected checkout also pair-builds the overlay.
+- **The two glibc CI gates do not exist.** No workflow in this repository
+  defines either check named in the size paragraph. The only build-backed
+  glibc check here is `guest-rootfs-no-glibc` in the `nix-flake-check` CI
+  job, which covers the baked rootfs, not the overlay or the sidecar.
+
+Direction (ADR-054, [#4100](https://github.com/tinylabscom/mvm/issues/4100)):
+the overlay, the sidecars and the initramfs leave the image set. `mvmctl`
+assembles them at boot from the guest-runtime asset each CLI release ships,
+or from a source build. The host-built sidecar carries only
+`libmvm_host_services.so`: the loader and `libc.so.6` the published sidecar
+bundles are never loaded, because the workload process that loads the
+library already has its own. The overlay stays verity-sealed and its root
+hash still reaches the agent in `ActivateEnvironment`.
+
 ## Context
 
 A microVM's rootfs can come from two different sources: an mvm-built Nix

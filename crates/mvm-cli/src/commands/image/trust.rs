@@ -34,7 +34,7 @@ impl CosignVerifier for CosignCommandVerifier {
                 "cosign is required for production OCI policy; install cosign or run without --prod ({e})"
             ))
         })?;
-        let output = std::process::Command::new(cosign)
+        let output = mvm_core::env_hygiene::helper_command(cosign)
             .args([
                 "verify",
                 "--certificate-identity",

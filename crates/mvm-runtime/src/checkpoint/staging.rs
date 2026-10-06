@@ -265,23 +265,36 @@ fn staging_owner(name: &str) -> Option<i32> {
 ///
 /// Best effort: a sweep that cannot remove something leaves it for the next
 /// one rather than failing the capture that triggered it.
-pub(super) fn sweep_abandoned(staging_root: &Path) {
+///
+/// Returns how many entries it removed.
+pub(super) fn sweep_abandoned(staging_root: &Path) -> usize {
+    abandoned_entries(staging_root)
+        .into_iter()
+        .filter(|path| match std::fs::remove_dir_all(path) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "could not sweep abandoned checkpoint staging");
+                false
+            }
+        })
+        .count()
+}
+
+/// The staging entries [`sweep_abandoned`] would remove: those whose owning
+/// process is gone. A missing or unreadable staging root has none.
+pub(super) fn abandoned_entries(staging_root: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(staging_root) else {
-        return;
+        return Vec::new();
     };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(pid) = staging_owner(&name) else {
-            continue;
-        };
-        if mvm_vmm::host::process_liveness::pid_is_alive(pid) {
-            continue;
-        }
-        let path = entry.path();
-        if let Err(error) = std::fs::remove_dir_all(&path) {
-            tracing::warn!(path = %path.display(), %error, "could not sweep abandoned checkpoint staging");
-        }
-    }
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            staging_owner(&name)
+                .is_some_and(|pid| !mvm_vmm::host::process_liveness::pid_is_alive(pid))
+        })
+        .map(|entry| entry.path())
+        .collect()
 }
 
 /// Every regular file and nested directory under `dir`. Directories are
@@ -412,7 +425,8 @@ mod tests {
             std::fs::create_dir_all(dir.join("content")).unwrap();
         }
 
-        sweep_abandoned(tmp.path());
+        assert_eq!(abandoned_entries(tmp.path()).len(), 2);
+        assert_eq!(sweep_abandoned(tmp.path()), 2);
 
         assert!(!dead.exists());
         assert!(!dead_replaced.exists());

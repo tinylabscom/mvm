@@ -34,7 +34,7 @@
 //! teardown without touching unrelated tables.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use thiserror::Error;
 
@@ -180,7 +180,7 @@ pub fn build_teardown_rules(vm_id: &str) -> Result<String, NftError> {
 /// without privileges can still exercise `build_default_deny_rules`
 /// directly.
 pub fn apply(rules: &str) -> Result<(), NftError> {
-    let mut child = Command::new("nft")
+    let mut child = mvm_core::env_hygiene::helper_command("nft")
         .arg("-f")
         .arg("-")
         .stdin(Stdio::piped())
