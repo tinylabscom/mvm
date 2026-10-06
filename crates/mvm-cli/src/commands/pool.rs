@@ -1255,21 +1255,24 @@ mod tests {
     // entry. Nothing admits a plan for a factory parent, so before this the
     // pool filled with parents no claim could ever verify.
 
-    /// A captured parent's checkpoint, written the way `capture_vm_full` leaves
-    /// it: a `vm_full` record carrying the rootfs blob a claim binds against.
-    fn write_captured_parent(store: &CheckpointStore, id: &str, rootfs_sha: &str) -> CheckpointId {
-        use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ContentBlob};
-        let ckpt = CheckpointId::new(id.to_string());
-        let meta = CheckpointMeta::builder(ckpt.clone(), CheckpointClass::VmFull, "standby-vm")
-            .content(vec![ContentBlob {
-                name: "rootfs.ext4".into(),
-                sha256: rootfs_sha.into(),
-            }])
-            .supervisor_config_digest("")
+    /// A captured parent's checkpoint carrying a chunked rootfs, the blob a
+    /// claim binds against. Captured as fs_quick: a parent's memory plays no
+    /// part in auditing it, and the rootfs is chunked the same way either way.
+    fn write_captured_parent(store: &CheckpointStore, id: &str) -> CheckpointId {
+        use mvm_runtime::checkpoint::{CaptureFsQuickParams, capture_fs_quick};
+        let source = tempfile::tempdir().unwrap();
+        let rootfs = source.path().join(mvm_core::checkpoint::ROOTFS_BLOB);
+        std::fs::write(&rootfs, id.as_bytes()).unwrap();
+        let params = CaptureFsQuickParams::builder()
+            .id(CheckpointId::new(id.to_string()))
+            .vm_name("standby-vm".into())
+            .rootfs(rootfs)
+            .supervisor_config_digest(String::new())
             .created_unix(1)
-            .build();
-        store.write_meta(&meta).unwrap();
-        ckpt
+            .quiesced(true)
+            .build()
+            .unwrap();
+        capture_fs_quick(store, params).unwrap().id
     }
 
     fn captured_handle(id: &str, ckpt: &CheckpointId) -> StandbyHandle {
@@ -1306,7 +1309,7 @@ mod tests {
         env.isolate_mvm_home(tmp.path());
 
         let store = CheckpointStore::open();
-        let ckpt = write_captured_parent(&store, "standby-standby-abc", &"ab".repeat(32));
+        let ckpt = write_captured_parent(&store, "standby-standby-abc");
         let handle = captured_handle("standby-abc", &ckpt);
         let meta = store.read_meta(&ckpt).unwrap();
 
@@ -1374,7 +1377,7 @@ mod tests {
         env.isolate_mvm_home(tmp.path());
 
         let store = CheckpointStore::open();
-        let ckpt = write_captured_parent(&store, "standby-standby-doomed", &"ef".repeat(32));
+        let ckpt = write_captured_parent(&store, "standby-standby-doomed");
         let handle = captured_handle("standby-doomed", &ckpt);
         assert!(store.read_meta(&ckpt).is_ok());
 
