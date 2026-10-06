@@ -1,7 +1,7 @@
 //! Verified, normalized local audit events for UI consumers.
 //!
 //! [`LocalAuditReader`] is the one seam through which a local consumer
-//! (mvm-studio, `mvmctl audit verify`) reads mvm's chain-signed audit
+//! (mvm-studio, `mvmctl trust audit verify`) reads mvm's chain-signed audit
 //! sources. It discovers the per-tenant lifecycle chains
 //! (`<audit_dir>/<tenant>.jsonl`) and the per-VM workload chains
 //! (`<audit_dir>/<tenant>.<vm>.workload.jsonl`), verifies each through the
