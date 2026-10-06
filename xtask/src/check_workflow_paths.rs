@@ -884,12 +884,24 @@ mod tests {
             "archive_run_id:",
             "--archive-file \"$RUNNER_TEMP/workspace-tests.tar.zst\"",
             "--partition hash:${{ inputs.shard }}/2",
+            "cargo nextest run -p xtask --features man",
+            "cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2",
+            "actions: read",
+            "workspace-archive-{0}",
+            "if: inputs.archive_run_id == ''",
+            "if: inputs.archive_run_id != ''",
+            "cp -a \"$GITHUB_WORKSPACE/.\" \"$archive_root/\"",
+            "run-id: ${{ inputs.archive_run_id }}",
+            "github-token: ${{ secrets.GITHUB_TOKEN }}",
+            "--workspace-remap \"$archive_root\"",
+            "--extract-to \"$archive_root\"",
         ] {
             assert!(
                 workspace_worker.contains(expected),
                 "workspace shard worker must contain {expected:?}"
             );
         }
+        assert!(!workspace_worker.contains("actions: write"));
         let test_linux = job_block(&workflow, "test-linux");
         assert!(test_linux.contains("bash scripts/ci-linux-coverage.sh"));
         assert!(!workspace_worker.contains("ci-linux-coverage.sh"));
