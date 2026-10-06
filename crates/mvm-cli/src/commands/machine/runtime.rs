@@ -573,16 +573,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
     // The manifest that policy came from, for reviewing the run's refusals.
-    // Read now, while the arguments still name the flake directory.
+    // Read now, while the arguments still name the flake directory; the
+    // transient lanes carry it on the run arguments.
     let review_source = ReviewSource::for_launch(&args.run)?;
+    args.run.review_source = Some(review_source.clone());
     check_pack_entrypoint(&args)?;
-    let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
-        let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
-        args.run.manifest = Some(slot_hash.clone());
-        Some(slot_hash)
-    } else {
-        None
-    };
+    let resolved_flake_slot = crate::commands::vm::exec::build_flake_slot(&mut args.run)?;
     let local_deployment = args
         .run
         .deployment

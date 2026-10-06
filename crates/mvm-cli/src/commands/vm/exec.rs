@@ -349,6 +349,10 @@ pub(in crate::commands) struct RunArgs {
     /// Internal: backend used to resolve a backend-conditioned policy.
     #[arg(skip)]
     pub policy_backend: Option<mvm_core::protocol::vm_backend::BackendKind>,
+    /// Internal: where the run's policy came from, for reviewing its egress
+    /// refusals. Settled before a `--flake` is built into a slot.
+    #[arg(skip)]
+    pub review_source: Option<super::denial_review::ReviewSource>,
 }
 
 /// Every flag that authors policy. A resolved manifest is the whole policy,
@@ -548,16 +552,33 @@ pub(in crate::commands) fn run_transient(
              for a launch document, or `mvmctl machine run -d` to boot a machine with no command."
         );
     }
-    if !args.run.dry_run
-        && let Some(flake_ref) = args.run.flake.take()
-    {
-        let slot_hash = super::super::build::build::build_flake_to_slot(
-            &flake_ref,
-            args.run.flake_profile.as_deref(),
-        )?;
-        args.run.manifest = Some(slot_hash);
+    if !args.run.dry_run {
+        build_flake_slot(&mut args.run)?;
     }
     run_secure(cli, args.run, cfg)
+}
+
+/// Build a `--flake` into a manifest slot and point the run at it, returning
+/// the slot. The run's review source is settled first: once the slot replaces
+/// the flake, the arguments no longer name the project directory its policy
+/// was read from.
+pub(in crate::commands) fn build_flake_slot(args: &mut RunArgs) -> Result<Option<String>> {
+    build_flake_slot_with(args, super::super::build::build::build_flake_to_slot)
+}
+
+fn build_flake_slot_with(
+    args: &mut RunArgs,
+    build: impl FnOnce(&str, Option<&str>) -> Result<String>,
+) -> Result<Option<String>> {
+    if args.review_source.is_none() {
+        args.review_source = Some(super::denial_review::ReviewSource::for_launch(args)?);
+    }
+    let Some(flake_ref) = args.flake.take() else {
+        return Ok(None);
+    };
+    let slot = build(&flake_ref, args.flake_profile.as_deref())?;
+    args.manifest = Some(slot.clone());
+    Ok(Some(slot))
 }
 
 /// Run a transient workload through the normal admitted path, optionally
@@ -589,15 +610,13 @@ pub(in crate::commands) fn run_secure_with_source(
         }
         return Ok(());
     }
-    let review_manifest = if args.json {
+    // `--json` offers no review: its document carries the refusals instead.
+    let review_source = if args.json {
         None
     } else {
-        match super::run_routes::project_manifest(&args)? {
-            Some((path, _)) => Some(path),
-            None => {
-                let cwd = std::env::current_dir().context("resolving policy review directory")?;
-                Some(super::denial_review::manifest_path(&cwd)?)
-            }
+        match args.review_source.take() {
+            Some(source) => Some(source),
+            None => Some(super::denial_review::ReviewSource::for_launch(&args)?),
         }
     };
     // Prepare outputs before admission binds them to the grant.
@@ -845,11 +864,7 @@ pub(in crate::commands) fn run_secure_with_source(
         if !json_requested {
             network_access.announce_exit(output.exit_code, &super::host_notices::Stderr);
         }
-        if let Some(manifest) = review_manifest.as_deref()
-            && let Err(error) = super::denial_review::review(&refused, manifest)
-        {
-            ui::warn(&format!("could not review denied egress: {error:#}"));
-        }
+        offer_review(&refused, &denials, review_source.as_ref());
         if output.exit_code != 0 {
             mvm_observability::exit(output.exit_code);
         }
@@ -875,7 +890,7 @@ pub(in crate::commands) fn run_secure_with_source(
             outputs: &outputs,
             denials: &denials,
             network: network_access,
-            review_manifest: review_manifest.as_deref(),
+            review_source: review_source.as_ref(),
         },
     )
 }
@@ -922,8 +937,9 @@ struct RunAudit<'a> {
     denials: &'a super::egress_denials::PendingWatch,
     /// Whether the run could reach the network at all.
     network: NetworkAccess,
-    /// The single project manifest an explicitly confirmed draft updates.
-    review_manifest: Option<&'a Path>,
+    /// Where the run's policy came from; `None` for `--json`, which offers no
+    /// review.
+    review_source: Option<&'a super::denial_review::ReviewSource>,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -975,15 +991,24 @@ fn run_run_args(
     audit
         .network
         .announce_exit(exit_code, &super::host_notices::Stderr);
-    if let Some(manifest) = audit.review_manifest
-        && let Err(error) = super::denial_review::review(&refused, manifest)
-    {
-        ui::warn(&format!("could not review denied egress: {error:#}"));
-    }
+    offer_review(&refused, audit.denials, audit.review_source);
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }
     Ok(())
+}
+
+/// Offer a finished transient run's grantable refusals for review, under the
+/// name its machine was given and against the source its policy came from.
+/// `None` is `--json`, which offers nothing.
+fn offer_review(
+    refused: &super::egress_denials::DenialTally,
+    denials: &super::egress_denials::PendingWatch,
+    source: Option<&super::denial_review::ReviewSource>,
+) {
+    if let Some(offer) = source.and_then(|source| denials.review_offer(source)) {
+        super::denial_review::offer(refused, &offer);
+    }
 }
 
 /// Resolve the [`crate::exec::ImageSource`] a launch boots from: the OCI image
@@ -2514,5 +2539,77 @@ mod tests {
         assert!(grant_eligible(false, false, false));
         // Dev profile stays permissive by contract.
         assert!(!grant_eligible(false, false, true));
+    }
+}
+
+#[cfg(test)]
+mod review_source_tests {
+    use super::*;
+    use crate::commands::vm::denial_review::{NoManifest, ReviewSource};
+
+    fn project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("mvm.toml"), "flake = \".\"\n").unwrap();
+        dir
+    }
+
+    /// The slot replaces the flake, so the review source has to be read
+    /// before it does: afterwards the arguments name a slot hash, and the
+    /// project manifest the run's policy came from can no longer be found.
+    #[test]
+    fn the_review_source_is_read_before_the_flake_becomes_a_slot() {
+        let dir = project();
+        let mut args = RunArgs {
+            flake: Some(dir.path().display().to_string()),
+            ..RunArgs::default()
+        };
+
+        let slot = build_flake_slot_with(&mut args, |flake, _| {
+            assert_eq!(flake, dir.path().display().to_string());
+            Ok("0123abcd".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(slot.as_deref(), Some("0123abcd"));
+        assert_eq!(args.flake, None);
+        assert_eq!(args.manifest.as_deref(), Some("0123abcd"));
+        assert_eq!(
+            args.review_source,
+            Some(ReviewSource::Manifest(dir.path().join("mvm.toml")))
+        );
+        assert_eq!(
+            ReviewSource::for_launch(&args).unwrap(),
+            ReviewSource::Unavailable(NoManifest::NotNamed),
+            "read after the slot replaces the flake, the project manifest is gone"
+        );
+    }
+
+    /// A source an earlier step settled is the one the run keeps.
+    #[test]
+    fn a_settled_review_source_is_not_replaced() {
+        let dir = project();
+        let mut args = RunArgs {
+            flake: Some(dir.path().display().to_string()),
+            review_source: Some(ReviewSource::admitted_elsewhere()),
+            ..RunArgs::default()
+        };
+
+        build_flake_slot_with(&mut args, |_, _| Ok("slot".to_string())).unwrap();
+
+        assert_eq!(args.review_source, Some(ReviewSource::admitted_elsewhere()));
+    }
+
+    /// A run with no flake still settles where its policy came from.
+    #[test]
+    fn a_run_without_a_flake_settles_its_review_source_and_builds_nothing() {
+        let mut args = RunArgs::default();
+
+        let slot = build_flake_slot_with(&mut args, |_, _| panic!("nothing to build")).unwrap();
+
+        assert_eq!(slot, None);
+        assert_eq!(
+            args.review_source,
+            Some(ReviewSource::Unavailable(NoManifest::NotNamed))
+        );
     }
 }

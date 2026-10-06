@@ -35,7 +35,7 @@ pub(in crate::commands) use watch::{DenialWatch, Live, WatchTarget, print_summar
 
 use super::audit_chain::{audit_path_for_tenant, default_audit_dir};
 use super::audit_follow::{ChainLine, parse_chain_line};
-use super::denial_review::ReviewOffer;
+use super::denial_review::{ReviewOffer, ReviewSource};
 use super::host_notices::{NoticeSink, Stderr};
 
 /// The tenant a local run is admitted under, and so the chain its endpoint
@@ -115,6 +115,9 @@ fn latest_admission_in(
 pub(in crate::commands) struct PendingWatch {
     live: Live,
     running: RefCell<Option<DenialWatch>>,
+    /// The name the watch was last armed with, kept after it finishes so the
+    /// refusals can be offered for review under it.
+    armed: RefCell<Option<String>>,
 }
 
 impl PendingWatch {
@@ -122,6 +125,7 @@ impl PendingWatch {
         Self {
             live,
             running: RefCell::new(None),
+            armed: RefCell::new(None),
         }
     }
 
@@ -139,6 +143,7 @@ impl PendingWatch {
     /// Start watching `vm_name`. A second call — a retried boot under a new
     /// name — replaces the first watch.
     pub(in crate::commands) fn arm(&self, vm_name: &str) {
+        self.armed.replace(Some(vm_name.to_string()));
         let watch = watch_machine(vm_name, self.live);
         if let Some(previous) = self.running.replace(watch) {
             drop(previous.finish());
@@ -153,6 +158,15 @@ impl PendingWatch {
             .take()
             .map(DenialWatch::finish)
             .unwrap_or_default()
+    }
+
+    /// How the refusals are offered for review: under the machine's name,
+    /// against `source`. `None` when the run never named a machine.
+    pub(in crate::commands) fn review_offer(&self, source: &ReviewSource) -> Option<ReviewOffer> {
+        self.armed
+            .borrow()
+            .as_ref()
+            .map(|vm_name| ReviewOffer::new(vm_name.as_str(), source.clone()))
     }
 
     /// [`Self::finish`], printing the exit summary unless `print` is false.
@@ -265,6 +279,27 @@ mod tests {
             Some("plan-new")
         );
         assert_eq!(latest_admission_in(entries, "vm-c"), None);
+    }
+
+    /// A transient run's refusals are offered under the name its machine was
+    /// given at admission, which is the name `mvmctl explain` finds it by.
+    #[test]
+    fn an_armed_watch_offers_its_review_under_the_machines_name() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let watch = PendingWatch::new(Live::Quiet);
+        let source = ReviewSource::Manifest("/project/mvm.toml".into());
+
+        assert_eq!(watch.review_offer(&source), None);
+        watch.arm("vm-first");
+        watch.arm("vm-retried");
+        drop(watch.finish());
+
+        assert_eq!(
+            watch.review_offer(&source),
+            Some(ReviewOffer::new("vm-retried", source))
+        );
     }
 
     #[test]
