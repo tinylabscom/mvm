@@ -420,6 +420,43 @@ class MachineLogsStreamOpenReply:
 
 
 @dataclass
+class MachinePauseReply:
+    epoch: int
+    mem_len: int
+    vmstate_len: int
+
+
+@dataclass
+class MachinePauseRequest:
+    id: str
+    primed_barrier: Optional[bool] = False
+    primed_timeout_secs: Optional[int] = None
+
+
+@dataclass
+class MachineReconfigureRequest:
+    id: str
+    allow_host: Optional[List[str]] = None
+    cpus: Optional[int] = None
+    memory_mib: Optional[int] = None
+    net: Optional[bool] = None
+
+
+@dataclass
+class MachineResumeReply:
+    epoch: Optional[int] = 0
+    mem_len: Optional[int] = 0
+    reseed: Optional[str] = None
+    vmstate_len: Optional[int] = 0
+
+
+@dataclass
+class MachineResumeRequest:
+    id: str
+    warm: Optional[bool] = False
+
+
+@dataclass
 class MachineRmReply:
     pass
 
@@ -427,6 +464,17 @@ class MachineRmReply:
 @dataclass
 class MachineRmRequest:
     id: str
+
+
+@dataclass
+class MachineSetTtlReply:
+    pass
+
+
+@dataclass
+class MachineSetTtlRequest:
+    id: str
+    expires_at: Optional[str] = None
 
 
 @dataclass
@@ -760,9 +808,27 @@ class MachineLogsStreamClose:
 
 
 @dataclass
+class MachinePause:
+    reply: MachinePauseReply
+    request: MachinePauseRequest
+
+
+@dataclass
+class MachineResume:
+    reply: MachineResumeReply
+    request: MachineResumeRequest
+
+
+@dataclass
 class MachineRm:
     reply: MachineRmReply
     request: MachineRmRequest
+
+
+@dataclass
+class MachineSetTtl:
+    reply: MachineSetTtlReply
+    request: MachineSetTtlRequest
 
 
 @dataclass
@@ -918,6 +984,27 @@ class MachineLogsStreamOpenRequest:
 
 
 @dataclass
+class MachineReconfigureReply:
+    id: MachineId
+    name: str
+    status: MachineStatus
+    auto_resume: Optional[bool] = True
+    backend: Optional[str] = ''
+    cpus: Optional[int] = 0
+    expires_at: Optional[str] = None
+    flake_ref: Optional[str] = None
+    guest_ip: Optional[str] = None
+    last_readiness_change_at: Optional[str] = None
+    memory_mib: Optional[int] = 0
+    ports: Optional[List[PortMapping]] = field(default_factory=lambda: [])
+    profile: Optional[str] = None
+    readiness: Optional[InstanceReadiness] = None
+    revision: Optional[str] = None
+    status_detail: Optional[str] = None
+    tags: Optional[Dict[str, str]] = field(default_factory=lambda: {})
+
+
+@dataclass
 class MachineRunRequest:
     backend: Optional[str] = None
     command: Optional[List[str]] = field(default_factory=lambda: [])
@@ -1044,6 +1131,12 @@ class MachineLogsStreamOpen:
 
 
 @dataclass
+class MachineReconfigure:
+    reply: MachineReconfigureReply
+    request: MachineReconfigureRequest
+
+
+@dataclass
 class MachineStart:
     reply: MachineStartReply
     request: MachineStartRequest
@@ -1125,8 +1218,12 @@ class HostAbi:
     machine_logs_stream_close: MachineLogsStreamClose
     machine_logs_stream_next: MachineLogsStreamNext
     machine_logs_stream_open: MachineLogsStreamOpen
+    machine_pause: MachinePause
+    machine_reconfigure: MachineReconfigure
+    machine_resume: MachineResume
     machine_rm: MachineRm
     machine_run: MachineRun
+    machine_set_ttl: MachineSetTtl
     machine_start: MachineStart
     machine_stop: MachineStop
     session_call: SessionCall

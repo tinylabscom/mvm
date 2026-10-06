@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 4;
+export const ABI_MINOR = 5;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -60,8 +60,23 @@ export const MACHINE_LOGS_STREAM_NEXT = "machine.logs.stream.next";
  */
 export const MACHINE_LOGS_STREAM_OPEN = "machine.logs.stream.open";
 
+/**
+ * Pauses a running machine, sealing a snapshot where the backend
+ * uses one.
+ */
+export const MACHINE_PAUSE = "machine.pause";
+
+/** Patches a machine's resources and relaunches it when running. */
+export const MACHINE_RECONFIGURE = "machine.reconfigure";
+
+/** Resumes a paused machine, refusing a replayed snapshot. */
+export const MACHINE_RESUME = "machine.resume";
+
 /** Boots a machine through the admitted local launch. */
 export const MACHINE_RUN = "machine.run";
+
+/** Sets or clears the time the idle reaper removes a machine at. */
+export const MACHINE_SET_TTL = "machine.set_ttl";
 
 /** Boots a persisted machine definition. */
 export const MACHINE_START = "machine.start";
@@ -145,7 +160,11 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "machine.logs.stream.close": { key: "machine_logs_stream_close", classification: "prod_safe", summary: "Closes a captured-output stream. Idempotent." },
   "machine.logs.stream.next": { key: "machine_logs_stream_next", classification: "prod_safe", summary: "Returns the captured output that has arrived." },
   "machine.logs.stream.open": { key: "machine_logs_stream_open", classification: "prod_safe", summary: "Opens a stream over a machine's captured output, replayed then followed." },
+  "machine.pause": { key: "machine_pause", classification: "prod_safe", summary: "Pauses a running machine, sealing a snapshot where the backend uses one." },
+  "machine.reconfigure": { key: "machine_reconfigure", classification: "prod_safe", summary: "Patches a machine's resources and relaunches it when running." },
+  "machine.resume": { key: "machine_resume", classification: "prod_safe", summary: "Resumes a paused machine, refusing a replayed snapshot." },
   "machine.run": { key: "machine_run", classification: "prod_safe", summary: "Boots a machine through the admitted local launch." },
+  "machine.set_ttl": { key: "machine_set_ttl", classification: "prod_safe", summary: "Sets or clears the time the idle reaper removes a machine at." },
   "machine.start": { key: "machine_start", classification: "prod_safe", summary: "Boots a persisted machine definition." },
   "machine.stop": { key: "machine_stop", classification: "prod_safe", summary: "Stops a machine. Idempotent." },
   "session.call": { key: "session_call", classification: "prod_safe", summary: "Calls the entrypoint in a running session's microVM." },

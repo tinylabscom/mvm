@@ -358,7 +358,6 @@ impl SourceResolver {
         let binary = self
             .find_trusted(program)
             .ok_or(SourceError::CliNotFound { program })?;
-        let mut command = std::process::Command::new(&binary);
         let readmit = mvm_core::env_hygiene::EnvReadmit::from_names(
             std::env::vars_os()
                 .map(|(name, _)| name.to_string_lossy().into_owned())
@@ -370,7 +369,7 @@ impl SourceResolver {
         })?;
         // Every denied variable is removed from what the CLI inherits except
         // this CLI's own session variables, re-admitted by exact name.
-        mvm_core::env_hygiene::scrub_command(&mut command, &readmit);
+        let mut command = mvm_core::env_hygiene::helper_command_with(&binary, &readmit);
         let trusted: Vec<&PathBuf> = self
             .search_path
             .iter()

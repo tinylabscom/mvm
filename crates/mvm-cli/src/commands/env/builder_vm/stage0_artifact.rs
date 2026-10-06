@@ -1,7 +1,5 @@
-#[cfg(feature = "builder-vm")]
 use super::*;
 
-#[cfg(feature = "builder-vm")]
 #[derive(Debug)]
 pub(super) struct Stage0ArtifactBuild<'a> {
     workspace_root: &'a std::path::Path,
@@ -16,7 +14,6 @@ pub(super) struct Stage0ArtifactBuild<'a> {
     verbose: bool,
 }
 
-#[cfg(feature = "builder-vm")]
 #[derive(Debug)]
 pub(super) struct Stage0ArtifactBuildBuilder<'a> {
     workspace_root: &'a std::path::Path,
@@ -28,7 +25,6 @@ pub(super) struct Stage0ArtifactBuildBuilder<'a> {
     verbose: bool,
 }
 
-#[cfg(feature = "builder-vm")]
 impl<'a> Stage0ArtifactBuild<'a> {
     pub(super) fn builder(
         workspace_root: &'a std::path::Path,
@@ -77,7 +73,7 @@ impl<'a> Stage0ArtifactBuild<'a> {
         })?;
 
         use mvm_build::builder_backend_select as bbs;
-        let selected = bbs::resolve_choice();
+        let selected = bbs::resolve_choice(None);
         let explicit = bbs::resolve_env_override().is_some();
         bbs::run_with_builder_fallback(selected, explicit, |choice| {
             bbs::resolve_stage0_backend_for_choice(choice, self.verbose).run_stage0(
@@ -104,7 +100,6 @@ impl<'a> Stage0ArtifactBuild<'a> {
     }
 }
 
-#[cfg(feature = "builder-vm")]
 impl<'a> Stage0ArtifactBuildBuilder<'a> {
     pub(super) fn build_attr(mut self, build_attr: &'a str) -> Self {
         self.build_attr = Some(build_attr);
@@ -174,7 +169,6 @@ impl<'a> Stage0ArtifactBuildBuilder<'a> {
 /// the only hard requirement is that the value stays one line with no
 /// control characters, and that it names a `#packages` fragment the guest
 /// appends `.<arch>-linux.<attr>` to.
-#[cfg(feature = "builder-vm")]
 fn valid_flake_base(value: &str) -> bool {
     !value.is_empty()
         && !value.contains('\n')
@@ -182,7 +176,6 @@ fn valid_flake_base(value: &str) -> bool {
         && value.chars().all(|c| !c.is_control())
 }
 
-#[cfg(feature = "builder-vm")]
 fn valid_conf_token(value: &str) -> bool {
     !value.is_empty()
         && value
@@ -190,7 +183,7 @@ fn valid_conf_token(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 

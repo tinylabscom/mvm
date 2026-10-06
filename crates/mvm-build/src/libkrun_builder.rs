@@ -91,10 +91,9 @@ pub use crate::builder_vm::{
 use crate::builder_vm::BuilderCapabilities;
 use crate::builder_vm_runtime::{
     acquire_nix_store_image_lock, acquire_nix_store_image_lock_named, builder_vm_timeout,
-    ensure_nix_store_image_unlocked, finalize_flake_job, finalize_install_job,
-    read_job_result_with_diagnostics, shell_job_exit_error, stage_filtered_work_input,
-    stage_job_dir, stage_persistent_job_dir, stage_shell_job_dir, supervisor_exit_error,
-    verbose_from_env,
+    ensure_nix_store_image_unlocked, finalize_flake_job, finalize_install_job, read_job_result,
+    shell_job_exit_error, stage_filtered_work_input, stage_job_dir, stage_persistent_job_dir,
+    stage_shell_job_dir, supervisor_exit_error, verbose_from_env,
 };
 
 fn terminate_and_reap(child: &mut Child) {
@@ -737,7 +736,7 @@ impl LibkrunBuilderVm {
 
         extract_builder_transport_output(&output_disk, &job.artifact_out, &job_dir)?;
 
-        let result = match read_job_result_with_diagnostics(&job_dir, &vm_state_dir) {
+        let result = match read_job_result(&job_dir, &vm_state_dir) {
             Ok(result) => {
                 if let Some(rx) = guest_agent_rx {
                     tracing::info!(
@@ -1987,7 +1986,7 @@ fn build_supervisor_in_workspace(
         );
     }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd = Command::new(cargo);
+    let mut cmd = mvm_core::env_hygiene::helper_command(cargo);
     cmd.current_dir(workspace_root)
         .env("CARGO_TARGET_DIR", target_dir)
         .args([
@@ -2121,7 +2120,7 @@ fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, Build
     }
 
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let status = Command::new(cargo)
+    let status = mvm_core::env_hygiene::helper_command(cargo)
         .current_dir(&workspace_root)
         .args([
             "build",

@@ -555,6 +555,7 @@ uncovered = [
     "mvmctl trust audit tail --chain --tenant local -n 20",
     "mvmctl trust audit tail -f",
     "mvmctl trust audit verify 1e9fca73063e --json",
+    "mvmctl trust instructions verify . --policy mvm-instructions.toml",
     "mvmctl trust list",
     "mvmctl trust receipt verify /tmp/agent-run-receipt.json",
     "mvmctl trust receipt verify /tmp/run-receipt.json",

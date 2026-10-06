@@ -1,6 +1,6 @@
 //! mvm-supervisor — trusted host-side supervisor.
 //!
-//! A single host-side process that owns: egress proxy, tool gate,
+//! A single host-side process that owns: egress proxy,
 //! keystore releaser, audit signer, artifact collector, and the plan
 //! execution state machine. **Tenant code never runs in Zone B.**
 //!
@@ -21,7 +21,6 @@
 //! - `state` — `PlanState` + `PlanStateMachine` (transition rules
 //!   for the supervisor's plan lifecycle).
 //! - `egress` — `SupervisorEgressProxy` trait + `NoopEgressProxy`.
-//! - `tool_gate` — `ToolGate` trait + `NoopToolGate`.
 //! - `keystore` — `KeystoreReleaser` trait + `NoopKeystoreReleaser`.
 //! - `audit` — `AuditSigner` trait + `NoopAuditSigner`.
 //! - `artifact` — `ArtifactCollector` trait + `NoopArtifactCollector`.
@@ -97,7 +96,6 @@ pub mod network_endpoint;
 pub mod network_endpoint_connector;
 pub mod network_endpoint_proxy;
 pub mod pii_redactor;
-pub mod policy_tool_gate;
 pub mod proxy;
 pub mod reaper;
 pub mod redaction_resolve;
@@ -125,9 +123,11 @@ pub mod transcript_sink;
 // libraries that open a fresh UDS connection per call.
 pub mod aggregate;
 pub mod services;
+/// Session idle-timeout enforcement: the shared reap decision and the
+/// supervisor-side watcher.
+pub mod session_expiry;
 pub mod ssrf_guard;
 pub mod state;
-pub mod tool_gate;
 pub mod tools;
 /// The supervisor-side wall-clock timer — the mechanism behind
 /// `WallClockControl::SupervisorTimer`.
@@ -198,10 +198,6 @@ pub use lifecycle_hooks::{LifecycleHooks, standard_hooks};
 pub use pii_redactor::{
     Mode as PiiMode, PII_CATEGORY_NAMES, PiiPolicyError, PiiRedactor, PiiRule, PiiValidator,
 };
-pub use policy_tool_gate::{
-    CapturingToolAuditSink, NoopToolAuditSink, PolicyToolGate, ToolAuditError, ToolAuditFields,
-    ToolAuditSink, ToolOutcome,
-};
 pub use proxy::l4::{
     CanonicalL4Gate, L4Decision, L4Error, L4Gate, NoopL4Gate, Protocol as L4Protocol,
 };
@@ -212,5 +208,4 @@ pub use reaper::{
 pub use secrets_scanner::{DEFAULT_RULES, SecretRule, SecretsScanner};
 pub use ssrf_guard::SsrfGuard;
 pub use state::{PlanState, PlanStateMachine, StateTransitionError};
-pub use tool_gate::{NoopToolGate, ToolDecision, ToolError, ToolGate};
 pub use tools::{HostMediatedTool, ToolInvokeError, ToolRegistry};

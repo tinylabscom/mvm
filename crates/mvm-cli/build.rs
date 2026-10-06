@@ -15,7 +15,15 @@ mod embed_toolchain;
 #[allow(dead_code)]
 mod payload_build;
 
+// The environment denylist every host helper spawn is filtered by. The
+// included modules start toolchain processes as `super::helper_command`.
+#[path = "../mvm-core/src/env_hygiene/denylist.rs"]
+#[allow(dead_code)]
+mod env_denylist;
+
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use build_support::{EmbedDecision, EmbedRequest, embed_request};
 use embed_toolchain::{Pin, workspace_root_from_manifest_dir};
@@ -23,6 +31,18 @@ use payload_build::{
     EmbedCache, EmbeddedSourceBinary, ZigbuildRequest, artifact_key_for, build_embed_cache,
     run_cargo_zigbuild, zigbuild_output,
 };
+
+/// A toolchain process, inheriting none of the denied variables this build
+/// script was started with.
+fn helper_command(program: impl AsRef<OsStr>) -> Command {
+    let mut command = Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        if env_denylist::classify(&name.to_string_lossy()).is_some() {
+            command.env_remove(name);
+        }
+    }
+    command
+}
 
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());

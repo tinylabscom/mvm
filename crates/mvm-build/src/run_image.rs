@@ -638,7 +638,7 @@ fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
         extra_disks: vec![],
     };
 
-    let selected = crate::builder_backend_select::resolve_choice();
+    let selected = crate::builder_backend_select::resolve_choice(None);
     let explicit = crate::builder_backend_select::resolve_env_override().is_some();
     crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
         // Through the trait, so the backend the selection resolved is the one

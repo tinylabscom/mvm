@@ -29,7 +29,11 @@ export default defineConfig({
         { icon: "github", label: "GitHub", href: "https://github.com/tinylabscom/mvm" },
       ],
       expressiveCode: {
-        themes: ["github-dark"],
+        // Starlight maps the first dark and light variants to its
+        // data-theme switch. A single dark theme leaves Shiki's light text
+        // colors on Starlight's light code background, making plain-text and
+        // comment tokens nearly invisible.
+        themes: ["github-dark", "github-light"],
         defaultProps: {
           // Long shell/CLI samples were overflowing horizontally; wrap
           // them and align wrapped continuations with the source
@@ -40,10 +44,9 @@ export default defineConfig({
         styleOverrides: {
           // A CSS var(), not a literal — Expressive Code emits this
           // straight into its generated stylesheet as --ec-brdCol, so the
-          // browser resolves it against tailwind.css's --color-code-border
-          // at paint time. One source of truth instead of a hex here that
-          // custom.css's --ec-brdCol override then had to shadow.
-          borderColor: "var(--color-code-border)",
+          // browser resolves it against the active light/dark border token at
+          // paint time. One source of truth instead of a theme-specific hex.
+          borderColor: "var(--color-border)",
           borderRadius: "0.75rem",
         },
       },

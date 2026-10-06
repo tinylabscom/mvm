@@ -13,13 +13,15 @@
 //! runtime; the unit tests below hold the two lists to each other.
 
 use mvm_agentd::vsock::{FsStat, ProcInfo};
-use mvm_core::client::dto::{MachineFilter, MachineState};
+use mvm_core::client::dto::{MachineFilter, MachineState, PauseOutcome, ResumeOutcome};
 use serde::Serialize;
 
 use crate::dispatch::{
     BACKEND_CAPABILITIES, Empty as DispatchEmpty, ExecReply, ExecRequest, LogsReply, LogsRequest,
-    MACHINE_EXEC, MACHINE_INSPECT, MACHINE_INVENTORY, MACHINE_LIST, MACHINE_LOGS, MACHINE_RM,
-    MACHINE_START, MACHINE_STOP, MachineRef, RemoveRequest as DispatchRemoveRequest, StopRequest,
+    MACHINE_EXEC, MACHINE_INSPECT, MACHINE_INVENTORY, MACHINE_LIST, MACHINE_LOGS, MACHINE_PAUSE,
+    MACHINE_RECONFIGURE, MACHINE_RESUME, MACHINE_RM, MACHINE_SET_TTL, MACHINE_START, MACHINE_STOP,
+    MachineRef, PauseRequest, ReconfigurePatchRequest, RemoveRequest as DispatchRemoveRequest,
+    ResumeRequest, SetTtlRequest, StopRequest,
 };
 use crate::entrypoint::{
     ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, SESSION_CALL, SESSION_INFO,
@@ -243,12 +245,44 @@ pub const REGISTRY: &[MethodDef] = &[
         reply: schema_of::<OpenReply>,
     },
     MethodDef {
+        name: MACHINE_PAUSE,
+        key: "machine_pause",
+        summary: "Pauses a running machine, sealing a snapshot where the backend uses one.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<PauseRequest>,
+        reply: schema_of::<PauseOutcome>,
+    },
+    MethodDef {
+        name: MACHINE_RECONFIGURE,
+        key: "machine_reconfigure",
+        summary: "Patches a machine's resources and relaunches it when running.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<ReconfigurePatchRequest>,
+        reply: schema_of::<MachineState>,
+    },
+    MethodDef {
+        name: MACHINE_RESUME,
+        key: "machine_resume",
+        summary: "Resumes a paused machine, refusing a replayed snapshot.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<ResumeRequest>,
+        reply: schema_of::<ResumeOutcome>,
+    },
+    MethodDef {
         name: MACHINE_RUN,
         key: "machine_run",
         summary: "Boots a machine through the admitted local launch.",
         classification: Classification::ProdSafe,
         request: schema_of::<RunRequest>,
         reply: schema_of::<RunReply>,
+    },
+    MethodDef {
+        name: MACHINE_SET_TTL,
+        key: "machine_set_ttl",
+        summary: "Sets or clears the time the idle reaper removes a machine at.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<SetTtlRequest>,
+        reply: schema_of::<crate::guest::Empty>,
     },
     MethodDef {
         name: MACHINE_START,

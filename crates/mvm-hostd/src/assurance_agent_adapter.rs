@@ -175,18 +175,28 @@ pub struct AssurancePromptAdapter {
 }
 
 impl AssurancePromptAdapter {
-    /// Open or recover the adapter for the exact bound input.
+    /// Open or recover the adapter for the exact bound input, under the VM's
+    /// state directory and the host key directory.
     pub fn open(vm: &str, input: &AiSessionInput, now_unix_ms: u64) -> Result<Self> {
         let directory = mvm_core::config::vm_state_dir(vm).join("assurance-agent-sessions");
-        Self::open_at(&directory, vm, input, now_unix_ms)
+        Self::open_at(
+            &directory,
+            &mvm_core::config::mvm_keys_dir(),
+            vm,
+            input,
+            now_unix_ms,
+        )
     }
 
     /// Open or recover beneath an explicit durable provider-owned root.
     ///
-    /// Provider processes use this form so replay never depends on `HOME`,
-    /// `MVM_HOME`, a current directory, or a process-temporary path.
+    /// `keys_dir` holds the key-encryption key that seals recorded prompt
+    /// requests. Provider processes pass one beneath their own state root, so
+    /// neither the history nor the key that decrypts its replay inputs depends
+    /// on `HOME`, `MVM_HOME`, a current directory, or a process-temporary path.
     pub fn open_at(
         directory: &Path,
+        keys_dir: &Path,
         vm: &str,
         input: &AiSessionInput,
         now_unix_ms: u64,
@@ -208,10 +218,7 @@ impl AssurancePromptAdapter {
         let history_path = directory.join(format!("{session_id}.jsonl"));
         let cancellation_path = directory.join(format!("{session_id}.cancellation.json"));
         let replay_session_id = session_id.clone();
-        let replay_inputs = ReplayInputStore::at(
-            directory.join("replay-inputs"),
-            mvm_core::config::mvm_keys_dir(),
-        );
+        let replay_inputs = ReplayInputStore::at(directory.join("replay-inputs"), keys_dir);
 
         let (journal, persisted_sequence) = if history_path.exists() {
             let history = load_history(&history_path)?;

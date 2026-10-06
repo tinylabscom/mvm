@@ -35,21 +35,9 @@ fn parse_attr(value: &str) -> Result<FlakeAttr, String> {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    #[cfg(feature = "builder-vm")]
-    {
-        build::run(args)
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        let _ = args;
-        anyhow::bail!(
-            "building a local image set requires the `builder-vm` feature; rebuild the binary \
-             with that feature enabled"
-        )
-    }
+    build::run(args)
 }
 
-#[cfg(feature = "builder-vm")]
 mod build {
     use anyhow::{Context, Result, bail};
     use mvm_build::artifact_acquisition::compiled_channel;

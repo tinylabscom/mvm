@@ -1,7 +1,6 @@
 //! Package-manager provider abstractions.
 
 use std::path::Path;
-use std::process::Command;
 
 /// Trait for querying native package ownership and installed versions.
 pub trait PackageProvider: Send + Sync {
@@ -42,7 +41,11 @@ impl PackageProvider for DpkgProvider {
     }
 
     fn owner_of(&self, path: &Path) -> Option<PackageRecord> {
-        let output = Command::new("dpkg").arg("-S").arg(path).output().ok()?;
+        let output = mvm_core::env_hygiene::helper_command("dpkg")
+            .arg("-S")
+            .arg(path)
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -54,7 +57,7 @@ impl PackageProvider for DpkgProvider {
     }
 
     fn version_of(&self, package_name: &str) -> Option<String> {
-        let output = Command::new("dpkg-query")
+        let output = mvm_core::env_hygiene::helper_command("dpkg-query")
             .args(["-W", "-f=${Version}", package_name])
             .output()
             .ok()?;
@@ -142,7 +145,7 @@ impl PackageProvider for NixIndexProvider {
     }
 
     fn owner_of(&self, path: &Path) -> Option<PackageRecord> {
-        let output = Command::new("nix-locate")
+        let output = mvm_core::env_hygiene::helper_command("nix-locate")
             .args(["--minimal", "--top-level", "-w"])
             .arg(path)
             .output()

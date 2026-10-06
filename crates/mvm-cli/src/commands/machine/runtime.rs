@@ -1,5 +1,7 @@
 use super::*;
 use crate::commands::shared;
+use crate::commands::vm::denial_review::{ReviewOffer, ReviewSource};
+use crate::commands::vm::egress_denials::{DenialWatch, finish_and_summarize};
 use crate::commands::vm::{invoke, logs};
 
 pub(super) fn resolve_persistent_spec(
@@ -36,6 +38,7 @@ fn run_persistent(
     args: MachineRunArgs,
     cfg: &MvmConfig,
     resolved_flake_slot: Option<&str>,
+    review_source: ReviewSource,
 ) -> Result<()> {
     use std::io::IsTerminal as _;
     if !std::io::stdin().is_terminal() {
@@ -97,7 +100,32 @@ fn run_persistent(
         apply_machine_ttl(&name, dur_str)?;
     }
 
-    run_persistent_post_start(cli, cfg, &args, &name, denials)
+    let review = ReviewOffer::new(&name, persistent_review_source(review_source, booted));
+    run_persistent_post_start(cli, cfg, &args, &name, Denials { denials, review })
+}
+
+/// A persistent machine's refusals, and how to offer them for review once
+/// its foreground output ends.
+struct Denials {
+    denials: Option<DenialWatch>,
+    review: ReviewOffer,
+}
+
+impl Denials {
+    fn finish(self) {
+        finish_and_summarize(self.denials, &self.review);
+    }
+}
+
+/// Where a persistent run's policy came from. A machine this invocation did
+/// not boot was admitted by the invocation that did, under whatever manifest
+/// that one named.
+fn persistent_review_source(launch: ReviewSource, booted: bool) -> ReviewSource {
+    if booted {
+        launch
+    } else {
+        ReviewSource::admitted_elsewhere()
+    }
 }
 
 fn check_pack_entrypoint(args: &MachineRunArgs) -> Result<()> {
@@ -150,7 +178,7 @@ fn run_persistent_post_start(
     cfg: &MvmConfig,
     args: &MachineRunArgs,
     name: &str,
-    denials: Option<super::super::vm::egress_denials::DenialWatch>,
+    denials: Denials,
 ) -> Result<()> {
     if !args.run.argv.is_empty() {
         let outcome = if shared::wait_for_guest_agent(name, 30) {
@@ -172,7 +200,7 @@ fn run_persistent_post_start(
                 "guest agent for {name:?} not reachable to run the command"
             ))
         };
-        super::super::vm::egress_denials::finish_and_summarize(denials);
+        denials.finish();
         let code = outcome?;
         if code != 0 {
             mvm_observability::exit(code);
@@ -274,17 +302,14 @@ pub(super) fn post_start_action(args: &MachineRunArgs) -> PostStart {
 ///
 /// Egress refusals the machine hits while attached print as they happen, and
 /// once more as a summary if its output ends.
-fn attach_to_output(
-    name: &str,
-    denials: Option<super::super::vm::egress_denials::DenialWatch>,
-) -> Result<()> {
+fn attach_to_output(name: &str, denials: Denials) -> Result<()> {
     // Say what attaching means before it blocks. The machine is persistent, so
     // interrupting detaches from the output and leaves it running — the
     // opposite of what Ctrl-C does to a foreground transient run, and worth
     // stating rather than leaving to be discovered.
     eprintln!("attached to machine {name}; press Ctrl-C to detach (it keeps running)");
     let attached = logs::attach(name);
-    super::super::vm::egress_denials::finish_and_summarize(denials);
+    denials.finish();
     match attached? {
         logs::AttachOutcome::Followed => Ok(()),
         logs::AttachOutcome::NoCapture => {
@@ -394,7 +419,11 @@ pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> 
     mvm_client::inventory::resolve_workload_posture(manifest, name).label()
 }
 
-fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {
+fn run_entrypoint_action(
+    args: MachineRunArgs,
+    resolved_flake_slot: Option<String>,
+    review_source: ReviewSource,
+) -> Result<()> {
     if !args.run.outputs.is_empty() {
         anyhow::bail!(
             "machine run --entrypoint does not accept --output; collect outputs from a \
@@ -459,6 +488,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         r#fn: None,
         attach: args.attach,
         show_denials: show_entrypoint_denials(&args),
+        review_source,
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
     })
@@ -542,6 +572,9 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // Before the flake is built into a slot below: the project's `[policy]`
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
+    // The manifest that policy came from, for reviewing the run's refusals.
+    // Read now, while the arguments still name the flake directory.
+    let review_source = ReviewSource::for_launch(&args.run)?;
     check_pack_entrypoint(&args)?;
     let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
         let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
@@ -572,7 +605,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                  ceiling through entrypoint admission; use machine run with an argv"
             );
         }
-        return run_entrypoint_action(args, resolved_flake_slot);
+        return run_entrypoint_action(args, resolved_flake_slot, review_source);
     }
 
     // A flake was built into a manifest slot above, and that image carries its
@@ -613,7 +646,13 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                      (-d, --ttl, --port, --healthcheck, --up-json) has no exit to collect at"
                 );
             }
-            run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
+            run_persistent(
+                cli,
+                args,
+                cfg,
+                resolved_flake_slot.as_deref(),
+                review_source,
+            )
         }
         MachineRunMode::InteractiveTransient => {
             use std::io::IsTerminal as _;
@@ -851,6 +890,24 @@ mod command_denial_tests {
             ..Default::default()
         };
         assert!(!should_watch_denials(&json_command));
+    }
+
+    /// A machine this invocation booted was admitted under the manifest this
+    /// invocation named, so its refusals are reviewed against that file.
+    #[test]
+    fn a_booted_machine_is_reviewed_against_the_manifest_it_was_admitted_under() {
+        let manifest = ReviewSource::Manifest("/project/mvm.toml".into());
+        assert_eq!(persistent_review_source(manifest.clone(), true), manifest);
+    }
+
+    /// A machine that was already running was admitted by whichever
+    /// invocation booted it; this one's manifest may not be that one.
+    #[test]
+    fn a_machine_already_running_is_reviewed_through_explain() {
+        assert_eq!(
+            persistent_review_source(ReviewSource::Manifest("/project/mvm.toml".into()), false),
+            ReviewSource::admitted_elsewhere()
+        );
     }
 }
 

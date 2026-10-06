@@ -529,7 +529,7 @@ pub enum LocalAuditKind {
     // with any future pinned asset. Lands in the shared
     // local audit log (not the chain-signed stream), matching the Stage 0
     // siblings above. Wire string is stable (`vendor_blob_fetched`) — log
-    // shippers / `mvmctl audit` filter on it.
+    // shippers / `mvmctl trust audit` filter on it.
     //
     /// A vendored bootstrap blob was downloaded and verified, or
     /// re-verified on a cache hit. Detail format (space-separated
@@ -1301,7 +1301,7 @@ mod tests {
     fn lifecycle_gap_kinds_use_snake_case_on_the_wire() {
         // Pin the casing for the new gap-fillers exactly like the
         // reserved and egress kinds — the audit log is a stable
-        // parsed format for downstream tools (`mvmctl audit`, log
+        // parsed format for downstream tools (`mvmctl trust audit`, log
         // shippers).
         let kinds_and_strings = [
             (LocalAuditKind::TemplateBuildError, "template_build_error"),
@@ -1345,11 +1345,11 @@ mod tests {
             (LocalAuditKind::Stage0CachePromoted, "stage0_cache_promoted"),
             (LocalAuditKind::Stage0Failed, "stage0_failed"),
             // Vendored-blob supply-chain fetch. Wire string is
-            // load-bearing: `mvmctl audit` + log shippers
+            // load-bearing: `mvmctl trust audit` + log shippers
             // filter on `kind == "vendor_blob_fetched"`.
             (LocalAuditKind::VendorBlobFetched, "vendor_blob_fetched"),
             // Reviewed workspace apply: wire strings are load-bearing for
-            // `mvmctl audit` filters, pinned like the siblings above.
+            // `mvmctl trust audit` filters, pinned like the siblings above.
             (LocalAuditKind::WorkspaceApply, "workspace_apply"),
             (LocalAuditKind::WorkspaceUndo, "workspace_undo"),
             (LocalAuditKind::WorkspaceRedo, "workspace_redo"),
@@ -1364,7 +1364,7 @@ mod tests {
     #[test]
     fn test_egress_ca_rotated_uses_snake_case_rename() {
         // Pin the wire form so a future rename can't silently drift the
-        // audit log shape — downstream parsers (`mvmctl audit`,
+        // audit log shape — downstream parsers (`mvmctl trust audit`,
         // out-of-band log shippers) match on the literal string.
         let json = serde_json::to_string(&LocalAuditKind::EgressCaRotated).unwrap();
         assert_eq!(json, "\"egress_ca_rotated\"");
