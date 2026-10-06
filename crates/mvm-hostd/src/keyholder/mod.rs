@@ -9,6 +9,7 @@
 pub mod admission;
 pub mod injector;
 pub mod oauth;
+pub mod oauth_consent;
 pub mod remote_resolver;
 pub mod resolver;
 pub mod signer;
