@@ -176,6 +176,8 @@ jobs:
   bdd-live-readme:
     name: BDD live ${{ matrix.witness }} (Linux, Firecracker)
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
