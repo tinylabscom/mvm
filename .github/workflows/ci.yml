@@ -973,80 +973,119 @@ jobs:
     name: Test workspace
     needs: [scope, test-workspace-build]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    permissions:
+      actions: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        # Each shard runs a third of the suite out of the archive the build
-        # job compiled, so it pays no compile of its own. The pass is
-        # throughput-bound, not bound by one slow test (the slowest is under
-        # 40 s), so another shard trades about a minute of wall clock for one
-        # more runner's fixed setup.
-        shard: [1, 2, 3]
-    runs-on: ubuntu-latest
+        # Each broker races one shard across eligible runner pools. The worker
+        # that actually starts first owns the shard; its queued sibling is
+        # cancelled. A matrix in this workflow cannot provide that semantic,
+        # because Actions waits for every matrix child, including the loser.
+        shard: [1, 2]
+    runs-on: ubuntu-slim
     timeout-minutes: 60
     steps:
-      # The checkout is not optional. Tests read fixtures, workflows and
-      # manifests out of the source tree at run time, and a few run `cargo
-      # tree` or `cargo metadata` against it.
-      - uses: actions/checkout@v6
-
-      # No free-disk: nothing is compiled here, and the extracted archive is a
-      # fraction of the target directory the build job holds.
-
-      # The toolchain the archive was built with. Tests that shell out to
-      # `cargo` resolve the absolute path rustc baked into `env!("CARGO")`.
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly-2026-08-25
-
-      # Run-time tools the suite drives: `setfattr`/`getfattr` and
-      # `veritysetup`. `lld` because the workspace's cargo config links with
-      # it, and a few tests hand work to cargo.
-      - uses: ./.github/actions/apt-deps
-        with:
-          packages: attr cryptsetup-bin lld
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
-        with:
-          tool: nextest
-
-      - name: Download the workspace test archive
-        uses: actions/download-artifact@v8
-        with:
-          name: workspace-tests
-          path: ${{ runner.temp }}
-
-      - name: Run tests
-        # Extracting into the checkout puts `target/` back at the path it was
-        # built at. That matters: `env!("CARGO_BIN_EXE_*")` and the other
-        # compile-time paths are absolute, and fifty-odd integration tests
-        # spawn their binary through them rather than through the variable
-        # nextest sets at run time.
+      - name: Run shard on the first available runner
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ github.sha }}
+          SHARD: ${{ matrix.shard }}
+          ALLOW_SELF_HOSTED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
-          cargo nextest run \
-            --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst" \
-            --workspace-remap "$GITHUB_WORKSPACE" \
-            --extract-to "$GITHUB_WORKSPACE" \
-            --partition hash:${{ matrix.shard }}/${{ strategy.job-total }}
+          set -euo pipefail
+
+          api="https://api.github.com/repos/$REPOSITORY"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json")
+          correlation="${RUN_ID}-${RUN_ATTEMPT}-${SHARD}"
+          candidates=(github)
+          if [ "$ALLOW_SELF_HOSTED" = true ]; then
+            candidates+=(hetzner)
+          fi
+
+          run_ids=()
+          cleanup() {
+            for run_id in "${run_ids[@]}"; do
+              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
+            done
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          for candidate in "${candidates[@]}"; do
+            curl -fsS -X POST "${auth[@]}" \
+              "$api/actions/workflows/workspace-shard.yml/dispatches" \
+              -d "$(jq -nc \
+                --arg ref "$COMMIT_SHA" \
+                --arg shard "$SHARD" \
+                --arg runner "$candidate" \
+                --arg correlation "$correlation" \
+                --arg archive_run_id "$RUN_ID" \
+                '{ref:"main",inputs:{commit_sha:$ref,shard:$shard,runner_kind:$runner,correlation:$correlation,archive_run_id:$archive_run_id}}')"
+          done
+
+          winner=
+          deadline=$((SECONDS + 600))
+          while [ -z "$winner" ] && [ "$SECONDS" -lt "$deadline" ]; do
+            runs="$(curl -fsS "${auth[@]}" \
+              "$api/actions/workflows/workspace-shard.yml/runs?event=workflow_dispatch&per_page=50")"
+            mapfile -t run_ids < <(
+              jq -r --arg marker "$correlation" \
+                '.workflow_runs[] | select(.display_title | contains($marker)) | .id' \
+                <<<"$runs"
+            )
+            winner="$(jq -r --arg marker "$correlation" '
+              [.workflow_runs[]
+               | select(.display_title | contains($marker))
+               | select(.status == "in_progress" or .status == "completed")]
+              | sort_by(.run_started_at)
+              | first
+              | .id // empty
+            ' <<<"$runs")"
+            [ -n "$winner" ] || sleep 3
+          done
+          if [ -z "$winner" ]; then
+            echo "::error::no workspace shard candidate started within 10 minutes" >&2
+            exit 1
+          fi
+
+          for run_id in "${run_ids[@]}"; do
+            if [ "$run_id" != "$winner" ]; then
+              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
+            fi
+          done
+          run_ids=("$winner")
+
+          while :; do
+            run="$(curl -fsS "${auth[@]}" "$api/actions/runs/$winner")"
+            status="$(jq -r .status <<<"$run")"
+            if [ "$status" = completed ]; then
+              conclusion="$(jq -r .conclusion <<<"$run")"
+              url="$(jq -r .html_url <<<"$run")"
+              echo "workspace shard $SHARD completed on $(jq -r .display_title <<<"$run"): $url"
+              run_ids=()
+              if [ "$conclusion" != success ]; then
+                echo "::error::workspace shard $SHARD concluded $conclusion" >&2
+                exit 1
+              fi
+              exit 0
+            fi
+            sleep 5
+          done
 
   test-workspace-build:
     name: Build workspace tests
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
-    # Compiles every workspace test binary once and hands them to the
-    # `test-workspace` shards as a nextest archive. Each shard used to compile
-    # the whole graph on its own runner, which was three quarters of its wall
-    # clock and made the suite the long pole of every validation run.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-
-      # No free-disk. The hosted runner's root volume now starts with ~85 GB
-      # free, and the archive step prints what the build used, so the
-      # headroom stays visible.
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1065,11 +1104,14 @@ jobs:
           tool: nextest
 
       - name: Build the workspace test archive
-        # The same target selection the suite has always run:
-        # `--workspace --all-targets`. The archive carries the test binaries,
-        # every other workspace binary (the helpers tests spawn), and the
-        # build-script output directories.
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
         run: |
+          set -euo pipefail
+          archive_root="/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          mkdir -p -- "$archive_root"
+          cp -a "$GITHUB_WORKSPACE/." "$archive_root/"
+          cd "$archive_root"
           cargo nextest archive --workspace --all-targets \
             --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst"
           ls -lh "$RUNNER_TEMP/workspace-tests.tar.zst"
@@ -1081,29 +1123,28 @@ jobs:
         with:
           name: workspace-tests
           path: ${{ runner.temp }}/workspace-tests.tar.zst
-          # Already zstd; a second compression pass costs time and saves
-          # nothing.
           compression-level: 0
           retention-days: 1
-          # A re-run of this job replaces the archive rather than failing on
-          # the name the first attempt took.
           overwrite: true
           if-no-files-found: error
 
       - name: Validate nextest override filters
-        # Lists against the target directory the archive step just filled, so
-        # it compiles only xtask. The listing itself is not free: each filter
-        # enumerates every test binary, which takes minutes, not seconds.
-        run: cargo run -p xtask -- check-nextest-groups
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: |
+          cd "/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          cargo run -p xtask -- check-nextest-groups
+
+      - name: Remove archived workspace
+        if: always()
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: rm -rf -- "/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
 
   test-workspace-extras:
     name: Test workspace (doctests + feature suites)
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
-    # Suites that run exactly once and need their own feature selection or
-    # their own compile, so they cannot come out of the shards' archive. They
-    # used to ride on shard 1 behind its compile; here they compile in
-    # parallel with the build job and stay off the critical path.
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1120,34 +1161,17 @@ jobs:
 
       - uses: ./.github/actions/rust-cache
 
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@v2
         with:
           tool: nextest
 
       - name: xtask man-page tests
-        # gen-man lives behind xtask's off-by-default `man` feature. It pulls
-        # mvm-cli and its build script, and the doctests below reuse most of
-        # that graph, so it runs here rather than as a second build in Lint.
         run: cargo nextest run -p xtask --features man
 
-      # No separate `-p mvm-agentd --all-targets` run. It was a strict subset of
-      # the workspace run — every test it ran, that run already ran, plus 21
-      # more `flowmux` tests feature unification enables there — and nothing in
-      # mvm-agentd is gated on a feature being *off*, so no test runs only under
-      # per-package resolution. It cost ~41 recompiled crates and a second pass
-      # over the same suite. The addons run below is different: `addons` is not
-      # enabled by unification, and it runs 61 tests nothing else does.
       - name: Run addon/egress helper tests
-        # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
-        # mvm-egress-client) and their shared vsock session helper live behind
-        # the off-by-default `addons` feature, so the default workspace run
-        # skips their tests. Run mvm-agentd with the feature on so they stay
-        # exercised on every integrated code change.
         run: cargo nextest run -p mvm-agentd --features addons
 
       - name: Run doctests
-        # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc
 
   test-workspace-aarch64:
