@@ -234,7 +234,18 @@ each manifest. It does not verify a signature; `mvmctl pull` does.
 mvmctl search node
 mvmctl pull runtime/node
 mvmctl pack registry ls
+mvmctl pack info runtime/node
+mvmctl pack verify runtime/node
 ```
+
+`pack info` and `pack verify` work from the installed copy, without fetching a
+registry index. Both check the lock pin, publisher signature and every declared
+payload file before reporting success. `pack info --json` includes the signed
+file digests and the signing identities accepted by the local trust policy;
+when a policy accepts several identities, this list is not a claim that every
+identity signed the pack. A signature proves publisher identity and integrity,
+not safety. These commands do not assess whether a pack's policy is suitable
+for a particular invocation.
 
 `pull` downloads the manifest, the bundle and each declared file, verifies the
 signature against the publisher trust policy, checks every file against the
