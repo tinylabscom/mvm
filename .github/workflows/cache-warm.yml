@@ -124,6 +124,36 @@ jobs:
       - name: Build the workspace to populate the cache
         run: ./scripts/cargo-stable.sh clippy --workspace --all-targets -- -D warnings
 
+  # The self-hosted workspace shard uses Debian rather than GitHub's Ubuntu
+  # image, so it gets a separate trusted-main cache. Keeping this as a distinct
+  # writer prevents incompatible target artifacts crossing runner images.
+  warm-hetzner:
+    name: Warm (Hetzner)
+    runs-on: [self-hosted, Linux, X64, mvm, hetzner, kvm]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify provisioned system dependencies
+        run: |
+          set -euo pipefail
+          command -v cryptsetup
+          command -v getfattr
+          command -v ld.lld
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          save: "true"
+          key: hetzner-workspace
+
+      - name: Build the workspace to populate the Hetzner cache
+        run: cargo build --all-targets
+
   warm-test-support:
     name: Warm test-support
     runs-on: ubuntu-latest

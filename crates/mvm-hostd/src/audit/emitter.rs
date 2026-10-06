@@ -250,8 +250,8 @@ pub fn default_audit_dir() -> Result<PathBuf> {
 }
 
 /// Resolve the default per-tenant audit-chain file:
-/// `~/.mvm/audit/<tenant>.jsonl`. Used by the `mvmctl audit verify`
-/// and `mvmctl audit show` commands.
+/// `~/.mvm/audit/<tenant>.jsonl`. Used by the `mvmctl trust audit verify`
+/// and `mvmctl trust audit show` commands.
 pub fn audit_path_for_tenant(audit_dir: &Path, tenant: &str) -> PathBuf {
     audit_dir.join(format!("{tenant}.jsonl"))
 }
@@ -728,7 +728,7 @@ impl AuditEmitter {
     /// admission decision is still `plan.admitted`. This event lets
     /// operators answer "did my bundle actually parse on the last
     /// boot, or did I fall back to local-default?" via
-    /// `mvmctl audit tail --chain`.
+    /// `mvmctl trust audit tail --chain`.
     pub fn emit_policy_resolved(&self, plan: &ExecutionPlan, resolution: &str) -> Result<()> {
         self.emit(
             plan,

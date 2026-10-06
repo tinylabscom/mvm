@@ -1,4 +1,4 @@
-//! Structured comparison of two checkpoint metadata records.
+//! Structured comparison of two checkpoint records.
 
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 
@@ -112,5 +112,118 @@ pub fn diff_checkpoints(a: &CheckpointMeta, b: &CheckpointMeta) -> CheckpointDif
         supervisor_config_digest_same: a.supervisor_config_digest == b.supervisor_config_digest,
         lineage,
         blobs,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use mvm_core::checkpoint::{CheckpointDigest, ContentBlob};
+
+    use super::*;
+
+    fn fs_quick_meta(
+        id: &str,
+        vm: &str,
+        parent: Option<CheckpointDigest>,
+        rootfs_sha: &str,
+    ) -> CheckpointMeta {
+        CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::FsQuick, vm)
+            .parent(parent)
+            .content(vec![ContentBlob {
+                name: "rootfs.ext4".into(),
+                sha256: rootfs_sha.into(),
+            }])
+            .supervisor_config_digest("cfg")
+            .created_unix(10)
+            .build()
+    }
+
+    #[test]
+    fn diff_identical_metas_has_no_changes() {
+        let a = fs_quick_meta("a", "vm", None, "aaaa");
+        let b = fs_quick_meta("b", "vm", None, "aaaa");
+        let d = diff_checkpoints(&a, &b);
+        assert!(d.blobs.iter().all(|x| x.status == BlobStatus::Unchanged));
+        assert!(d.supervisor_config_digest_same);
+        assert_eq!(d.lineage, LineageRelation::Unrelated);
+    }
+
+    #[test]
+    fn diff_detects_changed_blob() {
+        let a = fs_quick_meta("a", "vm", None, "aaaa");
+        let b = fs_quick_meta("b", "vm", None, "bbbb");
+        let d = diff_checkpoints(&a, &b);
+        let rootfs = d.blobs.iter().find(|x| x.name == "rootfs.ext4").unwrap();
+        assert_eq!(rootfs.status, BlobStatus::Changed);
+        assert_eq!(rootfs.sha_a.as_deref(), Some("aaaa"));
+        assert_eq!(rootfs.sha_b.as_deref(), Some("bbbb"));
+    }
+
+    #[test]
+    fn diff_detects_added_and_removed_blobs_cross_class() {
+        let a = fs_quick_meta("a", "vm", None, "aaaa");
+        let b = CheckpointMeta::builder(CheckpointId::new("b"), CheckpointClass::VmFull, "vm")
+            .content(vec![
+                ContentBlob {
+                    name: "rootfs.ext4".into(),
+                    sha256: "aaaa".into(),
+                },
+                ContentBlob {
+                    name: "memory.bin".into(),
+                    sha256: "mmmm".into(),
+                },
+                ContentBlob {
+                    name: "machine-id".into(),
+                    sha256: "iiii".into(),
+                },
+            ])
+            .supervisor_config_digest("cfg")
+            .created_unix(11)
+            .build();
+        let d = diff_checkpoints(&a, &b);
+        assert_eq!(
+            d.blobs
+                .iter()
+                .find(|x| x.name == "memory.bin")
+                .unwrap()
+                .status,
+            BlobStatus::AddedInB
+        );
+        assert_eq!(
+            d.blobs
+                .iter()
+                .find(|x| x.name == "rootfs.ext4")
+                .unwrap()
+                .status,
+            BlobStatus::Unchanged
+        );
+        assert_eq!(d.class_a, CheckpointClass::FsQuick);
+        assert_eq!(d.class_b, CheckpointClass::VmFull);
+        let d2 = diff_checkpoints(&b, &a);
+        assert_eq!(
+            d2.blobs
+                .iter()
+                .find(|x| x.name == "memory.bin")
+                .unwrap()
+                .status,
+            BlobStatus::RemovedFromB
+        );
+    }
+
+    #[test]
+    fn diff_detects_child_lineage() {
+        let a = fs_quick_meta("parent", "vm", None, "aaaa");
+        let b = fs_quick_meta("child", "vm", Some(a.meta_digest.clone()), "aaaa");
+        assert_eq!(diff_checkpoints(&a, &b).lineage, LineageRelation::BChildOfA);
+        assert_eq!(diff_checkpoints(&b, &a).lineage, LineageRelation::AChildOfB);
+    }
+
+    #[test]
+    fn checkpoint_diff_serializes() {
+        let a = fs_quick_meta("a", "vm", None, "aaaa");
+        let b = fs_quick_meta("b", "vm", None, "bbbb");
+        let json = serde_json::to_string(&diff_checkpoints(&a, &b)).unwrap();
+        assert!(json.contains("rootfs.ext4"));
+        assert!(json.contains("changed"));
     }
 }
