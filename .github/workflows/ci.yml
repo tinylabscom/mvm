@@ -617,6 +617,7 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
           cargo nextest run -p mvm-cli --features manifest-verify --test signed_registry_pack
+          cargo nextest run -p mvm-hostd --features manifest-verify -E 'test(/real_signed_pack_identity_is_reverified_at_host_admission/)'
 
       # The other half: a build without the verifier must refuse every signature
       # and say why. The workspace lane unifies the verifier in, so those tests

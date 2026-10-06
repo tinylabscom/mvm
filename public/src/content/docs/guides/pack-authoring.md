@@ -241,7 +241,8 @@ mvmctl pack verify runtime/node
 `pack info` and `pack verify` work from the installed copy, without fetching a
 registry index. Both check the lock pin, publisher signature and every declared
 payload file before reporting success. `pack info --json` includes the signed
-file digests and the signing identities accepted by the local trust policy;
+policy text, file digests and the signing identities accepted by the local
+trust policy;
 when a policy accepts several identities, this list is not a claim that every
 identity signed the pack. A signature proves publisher identity and integrity,
 not safety. These commands do not assess whether a pack's policy is suitable

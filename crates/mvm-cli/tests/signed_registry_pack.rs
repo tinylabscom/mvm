@@ -111,6 +111,10 @@ fn pack_info_and_verify_recheck_installed_signed_content() {
     assert_eq!(document["reference"], "runtime/go@1.0.0");
     assert_eq!(document["manifest_sha256"], MANIFEST_SHA256);
     assert_eq!(document["policy_files"][0], "pack/group.toml");
+    assert_eq!(
+        document["policy_documents"][0]["text"],
+        String::from_utf8_lossy(GROUP).as_ref()
+    );
     assert_eq!(document["files"][0]["path"], "pack/group.toml");
 
     let verified = Command::new(binary)
