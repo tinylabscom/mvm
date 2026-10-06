@@ -2001,6 +2001,88 @@ fn pack_registry_verbs_parse_and_show_help() {
 }
 
 #[test]
+fn pack_info_and_verify_recheck_signed_installed_content() {
+    let home = tempfile::tempdir().expect("isolated home");
+    let registry = tempfile::tempdir().expect("local registry");
+    let pack = registry.path().join("packs/runtime/go/1.0.0");
+    std::fs::create_dir_all(pack.join("files/pack")).expect("pack directory");
+    std::fs::write(
+        registry.path().join("packs/index.json"),
+        br#"{"schema_version":1,"packs":[{"namespace":"runtime","name":"go","description":"Go runtime policy","versions":["1.0.0"]}]}"#,
+    )
+    .expect("registry index");
+    std::fs::write(
+        pack.join("manifest.json"),
+        include_bytes!("../crates/mvm-cli/tests/fixtures/signed-registry-go/manifest.json"),
+    )
+    .expect("signed manifest");
+    std::fs::write(
+        pack.join("manifest.sigstore.json"),
+        include_bytes!(
+            "../crates/mvm-cli/tests/fixtures/signed-registry-go/manifest.sigstore.json"
+        ),
+    )
+    .expect("signature bundle");
+    let policy =
+        include_bytes!("../crates/mvm-cli/tests/fixtures/signed-registry-go/pack/group.toml");
+    std::fs::write(pack.join("files/pack/group.toml"), policy).expect("signed policy");
+    let registry_url = format!("file://{}", registry.path().display());
+
+    let pulled = mvmctl_isolated(home.path())
+        .env("MVM_PACK_REGISTRY", &registry_url)
+        .args(["pull", "runtime/go", "--json"])
+        .output()
+        .expect("pull signed pack");
+    assert!(
+        pulled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&pulled.stderr)
+    );
+    let pull: serde_json::Value = serde_json::from_slice(&pulled.stdout).expect("pull JSON");
+    assert_eq!(pull["reference"], "runtime/go@1.0.0");
+    let digest = pull["manifest_sha256"].as_str().expect("manifest digest");
+
+    let info = mvmctl_isolated(home.path())
+        .args(["pack", "info", "runtime/go", "--json"])
+        .output()
+        .expect("inspect installed pack");
+    assert!(
+        info.status.success(),
+        "{}",
+        String::from_utf8_lossy(&info.stderr)
+    );
+    let details: serde_json::Value = serde_json::from_slice(&info.stdout).expect("pack info JSON");
+    assert_eq!(details["manifest_sha256"], digest);
+    assert_eq!(
+        details["policy_documents"][0]["text"],
+        String::from_utf8_lossy(policy).as_ref()
+    );
+
+    let verified = mvmctl_isolated(home.path())
+        .args(["pack", "verify", "runtime/go@1.0.0"])
+        .output()
+        .expect("verify installed pack");
+    assert!(
+        verified.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("Verified runtime/go@1.0.0"));
+
+    let cached_policy = mvm_core::config::mvm_cache_dir_at(home.path())
+        .join("registry-packs")
+        .join(digest)
+        .join("payload/pack/group.toml");
+    std::fs::write(cached_policy, b"tampered").expect("tamper installed policy");
+    let refused = mvmctl_isolated(home.path())
+        .args(["pack", "info", "runtime/go"])
+        .output()
+        .expect("inspect tampered pack");
+    assert!(!refused.status.success());
+    assert!(!String::from_utf8_lossy(&refused.stdout).contains("Publisher issuer:"));
+}
+
+#[test]
 fn search_reads_a_file_registry_and_marks_installed_packs() {
     let home = tempfile::tempdir().unwrap();
     let registry = tempfile::tempdir().unwrap();

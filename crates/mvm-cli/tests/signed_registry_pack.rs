@@ -1,7 +1,6 @@
 #![cfg(feature = "manifest-verify")]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use mvm_client::policy_profiles::{LayerOrigin, PolicyRef, PolicyStore};
 use mvm_core::registry_pack::{RegistryPackPublisher, RegistryPackPublisherPolicy};
@@ -89,56 +88,6 @@ fn published_signed_pack_pulls_pins_and_loads_without_network() {
             .allow
             .contains(&"proxy.golang.org:443".to_string())
     );
-}
-
-#[test]
-fn pack_info_and_verify_recheck_installed_signed_content() {
-    let temp = TempDir::new().expect("tempdir");
-    let _env = isolated_registry(&temp, MANIFEST, GROUP);
-    let summary = mvm_cli::pack_registry::pull("runtime/go").expect("signed pull");
-    let binary = env!("CARGO_BIN_EXE_mvmctl");
-
-    let info = Command::new(binary)
-        .args(["pack", "info", "runtime/go", "--json"])
-        .output()
-        .expect("pack info");
-    assert!(
-        info.status.success(),
-        "{}",
-        String::from_utf8_lossy(&info.stderr)
-    );
-    let document: serde_json::Value = serde_json::from_slice(&info.stdout).expect("info JSON");
-    assert_eq!(document["reference"], "runtime/go@1.0.0");
-    assert_eq!(document["manifest_sha256"], MANIFEST_SHA256);
-    assert_eq!(document["policy_files"][0], "pack/group.toml");
-    assert_eq!(
-        document["policy_documents"][0]["text"],
-        String::from_utf8_lossy(GROUP).as_ref()
-    );
-    assert_eq!(document["files"][0]["path"], "pack/group.toml");
-
-    let verified = Command::new(binary)
-        .args(["pack", "verify", "runtime/go@1.0.0"])
-        .output()
-        .expect("pack verify");
-    assert!(
-        verified.status.success(),
-        "{}",
-        String::from_utf8_lossy(&verified.stderr)
-    );
-    assert!(String::from_utf8_lossy(&verified.stdout).contains("Verified runtime/go@1.0.0"));
-
-    std::fs::write(
-        summary.installed_root.join("payload/pack/group.toml"),
-        b"tampered",
-    )
-    .expect("tamper installed payload");
-    let refused = Command::new(binary)
-        .args(["pack", "info", "runtime/go"])
-        .output()
-        .expect("pack info after tamper");
-    assert!(!refused.status.success());
-    assert!(!String::from_utf8_lossy(&refused.stdout).contains("Publisher issuer:"));
 }
 
 #[test]
