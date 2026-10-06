@@ -347,7 +347,14 @@ mod tests {
     fn recorder_emits_every_lifecycle_action() {
         let (_dir, audit, signer) = temp_audit_with_recorder();
         let ok: Result<()> = Ok(());
-        for action in ["create", "replace", "bind", "unbind", "remove"] {
+        for action in [
+            "create",
+            "replace",
+            "bind",
+            "unbind",
+            "remove",
+            "oauth_login",
+        ] {
             audit.record(action, "acme", "k", &ok).unwrap();
         }
         let refusal: Result<()> = Err(anyhow::anyhow!("referenced"));
@@ -364,6 +371,7 @@ mod tests {
                 "secret.bind",
                 "secret.unbind",
                 "secret.remove",
+                "secret.oauth_login",
                 "secret.remove_refused",
             ]
         );
