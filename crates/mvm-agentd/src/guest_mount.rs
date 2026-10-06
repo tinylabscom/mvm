@@ -35,7 +35,8 @@ pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
 /// Linux capability used by the authenticated guest agent to signal PID 1.
 pub const CAP_KILL: u32 = mvm_setpriv::CAP_KILL;
-/// Linux capability used by the guest agent's optional loopback DNS helper.
+/// Linux capability the egress client needs to serve the loopback DNS stub on
+/// port 53.
 pub const CAP_NET_BIND_SERVICE: u32 = mvm_setpriv::CAP_NET_BIND_SERVICE;
 /// Linux capability used by the guest agent to correct a restored wall clock.
 pub const CAP_SYS_TIME: u32 = mvm_setpriv::CAP_SYS_TIME;
@@ -62,10 +63,12 @@ mod capability_sets;
 #[cfg(target_os = "linux")]
 use capability_sets::{raise_ambient_capabilities, set_capabilities};
 mod cgroup2;
+mod service_identity;
 pub use cgroup2::{
     CGROUP_DELEGATION_DIR, CGROUP2_MOUNT_POINT, Cgroup2Status, DELEGATED_CONTROLLERS,
     mount_and_delegate_cgroup2,
 };
+pub use service_identity::{EGRESS_CLIENT_IDENTITY, ServiceIdentity};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.
@@ -2384,6 +2387,115 @@ mod privilege_tests {
         );
     }
 
+    /// The egress client runs as the uid mkGuest reserves for it, and keeps
+    /// the one capability its port-53 DNS stub needs.
+    #[test]
+    fn the_egress_client_identity_is_its_reserved_uid_with_net_bind_service_only() {
+        assert_eq!(EGRESS_CLIENT_IDENTITY.uid(), 989);
+        assert_eq!(EGRESS_CLIENT_IDENTITY.gid(), 989);
+        let retained: Vec<u32> = CAPABILITY_SLOTS_FOR_TEST
+            .filter(|cap| bounding_set_retains(EGRESS_CLIENT_IDENTITY.capabilities(), *cap))
+            .collect();
+        assert_eq!(
+            retained,
+            vec![CAP_NET_BIND_SERVICE],
+            "the egress client must retain CAP_NET_BIND_SERVICE and nothing else"
+        );
+    }
+
+    /// Sharing a uid with the workload would let the workload signal and trace
+    /// the process holding the signing key, and sharing a group would let it
+    /// read anything that process makes group-readable.
+    #[test]
+    fn the_egress_client_shares_no_uid_or_gid_with_any_other_guest_identity() {
+        for uid in [0, WORKLOAD_UID, CRNG_RESEED_HELPER_UID] {
+            assert_ne!(EGRESS_CLIENT_IDENTITY.uid(), uid);
+        }
+        for gid in [0, WORKLOAD_GID, CRNG_RESEED_HELPER_GID] {
+            assert_ne!(EGRESS_CLIENT_IDENTITY.gid(), gid);
+        }
+    }
+
+    #[test]
+    fn the_egress_client_shares_no_capability_with_the_agent_or_the_reseed_helper() {
+        let egress = EGRESS_CLIENT_IDENTITY.capabilities();
+        assert_eq!(egress & RESTORE_AGENT_CAPABILITIES, 0);
+        assert_eq!(egress & CRNG_RESEED_HELPER_CAPABILITIES, 0);
+        assert!(
+            !bounding_set_retains(egress, CAP_SETPCAP),
+            "the bounding drop must happen before the capability sets shrink"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "uid 0")]
+    fn a_service_identity_refuses_root() {
+        let _ = ServiceIdentity::new(0, 989, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "gid 0")]
+    fn a_service_identity_refuses_the_root_group() {
+        let _ = ServiceIdentity::new(989, 0, 0);
+    }
+
+    /// The non-comment lines of `fn name`'s body in `guest_bootstrap.rs`, which
+    /// compiles only for Linux, so its own test module runs nowhere else.
+    fn bootstrap_body_of(name: &str) -> String {
+        let source = include_str!("guest_bootstrap.rs");
+        let body = source
+            .split_once(&format!("fn {name}("))
+            .unwrap_or_else(|| panic!("fn {name} must exist"))
+            .1
+            .split("\n}")
+            .next()
+            .expect("the body ends at the first closing brace");
+        body.lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// PID 1 starts the egress client while it is still root, so the identity
+    /// is the spawn's to set. Started as-is, the process parsing every proxy
+    /// and DNS request from the workload kept uid 0 and every capability for
+    /// the life of the guest.
+    #[test]
+    fn the_egress_client_is_started_under_its_own_identity() {
+        let body = bootstrap_body_of("start_vsock_egress");
+        assert!(
+            body.contains("spawn_one_as(") && body.contains("EGRESS_CLIENT_IDENTITY"),
+            "start_vsock_egress must spawn the client as EGRESS_CLIENT_IDENTITY:\n{body}"
+        );
+    }
+
+    /// The client reads a 0400 signing key, so the key has to belong to the uid
+    /// the client runs as — or the drop above leaves it unable to start.
+    #[test]
+    fn the_signing_key_is_handed_to_the_identity_the_egress_client_runs_as() {
+        let body = bootstrap_body_of("provision_flowmux_identity");
+        assert!(
+            body.contains("provision_identity_from_drive_for_uid(")
+                && body.contains("EGRESS_CLIENT_IDENTITY.uid()"),
+            "the FlowMux identity must be provisioned for the egress client's uid:\n{body}"
+        );
+    }
+
+    /// The key changes owner on its way out of the drive, and the client checks
+    /// for it before it does anything else.
+    #[test]
+    fn the_signing_key_is_provisioned_before_the_egress_client_starts() {
+        let body = bootstrap_body_of("provision_guest_environment");
+        let identity = body
+            .find("provision_flowmux_identity();")
+            .expect("the bootstrap provisions the FlowMux identity");
+        let egress = body
+            .find("start_vsock_egress()")
+            .expect("the bootstrap starts the egress client");
+        assert!(identity < egress, "{body}");
+    }
+
     /// The whole reason the reseed runs in a separate process: the agent serves
     /// host requests and spawns workload code, so the capability the reseed
     /// needs must never be in the agent's own set, and the helper needs none of
@@ -2520,6 +2632,51 @@ mod privilege_tests {
             status.contains("CapBnd:\t0000000000200000"),
             "CapBnd must be exactly CAP_SYS_ADMIN; got:\n{status}"
         );
+    }
+
+    /// Live witness for the egress client's spawn, observed after exec.
+    ///
+    /// Runs a real child through the same command the init starts the egress
+    /// client with and reads that child's own status, so it checks what the
+    /// helper actually holds once its image is loaded rather than what the
+    /// pre-exec hook asked for. Without the ambient raise the capability would
+    /// not survive the exec into a binary carrying no file capabilities.
+    /// Unlike the drops above, it leaves the test process untouched.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn the_egress_client_is_spawned_as_its_own_uid_holding_only_net_bind_service() {
+        if !privileged() {
+            return;
+        }
+        let output = crate::guest_bootstrap::helper_command(
+            std::path::Path::new("/bin/cat"),
+            EGRESS_CLIENT_IDENTITY,
+        )
+        .arg("/proc/self/status")
+        .stdout(std::process::Stdio::piped())
+        .output()
+        .expect("spawn a child under the egress client identity");
+        assert!(output.status.success(), "{output:?}");
+        let status = String::from_utf8(output.stdout).expect("status is UTF-8");
+        let field = |name: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(name)?.strip_prefix(':'))
+                .map(str::trim)
+                .unwrap_or_else(|| panic!("no {name} line in:\n{status}"))
+                .to_string()
+        };
+        assert_eq!(field("Uid"), "989\t989\t989\t989");
+        assert_eq!(field("Gid"), "989\t989\t989\t989");
+        assert_eq!(field("Groups"), "", "supplementary groups must be cleared");
+        for set in ["CapPrm", "CapEff", "CapAmb", "CapBnd"] {
+            assert_eq!(
+                field(set),
+                "0000000000000400",
+                "{set} must be exactly CAP_NET_BIND_SERVICE"
+            );
+        }
+        assert_eq!(field("NoNewPrivs"), "1");
     }
 
     /// Live witness for the agent identity drop itself.
