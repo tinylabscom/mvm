@@ -245,30 +245,26 @@ pub(super) fn teardown_transient_vm(
     use crate::commands::vm::phase_timing::SubPhase;
 
     sub.start(SubPhase::StopTransient);
-    let (stopped, stop_timing) =
+    let (stop_error, stop_timing) =
         match backend.stop_transient_with_timing(&VmId(vm_name.to_string())) {
-            Ok(timing) => (true, timing),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    machine = vm_name,
-                    "transient stop failed; refusing to seal a potentially live session"
-                );
-                (false, None)
-            }
+            Ok(timing) => (None, timing),
+            Err(error) => (Some(format!("{error:#}")), None),
         };
     sub.finish(SubPhase::StopTransient);
     sub.record_stop_timing(stop_timing);
 
-    if stopped
-        && let Some(exit_audit) = exit_audit
-        && let Err(error) = mvm_client::launch::record_transient_exit(exit_audit)
-    {
-        tracing::warn!(
-            error = %error,
-            machine = vm_name,
-            "could not seal the transient session at exit"
-        );
+    // A potentially live session is never sealed, but its end is always
+    // recorded: either the seal, or the reason there is none. The audit calls
+    // record their own failures.
+    if let Some(exit_audit) = exit_audit {
+        match stop_error {
+            Some(error) => mvm_client::launch::record_transient_stop_failure(exit_audit, &error),
+            None => {
+                let _ = mvm_client::launch::record_transient_exit(exit_audit);
+            }
+        }
+    } else if let Some(error) = stop_error {
+        tracing::warn!(error = %error, machine = vm_name, "transient stop failed");
     }
 
     // Refilling the pool is not this VM's cleanup: it boots a standby parent

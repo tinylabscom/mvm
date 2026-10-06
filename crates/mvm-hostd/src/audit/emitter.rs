@@ -2241,6 +2241,39 @@ mod tests {
     }
 
     #[test]
+    fn emit_teardown_failed_records_why_a_session_has_no_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-T");
+        emitter
+            .emit_teardown_failed(&plan, "stop-failed", "vmm did not exit")
+            .unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join("local.jsonl")).expect("audit file exists");
+        assert!(content.contains("plan.teardown_failed"), "{content}");
+        assert!(content.contains("\"reason\":\"stop-failed\""), "{content}");
+        assert!(content.contains("vmm did not exit"), "{content}");
+        assert!(!content.contains("session.sealed"), "{content}");
+        assert_eq!(
+            verify_audit_chain(&dir.path().join("local.jsonl"), &vk).unwrap(),
+            1
+        );
+        // The record of why a session ended unsealed is a terminal outcome and
+        // must be on disk before the call returns.
+        assert_eq!(
+            crate::supervisor::audit_file::sync_policy_for("plan.teardown_failed"),
+            crate::supervisor::audit_file::SyncPolicy::Barrier
+        );
+    }
+
+    #[test]
     fn emit_failed_records_class_and_message() {
         let dir = tempfile::tempdir().unwrap();
         let key = {

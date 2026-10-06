@@ -1214,7 +1214,14 @@ pub fn emit_failed(ctx: &AdmissionContext, class: &str, err: &anyhow::Error) {
         ctx.admitted.plan(),
         mvm_hostd::audit::session::SealReason::Failed,
     ) {
-        tracing::warn!(error = %format!("{e:#}"), "could not seal the failed session (non-fatal)");
+        crate::launch::record_unsealed_end(
+            Some((&ctx.emitter, ctx.admitted.plan())),
+            crate::launch::UnsealedEnd::new(
+                &ctx.admitted.plan().workload.0,
+                crate::launch::UnsealedReason::SealFailed,
+            )
+            .error(format!("{e:#}")),
+        );
     }
 }
 
