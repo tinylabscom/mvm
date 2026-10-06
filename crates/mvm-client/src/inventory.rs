@@ -282,6 +282,15 @@ pub fn apply_secret_ref_counts(records: &mut [MachineInventoryRecord]) {
     }
 }
 
+/// Mark each running record whose admitted plan grants attended display input.
+/// A stopped machine has no current run, so it is never attended.
+pub fn apply_attended_runs(records: &mut [MachineInventoryRecord]) {
+    for record in records {
+        record.attended = matches!(record.status, MachineStatus::Running)
+            && mvm_runtime::vm::attendance::attended(&record.name);
+    }
+}
+
 /// The full local inventory: every persisted machine definition joined with
 /// every live VM `client` can see, readiness back-filled from the registry
 /// and secret-reference counts from the per-machine sidecars.
@@ -295,6 +304,7 @@ pub async fn list_local_inventory(client: &dyn MvmClient) -> Result<Vec<MachineI
     let mut records = inventory_with_specs(client, specs).await?;
     apply_registry_readiness(&mut records);
     apply_secret_ref_counts(&mut records);
+    apply_attended_runs(&mut records);
     Ok(records)
 }
 
@@ -744,5 +754,46 @@ mod tests {
         assert_eq!(records[0].name, "web");
         assert_eq!(records[0].kind, MachineKind::Persistent);
         assert_eq!(records[0].status, MachineStatus::Stopped);
+    }
+
+    #[test]
+    fn only_a_running_machine_with_an_attended_grant_is_reported_attended() {
+        let _home = IsolatedHome::new();
+        let plan = mvm_core::plan::test_support::PlanFixture::new()
+            .grants(Some(mvm_contract::grants::Grants {
+                display_input: Some(mvm_contract::grants::DisplayInputGrant {
+                    attended: true,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }))
+            .build();
+        for name in ["driven", "stopped-driven"] {
+            let state = mvm_core::config::vm_state_dir(name);
+            std::fs::create_dir_all(&state).unwrap();
+            std::fs::write(state.join("plan.json"), serde_json::to_vec(&plan).unwrap()).unwrap();
+        }
+        let mut records = vec![
+            MachineInventoryRecord::builder("driven", MachineKind::Persistent)
+                .status(MachineStatus::Running)
+                .build(),
+            MachineInventoryRecord::builder("stopped-driven", MachineKind::Persistent).build(),
+            MachineInventoryRecord::builder("plain", MachineKind::Persistent)
+                .status(MachineStatus::Running)
+                .build(),
+        ];
+        apply_attended_runs(&mut records);
+        let attended: Vec<(&str, bool)> = records
+            .iter()
+            .map(|record| (record.name.as_str(), record.attended))
+            .collect();
+        assert_eq!(
+            attended,
+            vec![
+                ("driven", true),
+                ("stopped-driven", false),
+                ("plain", false)
+            ]
+        );
     }
 }

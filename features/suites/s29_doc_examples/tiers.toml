@@ -214,7 +214,7 @@ tier = "live"
 [[command]]
 path = "machine display"
 tier = "parse"
-reason = "requires a running machine admitted with display.view, a live frame stream, and a long-lived loopback viewer; focused endpoint tests exercise the one-shot token and loopback-only bind"
+reason = "requires a running machine admitted with display.view, a live frame stream, and a long-lived loopback viewer; focused endpoint tests exercise the one-shot token and loopback-only bind, and the machine journey's live scenario exercises the `--input` refusal on a view-only guest"
 
 [[command]]
 path = "machine exec"

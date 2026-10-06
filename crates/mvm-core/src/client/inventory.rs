@@ -183,6 +183,11 @@ pub struct MachineInventoryRecord {
     /// never names-with-values, never the values themselves.
     #[serde(default)]
     pub secret_ref_count: u32,
+    /// The running machine's signed plan grants display input marked
+    /// attended: a human may be driving its display. An attended run is not
+    /// the same security tier as an unattended one.
+    #[serde(default)]
+    pub attended: bool,
 }
 
 impl MachineInventoryRecord {
@@ -211,6 +216,7 @@ impl MachineInventoryRecord {
                 last_started_at: None,
                 volumes: Vec::new(),
                 secret_ref_count: 0,
+                attended: false,
             },
         }
     }
@@ -333,6 +339,12 @@ impl MachineInventoryRecordBuilder {
         self
     }
 
+    #[must_use]
+    pub fn attended(mut self, attended: bool) -> Self {
+        self.record.attended = attended;
+        self
+    }
+
     /// Finish building. Infallible — identity was required up front.
     #[must_use]
     pub fn build(self) -> MachineInventoryRecord {
@@ -437,6 +449,7 @@ mod tests {
                 encrypted: true,
             }])
             .secret_ref_count(3)
+            .attended(true)
             .build()
     }
 
