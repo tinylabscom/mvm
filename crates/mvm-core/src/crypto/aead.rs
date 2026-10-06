@@ -79,25 +79,27 @@ impl Key {
         Key::from_slice(&open(kek, framed)?)
     }
 
-    /// Write this key's raw bytes to `path` with octal `mode` (0o600 for a
-    /// host KEK). Bytes are written straight from the type — no accessor
-    /// exposes them — and the file is truncated to exactly the key length.
-    pub fn persist(&self, path: &std::path::Path, mode: u32) -> std::io::Result<()> {
-        use std::io::Write as _;
-        use std::os::unix::fs::OpenOptionsExt as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(mode)
-            .open(path)?;
-        f.write_all(&self.0)
+    /// Load the key at `path`, minting and persisting a fresh random one
+    /// (mode 0600) if the file does not exist yet.
+    ///
+    /// Safe for any number of processes or threads to call at once: the new
+    /// key is linked into place whole and without replacing an existing file,
+    /// and every caller returns the key read back from disk. A caller whose
+    /// freshly minted key lost that race therefore returns the winner's key,
+    /// never its own, so nothing is ever sealed under a key that does not
+    /// match the file. The parent directory must already exist.
+    pub fn load_or_create(path: &std::path::Path) -> std::io::Result<Key> {
+        crate::atomic_io::load_or_create_private(
+            path,
+            || zeroize::Zeroizing::new(Key::random().0.to_vec()),
+            Key::load,
+        )
     }
 
-    /// Load a key persisted by [`Key::persist`]; a wrong-length file is an
-    /// `InvalidData` error.
+    /// Load a key persisted by [`Key::load_or_create`]; a wrong-length file
+    /// is an `InvalidData` error.
     pub fn load(path: &std::path::Path) -> std::io::Result<Key> {
-        let bytes = std::fs::read(path)?;
+        let bytes = zeroize::Zeroizing::new(std::fs::read(path)?);
         Key::from_slice(&bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }
@@ -220,6 +222,108 @@ mod tests {
             Err(AeadError::KeySize(16))
         ));
         assert!(Key::from_slice(&[0u8; KEY_SIZE]).is_ok());
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn load_or_create_mints_an_owner_only_key_once() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kek.bin");
+        let first = Key::load_or_create(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(std::fs::read(&path).unwrap(), first.0);
+        let again = Key::load_or_create(&path).unwrap();
+        assert_eq!(again.0, first.0, "an existing key is loaded, not replaced");
+    }
+
+    #[test]
+    fn load_or_create_refuses_a_wrong_length_key_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kek.bin");
+        std::fs::write(&path, [0u8; 7]).unwrap();
+        let err = Key::load_or_create(&path)
+            .err()
+            .expect("a 7-byte key is refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&path).unwrap(), [0u8; 7], "not overwritten");
+    }
+
+    /// Set in a child copy of this test binary: the key path to mint, and a
+    /// file whose appearance is the signal to start, so every child reaches
+    /// the race at the same moment.
+    const CHILD_KEY_PATH_ENV: &str = "MVM_AEAD_TEST_CHILD_KEY_PATH";
+    const CHILD_START_PATH_ENV: &str = "MVM_AEAD_TEST_CHILD_START_PATH";
+
+    /// Several processes minting the same key file at once must all end up
+    /// holding the key the file holds. Each child is this test binary
+    /// re-run on this one test with the child variables set.
+    #[test]
+    fn concurrent_processes_agree_on_one_key() {
+        if let Ok(path) = std::env::var(CHILD_KEY_PATH_ENV) {
+            let start = std::path::PathBuf::from(std::env::var(CHILD_START_PATH_ENV).unwrap());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !start.exists() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "start signal never came"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let key = Key::load_or_create(std::path::Path::new(&path)).unwrap();
+            println!("KEY={}", hex(&key.0));
+            return;
+        }
+
+        const CHILDREN: usize = 8;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("transcript-kek.bin");
+        let start = dir.path().join("start");
+        let exe = std::env::current_exe().unwrap();
+        let children: Vec<_> = (0..CHILDREN)
+            .map(|_| {
+                std::process::Command::new(&exe)
+                    .args([
+                        "--exact",
+                        "crypto::aead::tests::concurrent_processes_agree_on_one_key",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD_KEY_PATH_ENV, &path)
+                    .env(CHILD_START_PATH_ENV, &start)
+                    .stdout(std::process::Stdio::piped())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect();
+        std::fs::write(&start, b"").unwrap();
+
+        let mut reported = Vec::new();
+        for child in children {
+            let out = child.wait_with_output().unwrap();
+            assert!(out.status.success(), "child failed: {out:?}");
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            // libtest prints the test name on the same line before the
+            // child's own output, so the marker is not at a line start.
+            let key: String = stdout
+                .split("KEY=")
+                .nth(1)
+                .unwrap_or_else(|| panic!("child printed no key: {stdout}"))
+                .chars()
+                .take(KEY_SIZE * 2)
+                .collect();
+            reported.push(key);
+        }
+        let on_disk = hex(&std::fs::read(&path).unwrap());
+        assert_eq!(on_disk.len(), KEY_SIZE * 2);
+        assert!(
+            reported.iter().all(|key| *key == on_disk),
+            "every process must hold the key on disk: {reported:?} vs {on_disk}"
+        );
     }
 
     #[test]

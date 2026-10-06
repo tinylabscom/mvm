@@ -4,6 +4,22 @@
 
 Accepted.
 
+**Amended 2026-10-05 by ADR-054**
+(`specs/adrs/054-image-boundary-linux-layer.md`,
+[#4100](https://github.com/tinylabscom/mvm/issues/4100)). Decision 4 is
+narrowed. `mvm-images` builds only the Linux layer: kernels, base root
+filesystems that carry no mvm binary and no mvm `/init`, the builder image
+and the Stage 0 seeds. The runtime overlay, the SDK sidecars and the
+initramfs stop being images `mvm-images` builds; `mvmctl` assembles them from
+the guest runtime each CLI release ships, or from a source build, so a
+selected `mvm-images` checkout no longer pair-builds them. Until those
+workstreams land, decision 4 describes the code with one correction: since
+2026-10-02 a selected checkout builds the builder image only when the
+operator opts in with `MVM_ALLOW_LOCAL_BUILDER_BUILD=1` (`mvmctl build
+--allow-local-builder-build` sets it for one invocation); otherwise the
+builder image is fetched from the pinned set even with a checkout selected.
+Decisions 1 to 3 are unchanged.
+
 ## Context
 
 macOS exposes no `/dev/kvm`; running a Linux `nix build` or a Linux
@@ -34,7 +50,8 @@ regardless of what the host happens to have installed.
    the builder VM (selected per ADR-007's `BuilderVm` ladder) that
    `mvmctl` itself launches.
 4. **A source checkout with an image checkout selected builds images locally
-   by default and never silently substitutes a downloaded artifact.** Image
+   by default and never silently substitutes a downloaded artifact.** (Amended
+   2026-10-05 by ADR-054; see Status.) Image
    construction lives in mvm-images (the in-repo image flakes were deleted in
    2026-09). When `mvmctl` runs from a source checkout and an mvm-images
    checkout is selected (`MVM_IMAGES_DIR`, or a sibling `../mvm-images`), both
