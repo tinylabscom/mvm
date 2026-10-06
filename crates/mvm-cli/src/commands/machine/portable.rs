@@ -171,7 +171,7 @@ pub(in crate::commands) struct CheckArtifactArgs {
 }
 
 pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result<()> {
-    if args.path.extension().is_some_and(|ext| ext == "mvmpkg") {
+    if mvm_client::launch::manifest_ref::is_bundle_archive(&args.path) {
         return run_check_bundle_artifact(&args);
     }
     let verifying = super::super::vm::artifact::resolve_verifying_key(args.key.as_deref())?;

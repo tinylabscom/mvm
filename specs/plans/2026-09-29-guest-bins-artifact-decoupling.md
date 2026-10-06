@@ -1,12 +1,25 @@
 # Decouple mvm-images from the mvm source tree via a guest-bins artifact
 
-Backing: preview
+> **Superseded (2026-10-05)** by ADR-054
+> (`specs/adrs/054-image-boundary-linux-layer.md`) and its design attachment
+> `specs/plans/2026-10-05-image-boundary-linux-layer.md`; tracking issue
+> [#4100](https://github.com/tinylabscom/mvm/issues/4100). The producer half
+> survives: `mvmctl build guest-bins` and its archive carry over, now as a
+> signed CLI release asset that `mvmctl` itself consumes. The consumer half
+> does not: `mvm-images` stops depending on mvm entirely instead of building
+> from the archive, so the bump job, `guest-bins.nix`, vendoring `mkGuest`,
+> fetch-when-unchanged across the decoupling and `image-set/v0.3.0` built on
+> the artifact are all dropped. The body below is kept as history and is not
+> current work.
+
+Backing: historical
 Validation: each box ticks only with the live evidence its text names;
 unchecked boxes remain in progress.
 
-**Status:** NOT STARTED — sequences after the in-flight chain (image-set/v0.2.3,
-the mvm pin to it, and the v0.18.4 re-measure). Until then the current flake
-input remains the supported build path.
+**Status:** IN PROGRESS (2026-10-02) — the producer verb and a dispatch-only
+dev-copy workflow exist; the release attachment, bump job, and consumer have
+not started. Until the consumer cuts over, the current flake input remains the
+supported build path.
 **Date opened:** 2026-09-29
 
 ## The pattern this completes
@@ -37,6 +50,22 @@ boot ABI) keeps the trains safe to version independently.
       why the source does not move), plus a manifest recording each binary's
       sha256, the workspace version, and the cdylib source fingerprint. CLI
       releases attach it; a workflow_dispatch builds a dev copy.
+      *Landed (2026-10-02):* `mvmctl build guest-bins [--out] [--arch]`
+      (`mvm_build::guest_bins`) packages the ten static musl executables the
+      existing host-side guest builds produce — the runtime-overlay set plus
+      `mvm-oci-entrypoint` — for both arches, as `<arch>/<bin>` beside a
+      `manifest.json` (per-member sha256, version, guest-source and cdylib
+      source fingerprints) and a `.sha256`. The archive is deterministic and
+      re-verified after writing. `.github/workflows/guest-bins.yml` builds the
+      dev copy on dispatch. *Not yet:* (1) CLI releases do not attach it —
+      `release.yml`'s asset set is pinned to the signed checksum manifest, the
+      installer, and `tests/release_assets.rs`, so adding an asset is its own
+      change; (2) the shared objects `mvm-images` also takes from this tree —
+      `libmvm_host_services.so` (glibc + musl) and the GPU shims — and the
+      static `mvm-setpriv` are not in the archive, because no host-side build
+      path produces them today (this tree's Nix recipes build them during the
+      `mvm-images` image build). The consumer cannot drop the flake input until
+      they are.
 - [ ] **The bump job.** `mvm`'s release workflow opens a PR in `mvm-images`
       advancing the guest-bins `version`/`sha256` pair (needs the
       "Actions can open PRs" setting or a token; until then a maintainer opens

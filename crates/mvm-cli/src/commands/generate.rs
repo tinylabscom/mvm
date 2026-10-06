@@ -90,6 +90,7 @@ fn generate_sdk(cli: &Cli, script: PathBuf, out: PathBuf, cfg: &MvmConfig) -> Re
         from_recording: None,
         recording_sha256: None,
         out,
+        mvm_revision: None,
         mode: None,
         prod: false,
         dev: false,

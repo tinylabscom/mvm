@@ -12,9 +12,10 @@
 //! endpoint.
 
 use crate::compile::archive::{ArchiveError, archive_dir};
-use crate::compile::flake::build_flake_nix;
+use crate::compile::flake::render_flake_nix_at_url;
 use crate::compile::func_describe::{FuncDescribeError, describe_function, resolve_module_path};
 use crate::compile::launch::build_launch_json;
+use crate::compile::mvm_pin::{PinnedMvmRevision, resolved_mvm_flake_url};
 use crate::compile::reachability::{
     Language, ReachabilityError, detect_language, discover_node_reachable,
     discover_python_reachable,
@@ -126,12 +127,30 @@ pub fn compile_archive(
     out: &Path,
     manifest_dir: &Path,
 ) -> Result<(), CompileError> {
+    compile_archive_with_mvm_url(workload, out, manifest_dir, &resolved_mvm_flake_url())
+}
+
+pub fn compile_archive_pinned(
+    workload: &Workload,
+    out: &Path,
+    manifest_dir: &Path,
+    revision: &PinnedMvmRevision,
+) -> Result<(), CompileError> {
+    compile_archive_with_mvm_url(workload, out, manifest_dir, &revision.flake_url())
+}
+
+fn compile_archive_with_mvm_url(
+    workload: &Workload,
+    out: &Path,
+    manifest_dir: &Path,
+    mvm_url: &str,
+) -> Result<(), CompileError> {
     let tempdir = tempfile::Builder::new()
         .prefix(".mvmforge-archive-staging-")
         .tempdir_in(out.parent().unwrap_or_else(|| Path::new(".")))
         .map_err(CompileError::Staging)?;
     let staging_dir = tempdir.path().join("artifact");
-    compile(workload, &staging_dir, manifest_dir)?;
+    compile_with_mvm_url(workload, &staging_dir, manifest_dir, mvm_url)?;
     archive_dir(&staging_dir, out).map_err(CompileError::Archive)?;
     Ok(())
 }
@@ -142,6 +161,28 @@ pub fn compile_archive(
 /// copying the source tree into `<staging>/src/` before publishing. `path` in
 /// the IR is interpreted relative to `manifest_dir`, or absolute.
 pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(), CompileError> {
+    compile_with_mvm_url(workload, out, manifest_dir, &resolved_mvm_flake_url())
+}
+
+/// Compile a publishable image with an explicit, immutable mvm input.
+///
+/// The caller must still produce and verify `flake.lock` inside the builder
+/// VM before signing or publishing the output.
+pub fn compile_pinned(
+    workload: &Workload,
+    out: &Path,
+    manifest_dir: &Path,
+    revision: &PinnedMvmRevision,
+) -> Result<(), CompileError> {
+    compile_with_mvm_url(workload, out, manifest_dir, &revision.flake_url())
+}
+
+fn compile_with_mvm_url(
+    workload: &Workload,
+    out: &Path,
+    manifest_dir: &Path,
+    mvm_url: &str,
+) -> Result<(), CompileError> {
     // Fail closed before any staging/IO. Every SDK
     // artifact is sealed by construction, so an app with no declared
     // entrypoint is a misconfiguration, not a request for an interactive
@@ -264,7 +305,7 @@ pub fn compile(workload: &Workload, out: &Path, manifest_dir: &Path) -> Result<(
         // baked artifact so no env-baking path (launch.json → exec wrapper,
         // flake) can ever observe it. The image is secret-free by construction.
         let baked = strip_secret_env(workload);
-        let flake = build_flake_nix(&baked).map_err(CompileError::Render)?;
+        let flake = render_flake_nix_at_url(&baked, mvm_url).map_err(CompileError::Render)?;
         let launch = build_launch_json(&baked, &source_plan).map_err(CompileError::Render)?;
         write_lf(&staging.join("flake.nix"), &flake)?;
         write_lf(&staging.join("launch.json"), &launch)?;
@@ -572,6 +613,22 @@ mod tests {
         assert!(out.join("src").is_dir());
         let entries: Vec<_> = fs::read_dir(&out).unwrap().collect();
         assert_eq!(entries.len(), 4);
+    }
+
+    #[test]
+    fn publishable_compile_pins_the_sdk_generated_flake() {
+        let tmp = TempDir::new().expect("temp directory");
+        let manifest_dir = tmp.path().join("manifest");
+        make_src(&manifest_dir);
+        let out = tmp.path().join("artifact");
+        let revision = PinnedMvmRevision::parse("4e65b221744885e536ec91a3f2948cdc508dcb49")
+            .expect("commit revision");
+        compile_pinned(&sample(), &out, &manifest_dir, &revision).expect("compile pinned image");
+        let flake = fs::read_to_string(out.join("flake.nix")).expect("read generated flake");
+        assert!(flake.contains(&revision.flake_url()));
+        assert!(!flake.contains("github:tinylabscom/mvm/main"));
+        assert!(out.join("launch.json").is_file());
+        assert!(out.join("src/hello.py").is_file());
     }
 
     #[test]

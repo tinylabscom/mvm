@@ -423,7 +423,7 @@ pub(crate) fn detect_host_path_encryption_status(path: &std::path::Path) -> Host
         // Falling back to the path itself keeps the old behaviour when the
         // resolution fails rather than refusing outright.
         let target = macos_containing_device(path).unwrap_or_else(|| path.display().to_string());
-        match std::process::Command::new("diskutil")
+        match mvm_core::env_hygiene::helper_command("diskutil")
             .arg("info")
             .arg(&target)
             .output()
@@ -445,14 +445,14 @@ pub(crate) fn detect_host_path_encryption_status(path: &std::path::Path) -> Host
             )),
         }
     } else if matches!(plat, Platform::LinuxNative | Platform::LinuxNoKvm) {
-        match std::process::Command::new("findmnt")
+        match mvm_core::env_hygiene::helper_command("findmnt")
             .args(["-no", "SOURCE", "-T"])
             .arg(path)
             .output()
         {
             Ok(out) if out.status.success() => {
                 let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                match std::process::Command::new("lsblk")
+                match mvm_core::env_hygiene::helper_command("lsblk")
                     .args(["-no", "TYPE", &dev])
                     .output()
                 {
@@ -485,7 +485,7 @@ pub(crate) fn detect_host_path_encryption_status(path: &std::path::Path) -> Host
 pub(crate) fn detect_host_fde_status() -> HostFdeStatus {
     let plat = platform::current();
     if matches!(plat, Platform::MacOS) {
-        match std::process::Command::new("fdesetup")
+        match mvm_core::env_hygiene::helper_command("fdesetup")
             .arg("status")
             .output()
         {
@@ -498,13 +498,13 @@ pub(crate) fn detect_host_fde_status() -> HostFdeStatus {
             ),
         }
     } else if matches!(plat, Platform::LinuxNative | Platform::LinuxNoKvm) {
-        match std::process::Command::new("findmnt")
+        match mvm_core::env_hygiene::helper_command("findmnt")
             .args(["-no", "SOURCE", "/"])
             .output()
         {
             Ok(out) if out.status.success() => {
                 let dev = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                match std::process::Command::new("lsblk")
+                match mvm_core::env_hygiene::helper_command("lsblk")
                     .args(["-no", "TYPE", &dev])
                     .output()
                 {

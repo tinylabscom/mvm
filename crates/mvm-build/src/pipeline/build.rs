@@ -82,23 +82,15 @@ impl PoolBuildOptsBuilder {
 }
 
 /// Build artifacts for a pool using the host builder backend.
+/// `PoolBuildOpts::default()` applies the default timeout and no
+/// resource overrides.
 pub fn pool_build(
-    env: &dyn BuildEnvironment,
-    tenant_id: &str,
-    pool_id: &str,
-    timeout_secs: Option<u64>,
-) -> Result<()> {
-    crate::orchestrator::pool_build(env, tenant_id, pool_id, timeout_secs)
-}
-
-/// Build artifacts for a pool with optional resource overrides.
-pub fn pool_build_with_opts(
     env: &dyn BuildEnvironment,
     tenant_id: &str,
     pool_id: &str,
     opts: PoolBuildOpts,
 ) -> Result<()> {
-    crate::orchestrator::pool_build_with_opts(env, tenant_id, pool_id, opts)
+    crate::orchestrator::pool_build(env, tenant_id, pool_id, opts)
 }
 
 /// Append a build revision to the pool's build history.

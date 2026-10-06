@@ -7,11 +7,9 @@ mod builder_vm_bootstrap_tests;
 pub(in crate::commands) mod default_microvm;
 mod image_ops;
 mod kernel;
-#[cfg(feature = "builder-vm")]
 mod local_pair;
 #[cfg(test)]
 mod published_fetch_tests;
-#[cfg(feature = "builder-vm")]
 mod shell_job;
 mod stage0_artifact;
 mod stage0_cache;
@@ -29,7 +27,6 @@ use super::artifact_verify::bump_verify_outcome;
 use super::artifact_verify::{ChecksumManifest, verify_artifact_hash};
 use crate::ui;
 pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
-#[cfg(feature = "builder-vm")]
 pub(in crate::commands) use bootstrap::bootstrap_tool_builder_vm_image;
 pub(crate) use bootstrap::selected_local_checkout;
 
@@ -50,9 +47,7 @@ pub(super) fn synthesized_builder_vm_cmdline() -> String {
 /// Run `f` with the launch-time pair artifact source when a checkout is
 /// selected, or `None` when the selector is unset. The build closure runs
 /// `ensure_pair_built`, so a launch under a selected checkout builds the
-/// overlay or sidecar from the pair — never a download. A binary without the `builder-vm` feature has no pair build to
-/// offer; the selector-unset behavior then applies.
-#[cfg(feature = "builder-vm")]
+/// overlay or sidecar from the pair — never a download.
 pub(crate) fn with_pair_artifact_source<T>(
     f: impl FnOnce(
         Option<&mut mvm_client::launch::runtime_source::PairArtifactSource<'_>>,
@@ -70,15 +65,6 @@ pub(crate) fn with_pair_artifact_source<T>(
         build: &mut build,
     };
     f(Some(&mut pair))
-}
-
-#[cfg(not(feature = "builder-vm"))]
-pub(crate) fn with_pair_artifact_source<T>(
-    f: impl FnOnce(
-        Option<&mut mvm_client::launch::runtime_source::PairArtifactSource<'_>>,
-    ) -> anyhow::Result<T>,
-) -> anyhow::Result<T> {
-    f(None)
 }
 
 /// Report the tier recorded with a managed image cache entry, when `path`
@@ -103,9 +89,8 @@ pub(crate) fn images_built_from_source() -> bool {
     )
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 use default_microvm::DefaultMicrovmVariant;
-#[cfg(any(feature = "builder-vm", test))]
 use default_microvm::workload_config_carries_dm_verity;
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
@@ -114,21 +99,15 @@ pub(crate) use default_microvm::{
 use default_microvm::{evict_incompatible_workload_kernel, missing_workload_kernel_message};
 use image_ops::validate_dev_image_artifacts;
 pub(crate) use kernel::KernelSource;
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 use kernel::format_compile_start;
-#[cfg(feature = "builder-vm")]
 pub(crate) use kernel::resolve_kernel_source;
-#[cfg(feature = "builder-vm")]
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 pub(crate) use local_pair::derive_pair_key;
-#[cfg(feature = "builder-vm")]
 pub(crate) use local_pair::ensure_pair_built;
-#[cfg(feature = "builder-vm")]
 pub(crate) use local_pair::ensure_pair_workload_kernel;
-#[cfg(feature = "builder-vm")]
 pub(crate) use local_pair::seed_pair_workload_kernel_cache;
-#[cfg(feature = "builder-vm")]
 pub(crate) use local_pair::staged_contract_files;
 #[cfg(test)]
 use stage0_cache::builder_vm_artifact_names;
@@ -137,7 +116,6 @@ pub(in crate::commands) use stage0_cache::{
     Stage0SweepOutcome, stage0_active_in_process, stage0_bootstrap_in_flight,
     sweep_orphaned_stage0_staging_dirs,
 };
-#[cfg(any(feature = "builder-vm", test))]
 use stage0_cache::{
     acquire_stage0_lock, sweep_stage0_staging_siblings, unique_builder_vm_stage0_staging_dir,
 };
@@ -158,15 +136,7 @@ pub(in crate::commands) use vm_helpers::{
     sweep_orphaned_vm_helpers_before_spawn, sweep_orphaned_vm_helpers_on_startup,
 };
 
-#[cfg(feature = "builder-vm")]
 pub(in crate::commands) use vm_helpers::reap_orphaned_vm_helpers;
-
-#[cfg(not(feature = "builder-vm"))]
-pub(in crate::commands) fn reap_orphaned_vm_helpers(
-    _dry_run: bool,
-) -> Result<vm_helpers::ReapOutcome> {
-    anyhow::bail!("builder helper reaping requires the `builder-vm` cargo feature")
-}
 
 pub(super) fn builder_vm_host_arch() -> &'static str {
     bootstrap::builder_vm_host_arch()
@@ -182,7 +152,6 @@ fn promote_builder_vm_stage0_cache(
 }
 
 use mvm_build::cache_install::BUILDER_VM_PROVENANCE_FILE;
-#[cfg(any(feature = "builder-vm", test))]
 use mvm_build::cache_install::{
     BUILDER_VM_ARTIFACT_DIGEST_FILE, BUILDER_VM_SOURCE_FINGERPRINT_FILE,
 };

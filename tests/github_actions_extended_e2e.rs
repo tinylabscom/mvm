@@ -71,7 +71,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         "release.yml must call the shared documented-surface workflow"
     );
     assert!(
-        workflow.contains("needs: [bdd, e2e-docs, build]"),
+        workflow.contains("needs: [bdd, e2e-docs, build, distro-packages]"),
         "the release job must wait on e2e-docs, or a tag is published without \
          evidence that the documented examples run"
     );
@@ -90,7 +90,7 @@ fn the_release_workflow_waits_for_the_documented_surface() {
         .lines()
         .find(|line| line.trim_start().starts_with("if: ${{ !cancelled()"))
         .expect("the release job must gate publication on an explicit condition");
-    for need in ["bdd", "e2e-docs", "build"] {
+    for need in ["bdd", "e2e-docs", "build", "distro-packages"] {
         assert!(
             condition.contains(&format!("needs.{need}.result == 'success'")),
             "`{need}` is in the release job's `needs` but its result is not \
@@ -1141,47 +1141,20 @@ fn hvf_witness_uses_hvf_for_steady_state_builder_jobs() {
 fn root_manifest_keeps_libkrun_opt_in_on_macos() {
     let manifest = root_manifest();
 
-    let arm64 = manifest
-        .split_once(
-            "[target.'cfg(all(target_os = \"macos\", target_arch = \"aarch64\"))'.dependencies]",
-        )
-        .expect("Apple Silicon dependency section")
-        .1
-        .split_once("\n[")
-        .map_or_else(|| manifest.as_str(), |(section, _)| section);
-    let arm64_cli = arm64
+    let cli_dependencies: Vec<&str> = manifest
         .lines()
-        .find(|line| line.trim_start().starts_with("mvm-cli ="))
-        .expect("Apple Silicon mvm-cli dependency");
+        .filter(|line| line.trim_start().starts_with("mvm-cli ="))
+        .collect();
     assert!(
-        arm64_cli.contains("features = [\"builder-vm\"]"),
-        "Apple Silicon keeps builder orchestration for the native HVF path"
+        !cli_dependencies.is_empty(),
+        "the root package depends on mvm-cli"
     );
-    assert!(
-        !arm64_cli.contains("libkrun-sys"),
-        "Apple Silicon HVF builds must not require optional libkrun headers"
-    );
-
-    let intel = manifest
-        .split_once(
-            "[target.'cfg(all(target_os = \"macos\", target_arch = \"x86_64\"))'.dependencies]",
-        )
-        .expect("Intel macOS dependency section")
-        .1
-        .split_once("\n[")
-        .map_or_else(|| manifest.as_str(), |(section, _)| section);
-    let intel_cli = intel
-        .lines()
-        .find(|line| line.trim_start().starts_with("mvm-cli ="))
-        .expect("Intel macOS mvm-cli dependency");
-    assert!(
-        intel_cli.contains("features = [\"builder-vm\"]"),
-        "Intel HVF keeps builder orchestration without linking libkrun"
-    );
-    assert!(
-        !intel_cli.contains("libkrun-sys"),
-        "Intel HVF must not enable the ARM-only libkrun dependency"
-    );
+    for line in cli_dependencies {
+        assert!(
+            !line.contains("libkrun-sys"),
+            "no platform's mvm-cli dependency may enable the optional libkrun FFI: {line}"
+        );
+    }
 
     let features = manifest
         .split_once("\n[features]\n")

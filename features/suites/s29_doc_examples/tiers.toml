@@ -27,6 +27,11 @@ fixture = "decorator-script"
 env = { PYTHONPATH = "crates/mvm-sdk/sdks/python" }
 
 [[command]]
+path = "build guest-bins"
+tier = "parse"
+reason = "cross-compiles every guest binary for both guest architectures with the pinned zig toolchain, which takes minutes and needs that toolchain installed; its packaging and verification have focused unit tests"
+
+[[command]]
 path = "build kernel build"
 tier = "parse"
 reason = "downloads or builds a multi-hundred-megabyte artifact over the network; the e2e runner performs it once as setup rather than as an assertion"

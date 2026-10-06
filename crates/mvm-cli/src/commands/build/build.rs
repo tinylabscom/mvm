@@ -238,7 +238,6 @@ fn build_manifest(
     // A selected checkout is the workload kernel's source here too: the
     // template's kernel fallback otherwise reaches the builder kernel,
     // which has no device-mapper and cannot activate a sealed rootfs.
-    #[cfg(feature = "builder-vm")]
     crate::commands::env::builder_vm::seed_pair_workload_kernel_cache()?;
 
     let revision = match tmpl::template_build_from_manifest(&persisted, force, update_hash, mode) {
@@ -441,7 +440,6 @@ fn build_flake(
     // Skip when `MVM_BUILD_STUB_OUTDIR` short-circuits the build (the test
     // escape hatch — no builder VM is spawned), mirroring the same guard
     // `mvm_build::dev_build::dev_build` honours.
-    #[cfg(feature = "builder-vm")]
     if std::env::var("MVM_BUILD_STUB_OUTDIR")
         .map(|v| v.trim().is_empty())
         .unwrap_or(true)
@@ -761,7 +759,6 @@ pub(in crate::commands) fn build_flake_to_slot(
     validate_flake_ref(flake_ref)
         .with_context(|| format!("Invalid flake reference: {:?}", flake_ref))?;
 
-    #[cfg(feature = "builder-vm")]
     if std::env::var("MVM_BUILD_STUB_OUTDIR")
         .map(|v| v.trim().is_empty())
         .unwrap_or(true)

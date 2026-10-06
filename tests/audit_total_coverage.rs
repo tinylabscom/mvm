@@ -149,6 +149,10 @@ const BUILD_SUB: &[(&str, AuditPosture)] = &[
     // Like the other build-time cache preparation verbs here, it does not
     // emit a local audit-chain entry of its own.
     ("image-set", AuditPosture::ReadOnly),
+    // `build guest-bins` packages guest binaries from the shared guest-build
+    // cache into an archive in a caller-named directory. It produces a build
+    // output and touches no security state, so it emits no audit-chain entry.
+    ("guest-bins", AuditPosture::ReadOnly),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[

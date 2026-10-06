@@ -595,7 +595,6 @@ mod tests {
     // The default run-path materialize is the pure in-process writer, and it
     // must emit dm-verity sidecars so OCI block roots boot sealed even before
     // the builder-VM fallback is exercised.
-    #[cfg(feature = "pure-mkfs")]
     #[test]
     fn materialize_run_rootfs_default_is_pure_and_verity_backed() {
         // The builder-VM escape hatch must be unset for the default (pure) path.

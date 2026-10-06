@@ -56,7 +56,7 @@ fn main() {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Child, Stdio};
     use std::time::{Duration, Instant};
 
     use mvm_core::config::vm_state_dir;
@@ -85,7 +85,7 @@ fn main() {
             "network_policy": policy,
             "egress_mode": "raw",
         });
-        let mut child = Command::new(endpoint_bin())
+        let mut child = mvm_core::env_hygiene::helper_command(endpoint_bin())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

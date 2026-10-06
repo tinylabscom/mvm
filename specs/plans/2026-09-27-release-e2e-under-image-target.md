@@ -174,6 +174,18 @@ How it is wired:
   into the pinned set's member cache. Without that, the adopt arm installed
   bytes that a source-channel launch never looked at.
 
+*Note 2026-10-05:* the image boundary decided in
+[#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054) takes the
+SDK sidecar, runtime overlay and initramfs out of the image set: `mvmctl`
+assembles them from a guest-runtime asset each CLI release ships. The
+`pinned` value and the rest of fetch-when-unchanged are deleted under
+[#4105](https://github.com/tinylabscom/mvm/issues/4105), the re-measure box
+above is retargeted there to the pinned base set booted with the CLI's own
+guest runtime, and the merge-queue guest-image-boot lane this decision
+leaves untouched stops building from an `mvm-images` checkout under
+[#4108](https://github.com/tinylabscom/mvm/issues/4108). The wiring above
+describes the code until those land.
+
 Scenario dependence on newer guest behaviour, checked against
 `image-set/v0.2.4` (built from mvm `4e65b22`) by reading the range
 `4e65b22..4075b8fbf1`: the documented-surface scenarios that load the real
