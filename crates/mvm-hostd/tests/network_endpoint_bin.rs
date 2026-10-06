@@ -132,6 +132,7 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
         .unwrap();
 
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![SecretBinding {
@@ -259,6 +260,7 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
         .unwrap();
 
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![SecretBinding {
@@ -354,6 +356,7 @@ fn a_flowmux_endpoint_keeps_serving_sessions_after_one_ends() {
     let b64 = base64::engine::general_purpose::STANDARD;
 
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],
@@ -458,6 +461,7 @@ fn a_flowmux_endpoint_enforces_one_admitted_ceiling_across_sessions() {
     let guest_key = ed25519_dalek::SigningKey::from_bytes(&[19u8; 32]);
     let b64 = base64::engine::general_purpose::STANDARD;
     let cfg = EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],
@@ -563,6 +567,7 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
     let sock = dir.path().join("network.sock");
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut cfg = serde_json::to_value(EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![],
@@ -669,6 +674,7 @@ fn connector_only_config(connector: &std::path::Path, sock: &std::path::Path) ->
         connector_uds_path: Some(connector.to_path_buf()),
         approval_socket: None,
         flowmux_identity: None,
+        telemetry: None,
     }
 }
 
@@ -722,6 +728,19 @@ fn connector_serving_settles_to(connector: &std::path::Path, expected: bool) -> 
         let serving = UnixStream::connect(connector).is_ok();
         if serving == expected || std::time::Instant::now() >= deadline {
             return serving;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Whether a process is alive, polled until it matches `expected` or five
+/// seconds pass. Endpoint teardown can precede process exit on a busy runner.
+fn process_liveness_settles_to(pid: i32, expected: bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let alive = mvm_vmm::host::process_liveness::pid_is_alive(pid);
+        if alive == expected || std::time::Instant::now() >= deadline {
+            return alive;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -786,7 +805,7 @@ fn a_kept_endpoint_serves_after_its_launcher_exits_until_its_vm_stops() {
         "a stopped VM's endpoint must stop serving"
     );
     assert!(
-        !mvm_vmm::host::process_liveness::pid_is_alive(keeper),
+        !process_liveness_settles_to(keeper, false),
         "the keeper exits with its endpoint"
     );
 }
@@ -824,4 +843,294 @@ fn signalling_the_recorded_pid_stops_a_kept_endpoint() {
     );
     vm.kill().unwrap();
     vm.wait().unwrap();
+}
+
+/// The embedded telemetry collector runs inside the confined endpoint, so its
+/// I/O must fit the endpoint's confinement: on Linux a syscall the seccomp
+/// allowlist lacks kills the whole endpoint with SIGSYS, taking the guest's
+/// egress down with it and leaving nothing in the log. This drives the real
+/// bin with a telemetry section, has a guest double announce coverage, and
+/// requires the record to land, the status to reach `collecting`, the
+/// periodic status rewrite to survive, and the endpoint to keep serving.
+#[test]
+fn an_endpoint_embedding_the_collector_collects_and_keeps_serving() {
+    use base64::Engine as _;
+    use mvm_core::net::session::Session;
+    use mvm_core::net::telemetry::TelemetrySender;
+    use mvm_core::protocol::telemetry::{
+        CoverageState, ProducerEpoch, RecordBody, SourceKind, TelemetryRecord,
+    };
+    use mvm_hostd::audit_signer::helper::{SignerHelper, serve_on_listener};
+    use mvm_hostd::audit_signer::helper_client::DEFAULT_HELPER_MAX_FRAME_BYTES;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::telemetry_collector::TelemetryEmbedConfig;
+    use mvm_vmm::host::broker_services_spawn::{AUDIT_SIGNER_SOCK, HOST_SIGNER_PUB};
+    use mvm_vmm::host::telemetry_provisioning::{
+        TELEMETRY_COLLECTOR_STATUS_FILE, TELEMETRY_RECORDS_FILE,
+    };
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::time::{Duration, Instant};
+
+    const VM: &str = "telemetry-vm";
+
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let sock = state_dir.join("network.sock");
+    let b64 = base64::engine::general_purpose::STANDARD;
+
+    // The endpoint reads the host anchor from the keys dir under its own
+    // MVM_HOME, the one location its confinement makes readable for it.
+    let mvm_home = dir.path().join("home");
+    let keys_dir = mvm_core::config::mvm_keys_dir_at(&mvm_home);
+    std::fs::create_dir_all(&keys_dir).unwrap();
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+    let host_verify = host_key.verifying_key();
+    let anchor_path = keys_dir.join(HOST_SIGNER_PUB);
+    std::fs::write(&anchor_path, host_verify.to_bytes()).unwrap();
+
+    // The delegated signer the collector authenticates through. It runs in
+    // this test process, outside the endpoint's confinement, as the
+    // resident signer does in production.
+    let signer_key = dir.path().join("signer-key");
+    std::fs::write(&signer_key, [23u8; 32]).unwrap();
+    let signer_runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .unwrap();
+    let signer_sock = state_dir.join(AUDIT_SIGNER_SOCK);
+    let signer_listener = {
+        let _runtime = signer_runtime.enter();
+        tokio::net::UnixListener::bind(&signer_sock).unwrap()
+    };
+    let signer = signer_runtime.spawn(serve_on_listener(
+        signer_listener,
+        std::sync::Arc::new(tokio::sync::Mutex::new(SignerHelper::new(
+            "local",
+            Some(signer_key),
+        ))),
+        DEFAULT_HELPER_MAX_FRAME_BYTES,
+    ));
+
+    // This boot's guest identity, registered as the spawner registers it.
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[29u8; 32]);
+    mvm_vmm::host::telemetry_registration::register_telemetry_boot(
+        &state_dir,
+        VM,
+        &b64.encode(guest_key.verifying_key().as_bytes()),
+    )
+    .unwrap();
+
+    // Guest double on the bridged telemetry socket: announce coverage, then
+    // hold the session open until released.
+    let telemetry_sock = mvm_core::config::vm_hvf_vsock_port_socket_at(
+        &state_dir,
+        mvm_core::protocol::telemetry::TELEMETRY_PORT,
+    );
+    std::fs::create_dir_all(telemetry_sock.parent().unwrap()).unwrap();
+    let guest_listener = std::os::unix::net::UnixListener::bind(&telemetry_sock).unwrap();
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel::<()>(1);
+    let guest_identity = guest_key.clone();
+    let guest = std::thread::spawn(move || {
+        let (mut stream, _) = guest_listener.accept().unwrap();
+        let mut sender =
+            TelemetrySender::connect(&mut stream, guest_identity, &host_verify).unwrap();
+        let record = TelemetryRecord::builder()
+            .epoch(ProducerEpoch::new([6; 16]).unwrap())
+            .producer(1)
+            .sequence(1)
+            .source(SourceKind::GuestAgent)
+            .body(RecordBody::Coverage {
+                state: CoverageState::Started,
+                code: "guest-agent".try_into().unwrap(),
+            })
+            .build()
+            .unwrap();
+        sender.send(&mut stream, &record).unwrap();
+        let _ = release_rx.recv();
+    });
+
+    let cfg = EndpointConfig {
+        telemetry: Some(TelemetryEmbedConfig {
+            state_dir: state_dir.clone(),
+            telemetry_sock,
+            signer_sock,
+            host_anchor_path: anchor_path,
+            records_byte_cap: 64 * 1024,
+        }),
+        tenant_id: "local".into(),
+        instance_id: VM.into(),
+        secrets: vec![],
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        tools: Default::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        tls_intermediate: None,
+        network_policy: None,
+        network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
+        egress_mode: EgressMode::FlowMux,
+        resolver: ResolverBackend::default(),
+        session_marker: Some(state_dir.join("session.marker")),
+        session_ready_socket: None,
+        connector_uds_path: None,
+        approval_socket: None,
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: VM.into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
+    };
+
+    let mut child = Command::new(BIN)
+        .env("MVM_HOME", &mvm_home)
+        .env("HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn endpoint bin");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut guard = Kill(child);
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+
+    let mut assert_alive = |what: &str| {
+        if let Some(status) = guard.0.try_wait().unwrap() {
+            panic!(
+                "the endpoint exited {what} (code {:?}, signal {:?}); a signal of 31 is \
+                 SIGSYS from a syscall the confinement does not allow",
+                status.code(),
+                status.signal(),
+            );
+        }
+    };
+    let status_path = state_dir.join(TELEMETRY_COLLECTOR_STATUS_FILE);
+    let records_path = state_dir.join(TELEMETRY_RECORDS_FILE);
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert_alive("while the collector was starting");
+        let recorded = std::fs::read_to_string(&records_path)
+            .is_ok_and(|records| records.contains("guest-agent"));
+        let collecting =
+            std::fs::read_to_string(&status_path).is_ok_and(|status| status.contains("collecting"));
+        if recorded && collecting {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the collector never persisted the record and reached collecting"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // Outlast a status-writer cycle so its periodic replace runs confined.
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert_alive("after the collector's periodic status rewrite");
+
+    // And the endpoint still does its own job.
+    let mut conn = UnixStream::connect(&sock).expect("endpoint still accepts guest sessions");
+    conn.set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    Session::guest(&mut conn, guest_key, &host_verify)
+        .expect("endpoint still authenticates a guest session");
+
+    drop(conn);
+    drop(release_tx);
+    let _ = guest.join();
+    drop(guard);
+    signer.abort();
+}
+
+/// Telemetry is observability; egress is the endpoint's job. A collector that
+/// cannot start (here, no host anchor to authenticate under) must leave the
+/// endpoint serving rather than take the guest's network down with it.
+#[test]
+fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
+    use base64::Engine as _;
+    use mvm_core::net::session::Session;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+    use mvm_hostd::telemetry_collector::TelemetryEmbedConfig;
+
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let sock = state_dir.join("network.sock");
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[31u8; 32]);
+    let host_verify = host_key.verifying_key();
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[37u8; 32]);
+
+    let cfg = EndpointConfig {
+        telemetry: Some(TelemetryEmbedConfig {
+            state_dir: state_dir.clone(),
+            telemetry_sock: state_dir.join("telemetry.sock"),
+            signer_sock: state_dir.join("audit-signer.sock"),
+            host_anchor_path: dir.path().join("no-such-anchor.pub"),
+            records_byte_cap: 64 * 1024,
+        }),
+        tenant_id: "local".into(),
+        instance_id: "collector-refused-vm".into(),
+        secrets: vec![],
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        tools: Default::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        tls_intermediate: None,
+        network_policy: None,
+        network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
+        egress_mode: EgressMode::FlowMux,
+        resolver: ResolverBackend::default(),
+        session_marker: Some(state_dir.join("session.marker")),
+        session_ready_socket: None,
+        connector_uds_path: None,
+        approval_socket: None,
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "collector-refused-vm".into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
+    };
+
+    let mut child = Command::new(BIN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn endpoint bin");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut guard = Kill(child);
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+
+    let mut conn = UnixStream::connect(&sock).expect("endpoint still accepts guest sessions");
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    Session::guest(&mut conn, guest_key, &host_verify)
+        .expect("endpoint still authenticates a guest session");
+    assert!(
+        guard.0.try_wait().unwrap().is_none(),
+        "a collector that cannot start must not end the endpoint"
+    );
+    drop(conn);
 }
