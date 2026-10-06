@@ -482,6 +482,29 @@ pub(in crate::commands) fn prompt_machine(
     outcome
 }
 
+/// Re-deliver a replay plan's recorded prompts onto the fork `vm_name`,
+/// writing each answer to this process's fds.
+///
+/// # Errors
+/// The fork does not grant prompts, or a delivery or its audit entry failed.
+pub(in crate::commands) fn replay_prompts(
+    vm_name: &str,
+    plan: &mvm_runtime::agent_session::replay::ReplayPlan,
+    inputs: &mvm_runtime::agent_session::replay_input::ReplayInputStore,
+    timeout_secs: u64,
+) -> Result<mvm_client::agent_prompt::replay::ReplayedPrompts> {
+    let mut out = CallOutput::inherited();
+    let replayed = mvm_client::agent_prompt::replay::replay_onto(
+        vm_name,
+        plan,
+        inputs,
+        timeout_secs,
+        &mut out,
+    );
+    flush_inherited();
+    replayed
+}
+
 /// Flush this process's stdout and stderr before a possible exit.
 fn flush_inherited() {
     let _ = std::io::stdout().flush();

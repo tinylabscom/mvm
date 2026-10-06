@@ -462,3 +462,178 @@ fn outcome_labels_are_a_closed_vocabulary() {
         "failed:timeout"
     );
 }
+
+/// Accepts every checkpoint as recorded in the chain, so planning exercises the
+/// timeline and input checks without a signed audit log.
+struct RecordedAnchor;
+
+impl mvm_runtime::checkpoint::CheckpointChainAnchor for RecordedAnchor {
+    fn recorded_creation_digest(
+        &self,
+        meta: &CheckpointMeta,
+    ) -> Result<Option<mvm_core::checkpoint::CheckpointDigest>> {
+        Ok(Some(meta.meta_digest.clone()))
+    }
+
+    fn recorded_creation_tenant(&self, _meta: &CheckpointMeta) -> Result<Option<String>> {
+        Ok(Some("tenant-a".to_string()))
+    }
+}
+
+/// Record `prompts` against the fixture's machine, each as a committed step.
+fn recorded_session(fixture: &Fixture, prompts: &[&str]) -> AgentSessionRecord {
+    let agent = FakeAgent::answering(0);
+    let checkpointer = FakeCheckpointer {
+        store: &fixture.checkpoints,
+        taken: RefCell::new(0),
+    };
+    let host = fixture.host(&agent, Some(&checkpointer));
+    for (turn, text) in prompts.iter().enumerate() {
+        deliver(&host, &prompt(text, &format!("p-{turn}")), &mut Silent).unwrap();
+    }
+    fixture
+        .store
+        .load(&AgentSessionId::parse(VM).unwrap())
+        .unwrap()
+}
+
+fn replay_target<'a>(
+    fixture: &'a Fixture,
+    agent: &'a FakeAgent,
+    observer: &'a mut Silent,
+    state_dir: &std::path::Path,
+) -> replay::PromptReplayTarget<'a> {
+    replay::PromptReplayTarget {
+        vm_name: VM,
+        plan: &fixture.plan,
+        audit: &fixture.audit,
+        transport: agent,
+        observer,
+        state_dir: state_dir.to_path_buf(),
+        timeout_secs: 30,
+    }
+}
+
+#[test]
+fn a_recorded_prompt_sequence_replays_in_order_from_the_session_base() {
+    let fixture = Fixture::new(None);
+    let record = recorded_session(&fixture, &["first", "second", "third"]);
+    let base =
+        mvm_runtime::agent_session::replay::timeline_base(&fixture.checkpoints, &record).unwrap();
+    assert_eq!(base.as_str(), "step-1", "the base precedes every step");
+
+    let plan = mvm_runtime::agent_session::replay::prepare_replay(
+        &fixture.checkpoints,
+        &fixture.inputs,
+        &base,
+        &record,
+        &RecordedAnchor,
+    )
+    .unwrap();
+    assert_eq!(plan.inputs.len(), 3);
+
+    let fork_state = tempfile::tempdir().unwrap();
+    let agent = FakeAgent::answering(0);
+    let mut observer = Silent;
+    let mut dispatcher = replay::PromptReplayDispatcher::new(replay_target(
+        &fixture,
+        &agent,
+        &mut observer,
+        fork_state.path(),
+    ))
+    .unwrap();
+    let report = plan.dispatch(&fixture.inputs, &mut dispatcher).unwrap();
+
+    assert_eq!(report.applied, 3);
+    assert_eq!(
+        agent.seen.borrow().as_slice(),
+        [
+            b"first".as_slice(),
+            b"second".as_slice(),
+            b"third".as_slice()
+        ]
+    );
+    let replayed: Vec<_> = fixture
+        .chain()
+        .into_iter()
+        .filter(|entry| entry["labels"]["delivery"] == "replay")
+        .collect();
+    assert_eq!(
+        replayed.len(),
+        6,
+        "a delivered and a completed entry per prompt"
+    );
+    assert!(
+        replayed
+            .iter()
+            .all(|entry| !entry.to_string().contains("second")),
+        "a replayed prompt reached the chain"
+    );
+
+    // Re-running the same plan against the same fork delivers nothing twice.
+    let again_agent = FakeAgent::answering(0);
+    let mut again_observer = Silent;
+    let mut again = replay::PromptReplayDispatcher::new(replay_target(
+        &fixture,
+        &again_agent,
+        &mut again_observer,
+        fork_state.path(),
+    ))
+    .unwrap();
+    let report = plan.dispatch(&fixture.inputs, &mut again).unwrap();
+    assert_eq!((report.applied, report.duplicates), (0, 3));
+    assert!(again_agent.seen.borrow().is_empty());
+}
+
+#[test]
+fn a_replay_onto_a_fork_whose_plan_refuses_prompts_sends_nothing() {
+    let fixture = Fixture::new(Some(&["run-entrypoint"]));
+    let fork_state = tempfile::tempdir().unwrap();
+    let agent = FakeAgent::answering(0);
+    let mut observer = Silent;
+    let refused = replay::PromptReplayDispatcher::new(replay_target(
+        &fixture,
+        &agent,
+        &mut observer,
+        fork_state.path(),
+    ));
+    assert!(refused.is_err());
+    assert_eq!(fixture.events(), ["verb_denied"]);
+}
+
+#[test]
+fn a_prompt_recorded_without_a_step_stops_the_replay_before_it() {
+    let fixture = Fixture::new(None);
+    let record = recorded_session(&fixture, &["first"]);
+    // A prompt whose step capture failed: recorded, but on no checkpoint.
+    let agent = FakeAgent::answering(0);
+    deliver(
+        &fixture.host(&agent, None),
+        &prompt("unstepped", "p-unstepped"),
+        &mut Silent,
+    )
+    .unwrap();
+    let checkpointer = FakeCheckpointer {
+        store: &fixture.checkpoints,
+        taken: RefCell::new(2),
+    };
+    deliver(
+        &fixture.host(&agent, Some(&checkpointer)),
+        &prompt("after", "p-after"),
+        &mut Silent,
+    )
+    .unwrap();
+    let record_now = fixture.store.load(&record.session_id).unwrap();
+    let base = mvm_runtime::agent_session::replay::timeline_base(&fixture.checkpoints, &record_now)
+        .unwrap();
+
+    let err = mvm_runtime::agent_session::replay::prepare_replay(
+        &fixture.checkpoints,
+        &fixture.inputs,
+        &base,
+        &record_now,
+        &RecordedAnchor,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("no step checkpoint"), "{err:#}");
+}

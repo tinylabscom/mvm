@@ -148,3 +148,25 @@ and the session's journal cursor into one resume point. It shipped with no \
 caller outside its tests, so no recorded prompt could ever be replayed. \
 `machine prompt` is its production caller; losing it leaves prompts recorded \
 but never on a replayable timeline."""
+
+[[control]]
+symbol = "prepare_replay"
+file = "crates/mvm-runtime/src/agent_session/replay.rs"
+dormant = false
+why = """
+Verifies a replay checkpoint and the session's whole step timeline against \
+the signed audit chain, and refuses a timeline with a recorded input no step \
+holds. It had no caller outside its tests. `agent-session replay` is its \
+production caller; losing it leaves recorded prompts with no verified path \
+back onto a fork."""
+
+[[control]]
+symbol = "plan_grants_prompts"
+file = "crates/mvm-client/src/agent_prompt.rs"
+dormant = false
+why = """
+The host half of the prompt grant: a plan whose agent-verb list omits \
+`agent-prompt` is refused, and the refusal chain-signed, before a prompt is \
+recorded or sent. The replay dispatcher calls it for every fork it \
+re-delivers onto; losing that caller would let a replay deliver prompts to a \
+fork whose plan never granted them, leaving only the guest's check."""

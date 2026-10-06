@@ -51,6 +51,7 @@ impl Args {
             AgentSessionAction::Park(a) => a.retry.json,
             AgentSessionAction::Resume(a) => a.retry.json,
             AgentSessionAction::Renew(a) => a.retry.json,
+            AgentSessionAction::Replay(_) => false,
         }
     }
 }
@@ -70,6 +71,9 @@ pub(in crate::commands) enum AgentSessionAction {
     Resume(ResumeArgs),
     /// Extend a parked session's retention deadline; never shortens it
     Renew(RenewArgs),
+    /// Fork one of the session's checkpoints and re-deliver the prompts it
+    /// recorded after it to the fork's agent
+    Replay(super::vm::prompt_replay::ReplayArgs),
 }
 
 /// What it takes to bring a session into existence.
@@ -247,6 +251,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             resume(&AgentSessionStore::open(), &CheckpointStore::open(), &a)
         }
         AgentSessionAction::Renew(a) => renew(&AgentSessionStore::open(), &a),
+        AgentSessionAction::Replay(a) => super::vm::prompt_replay::run(&a),
     }
 }
 
