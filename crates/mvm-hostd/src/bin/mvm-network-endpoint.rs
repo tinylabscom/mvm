@@ -53,6 +53,20 @@ fn main() -> Result<()> {
     // First statement in the process: a panic before this line would
     // print its payload unredacted.
     mvm_hostd::panic_hook::install("substitution-endpoint");
+    // A machine that outlives its launcher gets a keeper between the two: this
+    // same binary, started with the VM's state directory, running the real
+    // endpoint as its child for as long as the VM runs. The keeper never reads
+    // stdin, so the endpoint below receives the launcher's config untouched.
+    if let Some(vm_state_dir) = mvm_hostd::vm_lifetime::requested_vm_state_dir(std::env::args_os())?
+    {
+        let endpoint = mvm_core::env_hygiene::helper_command(
+            std::env::current_exe().context("locating the endpoint binary to keep")?,
+        );
+        std::process::exit(mvm_hostd::vm_lifetime::keep_endpoint_for_vm(
+            endpoint,
+            &vm_state_dir,
+        ));
+    }
     // This process holds the workload's secrets in the clear; a backend that
     // died must not leave it serving as an orphan. Exit the instant the parent
     // is gone (macOS / SIGKILL gap the spawn-side attach misses).
@@ -130,15 +144,6 @@ fn main() -> Result<()> {
     };
     let fingerprinted = handshake.input_fingerprints.len();
     let line = serde_json::to_string(&handshake).context("serializing the ready handshake")?;
-    {
-        let mut stdout = std::io::stdout().lock();
-        writeln!(stdout, "{line}").context("writing handshake line")?;
-        stdout.flush().context("flushing handshake line")?;
-    }
-    info!(
-        handed = handed_len,
-        fingerprinted, "placeholders handed; serving"
-    );
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -151,19 +156,33 @@ fn main() -> Result<()> {
     // via HardenedForwarder.
     let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
 
-    // Self-confine before serving any guest byte. The runtime's worker threads
-    // are already spawned (multi-thread `build()` spawns them eagerly), and the
-    // listeners are bound above — so the broad setup is done. `clone`/`clone3`
-    // stay in the allowlist anyway because tokio spawns blocking
-    // threads lazily during serve (the vsock accept loop and the resolver run
-    // on `spawn_blocking`). We confine from inside `block_on` so the policy
-    // applies to the runtime thread that drives the accept loop. Fail-closed:
-    // any confinement error aborts before the first guest connection.
+    // Self-confine before reporting ready, and so before serving any guest
+    // byte. The runtime's worker threads are already spawned (multi-thread
+    // `build()` spawns them eagerly), and the listeners are bound above — so
+    // the broad setup is done. `clone`/`clone3` stay in the allowlist anyway
+    // because tokio spawns blocking threads lazily during serve (the vsock
+    // accept loop and every FlowMux session run on `spawn_blocking`). This
+    // thread goes on to drive the accept loop in `block_on`, so the policy
+    // applies to it and to every thread it spawns. Fail-closed: a confinement
+    // error, or a self-test probe the filter refuses, ends the process before
+    // the handshake line, and the launcher reports it with this process's
+    // stderr before any guest boots.
+    #[cfg(target_os = "linux")]
+    confine_endpoint(&cfg, runtime.handle())?;
+    #[cfg(not(target_os = "linux"))]
+    confine_endpoint_without_lsm(&cfg)?;
+
+    {
+        let mut stdout = std::io::stdout().lock();
+        writeln!(stdout, "{line}").context("writing handshake line")?;
+        stdout.flush().context("flushing handshake line")?;
+    }
+    info!(
+        handed = handed_len,
+        fingerprinted, "placeholders handed; serving"
+    );
+
     runtime.block_on(async move {
-        #[cfg(target_os = "linux")]
-        confine_endpoint(&cfg)?;
-        #[cfg(not(target_os = "linux"))]
-        confine_endpoint_without_lsm(&cfg)?;
         serve(
             ServeParams::builder()
                 .cfg(&cfg)
@@ -523,8 +542,13 @@ fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
 /// `assemble` resolves them, so the confinement matches the resolver's runtime
 /// reads. Fail-closed per the jailer's partial-confinement contract: on error
 /// we return it up to `main`, which exits nonzero before serving secrets.
+///
+/// Confinement is followed by the endpoint's self-test
+/// (`ConfinementSelfTest::network_endpoint`), so it must run outside
+/// `block_on`: one probe blocks this thread on the runtime's blocking pool.
 #[cfg(target_os = "linux")]
-fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
+fn confine_endpoint(cfg: &EndpointConfig, runtime: &tokio::runtime::Handle) -> Result<()> {
+    use mvm_hostd::jailer::self_test::ConfinementSelfTest;
     use mvm_hostd::jailer::{ConfinementSpec, confine_self};
     use mvm_hostd::supervisor::network_endpoint::resolve_store_dirs;
 
@@ -547,10 +571,11 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
             })
         })
         .transpose()?;
+    let audit_dir = mvm_core::config::mvm_audit_dir();
     let spec = ConfinementSpec::network_endpoint(
         secret_dir,
         binding_dir,
-        mvm_core::config::mvm_audit_dir(),
+        audit_dir.clone(),
         mvm_core::config::mvm_keys_dir(),
         resolver_uds_path(cfg),
     )
@@ -562,6 +587,19 @@ fn confine_endpoint(cfg: &EndpointConfig) -> Result<()> {
     );
     confine_self(&spec).context("confine substitution endpoint")?;
     info!("substitution endpoint self-confined (landlock + seccomp)");
+
+    // Meet any allowlist gap now, under the filter that will serve, rather
+    // than the first time a session reaches the path. A refused probe does
+    // not return: the process dies of SIGSYS after naming the probe.
+    let report = ConfinementSelfTest::network_endpoint(&audit_dir, runtime).run();
+    for (probe, error) in &report.errored {
+        warn!(
+            probe,
+            %error,
+            "confinement self-test probe failed after the filter allowed its calls"
+        );
+    }
+    info!(probes = report.ran.len(), "confinement self-test passed");
     Ok(())
 }
 
@@ -1687,7 +1725,10 @@ mod tests {
         let mut cfg = uds_cfg();
         cfg.session_marker = Some(PathBuf::new());
 
-        let error = confine_endpoint(&cfg)
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let error = confine_endpoint(&cfg, runtime.handle())
             .expect_err("a marker without a parent must fail before process confinement");
         assert!(
             error

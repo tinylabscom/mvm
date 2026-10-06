@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 use tracing::instrument;
 
 use crate::host::linux_env;
@@ -169,7 +169,7 @@ pub fn shell_quote(arg: &str) -> String {
 pub fn replace_process(cmd: &str, args: &[&str]) -> Result<()> {
     use std::os::unix::process::CommandExt;
 
-    let err = Command::new(cmd)
+    let err = mvm_core::env_hygiene::helper_command(cmd)
         .args(args)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())

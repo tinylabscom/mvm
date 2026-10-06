@@ -36,8 +36,9 @@ runs `mvmctl` and has no subprocess fallback. It finds the library, first
 match wins:
 
 1. `MVM_HOSTLIB_PATH`, naming the library file;
-2. `mvm/_native/` inside the installed package (wheels that carry the library
-   are follow-up work);
+2. `mvm/_native/` inside the installed package, which every published wheel
+   carries (`manylinux2014` and `musllinux_1_2` for x86_64 and aarch64
+   Linux, and arm64 macOS);
 3. beside `mvmctl` on `PATH`, including beside the real file behind a symlink.
 
 A missing library raises `MvmTransportError` naming all three. Every failed

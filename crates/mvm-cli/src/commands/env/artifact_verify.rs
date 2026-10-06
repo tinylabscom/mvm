@@ -289,7 +289,7 @@ fn download_to(url: &str, dest: &std::path::Path) -> Result<()> {
 
 /// Download a file from a URL using curl, resuming a partial `dest`.
 pub(crate) fn download_file(url: &str, dest: &str) -> Result<()> {
-    let status = std::process::Command::new("curl")
+    let status = mvm_core::env_hygiene::helper_command("curl")
         .args(curl_download_args(dest, url))
         .stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

@@ -84,7 +84,7 @@ pub(crate) fn ensure_pair_built(
         &cache,
         &mut || bootstrap::bootstrap_tool_builder_vm_image().map_err(|error| format!("{error:#}")),
         &mut |job| {
-            let choice = mvm_build::builder_backend_select::resolve_choice();
+            let choice = mvm_build::builder_backend_select::resolve_choice(None);
             let builder = ShellJobBuilder::for_choice(choice).ok_or_else(|| {
                 format!(
                     "the {choice:?} builder has no shell-job path to build a local image set \
@@ -172,7 +172,6 @@ pub(crate) fn staged_contract_files(
 /// to answer. The pair's kernel is that answer; without this seed a
 /// kernel-less mkGuest image (the common shape) falls through to the builder
 /// kernel the moment a checkout is selected.
-#[cfg(feature = "builder-vm")]
 pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
     let Some(checkout) = super::bootstrap::selected_local_checkout()? else {
         return Ok(());
@@ -506,6 +505,14 @@ mod tests {
             pair.mvm.parent().expect("tmp").join("cache"),
         );
         let contract = mvm_build::image_source::contract_for(&target).expect("builder-vm contract");
+        // The fixture stands in for a real build's output, so it may carry
+        // only what the contract makes a real build copy out. A fixture with
+        // an extra file would let the install pass here and fail on a real set.
+        let mut fixture_names: Vec<&str> = builder_vm_files().iter().map(|f| f.name).collect();
+        let mut contract_names: Vec<&str> = contract.files.iter().map(|f| f.name).collect();
+        fixture_names.sort_unstable();
+        contract_names.sort_unstable();
+        assert_eq!(fixture_names, contract_names);
         let ctx = mvm_build::image_source::EntryContext {
             images: &pair.images,
             mvm_checkout: &pair.mvm,

@@ -276,6 +276,11 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 /// `mvm-network-endpoint` honours this contract by returning the error
 /// up to `main`, which logs and exits nonzero; the supervisor turns that exit
 /// into a VM teardown.
+///
+/// The seccomp step also installs a `SIGSYS` handler that writes the refused
+/// call's number to stderr before the process dies of it. Run
+/// `self_test::ConfinementSelfTest` right after this returns to meet any
+/// allowlist gap at startup rather than mid-session.
 #[cfg(target_os = "linux")]
 pub fn confine_self(spec: &ConfinementSpec) -> Result<(), JailerError> {
     crate::jailer::landlock::apply(spec)?;
@@ -296,7 +301,11 @@ pub fn confine_self(_spec: &ConfinementSpec) -> Result<(), JailerError> {
 #[cfg(target_os = "linux")]
 pub mod landlock;
 #[cfg(target_os = "linux")]
+mod refusal_report;
+#[cfg(target_os = "linux")]
 pub mod seccomp;
+#[cfg(target_os = "linux")]
+pub mod self_test;
 
 #[cfg(test)]
 mod tests {

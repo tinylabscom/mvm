@@ -2,7 +2,6 @@
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -301,7 +300,7 @@ pub(crate) fn prepopulate_with_mkfs(
     }
     if let Some(mkfs) = host_mkfs {
         let blocks = host_file_4k_blocks(store_image)?;
-        let status = Command::new(mkfs)
+        let status = mvm_core::env_hygiene::helper_command(mkfs)
             .args(["-F", "-q", "-b", "4096", "-L"])
             .arg(crate::rootfs::STAGE0_NIX_STORE_EXT4_LABEL)
             .arg("-d")

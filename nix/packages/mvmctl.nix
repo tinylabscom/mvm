@@ -5,9 +5,8 @@
 #   project-published release tarball;
 # - native libkrun FFI is opt-in and requires explicit `libkrun`
 #   and `libkrunfw` packages so the bindgen/link boundary is visible in Nix;
-# - the default package keeps the builder-VM feature enabled for normal
-#   DX but does not force a host libkrun install on systems that do not
-#   need the native FFI path.
+# - the package always carries builder-VM orchestration but does not force
+#   a host libkrun install on systems that do not need the native FFI path.
 
 {
   pkgs,
@@ -25,7 +24,6 @@
   libkrun ? null,
   libkrunfw ? null,
   tpm2-tss ? null,
-  withBuilderVm ? true,
   withNativeLibkrun ? false,
   withTpm2 ? false,
   runTests ? true,
@@ -33,7 +31,6 @@
 
 assert withNativeLibkrun -> libkrun != null;
 assert withNativeLibkrun -> libkrunfw != null;
-assert withNativeLibkrun -> withBuilderVm;
 assert withTpm2 -> tpm2-tss != null;
 
 let
@@ -44,9 +41,6 @@ let
 
   featureList =
     [ ]
-    ++ lib.optionals withBuilderVm [
-      "mvm-cli/builder-vm"
-    ]
     ++ lib.optionals withNativeLibkrun [
       "mvm-cli/libkrun-sys"
       "mvm-hostd/libkrun-sys"
@@ -82,9 +76,6 @@ rustPlatform.buildRustPackage {
     "mvmctl"
     "--package"
     "mvm-hostd"
-  ]
-  ++ lib.optionals (!withBuilderVm) [
-    "--no-default-features"
   ]
   ++ lib.optionals (featureList != [ ]) [
     "--features"

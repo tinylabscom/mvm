@@ -3,6 +3,10 @@
 //! A denial is never itself authority. The operator chooses Grant or Skip for
 //! each safe candidate, sees the exact additions, and separately confirms the
 //! write. Until that final confirmation the draft exists only in memory.
+//!
+//! A run that cannot be reviewed where it ended — no terminal, or no project
+//! manifest this process admitted it under — names the `mvmctl explain`
+//! command that opens the same review later instead.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -13,6 +17,8 @@ use mvm_client::approval_broker::display_safe;
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use super::egress_denials::{DenialTally, DeniedDestination};
+use super::exec::RunArgs;
+use super::host_notices::{NoticeSink, Stderr};
 use crate::approval::tty::{ARMING_WINDOW, ControllingTty, Terminal};
 
 const ANSWER_LIMIT: usize = 32;
@@ -59,15 +65,16 @@ fn candidate(denial: &DeniedDestination) -> Option<GrantCandidate> {
     })
 }
 
-/// Open the controlling terminal and run the two-stage review. `Ok(false)`
-/// means no terminal, no candidates, or the operator declined the write.
+/// Open the controlling terminal and run the two-stage review, after verifying
+/// the local audit chain. `Ok(false)` means no terminal, no candidates, or the
+/// operator declined the write.
 pub(in crate::commands) fn review(tally: &DenialTally, manifest: &Path) -> Result<bool> {
-    let denials = tally.destinations();
-    if candidates_from_destinations(&denials).is_empty() {
-        return Ok(false);
-    }
-    super::egress_denials::verify_local_chain()?;
-    review_destinations(&denials, manifest)
+    review_with(
+        &tally.destinations(),
+        manifest,
+        &mut LocalHost::verifying_chain(),
+    )
+    .map(ReviewOutcome::wrote)
 }
 
 /// Review denials recovered after the run from the verified audit chain.
@@ -75,21 +82,265 @@ pub(in crate::commands) fn review_destinations(
     denials: &[DeniedDestination],
     manifest: &Path,
 ) -> Result<bool> {
-    let offered = candidates_from_destinations(denials);
-    if offered.is_empty() {
-        return Ok(false);
-    }
-    let Ok(mut terminal) = ControllingTty::open() else {
-        return Ok(false);
-    };
-    review_with_terminal(&mut terminal, &offered, manifest)
+    review_with(denials, manifest, &mut LocalHost::chain_already_verified())
+        .map(ReviewOutcome::wrote)
 }
 
-/// The one project file a review edits. Discover an existing manifest from
-/// `project`; when none exists, stage a new `mvm.toml` at that directory.
+/// The one project file a review edits: `project` itself when it names a
+/// manifest file, otherwise the manifest discovered from that directory, or a
+/// new `mvm.toml` staged there when none exists.
 pub(in crate::commands) fn manifest_path(project: &Path) -> Result<PathBuf> {
+    if project.is_file() {
+        return Ok(project.to_path_buf());
+    }
     Ok(mvm_core::manifest::discover_manifest_from_dir(project)?
         .unwrap_or_else(|| project.join("mvm.toml")))
+}
+
+/// Where the policy of a run came from, which decides whether its refusals
+/// can become grants in place.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) enum ReviewSource {
+    /// This process admitted the run, and this project manifest contributed
+    /// its `[network].allow_hosts`.
+    Manifest(PathBuf),
+    /// There is no project manifest here that a grant could be added to.
+    Unavailable(NoManifest),
+}
+
+/// Why a run has no project manifest a review could edit in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands) enum NoManifest {
+    /// This process admitted the run, and no project manifest contributed to
+    /// its policy.
+    NotNamed,
+    /// The run's policy came from a verified pack, which a review never edits.
+    SignedPack,
+    /// The run's policy came from a resolved-manifest file (`--plan`).
+    ResolvedPlan,
+    /// Another `mvmctl` invocation admitted the run, so this one cannot know
+    /// which manifest its policy came from.
+    AdmittedElsewhere,
+}
+
+impl ReviewSource {
+    /// The source of a launch's policy, read from its arguments the way
+    /// `apply_run_policy` reads them. Call it before a flake is built into a
+    /// slot: after that, the arguments no longer name the project directory.
+    pub(in crate::commands) fn for_launch(args: &RunArgs) -> Result<Self> {
+        if args.registry_pack_image.is_some() {
+            return Ok(Self::Unavailable(NoManifest::SignedPack));
+        }
+        if args.plan.is_some() {
+            return Ok(Self::Unavailable(NoManifest::ResolvedPlan));
+        }
+        Ok(super::run_routes::project_manifest(args)?
+            .map_or(Self::Unavailable(NoManifest::NotNamed), |(path, _)| {
+                Self::Manifest(path)
+            }))
+    }
+
+    pub(in crate::commands) fn admitted_elsewhere() -> Self {
+        Self::Unavailable(NoManifest::AdmittedElsewhere)
+    }
+}
+
+impl NoManifest {
+    fn reason(self, vm_name: &str) -> String {
+        match self {
+            Self::NotNamed => {
+                "this run was admitted without a project mvm.toml to add grants to".into()
+            }
+            Self::SignedPack => {
+                "this run's policy came from a verified pack, which a review never edits".into()
+            }
+            Self::ResolvedPlan => {
+                "this run's policy came from --plan, not from a project mvm.toml".into()
+            }
+            Self::AdmittedElsewhere => format!(
+                "machine {} was admitted by a separate run, so its project manifest is not \
+                 known here",
+                display_safe(vm_name, DISPLAY_LIMIT)
+            ),
+        }
+    }
+}
+
+/// What a lane knows about the run whose refusals it has just summarized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(in crate::commands) struct ReviewOffer {
+    vm_name: String,
+    source: ReviewSource,
+}
+
+impl ReviewOffer {
+    pub(in crate::commands) fn new(vm_name: impl Into<String>, source: ReviewSource) -> Self {
+        Self {
+            vm_name: vm_name.into(),
+            source,
+        }
+    }
+}
+
+/// Print a finished run's exit summary, then offer its grantable refusals for
+/// review: in place when the run's project manifest is known and there is a
+/// terminal to ask on; otherwise as the `mvmctl explain` command that opens
+/// the same review later. Never fails the run — a review that cannot proceed
+/// says why.
+pub(in crate::commands) fn summarize_and_offer(tally: &DenialTally, offer: &ReviewOffer) {
+    summarize_and_offer_with(tally, offer, &mut LocalHost::verifying_chain());
+}
+
+fn summarize_and_offer_with(tally: &DenialTally, offer: &ReviewOffer, host: &mut dyn ReviewHost) {
+    super::egress_denials::print_summary(tally, host.sink());
+    offer_with(tally, offer, host);
+}
+
+/// How a review ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewOutcome {
+    /// Nothing refused could become a grant.
+    NothingGrantable,
+    /// No controlling terminal to ask on.
+    NoTerminal,
+    /// The operator answered; `true` when the manifest was written.
+    Answered(bool),
+}
+
+impl ReviewOutcome {
+    fn wrote(self) -> bool {
+        self == Self::Answered(true)
+    }
+}
+
+/// What a review needs from the host it runs on.
+trait ReviewHost {
+    /// Where notices about the review go.
+    fn sink(&self) -> &dyn NoticeSink;
+    /// The controlling terminal, or `None` when the process has none.
+    fn open_terminal(&mut self) -> Option<Box<dyn Terminal>>;
+    /// Refuse unless the chain the refusals were read from verifies.
+    fn verify_chain(&mut self) -> Result<()>;
+    /// The plan id `mvmctl explain` should be pointed at for `vm_name`.
+    fn run_id(&self, vm_name: &str) -> Option<String>;
+}
+
+/// `/dev/tty`, the local tenant's chain, and stderr.
+struct LocalHost {
+    chain_verified: bool,
+}
+
+impl LocalHost {
+    fn verifying_chain() -> Self {
+        Self {
+            chain_verified: false,
+        }
+    }
+
+    fn chain_already_verified() -> Self {
+        Self {
+            chain_verified: true,
+        }
+    }
+}
+
+impl ReviewHost for LocalHost {
+    fn sink(&self) -> &dyn NoticeSink {
+        &Stderr
+    }
+
+    fn open_terminal(&mut self) -> Option<Box<dyn Terminal>> {
+        ControllingTty::open()
+            .ok()
+            .map(|terminal| Box::new(terminal) as Box<dyn Terminal>)
+    }
+
+    fn verify_chain(&mut self) -> Result<()> {
+        if !self.chain_verified {
+            super::egress_denials::verify_local_chain()?;
+            self.chain_verified = true;
+        }
+        Ok(())
+    }
+
+    fn run_id(&self, vm_name: &str) -> Option<String> {
+        super::egress_denials::latest_admission(vm_name)
+    }
+}
+
+/// The review itself. The chain is verified once a terminal is known to exist
+/// and before anything is asked on it.
+fn review_with(
+    denials: &[DeniedDestination],
+    manifest: &Path,
+    host: &mut dyn ReviewHost,
+) -> Result<ReviewOutcome> {
+    let offered = candidates_from_destinations(denials);
+    if offered.is_empty() {
+        return Ok(ReviewOutcome::NothingGrantable);
+    }
+    let Some(mut terminal) = host.open_terminal() else {
+        return Ok(ReviewOutcome::NoTerminal);
+    };
+    host.verify_chain()?;
+    review_with_terminal(terminal.as_mut(), &offered, manifest).map(ReviewOutcome::Answered)
+}
+
+fn offer_with(tally: &DenialTally, offer: &ReviewOffer, host: &mut dyn ReviewHost) {
+    let denials = tally.destinations();
+    if candidates_from_destinations(&denials).is_empty() {
+        return;
+    }
+    let (reason, manifest) = match &offer.source {
+        ReviewSource::Manifest(manifest) => match review_with(&denials, manifest, host) {
+            Ok(ReviewOutcome::NoTerminal) => (
+                "no terminal to review these refusals on".to_string(),
+                Some(manifest.as_path()),
+            ),
+            Ok(ReviewOutcome::NothingGrantable | ReviewOutcome::Answered(_)) => return,
+            Err(error) => (
+                format!("could not review denied egress: {error:#}"),
+                Some(manifest.as_path()),
+            ),
+        },
+        ReviewSource::Unavailable(why) => (why.reason(&offer.vm_name), None),
+    };
+    let run = host
+        .run_id(&offer.vm_name)
+        .unwrap_or_else(|| offer.vm_name.clone());
+    let lines = review_pointer(&reason, &run, manifest);
+    host.sink().block(&lines);
+}
+
+/// The lines naming the command that reviews a run's refusals later.
+fn review_pointer(reason: &str, run: &str, manifest: Option<&Path>) -> Vec<String> {
+    match manifest {
+        Some(manifest) => vec![
+            format!("{reason}; to grant any of them later, run:"),
+            format!(
+                "  mvmctl explain {} --review --project {}",
+                shell_word(run),
+                shell_word(&manifest.display().to_string())
+            ),
+        ],
+        None => vec![
+            format!("{reason}; to grant any of them later, run from the project directory:"),
+            format!("  mvmctl explain {} --review", shell_word(run)),
+        ],
+    }
+}
+
+/// `word` as one shell word, quoted only when it has to be.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_./:@+=,".contains(c));
+    if plain {
+        word.to_string()
+    } else {
+        crate::exec::shell_quote(word)
+    }
 }
 
 fn review_with_terminal(
@@ -374,6 +625,341 @@ mod tests {
         let written = std::fs::read_to_string(&manifest).unwrap();
         let parsed = mvm_core::manifest::Manifest::from_toml_str(&written).unwrap();
         assert_eq!(parsed.network.allow_hosts, ["api.example.com:443"]);
+    }
+
+    /// A terminal the host hands out by value while the test keeps a handle
+    /// on what was drawn on it and what is left to answer.
+    #[derive(Clone, Default)]
+    struct SharedTerminal(std::rc::Rc<std::cell::RefCell<FakeTerminal>>);
+
+    impl SharedTerminal {
+        fn answering(answers: &[&str]) -> Self {
+            Self(std::rc::Rc::new(std::cell::RefCell::new(FakeTerminal {
+                answers: answers.iter().map(ToString::to_string).collect(),
+                ..FakeTerminal::default()
+            })))
+        }
+
+        fn drawn(&self) -> String {
+            self.0.borrow().drawn.clone()
+        }
+    }
+
+    impl Terminal for SharedTerminal {
+        fn write(&mut self, text: &str) -> std::io::Result<()> {
+            self.0.borrow_mut().write(text)
+        }
+        fn discard_input(&mut self) -> std::io::Result<()> {
+            self.0.borrow_mut().discard_input()
+        }
+        fn read_line(
+            &mut self,
+            deadline: Instant,
+            max_bytes: usize,
+        ) -> std::io::Result<Option<String>> {
+            self.0.borrow_mut().read_line(deadline, max_bytes)
+        }
+        fn pause(&mut self, _duration: Duration) {}
+    }
+
+    struct FakeHost {
+        sink: crate::commands::vm::host_notices::Captured,
+        terminal: Option<SharedTerminal>,
+        chain: std::result::Result<(), &'static str>,
+        verified: bool,
+        run_id: Option<String>,
+    }
+
+    impl FakeHost {
+        /// No terminal; a chain that verifies; run `plan-1`.
+        fn headless() -> Self {
+            Self {
+                sink: crate::commands::vm::host_notices::Captured::default(),
+                terminal: None,
+                chain: Ok(()),
+                verified: false,
+                run_id: Some("plan-1".into()),
+            }
+        }
+
+        fn with_terminal(terminal: &SharedTerminal) -> Self {
+            Self {
+                terminal: Some(terminal.clone()),
+                ..Self::headless()
+            }
+        }
+
+        fn said(&self) -> String {
+            self.sink.lines().join("\n")
+        }
+    }
+
+    impl ReviewHost for FakeHost {
+        fn sink(&self) -> &dyn NoticeSink {
+            &self.sink
+        }
+        fn open_terminal(&mut self) -> Option<Box<dyn Terminal>> {
+            self.terminal
+                .clone()
+                .map(|terminal| Box::new(terminal) as Box<dyn Terminal>)
+        }
+        fn verify_chain(&mut self) -> Result<()> {
+            self.chain.map_err(|error| anyhow::anyhow!(error))?;
+            self.verified = true;
+            Ok(())
+        }
+        fn run_id(&self, _vm_name: &str) -> Option<String> {
+            self.run_id.clone()
+        }
+    }
+
+    fn grantable() -> DenialTally {
+        tally("api.example.com:443", "policy_denied")
+    }
+
+    fn project() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(&manifest, "image = \"alpine:3.20\"\n").unwrap();
+        (dir, manifest)
+    }
+
+    #[test]
+    fn a_run_without_a_terminal_names_the_review_command_for_its_manifest() {
+        let (_dir, manifest) = project();
+        let before = std::fs::read(&manifest).unwrap();
+        let mut host = FakeHost::headless();
+
+        summarize_and_offer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::Manifest(manifest.clone())),
+            &mut host,
+        );
+
+        let lines = host.sink.lines();
+        let summary = lines
+            .iter()
+            .position(|line| line.starts_with("egress denied: 1 destination"))
+            .expect("the exit summary");
+        let pointer = lines
+            .iter()
+            .position(|line| line.contains("no terminal to review these refusals on"))
+            .expect("why no review was opened");
+        assert!(summary < pointer, "{lines:#?}");
+        assert_eq!(
+            lines[pointer + 1],
+            format!(
+                "  mvmctl explain plan-1 --review --project {}",
+                manifest.display()
+            )
+        );
+        assert!(!host.verified, "no review was opened, so nothing to verify");
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    }
+
+    #[test]
+    fn a_run_with_a_terminal_reviews_in_place_after_verifying_the_chain() {
+        let (_dir, manifest) = project();
+        let terminal = SharedTerminal::answering(&["g", "y"]);
+        let mut host = FakeHost::with_terminal(&terminal);
+
+        summarize_and_offer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::Manifest(manifest.clone())),
+            &mut host,
+        );
+
+        assert!(host.verified);
+        assert!(terminal.drawn().contains("Grant / [S] Skip"));
+        assert!(terminal.drawn().contains("Write this change? [y/N]"));
+        let written = mvm_core::manifest::Manifest::read_file(&manifest).unwrap();
+        assert_eq!(written.network.allow_hosts, ["api.example.com:443"]);
+        assert!(!host.said().contains("mvmctl explain"), "{}", host.said());
+    }
+
+    #[test]
+    fn a_review_declined_at_the_write_leaves_the_manifest_and_prints_no_pointer() {
+        let (_dir, manifest) = project();
+        let before = std::fs::read(&manifest).unwrap();
+        let terminal = SharedTerminal::answering(&["g", "n"]);
+        let mut host = FakeHost::with_terminal(&terminal);
+
+        summarize_and_offer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::Manifest(manifest.clone())),
+            &mut host,
+        );
+
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        assert!(!host.said().contains("mvmctl explain"));
+    }
+
+    #[test]
+    fn a_chain_that_does_not_verify_is_never_reviewed() {
+        let (_dir, manifest) = project();
+        let before = std::fs::read(&manifest).unwrap();
+        let terminal = SharedTerminal::answering(&["g", "y"]);
+        let mut host = FakeHost {
+            chain: Err("chain broken at entry 3"),
+            ..FakeHost::with_terminal(&terminal)
+        };
+
+        summarize_and_offer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::Manifest(manifest.clone())),
+            &mut host,
+        );
+
+        assert!(terminal.drawn().is_empty(), "nothing may be asked");
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+        let said = host.said();
+        assert!(said.contains("chain broken at entry 3"), "{said}");
+        assert!(
+            said.contains("mvmctl explain plan-1 --review --project"),
+            "{said}"
+        );
+    }
+
+    #[test]
+    fn a_symlinked_manifest_is_refused_and_pointed_at_explain() {
+        let (dir, target) = project();
+        let manifest = dir.path().join("linked.toml");
+        std::os::unix::fs::symlink(&target, &manifest).unwrap();
+        let before = std::fs::read(&target).unwrap();
+        let terminal = SharedTerminal::answering(&["g", "y"]);
+        let mut host = FakeHost::with_terminal(&terminal);
+
+        summarize_and_offer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::Manifest(manifest)),
+            &mut host,
+        );
+
+        assert_eq!(std::fs::read(&target).unwrap(), before);
+        let said = host.said();
+        assert!(said.contains("symlinked manifest"), "{said}");
+        assert!(said.contains("mvmctl explain plan-1 --review"), "{said}");
+    }
+
+    #[test]
+    fn a_run_without_a_project_manifest_says_so_and_never_prompts() {
+        for (why, expected) in [
+            (NoManifest::NotNamed, "without a project mvm.toml"),
+            (NoManifest::SignedPack, "verified pack"),
+            (NoManifest::ResolvedPlan, "--plan"),
+            (NoManifest::AdmittedElsewhere, "admitted by a separate run"),
+        ] {
+            let terminal = SharedTerminal::answering(&["g", "y"]);
+            let mut host = FakeHost::with_terminal(&terminal);
+
+            summarize_and_offer_with(
+                &grantable(),
+                &ReviewOffer::new("vm-a", ReviewSource::Unavailable(why)),
+                &mut host,
+            );
+
+            assert!(terminal.drawn().is_empty(), "{why:?} must not prompt");
+            let lines = host.sink.lines();
+            let reason = lines
+                .iter()
+                .position(|line| line.contains(expected))
+                .unwrap_or_else(|| panic!("{why:?}: {lines:#?}"));
+            assert!(lines[reason].ends_with("run from the project directory:"));
+            assert_eq!(lines[reason + 1], "  mvmctl explain plan-1 --review");
+        }
+    }
+
+    #[test]
+    fn refusals_that_cannot_become_grants_get_neither_a_review_nor_a_pointer() {
+        let terminal = SharedTerminal::answering(&["g", "y"]);
+        let mut host = FakeHost::with_terminal(&terminal);
+
+        summarize_and_offer_with(
+            &tally("169.254.169.254:80", "cloud_metadata"),
+            &ReviewOffer::new("vm-a", ReviewSource::admitted_elsewhere()),
+            &mut host,
+        );
+
+        assert!(terminal.drawn().is_empty());
+        assert!(
+            host.said().contains("egress denied"),
+            "the summary still prints"
+        );
+        assert!(!host.said().contains("mvmctl explain"));
+    }
+
+    #[test]
+    fn the_pointer_names_the_machine_when_no_admission_is_found() {
+        let mut host = FakeHost {
+            run_id: None,
+            ..FakeHost::headless()
+        };
+
+        summarize_and_offer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::admitted_elsewhere()),
+            &mut host,
+        );
+
+        assert!(host.said().contains("  mvmctl explain vm-a --review"));
+    }
+
+    #[test]
+    fn the_pointer_quotes_only_what_the_shell_would_split() {
+        assert_eq!(shell_word("plan-1"), "plan-1");
+        assert_eq!(
+            shell_word("/p/my project/mvm.toml"),
+            "'/p/my project/mvm.toml'"
+        );
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn a_manifest_file_is_its_own_review_target() {
+        let (dir, _) = project();
+        let custom = dir.path().join("custom.toml");
+        std::fs::write(&custom, "").unwrap();
+        assert_eq!(manifest_path(&custom).unwrap(), custom);
+    }
+
+    #[test]
+    fn a_launch_review_source_is_the_manifest_its_policy_was_read_from() {
+        let (dir, manifest) = project();
+        let flake = RunArgs {
+            flake: Some(dir.path().display().to_string()),
+            ..RunArgs::default()
+        };
+        assert_eq!(
+            ReviewSource::for_launch(&flake).unwrap(),
+            ReviewSource::Manifest(manifest.clone())
+        );
+        let named = RunArgs {
+            manifest: Some(manifest.display().to_string()),
+            ..RunArgs::default()
+        };
+        assert_eq!(
+            ReviewSource::for_launch(&named).unwrap(),
+            ReviewSource::Manifest(manifest)
+        );
+
+        let empty = tempfile::tempdir().unwrap();
+        let bare = RunArgs {
+            flake: Some(empty.path().display().to_string()),
+            ..RunArgs::default()
+        };
+        assert_eq!(
+            ReviewSource::for_launch(&bare).unwrap(),
+            ReviewSource::Unavailable(NoManifest::NotNamed)
+        );
+        let planned = RunArgs {
+            flake: Some(dir.path().display().to_string()),
+            plan: Some(dir.path().join("resolved.json")),
+            ..RunArgs::default()
+        };
+        assert_eq!(
+            ReviewSource::for_launch(&planned).unwrap(),
+            ReviewSource::Unavailable(NoManifest::ResolvedPlan)
+        );
     }
 
     #[test]

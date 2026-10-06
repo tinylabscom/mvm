@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 4
+ABI_MINOR: Final = 5
 
 
 class Classification(str, Enum):
@@ -80,8 +80,25 @@ MACHINE_LOGS_STREAM_NEXT: Final = "machine.logs.stream.next"
 MACHINE_LOGS_STREAM_OPEN: Final = "machine.logs.stream.open"
 
 
+#: Pauses a running machine, sealing a snapshot where the backend
+#: uses one.
+MACHINE_PAUSE: Final = "machine.pause"
+
+
+#: Patches a machine's resources and relaunches it when running.
+MACHINE_RECONFIGURE: Final = "machine.reconfigure"
+
+
+#: Resumes a paused machine, refusing a replayed snapshot.
+MACHINE_RESUME: Final = "machine.resume"
+
+
 #: Boots a machine through the admitted local launch.
 MACHINE_RUN: Final = "machine.run"
+
+
+#: Sets or clears the time the idle reaper removes a machine at.
+MACHINE_SET_TTL: Final = "machine.set_ttl"
 
 
 #: Boots a persisted machine definition.
@@ -189,7 +206,11 @@ METHODS: dict[str, Method] = {
     "machine.logs.stream.close": Method(key="machine_logs_stream_close", classification=Classification.PROD_SAFE, summary="Closes a captured-output stream. Idempotent."),
     "machine.logs.stream.next": Method(key="machine_logs_stream_next", classification=Classification.PROD_SAFE, summary="Returns the captured output that has arrived."),
     "machine.logs.stream.open": Method(key="machine_logs_stream_open", classification=Classification.PROD_SAFE, summary="Opens a stream over a machine's captured output, replayed then followed."),
+    "machine.pause": Method(key="machine_pause", classification=Classification.PROD_SAFE, summary="Pauses a running machine, sealing a snapshot where the backend uses one."),
+    "machine.reconfigure": Method(key="machine_reconfigure", classification=Classification.PROD_SAFE, summary="Patches a machine's resources and relaunches it when running."),
+    "machine.resume": Method(key="machine_resume", classification=Classification.PROD_SAFE, summary="Resumes a paused machine, refusing a replayed snapshot."),
     "machine.run": Method(key="machine_run", classification=Classification.PROD_SAFE, summary="Boots a machine through the admitted local launch."),
+    "machine.set_ttl": Method(key="machine_set_ttl", classification=Classification.PROD_SAFE, summary="Sets or clears the time the idle reaper removes a machine at."),
     "machine.start": Method(key="machine_start", classification=Classification.PROD_SAFE, summary="Boots a persisted machine definition."),
     "machine.stop": Method(key="machine_stop", classification=Classification.PROD_SAFE, summary="Stops a machine. Idempotent."),
     "session.call": Method(key="session_call", classification=Classification.PROD_SAFE, summary="Calls the entrypoint in a running session's microVM."),
@@ -228,7 +249,11 @@ __all__ = [
     "MACHINE_LOGS_STREAM_CLOSE",
     "MACHINE_LOGS_STREAM_NEXT",
     "MACHINE_LOGS_STREAM_OPEN",
+    "MACHINE_PAUSE",
+    "MACHINE_RECONFIGURE",
+    "MACHINE_RESUME",
     "MACHINE_RUN",
+    "MACHINE_SET_TTL",
     "MACHINE_START",
     "MACHINE_STOP",
     "SESSION_CALL",

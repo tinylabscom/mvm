@@ -350,6 +350,63 @@ describe("Machine lifecycle", () => {
     expect(() => new mvm.Machine("")).toThrow(TypeError);
     expect(host.calls).toEqual([]);
   });
+
+  it("pause and resume send only what was asked", () => {
+    const sealed = { epoch: 3, vmstate_len: 12, mem_len: 8 };
+    host
+      .on("machine.pause", sealed, sealed)
+      .on("machine.resume", { ...sealed, reseed: "ok" }, { epoch: 0, vmstate_len: 0, mem_len: 0, reseed: "ok" });
+    const machine = new mvm.Machine("devbox");
+    expect(machine.pause()).toEqual(sealed);
+    expect(machine.pause({ primedBarrier: true, primedTimeout: 30 }).epoch).toBe(3);
+    expect(machine.resume().reseed).toBe("ok");
+    expect(machine.resume({ warm: true }).epoch).toBe(0);
+    expect(host.calls).toEqual([
+      { method: "machine.pause", request: { id: "devbox" } },
+      { method: "machine.pause", request: { id: "devbox", primed_barrier: true, primed_timeout_secs: 30 } },
+      { method: "machine.resume", request: { id: "devbox" } },
+      { method: "machine.resume", request: { id: "devbox", warm: true } },
+    ]);
+  });
+
+  it("propagates a refused resume as the library's typed error", () => {
+    host.on("machine.resume", failure("BACKEND_ERROR", "snapshot epoch 2 is older than 3", { status: 3 }));
+    expect(() => new mvm.Machine("devbox").resume()).toThrow(mvm.MachineBackendError);
+  });
+
+  it("reconfigure sends only the fields it changes", () => {
+    host.on("machine.reconfigure", { ...STATE, status: "running" }, STATE);
+    const machine = new mvm.Machine("devbox");
+    expect(machine.reconfigure({ cpus: 2 }).status).toBe("running");
+    expect(machine.reconfigure({ cpus: 4, memoryMib: 1024 }).status).toBe("stopped");
+    expect(host.requests("machine.reconfigure")).toEqual([
+      { id: "devbox", cpus: 2 },
+      { id: "devbox", cpus: 4, memory_mib: 1024 },
+    ]);
+  });
+
+  it("setTtl sets and clears the expiry", () => {
+    host.on("machine.set_ttl", {}, {});
+    const machine = new mvm.Machine("devbox");
+    expect(machine.setTtl("2030-01-02T03:04:05Z")).toBeUndefined();
+    expect(machine.setTtl(null)).toBeUndefined();
+    expect(host.requests("machine.set_ttl")).toEqual([
+      { id: "devbox", expires_at: "2030-01-02T03:04:05Z" },
+      { id: "devbox", expires_at: null },
+    ]);
+  });
+
+  it("refuses bad lifecycle arguments before any call", () => {
+    const machine = new mvm.Machine("devbox");
+    expect(() => machine.pause({ primedTimeout: 0 })).toThrow(RangeError);
+    expect(() => machine.pause({ primedBarrier: "yes" as unknown as boolean })).toThrow(TypeError);
+    expect(() => machine.resume({ warm: 1 as unknown as boolean })).toThrow(TypeError);
+    expect(() => machine.reconfigure({})).toThrow(TypeError);
+    expect(() => machine.reconfigure({ cpus: 0 })).toThrow(RangeError);
+    expect(() => machine.reconfigure({ memoryMib: -1 })).toThrow(RangeError);
+    expect(() => machine.setTtl("")).toThrow(TypeError);
+    expect(host.calls).toEqual([]);
+  });
 });
 
 describe("Machine.exec", () => {

@@ -616,6 +616,7 @@ fn fc_warm_pool_spawn_and_claim() {
             parent: None,
             session: None,
             workspace_volumes: Vec::new(),
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         },
         control.as_ref(),
     )
@@ -639,6 +640,7 @@ fn fc_warm_pool_spawn_and_claim() {
             parent: None,
             session: None,
             workspace_volumes: Vec::new(),
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         },
         control.as_ref(),
     )

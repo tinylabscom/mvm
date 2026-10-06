@@ -639,3 +639,189 @@ fn a_flowmux_endpoint_refuses_zero_limits_decoded_from_config() {
         "unexpected endpoint error: {stderr}"
     );
 }
+
+/// A minimal endpoint config whose only listener is the host connector.
+fn connector_only_config(connector: &std::path::Path, sock: &std::path::Path) -> EndpointConfig {
+    EndpointConfig {
+        tenant_id: "local".into(),
+        instance_id: "lifetime".into(),
+        secrets: vec![],
+        transport: EndpointTransport::Uds {
+            path: sock.to_path_buf(),
+        },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        tools: Default::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        tls_intermediate: None,
+        network_policy: None,
+        network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
+        egress_mode: EgressMode::Wire,
+        resolver: ResolverBackend::default(),
+        session_marker: None,
+        session_ready_socket: None,
+        connector_uds_path: Some(connector.to_path_buf()),
+        approval_socket: None,
+        flowmux_identity: None,
+    }
+}
+
+/// Start the endpoint from a short-lived shell, the way `machine start` starts
+/// it from a short-lived `mvmctl`: the launcher hands over the config, waits
+/// for the ready line, and exits while the endpoint is meant to keep serving.
+/// Returns the pid the launcher recorded, which is what the stop path signals.
+fn launch_from_a_launcher_that_exits(dir: &std::path::Path, args: &[&std::ffi::OsStr]) -> i32 {
+    let config = dir.join("config.json");
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&connector_only_config(
+            &dir.join("connector.sock"),
+            &dir.join("network.sock"),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let ready = dir.join("ready.line");
+    let pid_file = dir.join("endpoint.pid");
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(
+            r#"bin="$1"; config="$2"; ready="$3"; pid="$4"; shift 4
+"$bin" "$@" < "$config" > "$ready" 2>/dev/null &
+echo $! > "$pid"
+for _ in $(seq 1 200); do [ -s "$ready" ] && exit 0; sleep 0.05; done
+exit 1"#,
+        )
+        .arg("launcher")
+        .arg(BIN)
+        .arg(&config)
+        .arg(&ready)
+        .arg(&pid_file)
+        .args(args)
+        .status()
+        .expect("run the launcher");
+    assert!(status.success(), "the endpoint never wrote its ready line");
+    std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+/// Whether anything is listening on the endpoint's host connector, polled
+/// until it matches `expected` or five seconds pass.
+fn connector_serving_settles_to(connector: &std::path::Path, expected: bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let serving = UnixStream::connect(connector).is_ok();
+        if serving == expected || std::time::Instant::now() >= deadline {
+            return serving;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Signals a recorded pid on drop so a failing assertion leaks nothing.
+struct KillPid(i32);
+impl Drop for KillPid {
+    fn drop(&mut self) {
+        // SAFETY: signalling a pid this test started; a stale one is ESRCH.
+        unsafe {
+            libc::kill(self.0, libc::SIGKILL);
+        }
+    }
+}
+
+#[test]
+fn an_endpoint_bound_to_its_launcher_stops_serving_when_the_launcher_exits() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid = launch_from_a_launcher_that_exits(dir.path(), &[]);
+    let _guard = KillPid(pid);
+
+    assert!(
+        !connector_serving_settles_to(&dir.path().join("connector.sock"), false),
+        "an endpoint with no keeper must not serve as an orphan"
+    );
+}
+
+#[test]
+fn a_kept_endpoint_serves_after_its_launcher_exits_until_its_vm_stops() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("vm");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    // The VM: any live process recorded under one of the backend pid markers.
+    let mut vm = Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn VM stand-in");
+    std::fs::write(state_dir.join("fc.pid"), vm.id().to_string()).unwrap();
+
+    let keeper = launch_from_a_launcher_that_exits(
+        dir.path(),
+        &[
+            std::ffi::OsStr::new(mvm_hostd::vm_lifetime::VM_LIFETIME_FLAG),
+            state_dir.as_os_str(),
+        ],
+    );
+    let _guard = KillPid(keeper);
+    let connector = dir.path().join("connector.sock");
+
+    // Past one keeper poll after the launcher has gone.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    assert!(
+        connector_serving_settles_to(&connector, true),
+        "a running VM's endpoint must keep serving after the launcher exits"
+    );
+
+    vm.kill().unwrap();
+    vm.wait().unwrap();
+    assert!(
+        !connector_serving_settles_to(&connector, false),
+        "a stopped VM's endpoint must stop serving"
+    );
+    assert!(
+        !mvm_vmm::host::process_liveness::pid_is_alive(keeper),
+        "the keeper exits with its endpoint"
+    );
+}
+
+#[test]
+fn signalling_the_recorded_pid_stops_a_kept_endpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("vm");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let mut vm = Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn VM stand-in");
+    std::fs::write(state_dir.join("fc.pid"), vm.id().to_string()).unwrap();
+
+    let keeper = launch_from_a_launcher_that_exits(
+        dir.path(),
+        &[
+            std::ffi::OsStr::new(mvm_hostd::vm_lifetime::VM_LIFETIME_FLAG),
+            state_dir.as_os_str(),
+        ],
+    );
+    let _guard = KillPid(keeper);
+    let connector = dir.path().join("connector.sock");
+    assert!(connector_serving_settles_to(&connector, true));
+
+    // What the stop path does with the pid it recorded.
+    // SAFETY: signalling the keeper this test started.
+    unsafe {
+        libc::kill(keeper, libc::SIGTERM);
+    }
+    assert!(
+        !connector_serving_settles_to(&connector, false),
+        "stopping the keeper must take the endpoint with it"
+    );
+    vm.kill().unwrap();
+    vm.wait().unwrap();
+}

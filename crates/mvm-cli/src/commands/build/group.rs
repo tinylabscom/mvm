@@ -1,6 +1,6 @@
 //! `mvmctl build <sub>` — build-time commands.
 //!
-//! `address`/`compile`/`validate`/`kernel`/`runtime-overlay`/`sdk-sidecar`/`image-set` are the
+//! `address`/`compile`/`validate`/`kernel`/`runtime-overlay`/`sdk-sidecar`/`image-set`/`guest-bins` are the
 //! build-time verbs. Image builds moved to `machine build`.
 
 use anyhow::Result;
@@ -9,7 +9,9 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{address, compile, image_set, kernel, runtime_overlay, sdk_sidecar, validate};
+use super::{
+    address, compile, guest_bins, image_set, kernel, runtime_overlay, sdk_sidecar, validate,
+};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -41,6 +43,9 @@ pub(in crate::commands) enum BuildCmd {
     /// Build one role of the MVM_IMAGES_DIR checkout into the local image cache
     #[command(name = "image-set")]
     ImageSet(image_set::Args),
+    /// Assemble the publishable mvm-guest-bins artifact from this checkout
+    #[command(name = "guest-bins")]
+    GuestBins(guest_bins::Args),
 }
 
 impl BuildCmd {
@@ -54,6 +59,7 @@ impl BuildCmd {
             BuildCmd::SdkSidecar(_) => "sdk-sidecar",
             BuildCmd::Address(_) => "address",
             BuildCmd::ImageSet(_) => "image-set",
+            BuildCmd::GuestBins(_) => "guest-bins",
         }
     }
 }
@@ -67,5 +73,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         BuildCmd::SdkSidecar(a) => sdk_sidecar::run(cli, a, cfg),
         BuildCmd::Address(a) => address::run(cli, a, cfg),
         BuildCmd::ImageSet(a) => image_set::run(cli, a, cfg),
+        BuildCmd::GuestBins(a) => guest_bins::run(cli, a, cfg),
     }
 }

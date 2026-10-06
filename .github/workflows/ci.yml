@@ -1,25 +1,29 @@
 name: CI
 
 on:
-  # Pull requests run the same deterministic lint/test matrix that the merge
-  # queue runs. A PR must expose its own failures before admission; deferring
-  # them to the queue makes one bad entry poison every cumulative commit behind
-  # it. The queue adds integration-only Nix and published-image checks.
+  # Pull requests run the full deterministic lint/test matrix, including Nix
+  # evaluation and the published-image boot witness. A PR must expose its own
+  # failures before admission; deferring them to the queue makes one bad entry
+  # poison every cumulative commit behind it. The merge queue validates the
+  # synthetic commit's scope and aggregate only, reusing the admitted PR proof.
   # Expensive platform, live-VM, OCI ratification, security, Windows, and
   # release artifact jobs live in release/manual workflows.
   pull_request:
-  # Required for the merge queue: all checks must run against the merge_group event.
+  # Required for the merge queue. The full proof already ran on the PR; the
+  # synthetic merge commit gets the fail-closed scope/integration check and the
+  # required aggregate, not a second copy of the whole matrix.
   merge_group:
     types: [checks_requested]
   workflow_dispatch:
 
 # Pull-request refs are stable across updates, so a new commit cancels only the
-# superseded run for that PR. Merge-group refs identify exact queue commits and
-# must finish; manual dispatches receive a unique key so independent diagnostics
-# do not block each other.
+# superseded run for that PR. The repository's merge queue builds one entry at a
+# time; a new merge-group ref supersedes the old one, so all queue runs share a
+# key and stale checks stop consuming hosted capacity. Manual dispatches receive
+# a unique key so independent diagnostics do not block each other.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'workflow_dispatch' && github.run_id || github.event_name == 'merge_group' && 'queue' || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
 
 permissions:
   contents: read
@@ -34,7 +38,9 @@ jobs:
   # lane-specific path filters drifting.
   scope:
     name: CI scope
-    runs-on: ubuntu-latest
+    # Merge groups only need git/grep classification, so avoid waiting for a
+    # full hosted image while PR matrices occupy the standard runner pool.
+    runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-latest' }}
     outputs:
       code: ${{ steps.validate.outputs.code }}
       nix: ${{ steps.validate.outputs.nix }}
@@ -178,7 +184,7 @@ jobs:
   lint-core:
     name: Lint core (fmt + clippy)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -267,6 +273,7 @@ jobs:
     # merge-group fan-out.
     name: Invariant
     needs: [scope]
+    if: github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -500,7 +507,7 @@ jobs:
   lint-features:
     name: Lint feature coverage
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -610,7 +617,7 @@ jobs:
       - name: release artifact acquisition contract
         run: |
           cargo check -p mvm-cli --features release-artifact-bootstrap --lib
-          cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify,builder-vm --lib
+          cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib
           cargo test -p mvm-build --features release-channel --lib \
             artifact_acquisition
           cargo test -p mvm-build --features release-channel --lib \
@@ -621,7 +628,7 @@ jobs:
           cargo test -p mvm-build --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
 
-      - name: In-process pure-mkfs materialize tests
+      - name: In-process pure ext4 materialize tests
         run: cargo test -p mvm-build --lib rootfs::tests::pure
 
   # Split out of `lint-features`, which was 35 minutes and the critical path for
@@ -632,7 +639,7 @@ jobs:
   lint-features-test-support:
     name: Lint feature coverage (test-support)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -694,7 +701,7 @@ jobs:
   lint-features-embed:
     name: Lint feature coverage (embed-host-bins)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -817,14 +824,17 @@ jobs:
   bdd-conformance:
     name: BDD conformance
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     uses: ./.github/workflows/bdd.yml
 
   test:
     name: Test
     if: ${{ always() }}
     needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
-    runs-on: ubuntu-latest
+    # The queue aggregate only inspects `needs` results, so use the small,
+    # fast-starting image. Pull requests still need the full image for the
+    # admission smoke below.
+    runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Require CI scope to pass
@@ -875,13 +885,23 @@ jobs:
             echo "CI scope did not pass: $SCOPE_RESULT"
             exit 1
           fi
-          case "$SCOPE_CODE" in
-            true) required=success ;;
-            false) required=skipped ;;
-            *) echo "Invalid code scope: $SCOPE_CODE"; exit 1 ;;
+          case "$EVENT_NAME:$SCOPE_CODE" in
+            merge_group:true|merge_group:false)
+              required=skipped
+              policy_required=skipped
+              ;;
+            pull_request:true|workflow_dispatch:true)
+              required=success
+              policy_required=success
+              ;;
+            pull_request:false|workflow_dispatch:false)
+              required=skipped
+              policy_required=success
+              ;;
+            *) echo "Invalid event/scope: $EVENT_NAME/$SCOPE_CODE"; exit 1 ;;
           esac
-          if [ "$POLICY_RESULT" != success ]; then
-            echo "Policy lint did not pass: $POLICY_RESULT"
+          if [ "$POLICY_RESULT" != "$policy_required" ]; then
+            echo "Policy lint did not match event $EVENT_NAME: $POLICY_RESULT"
             exit 1
           fi
           case "$EVENT_NAME:$SCOPE_CODE" in
@@ -903,8 +923,8 @@ jobs:
             fi
           done
           case "$EVENT_NAME" in
-            pull_request) nix_required=skipped ;;
-            merge_group|workflow_dispatch) nix_required=success ;;
+            pull_request|workflow_dispatch) nix_required=success ;;
+            merge_group) nix_required=skipped ;;
             *) echo "Invalid event name: $EVENT_NAME"; exit 1 ;;
           esac
           if [ "$NIX_RESULT" != "$nix_required" ]; then
@@ -912,8 +932,8 @@ jobs:
             exit 1
           fi
           case "$EVENT_NAME:$SCOPE_CODE" in
-            merge_group:true|workflow_dispatch:true) boot_required=success ;;
-            pull_request:*|merge_group:false|workflow_dispatch:false) boot_required=skipped ;;
+            pull_request:true|workflow_dispatch:true) boot_required=success ;;
+            pull_request:false|merge_group:*|workflow_dispatch:false) boot_required=skipped ;;
             *) echo "Invalid boot scope: event=$EVENT_NAME code=$SCOPE_CODE"; exit 1 ;;
           esac
           if [ "$BOOT_RESULT" != "$boot_required" ]; then
@@ -924,7 +944,7 @@ jobs:
   test-workspace:
     name: Test workspace
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     strategy:
       fail-fast: false
       matrix:
@@ -996,7 +1016,7 @@ jobs:
   test-workspace-aarch64:
     name: Test workspace (aarch64)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     # The only lane that executes mvm's aarch64 code paths. Everything else in
     # this workflow runs on x86_64, so arch-gated code compiles here for the
     # first time and its tests run for the first time. The sharpest example is
@@ -1078,7 +1098,7 @@ jobs:
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1124,7 +1144,7 @@ jobs:
   test-linux:
     name: Test Linux and conformance
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -1160,7 +1180,7 @@ jobs:
   test-ebpf-telemetry:
     name: Test eBPF telemetry load/attach
     needs: [scope]
-    if: needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -1232,23 +1252,21 @@ jobs:
   # to catch drift will flake here and get switched off.
   boot-latency:
     name: Boot latency ceiling
-    # Merge queue and manual dispatch, not every PR push. This lane needs a KVM
-    # runner and takes ~11 minutes, and at the 20-concurrent-job cap six of them
-    # were queued at once across open PRs — it was a material share of the wait
-    # before any PR's own jobs could start.
+    # Prove this before queue admission, not after. The merge queue used to run
+    # the whole matrix again and this ~11-minute KVM lane was a material part of
+    # the hour-long ready-to-merged delay.
     #
     # Safe to move because of what this lane is: it pins a *published* image on
     # purpose, as a control variable, so a regression it catches is in host-side
-    # code and is caught in the queue before anything reaches main. The budget is
-    # a ceiling with roughly 3x headroom over the observed median, not a
-    # tolerance — it exists to catch multiple-x regressions, and one merge-queue
-    # run catches those exactly as well as one run per push.
+    # code and is caught before queue admission. The budget is a ceiling with
+    # roughly 3x headroom over the observed median, not a tolerance — it exists
+    # to catch multiple-x regressions.
     #
-    # `nix-flake-check` below makes the same trade for the same reason.
+    # `nix-flake-check` below follows the same admission-before-queue rule.
     needs: [scope]
     if: >-
       needs.scope.outputs.code == 'true'
-      && (github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch')
+      && (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1577,10 +1595,10 @@ jobs:
   nix-flake-check:
     name: Nix flake check (Linux eval)
     # This repository still owns the public mkGuest library and host-package
-    # flake, so keep its evaluation and lean-rootfs contracts in the merge
-    # queue. Canonical image builds and reproducibility belong to mvm-images.
+    # flake, so prove its evaluation and lean-rootfs contracts before queue
+    # admission. Canonical image builds and reproducibility belong to mvm-images.
     needs: [scope]
-    if: github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

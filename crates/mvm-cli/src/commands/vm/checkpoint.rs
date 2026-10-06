@@ -28,7 +28,9 @@ use super::Cli;
 use super::shared::clap_vm_name;
 use crate::commands::machine::input_journal;
 use crate::ui;
+use admitted::admitted_capture_for;
 
+mod admitted;
 mod fork_vm_full;
 mod lineage;
 mod revert;
@@ -309,6 +311,7 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
 
+    let admitted = admitted_capture_for(name)?;
     let meta = capture_fs_quick(
         &store,
         CaptureFsQuickParams {
@@ -320,7 +323,8 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
             tag,
             created_unix: now,
             quiesced: true,
-            grants: admitted_grants_for(name)?,
+            grants: admitted.grants,
+            key_domain: admitted.key_domain,
         },
     )
     .with_context(|| format!("capturing fs_quick checkpoint of {name:?}"))?;
@@ -373,6 +377,7 @@ fn capture_vm_full_for_running_vm(
             args.name
         )
     })?;
+    let admitted = admitted_capture_for(args.name)?;
     let params = CaptureVmFullParams {
         id: args.id,
         vm_name: args.name.to_string(),
@@ -386,7 +391,7 @@ fn capture_vm_full_for_running_vm(
         tag: args.tag,
         created_unix: args.created_unix,
         retain_paused: false,
-        grants: admitted_grants_for(args.name)?,
+        grants: admitted.grants,
         // Frozen in the same pause window, so `vm diff --from/--to` can
         // compare what the workspace held at each checkpoint.
         parent: None,
@@ -394,6 +399,7 @@ fn capture_vm_full_for_running_vm(
         workspace_volumes: super::workspace::capture_set(&super::workspace::workspaces_of(
             args.name,
         )?),
+        key_domain: admitted.key_domain,
     };
     capture_vm_full(args.store, params, control.as_ref())
 }
@@ -483,34 +489,6 @@ fn seal_machine_input_cursor(
         .write_meta(&sealed)
         .context("sealing the machine input cursor into checkpoint metadata")?;
     Ok(sealed)
-}
-
-/// The permission set `name` was admitted under, read off its persisted plan so
-/// the checkpoint can seal it and a later restore can bound a child against it.
-///
-/// Degrades the same way [`bind_checkpoint_created`] does, and safely for the
-/// same reason: a VM with no readable plan also gets no chain-signed
-/// `checkpoint.created` entry, so the record it produces has nothing to anchor
-/// its content-address and every fork of it is refused before the grants are
-/// consulted at all.
-fn admitted_grants_for(name: &str) -> Result<Option<mvm_contract::grants::Grants>> {
-    let path = super::plan_persist::plan_path(name)?;
-    // A VM that never had a plan legitimately has no grant to seal, and that is
-    // the only tolerated absence. Every other failure — a corrupt plan, one at
-    // loose permissions, one that will not parse — is refused rather than
-    // resolved to `None`, because `None` is not "unknown" here: for CPU and wall
-    // clock it means *unbounded*, so swallowing the error would widen the record
-    // silently and hand every child restored from it that widening.
-    if !path.exists() {
-        return Ok(None);
-    }
-    let plan = super::plan_persist::read_plan_at(&path).with_context(|| {
-        format!(
-            "reading {name}'s admitted plan to seal its grants into the checkpoint; \
-             refusing to seal a checkpoint whose permission set cannot be determined"
-        )
-    })?;
-    Ok(plan.grants)
 }
 
 pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {

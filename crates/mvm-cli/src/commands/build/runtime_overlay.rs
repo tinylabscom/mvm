@@ -78,7 +78,6 @@ fn run_build(args: BuildArgs) -> Result<()> {
     // artifact under one is refused, with the way out named. `--force` is a
     // source-build concept: the pair answers from its content-addressed
     // cache, so an unchanged pair has nothing to force.
-    #[cfg(feature = "builder-vm")]
     if let Some(checkout) = crate::commands::env::builder_vm::selected_local_checkout()? {
         if args.source == Source::Download {
             anyhow::bail!(
@@ -151,7 +150,6 @@ fn run_build(args: BuildArgs) -> Result<()> {
 /// Build the overlay from the pair's `runtime-overlay.default` target and
 /// install it into the version-matched cache, stamped with the pair identity
 /// so launches under this pair trust it.
-#[cfg(feature = "builder-vm")]
 fn build_pair_overlay(
     checkout: &mvm_build::image_source::LocalImageCheckout,
     cache_root: &std::path::Path,
@@ -227,7 +225,7 @@ fn announce_built_overlay(artifact: &mvm_fs::overlay::RuntimeOverlayArtifact, fo
     ));
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod pair_routing_tests {
     use super::*;
     use crate::commands::env::builder_vm::test_pair::{Pair, TestArtifact};

@@ -133,6 +133,12 @@ startup.
 
 ## Building
 
+`mvmctl build compile app.py --mvm-revision 4e65b221744885e536ec91a3f2948cdc508dcb49`
+renders the SDK workload with an immutable mvm flake input for a publishable image source. It
+does not create `flake.lock` or run Nix; lock and build the generated flake in
+the builder VM before signing a pack. An invalid or abbreviated revision is
+refused before any output is written.
+
 | Command                                                             | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl machine build <path>`                                       | Build the slot for a manifest directory. A `flake =` manifest builds through Nix in the builder VM; an `image =` manifest materializes the OCI reference through the same path `run --image` boots, then installs it as a slot revision                                                                                                                                                                                                                                                                                                                                                                                                  |
@@ -149,6 +155,7 @@ startup.
 | `mvmctl build sdk-sidecar build`                                    | Build the guest-facing host-services SDK sidecar from this checkout inside Stage 0, verify its ext4/checksum contract, and cache it with the checkout source fingerprint                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `mvmctl build sdk-sidecar build --force`                            | Rebuild the source sidecar even when the cached artifact already matches this checkout                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `mvmctl build image-set <role> [--attr <attr>]`                     | Contributor builds only. Build one role (`builder-vm`, `default-tenant`, `rootless-tenant`, `runtime-overlay`; `--attr sdk-sidecar-image` or `sdk-sidecar-image-musl` for the SDK sidecars) of the `mvm-images` checkout named by `MVM_IMAGES_DIR` against the mvm checkout this binary was compiled from, inside the HVF or Firecracker builder VM, and publish it to the local image cache at `~/.mvm/cache/local-images/` as `local-dev`. A second run with unchanged checkouts reuses the cached set. Run it through `MVM_IMAGES_DIR=../mvm-images bin/dev build image-set <role>`, which scopes `MVM_HOME` and `CARGO_TARGET_DIR` to the checkout pair |
+| `mvmctl build guest-bins [--out <dir>] [--arch aarch64\|x86_64]...` | Contributor builds only. Assemble `mvm-guest-bins-v<version>.tar.gz` plus a `sha256sum`-format `.sha256` beside it: every static guest executable for both guest architectures (or the repeated `--arch` subset), compiled from this checkout through the same cached host-side builds the runtime overlay and OCI runtime use, with a `manifest.json` recording each binary's sha256, the workspace version, and the checkout's guest-source and host-services cdylib source fingerprints. The archive is byte-reproducible from the same binaries. See the Guest Binaries section |
 | Runtime overlay update model                                        | Stopped VMs pick up the newer version-matched overlay on the next boot. Running VMs keep the overlay they booted with; mvm does not hot-remount a different runtime overlay into a live guest                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `just check::overlay [--force]`                                    | Preferred worktree-local convenience wrapper around `mvmctl build runtime-overlay build`; sources `scripts/dev-env.sh` first so cache/target state stays isolated per worktree                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `mvmctl env cleanup`                                                | Remove old dev-build artifacts and run Nix garbage collection                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
@@ -410,6 +417,16 @@ admission until their transports are wired.
 | ---------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `mvmctl build sdk-sidecar build`         | Build the current checkout's host-services sidecars — one per guest libc — inside the Stage 0 builder VM and install each into the version/architecture/libc cache with source provenance |
 | `mvmctl build sdk-sidecar build --force` | Rebuild even when the installed sidecar fingerprint already matches the checkout                                                                                                          |
+
+## Guest Binaries
+
+The `mvm-guest-bins` artifact is how the guest binaries this repository compiles reach the image builds in `mvm-images` as pinned bytes rather than as a source dependency.
+
+| Command | Description |
+| ------- | ----------- |
+| `mvmctl build guest-bins` | From a source checkout, build (or reuse from the guest-build cache) `mvm-guest-agent`, `mvm-guest-netinit`, `mvm-seccomp-apply`, `mvm-display-bridge`, `mvm-runner`, `mvm-egress-client`, `mvm-addon-dns`, `mvm-exit-report`, `mvm-ping` and `mvm-oci-entrypoint` as static musl executables for `aarch64` and `x86_64`, and write `mvm-guest-bins-v<version>.tar.gz` and its `.sha256` into the current directory. Members are `<arch>/<binary>` beside a `manifest.json`; every binary is checked to be a static ELF for its architecture before it is packaged, and the written archive is re-verified against its manifest before the command reports success. The host-services cdylib and the GPU shims are shared objects and are not in the archive; the manifest records the cdylib's source fingerprint so a consumer can tell whether its sidecar is current |
+| `mvmctl build guest-bins --out <dir>` | Write the archive and its checksum into `<dir>` (created if missing) |
+| `mvmctl build guest-bins --arch x86_64` | Build only the named architecture; repeat `--arch` for more than one |
 
 ## Networks
 
@@ -679,6 +696,15 @@ mechanism to reason about.
 This is a dev/accessible-tier feature: the check runs inside the guest via the
 host agent, so it only applies to backends where that agent is reachable.
 
+A warm session (`machine session start`, or a session opened through an SDK)
+is stopped once it has sat idle past its `--idle-timeout` (default 300
+seconds), measured from its last call. On libkrun and HVF the per-VM
+supervisor enforces this with no command running: it marks the session
+`reaped`, records the reap in the audit log, seals the session's audit chain
+the way `machine stop` does, and stops the machine. Firecracker and QEMU have
+no per-VM supervisor, so there an expired session is stopped by the next
+`machine session` command, or by `machine session reap` run on a schedule.
+
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
@@ -713,7 +739,7 @@ guest, on any tier.
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>`                                  | Same, with a stable transient VM name while it runs                                                                                                                                                                                                                                                                                  |
 | `mvmctl machine create <name> --image <ref>`                                                   | Persist a named OCI-backed machine spec without booting it                                                                                                                                                                                                                                                                           |
 | `mvmctl machine create <name> --manifest <path>`                                               | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml`                                                                                                                                                                                                                                                        |
-| `mvmctl machine create <name> --manifest <path> --policy NAME\|PATH`                          | Persist a spec under an authored policy profile, resolved with the manifest's `[policy]` and `[network] allow_hosts` exactly as `run` resolves them; the spec records the resulting network and resource grants. Also on `machine start --image/--manifest` |
+| `mvmctl machine create <name> --manifest <path> --policy NAME\|PATH`                          | Persist a spec under an authored policy profile, resolved with the manifest's `[policy]` and `[network] allow_hosts` exactly as `run` resolves them; the spec records network, resource and tool-command rules, then re-admits them on each start. Tool-scoped routes and secrets are refused until endpoint binding is enforced. Also on `machine start --image/--manifest` |
 | `mvmctl machine create <name> --image <ref> --net --allow-host <host[:port]>`                  | Persist a named spec with opt-in egress settings for future lifecycle starts                                                                                                                                                                                                                                                         |
 | `mvmctl machine create <name> --manifest <path>`                                               | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec                                                                                                                                                                                                                                                          |
 | `mvmctl machine create <name> --image <ref> --force`                                           | Overwrite an existing named machine spec                                                                                                                                                                                                                                                                                             |
@@ -968,11 +994,11 @@ existing console/down paths for the running VM. `machine reconfigure <name>`
 patches a subset of the stored config (`net`, `allow_host`, `cpus`, `memory`, and the CLI-only `mem_initial`) and relaunches the machine — auto stop + start when running,
 persist-only when stopped; identity, image, and volumes are preserved.
 `machine check-artifact` is the read-only gate for a signed `.mvmpkg`: it
-verifies the signed manifest, every artifact's size and hash, the size caps
-(2 GiB per entry, 4 GiB in total), the declared posture's coherence (a
-`sealed-prod` posture must cover a dm-verity rootfs and require
-authentication), and the host architecture before printing a preview. The
-older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
+streams verification of the signed manifest and every artifact's size and hash,
+enforces the size caps (2 GiB per entry, 4 GiB in total), checks posture
+coherence (a `sealed-prod` posture must cover a dm-verity rootfs and require
+authentication), and confirms the host architecture before printing a preview.
+The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
 to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
@@ -1448,7 +1474,7 @@ running microVM.
 | `mvmctl bench --json`                  | Emit the versioned report JSON — the same shape the CI gate produces, so the two are comparable                                                                           |
 | `mvmctl bench -- <launch>`             | Measure a specific launch instead of the reproducible default (`run --no-detect -- /bin/true`)                                                                            |
 | `mvmctl explain <run>`                 | Explain a run and its egress refusals from the chain-signed audit log: each refused destination, its count, and how to allow it where a grant can                           |
-| `mvmctl explain <run> --review [--project DIR]` | Open the same Grant / Skip review used after a foreground run. Only grantable denials from a verified audit chain are offered; selected grants are shown as a draft and require a second confirmation before `mvm.toml` changes |
+| `mvmctl explain <run> --review [--project PATH]` | Open the same Grant / Skip review used after a foreground run. Only grantable denials from a verified audit chain are offered; selected grants are shown as a draft and require a second confirmation before `mvm.toml` changes. `PATH` is a project directory or its manifest file; a foreground run that cannot review in place prints this command with its plan id |
 | `mvmctl watch <ir.json>`               | Rebuild a workload when its local inputs change                                                                                                                           |
 
 ## Packs, Bundles, and Dependencies

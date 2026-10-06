@@ -9,7 +9,6 @@
 use crate::CaptureError;
 use crate::report::{VerificationRecord, VerificationStatus};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 /// A request to verify a captured workload by replaying a command.
 #[derive(Clone, Debug)]
@@ -209,7 +208,7 @@ fn run_builder_shell_job(
         .keep();
 
     let bin = config.mvmctl();
-    let output = Command::new(&bin)
+    let output = mvm_core::env_hygiene::helper_command(&bin)
         .arg("__builder-shell-job")
         .arg("--script")
         .arg(&script_path)

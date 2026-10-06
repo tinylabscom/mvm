@@ -2,9 +2,9 @@
 //!
 //! CI is scope-reduced: the `scope` job classifies changed paths, lanes skip
 //! when out of scope, and this aggregate asserts each lane's result *matches*
-//! its scope. Pull requests and merge groups share the deterministic matrix;
-//! only integration checks such as Nix and published-image boot differ by
-//! event.
+//! its scope. Pull requests run the full proof, including Nix and the
+//! published-image boot. Merge groups reuse that proof and run only the
+//! fail-closed scope check against the synthetic commit.
 //!
 //! That is not hypothetical. A lane that lost its job-level `if:` once
 //! reported `success` on every run, while the aggregate still required
@@ -90,8 +90,8 @@ impl Verdict {
             preflight: "success",
             lanes: "success",
             bdd: "success",
-            boot: "skipped",
-            nix: "skipped",
+            boot: "success",
+            nix: "success",
         }
     }
 
@@ -106,28 +106,31 @@ impl Verdict {
             lanes: "skipped",
             bdd: "skipped",
             boot: "skipped",
-            nix: "skipped",
+            nix: "success",
         }
     }
 
-    /// The cumulative merge-group head runs every queue job for an in-scope
-    /// code and Nix change.
+    /// The cumulative merge-group head reuses the successful PR proof.
     fn queue_in_scope() -> Self {
         Self {
             event_name: "merge_group",
+            policy: "skipped",
             preflight: "skipped",
-            boot: "success",
-            nix: "success",
+            lanes: "skipped",
+            bdd: "skipped",
+            boot: "skipped",
+            nix: "skipped",
             ..Self::in_scope()
         }
     }
 
-    /// A docs-only merge group still executes Nix, while scoped lanes skip.
+    /// A docs-only merge group has the same lightweight queue shape.
     fn queue_out_of_scope() -> Self {
         Self {
             event_name: "merge_group",
+            policy: "skipped",
             preflight: "skipped",
-            nix: "success",
+            nix: "skipped",
             ..Self::out_of_scope()
         }
     }
@@ -247,28 +250,28 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             "a failing published-image boot ceiling",
             Verdict {
                 boot: "failure",
-                ..Verdict::queue_in_scope()
+                ..Verdict::in_scope()
             },
         ),
         (
             "a published-image boot that ran while out of scope",
             Verdict {
                 boot: "success",
-                ..Verdict::queue_out_of_scope()
+                ..Verdict::out_of_scope()
             },
         ),
         (
             "a failing Nix witness",
             Verdict {
                 nix: "failure",
-                ..Verdict::queue_in_scope()
+                ..Verdict::in_scope()
             },
         ),
         (
-            "a Nix witness that skipped in the queue",
+            "a Nix witness that skipped before queue admission",
             Verdict {
                 nix: "skipped",
-                ..Verdict::queue_in_scope()
+                ..Verdict::in_scope()
             },
         ),
     ];

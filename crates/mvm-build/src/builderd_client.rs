@@ -752,7 +752,7 @@ mod tests {
         };
         let handle = std::thread::spawn(move || {
             let (mut conn, _addr) = listener.accept().expect("accept");
-            serve_connection(&mut conn).expect("serve");
+            serve_connection(&mut conn, None).expect("serve");
         });
 
         let mut client =
@@ -853,7 +853,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             // Serve exactly one connection then return.
             let (mut conn, _addr) = listener.accept().expect("accept");
-            serve_connection(&mut conn).expect("serve");
+            serve_connection(&mut conn, None).expect("serve");
         });
 
         let readiness = probe_builderd_readiness(&sock, Duration::from_secs(2));

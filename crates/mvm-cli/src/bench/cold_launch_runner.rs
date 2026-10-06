@@ -7,7 +7,6 @@
 //! refuses any that does not belong in the lane, and summarises the rest.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
@@ -140,7 +139,7 @@ impl ColdLaunchBench {
         // iteration's sample if the launch died before writing.
         let _ = std::fs::remove_file(&sample_path);
 
-        let mut command = Command::new(&self.mvmctl);
+        let mut command = mvm_core::env_hygiene::helper_command(&self.mvmctl);
         command.args(&self.args);
         command.env(LAUNCH_SAMPLE_ENV, &sample_path);
         for (key, value) in &self.env {

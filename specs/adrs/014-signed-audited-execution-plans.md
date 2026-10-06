@@ -138,9 +138,13 @@ identically regardless of which backend produced the entries.
   to this design.
 - The `*Ref` policy fields resolve to real fail-closed no-ops today, not
   live enforcement — a plan can name a policy bundle and have it parsed,
-  but the enforcement components (`EgressProxy`, `ToolGate`,
-  `KeystoreReleaser`, `ArtifactCollector`) that would act on it are a
-  forward-compatible seam, not yet wired to a live consumer.
+  but the enforcement components (`EgressProxy`, `KeystoreReleaser`,
+  `ArtifactCollector`) that would act on it are a forward-compatible
+  seam, not yet wired to a live consumer. Tool decisions do not use that
+  seam: the plan carries its resolved tool rules inline, and the per-VM
+  endpoint's `ToolDecisionGate` decides and audits them. The supervisor's
+  bundle-driven tool-gate slot never had a production caller and was
+  removed.
 - `agent_verbs` gives the same signed-plan mechanism a guest-side
   capability dimension: least-privilege per workload, not just per
   profile class, without inventing a second signing authority — the
