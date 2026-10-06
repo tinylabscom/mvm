@@ -1,0 +1,194 @@
+name: Linux distro packages
+
+# The .deb and .rpm for each Linux release target, built from that target's
+# release tarball (scripts/build-distro-packages.sh) and then installed on two
+# distributions per format, on both architectures, where the installed mvmctl
+# is run and every installed file is checked against the tarball's bytes.
+#
+# release.yml calls this with `tarballs: build`, packaging the archives its
+# build job just made; the release job then signs, attests and publishes the
+# packages with the tarballs. Anywhere else it packages a published release's
+# tarballs instead, so the packaging path is exercised without a release
+# build: on pull requests that change it, nightly from Extended CI, and on
+# dispatch.
+
+on:
+  workflow_call:
+    inputs:
+      tarballs:
+        description: "`build` packages this run's mvmctl-* artifacts; `release` a published release's"
+        type: string
+        default: release
+      release_tag:
+        description: Release whose tarballs `release` mode packages; empty for the newest CLI release
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release whose tarballs to package; empty for the newest CLI release
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - .github/workflows/distro-packages.yml
+      - scripts/build-distro-packages.sh
+      - scripts/distro-package-smoke.sh
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      # Pinned in Cargo.toml's [workspace.metadata.mvm.toolchain]: the
+      # packages are signed release assets, so the tools that write them do
+      # not float.
+      - name: Install cargo-deb and cargo-generate-rpm
+        run: |
+          set -euo pipefail
+          pin() {
+            awk -v tool="$1" '/^\[workspace\.metadata\.mvm\.toolchain\]/ { t = 1; next }
+              /^\[/ { t = 0 }
+              t && $1 == tool { gsub(/"/, "", $3); print $3 }' Cargo.toml
+          }
+          deb="$(pin cargo-deb)"
+          rpm="$(pin cargo-generate-rpm)"
+          if [ -z "${deb}" ] || [ -z "${rpm}" ]; then
+            echo "::error::cargo-deb and cargo-generate-rpm must be pinned in [workspace.metadata.mvm.toolchain]" >&2
+            exit 1
+          fi
+          cargo install --locked "cargo-deb@${deb}" "cargo-generate-rpm@${rpm}"
+
+      - name: Download this run's release tarballs
+        if: ${{ inputs.tarballs == 'build' }}
+        uses: actions/download-artifact@v8
+        with:
+          pattern: mvmctl-*-unknown-linux-gnu
+          path: tarballs
+          merge-multiple: true
+
+      - name: Download a published release's tarballs
+        if: ${{ inputs.tarballs != 'build' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+          if [ -z "${tag}" ]; then
+            # CLI releases are the `v<semver>` tags; the repository also
+            # publishes SDK and revocation releases under other prefixes.
+            tag="$(gh release list --repo "${GITHUB_REPOSITORY}" --exclude-drafts --limit 50 \
+              --json tagName --jq '[.[].tagName | select(test("^v[0-9]"))][0]')"
+          fi
+          [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
+          gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern 'mvmctl-*-unknown-linux-gnu.tar.gz' --dir tarballs
+          echo "RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+
+      # A release build packages under the tree's version, which the tag
+      # matches; a published release, under its own tag's. The script refuses
+      # either way if the tarball's mvmctl reports something else.
+      - name: Resolve the package version
+        id: source
+        env:
+          TARBALLS: ${{ inputs.tarballs }}
+        run: |
+          set -euo pipefail
+          if [ "${TARBALLS}" = build ]; then
+            version="$(cargo metadata --no-deps --format-version 1 \
+              | jq -r '.packages[] | select(.name == "mvmctl") | .version')"
+          else
+            version="${RELEASE_TAG#v}"
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "packaging version ${version}"
+
+      - name: Build the packages
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          set -euo pipefail
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            bash scripts/build-distro-packages.sh \
+              "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages
+          done
+          ls -la distro-packages/
+
+      # The packages and their `.sha256` files: the release job merges every
+      # artifact of the run and builds the combined checksum manifest from
+      # the `*.sha256` files, so these join it beside the tarballs'.
+      - name: Upload the packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: distro-packages
+          path: |
+            distro-packages/*.deb
+            distro-packages/*.rpm
+            distro-packages/*.deb.sha256
+            distro-packages/*.rpm.sha256
+          retention-days: 7
+
+      - name: Upload the payload manifests
+        uses: actions/upload-artifact@v7
+        with:
+          name: distro-package-payloads
+          path: distro-packages/*.sha256sums
+          retention-days: 7
+
+  install-smoke:
+    name: ${{ matrix.image }} (${{ matrix.arch }})
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["debian:stable", "ubuntu:24.04", "fedora:latest", "rockylinux/rockylinux:9"]
+        arch: [x86_64, aarch64]
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            deb_arch: amd64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            deb_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download the packages
+        uses: actions/download-artifact@v8
+        with:
+          pattern: distro-*
+          path: distro-packages
+          merge-multiple: true
+
+      - name: Install, run, and remove the package
+        env:
+          IMAGE: ${{ matrix.image }}
+          ARCH: ${{ matrix.arch }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
+          VERSION: ${{ needs.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          case "${IMAGE}" in
+            debian:*|ubuntu:*) package="mvmctl_${VERSION}-1_${DEB_ARCH}.deb" ;;
+            *)                 package="mvmctl-${VERSION}-1.${ARCH}.rpm" ;;
+          esac
+          [ -f "distro-packages/${package}" ] || {
+            echo "::error::${package} was not built; have: $(ls distro-packages)" >&2
+            exit 1
+          }
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}/scripts:/scripts:ro" \
+            -v "${GITHUB_WORKSPACE}/distro-packages:/pkg:ro" \
+            "${IMAGE}" \
+            sh /scripts/distro-package-smoke.sh "/pkg/${package}" "${VERSION}" \
+              "/pkg/payload-${ARCH}-unknown-linux-gnu.sha256sums"

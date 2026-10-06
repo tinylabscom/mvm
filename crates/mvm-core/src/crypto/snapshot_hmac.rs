@@ -23,8 +23,7 @@
 //! `schema_version`.
 
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{BufReader, Read};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -160,30 +159,28 @@ pub enum VerifyError {
 /// `Debug`/`Display` is a compile error and the bytes are zeroized
 /// on drop. Callers consume the key via
 /// `.expose_secret()` before passing it to `seal` / `verify`.
-/// Idempotent on repeated calls against an existing key file.
+/// Idempotent on repeated calls against an existing key file, and safe
+/// when several processes create it at once: they all end up with the
+/// one key that was linked into place first.
 pub fn load_or_init_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> {
     if let Some(parent) = path.parent() {
-        // Create parent if missing. Don't enforce parent perms here —
-        // `~/.mvm/` is owned by other code (config dir helper).
-        std::fs::create_dir_all(parent)
+        crate::config::create_private_dir(parent)
             .with_context(|| format!("creating parent of {}", path.display()))?;
     }
+    crate::atomic_io::load_or_create_private(
+        path,
+        || {
+            let mut buf = zeroize::Zeroizing::new(vec![0u8; HMAC_KEY_BYTES]);
+            rand::rng().fill_bytes(&mut buf);
+            buf
+        },
+        load_existing_key,
+    )
+}
 
-    if !path.exists() {
-        let mut buf = [0u8; HMAC_KEY_BYTES];
-        rand::rng().fill_bytes(&mut buf);
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(path)
-            .with_context(|| format!("creating {}", path.display()))?;
-        f.write_all(&buf)
-            .with_context(|| format!("writing {}", path.display()))?;
-        f.sync_all().ok();
-        return Ok(SecretBox::new(Box::new(buf)));
-    }
-
+/// Read a key file [`load_or_init_key`] found or created, tightening a loose
+/// mode and refusing a file of the wrong length.
+fn load_existing_key(path: &Path) -> Result<SecretBox<[u8; HMAC_KEY_BYTES]>> {
     let metadata = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
     let mode = metadata.permissions().mode() & 0o777;
     if mode != 0o600 {
@@ -313,24 +310,8 @@ pub fn seal(
     let json = serde_json::to_vec_pretty(&sidecar).context("serialize sidecar")?;
 
     let final_path = snap_dir.join(SIDECAR_FILENAME);
-    let tmp_path = snap_dir.join(format!("{SIDECAR_FILENAME}.tmp"));
-
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp_path)
-            .with_context(|| format!("open {} for write", tmp_path.display()))?;
-        f.write_all(&json)
-            .with_context(|| format!("write {}", tmp_path.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp_path.display()))?;
-    }
-
-    std::fs::rename(&tmp_path, &final_path)
-        .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
+    crate::atomic_io::write_private(&final_path, &json)
+        .with_context(|| format!("writing {}", final_path.display()))?;
 
     Ok(sidecar)
 }
@@ -475,23 +456,8 @@ impl EpochStore {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating parent of {}", self.path.display()))?;
         }
-        let tmp_path = self.path.with_extension("tmp");
-        {
-            let mut f = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .mode(0o600)
-                .open(&tmp_path)
-                .with_context(|| format!("open {} for write", tmp_path.display()))?;
-            f.write_all(new_epoch.to_string().as_bytes())
-                .with_context(|| format!("write {}", tmp_path.display()))?;
-            f.sync_all()
-                .with_context(|| format!("fsync {}", tmp_path.display()))?;
-        }
-        std::fs::rename(&tmp_path, &self.path)
-            .with_context(|| format!("rename {} → {}", tmp_path.display(), self.path.display()))?;
-        Ok(())
+        crate::atomic_io::write_private(&self.path, new_epoch.to_string().as_bytes())
+            .with_context(|| format!("writing {}", self.path.display()))
     }
 
     /// Increment by one, persist, and return the new value. Convenience

@@ -15,9 +15,8 @@
 //! both, so a binding cannot say one thing to the certificate and another to
 //! the enforcement.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -227,22 +226,8 @@ impl BindingStore for FileBindingStore {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
             .with_context(|| format!("chmod 0700 {}", dir.display()))?;
         let json = serde_json::to_vec_pretty(meta).context("serializing binding metadata")?;
-        // Write 0600 then rename so a concurrent reader never sees a
-        // half-written file.
-        let tmp = path.with_extension("json.tmp");
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("opening {}", tmp.display()))?;
-        f.write_all(&json)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        f.sync_all().ok();
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::atomic_io::write_private(&path, &json)
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     fn get(&self, tenant: &str, name: &str) -> Result<Option<SecretBindingMeta>> {
