@@ -59,6 +59,12 @@ image and payload preparation excluded:
 `scripts/check-devshell-tiers.sh` keeps them out of the default shell and in
 `.#full`; the merge queue runs it in the Nix flake check lane.
 
+A full clone downloads about 215 MiB, roughly 150 MiB of which is a build
+directory committed by mistake in August 2026 and deleted in September. History
+was not rewritten to remove it. Add `--filter=blob:none` to the clone below to
+skip it: that clone downloads about 30 MiB and fetches older file versions only
+when a command such as `git log -p` needs them.
+
 ```bash
 git clone https://github.com/tinylabscom/mvm.git
 cd mvm

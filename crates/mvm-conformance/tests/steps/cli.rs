@@ -337,6 +337,30 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
 /// substitute scenario state (e.g. a staging path) into the command line
 /// reuse exactly the home/cwd/PATH wiring the plain step uses.
 pub(crate) fn run_mvmctl_isolated_live_home_argv(world: &mut CliWorld, argv: Vec<String>) {
+    run_live_home(world, argv, Terminal::Inherited);
+}
+
+/// The live-home run in a new session, with no controlling terminal: what a CI
+/// job, a pipeline or a supervisor gives mvmctl. Anything it would ask on
+/// `/dev/tty` has nowhere to ask, so a scenario can assert what it prints
+/// instead — on a developer's terminal as well as in CI.
+#[when(expr = "I run mvmctl without a controlling terminal in an isolated live home with {string}")]
+fn run_mvmctl_isolated_live_home_without_terminal(world: &mut CliWorld, args: String) {
+    run_live_home(
+        world,
+        mvm_conformance::doc_examples::tokenize(&args),
+        Terminal::Detached,
+    );
+}
+
+/// Whether a live-home run keeps the controlling terminal of the process
+/// running the suite.
+enum Terminal {
+    Inherited,
+    Detached,
+}
+
+fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
     // paths (e.g. `examples/exit_code`) resolve the same way as a manual run
@@ -362,6 +386,14 @@ pub(crate) fn run_mvmctl_isolated_live_home_argv(world: &mut CliWorld, argv: Vec
     apply_encrypted_volume_probe_path(world, &mut command);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
+    }
+    if let Terminal::Detached = terminal {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: `setsid` is async-signal-safe and touches no state of the
+        // parent; it is the only thing run between fork and exec.
+        unsafe {
+            command.pre_exec(|| nix::unistd::setsid().map(drop).map_err(Into::into));
+        }
     }
     let output = command.output().expect("failed to spawn mvmctl");
     world.last_live_home = Some(home);
@@ -628,6 +660,20 @@ fn error_output_contains(world: &mut CliWorld, needle: String) {
         stderr.contains(needle.as_str()),
         "expected stderr to contain {needle:?}; stderr:\n{stderr}\nstdout:\n{}",
         String::from_utf8_lossy(&output.stdout),
+    );
+}
+
+/// One stderr line that begins with `prefix` and ends with `suffix`, for a
+/// line carrying a value the scenario cannot know in advance, such as a plan id.
+#[then(expr = "an error output line starts with {string} and ends with {string}")]
+fn error_output_line_starts_and_ends_with(world: &mut CliWorld, prefix: String, suffix: String) {
+    let output = world.last_output();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.starts_with(prefix.as_str()) && line.ends_with(suffix.as_str())),
+        "expected a stderr line starting {prefix:?} and ending {suffix:?}; stderr:\n{stderr}",
     );
 }
 
@@ -901,6 +947,13 @@ fn collect_wrapped_help_items(
             ));
         }
     }
+}
+
+/// Every command path under `command`, depth first.
+pub(crate) fn command_paths(command: &clap::Command) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    collect_command_paths(command, &[], &mut paths);
+    paths
 }
 
 pub(crate) fn collect_command_paths(

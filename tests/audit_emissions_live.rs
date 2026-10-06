@@ -70,7 +70,7 @@
 //!   (test pre-creates `~/.mvm/instances/<name>/snapshot/` so the
 //!   bail-when-missing branch doesn't short-circuit the emit)
 //! - `mvmctl machine snapshot ls` → **no** audit entry
-//! - `mvmctl audit tail` / `audit verify` / `audit show <id>` →
+//! - `mvmctl trust audit tail` / `audit verify` / `audit show <id>` →
 //!   **no** audit entry (the `AUDIT` leaves are all ReadOnly)
 //! - `mvmctl attest status` / `attest export` → **no** audit
 //!   entry (the `ATTEST` leaves are all ReadOnly)
@@ -1143,7 +1143,7 @@ fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
 /// subprocesses — they discover the listener via the
 /// filesystem-based mock detection in `instance_dir_for`.
 ///
-/// Plan 66 W4. The `mvmctl up --hypervisor mock` subprocess pattern
+/// The `mvmctl machine run --hypervisor mock -d` subprocess pattern
 /// used by `bring_up_mock_vm` doesn't work here because the
 /// MockGuestAgent the subprocess spawns dies with the subprocess —
 /// follow-up commands would find a stale socket and fail to connect.
@@ -1200,8 +1200,8 @@ fn machine_run_with_mock_backend_emits_vm_start_audit_entry() {
 #[test]
 #[cfg(feature = "test-support")]
 fn set_ttl_emits_vm_ttl_set_audit_entry() {
-    // `mvmctl set-ttl <vm> <duration>` operates on the persistent
-    // name registry that `mvmctl up` populates. Bring up a mock
+    // `mvmctl machine set-ttl <vm> <duration>` operates on the persistent
+    // name registry that `mvmctl machine run` populates. Bring up a mock
     // VM first (registers it), then update its TTL — the verb
     // emits `vm_ttl_set` with `expires_at=<RFC3339>` in detail.
     let sandbox = AuditSandbox::new();
@@ -1502,7 +1502,7 @@ fn audit_tail_does_not_emit_local_audit_entry() {
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl audit tail failed: stderr={}",
+        "mvmctl trust audit tail failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -1533,7 +1533,7 @@ fn audit_verify_does_not_emit_local_audit_entry() {
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl audit verify failed: stderr={}",
+        "mvmctl trust audit verify failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 
@@ -2077,7 +2077,7 @@ fn audit_show_does_not_emit_local_audit_entry() {
         .expect("spawn mvmctl");
     assert!(
         output.status.success(),
-        "mvmctl audit show failed: stderr={}",
+        "mvmctl trust audit show failed: stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
 

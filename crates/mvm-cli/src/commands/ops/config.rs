@@ -48,7 +48,7 @@ fn config_edit() -> Result<()> {
     let _ = mvm_core::user_config::load(None);
     let config_path = mvm_core::user_config::config_path();
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
-    let status = std::process::Command::new(&editor)
+    let status = mvm_core::env_hygiene::helper_command(&editor)
         .arg(&config_path)
         .status()
         .with_context(|| format!("Failed to launch editor {:?}", editor))?;

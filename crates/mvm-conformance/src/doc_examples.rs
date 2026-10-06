@@ -149,8 +149,13 @@ impl DocExample {
     /// Whether the invocation is a syntax template (`mvmctl <command> --help`)
     /// rather than something a reader could paste and run. Templates document
     /// shape, not a specific command, so they are described rather than run.
-    pub fn is_template(&self) -> bool {
-        self.argv.iter().any(|token| is_placeholder(token))
+    ///
+    /// `known` is every command path the CLI exposes. It is needed to tell
+    /// slash alternation (`machine pause/resume`) from a literal argument of
+    /// the same shape (`pull agent/codex`): only the first sits where the
+    /// command tree expects a subcommand.
+    pub fn is_template(&self, known: &[Vec<String>]) -> bool {
+        (0..self.argv.len()).any(|index| self.is_placeholder_at(index, known))
     }
 
     /// The tokens before the first placeholder, which is the concrete part of
@@ -160,33 +165,49 @@ impl DocExample {
     /// document a command that does not exist — write `<placeholders>` and
     /// nothing checks it. The leading verbs are still concrete, so the caller
     /// resolves them against the real command tree.
-    pub fn concrete_prefix(&self) -> Vec<String> {
-        let mut prefix = Vec::new();
-        for token in &self.argv {
-            if is_placeholder(token) || token == "--" || token.starts_with('-') {
-                break;
-            }
-            prefix.push(token.clone());
-        }
-        prefix
+    pub fn concrete_prefix(&self, known: &[Vec<String>]) -> Vec<String> {
+        self.argv
+            .iter()
+            .enumerate()
+            .take_while(|(index, token)| {
+                !self.is_placeholder_at(*index, known)
+                    && token.as_str() != "--"
+                    && !token.starts_with('-')
+            })
+            .map(|(_, token)| token.clone())
+            .collect()
+    }
+
+    /// Whether the token at `index` stands in for something rather than being
+    /// a literal argument.
+    fn is_placeholder_at(&self, index: usize, known: &[Vec<String>]) -> bool {
+        let token = &self.argv[index];
+        is_placeholder(token)
+            || (is_word_alternation(token) && expects_subcommand(&self.argv[..index], known))
     }
 }
 
-/// Whether a token is a documentation placeholder (`<NAME>`, `[DIR]`) rather
-/// than a literal argument.
+/// Whether the command named by `path` has subcommands, so the token after it
+/// is read as one.
 ///
-/// A bare `<` or `>` is a shell redirect, not a placeholder: `mvmctl machine fs
-/// write vm /path < file` is a runnable command and must stay checked.
-fn is_placeholder(token: &str) -> bool {
-    // Elision and wildcards stand in for an argument list or a family of
-    // subcommands: `mvmctl manifest *`, `mvmctl machine exec ...`.
-    if matches!(token, "..." | "…" | "*") {
-        return true;
-    }
-    // Slash alternation names several subcommands at once
-    // (`mvmctl machine pause/resume`). A path argument also contains a slash,
-    // so require the token to look like a bare word list rather than a path.
-    if token.contains('/')
+/// `path` is the argv before the token. It matches a known path only when every
+/// word in it is a verb, so a flag, a flag value, or a positional anywhere
+/// earlier rules the position out.
+fn expects_subcommand(path: &[String], known: &[Vec<String>]) -> bool {
+    known
+        .iter()
+        .any(|candidate| candidate.len() == path.len() + 1 && candidate.starts_with(path))
+}
+
+/// Whether a token has the shape of slash alternation: bare words joined by
+/// `/`, as in `pause/resume` or `create/build/…`.
+///
+/// Shape alone does not make it alternation. A signed-pack reference
+/// (`agent/codex`) and a relative path (`examples/hello`) look the same, so the
+/// caller also checks that the token sits where a subcommand is expected.
+/// Absolute and dotted paths and anything carrying a `:` are never word lists.
+fn is_word_alternation(token: &str) -> bool {
+    token.contains('/')
         && !token.starts_with('/')
         && !token.starts_with('.')
         && !token.contains(':')
@@ -196,7 +217,20 @@ fn is_placeholder(token: &str) -> bool {
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '…')
         })
-    {
+}
+
+/// Whether a token is a documentation placeholder (`<NAME>`, `[DIR]`) rather
+/// than a literal argument, whatever position it holds.
+///
+/// Slash alternation is not decided here: it depends on position, so
+/// [`DocExample::is_template`] checks it against the command tree.
+///
+/// A bare `<` or `>` is a shell redirect, not a placeholder: `mvmctl machine fs
+/// write vm /path < file` is a runnable command and must stay checked.
+fn is_placeholder(token: &str) -> bool {
+    // Elision and wildcards stand in for an argument list or a family of
+    // subcommands: `mvmctl manifest *`, `mvmctl machine exec ...`.
+    if matches!(token, "..." | "…" | "*") {
         return true;
     }
     let angled = token
@@ -1040,6 +1074,36 @@ mod tests {
         doc_examples("doc.md", body)
     }
 
+    /// A slice of the real command tree, enough to tell a subcommand position
+    /// from an argument position in the examples below.
+    fn known() -> Vec<Vec<String>> {
+        [
+            "doctor",
+            "machine",
+            "machine run",
+            "machine pause",
+            "machine resume",
+            "machine fs",
+            "machine fs write",
+            "machine logs",
+            "machine checkpoint",
+            "machine checkpoint create",
+            "machine checkpoint restore",
+            "manifest",
+            "manifest pull",
+            "manifest push",
+            "pull",
+            "run",
+            "why",
+            "pack",
+            "pack registry",
+            "pack registry rm",
+        ]
+        .iter()
+        .map(|path| argv(path))
+        .collect()
+    }
+
     #[test]
     fn extracts_a_plain_invocation_with_its_line() {
         let found = examples("intro\n\n```bash\nmvmctl doctor\n```\n");
@@ -1173,7 +1237,7 @@ mod tests {
     fn a_template_still_exposes_its_concrete_verb_prefix() {
         let found = examples("```bash\nmvmctl manifest pull <CHANNEL> <DIR>\n```\n");
         assert_eq!(
-            found[0].concrete_prefix(),
+            found[0].concrete_prefix(&known()),
             vec!["manifest".to_string(), "pull".to_string()]
         );
     }
@@ -1182,7 +1246,7 @@ mod tests {
     fn a_template_prefix_stops_at_the_first_flag() {
         let found = examples("```bash\nmvmctl machine run --image <REF>\n```\n");
         assert_eq!(
-            found[0].concrete_prefix(),
+            found[0].concrete_prefix(&known()),
             vec!["machine".to_string(), "run".to_string()]
         );
     }
@@ -1218,7 +1282,7 @@ mod tests {
             examples("```bash\nmvmctl machine fs write vm /work/main.py < /tmp/in.py\n```\n");
         assert_eq!(found.len(), 1);
         assert!(
-            !found[0].is_template(),
+            !found[0].is_template(&known()),
             "a redirect made this look like a template: {:?}",
             found[0].argv
         );
@@ -1227,31 +1291,77 @@ mod tests {
     #[test]
     fn slash_alternation_names_a_family_not_a_command() {
         let found = inline_code_examples("d.md", "see `mvmctl machine pause/resume`\n");
-        assert!(found[0].is_template(), "{:?}", found[0].argv);
+        assert!(found[0].is_template(&known()), "{:?}", found[0].argv);
+    }
+
+    #[test]
+    fn slash_alternation_is_recognised_at_any_depth_of_the_verb_tree() {
+        let found =
+            inline_code_examples("d.md", "see `mvmctl machine checkpoint create/restore`\n");
+        assert!(found[0].is_template(&known()), "{:?}", found[0].argv);
+        assert_eq!(
+            found[0].concrete_prefix(&known()),
+            argv("machine checkpoint")
+        );
+    }
+
+    #[test]
+    fn a_pack_reference_in_a_positional_is_a_literal_argument() {
+        for command in [
+            "mvmctl pull agent/codex",
+            "mvmctl pack registry rm agent/codex",
+            "mvmctl pull agent/claude@1.0.1",
+        ] {
+            let found = examples(&format!("```sh\n{command}\n```\n"));
+            assert!(!found[0].is_template(&known()), "{:?}", found[0].argv);
+        }
+    }
+
+    #[test]
+    fn a_pack_reference_as_a_flag_value_is_a_literal_argument() {
+        for command in [
+            "mvmctl run --policy agent/codex -- codex exec hello",
+            "mvmctl why --host api.openai.com:443 --profile agent/codex",
+        ] {
+            let found = examples(&format!("```sh\n{command}\n```\n"));
+            assert!(!found[0].is_template(&known()), "{:?}", found[0].argv);
+        }
+    }
+
+    #[test]
+    fn a_relative_path_flag_value_is_a_literal_argument() {
+        let found = examples("```sh\nmvmctl machine run --flake examples/hello -- true\n```\n");
+        assert!(!found[0].is_template(&known()), "{:?}", found[0].argv);
+    }
+
+    #[test]
+    fn a_word_list_under_a_command_without_subcommands_is_not_alternation() {
+        let found = inline_code_examples("d.md", "see `mvmctl pull agent/codex`\n");
+        assert_eq!(found[0].concrete_prefix(&known()), argv("pull agent/codex"));
     }
 
     #[test]
     fn a_wildcard_names_a_family_not_a_command() {
         let found = inline_code_examples("d.md", "see `mvmctl manifest *`\n");
-        assert!(found[0].is_template());
+        assert!(found[0].is_template(&known()));
     }
 
     #[test]
     fn a_path_argument_is_not_alternation_notation() {
         let found = examples("```bash\nmvmctl machine run --mount /work/app:/w -- ls\n```\n");
-        assert!(!found[0].is_template(), "{:?}", found[0].argv);
+        assert!(!found[0].is_template(&known()), "{:?}", found[0].argv);
     }
 
     #[test]
     fn a_bracketed_optional_argument_is_a_placeholder() {
         let found = examples("```bash\nmvmctl manifest push [PATH]\n```\n");
-        assert!(found[0].is_template());
+        assert!(found[0].is_template(&known()));
     }
 
     #[test]
     fn a_placeholder_invocation_is_a_template() {
         let found = examples("```bash\nmvmctl <command> --help\n```\n");
-        assert!(found[0].is_template());
+        assert!(found[0].is_template(&known()));
     }
 
     #[test]

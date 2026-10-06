@@ -13,8 +13,11 @@ use mvm_contract::policy::restricted_address::{RestrictedClass, classify as clas
 use serde::{Deserialize, Serialize};
 
 /// Refusal labels that are not a decision about the destination: a flow that
-/// was admitted and then failed to connect. Shown nowhere as a denial.
-const NOT_A_DENIAL: &[&str] = &["connect_failed"];
+/// was admitted and then failed to connect, and a request on a host-terminated
+/// connection that ended before the host had it whole — the guest hung up part
+/// way through it, or the socket failed under it. The chain keeps them; no
+/// allow-list entry changes them, so they are shown nowhere as a denial.
+const NOT_A_DENIAL: &[&str] = &["connect_failed", "truncated_request", "read_failed"];
 
 /// TCP/22 is refused whatever the policy says; SSH never reaches a workload.
 const SSH_PORT: u16 = 22;
@@ -535,6 +538,23 @@ mod tests {
             })
             .is_none()
         );
+    }
+
+    /// A request the guest abandoned, or one lost to a socket failure, was
+    /// never judged, so the summary must not count it as blocked egress.
+    #[test]
+    fn a_request_that_ended_before_it_was_whole_is_not_a_denial() {
+        for label in ["truncated_request", "read_failed"] {
+            assert!(
+                DenialKind::classify(&ReasonInputs {
+                    label,
+                    port: Some(443),
+                    ..Default::default()
+                })
+                .is_none(),
+                "{label}"
+            );
+        }
     }
 
     #[test]

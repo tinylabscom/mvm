@@ -103,7 +103,7 @@ instrumentation at all. The two are deliberately not bridged.
 
 - [x] `mvm-hostd`: `plan_admission::admit_for_run`, `admit_and_start`,
       `supervisor::audit_file::verify_audit_chain_entries`.
-- [x] `mvm-build`: `pipeline::orchestrator::pool_build_with_opts`,
+- [x] `mvm-build`: `pipeline::orchestrator::pool_build`,
       `pipeline::vsock_builder::build_via_vsock`,
       `pipeline::build_cache::workload_build_fingerprint`.
 - [x] `mvm-client`: `launch_transient`.

@@ -12,9 +12,8 @@ it is about to copy into the guest before admitting it.
 
 **Status: Preview.** The gate and its audit entries are wired into admission
 and tested, but this is not one of the numbered security claims in the
-[claim ledger](/security/claim-ledger/). Read the
-[persistent volume scan behavior](#persistent-volume-scans) before relying on
-it.
+[claim ledger](/security/claim-ledger/). Read [what is scanned](#what-is-scanned)
+and the [limits](#limits) before relying on it.
 
 ## Quick start
 
@@ -144,13 +143,13 @@ user policy exists to give it force.
 
 ## Before every boot
 
-Admission scans every host path the boot copies into the guest:
+Admission scans everything the boot copies into the guest from the host:
 
-- each `--mount` source directory,
+- the ext4 image each `--mount` is materialized into,
 - each `--asset` file or tree,
 - the workload's own source directory, when `--flake` or `--manifest` names a
   local path — the project policy is read from there too,
-- the mounted ext4 snapshot of each persistent host-directory volume.
+- the ext4 image of each persistent host-directory volume.
 
 Each instruction file gets a verdict — verified, unsigned, or refused for a
 named reason — and a chain-signed audit entry bound to the plan the boot was
@@ -184,30 +183,155 @@ the chain fails the boot.
 `.github/workflows/sign-instructions.yml` signs this repository's instruction
 files keylessly on a push to `main` that touches one (or on manual dispatch),
 verifies every fresh bundle through `mvmctl trust instructions verify` under a
-policy trusting exactly that workflow and ref, and uploads the bundles as an
-artifact. It holds no write access: a maintainer reviews the artifact and lands
-the bundles through a pull request.
+policy trusting exactly that workflow and ref, and uploads the bundles as the
+`instruction-signatures` artifact of that run, kept for 90 days. The steps live
+in the composite action `.github/actions/sign-instructions`, which is what
+another repository calls.
 
-To sign another repository's files, **copy** the workflow into that repository
-rather than calling it as a reusable workflow. A keyless certificate names the
-workflow file that ran; for a called workflow that is the called file, whoever
-called it, so a policy trusting a shared reusable workflow would trust every
-repository able to call it. Pin the copy's own identity in the publisher entry,
-and pin the ref: `workflow_dispatch` can run the workflow on any branch, which
-signs under that branch's ref.
+### Where the bundles are published
+
+The bundles are published as that workflow artifact, not committed next to the
+files. Committing them was the obvious reading of "bundles beside the files" and
+was rejected for two reasons:
+
+- **Nothing can land them automatically.** The signing job holds no write
+  access, deliberately: a workflow that pushed its own signatures to `main`
+  would let anything able to trigger it decide what `main` vouches for. Opening
+  a pull request instead is not available either — GitHub Actions is not
+  permitted to create pull requests in this repository; the release workflow's
+  prebuilt-pin job already fails there after pushing its branch.
+- **A committed bundle is wrong as often as it is right.** Every edit to
+  `CLAUDE.md` or `AGENTS.md` invalidates its bundle the moment it merges, and
+  the replacement could only follow in a second, hand-landed pull request.
+  These two files changed in 27 commits over the two weeks to 2026-10-04, so a
+  checkout of `main` would carry a bundle that fails as `bad_signature` for
+  much of the time — under `deny`, no better than carrying none.
+
+The verifier is unchanged by this: it reads `<file>.sigstore.json` beside the
+file, wherever the sidecar came from. Verifying a checkout is a download into
+it:
+
+```sh
+# The most recent signing run on main. For an older checkout, pick the run
+# whose head commit has the same instruction files as yours
+# (`gh run list ... --json databaseId,headSha`).
+run=$(gh run list --repo tinylabscom/mvm --workflow sign-instructions.yml \
+  --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+
+# Writes CLAUDE.md.sigstore.json and the rest beside the files they sign.
+gh run download "$run" --repo tinylabscom/mvm --name instruction-signatures --dir .
+
+cat > mvm-instructions.toml <<'POLICY'
+enforcement = "deny"
+
+[[publishers]]
+kind = "keyless"
+name = "mvm-instructions"
+issuer = "https://token.actions.githubusercontent.com"
+repository = "tinylabscom/mvm"
+workflow = ".github/workflows/sign-instructions.yml"
+ref = "refs/heads/main"
+POLICY
+
+mvmctl trust instructions verify . --policy mvm-instructions.toml
+```
+
+A file edited since that run fails as `bad_signature`, which is the point. The
+downloaded sidecars are untracked; a `--mount` of the checkout carries them into
+the image admission scans, so the same files verify at boot.
+
+The artifact expires 90 days after the last instruction-file edit. A manual
+dispatch of the workflow on `main` signs the current files again.
+
+### Signing another repository
+
+Add this workflow to the repository as
+`.github/workflows/sign-instructions.yml`. It checks the repository out and
+hands the rest to the action:
+
+```yaml
+name: Sign instruction files
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "**/CLAUDE.md"
+      - "**/CLAUDE.local.md"
+      - "**/AGENTS.md"
+      - "**/AGENT.md"
+      - "**/GEMINI.md"
+      - "**/SKILL.md"
+      - "**/.claude/**/*.md"
+      - "**/.cursor/rules/**"
+      - "**/.cursorrules"
+      - ".github/workflows/sign-instructions.yml"
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: tinylabscom/mvm/.github/actions/sign-instructions@main
+```
+
+`@main` builds the action's `mvmctl` from the current `mvm` main; pin a commit
+SHA instead to fix the signing code a repository runs. The `paths` list is the
+built-in instruction-file set and only decides when the workflow runs; what gets
+signed is whatever `mvmctl trust instructions sign --dry-run .` selects, the
+same list `verify` reads.
+
+The signatures are the calling repository's own. Pin that identity in the
+publisher entry, and pin the ref: `workflow_dispatch` can run the workflow on any
+branch, which signs under that branch's ref.
+
+```toml
+[[publishers]]
+kind = "keyless"
+name = "mvmd-instructions"
+issuer = "https://token.actions.githubusercontent.com"
+repository = "tinylabscom/mvmd"
+workflow = ".github/workflows/sign-instructions.yml"
+ref = "refs/heads/main"
+```
+
+It is a composite action rather than a reusable workflow on purpose. A keyless
+certificate names the workflow file the job ran. For a composite action that is
+the caller's own workflow, so each repository signs under an identity only it
+can produce. For a reusable workflow it is the *called* file whoever called it,
+and because `mvm` is public, any repository on GitHub could mint a signature a
+policy trusting that identity accepts — including the entry above that trusts
+`mvm`'s own files. The verifier pins the certificate identity and nothing else,
+so it could not tell them apart. Do not add a `workflow_call` trigger to
+`sign-instructions.yml`.
 
 `mvmctl trust instructions sign --dry-run DIR` prints the files the policy
 selects, one per line — the list the workflow signs.
 
-## Persistent volume scans
+## What is scanned
 
-Before a persistent machine boots, admission scans the materialized ext4 image
-of each host-directory volume, including `machine volume mount --host DIR`.
-This checks the bytes the guest will mount, not the current contents of `DIR`.
-The check therefore also covers a `--rw` private copy reused across restarts
-and a snapshot refreshed after a host edit. An unreadable image fails admission.
-Managed block volumes, which are guest-owned rather than host-directory
-snapshots, are not scanned as host inputs.
+A host directory never reaches the guest as a live share. Both a `--mount` and a
+persistent machine's host-directory volume (`machine volume mount --host DIR`)
+are materialized into an ext4 image, and admission reads instruction files and
+their signature sidecars out of that image — the bytes the guest will mount —
+rather than out of the directory they were copied from. The image is read in
+place; nothing is extracted to the host first.
+
+For a persistent machine this covers a `--rw` private copy reused across
+restarts and a snapshot refreshed after a host edit. An image that cannot be
+read fails admission.
+
+Managed block volumes are not scanned. They hold guest-owned data with no host
+directory behind them, so they are not a host input, and an instruction file the
+guest writes into one is outside this gate by design.
+
+## Limits
+
 - **A `--mount` never changes under a running guest.** `--mount` is
   materialized into an ext4 image — a snapshot, handed to each launch as a
   private copy-on-write clone — not a live share, for transient runs and
@@ -216,10 +340,10 @@ snapshots, are not scanned as host inputs.
 - **`:rw` mounts are writable inside the guest.** `--mount` is read-only unless
   `:rw` is given; with `:rw` an in-guest process can rewrite its own copy for
   the rest of that boot. A transient run discards the copy on exit.
-- **The scan reads the host source, not the materialized image.** The mount
-  image is built moments before admission scans the directory it came from. The
-  share's content digest recorded in the plan is re-checked when the share is
-  attached, so a post-admission edit is refused, but the image is not re-scanned.
+- **The image is scanned once, at admission.** It is not re-scanned when it is
+  attached. The share's content digest recorded in the plan is re-checked at
+  attach time, so a host edit made after admission is refused rather than
+  booted.
 - **Only host trees are scanned.** Files baked into an OCI image, or into a
   flake fetched from a remote reference, are not; a local `--flake`/`--manifest`
   directory is.

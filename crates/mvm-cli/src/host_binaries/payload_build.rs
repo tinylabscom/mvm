@@ -357,7 +357,7 @@ pub(crate) fn run_cargo_zigbuild(spec: ZigbuildSpec<'_>) -> Result<(), String> {
     // propagates into the nested `cargo build` that cargo-zigbuild spawns.
     let (cargo, rustc) = try_rustup_cargo_and_rustc(strip_glibc(target), &spec.pin.rust)?;
     let rust_sysroot = rustc_sysroot(&rustc)?;
-    let mut cmd = Command::new(&cargo);
+    let mut cmd = super::helper_command(&cargo);
     cmd.args(spec.args());
     apply_nested_rust_env(&mut cmd, &rustc, spec.target_dir, spec.root, &rust_sysroot);
     cmd.current_dir(spec.root);
@@ -434,7 +434,7 @@ pub(crate) fn apply_nested_rust_env(
 }
 
 fn rustc_sysroot(rustc: &str) -> Result<PathBuf, String> {
-    let output = Command::new(rustc)
+    let output = super::helper_command(rustc)
         .args(["--print", "sysroot"])
         .output()
         .map_err(|error| format!("run {rustc} --print sysroot: {error}"))?;

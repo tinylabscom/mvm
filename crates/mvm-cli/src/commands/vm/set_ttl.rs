@@ -51,16 +51,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         Err(e) => return Err(anyhow::anyhow!("{e}")).context("Failed to update TTL"),
     }
 
-    let detail = match &new_expires_at {
-        Some(ts) => {
-            println!("{}: TTL set, expires at {ts}", args.name);
-            format!("expires_at={ts}")
-        }
-        None => {
-            println!("{}: TTL cleared", args.name);
-            "expires_at=cleared".to_string()
-        }
-    };
-    mvm_core::audit_emit!(VmTtlSet, vm: &args.name, "{detail}");
+    // The client records the `VmTtlSet` entry, so every surface leaves it.
+    match &new_expires_at {
+        Some(ts) => println!("{}: TTL set, expires at {ts}", args.name),
+        None => println!("{}: TTL cleared", args.name),
+    }
     Ok(())
 }

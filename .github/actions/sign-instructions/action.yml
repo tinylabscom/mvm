@@ -1,0 +1,173 @@
+name: Sign instruction files
+description: >
+  Keyless-sign the calling repository's agent instruction files (CLAUDE.md,
+  AGENTS.md, SKILL.md, .claude/**/*.md, .cursor/rules/**, ...) under the
+  calling workflow's own GitHub Actions OIDC identity, verify every fresh
+  bundle through mvmctl's in-process Sigstore verifier, and upload the
+  `<file>.sigstore.json` bundles as an artifact.
+
+# This is a composite action, not a reusable workflow, and that choice is the
+# security property. A keyless certificate's identity is the workflow file the
+# job ran: for a composite action that is the caller's own workflow
+# (`https://github.com/<caller>/.github/workflows/<file>@<ref>`), so each
+# repository signs under an identity only it can produce. A reusable workflow
+# would sign as this repository's file whoever called it, and since this
+# repository is public, any repository on GitHub could mint a signature that a
+# policy trusting that identity accepts. The verifier pins the certificate
+# identity alone, so it could not tell those signatures apart.
+#
+# The caller must check its repository out first and grant `id-token: write`.
+# mvmctl is built from the tree this action was fetched from, so the verifier
+# that checks the bundles is the one at the ref the caller pinned.
+
+inputs:
+  artifact-name:
+    description: Name of the uploaded bundle artifact.
+    required: false
+    default: instruction-signatures
+  retention-days:
+    description: >
+      How long the artifact is kept. A checkout is verified by downloading the
+      artifact of the run that signed it, so this bounds how long after the
+      last instruction-file edit that remains possible without a re-run.
+    required: false
+    default: "90"
+  cache-key:
+    description: Shared key for the Rust build cache of the mvmctl build.
+    required: false
+    default: instruction-signing
+  cache-save:
+    description: Whether this run may write the Rust build cache.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    # The action's path is `<checkout of tinylabscom/mvm>/.github/actions/
+    # sign-instructions`, both when called from another repository and when
+    # this repository uses it by relative path.
+    - name: Locate the mvmctl source and isolate its state
+      shell: bash
+      run: |
+        set -euo pipefail
+        mvm_src="$(cd "$GITHUB_ACTION_PATH/../../.." && pwd)"
+        test -f "$mvm_src/Cargo.toml"
+        {
+          echo "MVM_SIGN_SRC=$mvm_src"
+          echo "MVM_HOME=$RUNNER_TEMP/mvm-home"
+        } >> "$GITHUB_ENV"
+
+    # The workspace links with lld (`.cargo/config.toml`).
+    - name: Install lld
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v ld.lld >/dev/null; then
+          timeout 300 sudo apt-get update
+          timeout 300 sudo apt-get install -y --no-install-recommends lld
+        fi
+
+    # The first rustc call inside the source tree makes rustup install the
+    # toolchain its rust-toolchain.toml pins.
+    - name: Install the pinned Rust toolchain
+      shell: bash
+      run: cd "$MVM_SIGN_SRC" && rustc --version
+
+    - name: Restore the Rust build cache
+      uses: Swatinem/rust-cache@v2
+      with:
+        prefix-key: v1-rust
+        shared-key: ${{ inputs.cache-key }}
+        workspaces: ${{ env.MVM_SIGN_SRC }} -> target
+        save-if: ${{ inputs.cache-save }}
+
+    - name: Install cosign
+      uses: sigstore/cosign-installer@v3
+
+    # `user` carries the Sigstore verifier; a build without it reports every
+    # keyless signature as uncheckable.
+    - name: Build mvmctl with the Sigstore verifier
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$MVM_SIGN_SRC"
+        cargo build --locked -p mvmctl --features user --bin mvmctl
+        echo "MVM_SIGN_MVMCTL=$MVM_SIGN_SRC/target/debug/mvmctl" >> "$GITHUB_ENV"
+
+    - name: List the instruction files
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MVM_SIGN_MVMCTL" trust instructions sign --dry-run . \
+          > "$RUNNER_TEMP/instruction-files.txt"
+        echo "instruction files:"
+        cat "$RUNNER_TEMP/instruction-files.txt"
+
+    # --new-bundle-format writes the Sigstore bundle the in-process verifier
+    # parses, at the sidecar name it looks for.
+    - name: Keyless-sign each file
+      shell: bash
+      run: |
+        set -euo pipefail
+        while IFS= read -r file; do
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle "${file}.sigstore.json" \
+            "${file}"
+        done < "$RUNNER_TEMP/instruction-files.txt"
+
+    # The round trip that matters: the bundles cosign just wrote, checked by
+    # the verifier admission uses, under a policy that trusts exactly the
+    # calling workflow on this ref and refuses anything else.
+    - name: Verify the bundles under the calling workflow's identity
+      shell: bash
+      run: |
+        set -euo pipefail
+        # GITHUB_WORKFLOW_REF is `<owner>/<repo>/<workflow path>@<ref>`.
+        workflow="${GITHUB_WORKFLOW_REF#"$GITHUB_REPOSITORY/"}"
+        workflow="${workflow%%@*}"
+        # Both are interpolated into TOML below; refuse anything but a plain
+        # workflow path and ref name.
+        if ! printf '%s' "$workflow" | grep -Eq '^\.github/workflows/[A-Za-z0-9._-]+\.ya?ml$'; then
+          echo "refusing to build a policy for workflow ${workflow}" >&2
+          exit 1
+        fi
+        if ! printf '%s' "$GITHUB_REF" | grep -Eq '^refs/[A-Za-z0-9._/-]+$'; then
+          echo "refusing to build a policy for ref ${GITHUB_REF}" >&2
+          exit 1
+        fi
+        cat > "$RUNNER_TEMP/instruction-trust.toml" <<EOF
+        enforcement = "deny"
+
+        [[publishers]]
+        kind = "keyless"
+        name = "sign-instructions"
+        issuer = "https://token.actions.githubusercontent.com"
+        repository = "${GITHUB_REPOSITORY}"
+        workflow = "${workflow}"
+        ref = "${GITHUB_REF}"
+        EOF
+        "$MVM_SIGN_MVMCTL" trust instructions verify . \
+          --policy "$RUNNER_TEMP/instruction-trust.toml"
+
+    - name: Collect the bundles
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/bundles"
+        while IFS= read -r file; do
+          cp --parents "${file}.sigstore.json" "$RUNNER_TEMP/bundles/"
+        done < "$RUNNER_TEMP/instruction-files.txt"
+
+    # Instruction files live under dot-directories (.claude/, .cursor/), and
+    # upload-artifact drops hidden paths unless told otherwise.
+    - name: Upload the bundles
+      uses: actions/upload-artifact@v7
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ runner.temp }}/bundles/
+        include-hidden-files: true
+        if-no-files-found: error
+        retention-days: ${{ inputs.retention-days }}

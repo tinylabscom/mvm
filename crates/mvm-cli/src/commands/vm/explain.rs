@@ -26,8 +26,9 @@ pub(in crate::commands) struct Args {
     /// Review grantable denials and, after confirmation, update mvm.toml
     #[arg(long, conflicts_with = "json")]
     pub review: bool,
-    /// Project directory whose mvm.toml receives reviewed grants (default: .)
-    #[arg(long, value_name = "DIR", requires = "review")]
+    /// Project directory, or its manifest file, that receives reviewed grants
+    /// (default: .)
+    #[arg(long, value_name = "PATH", requires = "review")]
     pub project: Option<PathBuf>,
 }
 

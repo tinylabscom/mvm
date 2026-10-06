@@ -36,11 +36,14 @@ runs `mvmctl` and has no subprocess fallback. It finds the library, first
 match wins:
 
 1. `MVM_HOSTLIB_PATH`, naming the library file;
-2. `native/` inside the installed npm package (packages that carry the
-   library are follow-up work);
-3. beside `mvmctl` on `PATH`, including beside the real file behind a symlink.
+2. `native/` inside the package root, where a source checkout puts a locally
+   built library;
+3. the platform package for this host (`@runmvm/mvm-darwin-arm64`,
+   `@runmvm/mvm-linux-{x64,arm64}-{gnu,musl}`), which npm installs as an
+   optional dependency of `@runmvm/mvm` on a matching host;
+4. beside `mvmctl` on `PATH`, including beside the real file behind a symlink.
 
-A missing library raises `MvmTransportError` naming all three. Every failed
+A missing library raises `MvmTransportError` naming each place. Every failed
 call raises a typed `HostLibraryError` subclass (`MachineNotFoundError`,
 `MachineSpecError`, `MachineBackendError`, …) carrying `code` and `retryable`.
 

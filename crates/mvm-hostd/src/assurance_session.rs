@@ -1991,6 +1991,8 @@ mod tests {
 
     #[test]
     fn cleanup_is_signed_only_after_the_exact_backend_confirms_the_vm_stopped() {
+        // The mock backend keeps its VM directory under `MVM_HOME`.
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let opened = open_against_backend(bound_plan(), "mock");
         let binding = opened.result.as_ref().expect("session opens");
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
@@ -2034,6 +2036,8 @@ mod tests {
 
     #[test]
     fn cleanup_refuses_a_backend_identity_mismatch_before_stopping() {
+        // The mock backend keeps its VM directory under `MVM_HOME`.
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let opened = open_against(bound_plan());
         let binding = opened.result.as_ref().expect("session opens");
         let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
@@ -2072,6 +2076,8 @@ mod tests {
 
     #[tokio::test]
     async fn final_evidence_is_host_assembled_from_observer_cleanup_and_signed_refs() {
+        // The mock backend keeps its VM directory under `MVM_HOME`.
+        let (_env, _home) = crate::test_fixtures::isolated_mvm_home();
         let opened = open_against_backend(bound_plan(), "mock");
         let binding = opened.result.as_ref().expect("session opens").clone();
         let payload = serde_json::to_value(probe(&binding)).expect("payload");

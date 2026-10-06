@@ -62,7 +62,14 @@ pub(super) fn run_in_guest(
     let req = &with_provisioned_egress_env(req, vm_name);
     let wrapper = build_guest_wrapper(req);
 
+    let dispatch = command_dispatch(
+        mvm_runtime::microvm::read_verb_grant_envelope(vm_name)
+            .context("reading the run's signed verb grant")?
+            .as_ref(),
+    );
+
     if req.pty {
+        refuse_mediated_pty(dispatch)?;
         let pty = pty_console_request(req, wrapper);
         let exit_code =
             crate::commands::vm::console::run_pty_argv_for_exit(vm_name, pty.argv, pty.env)?;
@@ -80,7 +87,7 @@ pub(super) fn run_in_guest(
     // emit here. The detail format matches
     // `commands::shared::vsock::emit_vsock_rpc_audit`:
     // `scope=rpc,direction=in,kind=vsock,verb=<kebab-name>`.
-    let verb = "exec";
+    let verb = dispatch.verb();
     mvm_core::audit_emit!(
         NetworkPolicyAllow,
         vm: vm_name,
@@ -95,33 +102,46 @@ pub(super) fn run_in_guest(
     } else {
         Some(String::from_utf8_lossy(&req.stdin).into_owned())
     };
-    let terminal = mvm_agentd::vsock::send_exec_streaming(
-        &mut stream,
-        &wrapper,
-        stdin_str,
-        req.timeout_secs,
-        |event| match event {
-            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
-                if capture {
-                    out.extend_from_slice(chunk);
-                } else {
-                    let mut so = std::io::stdout();
-                    let _ = so.write_all(chunk);
-                    let _ = so.flush();
-                }
+    let on_event = |event: &mvm_agentd::vsock::ExecEvent| match event {
+        mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
+            if capture {
+                out.extend_from_slice(chunk);
+            } else {
+                let mut so = std::io::stdout();
+                let _ = so.write_all(chunk);
+                let _ = so.flush();
             }
-            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
-                if capture {
-                    err.extend_from_slice(chunk);
-                } else {
-                    let mut se = std::io::stderr();
-                    let _ = se.write_all(chunk);
-                    let _ = se.flush();
-                }
+        }
+        mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
+            if capture {
+                err.extend_from_slice(chunk);
+            } else {
+                let mut se = std::io::stderr();
+                let _ = se.write_all(chunk);
+                let _ = se.flush();
             }
-            _ => {}
-        },
-    )?;
+        }
+        _ => {}
+    };
+    let terminal = match dispatch {
+        CommandDispatch::Exec => mvm_agentd::vsock::send_exec_streaming(
+            &mut stream,
+            &wrapper,
+            stdin_str,
+            req.timeout_secs,
+            on_event,
+        )?,
+        CommandDispatch::Mediated => mvm_agentd::vsock::send_mediated_exec_streaming(
+            &mut stream,
+            run_command_call(wrapper, stdin_str, req.timeout_secs)?,
+            // The helper has already refused a question that differs from the
+            // call; what is left is the run's own command, which the operator
+            // supplied with the admitted plan. It is not a tool call, so the
+            // tool rules do not decide it.
+            |_question| Ok(true),
+            on_event,
+        )?,
+    };
     let exit_code = match terminal {
         mvm_agentd::vsock::ExecEvent::Exit { code } => code,
         mvm_agentd::vsock::ExecEvent::TimedOut => {
@@ -147,6 +167,78 @@ pub(super) fn run_in_guest(
         Either::Left(exit_code)
     };
     Ok((either, vsock_ready))
+}
+
+/// Tool name the run's own command is reported under when the guest mediates
+/// commands. The guest echoes it back in its pre-spawn question; no tool rule
+/// is consulted for it.
+const RUN_COMMAND_TOOL: &str = "mvmctl-run";
+
+/// How the run's own command reaches the guest agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandDispatch {
+    /// A plain `Exec`: nothing in the signed grant mediates guest commands.
+    Exec,
+    /// The signed grant carries tool mediation, so the guest refuses every
+    /// command RPC that does not pause before spawn. The run's command goes
+    /// out as a `MediatedExec` that this runner answers itself.
+    Mediated,
+}
+
+impl CommandDispatch {
+    /// The verb recorded in the inbound vsock RPC audit line.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Exec => "exec",
+            Self::Mediated => "mediated-exec",
+        }
+    }
+}
+
+/// Pick the dispatch from the grant the host minted for this boot — the same
+/// envelope the guest pinned, so the choice matches what the guest enforces.
+fn command_dispatch(
+    grant: Option<&mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+) -> CommandDispatch {
+    if grant.is_some_and(|envelope| envelope.grant.tool_mediation.is_some()) {
+        CommandDispatch::Mediated
+    } else {
+        CommandDispatch::Exec
+    }
+}
+
+/// An interactive console is an unmediated command channel, and a guest under
+/// tool mediation refuses it. Say so before boot work is wasted on a refusal
+/// that would otherwise read as an authorization failure.
+fn refuse_mediated_pty(dispatch: CommandDispatch) -> Result<()> {
+    anyhow::ensure!(
+        dispatch == CommandDispatch::Exec,
+        "this run's policy has a [tools] section, so the guest mediates every command and \
+         refuses an interactive console; run without --pty, or drop the [tools] section"
+    );
+    Ok(())
+}
+
+/// The run's wrapper as a mediated call. `/bin/sh -c <wrapper>` is exactly
+/// what the guest runs for a plain `Exec`, so the command behaves the same
+/// under either dispatch.
+fn run_command_call(
+    wrapper: String,
+    stdin: Option<String>,
+    timeout_secs: Option<u64>,
+) -> Result<mvm_agentd::vsock::MediatedExecCall> {
+    let call = mvm_agentd::vsock::MediatedExecCall {
+        tool: RUN_COMMAND_TOOL.to_string(),
+        argv: vec!["/bin/sh".to_string(), "-c".to_string(), wrapper],
+        stdin,
+        timeout_secs,
+    };
+    anyhow::ensure!(
+        call.tool_check().is_some(),
+        "the run's command is longer than the {} bytes a mediated guest command may carry",
+        mvm_contract::protocol::network_flow::tool::MAX_TOOL_ARGV_BYTES
+    );
+    Ok(call)
 }
 
 const AGENT_FAILURE_CONSOLE_LINES: usize = 80;
@@ -237,6 +329,96 @@ fn direct_pty_inline_argv(req_argv: &[String]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grant_envelope(
+        tool_mediation: Option<mvm_core::plan::ToolMediationGrant>,
+    ) -> mvm_core::protocol::vm_backend::VerbGrantEnvelope {
+        mvm_core::protocol::vm_backend::VerbGrantEnvelope {
+            pubkey_hex: "ab".repeat(32),
+            plan_nonce_hex: "00".repeat(16),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: mvm_core::plan::VerbGrant {
+                session_id: "vm".to_string(),
+                plan_nonce: mvm_core::plan::Nonce::from_bytes([0u8; 16]),
+                not_after: chrono::Utc::now() + chrono::Duration::minutes(5),
+                verbs: Vec::new(),
+                drive: None,
+                tool_mediation,
+                sig: vec![0u8; 64],
+            },
+        }
+    }
+
+    fn mediation() -> Option<mvm_core::plan::ToolMediationGrant> {
+        Some(mvm_core::plan::ToolMediationGrant {
+            class_gate_only: true,
+        })
+    }
+
+    #[test]
+    fn a_run_without_tool_mediation_keeps_plain_exec() {
+        assert_eq!(command_dispatch(None), CommandDispatch::Exec);
+        assert_eq!(
+            command_dispatch(Some(&grant_envelope(None))),
+            CommandDispatch::Exec
+        );
+        assert_eq!(CommandDispatch::Exec.verb(), "exec");
+        assert!(refuse_mediated_pty(CommandDispatch::Exec).is_ok());
+    }
+
+    #[test]
+    fn a_tool_mediated_run_dispatches_its_own_command_as_mediated_exec() {
+        let dispatch = command_dispatch(Some(&grant_envelope(mediation())));
+        assert_eq!(dispatch, CommandDispatch::Mediated);
+        assert_eq!(dispatch.verb(), "mediated-exec");
+    }
+
+    #[test]
+    fn the_guest_admits_the_mediated_run_command_and_refuses_plain_exec() {
+        let envelope = grant_envelope(mediation());
+        let wrapper = "set -e\necho hello\n".to_string();
+        let call = run_command_call(wrapper.clone(), Some("in".into()), Some(9)).expect("call");
+        assert_eq!(call.argv, ["/bin/sh", "-c", wrapper.as_str()]);
+        assert_eq!(call.stdin.as_deref(), Some("in"));
+        assert_eq!(call.timeout_secs, Some(9));
+
+        let mediated = mvm_agentd::vsock::GuestRequest::MediatedExec(call);
+        assert!(
+            mvm_agentd::vsock::enforce_verb_grant(&mediated, Some(&envelope.grant)).is_none(),
+            "the run's own command must pass the signed tool-mediation gate"
+        );
+        let plain = mvm_agentd::vsock::GuestRequest::Exec {
+            command: wrapper,
+            stdin: None,
+            timeout_secs: None,
+        };
+        assert!(matches!(
+            mvm_agentd::vsock::enforce_verb_grant(&plain, Some(&envelope.grant)),
+            Some(mvm_agentd::vsock::GuestResponse::VerbNotAuthorized { .. })
+        ));
+    }
+
+    #[test]
+    fn an_oversized_run_command_is_refused_with_the_limit() {
+        let wrapper = "x".repeat(mvm_contract::protocol::network_flow::tool::MAX_TOOL_ARGV_BYTES);
+        let error = run_command_call(wrapper, None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("bytes a mediated guest command may carry"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_tool_mediated_pty_run_is_refused_before_dispatch() {
+        let error = refuse_mediated_pty(CommandDispatch::Mediated)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("[tools]"), "{error}");
+        assert!(error.contains("--pty"), "{error}");
+    }
 
     #[test]
     fn pty_console_request_passes_inline_argv_directly() {

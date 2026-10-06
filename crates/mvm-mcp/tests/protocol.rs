@@ -7,7 +7,10 @@ use mvm_client::drive::{DriveError, DriveFileOperation, EntrypointEvent, FsResul
 use mvm_client::dto::{MachineFilter, MachineId, MachineStatus};
 use mvm_client::mock::MockBackend;
 use mvm_client::{ClientOperationCapabilities, MvmClient};
-use mvm_mcp::{CURRENT_PROTOCOL_VERSION, DriveTools, McpServer, ServerLimits};
+use mvm_mcp::{
+    CURRENT_PROTOCOL_VERSION, DriveTools, HANDSHAKE_PROTOCOL_VERSIONS, LEGACY_PROTOCOL_VERSION,
+    McpServer, ServerLimits,
+};
 use serde_json::{Value, json};
 
 struct GrantedDrive;
@@ -323,21 +326,161 @@ async fn notifications_receive_no_response_and_legacy_initialize_still_works() {
     .to_string();
     assert!(server.handle_json(&notification).await.is_none());
 
-    let initialize = json!({
-        "jsonrpc":"2.0", "id":50, "method":"initialize",
-        "params":{"protocolVersion":"2025-11-25", "capabilities":{},
-                  "clientInfo":{"name":"legacy", "version":"1"}}
-    })
-    .to_string();
-    let response: Value = serde_json::from_str(
-        &server
-            .handle_json(&initialize)
-            .await
-            .expect("initialize response"),
-    )
-    .expect("initialize json");
+    let response = initialize_with(&server, LEGACY_PROTOCOL_VERSION).await;
     assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
     assert_eq!(response["result"]["serverInfo"]["name"], "mvm");
+}
+
+async fn frame(server: &McpServer, line: &str) -> Value {
+    let response = server
+        .handle_json(line)
+        .await
+        .expect("request receives a response");
+    serde_json::from_str(&response).expect("response json")
+}
+
+async fn initialize_with(server: &McpServer, version: &str) -> Value {
+    let initialize = json!({
+        "jsonrpc":"2.0", "id":50, "method":"initialize",
+        "params":{"protocolVersion":version, "capabilities":{},
+                  "clientInfo":{"name":"handshake", "version":"1"}}
+    })
+    .to_string();
+    frame(server, &initialize).await
+}
+
+/// Codex 0.147.0's opening frames, recorded verbatim, through to a tool
+/// listing. Its `tools/list` carries a progress token in `_meta` and no
+/// protocol version there, as every request in a handshake session may.
+#[tokio::test]
+async fn codex_handshake_at_2025_06_18_is_echoed_and_lists_tools() {
+    let server = McpServer::new(Arc::new(MockBackend::default()));
+    let initialize = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{"elicitation":{"form":{},"url":{}}},"clientInfo":{"name":"codex-mcp-client","title":"Codex","version":"0.147.0"}}}"#;
+    let response = frame(&server, initialize).await;
+    assert!(response.get("error").is_none(), "refused: {response}");
+    assert_eq!(response["id"], 0);
+    assert_eq!(response["result"]["protocolVersion"], "2025-06-18");
+    assert_eq!(
+        response["result"]["capabilities"]["tools"]["listChanged"],
+        false
+    );
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    assert!(server.handle_json(initialized).await.is_none());
+
+    let listed = frame(
+        &server,
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"progressToken":0}}}"#,
+    )
+    .await;
+    let names: Vec<&str> = listed["result"]["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    assert!(names.contains(&"mvm.machine.list"), "listed {names:?}");
+}
+
+#[tokio::test]
+async fn handshake_request_metadata_is_accepted_but_a_wrong_version_is_not() {
+    let server = McpServer::new(Arc::new(MockBackend::default()));
+    let call = json!({
+        "jsonrpc":"2.0", "id":54, "method":"tools/call",
+        "params":{"name":"mvm.machine.list", "arguments":{},
+                  "_meta":{"progressToken":"call-1"}}
+    })
+    .to_string();
+    let response = frame(&server, &call).await;
+    assert_eq!(response["result"]["isError"], false, "{response}");
+
+    let stale = json!({
+        "jsonrpc":"2.0", "id":55, "method":"tools/list",
+        "params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2025-06-18",
+                           "io.modelcontextprotocol/clientCapabilities":{}}}
+    })
+    .to_string();
+    let response = frame(&server, &stale).await;
+    assert_eq!(
+        response["error"]["message"],
+        "unsupported MCP protocol version"
+    );
+
+    let discover = json!({
+        "jsonrpc":"2.0", "id":56, "method":"server/discover",
+        "params":{"_meta":{"progressToken":0}}
+    })
+    .to_string();
+    let response = frame(&server, &discover).await;
+    assert_eq!(
+        response["error"]["message"],
+        "server/discover requires request metadata"
+    );
+}
+
+#[tokio::test]
+async fn every_supported_handshake_version_is_echoed() {
+    let server = McpServer::new(Arc::new(MockBackend::default()));
+    assert_eq!(
+        HANDSHAKE_PROTOCOL_VERSIONS,
+        ["2025-11-25", "2025-06-18"],
+        "a version added here needs its responses checked against that revision"
+    );
+    for version in HANDSHAKE_PROTOCOL_VERSIONS {
+        let response = initialize_with(&server, version).await;
+        assert_eq!(response["result"]["protocolVersion"], *version);
+    }
+}
+
+#[tokio::test]
+async fn an_unsupported_handshake_version_is_answered_with_the_newest_supported() {
+    let server = McpServer::new(Arc::new(MockBackend::default()));
+    for requested in [
+        "2024-11-05",
+        "2025-03-26",
+        CURRENT_PROTOCOL_VERSION,
+        "draft",
+    ] {
+        let response = initialize_with(&server, requested).await;
+        assert!(response.get("error").is_none(), "{requested}: {response}");
+        assert_eq!(
+            response["result"]["protocolVersion"], LEGACY_PROTOCOL_VERSION,
+            "{requested}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn initialize_params_stay_strict_whatever_the_version() {
+    let server = McpServer::new(Arc::new(MockBackend::default()));
+    let extra_field = json!({
+        "jsonrpc":"2.0", "id":51, "method":"initialize",
+        "params":{"protocolVersion":"2025-06-18", "capabilities":{},
+                  "clientInfo":{"name":"handshake", "version":"1"}, "extra":true}
+    })
+    .to_string();
+    assert_eq!(frame(&server, &extra_field).await["error"]["code"], -32602);
+
+    let bad_capabilities = json!({
+        "jsonrpc":"2.0", "id":52, "method":"initialize",
+        "params":{"protocolVersion":"unknown", "capabilities":[],
+                  "clientInfo":{"name":"handshake", "version":"1"}}
+    })
+    .to_string();
+    assert_eq!(
+        frame(&server, &bad_capabilities).await["error"]["code"],
+        -32602
+    );
+}
+
+#[tokio::test]
+async fn discovery_lists_every_answered_version() {
+    let server = McpServer::new(Arc::new(MockBackend::default()));
+    let response = request(&server, 53, "server/discover", json!({})).await;
+    assert_eq!(
+        response["result"]["supportedVersions"],
+        json!([CURRENT_PROTOCOL_VERSION, "2025-11-25", "2025-06-18"])
+    );
 }
 
 #[test]

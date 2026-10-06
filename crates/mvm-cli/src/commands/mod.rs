@@ -2,7 +2,6 @@ mod agent_session;
 mod bench;
 mod bootstrap;
 mod build;
-#[cfg(feature = "builder-vm")]
 mod builder_shell_job;
 mod bundle;
 mod capture;
@@ -207,7 +206,6 @@ pub(in crate::commands) enum Commands {
     BuilderEgressSupervisor(bootstrap::BuilderEgressSupervisorArgs),
     /// Internal: run a shell script inside the Linux builder VM.
     #[command(name = "__builder-shell-job", hide = true)]
-    #[cfg(feature = "builder-vm")]
     BuilderShellJob(builder_shell_job::Args),
     /// Environment / install lifecycle (bootstrap, update, sign, …)
     #[command(display_order = 10)]
@@ -276,7 +274,6 @@ pub(in crate::commands) enum Commands {
     #[command(name = "seccomp-audit", hide = true)]
     SeccompAudit(seccomp_audit::Args),
     /// Manage the persistent builder VM
-    #[cfg(feature = "builder-vm")]
     #[command(name = "persistent-builder", hide = true)]
     PersistentBuilder(build::persistent_builder::Args),
     /// Internal: host-side AF_VSOCK↔UNIX bridge for the QEMU workload
@@ -615,7 +612,6 @@ fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::Dis
 fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
     match command {
         Commands::Build(_) | Commands::Kernel(_) | Commands::Bootstrap(_) => true,
-        #[cfg(feature = "builder-vm")]
         Commands::PersistentBuilder(_) => true,
         Commands::Env(env_args) => matches!(env_args.action, env::group::EnvCmd::Bootstrap(_)),
         _ => false,
@@ -670,15 +666,11 @@ fn apply_startup_env(cli: &Cli) {
 /// itself, because host-binary extraction, builder-image resolution and the
 /// session record all live up here. Same inversion as the hvf builder ctor
 /// below.
-#[cfg(feature = "builder-vm")]
 fn register_builder_session_starter() {
     mvm_build::persistent_builder::register_session_starter(Box::new(|| {
         crate::commands::build::persistent_builder::start_session_for_contended_build()
     }));
 }
-
-#[cfg(not(feature = "builder-vm"))]
-fn register_builder_session_starter() {}
 
 /// Tell `mvm-build` whether this binary can supply the Linux host binaries a
 /// builder VM bootstrap needs.
@@ -686,7 +678,6 @@ fn register_builder_session_starter() {}
 /// It cannot see the payload itself — that lives here, above it. A binary that
 /// carries the payload, or can produce it from its source checkout, *is* the
 /// bootstrap helper.
-#[cfg(feature = "builder-vm")]
 fn declare_embedded_host_binaries() {
     mvm_build::builder_vm_bootstrap::declare_current_exe_provides_host_binaries(
         crate::host_binaries::source::payload_available(),
@@ -698,15 +689,11 @@ fn declare_embedded_host_binaries() {
     ));
 }
 
-#[cfg(not(feature = "builder-vm"))]
-fn declare_embedded_host_binaries() {}
-
 fn register_inhouse_builder() {
     // `mvm-build` constructs the libkrun, QEMU and WebLinux builders itself but
     // cannot name the HVF and Firecracker drivers, which live a layer up.
     // `mvm-runtime` owns those constructors and their Stage 0; a library caller
     // registers the same ones before it builds.
-    #[cfg(feature = "builder-vm")]
     mvm_runtime::builder_runner::register_driver_backed_builders();
 
     // Stage 0's bootstrap kernel is pinned in source and verified in
@@ -715,7 +702,6 @@ fn register_inhouse_builder() {
     // `mvm-http` follows no redirects. Deliberately not `download_kernel`,
     // whose signed-manifest check needs `manifest-verify`, a feature an
     // ordinary `just embed` build does not carry.
-    #[cfg(feature = "builder-vm")]
     mvm_build::stage0_kernel::register_bootstrap_kernel_fetcher(Box::new(
         |url: &str, dest: &std::path::Path| {
             let dest = dest

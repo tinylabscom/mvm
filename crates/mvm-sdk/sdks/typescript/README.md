@@ -186,12 +186,18 @@ is found by looking, in order, at:
 
 1. `MVM_HOSTLIB_PATH` — the library file itself. If it is set and names
    nothing, that is an error; the SDK does not fall back to another copy.
-2. `native/` inside the installed package, for a package that bundles the
-   library.
-3. The directory holding `mvmctl` on `PATH`, and the directory of the file
+2. `native/` inside the package root. The published package leaves it
+   empty; it is where a source checkout puts a locally built library.
+3. The platform package for this host: `@runmvm/mvm-darwin-arm64`,
+   `@runmvm/mvm-linux-x64-gnu`, `@runmvm/mvm-linux-arm64-gnu`,
+   `@runmvm/mvm-linux-x64-musl`, or `@runmvm/mvm-linux-arm64-musl`. The
+   published package lists all five as optional dependencies, and npm
+   installs only the one whose `os`, `cpu` and `libc` match. The glibc
+   builds need glibc 2.17 or newer.
+4. The directory holding `mvmctl` on `PATH`, and the directory of the file
    that path resolves to. `mvmctl` is only located, never run.
 
-When none of these has it, calls throw `MvmTransportError` naming all three.
+When none of these has it, calls throw `MvmTransportError` naming each place.
 A refusal from the library throws the typed error its code names —
 `MachineNotFoundError`, `MachineSpecError`, `MachineConflictError`,
 `MachineUnavailableError` (retryable), and so on, all subclasses of

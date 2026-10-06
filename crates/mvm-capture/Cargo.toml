@@ -11,6 +11,8 @@ authors.workspace = true
 
 [dependencies]
 mvm-contract = { workspace = true, default-features = false }
+# The host-helper environment filter every tool spawn goes through.
+mvm-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

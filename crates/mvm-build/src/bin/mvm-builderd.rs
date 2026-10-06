@@ -9,7 +9,7 @@
 //! The daemon logic lives in the cross-platform `builderd` /
 //! `builderd_protocol` library modules; this binary is just the
 //! Linux-only AF_VSOCK listener that feeds accepted connections into
-//! `builderd::serve_connection_with_executor`. The modules are
+//! `builderd::serve_connection`. The modules are
 //! `#[path]`-included (not reached via `use mvm_build::…`) so the binary
 //! cross-compiles to static `aarch64-unknown-linux-musl` for the builder
 //! rootfs without dragging in the full `mvm-build` lib (which pulls
@@ -178,10 +178,9 @@ mod linux {
                 // drop. A vsock stream fd supports the read/write the
                 // framing uses.
                 let mut stream = unsafe { UnixStream::from_raw_fd(conn_fd) };
-                if let Err(e) = builderd::serve_connection_with_executor(
-                    &mut stream,
-                    &builderd::CommandExecutor,
-                ) {
+                if let Err(e) =
+                    builderd::serve_connection(&mut stream, Some(&builderd::CommandExecutor))
+                {
                     eprintln!("mvm-builderd: connection error: {e}");
                 }
             });

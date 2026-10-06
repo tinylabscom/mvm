@@ -12,6 +12,7 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use ed25519_dalek::Signer;
 
 use mvm_client::admission::InstructionSources;
+use mvm_client::admission::instructions::materialized_mount_images;
 use mvm_client::instruction_trust::gate::local_workload_dir;
 use mvm_core::plan::bundle::sha256_hex;
 use mvm_core::user_config::MvmConfig;
@@ -139,7 +140,7 @@ pub(in crate::commands) struct RunArgs {
     /// machine surface derives it from what the workload declares it needs.
     #[arg(skip)]
     pub network_mode: mvm_contract::plan::NetworkMode,
-    /// Boot a pre-built manifest (mvm.toml, a directory, or a slot).
+    /// Boot an mvm.toml, a built slot, or a signed .mvmpkg archive.
     #[arg(short = 'm', long, value_name = "PATH", conflicts_with_all = SOURCES_EXCEPT_MANIFEST)]
     pub manifest: Option<String>,
     /// Boot an OCI image (resolved through the local cache first).
@@ -537,6 +538,7 @@ pub(in crate::commands) fn run_transient(
     let cwd = std::env::current_dir().context("resolving the working directory")?;
     super::run_policy::select_pack_image(&mut args.run)?;
     resolve_run_source(&mut args.run, &cwd, Inference::Enabled)?.announce();
+    super::super::bundle::settle_manifest_archive(&mut args.run.manifest, args.run.dry_run)?;
     super::run_policy::apply_run_policy(&mut args.run)?;
     let image_supplies_entrypoint =
         args.run.prod && (args.run.image.is_some() || args.run.runtime.is_some());
@@ -629,7 +631,7 @@ pub(in crate::commands) fn run_secure_with_source(
     let network_access = NetworkAccess::of_run(&network_policy, !admit_secrets.secrets.is_empty());
 
     // Every transient run is admitted as a locally-signed workload (uniform
-    // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
+    // with `machine run`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
     // libkrun/HVF supervisor spawn the enforcing gateway bridge (so the egress
     // policy is enforced and the run is chain-audited) instead of the legacy
     // unfiltered path. The closure runs inside the boot path with the resolved
@@ -698,21 +700,15 @@ pub(in crate::commands) fn run_secure_with_source(
             sdk_sidecar,
             assets,
             volumes,
+            bundle_archive,
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
-        let instruction_mount_roots: Vec<std::path::PathBuf> = volumes
-            .iter()
-            .filter_map(|volume| {
-                volume
-                    .materialized_image
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
-            })
-            .collect();
+        let instruction_mount_images = materialized_mount_images(volumes);
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
-                .with_mount_roots(&instruction_mount_roots),
+                .with_mount_roots(&[])
+                .with_mount_images(&instruction_mount_images),
             outputs: admit_outputs.clone(),
             network_mode: admit_network_mode,
             tenant: "local",
@@ -733,7 +729,7 @@ pub(in crate::commands) fn run_secure_with_source(
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: None,
+            bundle_pin: bundle_archive,
             deps_volume: None,
             // The grants come from the launch config's own volume list, so the
             // plan names exactly what the backend will mount and every

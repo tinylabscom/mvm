@@ -195,7 +195,7 @@ pub struct VmStartConfig {
     /// it is never an implicit, backend-specific fallback.
     pub network_policy: crate::network_policy::NetworkPolicy,
     /// Pre-open the host-side interactive-console data-port range so a PTY can
-    /// attach (`machine run -t`, `machine shell`, `up --console`). The
+    /// attach (`machine run -t`, `machine shell`). The
     /// per-port-UDS backends (libkrun, HVF) bind a static vsock port list at
     /// start and otherwise can't reach the agent's dynamic
     /// `CONSOLE_PORT_BASE + session_id` data port; Firecracker multiplexes
@@ -400,7 +400,7 @@ pub trait VmBackend: Send + Sync {
                 available,
                 hint: format!(
                     "this backend warm-starts at the '{}' tier; re-run with that tier \
-                     or `mvmctl up` for a cold boot",
+                     or `mvmctl machine run` for a cold boot",
                     available.label()
                 ),
             });
@@ -451,7 +451,7 @@ pub trait VmBackend: Send + Sync {
     /// Returns the [`VmId`] assigned to the running VM.
     /// Equivalent to [`start_with_mode`](Self::start_with_mode) with
     /// [`StartMode::Detached`], which is the right default for the most common
-    /// path (`mvmctl up`) — this is a default-argument convenience, not a
+    /// path (`mvmctl machine run -d`) — this is a default-argument convenience, not a
     /// compatibility shim.
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         self.start_with_mode(config, StartMode::Detached)

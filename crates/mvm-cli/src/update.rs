@@ -283,10 +283,6 @@ fn kernel_fetch_hint(tag: &str, asset: &str, release_exists: bool) -> String {
 /// Download a workload or builder kernel from the signed image set pinned by
 /// this build. The root digest, exact publisher identity, compatibility and
 /// member digest are all established before the staged file is published.
-///
-/// Available without `builder-vm`: lean clients cannot compile kernels
-/// locally, so downloading the release-matched kernel is their supported
-/// acquisition path.
 pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {
     let (asset, _) = boot_image_kernel_assets(arch, variant)?;
     let arch = arch.parse::<mvm_core::arch::GuestArch>()?;
@@ -364,7 +360,7 @@ fn is_writable(path: &Path) -> bool {
 /// Called before and after swapping the binary to prevent a defective release from
 /// bricking an installation.
 fn smoke_test_binary(bin: &Path) -> Result<()> {
-    let output = std::process::Command::new(bin)
+    let output = mvm_core::env_hygiene::helper_command(bin)
         .arg("--version")
         .output()
         .with_context(|| format!("Failed to execute smoke test for {}", bin.display()))?;
@@ -1374,7 +1370,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn downloaded_kernel_publish_replaces_atomically_and_records_digest() {
         let dir = tempfile::tempdir().unwrap();

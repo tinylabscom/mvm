@@ -8,7 +8,6 @@
 
 use std::ffi::OsStr;
 use std::path::Path;
-use std::process::Command;
 
 use mvm_core::image_set::GitCommit;
 pub use mvm_core::image_set::{RepoIdentity, WorktreeState};
@@ -150,7 +149,7 @@ fn git_text<const N: usize>(dir: &Path, args: [&str; N]) -> Result<String, Strin
 }
 
 fn git_bytes<const N: usize>(dir: &Path, args: [&str; N]) -> Result<Vec<u8>, String> {
-    let mut cmd = Command::new("git");
+    let mut cmd = mvm_core::env_hygiene::helper_command("git");
     cmd.arg("-C")
         .arg(dir)
         .args(args)

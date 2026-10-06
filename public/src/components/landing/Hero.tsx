@@ -65,14 +65,14 @@ export function Hero() {
                 className="max-w-[16rem] sm:max-w-[26rem] lg:max-w-xl lowercase font-display font-semibold leading-[1.05] tracking-[-0.03em] text-title"
                 style={{ fontSize: "clamp(2.5rem, 4.8vw, 3.9rem)" }}
               >
-                Run code you can&rsquo;t fully{" "}
-                <span className="text-accent-2">trust</span>.
+                Run AI agents in a hardware-isolated{" "}
+                <span className="text-accent-2">sandbox</span>.
               </h1>
             </Reveal>
 
             <Reveal delay={120}>
               <p className="font-display text-xl font-semibold leading-snug text-title sm:text-2xl">
-                A secure execution layer, built security-first for AI agents.
+                One command. Their own kernel. No guest network device.
               </p>
               {/* The what-MVM-does callout — this sentence is the pitch, so
                   it gets an accent rule and emphasized key phrases instead
@@ -81,9 +81,9 @@ export function Hero() {
                 className="text-base leading-relaxed text-body"
                 style={{ marginTop: "1rem" }}
               >
-                mvm puts the agent in a box: any workload &mdash; an agent, a
-                customer&rsquo;s code, a build job &mdash; runs inside a
-                sealed, immutable, hardware-isolated microVM.
+                Every file, tool, secret, and outbound connection is governed
+                by a signed execution plan. Run agents, customer code, and
+                build jobs without sharing the host kernel.
               </p>
               {/* Runs-anywhere facts as badge chips, in the same mono idiom
                   as the credibility row above. */}
@@ -105,9 +105,9 @@ export function Hero() {
               <a href={`${base}getting-started/quickstart/`}>
                 <Button size="lg">Get Started</Button>
               </a>
-              <a href="#request-access">
+              <a href={`${base}getting-started/why-mvm/`}>
                 <Button size="lg" variant="outline">
-                  Request access &rarr;
+                  Why mvm &rarr;
                 </Button>
               </a>
             </Reveal>

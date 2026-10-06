@@ -129,17 +129,20 @@ pub fn run(workspace: &Path) -> Result<()> {
     )?;
     validate_runtime_storage_features(&runtime_manifest)?;
 
-    let build_manifest = std::fs::read_to_string(
-        workspace
-            .join("crates")
-            .join("mvm-build")
-            .join("Cargo.toml"),
-    )?;
-    validate_mvm_build_features(&build_manifest)?;
+    for owner in RETIRED_FEATURE_OWNERS {
+        let member_manifest =
+            std::fs::read_to_string(workspace.join("crates").join(owner).join("Cargo.toml"))?;
+        validate_retired_builder_features(owner, &member_manifest)?;
+    }
 
-    let ci_workflow =
-        std::fs::read_to_string(workspace.join(".github").join("workflows").join("ci.yml"))?;
-    validate_mvm_build_feature_references(&ci_workflow)?;
+    let workflows = workspace.join(".github").join("workflows");
+    for (label, path) in [
+        ("Cargo.toml", workspace.join("Cargo.toml")),
+        ("ci.yml", workflows.join("ci.yml")),
+        ("ci-full.yml", workflows.join("ci-full.yml")),
+    ] {
+        validate_retired_builder_feature_references(label, &std::fs::read_to_string(path)?)?;
+    }
 
     eprintln!(
         "check-two-surfaces: clean (exactly two product surfaces: host, user; \
@@ -149,19 +152,24 @@ pub fn run(workspace: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Builder orchestration and the pure ext4 writer are part of mvm-build's
-/// single supported composition. Reintroducing either retired switch recreates
-/// configurations no in-tree consumer can actually select.
-fn validate_mvm_build_features(manifest: &str) -> Result<()> {
-    const RETIRED_FEATURES: [&str; 2] = ["builder-vm", "pure-mkfs"];
+/// Builder orchestration and the pure ext4 writer are compiled unconditionally
+/// in every crate that carries them. These were feature flags once, in both
+/// `mvm-build` and `mvm-cli`; reintroducing either switch recreates
+/// configurations no shipped build selects and no lane tests.
+const RETIRED_BUILDER_FEATURES: [&str; 2] = ["builder-vm", "pure-mkfs"];
+
+/// The crates that used to declare [`RETIRED_BUILDER_FEATURES`].
+const RETIRED_FEATURE_OWNERS: [&str; 2] = ["mvm-build", "mvm-cli"];
+
+fn validate_retired_builder_features(owner: &str, manifest: &str) -> Result<()> {
     let features = feature_names(manifest);
-    let present: Vec<&str> = RETIRED_FEATURES
+    let present: Vec<&str> = RETIRED_BUILDER_FEATURES
         .into_iter()
         .filter(|feature| features.contains(*feature))
         .collect();
     if !present.is_empty() {
         bail!(
-            "check-two-surfaces: mvm-build feature(s) {:?} are retired dead configuration; \
+            "check-two-surfaces: {owner} feature(s) {:?} are retired dead configuration; \
              builder orchestration and pure ext4 materialization are unconditional",
             present
         );
@@ -169,22 +177,42 @@ fn validate_mvm_build_features(manifest: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_mvm_build_feature_references(source: &str) -> Result<()> {
-    const RETIRED_REFERENCES: [&str; 4] = [
-        "mvm-build/builder-vm",
-        "mvm-build/pure-mkfs",
-        "-p mvm-build --features builder-vm",
-        "-p mvm-build --features pure-mkfs",
-    ];
-    let present: Vec<&str> = RETIRED_REFERENCES
-        .into_iter()
-        .filter(|reference| source.contains(reference))
-        .collect();
-    if !present.is_empty() {
+/// Every place `source` names a retired builder feature: as a qualified
+/// `<crate>/<feature>` string, or as one entry of a `--features` list.
+fn retired_builder_feature_references(source: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for line in source.lines() {
+        for owner in RETIRED_FEATURE_OWNERS {
+            for feature in RETIRED_BUILDER_FEATURES {
+                let qualified = format!("{owner}/{feature}");
+                if line.contains(&qualified) {
+                    found.push(qualified);
+                }
+            }
+        }
+        let Some((_, after)) = line.split_once("--features") else {
+            continue;
+        };
+        let list = after
+            .trim_start_matches(['=', ' '])
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        for feature in RETIRED_BUILDER_FEATURES {
+            if list.split(',').any(|entry| entry == feature) {
+                found.push(format!("--features {feature}"));
+            }
+        }
+    }
+    found
+}
+
+fn validate_retired_builder_feature_references(label: &str, source: &str) -> Result<()> {
+    let found = retired_builder_feature_references(source);
+    if !found.is_empty() {
         bail!(
-            "check-two-surfaces: retired mvm-build feature reference(s) {:?}; builder \
-             orchestration and pure ext4 materialization are unconditional",
-            present
+            "check-two-surfaces: {label} names retired builder feature(s) {found:?}; builder \
+             orchestration and pure ext4 materialization are unconditional"
         );
     }
     Ok(())
@@ -395,43 +423,63 @@ wasm-backend = ["dep:wasmtime"]
     }
 
     #[test]
-    fn mvm_build_rejects_retired_builder_composition_features() {
+    fn rejects_retired_builder_features_in_either_owner() {
         let manifest = r#"
 [features]
 default = []
 builder-vm = ["pure-mkfs"]
 pure-mkfs = []
 "#;
-        let err = validate_mvm_build_features(manifest).unwrap_err();
-        assert!(err.to_string().contains("builder-vm"));
-        assert!(err.to_string().contains("pure-mkfs"));
+        for owner in RETIRED_FEATURE_OWNERS {
+            let err = validate_retired_builder_features(owner, manifest).unwrap_err();
+            let message = err.to_string();
+            assert!(message.contains(owner));
+            assert!(message.contains("builder-vm"));
+            assert!(message.contains("pure-mkfs"));
+        }
     }
 
     #[test]
-    fn mvm_build_accepts_only_live_optional_features() {
+    fn accepts_a_manifest_with_only_live_optional_features() {
         let manifest = r#"
 [features]
 default = []
 manifest-verify = ["mvm-core/manifest-verify"]
 release-channel = []
 "#;
-        validate_mvm_build_features(manifest).unwrap();
+        validate_retired_builder_features("mvm-cli", manifest).unwrap();
     }
 
     #[test]
-    fn mvm_build_rejects_retired_workflow_feature_references() {
+    fn rejects_retired_feature_references_in_any_position() {
         let workflow = r#"
 run: cargo test -p mvm-build --features builder-vm --lib
-features = ["mvm-build/pure-mkfs"]
+run: cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify,builder-vm --lib
+run: cargo check -p mvm-cli --features=pure-mkfs
+features = ["mvm-cli/pure-mkfs"]
 "#;
-        let err = validate_mvm_build_feature_references(workflow).unwrap_err();
-        assert!(err.to_string().contains("builder-vm"));
-        assert!(err.to_string().contains("pure-mkfs"));
+        let found = retired_builder_feature_references(workflow);
+        assert_eq!(
+            found,
+            [
+                "--features builder-vm",
+                "--features builder-vm",
+                "--features pure-mkfs",
+                "mvm-cli/pure-mkfs",
+            ]
+        );
+        let err = validate_retired_builder_feature_references("ci.yml", workflow).unwrap_err();
+        assert!(err.to_string().contains("ci.yml"));
     }
 
     #[test]
-    fn mvm_build_accepts_unconditional_workflow_invocations() {
-        let workflow = "run: cargo test -p mvm-build --lib rootfs::tests::pure";
-        validate_mvm_build_feature_references(workflow).unwrap();
+    fn accepts_unconditional_invocations_and_cache_paths() {
+        let workflow = r#"
+run: cargo test -p mvm-build --lib rootfs::tests::pure
+run: cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib
+run: nix build "./nix/images/builder-vm#packages.x86_64-linux.default"
+run: du -sh "$MVM_CACHE/builder-vm"
+"#;
+        validate_retired_builder_feature_references("ci.yml", workflow).unwrap();
     }
 }

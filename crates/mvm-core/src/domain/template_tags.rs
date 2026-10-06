@@ -10,8 +10,8 @@
 //!   they go through the same `mvm-core::crypto::policy::InputValidator`
 //!   discipline as sandbox tags.
 //! - **aliases** — name → revision_hash pointers (`latest`,
-//!   `stable`, etc.). Resolution happens at `mvmctl up` /
-//!   `mvmctl exec` time via [`resolve_alias`]. Setting an alias
+//!   `stable`, etc.). Resolution happens when `mvmctl machine run
+//!   --manifest` resolves its argument, via [`resolve_alias`]. Setting an alias
 //!   that already exists is a deliberate move — the old target is
 //!   silently overwritten, mirroring `git tag -f`'s "movable
 //!   pointer" semantics.
@@ -152,8 +152,8 @@ impl TemplateTags {
 /// Resolve `alias` for `template_id` to a revision_hash. Returns
 /// `None` when the catalog is missing, the alias is unknown, or
 /// the catalog can't be parsed (treat the latter as "no resolution"
-/// rather than a hard error so a corrupt tags.json doesn't block
-/// `mvmctl up`).
+/// rather than a hard error so a corrupt tags.json doesn't block a
+/// boot).
 pub fn resolve_alias(template_id: &str, alias: &str) -> Option<String> {
     let catalog = TemplateTags::load(template_id).ok()?;
     catalog.aliases.get(alias).cloned()
@@ -161,8 +161,8 @@ pub fn resolve_alias(template_id: &str, alias: &str) -> Option<String> {
 
 /// Parse an `<template_id>@<alias>` reference. Returns the
 /// (template_id, alias) split if `@` is present; `None` when the
-/// raw arg is just a template name. Used by `mvmctl up --manifest`
-/// to decide whether to consult the alias catalog.
+/// raw arg is just a template name. Used by `mvmctl machine run
+/// --manifest` to decide whether to consult the alias catalog.
 pub fn split_aliased_ref(raw: &str) -> Option<(&str, &str)> {
     let (id, alias) = raw.split_once('@')?;
     if id.is_empty() || alias.is_empty() {

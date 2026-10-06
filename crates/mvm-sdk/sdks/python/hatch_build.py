@@ -6,6 +6,12 @@ must be platform-tagged — a universal wheel would let another platform's
 pip install a package whose transport file has the wrong format. A build
 without the library (local development) stays universal: the SDK loaders
 fall back to the library beside ``mvmctl``.
+
+On Linux this hook can only say ``linux_<arch>``, which PyPI refuses: which
+glibc or musl the library needs is a property of how it was linked, not of
+the build host. The publish workflow therefore hands the wheel to auditwheel,
+which reads the library's symbol versions and retags it ``manylinux_2_17`` or
+``musllinux_1_2`` only if the library satisfies that policy.
 """
 
 import sys

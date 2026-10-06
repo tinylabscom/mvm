@@ -14,10 +14,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 pub(in crate::commands) use mvm_client::egress_denials::{
-    DenialTally, DenialWatch, DeniedDestination, Live, WatchTarget, print_summary,
-    verify_local_chain,
+    DenialTally, DenialWatch, DeniedDestination, Live, WatchTarget, latest_admission,
+    print_summary, verify_local_chain,
 };
 
+use super::denial_review::ReviewOffer;
 use super::host_notices::{NoticeSink, Stderr};
 
 /// Start watching `vm_name`'s refusals in the local tenant's chain. `None`
@@ -31,11 +32,16 @@ pub(in crate::commands) fn watch_machine(vm_name: &str, live: Live) -> Option<De
     }))
 }
 
-/// Finish a watch, if one was running, and print its exit summary. Returns
-/// what it saw.
-pub(in crate::commands) fn finish_and_summarize(watch: Option<DenialWatch>) -> DenialTally {
+/// Finish a watch, if one was running, print its exit summary, and offer its
+/// grantable refusals for review — in place when `review` names the project
+/// manifest the run was admitted under and there is a terminal, otherwise as
+/// the `mvmctl explain` command that reviews them later. Returns what it saw.
+pub(in crate::commands) fn finish_and_summarize(
+    watch: Option<DenialWatch>,
+    review: &ReviewOffer,
+) -> DenialTally {
     let tally = watch.map(DenialWatch::finish).unwrap_or_default();
-    print_summary(&tally, &Stderr);
+    super::denial_review::summarize_and_offer(&tally, review);
     tally
 }
 

@@ -250,11 +250,12 @@ fn parse_example(command: &ClapCommand, example: &DocExample) -> Result<Vec<Stri
 #[then(expr = "every documented mvmctl example parses against the real CLI")]
 fn every_documented_example_parses(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
+    let known = crate::steps::cli::command_paths(&command);
     let mut failures = Vec::new();
     let mut parsed = 0usize;
 
     for example in corpus() {
-        if example.is_template() || example.source != ExampleSource::Fenced {
+        if example.is_template(&known) || example.source != ExampleSource::Fenced {
             continue;
         }
         match parse_example(&command, &example) {
@@ -282,11 +283,12 @@ fn every_documented_example_parses(_world: &mut CliWorld) {
 #[then(expr = "every documented command path carries a verification tier")]
 fn every_documented_path_has_a_tier(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
+    let known = crate::steps::cli::command_paths(&command);
     let policy = tier_policy();
     let mut unclassified: BTreeMap<String, String> = BTreeMap::new();
 
     for example in corpus() {
-        if example.is_template() {
+        if example.is_template(&known) {
             continue;
         }
         let Ok(path) = parse_example(&command, &example) else {
@@ -591,6 +593,7 @@ fn instruction_trust_examples_run(
 #[then(expr = "every side-effect-free documented example executes successfully")]
 fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
+    let known = crate::steps::cli::command_paths(&command);
     let policy = tier_policy();
     let host_state_exit = host_state_exit_paths();
     let overrides = exec_overrides();
@@ -606,7 +609,7 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
     let mut seen: BTreeSet<Vec<String>> = BTreeSet::new();
 
     for example in corpus() {
-        if example.is_template() {
+        if example.is_template(&known) {
             continue;
         }
         let Ok(path) = parse_example(&command, &example) else {
@@ -670,14 +673,15 @@ fn every_exec_tier_example_runs(_world: &mut CliWorld) {
 #[then(expr = "every documented placeholder template names a real or declared command")]
 fn every_template_names_a_real_command(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
+    let known = crate::steps::cli::command_paths(&command);
     let planned = planned_paths();
 
     let mut unknown = Vec::new();
     for example in corpus() {
-        if !example.is_template() {
+        if !example.is_template(&known) {
             continue;
         }
-        if let Some(bogus) = unknown_subcommand(&command, &example.concrete_prefix()) {
+        if let Some(bogus) = unknown_subcommand(&command, &example.concrete_prefix(&known)) {
             if planned.contains(&bogus) {
                 continue;
             }
@@ -842,6 +846,7 @@ fn collect_features(dir: &Path, out: &mut Vec<PathBuf>) {
 #[then(expr = "every command named in the docs prose exists")]
 fn every_inline_named_command_exists(_world: &mut CliWorld) {
     let command = mvm_cli::commands::cli_command();
+    let known = crate::steps::cli::command_paths(&command);
     let planned = planned_paths();
 
     let mut unknown = Vec::new();
@@ -849,7 +854,7 @@ fn every_inline_named_command_exists(_world: &mut CliWorld) {
         if example.source != ExampleSource::Inline {
             continue;
         }
-        if let Some(bogus) = unknown_subcommand(&command, &example.concrete_prefix()) {
+        if let Some(bogus) = unknown_subcommand(&command, &example.concrete_prefix(&known)) {
             if planned.contains(&bogus) {
                 continue;
             }
@@ -1424,8 +1429,7 @@ fn docs_coverage_path() -> PathBuf {
 fn compute_docs_coverage() -> (BTreeSet<String>, BTreeSet<String>) {
     let root = repo_root();
     let command_tree = mvm_cli::commands::cli_command();
-    let mut known_paths = Vec::new();
-    crate::steps::cli::collect_command_paths(&command_tree, &[], &mut known_paths);
+    let known_paths = crate::steps::cli::command_paths(&command_tree);
 
     let scenarios = crate::steps::readme_contract::all_scenario_commands();
 
@@ -1445,7 +1449,7 @@ fn compute_docs_coverage() -> (BTreeSet<String>, BTreeSet<String>) {
             continue;
         };
         for example in mvm_conformance::doc_examples::doc_examples(&relative, &contents) {
-            if example.is_template()
+            if example.is_template(&known_paths)
                 || !matches!(
                     example.source,
                     mvm_conformance::doc_examples::ExampleSource::Fenced
@@ -1572,7 +1576,9 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // paths are exercised by tests/cli.rs against a file:// registry. Image
 // `dev ensure` likewise needs a signed release endpoint; its selection,
 // verification, and fetch-when-unchanged behavior have focused CLI tests.
-const PARSE_TIER_PIN: usize = 78;
+// `build guest-bins` cross-compiles every guest binary for both guest
+// architectures; its archive and verification logic have unit tests.
+const PARSE_TIER_PIN: usize = 79;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {

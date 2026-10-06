@@ -55,22 +55,19 @@ pub struct TemplateSpec {
     /// Initial host commitment in MiB when the template opts into
     /// virtio-balloon. `None` keeps the legacy "commit `mem_mib` at
     /// boot" behaviour; `Some(n)` sources `VmStartConfig::mem_initial_mib`
-    /// from the template when `mvmctl up` doesn't override it on the
-    /// CLI or via `--config`. Backward-compat: missing field
+    /// from the template when the boot request doesn't set its own.
+    /// Backward-compat: missing field
     /// deserialises to `None` for templates that predate the schema.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_initial_mib: Option<u32>,
     pub data_disk_mib: u32,
     pub created_at: String,
     pub updated_at: String,
-    /// Default network policy applied when `mvmctl up` / `mvmctl exec`
-    /// don't override it on the CLI. Lets templates ship with their
-    /// intended posture baked in
-    /// (e.g. `claude-code-vm` defaults to the `agent` preset) so
-    /// operators don't have to remember `--network-preset agent` per
-    /// invocation. Backward-compat: existing `template.json` files
-    /// that predate this field deserialize as `None` (open egress,
-    /// matching prior behaviour).
+    /// Default network policy for boots of this template that don't name
+    /// one. No boot path reads it yet and every template writer leaves it
+    /// `None`, so a boot's policy comes from its own flags, which default
+    /// to deny-all. `template.json` files that predate this field
+    /// deserialize as `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_network_policy: Option<crate::policy::network_policy::NetworkPolicy>,
 }
@@ -197,9 +194,9 @@ impl SnapshotCompatibility {
 
 /// Metadata about a template's pre-built snapshot.
 ///
-/// Created by `mvmctl build --snapshot` after booting the VM and
-/// waiting for the service to become healthy. Used by `mvmctl up
-/// --manifest` to restore the VM instantly instead of cold-booting.
+/// The transient runner probes a template revision for one when it
+/// resolves a template image, so a snapshot-eligible request can skip the
+/// cold boot. No build path writes one today.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SnapshotInfo {
     pub created_at: String,
