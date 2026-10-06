@@ -15,10 +15,11 @@
 //! implicitly reauthenticate previously emitted attestation reports,
 //! and vice versa.
 //!
-//! The lifecycle mirrors `mvm_cli::commands::vm::host_signer`
-//! verbatim — generate-on-first-use with `SysRng`, refuse to load if
-//! the secret-half's permissions are looser than `0600`, refuse if
-//! the public-half doesn't match what the secret derives. The
+//! The lifecycle is the host plan signer's, from the same
+//! [`crate::crypto::ed25519_keypair`] — generate on first use (safely
+//! when several processes race to it), refuse to load if the
+//! secret-half's permissions are looser than `0600`, refuse if the
+//! public-half doesn't match what the secret derives. The
 //! divergence is the directory + filenames so the two identities
 //! never collide on disk and a sloppy operator can't accidentally
 //! confuse "rotate my plan signer" with "rotate my attestation
@@ -33,13 +34,11 @@
 //! mode and the expected mode so the operator can `chmod 0600 <file>`
 //! and re-run, or rotate the keypair via `rm` + next CLI call.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use rand::Rng;
-use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+
+use crate::crypto::ed25519_keypair;
 
 /// Filename of the Ed25519 secret half under
 /// `~/.mvm/attestation/`.
@@ -50,13 +49,13 @@ pub const SECRET_FILENAME: &str = "identity.ed25519";
 pub const PUBLIC_FILENAME: &str = "identity.pub";
 
 /// Required mode for the secret half file.
-pub const SECRET_MODE: u32 = 0o600;
+pub const SECRET_MODE: u32 = ed25519_keypair::SECRET_MODE;
 
 /// Required mode for the public half file.
-pub const PUBLIC_MODE: u32 = 0o644;
+pub const PUBLIC_MODE: u32 = ed25519_keypair::PUBLIC_MODE;
 
 /// Length of an Ed25519 key, in bytes (both halves).
-pub const KEY_BYTES: usize = 32;
+pub const KEY_BYTES: usize = ed25519_keypair::KEY_BYTES;
 
 /// Resolve the attestation key directory: `<mvm_home>/attestation/`.
 pub fn default_identity_dir() -> Result<PathBuf> {
@@ -78,8 +77,8 @@ pub fn identity_signer_id() -> String {
 ///
 /// Idempotent — a subsequent call reloads the same keypair from
 /// disk. Refuses if the secret half's perms are looser than
-/// `SECRET_MODE`. The caller is responsible for ensuring `~/.mvm/`
-/// itself is mode `0700`.
+/// `SECRET_MODE`. The attestation directory and every component above
+/// it inside the mvm home are created or tightened to `0700`.
 pub fn load_or_init() -> Result<IdentityKey> {
     load_or_init_at(&default_identity_dir()?)
 }
@@ -87,26 +86,18 @@ pub fn load_or_init() -> Result<IdentityKey> {
 /// Same as [`load_or_init`] but accepts an explicit directory.
 /// Test seam — every unit test points this at a fresh `tempdir`.
 pub fn load_or_init_at(dir: &Path) -> Result<IdentityKey> {
-    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    #[cfg(unix)]
-    {
-        let mut perms = std::fs::metadata(dir)
-            .with_context(|| format!("stat {}", dir.display()))?
-            .permissions();
-        if perms.mode() & 0o777 != 0o700 {
-            perms.set_mode(0o700);
-            std::fs::set_permissions(dir, perms)
-                .with_context(|| format!("chmod 0700 {}", dir.display()))?;
-        }
-    }
+    crate::config::create_private_dir(dir)
+        .with_context(|| format!("creating {} privately", dir.display()))?;
 
     let secret_path = dir.join(SECRET_FILENAME);
     let public_path = dir.join(PUBLIC_FILENAME);
-
-    if secret_path.exists() {
-        return load_existing(&secret_path, &public_path);
-    }
-    generate_new(&secret_path, &public_path)
+    let (signing, verifying) = ed25519_keypair::load_or_init(&secret_path, &public_path)?;
+    Ok(IdentityKey {
+        signing,
+        verifying,
+        secret_path,
+        public_path,
+    })
 }
 
 /// The loaded identity key + its derived public half. Carries the
@@ -147,118 +138,11 @@ impl IdentityKey {
     }
 }
 
-fn generate_new(secret_path: &Path, public_path: &Path) -> Result<IdentityKey> {
-    let mut __ed_seed = [0u8; 32];
-    rand::rng().fill_bytes(&mut __ed_seed);
-    let signing = SigningKey::from_bytes(&__ed_seed);
-    let verifying = signing.verifying_key();
-
-    // Write secret half mode 0600. `create_new` refuses if a
-    // concurrent caller raced us into existence. `mode()` is subject
-    // to the process umask on Unix, so also chmod explicitly after the
-    // write to guarantee the secret half is never group- or world-readable.
-    {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(SECRET_MODE)
-            .open(secret_path)
-            .with_context(|| format!("creating {}", secret_path.display()))?;
-        f.write_all(signing.to_bytes().as_ref())
-            .with_context(|| format!("writing {}", secret_path.display()))?;
-        f.sync_all().ok();
-        let perms = std::fs::Permissions::from_mode(SECRET_MODE);
-        std::fs::set_permissions(secret_path, perms)
-            .with_context(|| format!("chmod 0600 {}", secret_path.display()))?;
-    }
-
-    // Write public half mode 0644.
-    {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(PUBLIC_MODE)
-            .open(public_path)
-            .with_context(|| format!("creating {}", public_path.display()))?;
-        f.write_all(verifying.to_bytes().as_ref())
-            .with_context(|| format!("writing {}", public_path.display()))?;
-        f.sync_all().ok();
-    }
-
-    Ok(IdentityKey {
-        signing,
-        verifying,
-        secret_path: secret_path.to_path_buf(),
-        public_path: public_path.to_path_buf(),
-    })
-}
-
-fn load_existing(secret_path: &Path, public_path: &Path) -> Result<IdentityKey> {
-    let meta = std::fs::metadata(secret_path)
-        .with_context(|| format!("stat {}", secret_path.display()))?;
-    let mode = meta.permissions().mode() & 0o777;
-    if mode != SECRET_MODE {
-        bail!(
-            "{} has mode {:04o}; expected {:04o}. Tighten with `chmod 0600 {}` or rotate.",
-            secret_path.display(),
-            mode,
-            SECRET_MODE,
-            secret_path.display(),
-        );
-    }
-
-    let secret_bytes = read_exact_n(secret_path, KEY_BYTES)?;
-    let signing = SigningKey::from_bytes(
-        &secret_bytes
-            .as_slice()
-            .try_into()
-            .expect("read_exact_n returned wrong length"),
-    );
-
-    let public_bytes = read_exact_n(public_path, KEY_BYTES)?;
-    let public_array: [u8; KEY_BYTES] = public_bytes
-        .as_slice()
-        .try_into()
-        .expect("read_exact_n returned wrong length");
-    let public_from_disk = VerifyingKey::from_bytes(&public_array)
-        .with_context(|| format!("parsing {}", public_path.display()))?;
-    let derived = signing.verifying_key();
-    if public_from_disk.to_bytes() != derived.to_bytes() {
-        bail!(
-            "{} does not match the public key derived from {}. Rotate via `rm` + re-run.",
-            public_path.display(),
-            secret_path.display(),
-        );
-    }
-
-    Ok(IdentityKey {
-        signing,
-        verifying: derived,
-        secret_path: secret_path.to_path_buf(),
-        public_path: public_path.to_path_buf(),
-    })
-}
-
-fn read_exact_n(path: &Path, n: usize) -> Result<Vec<u8>> {
-    let meta = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
-    if meta.len() != n as u64 {
-        bail!(
-            "{} is {} bytes, expected {}. Rotate via `rm` + re-run.",
-            path.display(),
-            meta.len(),
-            n
-        );
-    }
-    let mut f = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut buf = vec![0u8; n];
-    f.read_exact(&mut buf)
-        .with_context(|| format!("reading {}", path.display()))?;
-    Ok(buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::Rng as _;
+    use std::os::unix::fs::PermissionsExt as _;
     use tempfile::TempDir;
 
     fn fresh_dir() -> TempDir {

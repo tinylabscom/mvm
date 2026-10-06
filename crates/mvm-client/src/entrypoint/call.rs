@@ -16,13 +16,15 @@ use mvm_core::session::{SessionId, SessionMode};
 use super::admission::EntrypointAdmission;
 use super::boot::{
     AdmitInputs, SessionAuditSubstrate, SessionBoot, SessionVm, SessionVmName, boot_session_vm,
-    tear_down_session_vm,
+    stop_session_vm, tear_down_session_vm,
 };
 use super::dispatch::{
-    CallObserver, CallOutcome, CallStdin, EntrypointDispatch, authorize_stdin, dispatch,
+    CallObserver, CallOutcome, CallStdin, CallTerminal, EntrypointDispatch, authorize_stdin,
+    dispatch,
 };
 use crate::admission::{AdmissionContext, emit_failed, emit_launched};
 use crate::launch::runtime_source::PairArtifactSource;
+use crate::launch::{TransientEnd, seal_transient_end};
 
 /// How long a freshly booted VM's agent has to answer.
 pub const AGENT_WAIT_SECS: u64 = 30;
@@ -153,7 +155,9 @@ pub struct EntrypointCall<'a> {
 ///
 /// A session record is registered for the call's lifetime so `session ls`
 /// sees it, and a transport drop coincident with a `session kill` is reported
-/// as the kill. A kept-alive call keeps the record, writes a `SessionStart`
+/// as the kill. A transient call's audit session ends with its VM: once the VM
+/// is stopped, `plan.exited` and a seal are written under the admitted plan
+/// (see [`CallEnd`]). A kept-alive call keeps the record, writes a `SessionStart`
 /// audit entry, and tells the observer which VM and session it left running —
 /// even when the call itself failed, because the VM is still there.
 ///
@@ -174,6 +178,7 @@ pub fn run_entrypoint_call(
     let streams_stdin = stdin.is_streaming();
     vm.admission = vm.admission.with_stream_stdin(streams_stdin);
     let slot = vm.slot;
+    let backend_name = vm.admission.backend_name().to_string();
     let named = vm.vm_name.resolve();
     observer.vm_named(&named);
     let booted = boot_entrypoint_vm(
@@ -205,7 +210,7 @@ pub fn run_entrypoint_call(
     let dispatch_stdin = match authorize_stdin(stdin, Some(&booted.admission.admitted)) {
         Ok(stdin) => stdin,
         Err(refusal) => {
-            tear_down_session_vm(booted.vm.clone());
+            end_transient_call(&booted, &backend_name, CallEnd::NOT_RUN);
             deregister_call_session(session_id.as_ref());
             return Err(refusal);
         }
@@ -235,11 +240,76 @@ pub fn run_entrypoint_call(
             observer.kept_alive(&vm_name, session_id.as_ref());
         }
         CallLifecycle::Transient => {
-            tear_down_session_vm(booted.vm);
+            end_transient_call(&booted, &backend_name, CallEnd::of(&result));
             deregister_call_session(session_id.as_ref());
         }
     }
     result
+}
+
+/// How a transient call ended, as the host observed it. Only a workload that
+/// exited has an exit code; a call that failed, timed out, was killed or never
+/// reached the workload records none, so it can never read as exit 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CallEnd {
+    exit_code: Option<i32>,
+    completed: bool,
+}
+
+impl CallEnd {
+    /// A call refused before anything was dispatched.
+    const NOT_RUN: Self = Self {
+        exit_code: None,
+        completed: false,
+    };
+
+    fn of(result: &Result<CallOutcome>) -> Self {
+        match result {
+            Ok(CallOutcome {
+                terminal: CallTerminal::Exited { code },
+                ..
+            }) => Self {
+                exit_code: Some(*code),
+                completed: true,
+            },
+            Ok(_) | Err(_) => Self::NOT_RUN,
+        }
+    }
+}
+
+/// Stop a transient call's VM, then close its audit session. A VM whose stop
+/// failed may still be running, so its session is left open rather than
+/// sealed over a guest that can still act.
+fn end_transient_call(booted: &BootedEntrypoint, backend: &str, end: CallEnd) {
+    if let Err(e) = stop_session_vm(&booted.vm) {
+        tracing::warn!(
+            vm = %booted.vm.vm_name,
+            err = %e,
+            "transient call stop failed; refusing to seal a potentially live session"
+        );
+        return;
+    }
+    close_call_session(&booted.admission, &booted.vm.vm_name, backend, end);
+}
+
+/// Write `plan.exited` and the seal for a stopped transient call, under the
+/// plan it was admitted with. Best-effort: the call already happened, and a
+/// session that could not be sealed is reported `UNSEALED` by
+/// `trust audit verify` rather than failing the call.
+fn close_call_session(ctx: &AdmissionContext, vm_name: &str, backend: &str, end: CallEnd) {
+    let closed = seal_transient_end(
+        &ctx.emitter,
+        ctx.admitted.plan(),
+        TransientEnd {
+            vm_name,
+            backend,
+            exit_code: end.exit_code,
+            completed: end.completed,
+        },
+    );
+    if let Err(e) = closed {
+        tracing::warn!(vm = vm_name, err = %e, "could not seal the transient call's session");
+    }
 }
 
 /// Register a session record for a call. `None` when the record could not be
@@ -413,6 +483,131 @@ mod tests {
             mvm_core::session::list_sessions().expect("list").is_empty(),
             "a call that never booted registers nothing"
         );
+    }
+
+    /// The session `trust audit verify <session>` would report for `ctx`.
+    fn session_report(
+        ctx: &AdmissionContext,
+        audit_dir: &std::path::Path,
+    ) -> mvm_hostd::audit::session::SessionVerification {
+        mvm_hostd::audit::session::verify_session(
+            audit_dir,
+            "local",
+            &ctx.admitted.plan().plan_id.0,
+            &ctx.emitter.verifying_key(),
+        )
+    }
+
+    /// The single seal on `ctx`'s session, failing unless it verifies.
+    fn only_seal(
+        ctx: &AdmissionContext,
+        audit_dir: &std::path::Path,
+    ) -> mvm_hostd::audit::session::SessionSeal {
+        let report = session_report(ctx, audit_dir);
+        assert_eq!(
+            report.verdict,
+            mvm_hostd::audit::session::Verdict::Verified,
+            "{report:?}"
+        );
+        assert_eq!(report.late_entries, 0, "the seal covers the whole call");
+        let [check] = report.seals.as_slice() else {
+            panic!("exactly one seal: {:?}", report.seals);
+        };
+        check.seal.clone()
+    }
+
+    fn exited(code: i32) -> Result<CallOutcome> {
+        Ok(CallOutcome {
+            terminal: CallTerminal::Exited { code },
+            capture: None,
+        })
+    }
+
+    #[test]
+    fn only_a_workload_exit_carries_an_exit_code() {
+        assert_eq!(
+            CallEnd::of(&exited(3)),
+            CallEnd {
+                exit_code: Some(3),
+                completed: true
+            }
+        );
+        let timed_out = Ok(CallOutcome {
+            terminal: CallTerminal::Failed {
+                kind: mvm_agentd::vsock::RunEntrypointError::Timeout,
+                message: "timed out".to_string(),
+            },
+            capture: None,
+        });
+        assert_eq!(CallEnd::of(&timed_out), CallEnd::NOT_RUN);
+        assert_eq!(
+            CallEnd::of(&Err(anyhow::anyhow!("transport dropped"))),
+            CallEnd::NOT_RUN
+        );
+    }
+
+    #[test]
+    fn an_entrypoint_call_exit_is_sealed_from_its_admitted_plan() {
+        let _home = isolated();
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let ctx = crate::admission::admit_plan_tests::admitted_into(
+            keys_dir.path(),
+            audit_dir.path(),
+            "invoke-exit",
+        );
+        emit_launched(&ctx, "firecracker", true);
+
+        close_call_session(&ctx, "invoke-exit", "firecracker", CallEnd::of(&exited(0)));
+
+        let seal = only_seal(&ctx, audit_dir.path());
+        assert_eq!(seal.reason, mvm_hostd::audit::session::SealReason::Exited);
+        assert_eq!(seal.exit_code.as_deref(), Some("0"));
+        let audit = std::fs::read_to_string(audit_dir.path().join("local.jsonl")).expect("chain");
+        assert!(audit.contains("plan.exited"), "{audit}");
+        assert!(audit.contains("\"backend\":\"firecracker\""), "{audit}");
+    }
+
+    #[test]
+    fn a_failed_entrypoint_call_is_never_sealed_as_exit_zero() {
+        let _home = isolated();
+        let failures: [(&str, Result<CallOutcome>); 2] = [
+            (
+                "invoke-timeout",
+                Ok(CallOutcome {
+                    terminal: CallTerminal::Failed {
+                        kind: mvm_agentd::vsock::RunEntrypointError::Timeout,
+                        message: "timed out".to_string(),
+                    },
+                    capture: None,
+                }),
+            ),
+            ("invoke-error", Err(anyhow::anyhow!("transport dropped"))),
+        ];
+        for (vm_name, result) in failures {
+            let keys_dir = tempfile::tempdir().expect("keys dir");
+            let audit_dir = tempfile::tempdir().expect("audit dir");
+            let ctx = crate::admission::admit_plan_tests::admitted_into(
+                keys_dir.path(),
+                audit_dir.path(),
+                vm_name,
+            );
+            emit_launched(&ctx, "firecracker", true);
+
+            close_call_session(&ctx, vm_name, "firecracker", CallEnd::of(&result));
+
+            let seal = only_seal(&ctx, audit_dir.path());
+            assert_eq!(
+                seal.reason,
+                mvm_hostd::audit::session::SealReason::Failed,
+                "{vm_name}"
+            );
+            assert_ne!(seal.exit_code.as_deref(), Some("0"), "{vm_name}");
+            let audit =
+                std::fs::read_to_string(audit_dir.path().join("local.jsonl")).expect("chain");
+            assert!(audit.contains("\"exit_code\":\"none\""), "{audit}");
+            assert!(!audit.contains("\"exit_code\":\"0\""), "{audit}");
+        }
     }
 
     #[test]

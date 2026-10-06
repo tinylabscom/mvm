@@ -778,3 +778,74 @@ fn changing_only_an_owner_changes_the_fingerprint() {
         }
     }
 }
+
+/// A writable in-memory block device, so the reader can allocate in the image.
+struct WritableDev(std::sync::Mutex<Vec<u8>>);
+
+impl BlockDevice for WritableDev {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_ext4::error::Result<()> {
+        let image = self.0.lock().unwrap();
+        let start = offset as usize;
+        buf.copy_from_slice(&image[start..start + buf.len()]);
+        Ok(())
+    }
+    fn size_bytes(&self) -> u64 {
+        self.0.lock().unwrap().len() as u64
+    }
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_ext4::error::Result<()> {
+        let mut image = self.0.lock().unwrap();
+        let start = offset as usize;
+        image[start..start + buf.len()].copy_from_slice(buf);
+        Ok(())
+    }
+    fn is_writable(&self) -> bool {
+        true
+    }
+}
+
+fn workspace_tree() -> Vec<Node> {
+    vec![Node::File {
+        path: "/marker".into(),
+        mode: 0o644,
+        data: b"seeded\n".to_vec(),
+        xattrs: Vec::new(),
+        owner: Owner::ROOT,
+    }]
+}
+
+/// Create `/agent.bin` and write `len` bytes into it through the reader.
+fn write_new_file(image: Vec<u8>, len: usize) -> fs_ext4::error::Result<Vec<u8>> {
+    let fs = Filesystem::mount(Arc::new(WritableDev(std::sync::Mutex::new(image))))
+        .expect("mount writable");
+    fs.apply_create("/agent.bin", 0o644)?;
+    let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+    fs.apply_pwrite("/agent.bin", 0, &payload)?;
+    let ino = resolve(&fs, "/agent.bin");
+    Ok(read_file(&fs, ino))
+}
+
+#[test]
+fn a_read_only_image_has_no_room_for_a_guest_to_write() {
+    let image = build_image(workspace_tree(), &Default::default()).expect("image");
+    assert!(
+        write_new_file(image, 1024 * 1024).is_err(),
+        "a content-sized image must have no free blocks"
+    );
+}
+
+#[test]
+fn an_image_built_with_free_space_takes_new_files() {
+    let image = build_image(
+        workspace_tree(),
+        &mvm_fs::ext4::BuildOptions::default().with_free_space(16 * 1024 * 1024, 64),
+    )
+    .expect("image");
+    let written = write_new_file(image, 4 * 1024 * 1024).expect("the free space is usable");
+    assert_eq!(written.len(), 4 * 1024 * 1024);
+    assert!(
+        written
+            .iter()
+            .enumerate()
+            .all(|(i, b)| *b == (i % 251) as u8)
+    );
+}

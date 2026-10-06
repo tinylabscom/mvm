@@ -2,7 +2,7 @@ use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_core::checkpoint::{CheckpointKeyDomain, ContentBlob};
+use mvm_core::checkpoint::{CheckpointClass, CheckpointKeyDomain, CheckpointMeta, ContentBlob};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
@@ -733,9 +733,6 @@ fn expected_chunk_len(index: &ChunkIndex, position: usize) -> Result<usize> {
 }
 
 pub(super) fn materialized_sha256(content_dir: &Path, blob: &ContentBlob) -> Result<String> {
-    if !index_path(content_dir, &blob.name).is_file() {
-        return Ok(blob.sha256.clone());
-    }
     load_index(content_dir, blob)?
         .materialized_sha256
         .map(|digest| digest.as_str().to_string())
@@ -758,6 +755,49 @@ pub(super) fn load_index(content_dir: &Path, blob: &ContentBlob) -> Result<Chunk
         actual.as_str()
     );
     Ok(index)
+}
+
+/// The blobs a capture stores in chunks: the rootfs and memory image of a
+/// vm_full checkpoint, and the rootfs of an fs_quick one. An fs_quick rootfs
+/// keeps the live image's own file name, so it is found by position: the
+/// capture records it first.
+fn chunked_blob_names(meta: &CheckpointMeta) -> Vec<&str> {
+    match meta.class {
+        CheckpointClass::VmFull => vec![
+            mvm_core::checkpoint::ROOTFS_BLOB,
+            mvm_core::checkpoint::MEMORY_BLOB,
+        ],
+        CheckpointClass::FsQuick => meta
+            .content
+            .first()
+            .map(|blob| blob.name.as_str())
+            .into_iter()
+            .collect(),
+    }
+}
+
+/// Refuse a checkpoint that stores a large blob as one whole file, the layout
+/// captures used before they were chunked. Such a checkpoint is never
+/// migrated: checkpoints are host-local and the layout shipped only in a
+/// pre-release, so the fix is to remove it and capture again.
+///
+/// A blob with neither an index nor a whole file is left to the caller's own
+/// missing-blob error, which names what is missing rather than blaming the
+/// layout.
+pub(super) fn ensure_chunked_layout(content_dir: &Path, meta: &CheckpointMeta) -> Result<()> {
+    for name in chunked_blob_names(meta) {
+        validate_blob_name(name)?;
+        if index_path(content_dir, name).is_file() || !content_dir.join(name).is_file() {
+            continue;
+        }
+        anyhow::bail!(
+            "checkpoint '{}' stores {name} as one whole file, a layout this version no longer \
+             reads; remove it with `mvmctl machine checkpoint rm {}` and capture the machine again",
+            meta.id,
+            meta.id
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn is_chunked_blob(content_dir: &Path, blob: &ContentBlob) -> bool {

@@ -536,6 +536,7 @@ fn secret_bearing_config() -> mvm_hostd::supervisor::network_endpoint::EndpointC
     use mvm_hostd::supervisor::network_endpoint::{EndpointConfig, EndpointTransport};
 
     EndpointConfig {
+        telemetry: None,
         tenant_id: "local".into(),
         instance_id: "test".into(),
         secrets: vec![SecretBinding {
