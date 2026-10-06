@@ -289,6 +289,79 @@ def test_lifecycle_methods_address_the_machine_by_name(hostlib) -> None:
     ]
 
 
+def test_pause_and_resume_send_only_what_was_asked(hostlib) -> None:
+    sealed = {"epoch": 3, "vmstate_len": 12, "mem_len": 8}
+    hostlib.reply("machine.pause", sealed)
+    hostlib.reply("machine.pause", sealed)
+    hostlib.reply("machine.resume", {"epoch": 3, "vmstate_len": 12, "mem_len": 8, "reseed": "ok"})
+    hostlib.reply("machine.resume", {"epoch": 0, "vmstate_len": 0, "mem_len": 0, "reseed": "ok"})
+    machine = mvm.Machine("devbox")
+
+    assert machine.pause() == sealed
+    assert machine.pause(primed_barrier=True, primed_timeout=30)["epoch"] == 3
+    assert machine.resume()["reseed"] == "ok"
+    assert machine.resume(warm=True)["epoch"] == 0
+
+    assert hostlib.calls == [
+        ("machine.pause", {"id": "devbox"}),
+        ("machine.pause", {"id": "devbox", "primed_barrier": True, "primed_timeout_secs": 30}),
+        ("machine.resume", {"id": "devbox"}),
+        ("machine.resume", {"id": "devbox", "warm": True}),
+    ]
+
+
+def test_a_replayed_snapshot_refusal_propagates(hostlib) -> None:
+    hostlib.fail("machine.resume", "BACKEND_ERROR", "snapshot epoch 2 is older than 3")
+    with pytest.raises(mvm.MachineBackendError, match="older than"):
+        mvm.Machine("devbox").resume()
+
+
+def test_reconfigure_sends_only_the_fields_it_changes(hostlib) -> None:
+    hostlib.reply("machine.reconfigure", _state("devbox"))
+    hostlib.reply("machine.reconfigure", _state("devbox", status="stopped"))
+    machine = mvm.Machine("devbox")
+
+    assert machine.reconfigure(cpus=2)["status"] == "running"
+    assert machine.reconfigure(cpus=4, memory_mib=1024)["status"] == "stopped"
+
+    assert hostlib.requests("machine.reconfigure") == [
+        {"id": "devbox", "cpus": 2},
+        {"id": "devbox", "cpus": 4, "memory_mib": 1024},
+    ]
+
+
+def test_set_ttl_sets_and_clears_the_expiry(hostlib) -> None:
+    hostlib.reply("machine.set_ttl", {})
+    hostlib.reply("machine.set_ttl", {})
+    machine = mvm.Machine("devbox")
+
+    assert machine.set_ttl("2030-01-02T03:04:05Z") is None
+    assert machine.set_ttl(None) is None
+
+    assert hostlib.requests("machine.set_ttl") == [
+        {"id": "devbox", "expires_at": "2030-01-02T03:04:05Z"},
+        {"id": "devbox", "expires_at": None},
+    ]
+
+
+@pytest.mark.parametrize(
+    "call, match",
+    [
+        (lambda m: m.pause(primed_timeout=0), "primed_timeout"),
+        (lambda m: m.pause(primed_barrier="yes"), "primed_barrier"),
+        (lambda m: m.resume(warm=1), "warm"),
+        (lambda m: m.reconfigure(), "cpus or memory_mib"),
+        (lambda m: m.reconfigure(cpus=0), "cpus"),
+        (lambda m: m.reconfigure(memory_mib=-1), "memory_mib"),
+        (lambda m: m.set_ttl(""), "expires_at"),
+    ],
+)
+def test_invalid_lifecycle_arguments_are_refused_before_any_call(hostlib, call, match) -> None:
+    with pytest.raises(ValueError, match=match):
+        call(mvm.Machine("devbox"))
+    assert hostlib.calls == []
+
+
 def test_rm_of_a_running_machine_propagates_the_conflict(hostlib) -> None:
     hostlib.fail("machine.rm", "CONFLICT", "stop it first")
     with pytest.raises(mvm.MachineConflictError, match="stop it first"):

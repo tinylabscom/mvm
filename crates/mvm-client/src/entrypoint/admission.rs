@@ -109,6 +109,7 @@ impl EntrypointAdmission {
             sdk_sidecar: _,
             assets,
             volumes,
+            bundle_archive,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
@@ -133,7 +134,7 @@ impl EntrypointAdmission {
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: None,
+            bundle_pin: bundle_archive,
             bundle_posture: None,
             deps_volume: None,
             shares: mvm_hostd::run::shares_from_vm_volumes(volumes),
@@ -299,6 +300,7 @@ mod tests {
             sdk_sidecar: None,
             assets: &[],
             volumes: &[],
+            bundle_archive: None,
         }
     }
 
@@ -508,6 +510,7 @@ mod stdin_grant_tests {
                     sdk_sidecar: None,
                     assets: &[],
                     volumes: &[],
+                    bundle_archive: None,
                 })
         }
     }

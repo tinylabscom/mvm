@@ -682,9 +682,9 @@ fn materialize_ext4_in_builder_vm(
 fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendChoice {
     // Use the resolved builder backend (override → env → auto-detect: macOS 26+
     // Apple Silicon → hvf builder, Linux native → qemu builder, everywhere
-    // else → libkrun). Delegates to `resolve_choice()` so the materializer
+    // else → libkrun). Delegates to `resolve_choice(None)` so the materializer
     // always uses the same backend as every other build entry point.
-    crate::builder_backend_select::resolve_choice()
+    crate::builder_backend_select::resolve_choice(None)
 }
 
 /// Safety margin (bytes) left between the formatted ext4 size and the
@@ -928,6 +928,27 @@ fn chown_root_owned_lines(root_owned: &mvm_fs::ownership::RootOwnedPaths) -> Str
         .collect()
 }
 
+/// The writer options every in-process materialization runs under.
+///
+/// One function so the ownership guarantee cannot be lost by adding a second
+/// entry point: the paths the runtime injects are claimed here, on every tree
+/// rather than only on trees built from image layers. A tree carrying no
+/// declared owners loses nothing by it, and no caller has to remember to ask.
+///
+/// Stage-0 `/work` is mounted by label; every other caller leaves
+/// `volume_label` unset and gets the unchanged default-options image.
+fn pure_materialize_options(input: &MaterializeExt4Input) -> mvm_fs::rootfs::MaterializeOptions {
+    let options = mvm_fs::rootfs::MaterializeOptions::builder()
+        .extra_nodes(input.deferred_nodes.clone())
+        .owners(input.owners.clone())
+        .root_owned(crate::oci_runtime_inject::injected_root_owned_paths())
+        .build();
+    match &input.volume_label {
+        Some(label) => options.with_volume_label(label.as_bytes()),
+        None => options,
+    }
+}
+
 /// Materialize `input.unpacked_root` into `input.output` **in-process** — no
 /// builder VM, no `mkfs`, no subprocess. Delegates the tree walk + streamed
 /// emission to [`mvm_fs::rootfs::materialize_ext4_pure`] (the single
@@ -942,49 +963,12 @@ fn chown_root_owned_lines(root_owned: &mvm_fs::ownership::RootOwnedPaths) -> Str
 pub fn materialize_ext4_pure(
     input: &MaterializeExt4Input,
 ) -> Result<MaterializedExt4, RootfsError> {
-    materialize_ext4_pure_with_walk_options(input, mvm_fs::rootfs::WalkOptions::default())
-}
-
-/// The writer options every in-process materialization runs under.
-///
-/// One function so the ownership guarantee cannot be lost by adding a second
-/// entry point: the paths the runtime injects are claimed here, on every tree
-/// rather than only on trees built from image layers. A tree carrying no
-/// declared owners loses nothing by it, and no caller has to remember to ask.
-///
-/// Stage-0 `/work` is mounted by label; every other caller leaves
-/// `volume_label` unset and gets the unchanged default-options image.
-fn pure_materialize_options(
-    input: &MaterializeExt4Input,
-    walk: mvm_fs::rootfs::WalkOptions,
-) -> mvm_fs::rootfs::MaterializeOptions {
-    let options = mvm_fs::rootfs::MaterializeOptions::builder()
-        .walk(walk)
-        .extra_nodes(input.deferred_nodes.clone())
-        .owners(input.owners.clone())
-        .root_owned(crate::oci_runtime_inject::injected_root_owned_paths())
-        .build();
-    match &input.volume_label {
-        Some(label) => options.with_volume_label(label.as_bytes()),
-        None => options,
-    }
-}
-
-/// Materialize with caller-selected source-walk behavior.
-///
-/// Immutable OCI roots use [`mvm_fs::rootfs::WalkOptions::default`]. Live
-/// directory snapshots may instead omit entries that vanish during capture
-/// while preserving the same ext4 construction path.
-pub fn materialize_ext4_pure_with_walk_options(
-    input: &MaterializeExt4Input,
-    walk: mvm_fs::rootfs::WalkOptions,
-) -> Result<MaterializedExt4, RootfsError> {
     if !input.unpacked_root.is_dir() {
         return Err(RootfsError::UnpackedRootNotDirectory(
             input.unpacked_root.clone(),
         ));
     }
-    let options = pure_materialize_options(input, walk);
+    let options = pure_materialize_options(input);
     if !input.emit_verity {
         let materialized =
             mvm_fs::rootfs::materialize_ext4_pure(&input.unpacked_root, &input.output, &options)?;
@@ -1706,7 +1690,7 @@ mod injected_ownership_tests {
             MaterializeExt4Input::new(tree.path().to_path_buf(), tree.path().join("out.ext4"), 0)
                 .with_owners(hostile_owners());
 
-        let options = pure_materialize_options(&input, mvm_fs::rootfs::WalkOptions::default());
+        let options = pure_materialize_options(&input);
         let nodes = mvm_fs::rootfs::image_nodes(tree.path(), &options).unwrap();
 
         for injected in [

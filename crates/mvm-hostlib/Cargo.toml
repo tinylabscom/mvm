@@ -4,6 +4,9 @@ description = "Host library C ABI (libmvm_hostlib) — the MvmClient surface, lo
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# Reaches users as libmvm_hostlib inside the release tarball, the wheels and
+# the npm platform packages, never as a crate.
+publish = false
 repository.workspace = true
 authors.workspace = true
 

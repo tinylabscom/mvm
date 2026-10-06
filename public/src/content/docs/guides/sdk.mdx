@@ -119,6 +119,10 @@ Nix factory to bake into `/etc/mvm/hooks/<phase>.sh`.
 Use `mvmctl build compile` to produce local build artifacts that can be reviewed,
 signed, built, and launched through the normal `mvm` workflow. Treat packaging
 and rollout as a separate admission step, not as part of declaration parsing.
+For a pack image that will be published, pass `--mvm-revision` with the full
+commit ID of the mvm guest library. The SDK compiler then renders a flake
+whose mvm input cannot move with `main`. This does not create `flake.lock` or
+build the image; both remain builder-VM steps before signing the pack.
 
 ## Secret semantics
 

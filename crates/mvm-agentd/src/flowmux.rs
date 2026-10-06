@@ -1457,6 +1457,165 @@ mod tests {
         assert!(matches!(err, FlowMuxError::SessionClosed(_)));
     }
 
+    /// How the host's session validator describes a frame the guest sent:
+    /// by length, and by credit for a `WindowUpdate`, exactly as the endpoint
+    /// does before it dispatches anything.
+    fn as_host_reads_it(
+        opcode: Opcode,
+        stream_id: u32,
+        payload: &[u8],
+    ) -> mvm_contract::protocol::network_flow::FrameFacts {
+        let facts = frame_facts(
+            Direction::GuestToHost,
+            opcode,
+            stream_id,
+            payload.len() as u32,
+        );
+        match (opcode, payload) {
+            (Opcode::WindowUpdate, [a, b, c, d]) => {
+                facts.with_credit(u32::from_be_bytes([*a, *b, *c, *d]))
+            }
+            _ => facts,
+        }
+    }
+
+    /// The next frame the guest sends, admitted by `validator` the way the
+    /// host admits it. A frame the host would end the session over fails the
+    /// test, naming why.
+    async fn next(
+        host_stream: &mut tokio::io::DuplexStream,
+        host_session: &mut Session,
+        validator: &mut SessionValidator,
+    ) -> (Opcode, u32) {
+        let (opcode, sid, _len, payload) = recv_frame(host_stream, host_session).await.unwrap();
+        validator
+            .admit(&as_host_reads_it(opcode, sid, &payload))
+            .unwrap_or_else(|error| {
+                panic!("the host refuses guest {opcode:?} on stream {sid}: {error}")
+            });
+        (opcode, sid)
+    }
+
+    /// Send `bytes` on `stream_id`, spending the host's credit the way its
+    /// relay does before every `Data` frame.
+    async fn send_host_data(
+        host_stream: &mut tokio::io::DuplexStream,
+        host_session: &mut Session,
+        validator: &mut SessionValidator,
+        stream_id: u32,
+        bytes: &[u8],
+    ) {
+        validator
+            .admit(&frame_facts(
+                Direction::HostToGuest,
+                Opcode::Data,
+                stream_id,
+                bytes.len() as u32,
+            ))
+            .unwrap();
+        send_frame(host_stream, host_session, Opcode::Data, stream_id, bytes).await;
+    }
+
+    /// Data the host sent before the guest's `Reset` reached it crosses that
+    /// reset on the wire. The guest must not return credit for it: the host
+    /// retired the stream on the guest's own `Reset`, so a `WindowUpdate`
+    /// naming it is a frame on an unknown stream, and the host ends the whole
+    /// session over it — failing every other flow on the session mid-request.
+    ///
+    /// That is what a client sees as a TLS `UNEXPECTED_EOF` on a second
+    /// request: it hangs up on its first response before reading all of it,
+    /// the proxy drops that stream while the response's last chunk is still
+    /// in flight, and the session dies under the request it is making next.
+    #[tokio::test]
+    async fn a_dropped_stream_returns_no_credit_for_data_that_crosses_its_reset() {
+        let (guest_stream, host_stream) = tokio::io::duplex(4096);
+        let (guest_key, _guest_anchor) = generate_keypair();
+        let (host_key, host_anchor) = generate_keypair();
+
+        let host = tokio::spawn(async move {
+            let (mut host_stream, mut host_session) = host_handshake(host_stream, host_key).await;
+            let mut validator = SessionValidator::default();
+
+            let (opcode, _) = next(&mut host_stream, &mut host_session, &mut validator).await;
+            assert_eq!(opcode, Opcode::Hello);
+            validator.mark_hello_ack_sent().unwrap();
+            send_frame(
+                &mut host_stream,
+                &mut host_session,
+                Opcode::HelloAck,
+                0,
+                &Handshake::local("test-host").encode(),
+            )
+            .await;
+
+            let mut opened = Vec::new();
+            for _ in 0..2 {
+                let (opcode, sid) = next(&mut host_stream, &mut host_session, &mut validator).await;
+                assert_eq!(opcode, Opcode::OpenTcp);
+                validator
+                    .admit(&frame_facts(Direction::HostToGuest, Opcode::Opened, sid, 0))
+                    .unwrap();
+                send_frame(
+                    &mut host_stream,
+                    &mut host_session,
+                    Opcode::Opened,
+                    sid,
+                    &[],
+                )
+                .await;
+                opened.push(sid);
+            }
+            let (dropped, live) = (opened[0], opened[1]);
+
+            // The guest's `Reset` is on the wire, but the relay has not seen it
+            // yet: it sends the tail of the response it was writing, and only
+            // then is the reset read and the stream retired.
+            let (opcode, sid, _len, payload) = recv_frame(&mut host_stream, &mut host_session)
+                .await
+                .unwrap();
+            assert_eq!((opcode, sid), (Opcode::Reset, dropped));
+            send_host_data(
+                &mut host_stream,
+                &mut host_session,
+                &mut validator,
+                dropped,
+                b"0\r\n\r\n",
+            )
+            .await;
+            validator
+                .admit(&as_host_reads_it(opcode, sid, &payload))
+                .unwrap();
+            send_host_data(
+                &mut host_stream,
+                &mut host_session,
+                &mut validator,
+                live,
+                b"ping",
+            )
+            .await;
+
+            let (opcode, sid) = next(&mut host_stream, &mut host_session, &mut validator).await;
+            assert_eq!(
+                (opcode, sid),
+                (Opcode::WindowUpdate, live),
+                "the only credit returned is for the stream still open"
+            );
+        });
+
+        let client = FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
+            .await
+            .expect("guest handshake");
+        let first = client.open_tcp("api.example.com:443").await.unwrap();
+        let mut second = client.open_tcp("api.example.org:443").await.unwrap();
+        drop(first);
+
+        let mut buf = [0u8; 16];
+        let n = second.read(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"ping");
+
+        host.await.unwrap();
+    }
+
     #[tokio::test]
     async fn reconnect_client_fails_when_initial_transport_fails() {
         let (guest_key, _guest_anchor) = generate_keypair();

@@ -238,8 +238,13 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
     ) -> Result<BuilderOutcome> {
         let builder_policy = NetworkPolicy::trusted_build_egress();
         spawn_network_endpoint(SubstitutionSpawnParams {
+            // Builder-VM and wasm endpoints never collect telemetry.
+            telemetry: false,
             vm_name: &transport.name,
             state_dir: &transport.state_dir,
+            // One builder job: the runner owns the VM and stops it before it
+            // returns.
+            lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Launcher,
             tenant: "builder",
             secrets: &[],
             redaction: &RedactionPolicy::default(),

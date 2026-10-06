@@ -88,7 +88,7 @@ mod dmsetup_linux {
     use super::*;
 
     pub fn check_available() -> Result<()> {
-        match std::process::Command::new("dmsetup")
+        match mvm_core::env_hygiene::helper_command("dmsetup")
             .arg("--version")
             .output()
         {

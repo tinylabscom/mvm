@@ -60,11 +60,10 @@ pub struct BuilderResult {
 /// then `MVM_BUILDER_BACKEND`, then auto-detect. A backend this process has no
 /// constructor for refuses by name.
 pub fn run_builder_for_request(request: &BuildRequest) -> Result<BuilderResult> {
-    let selected = bbs::resolve_choice();
+    let selected = bbs::resolve_choice(None);
     let explicit = bbs::resolve_env_override().is_some();
     bbs::run_with_builder_fallback_anyhow(selected, explicit, |choice| {
-        let builder = bbs::try_resolve_builder_backend_with_override(Some(choice))
-            .map_err(anyhow::Error::new)?;
+        let builder = bbs::try_resolve_builder_backend(Some(choice)).map_err(anyhow::Error::new)?;
         run_builder_for_request_on(request, builder.as_ref())
     })
 }

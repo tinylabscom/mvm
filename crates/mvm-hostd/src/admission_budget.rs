@@ -211,16 +211,9 @@ mod tests {
         pid
     }
 
-    fn isolated_home() -> (mvm_core::util::test_env::TestEnv, tempfile::TempDir) {
-        let home = tempfile::tempdir().expect("scratch mvm home");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.isolate_mvm_home(home.path());
-        (env, home)
-    }
-
     #[test]
     fn an_empty_host_admits_a_boot_within_headroom() {
-        let (_env, home) = isolated_home();
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
         let committed = committed_at(home.path());
         assert_eq!(committed, MachineCharge::default());
         assert!(admits(&budget(8192), committed, charge(4096)).is_ok());
@@ -228,7 +221,7 @@ mod tests {
 
     #[test]
     fn a_boot_past_the_headroom_is_refused() {
-        let (_env, home) = isolated_home();
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
         machine(home.path(), "neighbour-a", charge(4096), true);
         machine(home.path(), "neighbour-b", charge(3072), true);
 
@@ -250,7 +243,7 @@ mod tests {
     /// host, permanently, with no way out but manual cleanup.
     #[test]
     fn budget_ignores_dead_machines() {
-        let (_env, home) = isolated_home();
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
         machine(home.path(), "crashed-and-never-reaped", charge(8192), false);
         machine(home.path(), "also-gone", charge(8192), false);
         machine(home.path(), "still-running", charge(1024), true);
@@ -274,7 +267,7 @@ mod tests {
     /// at the moment the question is asked.
     #[test]
     fn budget_counts_the_configured_maximum_not_current_usage() {
-        let (_env, home) = isolated_home();
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
         let ballooned = BalloonState {
             max_mib: 4096,
             inflated_mib: 3072,
@@ -325,7 +318,7 @@ mod tests {
 
     #[test]
     fn an_unreadable_charge_record_is_skipped_rather_than_fatal() {
-        let (_env, home) = isolated_home();
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
         machine(home.path(), "good", charge(1024), true);
         machine(home.path(), "corrupt", charge(2048), true);
         let corrupt = mvm_core::config::vm_state_dir_at(home.path(), "corrupt").join(CHARGE_FILE);
@@ -336,7 +329,7 @@ mod tests {
 
     #[test]
     fn a_live_machine_with_no_charge_record_is_not_counted() {
-        let (_env, home) = isolated_home();
+        let (_env, home) = crate::test_fixtures::isolated_mvm_home();
         let dir = mvm_core::config::vm_state_dir_at(home.path(), "no-record");
         std::fs::create_dir_all(&dir).expect("creating the state dir");
         std::fs::write(dir.join("libkrun.pid"), std::process::id().to_string())

@@ -28,7 +28,7 @@ use tracing::warn;
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::plan::Variant;
-use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
+use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy};
 use mvm_core::vm_backend::EnforcedGrants;
 use mvm_net::{EgressEnforcer, EgressWiring, EnforcementError};
 
@@ -47,11 +47,9 @@ use crate::supervisor::inspector::{Inspector, InspectorChain};
 use crate::supervisor::keystore::{KeystoreReleaser, NoopKeystoreReleaser};
 use crate::supervisor::l7_proxy::{DnsResolver, EgressAuditSink, L7EgressProxy};
 use crate::supervisor::pii_redactor::PiiRedactor;
-use crate::supervisor::policy_tool_gate::PolicyToolGate;
 use crate::supervisor::secrets_scanner::SecretsScanner;
 use crate::supervisor::ssrf_guard::SsrfGuard;
 use crate::supervisor::state::{PlanState, PlanStateMachine, StateTransitionError};
-use crate::supervisor::tool_gate::{NoopToolGate, ToolGate};
 
 /// Stable identity shared by every revision of one tenant workload.
 ///
@@ -103,9 +101,6 @@ pub enum SupervisorError {
 
     #[error("egress proxy error: {0}")]
     Egress(String),
-
-    #[error("tool gate error: {0}")]
-    Tool(String),
 
     #[error("keystore error: {0}")]
     Keystore(String),
@@ -159,7 +154,6 @@ pub enum SupervisorError {
 
 pub struct Supervisor {
     pub egress: Arc<dyn SupervisorEgressProxy>,
-    pub tool_gate: Arc<dyn ToolGate>,
     pub keystore: Arc<dyn KeystoreReleaser>,
     pub audit: Arc<dyn AuditSigner>,
     pub artifact: Arc<dyn ArtifactCollector>,
@@ -218,7 +212,6 @@ impl Default for Supervisor {
     fn default() -> Self {
         Self {
             egress: Arc::new(NoopEgressProxy),
-            tool_gate: Arc::new(NoopToolGate),
             keystore: Arc::new(NoopKeystoreReleaser),
             audit: Arc::new(NoopAuditSigner),
             artifact: Arc::new(NoopArtifactCollector),
@@ -255,12 +248,6 @@ impl Supervisor {
     /// Wire a prebuilt egress proxy slot.
     pub fn with_egress_proxy(mut self, egress: Arc<dyn SupervisorEgressProxy>) -> Self {
         self.egress = egress;
-        self
-    }
-
-    /// Wire a prebuilt tool gate slot.
-    pub fn with_tool_gate_slot(mut self, tool_gate: Arc<dyn ToolGate>) -> Self {
-        self.tool_gate = tool_gate;
         self
     }
 
@@ -707,7 +694,7 @@ impl Supervisor {
     /// extra labels alongside the `reason` field. Used to pin the
     /// deps-volume `volume_hash` +
     /// `manifest_sha256` into every `plan.admitted` / `plan.running`
-    /// entry for a deps-bound workload, so `mvmctl audit verify`
+    /// entry for a deps-bound workload, so `mvmctl trust audit verify`
     /// detects drift if either hash changes between runs.
     async fn emit_admission_audit_with_extras(
         &self,
@@ -870,25 +857,11 @@ impl Supervisor {
         self.circuit_breakers = Some(reporter);
         self
     }
-
-    /// Wire the tool gate slot from a workload's [`ToolPolicy`].
-    /// Pure policy decision (allowlist lookup); the vsock RPC layer
-    /// that drives `check()` calls from the workload lands later.
-    ///
-    /// An empty `ToolPolicy.allowed` is **not** treated as
-    /// "anything goes" — it's a deliberate fail-closed deny-all
-    /// configuration. Operators who genuinely want the workload to
-    /// have no tool restrictions must wire a different gate
-    /// implementation.
-    pub fn with_tool_gate(mut self, policy: &ToolPolicy) -> Self {
-        self.tool_gate = Arc::new(PolicyToolGate::from_policy(policy));
-        self
-    }
 }
 
 /// Build the `(key, value)` extras the supervisor stamps onto every
 /// admission audit entry (`plan.admitted` / `plan.running`) for a
-/// deps-bound workload. `mvmctl audit verify`
+/// deps-bound workload. `mvmctl trust audit verify`
 /// reads these back to detect drift if either hash changes between
 /// the plan signing and the on-disk volume.
 ///
@@ -2560,45 +2533,6 @@ mod tests {
                 assert_eq!(index, 1);
                 assert_eq!(name, "no_such_inspector");
             }
-        }
-    }
-
-    // ---- with_tool_gate builder ----
-
-    #[tokio::test]
-    async fn with_tool_gate_allows_listed_tool() {
-        let policy = ToolPolicy {
-            allowed: vec!["read_file".to_string(), "list_dir".to_string()],
-        };
-        let s = Supervisor::default().with_tool_gate(&policy);
-        let v = s.tool_gate.check("read_file").await.expect("ok");
-        assert_eq!(v, crate::supervisor::ToolDecision::Allow);
-    }
-
-    #[tokio::test]
-    async fn with_tool_gate_denies_unlisted_tool() {
-        let policy = ToolPolicy {
-            allowed: vec!["read_file".to_string()],
-        };
-        let s = Supervisor::default().with_tool_gate(&policy);
-        let v = s.tool_gate.check("rm_rf").await.expect("ok");
-        match v {
-            crate::supervisor::ToolDecision::Deny { reason } => {
-                assert!(reason.contains("rm_rf"));
-                assert!(reason.contains("read_file"));
-            }
-            other => panic!("expected Deny, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn with_tool_gate_empty_policy_is_deny_all() {
-        // Fail-closed: empty allowlist denies every call.
-        let policy = ToolPolicy { allowed: vec![] };
-        let s = Supervisor::default().with_tool_gate(&policy);
-        for name in ["read_file", "list_dir", "anything"] {
-            let v = s.tool_gate.check(name).await.expect("ok");
-            assert!(matches!(v, crate::supervisor::ToolDecision::Deny { .. }));
         }
     }
 

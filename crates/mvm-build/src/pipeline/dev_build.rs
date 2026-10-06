@@ -452,11 +452,10 @@ fn dev_build_via_builder_vm_uncached(
     // build error surfaces unchanged, and an explicit
     // `--builder`/`MVM_BUILDER_BACKEND` also stays single-backend.
     use crate::builder_backend_select as bbs;
-    let selected = bbs::resolve_choice();
+    let selected = bbs::resolve_choice(None);
     let explicit = bbs::resolve_env_override().is_some();
     bbs::run_with_builder_fallback_anyhow(selected, explicit, |choice| {
-        let builder = bbs::try_resolve_builder_backend_with_override(Some(choice))
-            .map_err(anyhow::Error::new)?;
+        let builder = bbs::try_resolve_builder_backend(Some(choice)).map_err(anyhow::Error::new)?;
         dev_build_with_builder_vm(env, flake_ref, profile, mode, builder.as_ref())
     })
 }

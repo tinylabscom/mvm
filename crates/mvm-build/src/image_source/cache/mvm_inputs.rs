@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use super::key::{ImageBuildRole, ImageBuildTarget};
 use crate::builder_image_inputs::BUILDER_FLAKE_NIX_INPUTS;
 use crate::image_source::LocalImageCheckout;
-use crate::image_source::build::contract_for;
+use crate::image_source::build::{TargetContract, contract_for};
 use crate::pipeline::build_cache::mvm_workspace_source_digest;
 use crate::source_closure::{SETPRIV_PACKAGE, fold_package_source_identity};
 use crate::workspace_graph::{hash_file, hash_tree};
@@ -133,6 +133,7 @@ fn consumed_inputs(
             fold_nix_inputs(&mut hasher, mvm_root, BUILDER_FLAKE_NIX_INPUTS);
             fold_package_source_identity(&mut hasher, mvm_root, SETPRIV_PACKAGE)
                 .map_err(|e| format!("{e:#}"))?;
+            fold_contract_outputs(&mut hasher, contract);
             // ABI 1+ builder images bake no host binaries — they arrive at boot in
             // mvmctl's initramfs payload — so the host-binary sources cannot affect
             // the built image and stay out of the key.
@@ -242,6 +243,17 @@ fn fold_nix_inputs(hasher: &mut Sha256, root: &Path, inputs: &[&str]) {
     }
 }
 
+/// The files the build copies out of the Nix output, by manifest role and
+/// name. They decide what an entry holds, and none of the sources folded
+/// above records them, so without this an entry built before a file was added
+/// to the contract keeps answering, and the install that needs the file
+/// refuses it on every run.
+fn fold_contract_outputs(hasher: &mut Sha256, contract: &TargetContract) {
+    for file in contract.files {
+        fold_listed(hasher, file.role, file.name.to_string());
+    }
+}
+
 /// One `(path, sha)` pair, length-prefixed so no two lists fold alike. An
 /// unreadable or absent file hashes to the empty string.
 fn fold_listed(hasher: &mut Sha256, path: &str, sha: String) {
@@ -299,6 +311,26 @@ mod tests {
         let reads = vec!["nix/flake.nix".to_string(), "crates/x/y.rs".to_string()];
         let err = check_reads_are_listed(&reads, BUILDER_FLAKE_NIX_INPUTS).unwrap_err();
         assert!(err.contains("crates/x/y.rs"), "{err}");
+    }
+
+    #[test]
+    fn a_contract_output_change_changes_the_builder_digest() {
+        let target = ImageBuildTarget {
+            role: ImageBuildRole::BuilderVm,
+            attr: crate::image_source::FlakeAttr::new("default").unwrap(),
+        };
+        let contract = contract_for(&target).unwrap();
+        let narrower = TargetContract {
+            files: &contract.files[..contract.files.len() - 1],
+            ..*contract
+        };
+        let digest = |contract: &TargetContract| {
+            let mut hasher = Sha256::new();
+            fold_contract_outputs(&mut hasher, contract);
+            hasher.finalize()
+        };
+        assert_ne!(digest(contract), digest(&narrower));
+        assert_eq!(digest(contract), digest(contract));
     }
 
     #[test]

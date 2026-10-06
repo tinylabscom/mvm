@@ -392,7 +392,7 @@ fn build_mke2fs_command(
     // (without this, mke2fs picks a fresh random hash seed each call,
     // shifting the htree layout and breaking the byte-determinism the
     // verity cache depends on).
-    let mut cmd = std::process::Command::new(binary);
+    let mut cmd = mvm_core::env_hygiene::helper_command(binary);
     let deterministic_time = options.source_date_epoch.to_string();
     cmd.env(SOURCE_DATE_EPOCH_ENV, &deterministic_time)
         .env(E2FSPROGS_FAKE_TIME_ENV, deterministic_time)

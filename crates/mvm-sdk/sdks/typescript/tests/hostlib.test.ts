@@ -21,6 +21,7 @@ import {
   LIB_PATH_ENV,
   libraryFileName,
   packagedLibraryPath,
+  platformPackageLibraryPath,
   resolveLibraryPath,
   setApprovalCallback,
   setInvokeForTesting,
@@ -107,6 +108,92 @@ describe("library file resolution", () => {
     expect(
       candidatePaths({ environ: {}, which: () => null, platform: "darwin", packageRoot: PKG }),
     ).toEqual(["/pkg/mvm/native/libmvm_hostlib.dylib"]);
+  });
+
+  it("looks in this host's platform package after native/ and before mvmctl", () => {
+    const asked: string[] = [];
+    const paths = candidatePaths({
+      environ: {},
+      which: () => "/usr/bin/mvmctl",
+      realpath: (p) => p,
+      platform: "linux",
+      arch: "arm64",
+      libc: "musl",
+      resolvePackage: (name) => {
+        asked.push(name);
+        return `/nm/${name}`;
+      },
+      packageRoot: PKG,
+    });
+    expect(asked).toEqual(["@runmvm/mvm-linux-arm64-musl"]);
+    expect(paths).toEqual([
+      "/pkg/mvm/native/libmvm_hostlib.so",
+      "/nm/@runmvm/mvm-linux-arm64-musl/libmvm_hostlib.so",
+      "/usr/bin/libmvm_hostlib.so",
+    ]);
+  });
+
+  it("picks the glibc package on a glibc host and the macOS one on darwin", () => {
+    const resolvePackage = (name: string) => `/nm/${name}`;
+    expect(
+      platformPackageLibraryPath({ platform: "linux", arch: "x64", libc: "glibc", resolvePackage }),
+    ).toBe("/nm/@runmvm/mvm-linux-x64-gnu/libmvm_hostlib.so");
+    expect(platformPackageLibraryPath({ platform: "darwin", arch: "arm64", resolvePackage })).toBe(
+      "/nm/@runmvm/mvm-darwin-arm64/libmvm_hostlib.dylib",
+    );
+  });
+
+  it("skips the platform package when it is not installed", () => {
+    expect(
+      platformPackageLibraryPath({
+        platform: "linux",
+        arch: "x64",
+        libc: "glibc",
+        resolvePackage: () => null,
+      }),
+    ).toBeNull();
+  });
+
+  it("asks for no package on a host nothing is published for", () => {
+    const asked: string[] = [];
+    const resolvePackage = (name: string) => {
+      asked.push(name);
+      return `/nm/${name}`;
+    };
+    expect(platformPackageLibraryPath({ platform: "darwin", arch: "x64", resolvePackage })).toBeNull();
+    expect(platformPackageLibraryPath({ platform: "win32", arch: "x64", resolvePackage })).toBeNull();
+    expect(asked).toEqual([]);
+  });
+
+  it("prefers native/ over the platform package", () => {
+    expect(
+      resolveLibraryPath({
+        environ: {},
+        which: () => null,
+        exists: () => true,
+        platform: "linux",
+        arch: "x64",
+        libc: "glibc",
+        resolvePackage: (name) => `/nm/${name}`,
+        packageRoot: PKG,
+      }),
+    ).toBe("/pkg/mvm/native/libmvm_hostlib.so");
+  });
+
+  it("loads from the platform package when native/ is empty", () => {
+    expect(
+      resolveLibraryPath({
+        environ: {},
+        which: () => "/usr/bin/mvmctl",
+        realpath: (p) => p,
+        exists: (p) => !p.startsWith("/pkg/"),
+        platform: "linux",
+        arch: "x64",
+        libc: "glibc",
+        resolvePackage: (name) => `/nm/${name}`,
+        packageRoot: PKG,
+      }),
+    ).toBe("/nm/@runmvm/mvm-linux-x64-gnu/libmvm_hostlib.so");
   });
 
   it("defaults the package root to the directory above this module's", () => {

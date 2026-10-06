@@ -1,28 +1,36 @@
 //! `xtask check-helper-env-hygiene`
 //!
-//! The host helper processes `mvmctl` starts are built by
+//! The host processes `mvmctl` and the host daemons start are built by
 //! `mvm_core::env_hygiene::helper_command`, which strips the loader, shell,
-//! interpreter and password-manager-session variables the helper would
-//! otherwise inherit. A helper started with a bare `Command::new` inherits
+//! interpreter and password-manager-session variables the child would
+//! otherwise inherit. A child started with a bare `Command::new` inherits
 //! `LD_PRELOAD`, `BASH_ENV` or a vault session token from whoever ran
 //! `mvmctl`, and nothing else would notice.
 //!
-//! The gate pins the helper spawn sites by name: each entry of [`HELPER_SPAWNS`]
-//! is a file and the header of the function or `impl` block that starts the
-//! helper. Inside that body the production code must call `helper_command(`
-//! and must not call `Command::new(`. Comments, string literals and
-//! `#[cfg(test)]` items are blanked first, so neither a comment naming the
-//! constructor nor a test fixture spawning `sleep` can satisfy or trip it.
+//! Two checks hold that line.
 //!
-//! A whole-crate inventory also finds new raw `Command::new` constructors.
-//! Existing guest and tool launches form a pinned per-file baseline; adding
-//! another raw constructor fails until it is classified. A new host helper
-//! belongs in the named list and uses the filter. The inventory permits
-//! removing raw constructors without an inventory edit.
+//! The named seams: each entry of [`HELPER_SPAWNS`] is a file and the header
+//! of the function or `impl` block that starts a helper. Inside that body the
+//! production code must call `helper_command(` and must not call
+//! `Command::new(`.
+//!
+//! The inventory: every `.rs` file under `crates/` is scanned for raw process
+//! creation — a `Command::new(` constructor, or a direct `fork`/`exec*` call —
+//! and each one found must match an entry of [`RAW_SITES`]. An entry is keyed
+//! by file, enclosing function and the call itself including its program
+//! argument, so replacing `Command::new("ip")` with `Command::new("bash")` in
+//! an exempt function is a new, unclassified site. An entry no longer matched
+//! by the tree is stale and fails too, so the list cannot carry slack for a
+//! later swap to consume. Only a process that is not started on the host may
+//! stay raw, and every entry says why.
+//!
+//! Comments, string literals and `#[cfg(test)]` items are blanked before
+//! either check, so neither a comment naming a constructor nor a test fixture
+//! spawning `sleep` can satisfy or trip them. Files under `tests/` are test
+//! harnesses, not processes `mvmctl` starts, and are not scanned.
 
 use anyhow::{Result, bail};
 use regex::Regex;
-use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -35,110 +43,522 @@ const SANITIZER: &str = "helper_command(";
 /// The unsanitized constructor a helper spawn must not use.
 const RAW: &str = "Command::new(";
 
-fn raw_constructor_count(code: &str) -> usize {
+fn raw_constructor() -> &'static Regex {
     static RAW_CONSTRUCTOR: OnceLock<Regex> = OnceLock::new();
-    RAW_CONSTRUCTOR
-        .get_or_init(|| {
-            Regex::new(r"\bCommand\s*::\s*new\s*\(")
-                .expect("valid static raw process constructor expression")
-        })
-        .find_iter(code)
-        .count()
+    RAW_CONSTRUCTOR.get_or_init(|| {
+        Regex::new(r"\bCommand\s*::\s*new\s*\(")
+            .expect("valid static raw process constructor expression")
+    })
 }
 
-/// Existing raw constructors outside the named host-helper spawn seams.
-/// Counts pin every production file so a new raw launch, even in a new file,
-/// requires classification before the gate can pass.
-const EXISTING_RAW_COMMAND_COUNTS: &[(&str, usize)] = &[
-    ("crates/mvm-agentd/src/bin/mvm-builder-agent.rs", 1),
-    ("crates/mvm-agentd/src/bin/mvm-guest-agent/handlers.rs", 1),
-    ("crates/mvm-agentd/src/bin/mvm-guest-agent/health.rs", 1),
-    (
+/// A direct process-creation call that bypasses `Command` altogether: bare,
+/// or through `libc::` or `nix::unistd::`. Any other path or a method receiver
+/// names something else (`checkpoint::fork(params)` forks a VM), and a process
+/// `fork` takes no arguments.
+fn raw_process_call() -> &'static Regex {
+    static RAW_CALL: OnceLock<Regex> = OnceLock::new();
+    RAW_CALL.get_or_init(|| {
+        Regex::new(
+            r"(?:^|[^.\w:])(?:(?:\w+::)*(?:libc|unistd)::)?(?:(fork|vfork)\s*\(\s*\)|(execv|execve|execvp|execvpe|execl|execlp|execle|posix_spawn|posix_spawnp)\s*\()",
+        )
+        .expect("valid static raw process call expression")
+    })
+}
+
+fn raw_constructor_count(code: &str) -> usize {
+    raw_constructor().find_iter(code).count()
+}
+
+/// Why a raw process creation is not a host spawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Where {
+    /// Runs inside a workload guest: the guest agent, its helpers, the guest
+    /// init and privilege-drop binaries.
+    Guest,
+    /// Runs inside the builder VM, or Stage 0 that boots it.
+    BuilderVm,
+    /// On the host, and the filter's own constructor: it has to start from a
+    /// `Command` to strip it. The enclosing function must remove what it
+    /// strips.
+    Filter,
+    /// On the host, started by a direct `exec` with the environment the
+    /// filter returns. The enclosing function must call it.
+    FilteredExec,
+}
+
+impl Where {
+    /// What the enclosing function's body must contain, for the places that
+    /// are on the host.
+    fn witnesses(self) -> &'static [&'static str] {
+        match self {
+            Self::Guest | Self::BuilderVm => &[],
+            Self::Filter => &["scrub_command(", "env_remove("],
+            Self::FilteredExec => &["env_hygiene::filtered_env("],
+        }
+    }
+}
+
+/// One raw process creation the inventory accepts.
+struct RawSite {
+    file: &'static str,
+    /// The nearest enclosing `fn`, or `"<module>"` outside any.
+    function: &'static str,
+    /// `Command::new(<argument as written>)`, or the bare call name for a
+    /// direct `fork`/`exec*`.
+    call: &'static str,
+    place: Where,
+    reason: &'static str,
+}
+
+const fn guest(
+    file: &'static str,
+    function: &'static str,
+    call: &'static str,
+    reason: &'static str,
+) -> RawSite {
+    RawSite {
+        file,
+        function,
+        call,
+        place: Where::Guest,
+        reason,
+    }
+}
+
+const fn builder(
+    file: &'static str,
+    function: &'static str,
+    call: &'static str,
+    reason: &'static str,
+) -> RawSite {
+    RawSite {
+        file,
+        function,
+        call,
+        place: Where::BuilderVm,
+        reason,
+    }
+}
+
+const fn on_host(
+    file: &'static str,
+    function: &'static str,
+    call: &'static str,
+    place: Where,
+    reason: &'static str,
+) -> RawSite {
+    RawSite {
+        file,
+        function,
+        call,
+        place,
+        reason,
+    }
+}
+
+/// Every raw process creation under `crates/`. Each is outside the host, or is
+/// the filter itself.
+const RAW_SITES: &[RawSite] = &[
+    builder(
+        "crates/mvm-agentd/src/bin/mvm-builder-agent.rs",
+        "child_command",
+        "Command::new(program)",
+        "the builder agent, inside the builder VM",
+    ),
+    guest(
+        "crates/mvm-agentd/src/bin/mvm-guest-agent/health.rs",
+        "run_shell_with_timeout",
+        "Command::new(\"/bin/sh\")",
+        "a workload health check, run by the guest agent",
+    ),
+    guest(
         "crates/mvm-agentd/src/bin/mvm-guest-agent/interactive.rs",
-        2,
+        "do_run_detached_with",
+        "Command::new(program)",
+        "a detached workload process, started by the guest agent",
     ),
-    ("crates/mvm-agentd/src/bin/mvm-oci-entrypoint.rs", 1),
-    ("crates/mvm-agentd/src/bin/mvm-runner.rs", 1),
-    ("crates/mvm-agentd/src/bin/mvm-seccomp-apply.rs", 1),
-    ("crates/mvm-agentd/src/builder_agent.rs", 1),
-    ("crates/mvm-agentd/src/builder_build.rs", 2),
-    ("crates/mvm-agentd/src/crng_reseed/helper.rs", 1),
-    ("crates/mvm-agentd/src/entrypoint.rs", 1),
-    ("crates/mvm-agentd/src/exec_stream.rs", 2),
-    ("crates/mvm-agentd/src/guest_bootstrap.rs", 5),
-    ("crates/mvm-agentd/src/guest_net.rs", 2),
-    ("crates/mvm-agentd/src/lifecycle_hooks.rs", 2),
-    ("crates/mvm-agentd/src/process_rpc.rs", 1),
-    ("crates/mvm-agentd/src/worker_pool.rs", 1),
-    ("crates/mvm-build/src/bin/mvm-host-vm-init.rs", 16),
-    ("crates/mvm-build/src/bin/mvm-host-vm-init/boot_stage.rs", 1),
-    (
+    guest(
+        "crates/mvm-agentd/src/bin/mvm-guest-agent/interactive.rs",
+        "do_run_detached_with",
+        "Command::new(&exit_report_bin)",
+        "a detached workload process, started by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/bin/mvm-oci-entrypoint.rs",
+        "main",
+        "Command::new(&config.argv[0])",
+        "the OCI image entrypoint, exec'd inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/bin/mvm-runner.rs",
+        "dispatch",
+        "Command::new(config.language.interpreter())",
+        "the workload language runtime, started inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/bin/mvm-seccomp-apply.rs",
+        "main",
+        "Command::new(&cmd)",
+        "execs the workload under its seccomp filter, inside the guest",
+    ),
+    builder(
+        "crates/mvm-agentd/src/builder_agent.rs",
+        "child_command",
+        "Command::new(program)",
+        "the builder agent, inside the builder VM",
+    ),
+    builder(
+        "crates/mvm-agentd/src/builder_build.rs",
+        "run_nix_build",
+        "Command::new(\"sh\")",
+        "a nix build run by the builder agent inside the builder VM",
+    ),
+    builder(
+        "crates/mvm-agentd/src/builder_build.rs",
+        "run_nix_build",
+        "Command::new(\"sh\")",
+        "a nix build run by the builder agent inside the builder VM",
+    ),
+    guest(
+        "crates/mvm-agentd/src/console.rs",
+        "spawn_shell",
+        "fork",
+        "the dev console shell, forked by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/console.rs",
+        "spawn_shell",
+        "execve",
+        "the dev console shell, forked by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/crng_reseed/helper.rs",
+        "spawn",
+        "Command::new(&self.executable)",
+        "the CRNG reseed helper, started by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/entrypoint.rs",
+        "execute_streaming",
+        "Command::new(&program)",
+        "the workload entrypoint, run by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/exec_stream.rs",
+        "stream_exec_argv",
+        "Command::new(program)",
+        "a guest process streamed over vsock by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/exec_stream.rs",
+        "stream_exec_with_environment",
+        "Command::new(\"/bin/sh\")",
+        "a guest process streamed over vsock by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/guest_bootstrap.rs",
+        "run_one",
+        "Command::new(&path)",
+        "guest init services and loopback setup, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/guest_bootstrap.rs",
+        "spawn_one",
+        "Command::new(path)",
+        "guest init services and loopback setup, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/guest_bootstrap.rs",
+        "spawn_one_as",
+        "Command::new(path)",
+        "guest init services and loopback setup, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/guest_bootstrap.rs",
+        "bring_loopback_up_with_busybox",
+        "Command::new(busybox)",
+        "guest init services and loopback setup, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/guest_bootstrap.rs",
+        "bring_loopback_up_with_busybox",
+        "Command::new(busybox)",
+        "guest init services and loopback setup, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/guest_net.rs",
+        "seed_resolv_conf_bytes",
+        "Command::new(\"/bin/busybox\")",
+        "guest resolver and DHCP setup, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/guest_net.rs",
+        "configure_guest_network",
+        "Command::new(\"/bin/udhcpc\")",
+        "guest resolver and DHCP setup, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/lifecycle_hooks.rs",
+        "status",
+        "Command::new(script_path)",
+        "a workload lifecycle hook, run by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/lifecycle_hooks.rs",
+        "spawn",
+        "Command::new(script_path)",
+        "a workload lifecycle hook, run by the guest agent",
+    ),
+    guest(
+        "crates/mvm-agentd/src/process_rpc.rs",
+        "build_command",
+        "Command::new(argv0)",
+        "a process started over the guest process API, inside the guest",
+    ),
+    guest(
+        "crates/mvm-agentd/src/worker_pool.rs",
+        "spawn_worker",
+        "Command::new(&program)",
+        "a workload worker, spawned by the guest agent",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init/boot_stage.rs",
+        "stage1",
+        "Command::new(stage2)",
+        "the builder VM's init",
+    ),
+    builder(
         "crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs",
-        4,
+        "seal_rootfs_journal",
+        "Command::new(E2FSCK)",
+        "the builder VM's init",
     ),
-    ("crates/mvm-build/src/bin/mvm-host-vm-init/install.rs", 1),
-    ("crates/mvm-build/src/bin/mvm-host-vm-init/workload.rs", 1),
-    ("crates/mvm-build/src/bin/stage0-init.rs", 6),
-    ("crates/mvm-build/src/bin/stage0-init/kernel_emit.rs", 1),
-    ("crates/mvm-build/src/bin/stage0-init/store_gc.rs", 2),
-    ("crates/mvm-build/src/builder_vm_image.rs", 1),
-    ("crates/mvm-build/src/builder_vm_runtime.rs", 1),
-    ("crates/mvm-build/src/builder_vm_transport.rs", 1),
-    ("crates/mvm-build/src/builderd.rs", 2),
-    ("crates/mvm-build/src/embed_toolchain.rs", 8),
-    ("crates/mvm-build/src/guest_agent_build.rs", 3),
-    ("crates/mvm-build/src/image_source/build.rs", 2),
-    ("crates/mvm-build/src/image_source/git.rs", 1),
-    ("crates/mvm-build/src/libkrun_builder.rs", 2),
-    ("crates/mvm-build/src/provenance_mark.rs", 1),
-    ("crates/mvm-build/src/qemu_builder.rs", 3),
-    ("crates/mvm-build/src/runtime_overlay.rs", 1),
-    ("crates/mvm-build/src/stage0.rs", 1),
-    ("crates/mvm-capture/src/collect/package.rs", 3),
-    ("crates/mvm-capture/src/collect/trace.rs", 2),
-    ("crates/mvm-capture/src/verify.rs", 1),
-    ("crates/mvm-cli/src/bench/cold_launch_runner.rs", 1),
-    ("crates/mvm-cli/src/bootstrap.rs", 1),
-    ("crates/mvm-cli/src/commands/bootstrap.rs", 1),
-    ("crates/mvm-cli/src/commands/build/kernel.rs", 1),
-    ("crates/mvm-cli/src/commands/build/sandbox_record.rs", 1),
-    ("crates/mvm-cli/src/commands/deps/audit.rs", 2),
-    ("crates/mvm-cli/src/commands/env/artifact_verify.rs", 1),
-    ("crates/mvm-cli/src/commands/env/builder_vm/test_pair.rs", 1),
-    (
-        "crates/mvm-cli/src/commands/env/builder_vm/vm_helpers.rs",
-        1,
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs",
+        "attach",
+        "Command::new(UTIL_LINUX_LOSETUP)",
+        "the builder VM's init",
     ),
-    ("crates/mvm-cli/src/commands/env/uninstall.rs", 1),
-    ("crates/mvm-cli/src/commands/image/trust.rs", 1),
-    ("crates/mvm-cli/src/commands/ops/config.rs", 1),
-    ("crates/mvm-cli/src/commands/vm/run_plan.rs", 1),
-    ("crates/mvm-cli/src/commands/vm/sdk_no_vm.rs", 1),
-    ("crates/mvm-cli/src/doctor/security_checks.rs", 6),
-    ("crates/mvm-cli/src/doctor/toolchain.rs", 1),
-    ("crates/mvm-cli/src/exec.rs", 1),
-    ("crates/mvm-cli/src/host_binaries/payload_build.rs", 2),
-    ("crates/mvm-cli/src/update.rs", 1),
-    ("crates/mvm-client/src/secret/source.rs", 1),
-    ("crates/mvm-core/src/crypto/key_rotation.rs", 1),
-    ("crates/mvm-core/src/env_hygiene.rs", 1),
-    ("crates/mvm-core/src/platform/platform.rs", 2),
-    ("crates/mvm-core/src/spawn_scope.rs", 3),
-    ("crates/mvm-fs/src/oci_to_rootfs/ext4.rs", 1),
-    ("crates/mvm-fs/src/oci_to_rootfs/verity.rs", 1),
-    ("crates/mvm-hostd/src/bin/mvm-hvf-supervisor.rs", 3),
-    ("crates/mvm-hostd/src/supervisor/firewall/linux_nft.rs", 1),
-    ("crates/mvm-runtime/examples/hvf-relay-egress.rs", 1),
-    ("crates/mvm-runtime/src/microvm/run_info.rs", 1),
-    ("crates/mvm-runtime/src/storage/backend.rs", 1),
-    (
-        "crates/mvm-runtime/src/storage/volume/encrypted_linux.rs",
-        7,
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs",
+        "drop",
+        "Command::new(UTIL_LINUX_LOSETUP)",
+        "the builder VM's init",
     ),
-    ("crates/mvm-setpriv/src/lib.rs", 1),
-    ("crates/mvm-vmm/src/host/aux_bin.rs", 1),
-    ("crates/mvm-vmm/src/host/codesign.rs", 3),
-    ("crates/mvm-vmm/src/host/shell/exec.rs", 1),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init/builder_hooks.rs",
+        "spawn_hook",
+        "Command::new(HOOK_PATH)",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init/install.rs",
+        "run_with_env",
+        "Command::new(program)",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init/workload.rs",
+        "command",
+        "Command::new(FIRECRACKER_BIN)",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "agent_spawn_command",
+        "Command::new(\"/bin/busybox\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "fork_vsock_egress_client_if_requested",
+        "Command::new(\"/bin/busybox\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "fork_vsock_egress_client_if_requested",
+        "Command::new(&egress_client)",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "spawn_builderd",
+        "Command::new(mvm_build::builder_boot::guest_host_binary(\"mvm-builderd\"))",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "prepare_builder_nix_permissions",
+        "Command::new(program)",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "import_seeded_closure",
+        "Command::new(\"/sbin/nix-store\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "stage_disk_transport_input",
+        "Command::new(\"/bin/busybox\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "restage_disk_transport_job",
+        "Command::new(\"/bin/busybox\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "collect_disk_transport_output",
+        "Command::new(\"/bin/busybox\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "run_modprobe",
+        "Command::new(\"/bin/busybox\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "build_isolated_command",
+        "Command::new(\"/bin/sh\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "build_isolated_command",
+        "Command::new(\"unshare\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "seed_nix_store",
+        "Command::new(\"/bin/cp\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "load_seeded_nix_db",
+        "Command::new(\"/sbin/nix-store\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "format_ext4",
+        "Command::new(\"/sbin/mkfs.ext4\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/mvm-host-vm-init.rs",
+        "power_off",
+        "Command::new(\"/bin/sync\")",
+        "the builder VM's init",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init/kernel_emit.rs",
+        "emit_resolved_config",
+        "Command::new(nix)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init/store_gc.rs",
+        "protect_seed_from_collection",
+        "Command::new(&nix_store)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init/store_gc.rs",
+        "run_store_gc",
+        "Command::new(&nix)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init.rs",
+        "best_effort_raise_loopback",
+        "Command::new(busybox)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init.rs",
+        "best_effort_raise_loopback",
+        "Command::new(busybox)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init.rs",
+        "fork_vsock_egress_client",
+        "Command::new(egress_client)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init.rs",
+        "ext4_format_command",
+        "Command::new(mkfs)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init.rs",
+        "build_and_copy",
+        "Command::new(&nix)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/bin/stage0-init.rs",
+        "build_and_copy",
+        "Command::new(&nix)",
+        "Stage 0's init, inside the bootstrap VM",
+    ),
+    builder(
+        "crates/mvm-build/src/builderd.rs",
+        "run",
+        "Command::new(program)",
+        "mvm-builderd, the daemon inside the builder VM",
+    ),
+    builder(
+        "crates/mvm-build/src/builderd.rs",
+        "run_builder_rootfs_command",
+        "Command::new(&runner)",
+        "mvm-builderd, the daemon inside the builder VM",
+    ),
+    guest(
+        "crates/mvm-setpriv/src/lib.rs",
+        "run",
+        "Command::new(&invocation.command)",
+        "execs the workload after the privilege drop, inside the guest",
+    ),
+    on_host(
+        "crates/mvm-core/src/env_hygiene.rs",
+        "helper_command_with",
+        "Command::new(program)",
+        Where::Filter,
+        "the constructor every host helper is built by",
+    ),
+    on_host(
+        "crates/mvm-cli/build.rs",
+        "helper_command",
+        "Command::new(program)",
+        Where::Filter,
+        "the build script's constructor over the same denylist; it cannot depend on mvm-core",
+    ),
+    on_host(
+        "crates/mvm-cli/src/commands/seccomp_audit.rs",
+        "run_linux",
+        "fork",
+        Where::FilteredExec,
+        "the tracee must stop itself before exec, which `Command` cannot do",
+    ),
+    on_host(
+        "crates/mvm-cli/src/commands/seccomp_audit.rs",
+        "run_linux",
+        "execvpe",
+        Where::FilteredExec,
+        "execs the audited command with the filtered environment",
+    ),
 ];
 
 /// `(file, header)`: the body opened by the first `{` after `header` starts a
@@ -250,7 +670,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             failures.push(format!("{file} `{header}`: {problem}"));
         }
     }
-    let mut production = Vec::new();
+    let mut sources = Vec::new();
     for_each_file(
         &workspace.join("crates"),
         Some("rs"),
@@ -260,52 +680,184 @@ pub fn run(workspace: &Path) -> Result<()> {
             if file.contains("/tests/") || file.ends_with("/tests.rs") {
                 return;
             }
-            production.push((
-                file,
-                strip_cfg_test_items(&blank_comments_and_strings(source)),
-            ));
+            sources.push((file, source.to_string()));
         },
     )?;
-    let sources: Vec<_> = production
+    let found: Vec<FoundSite> = sources
         .iter()
-        .map(|(file, code)| (file.as_str(), code.as_str()))
+        .flat_map(|(file, source)| raw_sites_in(file, source))
         .collect();
-    failures.extend(unreviewed_raw_command_sites(&sources));
+    failures.extend(unclassified_raw_sites(&found, RAW_SITES));
+    failures.extend(unwitnessed_host_sites(&sources, RAW_SITES));
     if !failures.is_empty() {
         bail!(
-            "check-helper-env-hygiene: {} spawn-site or raw-constructor inventory violation(s):\n  {}\n\
-             Build host helpers with `mvm_core::env_hygiene::helper_command(program)`. \
-             Classify a changed raw tool launch before updating the inventory.",
+            "check-helper-env-hygiene: {} spawn-site or raw-process inventory violation(s):\n  {}\n\
+             Build a host process with `mvm_core::env_hygiene::helper_command(program)`. \
+             Only a process started inside a guest or the builder VM may stay raw, \
+             with an entry in RAW_SITES saying why.",
             failures.len(),
             failures.join("\n  ")
         );
     }
     eprintln!(
-        "check-helper-env-hygiene: {} host helper spawn sites use the filter; new raw constructors require review",
+        "check-helper-env-hygiene: {} named helper seams use the filter; \
+         {} raw process creations are all outside the host",
         HELPER_SPAWNS.len(),
+        found.len(),
     );
     Ok(())
 }
 
-fn unreviewed_raw_command_sites(sources: &[(&str, &str)]) -> Vec<String> {
-    let reviewed: BTreeMap<_, _> = EXISTING_RAW_COMMAND_COUNTS.iter().copied().collect();
-    let mut actual = BTreeMap::new();
-    for &(file, code) in sources {
-        let count = raw_constructor_count(code);
-        if count > 0 {
-            actual.insert(file, count);
+/// A raw process creation found in production code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FoundSite {
+    file: String,
+    line: usize,
+    function: String,
+    call: String,
+}
+
+/// Every raw process creation in `source`'s production code.
+fn raw_sites_in(file: &str, source: &str) -> Vec<FoundSite> {
+    let production = strip_cfg_test_items(&blank_comments_and_strings(source));
+    // The blanker keeps every char in place, so a char index into the blanked
+    // text addresses the same char of the original.
+    let original: Vec<char> = source.chars().collect();
+    let blanked: Vec<char> = production.chars().collect();
+    let char_index = |byte: usize| production[..byte].chars().count();
+    let mut sites = Vec::new();
+    for found in raw_constructor().find_iter(&production) {
+        let open = char_index(found.end()) - 1;
+        let argument = parenthesized(&blanked, &original, open);
+        sites.push(FoundSite {
+            file: file.to_string(),
+            line: line_of(&production, found.start()),
+            function: enclosing_function(&production[..found.start()]),
+            call: format!("Command::new({argument})"),
+        });
+    }
+    for captures in raw_process_call().captures_iter(&production) {
+        let name = captures
+            .get(1)
+            .or_else(|| captures.get(2))
+            .expect("one call name is captured");
+        let before = &production[..name.start()];
+        if before.trim_end().ends_with("fn") {
+            continue;
+        }
+        sites.push(FoundSite {
+            file: file.to_string(),
+            line: line_of(&production, name.start()),
+            function: enclosing_function(before),
+            call: name.as_str().to_string(),
+        });
+    }
+    sites.sort_by_key(|site| site.line);
+    sites
+}
+
+fn line_of(text: &str, byte: usize) -> usize {
+    text[..byte].matches('\n').count() + 1
+}
+
+/// The name of the last `fn` declared before the end of `before`.
+fn enclosing_function(before: &str) -> String {
+    static FN_NAME: OnceLock<Regex> = OnceLock::new();
+    FN_NAME
+        .get_or_init(|| Regex::new(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)").expect("valid fn regex"))
+        .captures_iter(before)
+        .last()
+        .map_or_else(|| "<module>".to_string(), |c| c[1].to_string())
+}
+
+/// The original text between the `(` at char `open` and its matching `)`,
+/// with whitespace collapsed and a trailing comma dropped. Parens are matched
+/// on the blanked text, so a paren inside a string literal is not counted.
+fn parenthesized(blanked: &[char], original: &[char], open: usize) -> String {
+    let mut depth = 0usize;
+    let mut close = blanked.len();
+    for (index, &c) in blanked.iter().enumerate().skip(open) {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = index;
+                    break;
+                }
+            }
+            _ => {}
         }
     }
-    actual
-        .iter()
-        .filter(|(file, count)| **count > reviewed.get(**file).copied().unwrap_or(0))
-        .map(|(file, count)| {
-            format!(
-                "{file}: {count} raw process constructor(s), reviewed {:?}",
-                reviewed.get(file)
-            )
-        })
-        .collect()
+    let inner: String = original[open + 1..close].iter().collect();
+    let collapsed = inner.split_whitespace().collect::<Vec<_>>().join(" ");
+    collapsed.trim_end_matches(',').trim().to_string()
+}
+
+/// Match each found site against one unused entry of `allowed`. A found site
+/// with no entry, an entry with no reason, and an entry nothing matched all
+/// fail.
+fn unclassified_raw_sites(found: &[FoundSite], allowed: &[RawSite]) -> Vec<String> {
+    let mut used = vec![false; allowed.len()];
+    let mut failures = Vec::new();
+    for site in found {
+        let entry = allowed.iter().enumerate().position(|(index, entry)| {
+            !used[index]
+                && entry.file == site.file
+                && entry.function == site.function
+                && entry.call == site.call
+        });
+        match entry {
+            Some(index) => used[index] = true,
+            None => failures.push(format!(
+                "{}:{}: unclassified raw process creation `{}` in `fn {}`",
+                site.file, site.line, site.call, site.function
+            )),
+        }
+    }
+    for (entry, used) in allowed.iter().zip(used) {
+        if entry.reason.trim().is_empty() {
+            failures.push(format!(
+                "{} `fn {}` `{}`: a {:?} exemption must say why",
+                entry.file, entry.function, entry.call, entry.place
+            ));
+        }
+        if !used {
+            failures.push(format!(
+                "{} `fn {}` `{}`: stale RAW_SITES entry; nothing in the tree matches it",
+                entry.file, entry.function, entry.call
+            ));
+        }
+    }
+    failures
+}
+
+/// A raw site on the host whose enclosing function does not do the filtering
+/// its place claims.
+fn unwitnessed_host_sites(sources: &[(String, String)], allowed: &[RawSite]) -> Vec<String> {
+    let mut failures = Vec::new();
+    for entry in allowed {
+        let witnesses = entry.place.witnesses();
+        if witnesses.is_empty() {
+            continue;
+        }
+        let Some((_, source)) = sources.iter().find(|(file, _)| file == entry.file) else {
+            continue;
+        };
+        let production = strip_cfg_test_items(&blank_comments_and_strings(source));
+        let header = format!("fn {}(", entry.function);
+        match body_after(&production, &header) {
+            Ok(body) if witnesses.iter().any(|w| body.contains(w)) => {}
+            Ok(_) => failures.push(format!(
+                "{} `fn {}`: a {:?} site must call one of {witnesses:?}",
+                entry.file, entry.function, entry.place
+            )),
+            Err(problem) => {
+                failures.push(format!("{} `fn {}`: {problem}", entry.file, entry.function))
+            }
+        }
+    }
+    failures
 }
 
 /// Check one site: the production body after `header` calls the sanitizer and
@@ -411,15 +963,139 @@ mod tests {
         assert_eq!(check_site(src, HEADER), Ok(()));
     }
 
+    const GUEST_FILE: &str = "crates/mvm-agentd/src/guest_net.rs";
+
+    fn guest_ip_site() -> [RawSite; 1] {
+        [guest(
+            GUEST_FILE,
+            "bring_up",
+            "Command::new(\"ip\")",
+            "runs in the guest agent",
+        )]
+    }
+
+    #[test]
+    fn sites_are_keyed_by_file_function_and_program() {
+        let src =
+            "fn bring_up() {\n    let _ = Command::new(\n        \"ip\",\n    ).status();\n}\n";
+        let found = raw_sites_in(GUEST_FILE, src);
+        assert_eq!(
+            found,
+            vec![FoundSite {
+                file: GUEST_FILE.to_string(),
+                line: 2,
+                function: "bring_up".to_string(),
+                call: "Command::new(\"ip\")".to_string(),
+            }]
+        );
+        assert!(unclassified_raw_sites(&found, &guest_ip_site()).is_empty());
+    }
+
     #[test]
     fn a_new_raw_command_outside_the_pinned_sites_is_discovered() {
-        let production = [(
+        let found = raw_sites_in(
             "crates/mvm-hostd/src/new_helper.rs",
             "fn start() { Command :: new (helper).spawn(); }",
-        )];
-        let failures = unreviewed_raw_command_sites(&production);
+        );
+        let failures = unclassified_raw_sites(&found, &[]);
         assert_eq!(failures.len(), 1);
-        assert!(failures[0].contains("new_helper.rs"));
+        assert!(failures[0].contains("new_helper.rs:1"), "{failures:?}");
+        assert!(failures[0].contains("Command::new(helper)"), "{failures:?}");
+    }
+
+    #[test]
+    fn swapping_one_raw_call_for_another_in_an_exempt_function_is_caught() {
+        let swapped =
+            "fn bring_up() {\n    let _ = Command::new(\"bash\").arg(\"-c\").status();\n}\n";
+        let failures = unclassified_raw_sites(&raw_sites_in(GUEST_FILE, swapped), &guest_ip_site());
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(
+            failures[0].contains("Command::new(\"bash\")"),
+            "{failures:?}"
+        );
+        assert!(failures[1].contains("stale"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_second_raw_call_beside_an_exempt_one_is_caught() {
+        let doubled = "fn bring_up() {\n    Command::new(\"ip\");\n    Command::new(\"ip\");\n}\n";
+        let failures = unclassified_raw_sites(&raw_sites_in(GUEST_FILE, doubled), &guest_ip_site());
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains(":3:"), "{failures:?}");
+    }
+
+    #[test]
+    fn a_raw_bash_spawn_on_the_host_is_refused() {
+        let src = "pub fn teardown(dir: &Path) {\n    let _ = std::process::Command::new(\"bash\")\n        .args([\"-c\", \"rm -rf x\"])\n        .status();\n}\n";
+        // Against the real list: no entry admits a raw shell in a host file.
+        // Every other entry reads as stale here, since this one file is all
+        // the scan was given.
+        let failures: Vec<String> =
+            unclassified_raw_sites(&raw_sites_in("crates/mvm-cli/src/exec.rs", src), RAW_SITES)
+                .into_iter()
+                .filter(|failure| failure.contains("unclassified"))
+                .collect();
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(
+            failures[0].contains("crates/mvm-cli/src/exec.rs:2")
+                && failures[0].contains("Command::new(\"bash\")")
+                && failures[0].contains("fn teardown"),
+            "{failures:?}"
+        );
+    }
+
+    #[test]
+    fn a_direct_fork_or_exec_is_discovered_but_not_its_declaration() {
+        let src = "extern \"C\" { fn execve(p: *const u8) -> i32; }\nfn run() {\n    match unsafe { nix::unistd::fork() } { _ => {} }\n    nix::unistd::execvp(&p, &a);\n    cmd.exec();\n    parse_execve(line);\n}\n";
+        let calls: Vec<_> = raw_sites_in("crates/mvm-cli/src/x.rs", src)
+            .into_iter()
+            .map(|site| (site.line, site.function, site.call))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (3, "run".to_string(), "fork".to_string()),
+                (4, "run".to_string(), "execvp".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_stale_or_unexplained_entry_fails() {
+        let unexplained = [builder(GUEST_FILE, "bring_up", "Command::new(\"ip\")", " ")];
+        let failures = unclassified_raw_sites(&[], &unexplained);
+        assert!(
+            failures.iter().any(|f| f.contains("must say why")),
+            "{failures:?}"
+        );
+        assert!(failures.iter().any(|f| f.contains("stale")), "{failures:?}");
+    }
+
+    #[test]
+    fn a_raw_command_in_a_comment_string_or_test_is_not_a_site() {
+        let src = "fn f() {\n    // Command::new(\"bash\")\n    let s = \"Command::new(x)\";\n}\n#[cfg(test)]\nmod tests {\n    fn t() { std::process::Command::new(\"sleep\"); }\n}\n";
+        assert!(raw_sites_in("crates/mvm-cli/src/x.rs", src).is_empty());
+    }
+
+    #[test]
+    fn a_filtered_exec_must_call_the_filter_in_its_function() {
+        let file = "crates/mvm-cli/src/commands/seccomp_audit.rs";
+        let entry = [on_host(
+            file,
+            "run_linux",
+            "fork",
+            Where::FilteredExec,
+            "why",
+        )];
+        let unfiltered = "fn run_linux() {\n    let pid = unsafe { nix::unistd::fork() };\n}\n";
+        let failures =
+            unwitnessed_host_sites(&[(file.to_string(), unfiltered.to_string())], &entry);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("filtered_env"), "{failures:?}");
+        let filtered = "fn run_linux() {\n    let env = mvm_core::env_hygiene::filtered_env(&r);\n    let pid = unsafe { nix::unistd::fork() };\n}\n";
+        assert!(
+            unwitnessed_host_sites(&[(file.to_string(), filtered.to_string())], &entry).is_empty()
+        );
     }
 
     #[test]

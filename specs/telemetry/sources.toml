@@ -96,6 +96,15 @@ gap = "Local fmt subscriber writes to the guest console only; nothing reaches VM
 required_witness = "Authenticated host collector receives producer startup and diagnostics across cold start, restore and exit."
 
 [[subscriber_init]]
+file = "crates/mvm-agentd/src/bin/mvm-guest-agent/telemetry.rs"
+anchor = "tracing::subscriber::set_global_default"
+scope = "global"
+role = "workload-guest"
+owner = "sealed agent capture install (telemetry-asserted boots)"
+gap = "Captures the agent's own diagnostics into the bounded outbox and serves them per session; delivery to a VM-lifetime host collector is witnessed at component level only, not on a booted guest."
+required_witness = "Authenticated host collector receives agent diagnostics from a real telemetry-asserted boot across cold start, restore and exit."
+
+[[subscriber_init]]
 file = "crates/mvm-agentd/src/bin/mvm-addon-vsock-bridge.rs"
 anchor = "tracing_subscriber::fmt::init"
 scope = "global"

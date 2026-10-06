@@ -144,7 +144,7 @@ impl Platform {
         *HOST_NIX.get_or_init(|| {
             // Try PATH first.
             // allow(host-nix): debug/legacy-only detection probe; has_host_nix() has zero callers on the normal build/run path, which routes every nix invocation through the builder VM.
-            if std::process::Command::new("nix")
+            if crate::env_hygiene::helper_command("nix")
                 .args(["--version"])
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
@@ -234,8 +234,7 @@ fn is_macos_26_or_later() -> bool {
 /// Read the macOS major version number via sysctl.
 #[cfg(target_os = "macos")]
 fn macos_major_version() -> u32 {
-    use std::process::Command;
-    Command::new("sw_vers")
+    crate::env_hygiene::helper_command("sw_vers")
         .arg("-productVersion")
         .output()
         .ok()
