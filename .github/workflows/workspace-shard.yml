@@ -1,0 +1,87 @@
+name: Workspace shard worker
+run-name: workspace-shard / ${{ inputs.correlation }} / ${{ inputs.runner_kind }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact commit to test
+        required: true
+        type: string
+      shard:
+        description: One-based nextest shard
+        required: true
+        type: choice
+        options: ["1", "2"]
+      runner_kind:
+        description: Runner pool selected by the parent broker
+        required: true
+        type: choice
+        options: [github, hetzner]
+      correlation:
+        description: Parent run/shard correlation key
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
+    runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-latest' }}
+    timeout-minutes: 55
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit_sha }}
+
+      - uses: ./.github/actions/free-disk
+        if: inputs.runner_kind == 'github'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        if: inputs.runner_kind == 'github'
+        with:
+          packages: attr cryptsetup-bin lld
+
+      - name: Verify provisioned self-hosted dependencies
+        if: inputs.runner_kind == 'hetzner'
+        run: |
+          set -euo pipefail
+          command -v cryptsetup
+          command -v getfattr
+          command -v ld.lld
+
+      - uses: ./.github/actions/rust-cache
+        with:
+          key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Validate nextest override filters
+        run: cargo run -p xtask -- check-nextest-groups
+
+      - name: xtask man-page tests
+        run: cargo nextest run -p xtask --features man
+
+      - name: Run tests
+        run: cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2
+
+      - name: Run addon/egress helper tests
+        if: inputs.shard == '1'
+        run: cargo nextest run -p mvm-agentd --features addons
+
+      - name: Run doctests
+        if: inputs.shard == '1'
+        run: cargo test --workspace --doc

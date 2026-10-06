@@ -97,7 +97,7 @@ pub(in crate::commands) fn auto_exec_record_script(
         script.display()
     );
 
-    let mut cmd = Command::new(&interpreter);
+    let mut cmd = user_script_command(&interpreter);
     // Deno's default sandbox refuses fs writes; the SDK's atexit
     // hook needs to write the recording, so opt out explicitly.
     let basename = interpreter
@@ -187,6 +187,19 @@ pub(in crate::commands) fn load_recording(
         digest_hex,
         secret_findings,
     })
+}
+
+/// The module search paths a user's script resolves its imports from. The
+/// user set them for the script, so its launch keeps them by exact name; every
+/// other denied variable, `PYTHONSTARTUP` and `NODE_OPTIONS` included, is
+/// still stripped.
+const USER_SCRIPT_IMPORT_PATHS: [&str; 2] = ["PYTHONPATH", "NODE_PATH"];
+
+/// A host command running the user's own script under `interpreter`.
+pub(in crate::commands) fn user_script_command(interpreter: &Path) -> Command {
+    let readmit = mvm_core::env_hygiene::EnvReadmit::from_names(USER_SCRIPT_IMPORT_PATHS)
+        .expect("exact variable names re-admit");
+    mvm_core::env_hygiene::helper_command_with(interpreter, &readmit)
 }
 
 /// Resolve which interpreter to spawn for a given language. Each

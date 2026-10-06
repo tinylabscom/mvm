@@ -5,7 +5,7 @@
 //! daemon: it turns a decoded [`BuilderRequest`] into a
 //! [`BuilderResponse`] ([`dispatch`]) and runs the read-dispatch-write
 //! loop over a framed connection
-//! ([`serve_connection_with_executor`]). The binary entrypoint and the
+//! ([`serve_connection`]). The binary entrypoint and the
 //! Linux AF_VSOCK listener are deliberately *not*
 //! here — they land with the builder-VM boot wiring. Keeping the core
 //! in the library lets it be driven from a `UnixStream` pair in tests
@@ -31,12 +31,12 @@ use crate::builderd_protocol::{
     handshake_reply,
 };
 
-/// Map one [`BuilderRequest`] to its [`BuilderResponse`]. Pure and
-/// stateless: the skeleton daemon holds no per-connection or
-/// cross-request state yet, so a handshake/probe is answered the same
-/// regardless of order. Stateful "must handshake first" enforcement and
-/// real operation handlers are later slices.
-pub fn dispatch(request: &BuilderRequest) -> BuilderResponse {
+/// Answer the control operations (Handshake / Probe / CancelJob) and
+/// refuse every build/eval operation as [`FailureCategory::Unsupported`].
+/// Pure and stateless: the daemon holds no per-connection or
+/// cross-request state, so a handshake/probe is answered the same
+/// regardless of order.
+fn dispatch_control(request: &BuilderRequest) -> BuilderResponse {
     match request {
         BuilderRequest::Handshake { protocol_version } => handshake_reply(*protocol_version),
 
@@ -131,24 +131,17 @@ fn serve_loop(
     }
 }
 
-/// Serve one control connection with the stateless [`dispatch`] (no
-/// operation executor): build/eval operations answer
-/// [`FailureCategory::Unsupported`]. Used where the daemon has no
-/// builder-side execution context (the skeleton path and tests).
-#[cfg(test)]
-pub fn serve_connection(stream: &mut UnixStream) -> std::io::Result<()> {
-    serve_loop(stream, dispatch)
-}
-
-/// Serve one control connection with an [`OpExecutor`] so recognized
-/// build/eval operations actually run inside the builder VM (e.g.
-/// [`BuilderRequest::FlakeCheck`] → `nix flake check`). Operations
-/// without a handler still answer [`FailureCategory::Unsupported`].
-pub fn serve_connection_with_executor(
+/// Serve one control connection, answering each request through
+/// [`dispatch`]. With an [`OpExecutor`], recognized build/eval operations
+/// actually run inside the builder VM (e.g. [`BuilderRequest::FlakeCheck`]
+/// → `nix flake check`); without one they answer
+/// [`FailureCategory::Unsupported`], which is how the daemon is driven
+/// where it has no builder-side execution context.
+pub fn serve_connection(
     stream: &mut UnixStream,
-    executor: &dyn OpExecutor,
+    executor: Option<&dyn OpExecutor>,
 ) -> std::io::Result<()> {
-    serve_loop(stream, |request| dispatch_with_executor(request, executor))
+    serve_loop(stream, |request| dispatch(request, executor))
 }
 
 // ============================================================================
@@ -652,13 +645,15 @@ pub fn dispatch_query_store_path(
     }
 }
 
-/// Dispatch with an [`OpExecutor`]: recognized build/eval operations
-/// that have a handler run through the executor; everything else falls
-/// back to the stateless [`dispatch`] (Handshake / Probe / CancelJob).
-pub fn dispatch_with_executor(
-    request: &BuilderRequest,
-    executor: &dyn OpExecutor,
-) -> BuilderResponse {
+/// Map one [`BuilderRequest`] to its [`BuilderResponse`]. Control
+/// operations (Handshake / Probe / CancelJob) are always answered
+/// statelessly. Build/eval operations run through `executor` when one is
+/// supplied, and are refused as [`FailureCategory::Unsupported`] when it
+/// is not.
+pub fn dispatch(request: &BuilderRequest, executor: Option<&dyn OpExecutor>) -> BuilderResponse {
+    let Some(executor) = executor else {
+        return dispatch_control(request);
+    };
     match request {
         BuilderRequest::FlakeCheck { op, flake_path } => {
             dispatch_flake_check(*op, flake_path, executor)
@@ -685,7 +680,7 @@ pub fn dispatch_with_executor(
         BuilderRequest::QueryStorePath { op, store_path } => {
             dispatch_query_store_path(*op, store_path, executor)
         }
-        other => dispatch(other),
+        other => dispatch_control(other),
     }
 }
 
@@ -725,9 +720,12 @@ mod tests {
 
     #[test]
     fn dispatch_handshake_accepts_supported_version() {
-        let resp = dispatch(&BuilderRequest::Handshake {
-            protocol_version: PROTOCOL_VERSION,
-        });
+        let resp = dispatch(
+            &BuilderRequest::Handshake {
+                protocol_version: PROTOCOL_VERSION,
+            },
+            None,
+        );
         assert!(matches!(
             resp,
             BuilderResponse::Accepted {
@@ -739,9 +737,12 @@ mod tests {
 
     #[test]
     fn dispatch_handshake_refuses_bad_version() {
-        let resp = dispatch(&BuilderRequest::Handshake {
-            protocol_version: PROTOCOL_VERSION + 1,
-        });
+        let resp = dispatch(
+            &BuilderRequest::Handshake {
+                protocol_version: PROTOCOL_VERSION + 1,
+            },
+            None,
+        );
         assert!(matches!(
             resp,
             BuilderResponse::Failed {
@@ -753,7 +754,7 @@ mod tests {
 
     #[test]
     fn dispatch_probe_echoes_op() {
-        let resp = dispatch(&BuilderRequest::Probe { op: op() });
+        let resp = dispatch(&BuilderRequest::Probe { op: op() }, None);
         match resp {
             BuilderResponse::Accepted {
                 op: got,
@@ -768,7 +769,7 @@ mod tests {
 
     #[test]
     fn dispatch_cancel_acks() {
-        let resp = dispatch(&BuilderRequest::CancelJob { target: op() });
+        let resp = dispatch(&BuilderRequest::CancelJob { target: op() }, None);
         assert!(matches!(resp, BuilderResponse::Cancelled { op: got } if got == op()));
     }
 
@@ -802,7 +803,7 @@ mod tests {
             },
         ];
         for req in cases {
-            match dispatch(&req) {
+            match dispatch(&req, None) {
                 BuilderResponse::Failed {
                     op: got,
                     category,
@@ -831,7 +832,7 @@ mod tests {
         client
             .shutdown(std::net::Shutdown::Write)
             .expect("half-close write");
-        serve_connection(&mut server).expect("serve");
+        serve_connection(&mut server, None).expect("serve");
         mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("read response")
     }
 
@@ -867,7 +868,7 @@ mod tests {
             .shutdown(std::net::Shutdown::Write)
             .expect("half-close write");
 
-        serve_connection(&mut server).expect("serve returns Ok on clean eof");
+        serve_connection(&mut server, None).expect("serve returns Ok on clean eof");
 
         let first = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("first");
         let second = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("second");
@@ -881,7 +882,7 @@ mod tests {
         // normal, non-error end of connection.
         let (client, mut server) = UnixStream::pair().expect("socketpair");
         drop(client);
-        serve_connection(&mut server).expect("immediate eof is Ok");
+        serve_connection(&mut server, None).expect("immediate eof is Ok");
     }
 
     // ---- typed operation execution (FlakeCheck) -----------------------
@@ -1051,23 +1052,23 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_with_executor_routes_build_ops_but_delegates_control_ops() {
+    fn dispatch_routes_build_ops_to_the_executor_and_answers_control_ops() {
         // A clean build emits an out-path on stdout.
         let exec = FakeExecutor::full(0, "/nix/store/aaaa-img\n", "");
         // FlakeCheck reaches the executor → Completed.
         assert!(matches!(
-            dispatch_with_executor(
+            dispatch(
                 &BuilderRequest::FlakeCheck {
                     op: op(),
                     flake_path: "/work/nix".to_string(),
                 },
-                &exec,
+                Some(&exec),
             ),
             BuilderResponse::Completed { .. }
         ));
         // BuildGuestImage now reaches the executor → ArtifactReady.
         assert!(matches!(
-            dispatch_with_executor(
+            dispatch(
                 &BuilderRequest::BuildGuestImage {
                     op: op(),
                     flake_ref: "path:.".to_string(),
@@ -1075,17 +1076,17 @@ mod tests {
                     fingerprint: None,
                     output_dir: None,
                 },
-                &exec,
+                Some(&exec),
             ),
             BuilderResponse::ArtifactReady { .. }
         ));
-        // Control ops still delegate to the stateless dispatch.
+        // Control ops are answered the same whether or not an executor is present.
         assert!(matches!(
-            dispatch_with_executor(&BuilderRequest::Probe { op: op() }, &exec),
+            dispatch(&BuilderRequest::Probe { op: op() }, Some(&exec)),
             BuilderResponse::Accepted { .. }
         ));
         assert!(matches!(
-            dispatch_with_executor(&BuilderRequest::CancelJob { target: op() }, &exec),
+            dispatch(&BuilderRequest::CancelJob { target: op() }, Some(&exec)),
             BuilderResponse::Cancelled { .. }
         ));
     }
@@ -1264,14 +1265,14 @@ mod tests {
     fn build_host_tool_uses_the_same_nix_build_path() {
         let exec = FakeExecutor::full(0, "/nix/store/dddd-tool\n", "");
         assert!(matches!(
-            dispatch_with_executor(
+            dispatch(
                 &BuilderRequest::BuildHostTool {
                     op: op(),
                     flake_ref: "path:.".to_string(),
                     attr_path: "packages.aarch64-linux.mvm-host-vm-init".to_string(),
                     fingerprint: Some("blake3:abcd".to_string()),
                 },
-                &exec,
+                Some(&exec),
             ),
             BuilderResponse::ArtifactReady { .. }
         ));
@@ -1391,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_connection_with_executor_runs_a_build_over_the_wire() {
+    fn serve_connection_runs_a_build_over_the_wire() {
         let (mut client, mut server) = UnixStream::pair().expect("socketpair");
         mvm_agentd::vsock::write_frame(
             &mut client,
@@ -1408,7 +1409,7 @@ mod tests {
             .shutdown(std::net::Shutdown::Write)
             .expect("half-close");
         let exec = FakeExecutor::full(0, "/nix/store/gggg-img\n", "");
-        serve_connection_with_executor(&mut server, &exec).expect("serve");
+        serve_connection(&mut server, Some(&exec)).expect("serve");
         let resp = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
         assert!(
             matches!(resp, BuilderResponse::ArtifactReady { op: got, store_path: Some(p), .. }
@@ -1417,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn serve_connection_with_executor_runs_flake_check_over_the_wire() {
+    fn serve_connection_runs_flake_check_over_the_wire() {
         let (mut client, mut server) = UnixStream::pair().expect("socketpair");
         mvm_agentd::vsock::write_frame(
             &mut client,
@@ -1431,7 +1432,7 @@ mod tests {
             .shutdown(std::net::Shutdown::Write)
             .expect("half-close");
         let exec = FakeExecutor::ok(0, "");
-        serve_connection_with_executor(&mut server, &exec).expect("serve");
+        serve_connection(&mut server, Some(&exec)).expect("serve");
         let resp = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
         assert!(matches!(resp, BuilderResponse::Completed { op: got } if got == op()));
     }

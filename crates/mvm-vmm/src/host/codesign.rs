@@ -172,7 +172,7 @@ mod macos {
         if std::fs::write(&ent_path, entitlements).is_err() {
             return;
         }
-        let _ = std::process::Command::new("codesign")
+        let _ = mvm_core::env_hygiene::helper_command("codesign")
             .args(["--sign", "-", "--force", "--entitlements"])
             .arg(&ent_path)
             .arg(exe_str)
@@ -182,7 +182,7 @@ mod macos {
 
     /// Read the binary's entitlements XML via codesign.
     fn read_entitlements_xml(path: &Path) -> Option<String> {
-        let out = std::process::Command::new("codesign")
+        let out = mvm_core::env_hygiene::helper_command("codesign")
             .args(["-d", "--entitlements", "-", "--xml"])
             .arg(path)
             .output()
@@ -224,7 +224,7 @@ mod macos {
         sign_binary(&exe.to_string_lossy(), RequiredEntitlement::Hypervisor);
 
         use std::os::unix::process::CommandExt;
-        let err = std::process::Command::new(&exe)
+        let err = mvm_core::env_hygiene::helper_command(&exe)
             .args(std::env::args_os().skip(1))
             .env("MVM_SIGNED", "1")
             .exec();

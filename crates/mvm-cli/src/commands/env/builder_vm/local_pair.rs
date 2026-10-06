@@ -84,7 +84,7 @@ pub(crate) fn ensure_pair_built(
         &cache,
         &mut || bootstrap::bootstrap_tool_builder_vm_image().map_err(|error| format!("{error:#}")),
         &mut |job| {
-            let choice = mvm_build::builder_backend_select::resolve_choice();
+            let choice = mvm_build::builder_backend_select::resolve_choice(None);
             let builder = ShellJobBuilder::for_choice(choice).ok_or_else(|| {
                 format!(
                     "the {choice:?} builder has no shell-job path to build a local image set \
@@ -172,7 +172,6 @@ pub(crate) fn staged_contract_files(
 /// to answer. The pair's kernel is that answer; without this seed a
 /// kernel-less mkGuest image (the common shape) falls through to the builder
 /// kernel the moment a checkout is selected.
-#[cfg(feature = "builder-vm")]
 pub(crate) fn seed_pair_workload_kernel_cache() -> Result<()> {
     let Some(checkout) = super::bootstrap::selected_local_checkout()? else {
         return Ok(());

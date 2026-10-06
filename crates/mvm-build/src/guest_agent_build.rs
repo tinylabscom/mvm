@@ -121,6 +121,27 @@ pub struct RuntimeOverlayGuestBinaries {
     pub ping: PathBuf,
 }
 
+impl RuntimeOverlayGuestBinaries {
+    /// Every binary in the set, named by the Cargo `[[bin]]` that produced it.
+    ///
+    /// The overlay itself stages these under short names (`agent`,
+    /// `netinit`, …); a consumer that builds images from the binaries knows
+    /// them by their Cargo names, so that is the name an exported set uses.
+    pub fn artifacts(&self) -> [(&'static str, &Path); 9] {
+        [
+            ("mvm-guest-agent", self.agent.as_path()),
+            ("mvm-guest-netinit", self.netinit.as_path()),
+            ("mvm-seccomp-apply", self.seccomp_apply.as_path()),
+            ("mvm-display-bridge", self.display_bridge.as_path()),
+            ("mvm-runner", self.runner.as_path()),
+            ("mvm-egress-client", self.egress_client.as_path()),
+            ("mvm-addon-dns", self.addon_dns.as_path()),
+            ("mvm-exit-report", self.exit_report.as_path()),
+            ("mvm-ping", self.ping.as_path()),
+        ]
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOverlayGuestLayout {
     pub dir: PathBuf,
@@ -734,7 +755,7 @@ fn run_zigbuild(spec: &GuestAgentBuildSpec, args: &[String]) -> Result<(), Guest
         workspace = %spec.workspace_root.display(),
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
-    let mut cmd = std::process::Command::new(&cargo);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(args))
         .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
@@ -798,7 +819,7 @@ pub fn build_guest_binaries(
         workspace = %spec.workspace_root.display(),
         "cross-compiling guest runtime via cargo zigbuild (first build for this source checkout)"
     );
-    let mut cmd = std::process::Command::new(&cargo);
+    let mut cmd = mvm_core::env_hygiene::helper_command(&cargo);
     cmd.args(zigbuild_args_for_output(&argv[1..]))
         .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
@@ -997,7 +1018,7 @@ fn pinned_rust_toolchain(workspace_root: &Path) -> Result<String, GuestAgentBuil
 }
 
 fn rustup_tool(toolchain: &str, tool: &str) -> Result<PathBuf, GuestAgentBuildError> {
-    let output = std::process::Command::new("rustup")
+    let output = mvm_core::env_hygiene::helper_command("rustup")
         .args(["which", tool, "--toolchain", toolchain])
         .output()
         .map_err(|e| GuestAgentBuildError::BuildFailed {

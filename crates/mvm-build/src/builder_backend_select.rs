@@ -265,9 +265,9 @@ pub fn resolve_env_override() -> Option<BuilderBackendChoice> {
 }
 
 /// Apply the override priority: CLI flag > env var > auto-detect.
-/// `flag` is the typed `--builder` value the CLI plumbs in (`None`
-/// when the flag isn't supplied).
-pub fn resolve_choice_with_override(flag: Option<BuilderBackendChoice>) -> BuilderBackendChoice {
+/// `flag` is the typed `--builder` value the CLI plumbs in; `None` when
+/// the flag isn't supplied, which leaves the env var and auto-detect.
+pub fn resolve_choice(flag: Option<BuilderBackendChoice>) -> BuilderBackendChoice {
     if let Some(c) = flag {
         return c;
     }
@@ -275,13 +275,6 @@ pub fn resolve_choice_with_override(flag: Option<BuilderBackendChoice>) -> Build
         return c;
     }
     auto_detect_default()
-}
-
-/// Resolve the choice with no CLI flag — env var + auto-detect only.
-/// Existing callers that don't yet plumb the `--builder` flag use
-/// this; they migrate to `resolve_choice_with_override` once wired.
-pub fn resolve_choice() -> BuilderBackendChoice {
-    resolve_choice_with_override(None)
 }
 
 /// Browser-only builder stub. The WebLinux builder runs inside a browser
@@ -365,49 +358,20 @@ pub fn declared_capabilities_for(
     }
 }
 
-/// Construct the builder driver the selection resolves to. Returns
-/// a boxed trait object so callers don't have to enumerate concrete
-/// types at the call site.
+/// Construct the builder driver the selection resolves to, honouring an
+/// explicit `--builder` flag at the highest priority (see
+/// [`resolve_choice`]). Fallible because the driver-backed arms (hvf,
+/// Firecracker) depend on a constructor the CLI registers at startup.
 ///
-/// Both drivers construct via `::default()` — neither does I/O at
-/// construction time. The first I/O happens inside `run_build`
-/// (image lookup, lock acquire, supervisor spawn).
-pub fn resolve_builder_backend() -> Box<dyn BuilderVm> {
-    resolve_builder_backend_with_override(None)
-}
-
-/// As [`resolve_builder_backend`] but accepts an explicit CLI flag
-/// override at the highest priority. Used by CLI dispatch.
-///
-/// Returns the concrete builder for all backends except `Hvf`, which
-/// requires a registered constructor. Callers that may receive `Hvf`
-/// should use [`try_resolve_builder_backend_with_override`] instead.
-pub fn resolve_builder_backend_with_override(
-    flag: Option<BuilderBackendChoice>,
-) -> Box<dyn BuilderVm> {
-    let choice = resolve_choice_with_override(flag);
-    match choice {
-        BuilderBackendChoice::Libkrun => {
-            Box::new(LibkrunBuilderVm::default().with_closure_nar(closure_nar_for_host_arch()))
-        }
-        BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::WebLinux => Box::new(WebLinuxBuilderVm),
-        // Only reachable when CLI startup did not register the driver-backed
-        // builders, which is a programming error rather than a host condition.
-        BuilderBackendChoice::Hvf | BuilderBackendChoice::Firecracker => driver_builder(choice)
-            .expect("driver-backed builder not registered — call register_driver_builders at CLI startup before resolving via the infallible path"),
-    }
-}
-
-/// As [`resolve_builder_backend_with_override`] but fallible — the hvf arm
-/// depends on a registered constructor.
-pub fn try_resolve_builder_backend_with_override(
+/// No driver does I/O at construction time; the first I/O happens inside
+/// `run_build` (image lookup, lock acquire, supervisor spawn).
+pub fn try_resolve_builder_backend(
     flag: Option<BuilderBackendChoice>,
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
-    try_resolve_builder_backend_for(resolve_choice_with_override(flag))
+    try_resolve_builder_backend_for(resolve_choice(flag))
 }
 
-/// As [`try_resolve_builder_backend_with_override`] but for an already-resolved
+/// As [`try_resolve_builder_backend`] but for an already-resolved
 /// choice. The shell-job call sites take the choice the fallback loop handed
 /// them, so they cannot re-resolve.
 pub fn try_resolve_builder_backend_for(
@@ -427,14 +391,14 @@ pub fn try_resolve_builder_backend_for(
 ///
 /// Stage 0 is implemented for libkrun and QEMU; hvf and Firecracker
 /// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
-/// from [`resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
+/// from [`try_resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
 /// everything else — including the hvf auto-detect default on macOS-26+ —
 /// falls back to libkrun, preserving the "Stage 0 is libkrun even on
 /// hvf-default hosts" invariant rather than hitting the gap.
 /// `verbose` streams the libkrun console; the QEMU path always logs to
 /// `console.log`.
 pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
-    resolve_stage0_backend_for_choice(resolve_choice(), verbose)
+    resolve_stage0_backend_for_choice(resolve_choice(None), verbose)
 }
 
 /// Constructor for a driver-backed Stage 0 bootstrapper, registered by the CLI
@@ -988,7 +952,7 @@ mod tests {
         // Flag says libkrun, env says qemu → flag wins.
         with_env(Some("qemu"), || {
             assert_eq!(
-                resolve_choice_with_override(Some(BuilderBackendChoice::Libkrun)),
+                resolve_choice(Some(BuilderBackendChoice::Libkrun)),
                 BuilderBackendChoice::Libkrun,
             );
         });
@@ -999,11 +963,11 @@ mod tests {
         // No env, flag explicit → flag wins regardless of host.
         with_env(None, || {
             assert_eq!(
-                resolve_choice_with_override(Some(BuilderBackendChoice::Qemu)),
+                resolve_choice(Some(BuilderBackendChoice::Qemu)),
                 BuilderBackendChoice::Qemu,
             );
             assert_eq!(
-                resolve_choice_with_override(Some(BuilderBackendChoice::Libkrun)),
+                resolve_choice(Some(BuilderBackendChoice::Libkrun)),
                 BuilderBackendChoice::Libkrun,
             );
         });
@@ -1012,16 +976,10 @@ mod tests {
     #[test]
     fn env_var_beats_auto_detect_when_no_flag() {
         with_env(Some("qemu"), || {
-            assert_eq!(
-                resolve_choice_with_override(None),
-                BuilderBackendChoice::Qemu,
-            );
+            assert_eq!(resolve_choice(None), BuilderBackendChoice::Qemu,);
         });
         with_env(Some("libkrun"), || {
-            assert_eq!(
-                resolve_choice_with_override(None),
-                BuilderBackendChoice::Libkrun,
-            );
+            assert_eq!(resolve_choice(None), BuilderBackendChoice::Libkrun,);
         });
     }
 
@@ -1032,7 +990,7 @@ mod tests {
         // tests. Here we just pin the wiring: an unset env with no
         // flag must produce *some* choice (no panic, no crash).
         with_env(None, || {
-            let _ = resolve_choice_with_override(None);
+            let _ = resolve_choice(None);
         });
     }
 
@@ -1068,24 +1026,24 @@ mod tests {
     }
 
     #[test]
-    fn resolve_builder_backend_constructs_some_driver() {
+    fn try_resolve_builder_backend_constructs_some_driver() {
         // The factory doesn't expose the concrete type. This test
         // pins the wiring: env override path constructs successfully
         // without panicking. The choice-mapping is covered above.
         with_env(Some("libkrun"), || {
-            let _backend = resolve_builder_backend();
+            try_resolve_builder_backend(None).expect("libkrun builder constructs");
         });
         with_env(Some("qemu"), || {
-            let _backend = resolve_builder_backend();
+            try_resolve_builder_backend(None).expect("qemu builder constructs");
         });
     }
 
     #[test]
-    fn resolve_builder_backend_with_override_honours_flag() {
+    fn try_resolve_builder_backend_honours_flag() {
         with_env(Some("not-a-backend"), || {
             // Flag forces libkrun even though env names an unknown backend.
-            let _backend =
-                resolve_builder_backend_with_override(Some(BuilderBackendChoice::Libkrun));
+            try_resolve_builder_backend(Some(BuilderBackendChoice::Libkrun))
+                .expect("flagged libkrun builder constructs");
         });
     }
 

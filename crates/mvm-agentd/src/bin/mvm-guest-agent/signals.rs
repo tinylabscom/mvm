@@ -226,6 +226,9 @@ fn apply_reload_to_atomics(new_cfg: &AgentConfig) {
 /// teardown) want orderly exit.
 pub(crate) fn shutdown_subsystems(grace: Duration) {
     eprintln!("mvm-guest-agent: shutdown requested; draining for up to {grace:?}");
+    // Coverage Stopped, if capture is live: one non-waiting offer that rides
+    // whatever session drains before the process exits. Never a join.
+    crate::telemetry::emit_stopped();
     // Run the workload's baked `before_stop.sh` hook *before*
     // tearing down the worker
     // pool so the hook can still see live workers (e.g. to flush

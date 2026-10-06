@@ -22,25 +22,10 @@ fn validate_builder_mode(value: Option<&str>) -> Result<()> {
     }
 }
 
-/// Build artifacts for a pool. Default mode runs `nix build` on the host.
-pub fn pool_build(
-    env: &dyn BuildEnvironment,
-    tenant_id: &str,
-    pool_id: &str,
-    timeout_secs: Option<u64>,
-) -> Result<()> {
-    let opts = PoolBuildOpts {
-        timeout_secs,
-        builder_vcpus: None,
-        builder_mem_mib: None,
-        force_rebuild: false,
-    };
-    pool_build_with_opts(env, tenant_id, pool_id, opts)
-}
-
-/// Build artifacts for a pool with optional resource overrides.
+/// Build artifacts for a pool. Default mode runs `nix build` on the host;
+/// `opts` carries the timeout and builder resource overrides.
 #[tracing::instrument(skip_all, fields(tenant_id, pool_id))]
-pub fn pool_build_with_opts(
+pub fn pool_build(
     env: &dyn BuildEnvironment,
     tenant_id: &str,
     pool_id: &str,

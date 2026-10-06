@@ -52,10 +52,8 @@ pub(super) fn stage0_build_conf_contents(
 /// it is the builder image the image lock pins, fetched and verified. A local
 /// build asked for without a checkout is refused rather than answered with
 /// the fetched image, which is exactly what the caller asked not to have.
-#[cfg(feature = "builder-vm")]
 pub(in crate::commands) const MVM_ALLOW_LOCAL_BUILDER_ENV: &str = "MVM_ALLOW_LOCAL_BUILDER_BUILD";
 
-#[cfg(feature = "builder-vm")]
 fn local_builder_build_opted_in(value: Option<&std::ffi::OsStr>) -> bool {
     value == Some(std::ffi::OsStr::new("1"))
 }
@@ -63,7 +61,6 @@ fn local_builder_build_opted_in(value: Option<&std::ffi::OsStr>) -> bool {
 /// Decide whether to build the builder VM from a local checkout or fetch the
 /// published image. This logic is intentionally small and pure so unit tests can
 /// drive it without touching the filesystem or CI-bound network I/O.
-#[cfg(feature = "builder-vm")]
 fn decide_builder_image_acquisition(
     allow_local_build: bool,
     env_override: Option<mvm_build::boot_image_select::BootImageAcquisition>,
@@ -103,32 +100,26 @@ fn decide_builder_image_acquisition(
 }
 
 pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
-    #[cfg(feature = "builder-vm")]
-    {
-        // Operator opt-in: only the documented value `1` permits building the
-        // builder VM from a local image checkout.
-        let allow_local_build =
-            local_builder_build_opted_in(std::env::var_os(MVM_ALLOW_LOCAL_BUILDER_ENV).as_deref());
-        let env_override = mvm_build::boot_image_select::resolve_env_override();
-        let checkout = selected_local_checkout()?;
-        let has_checkout = checkout.is_some();
+    // Operator opt-in: only the documented value `1` permits building the
+    // builder VM from a local image checkout.
+    let allow_local_build =
+        local_builder_build_opted_in(std::env::var_os(MVM_ALLOW_LOCAL_BUILDER_ENV).as_deref());
+    let env_override = mvm_build::boot_image_select::resolve_env_override();
+    let checkout = selected_local_checkout()?;
+    let has_checkout = checkout.is_some();
 
-        match decide_builder_image_acquisition(allow_local_build, env_override, has_checkout) {
-            Ok(mvm_build::boot_image_select::BootImageAcquisition::Build) => {
-                // Safe to unwrap: the decision only returns Build when a
-                // checkout exists and was permitted.
-                bootstrap_builder_vm_image_from_local_pair(&checkout.expect("checkout present"))?;
-            }
-            Ok(mvm_build::boot_image_select::BootImageAcquisition::Fetch) => {
-                bootstrap_tool_builder_vm_image()?;
-            }
-            Err(e) => return Err(e),
+    match decide_builder_image_acquisition(allow_local_build, env_override, has_checkout) {
+        Ok(mvm_build::boot_image_select::BootImageAcquisition::Build) => {
+            // Safe to unwrap: the decision only returns Build when a
+            // checkout exists and was permitted.
+            bootstrap_builder_vm_image_from_local_pair(&checkout.expect("checkout present"))?;
         }
-        Ok(())
+        Ok(mvm_build::boot_image_select::BootImageAcquisition::Fetch) => {
+            bootstrap_tool_builder_vm_image()?;
+        }
+        Err(e) => return Err(e),
     }
-
-    #[cfg(not(feature = "builder-vm"))]
-    bootstrap_tool_builder_vm_image()
+    Ok(())
 }
 
 /// The local image checkout the selector names, if that is the selected
@@ -157,24 +148,19 @@ pub(super) fn selected_local_checkout_from(
 /// this builder, so routing it through the pair's `builder-vm` target would
 /// recurse — building the builder image would need the builder image.
 pub(in crate::commands) fn bootstrap_tool_builder_vm_image() -> Result<()> {
-    #[cfg(feature = "builder-vm")]
-    return bootstrap_builder_vm_image_with(
+    bootstrap_builder_vm_image_with(
         || {
             mvm_build::builder_vm_bootstrap::maybe_reexec_builder_vm_bootstrap_helper()
                 .map_err(anyhow::Error::from)
         },
         bootstrap_tool_builder_vm_image_in_process,
-    );
-
-    #[cfg(not(feature = "builder-vm"))]
-    bootstrap_tool_builder_vm_image_in_process()
+    )
 }
 
 /// Serve the builder-VM cache from the pair's `builder-vm` target: build it
 /// through the shared local-image-set path when the pair changed, install the
 /// verified entry under a fingerprint naming both checkouts, and answer an
 /// unchanged pair from the installed cache.
-#[cfg(feature = "builder-vm")]
 fn bootstrap_builder_vm_image_from_local_pair(
     checkout: &mvm_build::image_source::LocalImageCheckout,
 ) -> Result<()> {
@@ -199,7 +185,6 @@ fn bootstrap_builder_vm_image_from_local_pair(
     super::local_pair::install_pair_builder_vm(&build.entry, arch, &fingerprint)
 }
 
-#[cfg(feature = "builder-vm")]
 fn bootstrap_builder_vm_image_with(
     maybe_reexec: impl FnOnce() -> Result<bool>,
     bootstrap_in_process: impl FnOnce() -> Result<()>,
@@ -220,7 +205,7 @@ fn bootstrap_tool_builder_vm_image_in_process() -> Result<()> {
     perform_builder_vm_download_published(arch, &out_dir)
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod bootstrap_helper_routing_tests {
     use super::bootstrap_builder_vm_image_with;
     use std::cell::Cell;
@@ -292,7 +277,7 @@ fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()
     download_builder_vm_image(arch, out_dir).context("downloading the builder VM image")
 }
 
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod decide_tests {
     use super::*;
     use mvm_build::boot_image_select::BootImageAcquisition;

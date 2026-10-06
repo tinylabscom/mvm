@@ -500,8 +500,8 @@ pub(crate) mod tests {
 
     #[test]
     fn flow_direction_wire_strings_pinned() {
-        // Downstream parsers (mvmd tenant audit rollup, mvmctl audit
-        // traffic) filter on these literals; a rename here would
+        // Downstream parsers (mvmd tenant audit rollup, mvmctl trust
+        // audit) filter on these literals; a rename here would
         // silently break them. Both serde and `as_str` must agree.
         assert_eq!(FlowDirection::Egress.as_str(), "egress");
         assert_eq!(FlowDirection::Ingress.as_str(), "ingress");

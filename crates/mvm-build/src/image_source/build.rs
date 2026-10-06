@@ -441,7 +441,7 @@ pub fn build_host_binaries(
     mvm_root: &Path,
     arch: GuestArch,
 ) -> Result<PathBuf, LocalImageBuildError> {
-    let mut cmd = Command::new("bash");
+    let mut cmd = mvm_core::env_hygiene::helper_command("bash");
     cmd.arg(images_root.join(HOST_BINARIES_SCRIPT))
         .arg("--mvm-checkout")
         .arg(mvm_root)
@@ -494,7 +494,7 @@ pub struct EmitRequest<'a> {
 /// image checkout's emitter.
 pub fn emit_local_manifest(request: &EmitRequest<'_>) -> Result<(), LocalImageBuildError> {
     let argv = emit_argv(request)?;
-    let mut cmd = Command::new("python3");
+    let mut cmd = mvm_core::env_hygiene::helper_command("python3");
     cmd.args(argv).stderr(std::process::Stdio::inherit());
     run_tool("writing the local image-set manifest", &mut cmd).map(|_| ())
 }
