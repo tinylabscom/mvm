@@ -722,7 +722,7 @@ mod tests {
 
     use mvm_contract::ir::AuthType;
     use mvm_contract::plan::{SecretBinding, SecretSource};
-    use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ContentBlob, ROOTFS_BLOB};
+    use mvm_core::checkpoint::{CheckpointClass, CheckpointMeta, ROOTFS_BLOB};
     use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 
     #[test]
@@ -842,31 +842,33 @@ mod tests {
         assert!(fork_admission_rootfs(&store, &parent, &scratch).is_err());
     }
 
-    /// A parent checkpoint whose recorded rootfs sha matches a real blob on
-    /// disk. The blob has to exist: admission *verifies* the recorded digest
-    /// against the bytes rather than trusting it, so a fixture that records a
-    /// sha without writing the file fails before it reaches the plan.
+    /// A vm_full parent checkpoint carrying a real chunked rootfs. The blob has
+    /// to exist: admission *verifies* the recorded digest against the bytes
+    /// rather than trusting it, so a fixture that records a digest without
+    /// storing the chunks fails before it reaches the plan. Admission reads
+    /// only the rootfs, so the record is captured as fs_quick and re-sealed
+    /// as vm_full rather than driving a machine-state capture.
     fn parent_with_grants(
         store: &CheckpointStore,
         id: &str,
         grants: Option<mvm_contract::grants::Grants>,
     ) -> CheckpointMeta {
-        use sha2::{Digest, Sha256};
-        let content_dir = store.content_dir(&CheckpointId::new(id));
-        std::fs::create_dir_all(&content_dir).unwrap();
-        let bytes = b"fixture rootfs";
-        std::fs::write(content_dir.join(ROOTFS_BLOB), bytes).unwrap();
-
-        let mut meta =
-            CheckpointMeta::builder(CheckpointId::new(id), CheckpointClass::VmFull, "parent-vm")
-                .content(vec![ContentBlob {
-                    name: ROOTFS_BLOB.to_string(),
-                    sha256: hex::encode(Sha256::digest(bytes)),
-                }])
-                .supervisor_config_digest("d")
-                .created_unix(1)
-                .build();
-        meta.grants = grants;
+        let source = tempfile::tempdir().unwrap();
+        let rootfs = source.path().join(ROOTFS_BLOB);
+        std::fs::write(&rootfs, b"fixture rootfs").unwrap();
+        let params = mvm_runtime::checkpoint::CaptureFsQuickParams::builder()
+            .id(CheckpointId::new(id))
+            .vm_name("parent-vm".into())
+            .rootfs(rootfs)
+            .supervisor_config_digest("d".into())
+            .created_unix(1)
+            .quiesced(true)
+            .grants(grants)
+            .build()
+            .unwrap();
+        let mut meta = mvm_runtime::checkpoint::capture_fs_quick(store, params).unwrap();
+        meta.class = CheckpointClass::VmFull;
+        meta.meta_digest = meta.compute_meta_digest();
         store.write_meta(&meta).unwrap();
         meta
     }

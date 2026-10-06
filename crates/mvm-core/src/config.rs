@@ -1138,7 +1138,7 @@ pub const AUDIT_ROOT_HISTORY_SUFFIX: &str = ".roots.jsonl";
 /// **per VM, not per tenant**, because that signer's chain writer is
 /// single-writer (in-memory head, `O_APPEND`, no flock) — two VMs of one tenant
 /// must not co-write one file, so each signer owns its own. Shared by the writer
-/// (the backend spawn) and the verifier (`mvmctl audit verify`) so the path
+/// (the backend spawn) and the verifier (`mvmctl trust audit verify`) so the path
 /// can't drift between them.
 pub fn workload_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
     mvm_audit_dir().join(format!("{tenant}.{vm_name}{WORKLOAD_AUDIT_SUFFIX}"))
@@ -1286,7 +1286,7 @@ pub fn lifecycle_chain_base(file_name: &str) -> Option<&str> {
 
 /// If `file_name` is a workload audit chain for `tenant`
 /// (`<tenant>.<vm>{WORKLOAD_AUDIT_SUFFIX}`), return its VM name. Lets
-/// `mvmctl audit verify` enumerate a tenant's per-VM workload chains from a
+/// `mvmctl trust audit verify` enumerate a tenant's per-VM workload chains from a
 /// directory listing without re-deriving the naming convention.
 pub fn workload_audit_vm_name<'a>(file_name: &'a str, tenant: &str) -> Option<&'a str> {
     let prefix = format!("{tenant}.");
@@ -1366,7 +1366,7 @@ mod tests {
     #[test]
     fn workload_audit_path_roundtrips_with_vm_name_matcher() {
         // The writer (backend spawn) builds the path; the verifier
-        // (`mvmctl audit verify`) recovers the VM name from a dir listing.
+        // (`mvmctl trust audit verify`) recovers the VM name from a dir listing.
         // They must agree — assert on the file name (env-independent).
         let path = workload_audit_path("local", "vm-7");
         let name = path.file_name().unwrap().to_str().unwrap();

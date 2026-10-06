@@ -422,6 +422,16 @@ Stage 0 keeps its own `mvm-bins`.
   commit and were never compared with the CLI's.
 - `mvm_source_commit` stays as provenance for the image's Nix-built content and
   `mvm-setpriv`.
+- *Note 2026-10-05:* the image boundary decided in
+  [#4100](https://github.com/tinylabscom/mvm/issues/4100) (ADR-054) removes the
+  `mvm-setpriv` exception above. Builder boot ABI 2
+  ([#4107](https://github.com/tinylabscom/mvm/issues/4107)) carries
+  `mvm-setpriv` in the boot payload, so the released builder image carries no
+  mvm Rust at all, its cache key stops folding the setpriv source closure, and
+  `mvm-images` no longer builds anything from mvm's source
+  ([tinylabscom/mvm-images#49](https://github.com/tinylabscom/mvm-images/issues/49)),
+  which leaves `mvm_source_commit` with nothing to describe. The two bullets
+  above describe the ABI 1 image the lock pins today.
 - `scripts/build-host-binaries.sh` and the builder job's cargo-zigbuild step
   leave `mvm-images`. The image train no longer builds Rust for the builder
   beyond `mvm-setpriv`.

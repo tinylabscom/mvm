@@ -1,4 +1,4 @@
-//! `mvmctl audit` subcommand handlers.
+//! `mvmctl trust audit` subcommand handlers.
 
 mod inspect;
 mod sessions;
@@ -239,7 +239,7 @@ pub(in crate::commands) enum AuditAction {
     },
 }
 
-/// Subcommands under `mvmctl audit provenance`.
+/// Subcommands under `mvmctl trust audit provenance`.
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum ProvenanceAction {
     /// Export audit events as W3C PROV-O Turtle for compliance reporting.

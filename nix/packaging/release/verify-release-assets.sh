@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Verify a published mvm release's asset set is complete and self-consistent:
 # every binary target tarball has a SHA256 file that matches, a cosign
-# signature bundle, and an entry in the combined checksums manifest; the
-# signed SBOM is present. Fail-closed — any missing or mismatched asset is a
+# signature bundle, and an entry in the combined checksums manifest; every
+# Linux target has exactly one .deb and one .rpm held to the same three
+# checks; the signed SBOM is present. Fail-closed — any missing or mismatched asset is a
 # nonzero exit. Run post-publish (release.yml `verify-release` job) against a
 # directory of downloaded release assets, or locally against a staging dir.
 #
@@ -96,6 +97,66 @@ required_bins_for_target() {
   esac
 }
 
+# The distro package architectures for a target, or nothing for a target
+# that has no packages.
+package_arches() {
+  case "$1" in
+    x86_64-unknown-linux-gnu)  echo "amd64 x86_64" ;;
+    aarch64-unknown-linux-gnu) echo "arm64 aarch64" ;;
+    *)                         echo "" ;;
+  esac
+}
+
+# One signed, listed, digest-matching asset: the checks a tarball gets, for a
+# distro package.
+check_signed_asset() {
+  label="$1"; asset="$2"
+  name="$(basename "$asset")"
+  [ -f "$asset.bundle" ] || fail "$label cosign signature bundle missing: $name.bundle"
+  if [ -f "$COMBINED" ]; then
+    want=$(awk -v name="$name" '$2 == name || $2 == "*" name {print $1}' "$COMBINED")
+    if [ -z "$want" ]; then
+      fail "$label $name not listed in checksums-sha256.txt"
+    else
+      got=$(sha256_of "$asset")
+      [ "$want" = "$got" ] || fail "$label $name sha256 mismatch against checksums-sha256.txt: recorded=$want actual=$got"
+    fi
+  fi
+  if [ "$DO_COSIGN" = 1 ] && [ -f "$asset.bundle" ]; then
+    command -v cosign >/dev/null 2>&1 || { fail "--cosign given but cosign not on PATH"; return 0; }
+    cosign verify-blob --bundle "$asset.bundle" \
+      ${COSIGN_IDENTITY_REGEXP:+--certificate-identity-regexp "$COSIGN_IDENTITY_REGEXP"} \
+      ${COSIGN_IDENTITY:+--certificate-identity "$COSIGN_IDENTITY"} \
+      ${COSIGN_OIDC_ISSUER:+--certificate-oidc-issuer "$COSIGN_OIDC_ISSUER"} \
+      "$asset" >/dev/null 2>&1 \
+      || fail "$label $name cosign verify-blob failed"
+  fi
+  return 0
+}
+
+# Exactly one package of a format per architecture: none is a release that
+# dropped it, two is one a user cannot pick between. The version is part of
+# the name, so it is matched rather than derived.
+check_distro_packages() {
+  target="$1"
+  arches="$(package_arches "$target")"
+  [ -n "$arches" ] || return 0
+  deb_arch="${arches% *}"; rpm_arch="${arches#* }"
+  for pattern in "mvmctl_*_${deb_arch}.deb" "mvmctl-*.${rpm_arch}.rpm"; do
+    found=()
+    # shellcheck disable=SC2086  # $pattern is a glob, expanded on purpose.
+    for candidate in "$ASSETS_DIR"/$pattern; do
+      if [ -f "$candidate" ]; then found+=("$candidate"); fi
+    done
+    if [ "${#found[@]}" -ne 1 ]; then
+      fail "[$target] expected one $pattern, found ${#found[@]}"
+      continue
+    fi
+    check_signed_asset "[$target]" "${found[0]}"
+  done
+  return 0
+}
+
 COMBINED="$ASSETS_DIR/checksums-sha256.txt"
 [ -f "$COMBINED" ] || fail "combined checksums manifest missing: checksums-sha256.txt"
 require_signed_manifest "$COMBINED" "combined checksums manifest"
@@ -156,6 +217,8 @@ for target in $TARGETS; do
     fi
     rm -rf "$tmp"
   fi
+
+  check_distro_packages "$target"
 done
 
 # The SBOM ships signed alongside the binaries on every release.
@@ -163,7 +226,7 @@ done
 [ -f "$ASSETS_DIR/sbom.cdx.json.bundle" ] || fail "SBOM signature bundle missing: sbom.cdx.json.bundle"
 
 if [ "$FAILED" = 0 ]; then
-  echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry; SBOM signed."
+  echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry, Linux targets one signed .deb and .rpm; SBOM signed."
 else
   echo "release asset verification FAILED" >&2
   exit 1

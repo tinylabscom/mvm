@@ -1359,6 +1359,14 @@ pub fn resolve_launch(
     // snapshot restore is unavailable for workload admission.
     let t_admission = std::time::Instant::now();
     sub.start(SubPhase::AdmitPlan);
+    // A run resolved from an installed bundle boots its extracted files;
+    // admission pins the bundle and checks those files against what was signed.
+    let bundle_archive = image
+        .template_id
+        .as_deref()
+        .map(mvm_runtime::vm::template::lifecycle::installed_bundle_archive)
+        .transpose()?
+        .flatten();
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(AdmitInputs {
             rootfs: std::path::Path::new(&image.rootfs),
@@ -1370,6 +1378,7 @@ pub fn resolve_launch(
             sdk_sidecar: sdk_sidecar.as_ref(),
             assets: shape.assets,
             volumes: &start_config.volumes,
+            bundle_archive: bundle_archive.as_deref(),
         })?
     {
         start_config.tenant_id = Some(sub.tenant_id);
