@@ -635,7 +635,7 @@ pub fn spawn_one_as(path: &Path, label: &str, identity: crate::guest_mount::Serv
         );
         return;
     }
-    match helper_command(path, identity).spawn() {
+    match guest_helper_command(path, identity).spawn() {
         Ok(child) => eprintln!(
             "mvm-guest-init: spawned {label} pid={} uid={} gid={}",
             child.id(),
@@ -650,7 +650,7 @@ pub fn spawn_one_as(path: &Path, label: &str, identity: crate::guest_mount::Serv
 /// stderr, every descriptor above stderr closed, and `identity` assumed in the
 /// child before exec.
 #[cfg(target_os = "linux")]
-pub(crate) fn helper_command(
+pub(crate) fn guest_helper_command(
     path: &Path,
     identity: crate::guest_mount::ServiceIdentity,
 ) -> Command {

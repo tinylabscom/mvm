@@ -2648,7 +2648,7 @@ mod privilege_tests {
         if !privileged() {
             return;
         }
-        let output = crate::guest_bootstrap::helper_command(
+        let output = crate::guest_bootstrap::guest_helper_command(
             std::path::Path::new("/bin/cat"),
             EGRESS_CLIENT_IDENTITY,
         )
