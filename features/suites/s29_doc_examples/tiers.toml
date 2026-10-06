@@ -535,6 +535,11 @@ tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
+path = "secret login"
+tier = "parse"
+reason = "opens the host browser and waits for a human to consent at a real OAuth provider; the consent flow, the PKCE exchange and the forged-callback refusals are exercised in-process against a loopback provider by mvm-client's oauth_login tests"
+
+[[command]]
 path = "secret rm"
 tier = "live"
 

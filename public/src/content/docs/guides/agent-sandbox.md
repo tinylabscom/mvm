@@ -159,6 +159,29 @@ environment carrying only their own session variables (`OP_SESSION_*`,
 failure reports the tool's exit status and the first line it wrote to stderr,
 never the value.
 
+For an API behind an OAuth sign-in, the sign-in happens in a browser on the
+host, never in the guest. Define the secret with the provider's OAuth endpoints
+and `--oauth-login`:
+
+```sh
+mvmctl secret set my-api --host api.example.com --type bearer \
+  --oauth-authorization-url https://auth.example.com/authorize \
+  --oauth-token-url https://auth.example.com/token \
+  --oauth-client-id my-client-id --oauth-scope read --oauth-login
+```
+
+`mvmctl` prints an authorization URL, opens it in your browser, and listens on
+`127.0.0.1` for the redirect. Register `http://127.0.0.1/callback` as the
+client's redirect URI. The port is picked per login, so the provider has to
+accept a loopback redirect on any port, as RFC 8252 §7.3 requires. Once you
+consent, the host redeems the code with its PKCE verifier and stores the
+token set. The guest gets a placeholder for the access token like any other
+secret; the session cookie, the code, and the refresh token stay on the host,
+so a snapshot or a warm fork of the VM copies none of them. The per-VM endpoint
+renews the access token with the refresh token before it expires, so a long run
+needs no second sign-in. If the provider revokes the refresh token, run
+`mvmctl secret login my-api` to consent again.
+
 **2. Bind it to the run with `--secret`.** `run` and `machine run` both take
 `--secret NAME[:HOST,...]`, repeatable:
 
@@ -371,7 +394,7 @@ tenant, `~/.mvm/audit/local.jsonl`, signed with the host key at
 | `secret.placeholder_dropped` | A placeholder was found where it may not travel and was dropped | `destination` |
 | `secret.reflection_scrubbed` | A response carried back a value the endpoint had substituted, and each occurrence was replaced by the binding's placeholder before the guest read it | `name`, `destination`, `count` |
 | `secret.flow_refused` | A request was refused before anything was forwarded: the network policy does not admit its destination (`policy_denied`), it names a peer (`peer_destination`), its URL has no host and port (`malformed`), it carries a placeholder outside a header (`placeholder_in_url`, `placeholder_in_body`), or, on a connection the host intercepted, it was addressed to a different host than the connection (`authority_mismatch`) or could not be framed (`unframeable_request`, `pipelined_request`). On an intercepted connection the same entry also records a request that ended before the host had it whole — the workload hung up part-way through it (`truncated_request`) or the connection failed under it (`read_failed`); those are not refusals of the destination, and the denial summary does not count them. A workload closing the connection between requests records nothing | `destination`, `reason` |
-| `secret.oauth_refresh` | The host refreshed an OAuth client-credentials token for a bound secret, or tried to: `refreshed` (a fresh token set was stored), `failed` (an attempt failed and will be retried), `policy_denied` (the network policy does not admit the token endpoint, so nothing was sent) or `stopped` (the refresher gave up and resolution fails closed once the token expires) | `name`, `destination` (the token endpoint's host), `outcome` |
+| `secret.oauth_refresh` | The host refreshed an OAuth token set for a bound secret, with the client-credentials grant or, for a set a human consented to, the refresh-token grant, or tried to: `refreshed` (a fresh token set was stored), `failed` (an attempt failed and will be retried), `policy_denied` (the network policy does not admit the token endpoint, so nothing was sent) or `stopped` (the refresher gave up and resolution fails closed once the token expires) | `name`, `destination` (the token endpoint's host), `outcome` |
 
 No entry carries a secret value, a request body, or a header value.
 
