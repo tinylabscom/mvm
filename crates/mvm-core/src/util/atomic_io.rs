@@ -157,29 +157,172 @@ fn is_rename_flag_unsupported(err: &std::io::Error) -> bool {
 /// final name.
 pub fn atomic_write_new(path: &Path, data: &[u8]) -> Result<()> {
     let tmp = synced_temp_in(path, data)?;
+    match persist_noclobber(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(LostCreateRace(err).into())
+        }
+        Err(err) => {
+            Err(err).with_context(|| format!("failed to persist temp file to {}", path.display()))
+        }
+    }
+}
+
+/// Move a finished temp file to `path` only if `path` does not exist.
+///
+/// An `AlreadyExists` error means another writer already holds `path`, and
+/// nothing else this does raises that kind. The temp file is removed on every
+/// outcome: a rename consumes it, and on a refusal or a link it drops here.
+fn persist_noclobber(tmp: tempfile::NamedTempFile, path: &Path) -> std::io::Result<()> {
     match tmp.persist_noclobber(path) {
         Ok(_) => Ok(()),
-        Err(err) if err.error.kind() == std::io::ErrorKind::AlreadyExists => {
-            Err(LostCreateRace(err.error).into())
-        }
+        // `err.file` is the same temp file, handed back unpersisted. Unlike a
+        // rename, a successful `hard_link` never consumes the source name, so
+        // it is removed when `err.file` drops at the end of this arm.
         Err(err) if is_rename_flag_unsupported(&err.error) => {
-            // `err.file` is the same temp file, handed back unpersisted.
-            // It drops (and is removed) at the end of this arm either way —
-            // unlike a rename, a successful `hard_link` never consumes the
-            // source name.
-            let tmp = err.file;
-            match std::fs::hard_link(tmp.path(), path) {
-                Ok(()) => Ok(()),
-                Err(link_err) if link_err.kind() == std::io::ErrorKind::AlreadyExists => {
-                    Err(LostCreateRace(link_err).into())
-                }
-                Err(link_err) => Err(link_err)
-                    .with_context(|| format!("failed to link temp file to {}", path.display())),
-            }
+            std::fs::hard_link(err.file.path(), path)
         }
-        Err(err) => Err(err.error)
-            .with_context(|| format!("failed to persist temp file to {}", path.display())),
+        Err(err) => Err(err.error),
     }
+}
+
+/// Mode of every file the private writers below leave behind: owner
+/// read/write, nothing for anyone else.
+const PRIVATE_FILE_MODE: u32 = 0o600;
+
+/// What [`write_new_with_mode`] found at its destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NewFile {
+    /// The path was absent and now holds the bytes this call wrote.
+    Created,
+    /// Another writer's file was already there. This call's bytes were
+    /// discarded and the existing file was not touched.
+    AlreadyPresent,
+}
+
+/// The directory `path` lives in, with a bare file name resolving to the
+/// current directory rather than to an empty path.
+fn parent_dir(path: &Path) -> std::io::Result<&Path> {
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() => Ok(Path::new(".")),
+        Some(parent) => Ok(parent),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("path has no parent directory: {}", path.display()),
+        )),
+    }
+}
+
+/// Flush the directory holding `path`, so a name just linked or renamed into
+/// it survives a crash.
+fn sync_parent_dir(path: &Path) -> std::io::Result<()> {
+    fs::File::open(parent_dir(path)?)?.sync_all()
+}
+
+/// Write `data` to a new temporary beside `path`, at exactly `mode`, and
+/// sync it.
+///
+/// The temporary is opened `O_EXCL` under a random name, so it cannot be a
+/// file another writer is also using, nor a symlink planted ahead of it. Its
+/// name is `.<file name>.<random>.tmp`, so a directory listing that already
+/// skips `*.tmp` leftovers skips it too. The parent directory must exist:
+/// directories holding key material are created by their owners at mode 0700
+/// (`config::create_private_dir`), never implicitly at the umask here.
+fn synced_temp_with_mode(
+    path: &Path,
+    data: &[u8],
+    mode: u32,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut prefix = std::ffi::OsString::from(".");
+    prefix.push(path.file_name().unwrap_or_default());
+    prefix.push(".");
+    let mut tmp = tempfile::Builder::new()
+        .prefix(&prefix)
+        .suffix(".tmp")
+        .permissions(fs::Permissions::from_mode(mode))
+        .tempfile_in(parent_dir(path)?)?;
+    // The mode given at open is filtered through the process umask. Setting it
+    // on the inode pins it to exactly `mode` before the first byte lands.
+    tmp.as_file()
+        .set_permissions(fs::Permissions::from_mode(mode))?;
+    tmp.write_all(data)?;
+    tmp.as_file().sync_all()?;
+    Ok(tmp)
+}
+
+/// Replace `path` with `data` at mode 0600, so that every reader sees either
+/// the whole old file or the whole new one.
+///
+/// For files carrying key material or secrets that a later write legitimately
+/// supersedes. Each call writes its own temporary, so two concurrent writers
+/// cannot interleave into one file the way two writers sharing a fixed
+/// `<name>.tmp` can; the last rename wins with a complete file. The rename
+/// replaces a symlink at `path` rather than following it, and the parent
+/// directory is synced so the new name survives a crash.
+pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = synced_temp_with_mode(path, data, PRIVATE_FILE_MODE)?;
+    tmp.persist(path).map_err(|err| err.error)?;
+    sync_parent_dir(path)
+}
+
+/// Create `path` holding `data` at exactly `mode`, unless it already exists.
+///
+/// The bytes are written and synced under a temporary name, then linked into
+/// place with a no-clobber rename, so `path` never names a partly written
+/// file. Of any number of concurrent callers exactly one gets
+/// [`NewFile::Created`]; every other gets [`NewFile::AlreadyPresent`] and must
+/// use what is on disk, since its own bytes were thrown away. The parent
+/// directory is synced after a successful create.
+pub fn write_new_with_mode(path: &Path, data: &[u8], mode: u32) -> std::io::Result<NewFile> {
+    let tmp = synced_temp_with_mode(path, data, mode)?;
+    match persist_noclobber(tmp, path) {
+        Ok(()) => {
+            sync_parent_dir(path)?;
+            Ok(NewFile::Created)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(NewFile::AlreadyPresent),
+        Err(err) => Err(err),
+    }
+}
+
+/// [`write_new_with_mode`] at mode 0600, for key material and secrets.
+pub fn write_private_new(path: &Path, data: &[u8]) -> std::io::Result<NewFile> {
+    write_new_with_mode(path, data, PRIVATE_FILE_MODE)
+}
+
+/// Load the private file at `path`, minting it first if it does not exist.
+///
+/// This is the load-or-init shape every host key uses, made safe against a
+/// second process doing the same thing at the same moment. The file on disk
+/// is the only source of truth: a caller that mints a key and loses the race
+/// to publish it discards its own key and loads the winner's, so no process
+/// ever holds a key that does not match the file. `mint` runs only when the
+/// file is absent, and `load` always reads what is on disk, including right
+/// after this call created it.
+///
+/// The parent directory must already exist; create it with
+/// `config::create_private_dir` so it is 0700.
+pub fn load_or_create_private<T, E: From<std::io::Error>>(
+    path: &Path,
+    mint: impl FnOnce() -> zeroize::Zeroizing<Vec<u8>>,
+    load: impl FnOnce(&Path) -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            // `Created` and `AlreadyPresent` end the same way: the file now holds
+            // the one key every caller will load.
+            write_private_new(path, &mint()).map_err(|err| {
+                std::io::Error::new(
+                    err.kind(),
+                    format!("creating private file {}: {err}", path.display()),
+                )
+            })?;
+        }
+        Err(err) => return Err(err.into()),
+    }
+    load(path)
 }
 
 /// Whether `err` is the signal [`atomic_write_new`] raises when a concurrent
@@ -618,5 +761,194 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path: PathBuf = dir.path().join("sub/dir/state.json");
         let _lock = FileLock::acquire(&path).expect("lock with nested path");
+    }
+
+    fn dir_entries(dir: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<_> = fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_new_creates_an_owner_only_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("host.key");
+        let outcome = write_private_new(&path, b"key bytes").expect("create");
+        assert_eq!(outcome, NewFile::Created);
+        assert_eq!(fs::read(&path).expect("read"), b"key bytes");
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(dir_entries(dir.path()), vec!["host.key"]);
+    }
+
+    #[test]
+    fn write_private_new_leaves_an_existing_file_alone() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("host.key");
+        write_private_new(&path, b"winner").expect("first create");
+
+        let outcome = write_private_new(&path, b"loser").expect("second create");
+
+        assert_eq!(outcome, NewFile::AlreadyPresent);
+        assert_eq!(fs::read(&path).expect("read"), b"winner");
+        assert_eq!(
+            dir_entries(dir.path()),
+            vec!["host.key"],
+            "the loser's temporary must not be left behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_new_with_mode_applies_the_requested_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("host.pub");
+        write_new_with_mode(&path, b"public", 0o644).expect("create");
+        assert_eq!(mode_of(&path), 0o644);
+    }
+
+    /// `OpenOptions::mode` only applies at creation, so rewriting a 0644 file
+    /// in place keeps it 0644. A replacement is a new inode at 0600.
+    #[cfg(unix)]
+    #[test]
+    fn write_private_replaces_a_loose_file_with_an_owner_only_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("secret");
+        fs::write(&path, b"old").expect("seed");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        write_private(&path, b"new").expect("write");
+
+        assert_eq!(fs::read(&path).expect("read"), b"new");
+        assert_eq!(mode_of(&path), 0o600);
+        assert_eq!(dir_entries(dir.path()), vec!["secret"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_private_replaces_a_symlink_instead_of_following_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, b"untouched").expect("seed");
+        let path = dir.path().join("secret");
+        std::os::unix::fs::symlink(&elsewhere, &path).expect("symlink");
+
+        write_private(&path, b"new").expect("write");
+
+        assert_eq!(fs::read(&elsewhere).expect("read"), b"untouched");
+        assert!(!fs::symlink_metadata(&path).expect("stat").is_symlink());
+        assert_eq!(fs::read(&path).expect("read"), b"new");
+    }
+
+    #[test]
+    fn load_or_create_private_loads_an_existing_file_without_minting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("host.key");
+        fs::write(&path, b"existing").expect("seed");
+
+        let loaded: Vec<u8> = load_or_create_private(
+            &path,
+            || panic!("an existing file must not be re-minted"),
+            |p: &Path| fs::read(p),
+        )
+        .expect("load");
+
+        assert_eq!(loaded, b"existing");
+    }
+
+    /// The bug this guards against: two first uses each minted a key, the
+    /// second write replaced the first, and the first caller went on using a
+    /// key the file no longer held. Every caller must return the file's bytes.
+    #[test]
+    fn concurrent_load_or_create_callers_all_return_the_key_on_disk() {
+        use std::sync::{Arc, Barrier};
+        const THREADS: usize = 16;
+        for _ in 0..16 {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("host.key");
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let handles: Vec<_> = (0..THREADS)
+                .map(|i| {
+                    let (path, barrier) = (path.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        load_or_create_private(
+                            &path,
+                            || zeroize::Zeroizing::new(vec![i as u8; 32]),
+                            |p: &Path| fs::read(p),
+                        )
+                    })
+                })
+                .collect();
+            let keys: Vec<Vec<u8>> = handles
+                .into_iter()
+                .map(|h| h.join().expect("thread").expect("load or create"))
+                .collect();
+            let on_disk = fs::read(&path).expect("read");
+            assert_eq!(on_disk.len(), 32);
+            assert!(
+                keys.iter().all(|key| *key == on_disk),
+                "every caller must hold the published key"
+            );
+            assert_eq!(dir_entries(dir.path()), vec!["host.key"]);
+        }
+    }
+
+    /// A reader polling while writers create and then replace the file must
+    /// only ever see nothing at all or one writer's complete bytes.
+    #[test]
+    fn a_concurrent_reader_never_sees_a_partial_file() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        const LEN: usize = 256 * 1024;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("host.key");
+        let done = Arc::new(AtomicBool::new(false));
+
+        let reader = {
+            let (path, done) = (path.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut observed = 0usize;
+                // Keep going past `done` until one read has landed, so the
+                // test cannot pass without having looked at the file.
+                while !done.load(Ordering::Acquire) || observed == 0 {
+                    match fs::read(&path) {
+                        Ok(bytes) => {
+                            assert_eq!(bytes.len(), LEN, "short read of a published file");
+                            assert!(
+                                bytes.iter().all(|b| *b == bytes[0]),
+                                "bytes from two writers interleaved"
+                            );
+                            observed += 1;
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(err) => panic!("read failed: {err}"),
+                    }
+                }
+                observed
+            })
+        };
+
+        let writers: Vec<_> = (1..=4u8)
+            .map(|fill| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let bytes = vec![fill; LEN];
+                    write_private_new(&path, &bytes).expect("create");
+                    for _ in 0..25 {
+                        write_private(&path, &bytes).expect("replace");
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().expect("writer");
+        }
+        done.store(true, Ordering::Release);
+        reader.join().expect("reader");
     }
 }

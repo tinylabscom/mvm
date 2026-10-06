@@ -451,6 +451,8 @@ fn wasm_network_endpoint_spawn_params<'a>(
     network_policy: &'a mvm_core::network_policy::NetworkPolicy,
 ) -> crate::network_endpoint_spawn::SubstitutionSpawnParams<'a> {
     crate::network_endpoint_spawn::SubstitutionSpawnParams {
+        // Builder-VM and wasm endpoints never collect telemetry.
+        telemetry: false,
         vm_name: &plan.vm_name,
         state_dir: &plan.state_dir,
         // The wasm guest runs inside this process.

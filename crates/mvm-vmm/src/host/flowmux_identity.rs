@@ -34,7 +34,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::TryRng;
 
 use super::network_endpoint_spawn::FlowMuxIdentitySpawnConfig;
-use super::private_file::write_private;
+use mvm_core::atomic_io::write_private;
 
 // The drive's label and filenames are declared on the reading side, in
 // `mvm_agentd::flowmux_keys`, and used here. One declaration, so a rename

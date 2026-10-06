@@ -158,6 +158,7 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             // A detached machine outlives the `mvmctl` that started it; its
             // endpoint must too, and must stop when the machine does.
             lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Vm,
+            telemetry: mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
             tenant: req.tenant,
             secrets: req.secrets,
             redaction: req.redaction,

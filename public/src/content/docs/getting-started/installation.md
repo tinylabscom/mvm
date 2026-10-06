@@ -25,6 +25,37 @@ curl -fsSL https://runmvm.com/install.sh | MVM_VERSION=v0.16.1 sh
 `MVM_VERSION` installs exactly that tag, prereleases included, without
 consulting the releases API.
 
+## Debian, Ubuntu, Fedora and RHEL Packages
+
+Every release also publishes a `.deb` and an `.rpm` for x86_64 and aarch64
+Linux, named `mvmctl_<version>-1_<arch>.deb` (`amd64`, `arm64`) and
+`mvmctl-<version>-1.<arch>.rpm` (`x86_64`, `aarch64`):
+
+```bash
+sudo apt install ./mvmctl_0.22.0-1_amd64.deb      # Debian, Ubuntu
+sudo dnf install ./mvmctl-0.22.0-1.x86_64.rpm     # Fedora, RHEL, Rocky
+```
+
+A package holds exactly the files of the Linux tarball, byte for byte:
+`mvmctl`, its host binaries and `libmvm_hostlib.so` side by side in
+`/usr/bin`, the README under `/usr/share/doc/mvmctl`, and the man pages. The
+binaries are statically linked, so the packages declare no dependencies.
+Each package is listed in the release's signed `checksums-sha256.txt`, has
+its own cosign bundle (`<package>.bundle`), and carries a build provenance
+attestation, so it verifies the same way as the tarball:
+
+```bash
+cosign verify-blob --bundle mvmctl_0.22.0-1_amd64.deb.bundle \
+  --certificate-identity-regexp '^https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  mvmctl_0.22.0-1_amd64.deb
+gh attestation verify mvmctl_0.22.0-1_amd64.deb --repo tinylabscom/mvm
+```
+
+Upgrade and remove a package install with the package manager. `mvmctl env
+update` does not know a package manager owns `/usr/bin/mvmctl` and would
+replace the file underneath it.
+
 ## Where install.sh Puts Things
 
 Each release is unpacked whole into its own directory, and the commands on
