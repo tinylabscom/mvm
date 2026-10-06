@@ -727,6 +727,19 @@ fn connector_serving_settles_to(connector: &std::path::Path, expected: bool) -> 
     }
 }
 
+/// Whether a process is alive, polled until it matches `expected` or five
+/// seconds pass. Endpoint teardown can precede process exit on a busy runner.
+fn process_liveness_settles_to(pid: i32, expected: bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let alive = mvm_vmm::host::process_liveness::pid_is_alive(pid);
+        if alive == expected || std::time::Instant::now() >= deadline {
+            return alive;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Signals a recorded pid on drop so a failing assertion leaks nothing.
 struct KillPid(i32);
 impl Drop for KillPid {
@@ -786,7 +799,7 @@ fn a_kept_endpoint_serves_after_its_launcher_exits_until_its_vm_stops() {
         "a stopped VM's endpoint must stop serving"
     );
     assert!(
-        !mvm_vmm::host::process_liveness::pid_is_alive(keeper),
+        !process_liveness_settles_to(keeper, false),
         "the keeper exits with its endpoint"
     );
 }
