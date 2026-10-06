@@ -438,7 +438,7 @@ jobs:
       - source-bootstrap-linux
       - no-kvm-smoke
       - bdd-live-readme
-      - crates-publish-dry-run
+      - distro-packages-dry-run
     if: ${{ !cancelled() }}
     permissions:
       contents: read
@@ -463,6 +463,8 @@ jobs:
   # a packaging break shows up before a tag depends on it.
   distro-packages-dry-run:
     name: Linux distro packages dry-run
+    needs: crates-publish-dry-run
+    if: ${{ !cancelled() }}
     permissions:
       contents: read
     uses: ./.github/workflows/distro-packages.yml
