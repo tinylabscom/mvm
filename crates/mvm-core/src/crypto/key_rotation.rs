@@ -43,7 +43,7 @@
 use rand::Rng;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -181,28 +181,9 @@ pub fn load_manifest(active_dir: &Path) -> Result<MasterKeyManifest> {
 
 fn write_manifest_atomic(active_dir: &Path, manifest: &MasterKeyManifest) -> Result<()> {
     let final_path = manifest_path(active_dir);
-    let tmp_path = final_path.with_extension("json.tmp");
     let json = serde_json::to_vec_pretty(manifest).context("serialize manifest")?;
-    {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp_path)
-            .with_context(|| format!("creating {}", tmp_path.display()))?;
-        f.write_all(&json)
-            .with_context(|| format!("writing {}", tmp_path.display()))?;
-        f.sync_all().ok();
-    }
-    fs::rename(&tmp_path, &final_path).with_context(|| {
-        format!(
-            "atomic rename {} → {}",
-            tmp_path.display(),
-            final_path.display()
-        )
-    })?;
-    Ok(())
+    crate::atomic_io::write_private(&final_path, &json)
+        .with_context(|| format!("writing manifest {}", final_path.display()))
 }
 
 /// Load a master key version's bytes from disk. Refuses to read if
@@ -256,19 +237,20 @@ pub fn rotate_master_key(active_dir: &Path, org_id: &OrgId) -> Result<MasterKeyR
     // Write the new key first; if anything below fails we leave a
     // dangling v<N>.bin on disk, which is fine — the manifest
     // hasn't been updated yet, so nothing references it.
-    let mut buf = [0u8; MASTER_KEY_BYTES];
-    rand::rng().fill_bytes(&mut buf);
+    let mut buf = zeroize::Zeroizing::new([0u8; MASTER_KEY_BYTES]);
+    rand::rng().fill_bytes(buf.as_mut_slice());
     let key_path = version_path(active_dir, new_version);
+    match crate::atomic_io::write_private_new(&key_path, buf.as_slice())
+        .with_context(|| format!("writing {}", key_path.display()))?
     {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&key_path)
-            .with_context(|| format!("creating {}", key_path.display()))?;
-        f.write_all(&buf)
-            .with_context(|| format!("writing {}", key_path.display()))?;
-        f.sync_all().ok();
+        crate::atomic_io::NewFile::Created => {}
+        // Another rotation claimed this version number between our manifest
+        // read and now. Its key is the one its manifest will name; refusing
+        // here keeps two processes from each believing they minted v<N>.
+        crate::atomic_io::NewFile::AlreadyPresent => anyhow::bail!(
+            "master key {} was created by a concurrent rotation; retry",
+            key_path.display()
+        ),
     }
 
     // Mark every prior Active → Legacy.

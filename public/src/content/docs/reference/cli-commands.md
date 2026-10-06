@@ -1108,6 +1108,8 @@ silently selecting a weaker tier.
 
 Checkpoint blobs are stored under the configured checkpoint store (`MVM_HOME` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
+The rootfs and memory image are stored as 1 MiB chunks shared, by hard link, with every other checkpoint of the same tenant that holds the same bytes; each blob's recorded hash is the digest of its chunk index. A checkpoint from a pre-release that stored those images as whole files is refused by restore and fork, with a message naming it. Remove it with `mvmctl machine checkpoint rm <checkpoint>` and capture the machine again; there is no migration.
+
 ## Durable Agent Sessions
 
 `mvmctl agent-session` is the operator surface for durable agent sessions: an

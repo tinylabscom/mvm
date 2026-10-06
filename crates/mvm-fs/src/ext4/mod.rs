@@ -36,8 +36,11 @@
 
 mod host_file;
 pub mod journal_state;
+mod layout;
 pub mod mkfs;
 pub mod verity;
+
+use layout::{Layout, RegionAllocator};
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -289,11 +292,17 @@ impl Owner {
     }
 }
 
-/// Deterministic superblock metadata to stamp into a built image.
+/// Deterministic superblock metadata to stamp into a built image, and the
+/// free space a writable image is built with.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct BuildOptions {
     pub uuid: [u8; 16],
     pub volume_name: [u8; 16],
+    /// Data blocks left unallocated past the tree, for a guest that writes.
+    /// Zero — the default — builds the read-only image exactly to size.
+    pub free_blocks: u32,
+    /// Inode slots reserved past the tree's own, for files a guest creates.
+    pub free_inodes: u32,
 }
 
 impl BuildOptions {
@@ -305,6 +314,17 @@ impl BuildOptions {
     pub fn with_volume_name(mut self, volume_name: &[u8]) -> Self {
         let len = volume_name.len().min(self.volume_name.len());
         self.volume_name[..len].copy_from_slice(&volume_name[..len]);
+        self
+    }
+
+    /// Leave at least `bytes` of free data space and `inodes` free inode
+    /// slots, so a guest mounting the image read-write can grow it. The
+    /// free blocks are never written, so a sparse destination does not pay
+    /// for them until the guest does.
+    pub fn with_free_space(mut self, bytes: u64, inodes: u32) -> Self {
+        let blocks = bytes.div_ceil(BLOCK_SIZE as u64);
+        self.free_blocks = u32::try_from(blocks).unwrap_or(u32::MAX);
+        self.free_inodes = inodes;
         self
     }
 }
@@ -535,146 +555,6 @@ enum Kind {
     Dir,
     File,
     Symlink,
-}
-
-/// Resolved on-disk geometry: how many block groups, where each group's
-/// metadata and data live, and how inodes map to groups. Every field is a pure
-/// function of `(inode_high, data_blocks_total)`, so the layout — and thus the
-/// image bytes — are deterministic.
-struct Layout {
-    groups: u32,
-    inodes_per_group: u32,
-    gdt_blocks: u32,
-    /// Metadata blocks at the start of every group: 1 (superblock/backup) +
-    /// gdt_blocks + 1 (block bitmap) + 1 (inode bitmap) + inode-table blocks.
-    prefix: u32,
-    total_blocks: u32,
-    inode_slots: u32,
-    /// Highest inode number in use (inodes `1..=used_inodes` are all occupied:
-    /// the reserved 1..=10, root at 2, then our nodes contiguously).
-    used_inodes: u32,
-}
-
-impl Layout {
-    fn plan(inode_high: u32, data_blocks_total: u64) -> Result<Self, Ext4Error> {
-        let used_inodes = inode_high.saturating_sub(1);
-        for groups in 1..=MAX_GROUPS {
-            let gdt_blocks = ceil_div_u32(groups.saturating_mul(32), BLOCK_SIZE);
-            let per_group_need = ceil_div_u32(inode_high, groups).max(MIN_INODES_PER_GROUP);
-            let inodes_per_group = round_up_8(per_group_need);
-            let itb_per_group = ceil_div_u32(inodes_per_group * INODE_SIZE as u32, BLOCK_SIZE);
-            let prefix = 3 + gdt_blocks + itb_per_group;
-            // A group whose metadata leaves no room for data can't help; a
-            // larger group count shrinks inodes_per_group and thus the prefix.
-            if prefix >= BLOCKS_PER_GROUP {
-                continue;
-            }
-            let data_per_group = (BLOCKS_PER_GROUP - prefix) as u64;
-            let capacity = groups as u64 * data_per_group;
-            if capacity < data_blocks_total {
-                continue;
-            }
-            // Trim the final group to exactly the data it holds so the image is
-            // no larger than the tree needs (verity hashes every byte).
-            let full_groups = (groups - 1) as u64;
-            let last_data = data_blocks_total - full_groups * data_per_group; // >= 1
-            let total = full_groups * BLOCKS_PER_GROUP as u64 + prefix as u64 + last_data;
-            if total > u32::MAX as u64 {
-                break;
-            }
-            return Ok(Self {
-                groups,
-                inodes_per_group,
-                gdt_blocks,
-                prefix,
-                total_blocks: total as u32,
-                inode_slots: inodes_per_group * groups,
-                used_inodes,
-            });
-        }
-        Err(Ext4Error::TooLarge {
-            blocks: data_blocks_total,
-        })
-    }
-
-    fn group_start(&self, g: u32) -> u32 {
-        g * BLOCKS_PER_GROUP
-    }
-    fn block_bitmap(&self, g: u32) -> u32 {
-        self.group_start(g) + 1 + self.gdt_blocks
-    }
-    fn inode_bitmap(&self, g: u32) -> u32 {
-        self.group_start(g) + 2 + self.gdt_blocks
-    }
-    fn inode_table(&self, g: u32) -> u32 {
-        self.group_start(g) + 3 + self.gdt_blocks
-    }
-    fn data_start(&self, g: u32) -> u32 {
-        self.group_start(g) + self.prefix
-    }
-    fn group_end(&self, g: u32) -> u32 {
-        ((g + 1) * BLOCKS_PER_GROUP).min(self.total_blocks)
-    }
-    /// `(group, local index)` of an inode number (1-based).
-    fn locate_inode(&self, ino: u32) -> (u32, u32) {
-        (
-            (ino - 1) / self.inodes_per_group,
-            (ino - 1) % self.inodes_per_group,
-        )
-    }
-    /// Per-group data regions, in order, that the allocator hands out.
-    fn data_regions(&self) -> Vec<(u32, u32)> {
-        (0..self.groups)
-            .filter_map(|g| {
-                let start = self.data_start(g);
-                let end = self.group_end(g);
-                (end > start).then_some((start, end - start))
-            })
-            .collect()
-    }
-}
-
-/// Hands out physical blocks from each group's data region in order, splitting
-/// a request into one [`Extent`] per region it spans (so no extent ever crosses
-/// a group's metadata prefix).
-struct RegionAllocator {
-    regions: Vec<(u32, u32)>,
-    ridx: usize,
-    roff: u32,
-}
-
-impl RegionAllocator {
-    fn new(layout: &Layout) -> Self {
-        Self {
-            regions: layout.data_regions(),
-            ridx: 0,
-            roff: 0,
-        }
-    }
-
-    fn take(&mut self, blocks: u32) -> Vec<Extent> {
-        let mut out = Vec::new();
-        let mut logical = 0u32;
-        let mut remaining = blocks;
-        while remaining > 0 {
-            let (start, len) = self.regions[self.ridx];
-            let avail = len - self.roff;
-            let n = avail.min(remaining);
-            out.push(Extent {
-                logical,
-                len: n,
-                phys: start + self.roff,
-            });
-            self.roff += n;
-            logical += n;
-            remaining -= n;
-            if self.roff == len {
-                self.ridx += 1;
-                self.roff = 0;
-            }
-        }
-        out
-    }
 }
 
 /// Build a deterministic read-only ext4 image containing `nodes` (plus the
@@ -911,8 +791,13 @@ where
     //    converges in one or two passes.
     let mut meta_blocks: u64 = 0;
     let layout = loop {
-        let layout = Layout::plan(inode_high, data_blocks_total + meta_blocks)
-            .map_err(EmitImageError::Build)?;
+        let layout = Layout::plan(
+            inode_high,
+            data_blocks_total + meta_blocks,
+            options.free_blocks,
+            options.free_inodes,
+        )
+        .map_err(EmitImageError::Build)?;
         let mut alloc = RegionAllocator::new(&layout);
         let mut needed = 0u64;
         for p in &planned {
@@ -1060,7 +945,8 @@ fn write_superblock(img: &mut Image, layout: &Layout, options: &BuildOptions) {
 
     img.put_u32(sb, layout.inode_slots); // s_inodes_count
     img.put_u32(sb + 0x04, layout.total_blocks); // s_blocks_count_lo
-    img.put_u32(sb + 0x0C, 0); // s_free_blocks_count_lo (RO image: none free)
+    let free_blocks: u32 = (0..layout.groups).map(|g| layout.free_data_blocks(g)).sum();
+    img.put_u32(sb + 0x0C, free_blocks); // s_free_blocks_count_lo
     img.put_u32(sb + 0x10, free_inodes); // s_free_inodes_count
     img.put_u32(sb + 0x14, 0); // s_first_data_block (0 for 4 KiB)
     img.put_u32(sb + 0x18, 2); // s_log_block_size: 1024<<2 = 4096
@@ -1089,8 +975,8 @@ fn write_group_descs(img: &mut Image, layout: &Layout, planned: &[Planned]) {
         img.put_u32(gd, layout.block_bitmap(g));
         img.put_u32(gd + 0x04, layout.inode_bitmap(g));
         img.put_u32(gd + 0x08, layout.inode_table(g));
-        // RO image: no free blocks anywhere.
-        img.put_u16(gd + 0x0C, 0); // bg_free_blocks_count_lo
+        // Only a writable image built with free space has any.
+        img.put_u16(gd + 0x0C, layout.free_data_blocks(g) as u16); // bg_free_blocks_count_lo
         img.put_u16(gd + 0x0E, group_free_inodes(layout, g) as u16);
         img.put_u16(gd + 0x10, group_used_dirs(layout, planned, g) as u16);
     }
@@ -1114,10 +1000,15 @@ fn group_used_dirs(layout: &Layout, planned: &[Planned], g: u32) -> u32 {
 fn write_bitmaps(img: &mut Image, layout: &Layout) {
     for g in 0..layout.groups {
         // Block bitmap: every block in the group is in use (metadata + data,
-        // plus padding past the image end in the final partial group).
+        // plus padding past the image end in the final partial group) except
+        // the free tail of its data region.
         let bb = img.block_off(layout.block_bitmap(g));
+        let free = layout.free_data_blocks(g);
+        let free_start = layout.group_end(g) - free - layout.group_start(g);
         for b in 0..BLOCKS_PER_GROUP {
-            img.set_bit(bb, b as usize);
+            if !(free_start..free_start + free).contains(&b) {
+                img.set_bit(bb, b as usize);
+            }
         }
         // Inode bitmap: mark occupied inode slots used, pad the rest of the
         // bitmap block used (bits past inodes_per_group are not real inodes).
@@ -1475,6 +1366,112 @@ mod tests {
 
         assert_eq!(&image[1024 + 0x68..1024 + 0x78], &uuid);
         assert_eq!(&image[1024 + 0x78..1024 + 0x82], b"mvm-rootfs");
+    }
+
+    fn u16_at(image: &[u8], off: usize) -> u32 {
+        u32::from(u16::from_le_bytes([image[off], image[off + 1]]))
+    }
+
+    fn u32_at(image: &[u8], off: usize) -> u32 {
+        u32::from_le_bytes(image[off..off + 4].try_into().unwrap())
+    }
+
+    /// `(superblock free blocks, per-group (descriptor free, bitmap zero bits))`.
+    fn free_block_accounting(image: &[u8]) -> (u32, Vec<(u32, u32)>) {
+        let block = super::BLOCK_SIZE_USIZE;
+        let blocks = u32_at(image, 1024 + 0x04);
+        let groups = blocks.div_ceil(super::BLOCKS_PER_GROUP);
+        let per_group = (0..groups)
+            .map(|g| {
+                let gd = block + g as usize * 32;
+                let bitmap = u32_at(image, gd) as usize * block;
+                let zero_bits = (0..super::BLOCKS_PER_GROUP as usize)
+                    .filter(|bit| image[bitmap + bit / 8] & (1 << (bit % 8)) == 0)
+                    .count() as u32;
+                (u16_at(image, gd + 0x0C), zero_bits)
+            })
+            .collect();
+        (u32_at(image, 1024 + 0x0C), per_group)
+    }
+
+    fn one_file(data: Vec<u8>) -> Vec<super::Node> {
+        vec![super::Node::File {
+            path: "/data".into(),
+            mode: 0o644,
+            data,
+            xattrs: Vec::new(),
+            owner: super::Owner::ROOT,
+        }]
+    }
+
+    #[test]
+    fn a_default_image_has_no_free_space() {
+        let image =
+            build_image(one_file(vec![7; 10_000]), &BuildOptions::default()).expect("image");
+        let (sb_free, groups) = free_block_accounting(&image);
+        assert_eq!(sb_free, 0);
+        assert!(
+            groups.iter().all(|&(gd, bits)| gd == 0 && bits == 0),
+            "{groups:?}"
+        );
+    }
+
+    #[test]
+    fn free_space_is_marked_free_and_counted_consistently() {
+        let free_bytes = 64 * 1024 * 1024;
+        let image = build_image(
+            one_file(vec![7; 10_000]),
+            &BuildOptions::default().with_free_space(free_bytes, 1000),
+        )
+        .expect("image");
+        let (sb_free, groups) = free_block_accounting(&image);
+        let free_blocks = (free_bytes / u64::from(super::BLOCK_SIZE)) as u32;
+        assert_eq!(sb_free, free_blocks);
+        for (g, &(gd, bits)) in groups.iter().enumerate() {
+            assert_eq!(gd, bits, "group {g}: descriptor and bitmap disagree");
+        }
+        assert_eq!(groups.iter().map(|&(gd, _)| gd).sum::<u32>(), sb_free);
+        let free_inodes = u32_at(&image, 1024 + 0x10);
+        assert!(free_inodes >= 1000, "{free_inodes} free inodes");
+    }
+
+    #[test]
+    fn free_space_spanning_groups_never_frees_an_allocated_block() {
+        // The free space runs past group 0 into the next, and the boundary
+        // between used and free falls mid-group.
+        let data = vec![9u8; 20 * 1024 * 1024];
+        let free_bytes = 140 * 1024 * 1024;
+        let image = build_image(
+            one_file(data.clone()),
+            &BuildOptions::default().with_free_space(free_bytes, 0),
+        )
+        .expect("image");
+        let (sb_free, groups) = free_block_accounting(&image);
+        assert!(groups.len() >= 2, "{} groups", groups.len());
+        assert_eq!(sb_free, (free_bytes / u64::from(super::BLOCK_SIZE)) as u32);
+        for (g, &(gd, bits)) in groups.iter().enumerate() {
+            assert_eq!(gd, bits, "group {g}");
+        }
+        // Every block of the file is still marked in use.
+        let block = super::BLOCK_SIZE_USIZE;
+        let ino_table = u32_at(&image, block + 0x08) as usize * block;
+        let inode = ino_table + (super::FIRST_INO as usize - 1) * super::INODE_SIZE as usize;
+        let extents = u16_at(&image, inode + 0x28 + 2);
+        for e in 0..extents as usize {
+            let at = inode + 0x28 + 12 + e * 12;
+            let len = u16_at(&image, at + 4);
+            let start = u32_at(&image, at + 8);
+            for b in start..start + len {
+                let g = (b / super::BLOCKS_PER_GROUP) as usize;
+                let bitmap = u32_at(&image, block + g * 32) as usize * block;
+                let bit = (b % super::BLOCKS_PER_GROUP) as usize;
+                assert_ne!(
+                    image[bitmap + bit / 8] & (1 << (bit % 8)),
+                    0,
+                    "block {b} freed"
+                );
+            }
+        }
     }
 
     #[test]
