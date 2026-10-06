@@ -39,9 +39,7 @@
 //! which enrolled key vouched for a given snapshot.
 
 use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{BufReader, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -221,23 +219,8 @@ pub fn verify_manifest(
 fn write_manifest_atomic(snapshot_dir: &Path, sidecar: &ManifestSignature) -> Result<()> {
     let json = serde_json::to_vec_pretty(sidecar).context("serialize manifest signature")?;
     let final_path = snapshot_dir.join(MANIFEST_SIGNATURE_FILENAME);
-    let tmp_path = snapshot_dir.join(format!("{MANIFEST_SIGNATURE_FILENAME}.tmp"));
-    {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp_path)
-            .with_context(|| format!("open {} for write", tmp_path.display()))?;
-        file.write_all(&json)
-            .with_context(|| format!("write {}", tmp_path.display()))?;
-        file.sync_all()
-            .with_context(|| format!("fsync {}", tmp_path.display()))?;
-    }
-    std::fs::rename(&tmp_path, &final_path)
-        .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
-    Ok(())
+    crate::atomic_io::write_private(&final_path, &json)
+        .with_context(|| format!("writing {}", final_path.display()))
 }
 
 /// Sign a snapshot: compute its content-address, sign `(sha256 ‖ epoch)`
@@ -316,23 +299,8 @@ pub fn verify_signature(
 fn write_sig_atomic(snap_dir: &Path, sidecar: &SnapshotSignature) -> Result<()> {
     let json = serde_json::to_vec_pretty(sidecar).context("serialize signature sidecar")?;
     let final_path = snap_dir.join(SIGNATURE_FILENAME);
-    let tmp_path = snap_dir.join(format!("{SIGNATURE_FILENAME}.tmp"));
-    {
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp_path)
-            .with_context(|| format!("open {} for write", tmp_path.display()))?;
-        f.write_all(&json)
-            .with_context(|| format!("write {}", tmp_path.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync {}", tmp_path.display()))?;
-    }
-    std::fs::rename(&tmp_path, &final_path)
-        .with_context(|| format!("rename {} → {}", tmp_path.display(), final_path.display()))?;
-    Ok(())
+    crate::atomic_io::write_private(&final_path, &json)
+        .with_context(|| format!("writing {}", final_path.display()))
 }
 
 fn decode_pubkey(hex: &str) -> std::result::Result<VerifyingKey, SnapshotSigError> {

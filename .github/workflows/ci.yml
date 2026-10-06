@@ -51,6 +51,31 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Keep the queue singleton and immediate. Wider speculative builds caused
+      # unrelated entries to inherit failures and conflicts; a wait or batch
+      # recreates the same misleading red queue even though merge-group CI is
+      # now lightweight.
+      - name: Enforce merge queue policy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          bash scripts/check-merge-queue-policy.test.sh
+
+          rulesets="$RUNNER_TEMP/merge-queue-rulesets.json"
+          gh api "repos/${REPO}/rulesets" > "$rulesets"
+          matches=$(jq '[.[] | select(.name == "main merge queue" and .enforcement == "active")] | length' "$rulesets")
+          if [ "$matches" != 1 ]; then
+            echo "::error::Expected exactly one active 'main merge queue' ruleset; found $matches."
+            exit 1
+          fi
+          ruleset_id=$(jq -er '[.[] | select(.name == "main merge queue" and .enforcement == "active")][0].id' "$rulesets")
+
+          policy="$RUNNER_TEMP/merge-queue-policy.json"
+          gh api "repos/${REPO}/rulesets/${ruleset_id}" > "$policy"
+          bash scripts/check-merge-queue-policy.sh "$policy"
+
       - name: Classify changed paths
         id: decide
         env:

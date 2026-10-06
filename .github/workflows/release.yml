@@ -348,8 +348,17 @@ jobs:
       # whose name is not a version.
       tag: ${{ github.event_name == 'push' && github.ref_name || '' }}
 
+  # The .deb and .rpm, built from the Linux tarballs above rather than
+  # rebuilt, and installed on Debian, Ubuntu, Fedora and Rocky on both
+  # architectures before the release job will publish them.
+  distro-packages:
+    needs: build
+    uses: ./.github/workflows/distro-packages.yml
+    with:
+      tarballs: build
+
   release:
-    needs: [bdd, e2e-docs, build, release-archive-smoke]
+    needs: [bdd, e2e-docs, build, release-archive-smoke, distro-packages]
     # `e2e-docs` was added to `needs` above when the documented-surface gate
     # landed, and its result was never added here. `!cancelled()` overrides the
     # implicit all-needs-succeeded rule, so for as long as that was true the
@@ -362,7 +371,7 @@ jobs:
     # Dry-run guard: a `workflow_dispatch` with dry_run=true builds + packages
     # (the `build` job) but never reaches this publish job — only a tag push or
     # an explicit dry_run=false dispatch publishes.
-    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.release-archive-smoke.result == 'success' }}
+    if: ${{ !cancelled() && needs.bdd.result == 'success' && needs.e2e-docs.result == 'success' && needs.build.result == 'success' && needs.release-archive-smoke.result == 'success' && needs.distro-packages.result == 'success' }}
     # This job mints the one keyless identity every installed mvmctl trusts:
     # `release.yml@refs/tags/v{version}`, the sole entry in
     # RELEASE_IDENTITY_TEMPLATES. The environment's policy admits `v*` tags and
@@ -396,7 +405,9 @@ jobs:
         shell: bash
         run: |
           cd artifacts
-          # Combine per-platform checksums into one file
+          # Combine the per-tarball and per-package checksums into one file;
+          # distro-packages writes a `.sha256` per .deb and .rpm in the same
+          # format as the build job's.
           # ./ prefix: a file named like an option must stay a filename.
           cat ./*.sha256 > checksums-sha256.txt
           echo "Combined checksums:"
@@ -427,11 +438,16 @@ jobs:
           # comparison still passes. It is a literal because the preceding step
           # always writes it and this job hard-gates on the binary build.
           #
+          # The .deb and .rpm are signed directly like the tarballs, and are
+          # in the manifest too, so either anchor authenticates them.
+          #
           # Boot images are not in this release: they are members of the
           # signed image set `images.lock` pins, verified against that root's
           # own signature, so nothing here re-signs them.
           for blob in \
             artifacts/*.tar.gz \
+            artifacts/*.deb \
+            artifacts/*.rpm \
             artifacts/checksums-sha256.txt \
             sbom.cdx.json; do
             cosign sign-blob \
@@ -454,12 +470,16 @@ jobs:
       # an independent rebuild landing on the same bytes needs no trust in this
       # builder at all.
       #
-      # Subjects are the tarballs, matching the direct-signature set.
+      # Subjects are the tarballs and the distro packages, matching the
+      # direct-signature set.
       - name: Attest build provenance for the release tarballs (release-provenance)
         if: ${{ github.event_name == 'push' }}
         uses: actions/attest-build-provenance@v4
         with:
-          subject-path: artifacts/*.tar.gz
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.deb
+            artifacts/*.rpm
 
       - name: Create GitHub Release
         env:
@@ -480,6 +500,10 @@ jobs:
           assets=(
             artifacts/*.tar.gz
             artifacts/*.tar.gz.bundle
+            artifacts/*.deb
+            artifacts/*.deb.bundle
+            artifacts/*.rpm
+            artifacts/*.rpm.bundle
             artifacts/checksums-sha256.txt
             artifacts/checksums-sha256.txt.bundle
             sbom.cdx.json

@@ -102,6 +102,16 @@ reported code and seals the session after VM stop, before removing its state
 directory. If dispatch fails without a reported code, the exit record says
 `captured=false` rather than claiming success.
 
+A transient `machine run --entrypoint` call ends the same way once its VM has
+stopped. `plan.exited` carries the entrypoint's exit code, and the seal reason
+is `exited`. A call that times out, is cancelled, or fails to dispatch records no exit code and seals as `failed`. If the VM could not be
+stopped, nothing is sealed and the session stays `UNSEALED`, because a guest
+that may still be running can extend it.
+
+A `machine session start` session, or an entrypoint call kept alive past its exit
+(`-d`, for example), is not sealed when it is killed or reaped for idling. It reports
+`UNSEALED`.
+
 The seal records:
 
 - how many entries the session had

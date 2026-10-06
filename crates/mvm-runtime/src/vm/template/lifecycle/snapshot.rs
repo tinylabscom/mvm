@@ -142,6 +142,33 @@ pub fn template_artifacts_for_boot(
 /// Reuses the same slot-or-bundle decision `template_artifacts_dispatched`
 /// makes, so the gate cannot drift from what actually gets resolved.
 pub fn installed_bundle_arch(id_or_slot: &str) -> Result<Option<String>> {
+    Ok(installed_bundle(id_or_slot)?.map(|installed| installed.manifest.arch))
+}
+
+/// The cached `.mvmpkg` archive of the installed bundle `id_or_slot` names,
+/// or `None` when it names a slot or anything else that is not an installed
+/// bundle.
+///
+/// A boot that resolves its kernel and rootfs from an installed bundle hands
+/// this to admission as the bundle pin. Admission then verifies the archive
+/// against the trust store, signs its identity into the plan, and checks the
+/// extracted files the boot actually reads against the signed manifest. The
+/// path is returned whether or not the archive is still on disk: a missing
+/// archive is admission's refusal to make, naming the file it could not read.
+pub fn installed_bundle_archive(id_or_slot: &str) -> Result<Option<std::path::PathBuf>> {
+    let Some(installed) = installed_bundle(id_or_slot)? else {
+        return Ok(None);
+    };
+    let registry = mvm_core::plan::bundle::BundleRegistry::default_path()?;
+    Ok(Some(registry.archive_path(&installed.sha256)))
+}
+
+/// The installed bundle `id_or_slot` names.
+///
+/// The same slot-or-bundle decision `template_artifacts_dispatched` makes: a
+/// 64-character key with no slot directory is looked up in the bundle
+/// registry, and a slot wins over a same-named bundle.
+fn installed_bundle(id_or_slot: &str) -> Result<Option<mvm_core::plan::bundle::InstalledBundle>> {
     if !is_slot_hash_dirname(id_or_slot) {
         return Ok(None);
     }
@@ -152,9 +179,7 @@ pub fn installed_bundle_arch(id_or_slot: &str) -> Result<Option<String>> {
     // A registry we cannot read must not silently skip the gate: propagate,
     // so an unparseable manifest refuses the boot rather than admitting it
     // unchecked.
-    Ok(registry
-        .find(id_or_slot)?
-        .map(|installed| installed.manifest.arch))
+    registry.find(id_or_slot)
 }
 
 /// The declared arch of an installed bundle, for the *export* path, which
@@ -362,6 +387,39 @@ mod tests {
             !msg.contains("but this host is"),
             "a slot must not be gated on a same-named bundle's arch: {msg}"
         );
+    }
+
+    /// A boot from an installed bundle is told where that bundle's archive is,
+    /// so admission can pin it. A slot, even one sharing the bundle's name, and
+    /// a key nothing is installed under are not bundles and yield no pin.
+    #[test]
+    fn installed_bundle_archive_names_the_registry_archive_and_only_for_a_bundle() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_HOME", tmp.path());
+
+        let bundle = "a1b2c3d4e5f60718".repeat(4);
+        install_bundle_manifest(&bundle, &mvm_core::arch::GuestArch::host().to_string());
+        assert_eq!(
+            installed_bundle_archive(&bundle).expect("registry readable"),
+            Some(mvm_core::config::bundles_dir().join(format!("{bundle}.mvmpkg")))
+        );
+
+        let slot = "0123456789abcdef".repeat(4);
+        test_persisted_manifest(&slot)
+            .write_to_slot(std::path::Path::new(&slot_dir(&slot)))
+            .expect("write persisted slot");
+        install_bundle_manifest(&slot, &mvm_core::arch::GuestArch::host().to_string());
+        assert_eq!(installed_bundle_archive(&slot).expect("slot"), None);
+
+        assert_eq!(
+            installed_bundle_archive(&"9".repeat(64)).expect("absent"),
+            None
+        );
+        assert_eq!(installed_bundle_archive("not-a-key").expect("name"), None);
     }
 
     /// The regression the first attempt at this gate broke: `bundle export` and

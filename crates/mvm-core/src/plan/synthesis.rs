@@ -151,7 +151,7 @@ pub struct SynthesisInput<'a> {
     /// Optional pin to a content-addressed `.mvmpkg` bundle. When
     /// set, the synthesised plan carries the pin and the supervisor's
     /// admit path re-verifies the archive against this triple before
-    /// backend dispatch. No boot path sets it today.
+    /// backend dispatch. Boots resolved from an installed bundle set it.
     pub bundle_pin: Option<crate::plan::bundle::PlanArtifact>,
     /// Optional pin to an application-dependencies volume sealed by
     /// `mvm_sdk::compile::deps_audit::seal_volume`. No boot path sets it
