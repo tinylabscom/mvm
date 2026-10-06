@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mvm_client::approval_broker::display_safe;
+use serde::Serialize;
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 use super::egress_denials::{DenialTally, DeniedDestination};
@@ -170,6 +171,82 @@ impl ReviewOffer {
     }
 }
 
+/// A command a machine-readable run summary can present for later review.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(in crate::commands) struct JsonReviewPointer {
+    pub run: String,
+    pub command: String,
+    pub reason: String,
+}
+
+/// Name the same after-the-fact review offered by a human summary, without
+/// opening a terminal or changing policy.
+pub(in crate::commands) fn json_review_pointer(
+    tally: &DenialTally,
+    offer: &ReviewOffer,
+) -> Option<JsonReviewPointer> {
+    json_review_pointer_with(tally, offer, &LocalHost::verifying_chain())
+}
+
+fn json_review_pointer_with(
+    tally: &DenialTally,
+    offer: &ReviewOffer,
+    host: &dyn ReviewHost,
+) -> Option<JsonReviewPointer> {
+    if candidates_from_destinations(&tally.destinations()).is_empty() {
+        return None;
+    }
+    let run = host
+        .run_id(&offer.vm_name)
+        .unwrap_or_else(|| offer.vm_name.clone());
+    let (reason, manifest) = match &offer.source {
+        ReviewSource::Manifest(manifest) => (
+            "interactive review is deferred for JSON output".to_string(),
+            Some(manifest.as_path()),
+        ),
+        ReviewSource::Unavailable(why) => (why.reason(&offer.vm_name), None),
+    };
+    Some(JsonReviewPointer {
+        command: review_command(&run, manifest),
+        run,
+        reason,
+    })
+}
+
+#[derive(Serialize)]
+struct JsonDenialSummary {
+    schema_version: u32,
+    event: &'static str,
+    egress_denials: Vec<DeniedDestination>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    egress_review: Option<JsonReviewPointer>,
+}
+
+/// Emit a post-run JSON record on stderr, keeping the command's stdout JSON
+/// document intact.
+pub(in crate::commands) fn emit_json_denial_summary(
+    tally: &DenialTally,
+    offer: &ReviewOffer,
+) -> Result<()> {
+    if let Some(summary) = json_denial_summary_with(tally, offer, &LocalHost::verifying_chain()) {
+        eprintln!("{}", serde_json::to_string(&summary)?);
+    }
+    Ok(())
+}
+
+fn json_denial_summary_with(
+    tally: &DenialTally,
+    offer: &ReviewOffer,
+    host: &dyn ReviewHost,
+) -> Option<JsonDenialSummary> {
+    (!tally.is_empty()).then(|| JsonDenialSummary {
+        schema_version: 1,
+        event: "egress_denial_summary",
+        egress_denials: tally.destinations(),
+        egress_review: json_review_pointer_with(tally, offer, host),
+    })
+}
+
 /// Print a finished run's exit summary, then offer its grantable refusals for
 /// review: in place when the run's project manifest is known and there is a
 /// terminal to ask on; otherwise as the `mvmctl explain` command that opens
@@ -311,16 +388,24 @@ fn review_pointer(reason: &str, run: &str, manifest: Option<&Path>) -> Vec<Strin
     match manifest {
         Some(manifest) => vec![
             format!("{reason}; to grant any of them later, run:"),
-            format!(
-                "  mvmctl explain {} --review --project {}",
-                shell_word(run),
-                shell_word(&manifest.display().to_string())
-            ),
+            format!("  {}", review_command(run, Some(manifest))),
         ],
         None => vec![
             format!("{reason}; to grant any of them later, run from the project directory:"),
-            format!("  mvmctl explain {} --review", shell_word(run)),
+            format!("  {}", review_command(run, None)),
         ],
+    }
+}
+
+fn review_command(run: &str, manifest: Option<&Path>) -> String {
+    let command = format!("mvmctl explain {} --review", shell_word(run));
+    match manifest {
+        Some(manifest) => format!(
+            "{} --project {}",
+            command,
+            shell_word(&manifest.display().to_string())
+        ),
+        None => command,
     }
 }
 
@@ -763,6 +848,84 @@ mod tests {
         );
         assert!(!host.verified, "no review was opened, so nothing to verify");
         assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    }
+
+    #[test]
+    fn json_review_pointer_names_the_admitted_run_and_manifest_without_prompting() {
+        let (_dir, manifest) = project();
+        let before = std::fs::read(&manifest).unwrap();
+        let terminal = SharedTerminal::answering(&["g", "y"]);
+        let host = FakeHost::with_terminal(&terminal);
+
+        let pointer = json_review_pointer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::Manifest(manifest.clone())),
+            &host,
+        )
+        .expect("grantable denial has a review pointer");
+
+        assert_eq!(pointer.run, "plan-1");
+        assert_eq!(
+            pointer.command,
+            format!(
+                "mvmctl explain plan-1 --review --project {}",
+                manifest.display()
+            )
+        );
+        assert!(terminal.drawn().is_empty());
+        assert!(!host.verified);
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    }
+
+    #[test]
+    fn json_review_pointer_explains_when_the_admitted_manifest_is_unknown() {
+        let host = FakeHost::headless();
+        let pointer = json_review_pointer_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::admitted_elsewhere()),
+            &host,
+        )
+        .expect("grantable denial has a review pointer");
+
+        assert_eq!(pointer.command, "mvmctl explain plan-1 --review");
+        assert!(pointer.reason.contains("admitted by a separate run"));
+        assert!(
+            json_review_pointer_with(
+                &tally("169.254.169.254:80", "cloud_metadata"),
+                &ReviewOffer::new("vm-a", ReviewSource::admitted_elsewhere()),
+                &host,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn json_denial_summary_carries_the_review_pointer_and_no_raw_prompt() {
+        let host = FakeHost::headless();
+        let summary = json_denial_summary_with(
+            &grantable(),
+            &ReviewOffer::new("vm-a", ReviewSource::admitted_elsewhere()),
+            &host,
+        )
+        .expect("a denial yields a summary");
+        let json = serde_json::to_value(summary).expect("JSON summary");
+
+        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["event"], "egress_denial_summary");
+        assert_eq!(json["egress_denials"][0]["count"], 1);
+        assert_eq!(
+            json["egress_review"]["command"],
+            "mvmctl explain plan-1 --review"
+        );
+        assert!(!json.to_string().contains("Grant / [S] Skip"));
+        assert!(
+            json_denial_summary_with(
+                &DenialTally::default(),
+                &ReviewOffer::new("vm-a", ReviewSource::admitted_elsewhere()),
+                &host,
+            )
+            .is_none()
+        );
     }
 
     #[test]

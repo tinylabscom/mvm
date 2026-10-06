@@ -263,6 +263,12 @@ is `none` or `granted`, and the summary's records are in its `egress_denials`
 array, each with the destination, the recorded
 event and reason, a count, first and last timestamps, and a `remedy` whose
 `kind` is `allow_host`, `name_explicitly`, `edit_route`, `never` or `advice`.
+When a refusal can become a project grant, `egress_review` names the exact
+`mvmctl explain` command for reviewing it later. JSON runs never open a
+terminal prompt. Persistent `machine run --json -- <cmd>` and
+`machine run --entrypoint --json` keep their existing stdout format and emit
+a JSON `egress_denial_summary` record on stderr after the command; its
+`egress_denials` and optional `egress_review` fields have the same meaning.
 An interactive `--pty` run also prints nothing live, because a line written
 over a raw-mode terminal would corrupt it; its summary prints after the
 session ends.
