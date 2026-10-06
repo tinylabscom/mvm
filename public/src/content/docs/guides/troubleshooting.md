@@ -397,6 +397,20 @@ mvmctl machine exec  <N> -- <cmd>   # one-shot command
 mvmctl machine stop  <N>          # tear it down (prompts; add --yes to skip)
 ```
 
+### "checkpoint '…' stores … as one whole file"
+
+The checkpoint was captured by a pre-release that stored the rootfs and memory
+image as whole files. Current releases store them as chunks and do not read
+the old layout, so restore and fork refuse it. It cannot be converted. Remove
+it and capture the machine again:
+
+```bash
+mvmctl machine checkpoint rm <checkpoint>
+mvmctl machine checkpoint create <machine> --class vm-full
+```
+
+`mvmctl cache prune` also removes an untagged one once it ages out.
+
 ## Network Issues
 
 ### MicroVM has no internet
