@@ -1,6 +1,6 @@
 //! Integration tests for the build pipeline.
 //!
-//! Tests exercise the public `pool_build_with_opts` API with a custom
+//! Tests exercise the public `pool_build` API with a custom
 //! `BuildEnvironment` implementation, verifying cache hits, template reuse,
 //! cache key mismatches, force rebuild, and artifact recording.
 
@@ -206,7 +206,7 @@ fn test_cache_hit_skips_build() {
     let env = TestBuildEnv::new(spec, tenant, &["sha256-abc123", "yes", "sha256-abc123"]);
 
     let opts = mvm_build::build::PoolBuildOpts::default();
-    let result = mvm_build::build::pool_build_with_opts(&env, "acme", "workers", opts);
+    let result = mvm_build::build::pool_build(&env, "acme", "workers", opts);
 
     assert!(
         result.is_ok(),
@@ -236,7 +236,7 @@ fn test_template_reuse_skips_build() {
     let env = TestBuildEnv::new(spec, tenant, &["yes", "revisions/rev123", &rev_json]);
 
     let opts = mvm_build::build::PoolBuildOpts::default();
-    let result = mvm_build::build::pool_build_with_opts(&env, "acme", "workers", opts);
+    let result = mvm_build::build::pool_build(&env, "acme", "workers", opts);
 
     assert!(
         result.is_ok(),
@@ -267,7 +267,7 @@ fn test_cache_key_mismatch_triggers_build() {
     let env = TestBuildEnv::new(spec, tenant, &["yes", "revisions/rev123", &rev_json, ""]);
 
     let opts = mvm_build::build::PoolBuildOpts::default();
-    let result = mvm_build::build::pool_build_with_opts(&env, "acme", "workers", opts);
+    let result = mvm_build::build::pool_build(&env, "acme", "workers", opts);
 
     assert!(
         result.is_err(),
@@ -298,7 +298,7 @@ fn test_force_rebuild_ignores_cache() {
         force_rebuild: true,
         ..Default::default()
     };
-    let result = mvm_build::build::pool_build_with_opts(&env, "acme", "workers", opts);
+    let result = mvm_build::build::pool_build(&env, "acme", "workers", opts);
 
     assert!(result.is_err(), "Should fail in build pipeline");
     assert!(
@@ -324,7 +324,7 @@ fn test_build_revision_recorded() {
     let env = TestBuildEnv::new(spec, tenant, &["yes", "revisions/rev123", &rev_json]);
 
     let opts = mvm_build::build::PoolBuildOpts::default();
-    let result = mvm_build::build::pool_build_with_opts(&env, "acme", "workers", opts);
+    let result = mvm_build::build::pool_build(&env, "acme", "workers", opts);
     assert!(result.is_ok());
 
     let cmds = env.shell_cmds();

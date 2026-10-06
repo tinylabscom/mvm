@@ -67,6 +67,7 @@ fn seed_parent(world: &mut CliWorld, chain_carries_creation_entry: bool) {
             created_unix: 1,
             quiesced: true,
             grants: None,
+            key_domain: mvm_core::checkpoint::CheckpointKeyDomain::host(),
         },
     )
     .expect("capture the clean parent checkpoint");

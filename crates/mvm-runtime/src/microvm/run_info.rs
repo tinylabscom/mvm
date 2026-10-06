@@ -89,7 +89,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        std::process::Command::new("kill")
+        mvm_core::env_hygiene::helper_command("kill")
             .args(["-0", &pid.to_string()])
             .output()
             .map(|o| o.status.success())

@@ -9,7 +9,6 @@
 //! milliseconds rather than at the end of a compile.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 #[derive(Debug)]
 pub struct Pin {
@@ -132,10 +131,10 @@ pub fn try_rustup_cargo_and_rustc(
     let home = std::env::var("HOME").unwrap_or_default();
     let rustup_candidates = vec!["rustup".to_string(), format!("{home}/.cargo/bin/rustup")];
     for rustup in &rustup_candidates {
-        let rustc_out = Command::new(rustup)
+        let rustc_out = super::helper_command(rustup)
             .args(["which", "rustc", "--toolchain", toolchain])
             .output();
-        let cargo_out = Command::new(rustup)
+        let cargo_out = super::helper_command(rustup)
             .args(["which", "cargo", "--toolchain", toolchain])
             .output();
         if let (Ok(rc), Ok(ca)) = (rustc_out, cargo_out)
@@ -168,7 +167,9 @@ pub fn check_toolchain_ready(pin: &Pin) -> Result<(), String> {
     let (cargo, _) = try_rustup_cargo_and_rustc(strip_glibc(&pin.target), &pin.rust)?;
     // `--help`, not `--version`: the subcommand has no version flag, and cargo
     // fails `--help` too when no `cargo-zigbuild` is installed to dispatch to.
-    let zigbuild = Command::new(&cargo).args(["zigbuild", "--help"]).output();
+    let zigbuild = super::helper_command(&cargo)
+        .args(["zigbuild", "--help"])
+        .output();
     if zigbuild.is_ok_and(|out| out.status.success()) {
         return Ok(());
     }
@@ -181,14 +182,14 @@ pub fn check_toolchain_ready(pin: &Pin) -> Result<(), String> {
 }
 
 fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
-    let ver = Command::new("python3")
+    let ver = super::helper_command("python3")
         .args(["-m", "ziglang", "version"])
         .output()
         .ok()?;
     if !ver.status.success() || String::from_utf8_lossy(&ver.stdout).trim() != zig_pin {
         return home_dir().and_then(|home| ziglang_mise_path(zig_pin, &home));
     }
-    let path = Command::new("python3")
+    let path = super::helper_command("python3")
         .args([
             "-c",
             "import ziglang, os; print(os.path.join(os.path.dirname(ziglang.__file__), 'zig'))",
@@ -206,7 +207,7 @@ fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
 }
 
 fn zig_on_path_matches(zig_pin: &str) -> bool {
-    Command::new("zig")
+    super::helper_command("zig")
         .arg("version")
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == zig_pin)
@@ -222,7 +223,7 @@ fn configured_embed_tools() -> Result<Option<(String, String)>, String> {
 
 fn zig_path_matches(path: &str, zig_pin: &str) -> bool {
     !path.trim().is_empty()
-        && Command::new(path)
+        && super::helper_command(path)
             .arg("version")
             .output()
             .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == zig_pin)
@@ -272,7 +273,7 @@ fn configured_embed_tools_from(
 }
 
 fn rustc_has_target(rustc: &str, target: &str) -> bool {
-    let out = Command::new(rustc)
+    let out = super::helper_command(rustc)
         .args(["--target", target, "--print", "target-libdir"])
         .output();
     if let Ok(o) = out

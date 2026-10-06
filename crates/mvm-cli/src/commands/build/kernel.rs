@@ -16,7 +16,6 @@
 //! ~20s; `--verbose` streams the builder VM's `console.log` (the inner
 //! `nix build` output) to stderr live.
 
-#[cfg(feature = "builder-vm")]
 use anyhow::Context;
 use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
@@ -89,8 +88,7 @@ enum Source {
 }
 
 /// Host architecture tag — matches `builder_vm_host_arch()`. Only the
-/// `builder-vm` build path consumes it (compile + cache routing).
-#[cfg(feature = "builder-vm")]
+/// local build path consumes it (compile + cache routing).
 fn host_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"
@@ -105,7 +103,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
     }
 }
 
-#[cfg(feature = "builder-vm")]
 fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
     use crate::commands::env::builder_vm::KernelVariant;
     use crate::ui;
@@ -160,12 +157,10 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
 /// `MVM_KERNEL_SOURCE` policy applies. Keeping this policy shared means a
 /// contributor can opt into published kernels for both builder bootstrap and
 /// direct kernel acquisition without changing command lines.
-#[cfg(feature = "builder-vm")]
 fn source_from_global_policy() -> Source {
     source_from_policy(crate::commands::env::builder_vm::resolve_kernel_source())
 }
 
-#[cfg(feature = "builder-vm")]
 fn source_from_policy(policy: Option<crate::commands::env::builder_vm::KernelSource>) -> Source {
     match policy {
         Some(crate::commands::env::builder_vm::KernelSource::Compile) | None => Source::Compile,
@@ -176,7 +171,6 @@ fn source_from_policy(policy: Option<crate::commands::env::builder_vm::KernelSou
 
 /// JSON metrics emitted next to the cached kernel, so a contributor sees the
 /// `=y` count and size of what they compiled without a CI round-trip.
-#[cfg(feature = "builder-vm")]
 #[derive(serde::Serialize)]
 struct KernelMetrics<'a> {
     arch: &'a str,
@@ -188,7 +182,6 @@ struct KernelMetrics<'a> {
 /// Count built-in (`=y`) symbols in a resolved kernel `.config` — the metric
 /// the kernel config budget ratchets on (`xtask perf footprint
 /// --kernel-config`). Matches `grep -c '=y$'`.
-#[cfg(feature = "builder-vm")]
 fn count_builtin_symbols(config: &str) -> usize {
     config
         .lines()
@@ -200,7 +193,6 @@ fn count_builtin_symbols(config: &str) -> usize {
 /// write `kernel-metrics-<arch>.json` beside it, and return the count. Returns
 /// `None` when no config was emitted (e.g. `--source download`) — purely
 /// additive, never an error.
-#[cfg(feature = "builder-vm")]
 fn emit_local_metrics(
     vmlinux: &std::path::Path,
     label: &str,
@@ -226,7 +218,6 @@ fn emit_local_metrics(
 /// Boot a throwaway microVM on the freshly-built workload kernel and confirm
 /// the agent answers. Re-execs `mvmctl` (the real machine lifecycle paths)
 /// rather than reconstructing their argument plumbing here.
-#[cfg(feature = "builder-vm")]
 fn run_boot_check(
     variants: &[(crate::commands::env::builder_vm::KernelVariant, &str)],
     arch: &str,
@@ -275,7 +266,6 @@ fn run_boot_check(
     Ok(())
 }
 
-#[cfg(feature = "builder-vm")]
 fn boot_check_run_args(name: &str) -> Vec<&str> {
     vec![
         "machine",
@@ -293,9 +283,8 @@ fn boot_check_run_args(name: &str) -> Vec<&str> {
 }
 
 /// Run `mvmctl <args>` inheriting stdio; error on non-zero exit.
-#[cfg(feature = "builder-vm")]
 fn run_self(exe: &std::path::Path, args: &[&str]) -> Result<()> {
-    let status = std::process::Command::new(exe)
+    let status = mvm_core::env_hygiene::helper_command(exe)
         .args(args)
         .status()
         .with_context(|| format!("spawning mvmctl {}", args.join(" ")))?;
@@ -306,7 +295,6 @@ fn run_self(exe: &std::path::Path, args: &[&str]) -> Result<()> {
 }
 
 /// Resolve a kernel by `source` into the per-arch cache, returning its path.
-#[cfg(feature = "builder-vm")]
 fn acquire_kernel(
     source: Source,
     variant: crate::commands::env::builder_vm::KernelVariant,
@@ -332,7 +320,6 @@ fn acquire_kernel(
 }
 
 /// Compile arm — host arch only (Stage 0 cannot cross-compile).
-#[cfg(feature = "builder-vm")]
 fn compile_host_arch(
     variant: crate::commands::env::builder_vm::KernelVariant,
     arch: &str,
@@ -349,7 +336,6 @@ fn compile_host_arch(
 
 /// Per-arch, per-variant cached kernel path. Mirrors
 /// `build_kernel_via_stage0`'s output location.
-#[cfg(feature = "builder-vm")]
 fn kernel_cache_path(arch: &str, label: &str) -> std::path::PathBuf {
     mvm_build::kernel_fetch::cached_kernel_path(
         std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
@@ -358,15 +344,7 @@ fn kernel_cache_path(arch: &str, label: &str) -> std::path::PathBuf {
     )
 }
 
-#[cfg(not(feature = "builder-vm"))]
-fn run_build(_args: BuildArgs, _verbose: bool) -> Result<()> {
-    anyhow::bail!(
-        "`mvmctl kernel build` requires the `builder-vm` feature; \
-         rebuild mvmctl with it enabled."
-    )
-}
-
-#[cfg(all(test, feature = "builder-vm"))]
+#[cfg(test)]
 mod tests {
     use super::{Source, boot_check_run_args, count_builtin_symbols, source_from_policy};
     use crate::commands::env::builder_vm::KernelSource;

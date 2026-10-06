@@ -4,6 +4,36 @@ use assert_cmd::cargo::CommandCargoExt;
 use std::process::Command;
 
 #[test]
+fn build_compile_help_advertises_pinned_publication_input() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "compile", "--help"])
+        .output()
+        .expect("run build compile help");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("--mvm-revision"), "{stdout}");
+    assert!(stdout.contains("COMMIT"), "{stdout}");
+}
+
+#[test]
+fn build_compile_rejects_invalid_pin_before_reading_source() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args([
+            "build",
+            "compile",
+            "/does/not/exist.py",
+            "--mvm-revision",
+            "main",
+        ])
+        .output()
+        .expect("run build compile with invalid revision");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("40-character hexadecimal"), "{stderr}");
+    assert!(!stderr.contains("does/not/exist.py"), "{stderr}");
+}
+
+#[test]
 fn machine_workspace_apply_verbs_are_discoverable() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "--help"])
@@ -35,6 +65,44 @@ fn machine_check_artifact_help_names_bundle_verification_controls() {
             "help missing {expected}: {stdout}"
         );
     }
+}
+
+/// `build guest-bins` is the producer of the artifact mvm-images pins; its
+/// help names the output directory and the per-architecture selector.
+#[test]
+fn build_guest_bins_help_names_output_and_arch_controls() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "guest-bins", "--help"])
+        .output()
+        .expect("run build guest-bins help");
+    assert!(
+        out.status.success(),
+        "help must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in ["--out", "--arch", "mvm-guest-bins-v"] {
+        assert!(
+            stdout.contains(expected),
+            "help missing {expected}: {stdout}"
+        );
+    }
+}
+
+/// An unknown architecture is a parse error, not a silent fallback to the
+/// host's: a published artifact must carry exactly what was asked for.
+#[test]
+fn build_guest_bins_rejects_an_unknown_arch() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args(["build", "guest-bins", "--arch", "riscv64"])
+        .output()
+        .expect("run build guest-bins with a bad arch");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("riscv64"),
+        "the refusal names the bad value: {stderr}"
+    );
 }
 
 #[test]
@@ -2076,4 +2144,39 @@ fn pack_registry_ls_starts_empty_and_rm_unpinned_is_a_no_op() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(shown.contains("not pinned"), "{shown}");
+}
+
+/// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive
+/// launch, and an archive that does not verify is refused at the install step,
+/// before the run reaches admission or any backend, with nothing installed.
+#[test]
+fn machine_run_refuses_an_unverifiable_bundle_archive_before_booting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("app.mvmpkg");
+    std::fs::write(&archive, b"not a signed bundle").unwrap();
+    let state = tmp.path().join("state");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .env("HOME", tmp.path())
+        .env("MVM_HOME", &state)
+        .env("MVM_NO_AUTO_DEV", "1")
+        .args(["machine", "run", "--manifest"])
+        .arg(&archive)
+        .args(["--", "true"])
+        .output()
+        .unwrap();
+
+    assert!(
+        !out.status.success(),
+        "an unverifiable archive must not run"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed verification"),
+        "the refusal must come from bundle verification: {stderr}"
+    );
+    let installed = std::fs::read_dir(state.join("bundles"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(installed, 0, "a refused archive installs nothing");
 }

@@ -42,10 +42,10 @@ when that release feature is enabled.
 
 ## Features
 
-Default features enable the builder VM and pure image writer used by normal
-local workflows. Optional features cover test support, release channels,
-embedded host binaries, libkrun, trusted APFS, S3 template registries, the wasm
-backend, custom DNS, and live HVF validation. Feature selection must preserve
+The builder VM and the pure image writer are always compiled. Optional
+features cover test support, release channels, embedded host binaries, libkrun,
+trusted APFS, S3 template registries, the wasm backend, custom DNS, and live
+HVF validation. Feature selection must preserve
 the distinction between user, host, and development closures in the root
 package.
 

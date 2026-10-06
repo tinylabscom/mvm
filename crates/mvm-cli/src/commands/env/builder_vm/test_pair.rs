@@ -27,7 +27,7 @@ pub(crate) fn write(path: &Path, bytes: &[u8]) {
 }
 
 pub(crate) fn git(dir: &Path, args: &[&str]) {
-    let out = std::process::Command::new("git")
+    let out = mvm_core::env_hygiene::helper_command("git")
         .arg("-C")
         .arg(dir)
         .args([

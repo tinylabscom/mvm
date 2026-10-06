@@ -74,8 +74,8 @@ pub const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
 ///
 /// This lives here, rather than beside the builder code, because both sides of
 /// a feature boundary need it: the seed in `libkrun_builder` is gated on
-/// `builder-vm`, while the bootstrap readiness check also compiles under a
-/// bare `test` cfg. One ungated list is the only way the two cannot disagree
+/// `builder-libkrun`, while the bootstrap readiness check compiles without
+/// it. One ungated list is the only way the two cannot disagree
 /// about what a complete cache dir contains.
 pub const BUILDER_VM_CACHE_ARTIFACTS: &[&str] = &[
     "vmlinux",

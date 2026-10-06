@@ -8,7 +8,7 @@
 //! 4. Serialize the array as JSON (the overlay-erasure certificate
 //!    batch format)
 //! 5. Hand the JSON to `verify_destruction_receipt` (the same
-//!    function `mvmctl audit verify-cert` uses internally)
+//!    function `mvmctl trust audit verify-cert` uses internally)
 //! 6. Assert: every cert verifies, the receipt fields match the
 //!    pre-destroy state, the overlay directories are gone.
 //!

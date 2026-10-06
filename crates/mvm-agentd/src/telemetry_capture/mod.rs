@@ -20,3 +20,5 @@ mod subscriber;
 pub use emit::{EmitOutcome, ShedReason};
 pub use state::{CaptureState, LossTally, ProducerId, SourceLosses};
 pub use subscriber::AgentSubscriber;
+
+pub mod session;

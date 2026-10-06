@@ -707,8 +707,8 @@ pub enum BuilderVmError {
 
 /// `~/.mvm/cache/builder-vm/` (honors `MVM_HOME`) — the directory to clear
 /// to recover a degraded builder store. Lives here (ungated) so the build
-/// error path can name the recovery dir; the `builder-vm`-gated builder modules
-/// delegate to this for a single source of truth.
+/// error path can name the recovery dir; the backend builder modules delegate
+/// to this for a single source of truth.
 pub fn builder_vm_cache_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm")
 }

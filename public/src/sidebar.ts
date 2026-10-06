@@ -26,6 +26,7 @@ export const sidebar: SidebarGroup[] = [
       { label: "Installation", slug: "getting-started/installation" },
       { label: "First-Use Happy Paths", slug: "getting-started/happy-paths" },
       { label: "Quick Start", slug: "getting-started/quickstart" },
+      { label: "Why mvm", slug: "getting-started/why-mvm" },
       { label: "Python quickstart", slug: "getting-started/python-quickstart" },
       { label: "Node.js quickstart", slug: "getting-started/nodejs-quickstart" },
       { label: "Rust quickstart", slug: "getting-started/rust-quickstart" },

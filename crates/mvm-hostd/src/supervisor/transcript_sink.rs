@@ -1,7 +1,7 @@
 //! Live transcript capture sink — fills an armed capture's manifest with the
 //! guest's byte chunks as they cross the host bridge.
 //!
-//! The operator arms a capture out of band (`mvmctl audit transcript arm`),
+//! The operator arms a capture out of band (`mvmctl trust audit transcript arm`),
 //! which writes an empty-chunk manifest under
 //! `<transcripts>/<tenant>/<capture-id>/` with the per-capture data key wrapped
 //! under the host KEK. When a VM whose binding matches boots, the bridge opens
@@ -136,7 +136,7 @@ mod tests {
     use mvm_core::transcript::{CaptureBinding, CaptureBounds, RetentionPolicy};
     use std::path::Path;
 
-    /// Arrange an armed capture exactly the way `mvmctl audit transcript arm`
+    /// Arrange an armed capture exactly the way `mvmctl trust audit transcript arm`
     /// does: a sealed-but-empty manifest with the data key wrapped under the KEK.
     fn arm(transcripts: &Path, keys: &Path, tenant: &str, vm: &str, id: &str) {
         let dir = transcripts.join(tenant).join(id);

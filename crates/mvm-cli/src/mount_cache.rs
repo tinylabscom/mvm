@@ -3,8 +3,9 @@
 //! Persistent `--host` registrations and transient `--mount` launches share
 //! this one cache. Source identity covers the filesystem semantics the ext4
 //! writer emits; cache identity also covers its format version and volume
-//! label. Cache objects are immutable and verified on every lookup. A writable
-//! consumer receives a private copy-on-write clone and never the cache object.
+//! label. Cache objects are immutable and verified on every lookup, and built
+//! exactly to size. A writable consumer never receives the cache object: it
+//! gets a private image of the same tree, built with free space to grow into.
 
 use std::path::{Path, PathBuf};
 
@@ -14,6 +15,11 @@ use sha2::{Digest, Sha256};
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const CACHE_DIR_NAME: &str = "mount-images";
+/// Free data space a writable image is built with. The blocks are never
+/// written, so the sparse image costs nothing on disk until the guest uses them.
+const WRITABLE_FREE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+/// Free inode slots a writable image is built with, for files the guest adds.
+const WRITABLE_FREE_INODES: u32 = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MountFingerprint {
@@ -48,10 +54,13 @@ impl CachedMountImage {
         &self.fingerprint
     }
 
-    /// Produce a private writable image without ever granting write access to
-    /// the shared cache object. Reflink is the ordinary fast path; a
-    /// sparse-aware copy preserves correctness on filesystems without CoW.
-    pub(crate) fn writable_copy(&self, target: &Path) -> Result<PathBuf> {
+    /// Build a private writable image of this cache object's tree, with free
+    /// space for the guest to grow into. The cache object is built exactly to
+    /// size, so a copy of it would leave the guest no room to write; this
+    /// re-collects the source, refuses if it no longer matches the cached
+    /// tree, and builds the same tree with [`WRITABLE_FREE_BYTES`] free. The
+    /// shared cache object is never opened for writing.
+    pub(crate) fn writable_image(&self, target: &Path) -> Result<PathBuf> {
         let parent = target
             .parent()
             .with_context(|| format!("writable mount image has no parent: {}", target.display()))?;
@@ -62,22 +71,44 @@ impl CachedMountImage {
             .tempdir_in(parent)
             .with_context(|| format!("creating mount image staging dir in {}", parent.display()))?;
         let staged_image = staging.path().join("image.ext4");
-        mvm_fs::clone::reflink_or_copy(&self.path, &staged_image).with_context(|| {
-            format!(
-                "cloning cached mount image {} to {}",
-                self.path.display(),
-                target.display()
-            )
-        })?;
+        let nodes = collect_matching_nodes(&self.fingerprint)?;
+        let build = mvm_fs::ext4::BuildOptions::default()
+            .with_volume_name(self.fingerprint.volume_label.as_bytes())
+            .with_free_space(WRITABLE_FREE_BYTES, WRITABLE_FREE_INODES);
+        mvm_fs::rootfs::materialize_ext4_nodes_pure(nodes, &staged_image, &build).with_context(
+            || {
+                format!(
+                    "materializing writable image of {}",
+                    self.fingerprint.source.display()
+                )
+            },
+        )?;
         set_private_writable(&staged_image)?;
-        std::fs::rename(&staged_image, target).with_context(|| {
-            format!(
-                "publishing writable mount image {} from cache",
-                target.display()
-            )
-        })?;
+        std::fs::rename(&staged_image, target)
+            .with_context(|| format!("publishing writable mount image {}", target.display()))?;
         Ok(target.to_path_buf())
     }
+}
+
+/// The source's ext4 nodes, refused unless they still fingerprint to the tree
+/// `fingerprint` names — so an image built from them holds exactly that tree.
+fn collect_matching_nodes(fingerprint: &MountFingerprint) -> Result<Vec<mvm_fs::ext4::Node>> {
+    let nodes = mvm_fs::rootfs::collect_nodes(&fingerprint.source, mount_walk_options())
+        .with_context(|| {
+            format!(
+                "collecting mount source {} for materialization",
+                fingerprint.source.display()
+            )
+        })?;
+    let collected = mvm_fs::rootfs::fingerprint_ext4_nodes(&nodes)
+        .context("fingerprinting the collected mount nodes")?;
+    if collected != fingerprint.source_sha256 {
+        bail!(
+            "mount source {} changed while it was being snapshotted; retry the launch",
+            fingerprint.source.display()
+        );
+    }
+    Ok(nodes)
 }
 
 pub(crate) enum MountCacheLookup {
@@ -116,21 +147,7 @@ impl MountCacheMiss {
                 )
             })?;
         let staged_image = staging.path().join("image.ext4");
-        let nodes = mvm_fs::rootfs::collect_nodes(&self.fingerprint.source, mount_walk_options())
-            .with_context(|| {
-            format!(
-                "collecting mount source {} for materialization",
-                self.fingerprint.source.display()
-            )
-        })?;
-        let after = mvm_fs::rootfs::fingerprint_ext4_nodes(&nodes)
-            .context("fingerprinting the collected mount nodes")?;
-        if after != self.fingerprint.source_sha256 {
-            bail!(
-                "mount source {} changed while it was being snapshotted; retry the launch",
-                self.fingerprint.source.display()
-            );
-        }
+        let nodes = collect_matching_nodes(&self.fingerprint)?;
         let build = mvm_fs::ext4::BuildOptions::default()
             .with_volume_name(self.fingerprint.volume_label.as_bytes());
         mvm_fs::rootfs::materialize_ext4_nodes_pure(nodes, &staged_image, &build).with_context(
@@ -559,6 +576,61 @@ mod tests {
     }
 
     #[test]
+    fn a_writable_image_holds_the_cached_tree_with_room_to_grow() {
+        let scratch = tempfile::tempdir().unwrap();
+        let cache = MountImageCache::at(scratch.path().join("cache"));
+        let source = source(scratch.path(), b"source");
+        let cached = cache
+            .lookup(cache.fingerprint(&source, "mvmvolwork").unwrap())
+            .unwrap()
+            .resolve()
+            .unwrap();
+        let private = cached
+            .writable_image(&scratch.path().join("private.ext4"))
+            .unwrap();
+        let diff = mvm_fs::tree_diff::diff_images(
+            cached.path(),
+            &private,
+            mvm_fs::tree_diff::DiffLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(diff.stats.changed(), 0, "the same tree as the baseline");
+        let free_blocks = |image: &Path| {
+            let bytes = std::fs::read(image).unwrap();
+            u64::from(u32::from_le_bytes(
+                bytes[1024 + 0x0C..1024 + 0x10].try_into().unwrap(),
+            ))
+        };
+        assert_eq!(
+            free_blocks(cached.path()),
+            0,
+            "the cache object stays exact"
+        );
+        assert!(
+            free_blocks(&private) * u64::from(mvm_fs::ext4::BLOCK_SIZE) >= WRITABLE_FREE_BYTES,
+            "the writable image has room for the guest"
+        );
+    }
+
+    #[test]
+    fn a_writable_image_refuses_a_source_that_changed_since_it_was_cached() {
+        let scratch = tempfile::tempdir().unwrap();
+        let cache = MountImageCache::at(scratch.path().join("cache"));
+        let source = source(scratch.path(), b"source");
+        let cached = cache
+            .lookup(cache.fingerprint(&source, "mvmvolwork").unwrap())
+            .unwrap()
+            .resolve()
+            .unwrap();
+        std::fs::write(source.join("added"), b"later").unwrap();
+        let error = cached
+            .writable_image(&scratch.path().join("private.ext4"))
+            .unwrap_err();
+        assert!(error.to_string().contains("changed"), "{error:#}");
+        assert!(!scratch.path().join("private.ext4").exists());
+    }
+
+    #[test]
     fn a_writable_copy_cannot_mutate_the_shared_cache_object() {
         let scratch = tempfile::tempdir().unwrap();
         let cache = MountImageCache::at(scratch.path().join("cache"));
@@ -570,7 +642,7 @@ mod tests {
             .unwrap();
         let cached_digest = mvm_core::crypto::image_verify::sha256_file(cached.path()).unwrap();
         let private = cached
-            .writable_copy(&scratch.path().join("private.ext4"))
+            .writable_image(&scratch.path().join("private.ext4"))
             .unwrap();
         let mut file = std::fs::OpenOptions::new()
             .write(true)

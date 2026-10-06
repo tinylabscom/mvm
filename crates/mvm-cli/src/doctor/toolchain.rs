@@ -81,7 +81,10 @@ pub fn probe_zigbuild() -> ZigbuildProbe {
 /// as "not usefully installed" — the caller surfaces that to the
 /// doctor output, not as a hard error.
 fn which_version(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new(cmd).args(args).output().ok()?;
+    let out = mvm_core::env_hygiene::helper_command(cmd)
+        .args(args)
+        .output()
+        .ok()?;
     if !out.status.success() {
         return None;
     }

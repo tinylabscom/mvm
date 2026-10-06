@@ -19,7 +19,6 @@ impl TopLevelCommand for Commands {
             Commands::BuilderEgressSupervisor(a) => {
                 bootstrap::run_builder_egress_supervisor(cli, a, cfg)
             }
-            #[cfg(feature = "builder-vm")]
             Commands::BuilderShellJob(a) => builder_shell_job::run(cli, a, cfg),
             Commands::Explain(a) => vm::explain::run(a),
             Commands::Why(a) => why::run(a),
@@ -62,7 +61,6 @@ impl TopLevelCommand for Commands {
             Commands::Capture(a) => capture::run(cli, a, cfg),
             Commands::Artifact(a) => vm::artifact::run(cli, a, cfg),
             Commands::SeccompAudit(a) => seccomp_audit::run(cli, a),
-            #[cfg(feature = "builder-vm")]
             Commands::PersistentBuilder(a) => build::persistent_builder::run(cli, a),
             Commands::QemuVsockBridge(_) => {
                 unreachable!("qemu vsock bridge short-circuits in run()")

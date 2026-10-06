@@ -181,6 +181,7 @@ impl WallClockGuard {
 /// Grouped rather than passed positionally because three of the four are
 /// optional paths of the same shape, and a caller swapping two of them would
 /// produce a timer that audits into the wrong place.
+#[derive(Clone, Copy)]
 pub struct SupervisorTimerInputs<'a> {
     /// The admitted `ExecutionPlan`, as the supervisor received it. `None` on
     /// the legacy non-plan boot paths (Stage 0, the builder VM), which carry no
@@ -208,7 +209,7 @@ pub struct SupervisorTimerInputs<'a> {
 /// value themselves — and a decoder that understands only one shape would just
 /// move the failure rather than remove it. Anything that is neither still
 /// errors, so an unreadable bound keeps failing closed.
-fn decode_admitted_plan(value: &serde_json::Value) -> anyhow::Result<ExecutionPlan> {
+pub(crate) fn decode_admitted_plan(value: &serde_json::Value) -> anyhow::Result<ExecutionPlan> {
     use anyhow::anyhow;
 
     let signed_err =
@@ -226,6 +227,27 @@ fn decode_admitted_plan(value: &serde_json::Value) -> anyhow::Result<ExecutionPl
         // at the wrong half of the problem.
         Err(bare_err) => Err(anyhow!("{signed_err}; and not a bare plan: {bare_err}")),
     }
+}
+
+/// Open the chain-signed audit log a supervisor records its own enforcement
+/// in, under the host key its inputs name.
+pub(crate) fn supervisor_emitter(
+    inputs: &SupervisorTimerInputs<'_>,
+) -> anyhow::Result<Arc<AuditEmitter>> {
+    use anyhow::Context;
+
+    let audit_dir = inputs.audit_dir.context("no audit dir was configured")?;
+    let key_path = inputs
+        .signing_key_path
+        .context("no signing key was configured")?;
+    let keys_dir = key_path
+        .parent()
+        .context("the signing key path has no parent directory")?;
+    let signer =
+        crate::audit::host_keypair::load_or_init_at(keys_dir).context("loading the host signer")?;
+    let emitter =
+        AuditEmitter::with_dir(signer.signing, audit_dir).context("opening the audit chain")?;
+    Ok(Arc::new(emitter))
 }
 
 /// Arm the wall-clock timer for a supervisor that is about to enter its VMM
@@ -250,21 +272,8 @@ pub fn arm_for_supervisor(
         return Ok(None);
     }
 
-    let audit_dir = inputs
-        .audit_dir
-        .context("a plan with a wall-clock bound needs an audit dir to record its kill")?;
-    let key_path = inputs
-        .signing_key_path
-        .context("a plan with a wall-clock bound needs a signing key to record its kill")?;
-    let keys_dir = key_path
-        .parent()
-        .context("the signing key path has no parent directory")?;
-    let signer = crate::audit::host_keypair::load_or_init_at(keys_dir)
-        .context("loading the host signer for the wall-clock audit entry")?;
-    let emitter = Arc::new(
-        AuditEmitter::with_dir(signer.signing, audit_dir)
-            .context("opening the audit chain for the wall-clock timer")?,
-    );
+    let emitter = supervisor_emitter(&inputs)
+        .context("a plan with a wall-clock bound needs an audit chain to record its kill")?;
 
     let killer = Box::new(SupervisorExitKiller::new(inputs.vm_state_dir.to_path_buf()));
     let timer = WallClockTimer::for_plan(Arc::new(plan), emitter, killer)

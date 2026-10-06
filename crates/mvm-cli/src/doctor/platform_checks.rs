@@ -83,14 +83,8 @@ pub(super) fn nested_kvm_check(plat: Platform) -> Check {
     }
 }
 
-#[cfg(feature = "builder-vm")]
 fn linux_builder_vm_requested_for_doctor() -> bool {
     mvm_build::builder_backend_select::linux_builder_vm_requested()
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn linux_builder_vm_requested_for_doctor() -> bool {
-    false
 }
 
 pub(super) fn kvm_check(plat: Platform, in_vm: bool) -> Check {
@@ -415,7 +409,7 @@ mod tests {
         assert!(c.info.contains("n/a"));
     }
 
-    #[cfg(all(target_os = "linux", feature = "builder-vm"))]
+    #[cfg(target_os = "linux")]
     #[test]
     fn nested_kvm_check_linux_native_reports_actionable_text() {
         // Without spoofing the sysfs probe we can't pin the (ok/!ok)

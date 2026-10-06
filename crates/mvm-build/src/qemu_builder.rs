@@ -255,10 +255,6 @@ fn run_stage0_qemu(
         "console={serial_console} root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} {hostepoch} panic=-1"
     );
     let guest_cid = allocate_qemu_builder_guest_cid();
-    // Both statements sit behind the same feature: the endpoint type only
-    // exists with `builder-vm`, and so does the identity it needs. Gating only
-    // one of them compiles on a dev host and fails on the feature-gated
-    // target, which is exactly what happened the first time.
     let (identity_material, identity_drive) =
         crate::builder_vm_transport::stage_builder_flowmux_identity(&work)?;
     let egress_endpoint = BuilderVsockEgressEndpoint::spawn_on_transport(
@@ -555,7 +551,7 @@ fn stage_qemu_vsock_guest_modules(host_bins_dir: &Path) -> Result<(), BuilderVmE
         })?;
         let dst = dest_dir.join(module);
         if src.extension().is_some_and(|extension| extension == "zst") {
-            let output = Command::new("zstd")
+            let output = mvm_core::env_hygiene::helper_command("zstd")
                 .args(["--quiet", "--decompress", "--stdout"])
                 .arg(&src)
                 .output()
@@ -593,7 +589,7 @@ fn pack_ext4(src_dir: &Path, img: &Path, size: u64) -> Result<(), BuilderVmError
     std::fs::File::create(img)
         .and_then(|f| f.set_len(size))
         .map_err(|e| io_err("creating ext4 image", img, e))?;
-    let status = Command::new("mkfs.ext4")
+    let status = mvm_core::env_hygiene::helper_command("mkfs.ext4")
         .args(["-F", "-q", "-d"])
         .arg(src_dir)
         .arg(img)
@@ -622,7 +618,7 @@ fn extract_out_artifacts(out_img: &Path, dest: &Path) -> Result<(), BuilderVmErr
     std::fs::create_dir_all(&tmp).map_err(|e| io_err("creating extract dir", &tmp, e))?;
     for name in QEMU_STAGE0_OUT_ARTIFACT_NAMES {
         let from = tmp.join(name);
-        let status = Command::new("debugfs")
+        let status = mvm_core::env_hygiene::helper_command("debugfs")
             .arg("-R")
             .arg(debugfs_dump_request(name, &from))
             .arg(out_img)
@@ -944,8 +940,8 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
     use crate::builder_disk_transport::InputTree;
     use crate::builder_vm::{BuilderVmImage, DEFAULT_NIX_STORE_MIB, host_arch_tag};
     use crate::builder_vm_runtime::{
-        acquire_nix_store_image_lock, builder_vm_timeout, read_job_result_with_diagnostics,
-        shell_job_exit_error, stage_filtered_work_input, stage_shell_job_dir,
+        acquire_nix_store_image_lock, builder_vm_timeout, read_job_result, shell_job_exit_error,
+        stage_filtered_work_input, stage_shell_job_dir,
     };
     use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -1147,12 +1143,12 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
 
     // The guest wrote its artifacts onto the output disk rather than into a
     // shared `/out`, so the host has to extract before anything reads them —
-    // `read_job_result_with_diagnostics` looks for `result` in `job_dir`, which
+    // `read_job_result` looks for `result` in `job_dir`, which
     // the extraction populates.
     extract_builder_transport_output(&output_disk, &job.artifact_out, &job_dir)?;
     drop(work_staging);
 
-    let result = read_job_result_with_diagnostics(&job_dir, &vm_state_dir)?;
+    let result = read_job_result(&job_dir, &vm_state_dir)?;
     if result.exit_code != 0 {
         return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
     }
