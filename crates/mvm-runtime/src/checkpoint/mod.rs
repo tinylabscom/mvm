@@ -31,7 +31,6 @@ use restore_content::{
     content_with_load_memory_digest, reseed_forked_identity_drive, validate_fork_verity_binding,
 };
 
-pub use diff::{BlobDelta, BlobStatus, CheckpointDiff, LineageRelation, diff_checkpoints};
 pub use gc::{ContentPruneReport, prune_unreferenced_content};
 pub use retention::{
     Retention, RetentionCut, RetentionVerdict, dependent_children, direct_retention,
