@@ -980,7 +980,8 @@ jobs:
         # persistent runner pool is reserved until its workspace tests can
         # run without filesystem and privilege state leaking between jobs.
         shard: [1, 2]
-    runs-on: ubuntu-slim
+    # The shard broker can wait longer than the 15-minute ubuntu-slim job cap.
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - name: Run shard on the first available runner
