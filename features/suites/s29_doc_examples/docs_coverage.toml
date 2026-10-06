@@ -542,6 +542,7 @@ uncovered = [
     "mvmctl secret set deploy-token --host api.example.com --type bearer --approve ask",
     "mvmctl secret set echo-key --host httpbin.org --type bearer --value -",
     "mvmctl secret set my-api --host api.example.com --type bearer",
+    "mvmctl secret set my-api --host api.example.com --type bearer --oauth-authorization-url https://auth.example.com/authorize --oauth-token-url https://auth.example.com/token --oauth-client-id my-client-id --oauth-scope read --oauth-login",
     "mvmctl secret set openai --provider openai",
     "mvmctl secret set openai-api-key --provider openai",
     "mvmctl secret set query-key --host api.example.com --type bearer --inject query_param",
