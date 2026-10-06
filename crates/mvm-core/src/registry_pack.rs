@@ -399,9 +399,7 @@ impl RegistryPackPublisher {
     /// Construct a publisher authority, refusing malformed or ambiguous input.
     ///
     /// The namespace `"*"` is the wildcard: it applies to every namespace
-    /// that has no exact publisher entry. Operators choose it explicitly; the
-    /// built-in official policy uses it so new official namespaces need no
-    /// client release.
+    /// that has no exact publisher entry. Operators choose it explicitly.
     pub fn new(
         namespace: impl Into<String>,
         issuer: impl Into<String>,
@@ -534,19 +532,23 @@ pub const OFFICIAL_PACK_SIGNING_IDENTITY: &str =
 pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// The publisher trust policy that applies when the operator has made no
-/// trust decision of their own: one wildcard publisher accepting only the
-/// official registry's signing identity. It trusts packs the official
-/// workflow signed, in any namespace, and nothing else; an operator policy
-/// file replaces it wholesale.
+/// trust decision of their own. It accepts only the existing published pack
+/// namespaces under the registry's signing identity. An operator policy file
+/// replaces it wholesale.
 pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
-    let publisher = RegistryPackPublisher::new(
-        "*",
-        OFFICIAL_PACK_SIGNING_ISSUER,
-        vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
-    )
-    .expect("the official publisher policy is built from constants and always validates");
-    RegistryPackPublisherPolicy::new(vec![publisher])
-        .expect("the official publisher policy has one publisher and no duplicates")
+    let publishers = ["agent", "runtime"]
+        .into_iter()
+        .map(|namespace| {
+            RegistryPackPublisher::new(
+                namespace,
+                OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .expect("the built-in publisher policy is built from valid constants")
+        })
+        .collect();
+    RegistryPackPublisherPolicy::new(publishers)
+        .expect("the built-in publisher policy has unique namespaces")
 }
 
 impl<'de> Deserialize<'de> for RegistryPackPublisherPolicy {
@@ -1396,9 +1398,13 @@ mod tests {
     #[test]
     fn the_official_default_policy_matches_its_constants() {
         let policy = official_publisher_policy();
-        let trust = policy.trust_for_namespace("any-future-namespace").unwrap();
-        assert_eq!(trust.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
-        assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
+        for namespace in ["agent", "runtime"] {
+            let trust = policy.trust_for_namespace(namespace).unwrap();
+            assert_eq!(trust.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
+            assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
+        }
+        assert!(policy.trust_for_namespace("mvm").is_err());
+        assert!(policy.trust_for_namespace("community").is_err());
     }
 
     #[test]

@@ -475,18 +475,22 @@ mod tests {
         let path = home.path().join("config/policy/publishers.toml");
         let loaded = load_publisher_policy_or_official_default(&path).unwrap();
         assert!(loaded.is_official_default());
-        let trust = loaded
-            .policy
-            .trust_for_namespace("anything")
-            .expect("the wildcard default trusts official namespaces");
-        assert_eq!(
-            trust.issuer,
-            crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
-        );
-        assert_eq!(
-            trust.accepted_identities,
-            [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()]
-        );
+        for namespace in ["agent", "runtime"] {
+            let trust = loaded
+                .policy
+                .trust_for_namespace(namespace)
+                .expect("the default trusts published namespaces");
+            assert_eq!(
+                trust.issuer,
+                crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
+            );
+            assert_eq!(
+                trust.accepted_identities,
+                [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()]
+            );
+        }
+        assert!(loaded.policy.trust_for_namespace("mvm").is_err());
+        assert!(loaded.policy.trust_for_namespace("community").is_err());
     }
 
     #[test]
