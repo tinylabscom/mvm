@@ -65,6 +65,7 @@ fn admitted_plan(grants: &RunGrants, dir: &std::path::Path) -> mvm_core::plan::E
         audit_dir: Some(&audit),
         policy_dir: None,
         bundle_pin: None,
+        bundle_posture: None,
         deps_volume: None,
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
