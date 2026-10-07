@@ -2,8 +2,8 @@
 //!
 //! CI is scope-reduced: the `scope` job classifies changed paths, lanes skip
 //! when out of scope, and this aggregate asserts each lane's result *matches*
-//! its scope. Pull requests run the full proof, including Nix and the
-//! published-image boot. Merge groups reuse that proof and run only the
+//! its scope. Pull requests run the relevant proof, including Nix for changes
+//! that affect it. Merge groups reuse that proof and run only the
 //! fail-closed scope check against the synthetic commit.
 //!
 //! That is not hypothetical. A lane that lost its job-level `if:` once
@@ -71,8 +71,8 @@ struct Verdict {
     code: &'static str,
     /// The documentation-corpus scope. It brings only the BDD lane into scope.
     docs: &'static str,
+    nix_scope: &'static str,
     policy: &'static str,
-    preflight: &'static str,
     lanes: &'static str,
     /// Kept separate from `lanes` even though it now shares their scope, so
     /// "the BDD lane skipped while in scope" stays expressible on its own.
@@ -89,8 +89,8 @@ impl Verdict {
             scope_result: "success",
             code: "true",
             docs: "false",
+            nix_scope: "true",
             policy: "success",
-            preflight: "success",
             lanes: "success",
             bdd: "success",
             boot: "success",
@@ -106,12 +106,12 @@ impl Verdict {
             scope_result: "success",
             code: "false",
             docs: "false",
+            nix_scope: "false",
             policy: "success",
-            preflight: "skipped",
             lanes: "skipped",
             bdd: "skipped",
             boot: "skipped",
-            nix: "success",
+            nix: "skipped",
         }
     }
 
@@ -120,7 +120,6 @@ impl Verdict {
         Self {
             event_name: "merge_group",
             policy: "skipped",
-            preflight: "skipped",
             lanes: "skipped",
             bdd: "skipped",
             boot: "skipped",
@@ -134,7 +133,6 @@ impl Verdict {
         Self {
             event_name: "merge_group",
             policy: "skipped",
-            preflight: "skipped",
             nix: "skipped",
             ..Self::out_of_scope()
         }
@@ -168,7 +166,7 @@ impl Verdict {
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
             .env("SCOPE_DOCS", self.docs)
-            .env("PREFLIGHT_RESULT", self.preflight)
+            .env("SCOPE_NIX", self.nix_scope)
             .env("CORE_RESULT", self.lanes)
             .env("POLICY_RESULT", self.policy)
             .env("FEATURES_RESULT", self.lanes)
@@ -211,6 +209,14 @@ fn a_fully_in_scope_green_run_is_admitted() {
     assert!(Verdict::in_scope().accepts());
     assert!(Verdict::queue_in_scope().accepts());
     assert!(Verdict::queue_out_of_scope().accepts());
+    assert!(
+        Verdict {
+            nix_scope: "false",
+            nix: "skipped",
+            ..Verdict::in_scope()
+        }
+        .accepts()
+    );
 }
 
 /// A documentation-only change has to pay for the suite that reads the
@@ -242,7 +248,7 @@ fn a_docs_only_run_requires_the_bdd_lane_and_nothing_else() {
 /// into a rubber stamp.
 #[test]
 fn a_docs_only_run_is_refused_when_its_lane_does_not_pass() {
-    let cases: [(&str, Verdict); 5] = [
+    let cases: [(&str, Verdict); 4] = [
         (
             "a docs-only change whose BDD lane skipped",
             Verdict {
@@ -271,13 +277,6 @@ fn a_docs_only_run_is_refused_when_its_lane_does_not_pass() {
                 ..Verdict::docs_only()
             },
         ),
-        (
-            "a docs-only PR that ran the code preflight",
-            Verdict {
-                preflight: "success",
-                ..Verdict::docs_only()
-            },
-        ),
     ];
     for (what, verdict) in cases {
         assert!(!verdict.accepts(), "the aggregate must refuse {what}");
@@ -288,7 +287,7 @@ fn a_docs_only_run_is_refused_when_its_lane_does_not_pass() {
 /// real failure that has to keep being caught, in whichever scope it can occur.
 #[test]
 fn a_genuine_failure_is_still_refused_in_either_scope() {
-    let cases: [(&str, Verdict); 11] = [
+    let cases: [(&str, Verdict); 12] = [
         (
             // New with the suite moving onto the `code` scope: BDD is matched
             // by the same arithmetic as every other lane, so a run on a
@@ -336,9 +335,16 @@ fn a_genuine_failure_is_still_refused_in_either_scope() {
             },
         ),
         (
-            "a failing PR preflight",
+            "a Nix job that ran for an unrelated diff",
             Verdict {
-                preflight: "failure",
+                nix_scope: "false",
+                ..Verdict::in_scope()
+            },
+        ),
+        (
+            "an invalid Nix scope",
+            Verdict {
+                nix_scope: "",
                 ..Verdict::in_scope()
             },
         ),

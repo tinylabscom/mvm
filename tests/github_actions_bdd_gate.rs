@@ -68,7 +68,7 @@ fn live_bdd_witness_runs_in_extended_ci_not_the_merge_queue() {
     let required = workflow("bdd.yml");
     assert!(
         !required.contains("bdd-live:") && !required.contains("just bdd::live-ci"),
-        "the potentially 45-minute live lifecycle must not serialize the merge queue"
+        "the long-running live lifecycle must not serialize the merge queue"
     );
 
     let extended = workflow("ci-full.yml");
@@ -78,7 +78,6 @@ fn live_bdd_witness_runs_in_extended_ci_not_the_merge_queue() {
         "runs-on: ubuntu-latest",
         "witness: ci_live",
         "witness: tool_live",
-        "timeout: 45",
         "timeout: 60",
         "timeout-minutes: ${{ matrix.timeout }}",
         "FC_VERSION: v1.17.0",
@@ -92,6 +91,33 @@ fn live_bdd_witness_runs_in_extended_ci_not_the_merge_queue() {
             "the nightly live BDD job must contain {expected:?}"
         );
     }
+}
+
+#[test]
+fn live_ci_budget_covers_cold_setup_and_measured_lifecycle() {
+    let extended = workflow("ci-full.yml");
+    let live = job_block(&extended, "bdd-live-readme");
+    let lifecycle = live
+        .split("- witness: ci_live\n")
+        .nth(1)
+        .expect("the lifecycle witness must remain in the matrix")
+        .split("- witness:")
+        .next()
+        .expect("the lifecycle witness has a matrix entry");
+    let job_minutes: u32 = lifecycle
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("timeout:"))
+        .expect("the lifecycle witness must declare its own job budget")
+        .trim()
+        .parse()
+        .expect("the job budget must be a number");
+    let cold_setup_minutes = 35;
+    let measured_lifecycle_minutes = 40;
+    assert!(
+        job_minutes >= cold_setup_minutes + measured_lifecycle_minutes,
+        "the job budget ({job_minutes}m) must cover cold compilation and the \
+         measured lifecycle, or GitHub cancels progressing scenarios"
+    );
 }
 
 #[test]
