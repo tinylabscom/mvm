@@ -305,7 +305,7 @@ yours. It can tighten, but it cannot use an escape hatch.
 
 ### Pack policy: signed, official profiles and groups
 
-The official registry is the `mvm-templates` repository; every pack in it is
+The official registry is the `mvm-packs` repository; every pack in it is
 signed keyless (Sigstore) by its `publish.yml` workflow. `mvmctl search`
 lists what the registry offers and `mvmctl pull ns/name[@version]` fetches a
 pack: the signature is verified against the publisher trust policy, the
@@ -359,13 +359,18 @@ bounds are ceilings, and `env.readmit` and `shares.mount` entries the pack
 carries are stripped with notes, never honoured.
 
 Trust in the official registry is the default: with no publisher policy
-file, packs signed by the `mvm-templates` publish workflow verify in any
+file, packs signed by the `mvm-packs` publish workflow verify in any
 namespace. To make your own trust decision — pin other publishers, or
 refuse packs outright — write `$MVM_HOME/registry/publishers.toml`; it
 replaces the default wholesale, and a malformed file fails closed rather
 than silently widening trust. One publisher may use the `*` namespace to
 accept a signing identity for every namespace, and an exact
 `namespace = ...` entry always wins over the wildcard.
+
+The repository rename changed its workflow identity. Packs signed under the
+former repository identity fail closed under the built-in default; re-pull a
+version published under the current workflow identity. The built-in policy
+does not automatically trust both identities.
 
 ## Commands
 

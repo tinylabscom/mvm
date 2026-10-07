@@ -89,8 +89,9 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// 4 added the process-wide runtime-approval callback and retained brokers for
 /// machines launched or started through the host library. 5 added
 /// `machine.pause`, `machine.resume`, `machine.reconfigure`, and
-/// `machine.set_ttl`.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 5;
+/// `machine.set_ttl`. 6 added `telemetry.status` and `telemetry.records`, the
+/// per-machine collector read seam.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 6;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 

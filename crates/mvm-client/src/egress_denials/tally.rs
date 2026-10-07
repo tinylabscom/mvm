@@ -17,7 +17,7 @@ use super::reason::{DenialKind, Remedy};
 /// One distinct refusal: what, why, how often, and what to do about it. The
 /// record `--json` output and `mvmctl explain --json` carry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(in crate::commands) struct DeniedDestination {
+pub struct DeniedDestination {
     /// What was refused, as the notice names it (`api.example.com:443`,
     /// `DNS lookup of pypi.org`, `POST api.github.com:443`).
     pub destination: String,
@@ -42,7 +42,7 @@ impl DeniedDestination {
     /// `None` is the security-important answer: metadata, loopback,
     /// link-local, SSH and operational failures never acquire a grant merely
     /// because they appeared in an audit record.
-    pub(in crate::commands) fn grant_target(&self) -> Option<&str> {
+    pub fn grant_target(&self) -> Option<&str> {
         match &self.remedy {
             Remedy::AllowHost { flag } | Remedy::NameExplicitly { flag } => {
                 flag.strip_prefix("--allow-host ")
@@ -52,7 +52,7 @@ impl DeniedDestination {
     }
 
     /// Whether granting requires naming a restricted address exactly.
-    pub(in crate::commands) fn requires_explicit_name(&self) -> bool {
+    pub fn requires_explicit_name(&self) -> bool {
         matches!(self.remedy, Remedy::NameExplicitly { .. })
     }
 }
@@ -77,14 +77,14 @@ struct Seen {
 
 /// Every refusal seen for one machine, counted by destination and reason.
 #[derive(Debug, Clone, Default)]
-pub(in crate::commands) struct DenialTally {
+pub struct DenialTally {
     seen: BTreeMap<Key, Seen>,
 }
 
 impl DenialTally {
     /// Count `denial`. `true` the first time this destination is refused for
     /// this reason — the one time a live notice is worth printing.
-    pub(in crate::commands) fn observe(&mut self, denial: EgressDenial) -> bool {
+    pub fn observe(&mut self, denial: EgressDenial) -> bool {
         let key = Key {
             subject: denial.subject.clone(),
             reason: denial.reason.clone(),
@@ -107,7 +107,7 @@ impl DenialTally {
         true
     }
 
-    pub(in crate::commands) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.seen.is_empty()
     }
 
@@ -118,7 +118,7 @@ impl DenialTally {
     }
 
     /// The distinct refusals in the order they were first seen.
-    pub(in crate::commands) fn destinations(&self) -> Vec<DeniedDestination> {
+    pub fn destinations(&self) -> Vec<DeniedDestination> {
         self.in_order()
             .into_iter()
             .map(|seen| DeniedDestination {
@@ -138,7 +138,7 @@ impl DenialTally {
     /// The exit summary: one block listing every refused destination with its
     /// count, then the exact flags — and the manifest snippet — that admit
     /// the ones a grant can admit. Empty when nothing was refused.
-    pub(in crate::commands) fn summary_lines(&self) -> Vec<String> {
+    pub fn summary_lines(&self) -> Vec<String> {
         if self.is_empty() {
             return Vec::new();
         }
