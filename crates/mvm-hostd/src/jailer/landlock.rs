@@ -54,7 +54,15 @@ fn rw_file_access() -> BitFlags<AccessFs> {
     AccessFs::ReadFile | AccessFs::WriteFile
 }
 
+/// Restrict the process to `spec`'s paths.
+///
+/// `landlock_restrict_self` binds only the calling thread and the threads it
+/// creates afterwards; a thread that already exists keeps unrestricted access
+/// for the rest of its life. So this refuses, before building the ruleset,
+/// unless the process has exactly one thread. That makes the restriction
+/// process-wide by construction rather than by the caller's care.
 pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
+    crate::jailer::require_single_threaded()?;
     let abi = ABI::V2;
     let mut ruleset = Ruleset::default()
         .handle_access(AccessFs::from_all(abi))

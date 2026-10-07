@@ -37,12 +37,40 @@ was: `rt_sigaction` is on the allowlist, so a compromised process could
 always install its own `SIGSYS` handler. `Trap` stops the call; it does
 not, on its own, stop the process from observing that it was stopped.
 
+## Every thread
+
+A seccomp filter is per-thread kernel state. Installed the ordinary way
+it binds only the calling thread and the threads that thread creates
+afterwards; a thread that already exists keeps making any call it likes.
+`mvm-network-endpoint` used to build its async runtime before confining,
+so its runtime workers — and every blocking-pool thread they started,
+which is where FlowMux sessions parse guest bytes — ran with no filter.
+
+Two things now close that:
+
+- `seccomp::apply` installs the filter with `SECCOMP_FILTER_FLAG_TSYNC`
+  (`seccompiler::apply_filter_all_threads`), so the kernel applies it to
+  every thread of the process at once, or to none if one cannot take it.
+- `confine_self` refuses a process that has more than one thread, before
+  applying either layer (see `LANDLOCK.md`: Landlock has no equivalent of
+  TSYNC on the kernels mvm supports). The endpoint confines while it is
+  still single-threaded and builds its runtime afterwards, so every later
+  thread inherits both layers.
+
+`tests/confinement_self_test.rs` holds both: a thread started before the
+filter is killed for a call off the allowlist, and confinement refuses a
+process that already has a second thread. `tests/network_endpoint_bin.rs`
+reads `/proc/<pid>/task/*/status` of a serving endpoint and requires
+`Seccomp: 2` on every thread.
+
 ## Self-test
 
-Right after confining itself, `mvm-network-endpoint` runs
-`self_test::ConfinementSelfTest::network_endpoint` on the confined
-thread, before it reports ready: thread creation, a blocking-pool round
-trip, clock and entropy, resolver set-up (`getaddrinfo` for
+Right after confining itself and building its runtime,
+`mvm-network-endpoint` runs `self_test::ConfinementSelfTest::network_endpoint`,
+before it reports ready: thread creation, a blocking-pool round
+trip, a required check that a runtime worker and a blocking-pool thread
+it starts are both inside the filter and the Landlock ruleset (a failure
+here stops the launch), clock and entropy, resolver set-up (`getaddrinfo` for
 `localhost`, `res_init`, the UDP upstream socket), the trust-store
 directory walk, the audit write path (create, `flock`, `fdatasync`,
 rename, unlink), and a Unix-socket accept. These are the paths that
