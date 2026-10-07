@@ -8,7 +8,10 @@
 //!
 //! Values go in as [`SecretValueInput`] (redacted `Debug`, zeroize-on-drop,
 //! no accessor outside this crate) and never come back out: there is no
-//! method that returns, prints, serializes, or logs a stored value. Every
+//! method that returns, prints, serializes, or logs a stored value. The one
+//! internal read is [`SecretService::oauth_login`], which carries a stored
+//! OAuth client secret into the token request it authenticates and returns
+//! only expiry metadata. Every
 //! read-shaped operation ([`SecretService::list`],
 //! [`SecretService::metadata`], [`SecretService::references`]) returns
 //! names, auth types, destination allow-lists, reference metadata, and
@@ -36,6 +39,7 @@
 
 pub mod audit;
 pub mod input;
+pub mod oauth_login;
 pub mod refs;
 pub mod source;
 
@@ -53,6 +57,7 @@ pub use input::SecretValueInput;
 pub use mvm_contract::ir::{AuthType, Sigv4Params};
 pub use mvm_core::crypto::secret_binding::SecretApproval;
 pub use mvm_hostd::keyholder::SecretBindingMeta;
+pub use oauth_login::{DEFAULT_CONSENT_TIMEOUT, OAuthLoginOptions};
 pub use refs::{MachineSecretRef, MachineSecretRefSet};
 pub use source::{SecretSource, SourceError, SourceResolver};
 
@@ -102,8 +107,28 @@ pub enum SecretServiceError {
         name: String,
         machines: Vec<String>,
     },
+    #[error("secret '{name}' in scope '{tenant}' is not bound to an oauth flow")]
+    NotOAuthBound { tenant: String, name: String },
+    #[error("oauth consent for secret '{name}' in scope '{tenant}' did not complete: {reason}")]
+    OAuthConsent {
+        tenant: String,
+        name: String,
+        /// The flattened error chain. Built only from fixed text, status
+        /// codes, and endpoint names — never a code, verifier, or token.
+        reason: String,
+    },
     #[error(transparent)]
     Storage(#[from] anyhow::Error),
+}
+
+/// What a completed [`SecretService::oauth_login`] stored, as metadata only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct OAuthLoginOutcome {
+    /// When the stored access token expires.
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the token endpoint issued a refresh token, so the host can
+    /// renew the set without another consent.
+    pub renewable: bool,
 }
 
 /// Whether a [`SecretService::put`] created a new secret or replaced an
@@ -367,6 +392,112 @@ impl SecretService {
         Ok(())
     }
 
+    // ── OAuth consent ─────────────────────────────────────────────────
+
+    /// Run the authorization-code consent for an OAuth-bound secret in a
+    /// browser on this host, and store the resulting token set in place of
+    /// the secret's current value. Emits `secret.oauth_login`.
+    ///
+    /// The secret must already be defined with an OAuth binding (`secret set
+    /// --oauth-*`). A confidential client's secret stored with it
+    /// authenticates the code exchange and stays in the new set; a public
+    /// client has none. `present` is handed the authorization URL to put in
+    /// front of the human. Blocking: it runs its own single-threaded runtime,
+    /// so it must not be called from inside one. On any failure the stored
+    /// value is left untouched.
+    pub fn oauth_login(
+        &self,
+        tenant: &str,
+        name: &str,
+        options: &OAuthLoginOptions,
+        present: &dyn Fn(&str),
+    ) -> Result<OAuthLoginOutcome, SecretServiceError> {
+        let result = self.oauth_login_inner(tenant, name, options, present);
+        self.audit.record("oauth_login", tenant, name, &result)?;
+        result
+    }
+
+    fn oauth_login_inner(
+        &self,
+        tenant: &str,
+        name: &str,
+        options: &OAuthLoginOptions,
+        present: &dyn Fn(&str),
+    ) -> Result<OAuthLoginOutcome, SecretServiceError> {
+        if !self.secret_exists(tenant, name)? {
+            return Err(SecretServiceError::MissingSecret {
+                tenant: tenant.to_string(),
+                name: name.to_string(),
+            });
+        }
+        let Some(meta) = self.bindings.get(tenant, name)? else {
+            return Err(SecretServiceError::MissingBinding {
+                tenant: tenant.to_string(),
+                name: name.to_string(),
+            });
+        };
+        // The same checks a bind runs, endpoints https among them: a binding
+        // edited on disk gets no laxer treatment than one authored here.
+        validate_binding_meta(tenant, name, &meta)?;
+        let Some(oauth) = meta.oauth else {
+            return Err(SecretServiceError::NotOAuthBound {
+                tenant: tenant.to_string(),
+                name: name.to_string(),
+            });
+        };
+        let client_secret = self.stored_oauth_client_secret(tenant, name)?;
+        let consent_failed = |error: anyhow::Error| SecretServiceError::OAuthConsent {
+            tenant: tenant.to_string(),
+            name: name.to_string(),
+            reason: format!("{error:#}"),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("building the runtime for the oauth consent")?;
+        let token_set = runtime
+            .block_on(oauth_login::run_consent(
+                &oauth,
+                client_secret,
+                options,
+                present,
+            ))
+            .map_err(consent_failed)?;
+        let outcome = OAuthLoginOutcome {
+            expires_at: token_set.expires_at,
+            renewable: token_set.refresh_token.is_some(),
+        };
+        let serialized = serde_json::to_string(&token_set)
+            .context("serializing the consented oauth token set")?;
+        self.store
+            .put(tenant, name, &secrecy::SecretBox::new(Box::new(serialized)))
+            .context("storing the consented oauth token set")?;
+        Ok(outcome)
+    }
+
+    /// The client secret stored with an OAuth-bound secret, if its client is
+    /// confidential. Read only to be sent as that client's credential; never
+    /// returned past this service.
+    fn stored_oauth_client_secret(
+        &self,
+        tenant: &str,
+        name: &str,
+    ) -> Result<Option<mvm_hostd::keyholder::resolver::OAuthSecretString>, SecretServiceError> {
+        use secrecy::ExposeSecret as _;
+        let stored = self.store.get(tenant, name)?;
+        let token_set: mvm_hostd::keyholder::resolver::OAuthTokenSet =
+            serde_json::from_str(stored.expose_secret()).map_err(|_| {
+                SecretServiceError::InvalidBinding {
+                    tenant: tenant.to_string(),
+                    name: name.to_string(),
+                    reason: "the stored value is not an oauth token set; define the secret \
+                             again with `secret set --oauth-*`"
+                        .to_string(),
+                }
+            })?;
+        Ok(token_set.client_secret)
+    }
+
     // ── Persistent-machine references ─────────────────────────────────
 
     /// Names of existing persistent machines that reference `(tenant, name)`.
@@ -507,8 +638,8 @@ pub fn validate_binding_meta(
 }
 
 /// Structural checks on the OAuth flow metadata. The endpoints are the ones
-/// the host-side refresher dials and the browser consent flow will, so both
-/// must be absolute https URLs; the access-token pointer must be an absolute
+/// the host-side token exchanges dial and the consent flow sends the browser
+/// to, so both must be absolute https URLs; the access-token pointer must be an absolute
 /// JSON pointer the response parser can walk.
 fn validate_oauth_meta(
     oauth: &mvm_core::crypto::secret_binding::OAuthBindingMeta,
@@ -1211,6 +1342,168 @@ mod tests {
             let err = validate_binding_meta("local", "oauth-secret", &meta).unwrap_err();
             assert!(format!("{err}").contains("oauth"), "got: {err}");
         }
+    }
+
+    // ── OAuth consent ─────────────────────────────────────────────────
+
+    fn oauth_bound(f: &Fixture, client_secret: Option<&str>) {
+        let set = mvm_hostd::keyholder::oauth::awaiting_consent_token_set(client_secret);
+        f.service
+            .put(
+                "local",
+                "oauth-secret",
+                SecretValueInput::new(serde_json::to_string(&set).unwrap()),
+            )
+            .unwrap();
+        let mut meta = bearer_fixture_meta();
+        meta.oauth = Some(oauth_meta());
+        f.service.bind("local", "oauth-secret", meta).unwrap();
+    }
+
+    fn stored_value(f: &Fixture) -> String {
+        use secrecy::ExposeSecret as _;
+        f.service
+            .store
+            .get("local", "oauth-secret")
+            .unwrap()
+            .expose_secret()
+            .clone()
+    }
+
+    fn never_presented(_: &str) {
+        panic!("a refused login must not start a consent");
+    }
+
+    #[test]
+    fn oauth_login_refuses_a_secret_it_cannot_drive_before_starting_a_consent() {
+        let f = fixture();
+        let options = OAuthLoginOptions::default();
+        let err = f
+            .service
+            .oauth_login("local", "absent", &options, &never_presented)
+            .unwrap_err();
+        assert!(
+            matches!(err, SecretServiceError::MissingSecret { .. }),
+            "{err}"
+        );
+
+        f.service
+            .put("local", "plain", SecretValueInput::new("sk-one".into()))
+            .unwrap();
+        let err = f
+            .service
+            .oauth_login("local", "plain", &options, &never_presented)
+            .unwrap_err();
+        assert!(
+            matches!(err, SecretServiceError::MissingBinding { .. }),
+            "{err}"
+        );
+
+        f.service
+            .bind("local", "plain", bearer_fixture_meta())
+            .unwrap();
+        let err = f
+            .service
+            .oauth_login("local", "plain", &options, &never_presented)
+            .unwrap_err();
+        assert!(
+            matches!(err, SecretServiceError::NotOAuthBound { .. }),
+            "{err}"
+        );
+
+        let log = audit_text(&f);
+        assert!(log.contains("\"action\":\"oauth_login\""), "got: {log}");
+        assert!(!log.contains("sk-one"), "got: {log}");
+    }
+
+    #[test]
+    fn oauth_login_refuses_a_value_that_is_not_a_token_set() {
+        let f = fixture();
+        f.service
+            .put(
+                "local",
+                "oauth-secret",
+                SecretValueInput::new("sk-raw".into()),
+            )
+            .unwrap();
+        let mut meta = bearer_fixture_meta();
+        meta.oauth = Some(oauth_meta());
+        f.service.bind("local", "oauth-secret", meta).unwrap();
+        let err = f
+            .service
+            .oauth_login(
+                "local",
+                "oauth-secret",
+                &OAuthLoginOptions::default(),
+                &never_presented,
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("not an oauth token set"), "{err}");
+        assert!(!format!("{err} {err:?}").contains("sk-raw"));
+    }
+
+    #[test]
+    fn oauth_login_refuses_a_cleartext_binding_edited_on_disk() {
+        let f = fixture();
+        oauth_bound(&f, None);
+        let mut meta = bearer_fixture_meta();
+        let mut oauth = oauth_meta();
+        oauth.token_url = "http://auth.example.com/token".into();
+        meta.oauth = Some(oauth);
+        // Written past the service, as an on-disk edit would be.
+        FileBindingStore::with_dir(&f.bindings_dir)
+            .put("local", "oauth-secret", &meta)
+            .unwrap();
+        let err = f
+            .service
+            .oauth_login(
+                "local",
+                "oauth-secret",
+                &OAuthLoginOptions::default(),
+                &never_presented,
+            )
+            .unwrap_err();
+        assert!(format!("{err}").contains("https"), "{err}");
+    }
+
+    #[test]
+    fn an_abandoned_oauth_login_leaves_the_stored_set_untouched_and_audits_no_secret() {
+        let f = fixture();
+        oauth_bound(&f, Some("the-client-secret"));
+        let before = stored_value(&f);
+        let presented = std::sync::Mutex::new(None::<String>);
+        let err = f
+            .service
+            .oauth_login(
+                "local",
+                "oauth-secret",
+                &OAuthLoginOptions::default().with_timeout(std::time::Duration::from_millis(100)),
+                &|url: &str| *presented.lock().unwrap() = Some(url.to_owned()),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, SecretServiceError::OAuthConsent { .. }),
+            "{err}"
+        );
+        // A consent was offered: an https authorization URL with PKCE.
+        let url = presented.lock().unwrap().clone().unwrap();
+        assert!(
+            url.starts_with("https://auth.example.com/authorize?"),
+            "{url}"
+        );
+        assert!(url.contains("code_challenge_method=S256"), "{url}");
+        assert!(
+            url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A"),
+            "{url}"
+        );
+        assert!(!url.contains("the-client-secret"), "{url}");
+
+        assert_eq!(stored_value(&f), before);
+        let log = audit_text(&f);
+        assert!(log.contains("\"action\":\"oauth_login\""), "got: {log}");
+        assert!(log.contains("\"outcome\":\"err\""), "got: {log}");
+        assert!(!log.contains("the-client-secret"), "got: {log}");
+        assert!(!format!("{err} {err:?}").contains("the-client-secret"));
     }
 
     // ── No-leak invariants across error surfaces ──────────────────────
