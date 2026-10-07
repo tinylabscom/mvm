@@ -3,14 +3,63 @@
 //! AF_VSOCK dial path used by the guest's blocking FlowMux client.
 
 use std::io::{Read, Write};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::SigningKey;
 
 use super::*;
+
+fn remaining_before(deadline: Instant) -> Result<Duration> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        bail!("guest control connection deadline elapsed");
+    }
+    Ok(remaining)
+}
+
+/// Connect to a pathname Unix socket within one absolute deadline.
+pub fn connect_unix_before(path: &std::path::Path, deadline: Instant) -> Result<UnixStream> {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)
+        .context("create Unix stream socket")?;
+    let address = socket2::SockAddr::unix(path)
+        .with_context(|| format!("encode Unix socket path {}", path.display()))?;
+    socket
+        .connect_timeout(&address, remaining_before(deadline)?)
+        .with_context(|| format!("connect to Unix socket {}", path.display()))?;
+    let fd: OwnedFd = socket.into();
+    Ok(UnixStream::from(fd))
+}
+
+/// Run stream I/O under an absolute deadline.
+///
+/// Socket read timeouts are per operation and can be defeated by a peer that
+/// drips bytes. The watchdog shuts down a clone at the deadline, interrupting
+/// any in-flight connect protocol or authenticated frame read.
+pub fn run_with_stream_deadline<T>(
+    stream: &mut UnixStream,
+    deadline: Instant,
+    operation: impl FnOnce(&mut UnixStream) -> Result<T>,
+) -> Result<T> {
+    let remaining = remaining_before(deadline)?;
+    let interrupter = stream.try_clone().context("clone stream for deadline")?;
+    let (done_tx, done_rx) = std::sync::mpsc::sync_channel(1);
+    let watchdog = std::thread::spawn(move || {
+        if done_rx.recv_timeout(remaining).is_err() {
+            let _ = interrupter.shutdown(std::net::Shutdown::Both);
+        }
+    });
+    let result = operation(stream);
+    let _ = done_tx.send(());
+    let _ = watchdog.join();
+    if Instant::now() >= deadline {
+        bail!("guest control operation exceeded its deadline");
+    }
+    result
+}
 
 /// Path to the Firecracker vsock UDS for an instance.
 pub fn vsock_uds_path(instance_dir: &str) -> String {
@@ -259,6 +308,54 @@ pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<U
     }))
 }
 
+/// Connect through a Firecracker vsock multiplexer within one total deadline.
+pub fn connect_to_port_before(uds_path: &str, port: u32, deadline: Instant) -> Result<UnixStream> {
+    let path = std::path::Path::new(uds_path);
+    match std::fs::metadata(path) {
+        Err(error) => bail!("Vsock socket not found at {uds_path}: {error}"),
+        Ok(metadata) if !metadata.file_type().is_socket() => {
+            bail!("Path {uds_path} exists but is not a socket")
+        }
+        Ok(_) => {}
+    }
+
+    let mut last_error = None;
+    for attempt in 0..CONNECT_RETRIES {
+        let result: Result<UnixStream> = (|| {
+            let mut stream = connect_unix_before(path, deadline)?;
+            run_with_stream_deadline(&mut stream, deadline, |stream| {
+                writeln!(stream, "CONNECT {port}").context("Failed to send CONNECT")?;
+                stream.flush().context("flush CONNECT")?;
+                let response = read_connect_response_line(stream)
+                    .context("Failed to read CONNECT response")?;
+                parse_connect_ack(&response).map_err(|reason| {
+                    anyhow::Error::new(reason).context(format!(
+                        "Vsock CONNECT to port {port} was refused by the multiplexer: {response:?}"
+                    ))
+                })
+            })?;
+            Ok(stream)
+        })();
+        match result {
+            Ok(stream) => return Ok(stream),
+            Err(error) => {
+                if !should_retry_connect_error(error.root_cause()) {
+                    return Err(error);
+                }
+                last_error = Some(error);
+            }
+        }
+
+        if attempt + 1 < CONNECT_RETRIES {
+            let remaining = remaining_before(deadline)?;
+            std::thread::sleep(connect_retry_delay(attempt).min(remaining));
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        anyhow::anyhow!("Failed to connect to guest agent on port {port} before deadline")
+    }))
+}
+
 /// Connect to the guest agent control port ([`GUEST_AGENT_PORT`]) via
 /// a direct UDS path. Backward-compatible thin wrapper over
 /// [`connect_to_port`] that all existing callers (control-plane RPCs,
@@ -390,6 +487,78 @@ pub(crate) fn open_authenticated_session_stream<S: std::io::Read + std::io::Writ
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::BufRead;
+
+    #[test]
+    fn stream_deadline_interrupts_a_peer_that_drips_bytes() {
+        let (mut client, mut peer) = UnixStream::pair().unwrap();
+        let worker = std::thread::spawn(move || {
+            for byte in b"12345678" {
+                std::thread::sleep(Duration::from_millis(20));
+                if peer.write_all(&[*byte]).is_err() {
+                    break;
+                }
+            }
+        });
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(45);
+        let error = run_with_stream_deadline(&mut client, deadline, |stream| {
+            let mut bytes = [0u8; 8];
+            stream.read_exact(&mut bytes).context("read slow frame")
+        })
+        .expect_err("slow progress must not extend the total deadline");
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "deadline returned too late: {:?}",
+            started.elapsed()
+        );
+        assert!(format!("{error:#}").contains("deadline"), "{error:#}");
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn firecracker_connect_ack_uses_one_total_deadline() {
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("v.sock");
+        let listener = match UnixListener::bind(&socket) {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping socket deadline test: {error}");
+                return;
+            }
+            Err(error) => panic!("bind fixture: {error}"),
+        };
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = String::new();
+            std::io::BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut request)
+                .unwrap();
+            for byte in b"OK 5252\n" {
+                std::thread::sleep(Duration::from_millis(20));
+                if stream.write_all(&[*byte]).is_err() {
+                    break;
+                }
+            }
+        });
+
+        let started = Instant::now();
+        let error = connect_to_port_before(
+            &socket.to_string_lossy(),
+            5252,
+            started + Duration::from_millis(45),
+        )
+        .expect_err("slow CONNECT acknowledgement must exceed one total deadline");
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "connect deadline returned too late: {:?}",
+            started.elapsed()
+        );
+        assert!(format!("{error:#}").contains("deadline"), "{error:#}");
+        worker.join().unwrap();
+    }
 
     #[test]
     fn test_vsock_uds_path() {

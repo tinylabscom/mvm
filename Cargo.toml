@@ -292,6 +292,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 
 # Signal handling
 libc = "0.2"
+socket2 = "0.6"
 # Readiness-driven event loop for the in-house VMM's host↔guest vsock I/O thread
 # (os-poll = kqueue/epoll + Waker; os-ext = SourceFd to register std sockets).
 mio = { version = "1", features = ["os-poll", "os-ext"] }

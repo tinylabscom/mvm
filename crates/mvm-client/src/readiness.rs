@@ -88,25 +88,24 @@ pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
 
 /// Duration-based form used by launch policy and tests.
 pub fn wait_for_guest_agent_for(vm_id: &str, timeout: std::time::Duration) -> bool {
-    wait_with_probe(timeout, |remaining| {
-        let Ok(transport) = mvm_runtime::vsock_transport::for_vm(vm_id) else {
+    wait_with_probe(timeout, |deadline, _remaining| {
+        let Ok(mut stream) = mvm_runtime::vsock_transport::connect_for_vm_before(
+            vm_id,
+            mvm_agentd::vsock::GUEST_AGENT_PORT,
+            deadline,
+        ) else {
             return false;
         };
-        let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) else {
-            return false;
-        };
-        // Never let a bound-but-silent socket park this probe past the launch
-        // deadline. Authentication and Ping/Pong must both complete.
-        let io_timeout = remaining.min(std::time::Duration::from_secs(3));
-        let _ = stream.set_read_timeout(Some(io_timeout));
-        let _ = stream.set_write_timeout(Some(io_timeout));
-        mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok()
+        mvm_agentd::vsock::run_with_stream_deadline(&mut stream, deadline, |stream| {
+            mvm_agentd::vsock::probe_agent_ready(stream)
+        })
+        .is_ok()
     })
 }
 
 fn wait_with_probe(
     timeout: std::time::Duration,
-    mut probe: impl FnMut(std::time::Duration) -> bool,
+    mut probe: impl FnMut(std::time::Instant, std::time::Duration) -> bool,
 ) -> bool {
     let deadline = std::time::Instant::now() + timeout;
 
@@ -123,7 +122,7 @@ fn wait_with_probe(
     let mut attempt: u32 = 0;
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if probe(remaining) {
+        if probe(deadline, remaining) && std::time::Instant::now() < deadline {
             return true;
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -145,7 +144,7 @@ mod tests {
         let mut attempts = 0;
         assert!(wait_with_probe(
             std::time::Duration::from_millis(100),
-            |_| {
+            |_, _| {
                 attempts += 1;
                 attempts == 2
             }
@@ -158,8 +157,19 @@ mod tests {
         let started = std::time::Instant::now();
         assert!(!wait_with_probe(
             std::time::Duration::from_millis(35),
-            |_| false
+            |_, _| false
         ));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn readiness_rejects_a_probe_that_finishes_after_the_deadline() {
+        assert!(!wait_with_probe(
+            std::time::Duration::from_millis(10),
+            |_, _| {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                true
+            }
+        ));
     }
 }

@@ -24,6 +24,43 @@ use crate::secret::MachineSecretRef;
 /// up. Matches what `machine run -d -- <argv>` has always waited.
 const AGENT_READY_SECS: u64 = 30;
 
+/// Failure to establish detached launch readiness.
+#[derive(Debug, thiserror::Error)]
+pub enum DetachedReadinessError {
+    /// The partial launch was terminated and its registry entry removed.
+    #[error(
+        "guest control for machine {name:?} did not become ready within {timeout_secs}s; \
+         the partial start was rolled back"
+    )]
+    RolledBack {
+        /// Machine name.
+        name: String,
+        /// Readiness timeout.
+        timeout_secs: u64,
+    },
+    /// The VMM may still own launch resources, so ownership must be retained.
+    #[error(
+        "guest control for machine {name:?} did not become ready within {timeout_secs}s; \
+         aborting the partial start also failed: {source:#}"
+    )]
+    AbortUnresolved {
+        /// Machine name.
+        name: String,
+        /// Readiness timeout.
+        timeout_secs: u64,
+        /// Backend abort failure.
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl DetachedReadinessError {
+    /// Whether the VMM may still own resources from this launch.
+    pub fn abort_is_unresolved(&self) -> bool {
+        matches!(self, Self::AbortUnresolved { .. })
+    }
+}
+
 /// A detached persistent launch is accepted only after the authenticated guest
 /// control plane completes a Ping/Pong. On failure the backend that performed
 /// the start owns rollback, including its VMM and host helpers.
@@ -31,19 +68,14 @@ pub fn require_serving_guest(
     name: &str,
     started: &crate::StartedVm,
     timeout: std::time::Duration,
-    admission: &crate::admission::AdmissionContext,
-) -> Result<()> {
+) -> std::result::Result<(), DetachedReadinessError> {
     // The in-memory backend has no guest transport. It is a lifecycle test
     // double, not a production detached lane.
     let ready = started.backend().kind() == mvm_core::vm_backend::BackendKind::Mock
         || crate::readiness::wait_for_guest_agent_for(name, timeout);
-    require_serving_guest_result(
-        name,
-        timeout,
-        ready,
-        || started.backend().stop(started.vm_id()).map(|_| ()),
-        admission,
-    )
+    require_serving_guest_result(name, timeout, ready, || {
+        started.backend().abort_start(started.vm_id()).map(|_| ())
+    })
 }
 
 fn require_serving_guest_result(
@@ -51,27 +83,22 @@ fn require_serving_guest_result(
     timeout: std::time::Duration,
     ready: bool,
     rollback: impl FnOnce() -> Result<()>,
-    admission: &crate::admission::AdmissionContext,
-) -> Result<()> {
-    let result = (|| {
-        if ready {
-            return Ok(());
-        }
-        rollback().with_context(|| {
-            format!(
-                "guest control for machine {name:?} did not become ready within {}s; \
-                 rolling back the partial start also failed",
-                timeout.as_secs()
-            )
-        })?;
-        crate::local::deregister_from_name_registry(name);
-        bail!(
-            "guest control for machine {name:?} did not become ready within {}s; \
-             the partial start was rolled back",
-            timeout.as_secs()
-        )
-    })();
-    result.inspect_err(|err| crate::admission::emit_failed(admission, "guest-readiness", err))
+) -> std::result::Result<(), DetachedReadinessError> {
+    if ready {
+        return Ok(());
+    }
+    if let Err(source) = rollback() {
+        return Err(DetachedReadinessError::AbortUnresolved {
+            name: name.to_string(),
+            timeout_secs: timeout.as_secs(),
+            source,
+        });
+    }
+    crate::local::deregister_from_name_registry(name);
+    Err(DetachedReadinessError::RolledBack {
+        name: name.to_string(),
+        timeout_secs: timeout.as_secs(),
+    })
 }
 
 /// Whether `name` is running on the backend this host selects.
@@ -279,58 +306,6 @@ impl CommandStarter for GuestAgentStarter {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_hostd::plan_admission::InMemoryNonceLedger;
-
-    use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
-    use crate::admission::{AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot};
-
-    fn admitted(vm_name: &str) -> (AdmissionContext, tempfile::TempDir, tempfile::TempDir) {
-        let keys_dir = tempfile::tempdir().expect("keys dir");
-        let audit_dir = tempfile::tempdir().expect("audit dir");
-        let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
-        let rootfs = rootfs_dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
-        let ledger = InMemoryNonceLedger::new();
-        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            tools: Default::default(),
-            instructions: Default::default(),
-            outputs: Vec::new(),
-            network_mode: mvm_contract::plan::NetworkMode::default(),
-            tenant: "local",
-            vm_name,
-            backend_name: "libkrun",
-            configured_images_dir: None,
-            rootfs_path: &rootfs,
-            kernel_path: None,
-            precomputed_image_sha256: None,
-            boot_artifact_identity: None,
-            cpus: 2,
-            mem_mib: 512,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            caller_commitment: None,
-            ledger: &ledger,
-            keys_dir: Some(keys_dir.path()),
-            audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            bundle_posture: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            assets: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-            services: Vec::new(),
-            grants: None,
-            backend_kind: Some(mvm_core::protocol::vm_backend::BackendKind::Libkrun),
-            entrypoint: ResolvedEntrypoint::unresolved("this test resolves no entrypoint"),
-        })
-        .expect("admission succeeds");
-        (ctx, keys_dir, audit_dir)
-    }
 
     fn spec(name: &str, image: &str, cpus: u32) -> MachineSpec {
         MachineSpec {
@@ -517,7 +492,6 @@ mod tests {
     fn failed_readiness_rolls_back_without_an_accepted_launch() {
         let (_env, _home) = isolated();
         let name = "not-serving";
-        let (admission, _keys, audit_dir) = admitted(name);
         crate::register_machine(&crate::MachineRegistration {
             vm_dir: mvm_core::config::vm_state_dir(name)
                 .to_string_lossy()
@@ -530,17 +504,12 @@ mod tests {
         );
         let rolled_back = std::sync::atomic::AtomicBool::new(false);
 
-        let err = require_serving_guest_result(
-            name,
-            std::time::Duration::from_millis(1),
-            false,
-            || {
+        let err =
+            require_serving_guest_result(name, std::time::Duration::from_millis(1), false, || {
                 rolled_back.store(true, std::sync::atomic::Ordering::SeqCst);
                 Ok(())
-            },
-            &admission,
-        )
-        .expect_err("a non-serving guest must fail closed");
+            })
+            .expect_err("a non-serving guest must fail closed");
 
         assert!(err.to_string().contains("partial start was rolled back"));
         assert!(
@@ -552,53 +521,44 @@ mod tests {
             None,
             "no LaunchAccepted state survives rollback"
         );
-        let chain = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
-            .expect("the chain file exists");
-        assert!(
-            chain.contains("plan.failed") && chain.contains("guest-readiness"),
-            "{chain}"
-        );
-        assert!(!chain.contains("plan.launched"), "{chain}");
     }
 
     #[test]
-    fn serving_guest_does_not_roll_back_or_record_failure() {
+    fn serving_guest_does_not_roll_back() {
         let (_env, _home) = isolated();
         let name = "serving";
-        let (admission, _keys, audit_dir) = admitted(name);
-        require_serving_guest_result(
-            name,
-            std::time::Duration::from_secs(1),
-            true,
-            || bail!("a serving guest must not be stopped"),
-            &admission,
-        )
+        require_serving_guest_result(name, std::time::Duration::from_secs(1), true, || {
+            bail!("a serving guest must not be stopped")
+        })
         .expect("a serving guest is accepted");
-        let chain = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
-            .expect("the chain file exists");
-        assert!(!chain.contains("plan.failed"), "{chain}");
     }
 
     #[test]
-    fn rollback_failure_still_records_failed_audit_state() {
+    fn failed_abort_retains_registry_ownership_for_recovery() {
         let (_env, _home) = isolated();
-        let name = "rollback-failed";
-        let (admission, _keys, audit_dir) = admitted(name);
-        let err = require_serving_guest_result(
-            name,
-            std::time::Duration::from_millis(1),
-            false,
-            || bail!("backend stop failed"),
-            &admission,
+        let name = "abort-unresolved";
+        crate::register_machine(&crate::MachineRegistration {
+            vm_dir: mvm_core::config::vm_state_dir(name)
+                .to_string_lossy()
+                .into_owned(),
+            ..crate::MachineRegistration::minimal(name, "default")
+        });
+
+        let error =
+            require_serving_guest_result(name, std::time::Duration::from_millis(1), false, || {
+                anyhow::bail!("VMM is still alive")
+            })
+            .expect_err("failed abort stays unresolved");
+
+        assert!(error.abort_is_unresolved());
+        let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(
+            &mvm_runtime::vm::name_registry::registry_path(),
         )
-        .expect_err("a non-serving guest must fail closed even if rollback fails");
-        assert!(format!("{err:#}").contains("backend stop failed"));
-        let chain = std::fs::read_to_string(audit_dir.path().join("local.jsonl"))
-            .expect("the chain file exists");
+        .expect("load registry");
         assert!(
-            chain.contains("plan.failed") && chain.contains("guest-readiness"),
-            "{chain}"
+            registry.lookup(name).is_some(),
+            "registry ownership must survive until VMM death is proven"
         );
-        assert!(!chain.contains("plan.launched"), "{chain}");
+        assert!(format!("{error:#}").contains("VMM is still alive"));
     }
 }
