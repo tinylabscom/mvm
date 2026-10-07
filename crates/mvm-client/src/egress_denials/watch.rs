@@ -16,10 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use super::super::audit_follow::{ChainFollower, ChainLine, parse_chain_line};
-use super::super::host_notices::NoticeSink;
 use super::denial::EgressDenial;
 use super::tally::DenialTally;
+use crate::audit::follow::{ChainFollower, ChainLine, parse_chain_line};
+use crate::notices::NoticeSink;
 
 /// How often the chain is polled. Short enough that a refusal is on screen
 /// before the workload has finished printing its own error about it.
@@ -28,7 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 /// Whether each distinct refusal is printed as it happens, or only counted
 /// for the exit summary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(in crate::commands) enum Live {
+pub enum Live {
     /// A notice per distinct refusal, as it is recorded.
     Notices,
     /// Count only. For a raw-mode terminal, where a stray line would corrupt
@@ -42,13 +42,13 @@ struct Shared {
 }
 
 /// A running watch. [`Self::finish`] stops it and hands back what it saw.
-pub(in crate::commands) struct DenialWatch {
+pub struct DenialWatch {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
 }
 
 /// What a watch reads and where its notices go.
-pub(in crate::commands) struct WatchTarget {
+pub struct WatchTarget {
     /// The tenant's live chain file.
     pub chain: PathBuf,
     /// The machine whose refusals count.
@@ -59,7 +59,7 @@ pub(in crate::commands) struct WatchTarget {
 
 impl DenialWatch {
     /// Start watching from the chain's current end.
-    pub(in crate::commands) fn start(target: WatchTarget) -> Self {
+    pub fn start(target: WatchTarget) -> Self {
         let shared = Arc::new(Shared {
             tally: Mutex::new(DenialTally::default()),
             stop: AtomicBool::new(false),
@@ -78,7 +78,7 @@ impl DenialWatch {
     }
 
     /// Stop, read whatever was recorded up to now, and return the tally.
-    pub(in crate::commands) fn finish(mut self) -> DenialTally {
+    pub fn finish(mut self) -> DenialTally {
         self.shared.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -128,7 +128,7 @@ fn run(mut follower: ChainFollower, target: &WatchTarget, shared: &Shared) {
 
 /// Print a finished watch's exit summary as one block, if anything was
 /// refused.
-pub(in crate::commands) fn print_summary(tally: &DenialTally, sink: &dyn NoticeSink) {
+pub fn print_summary(tally: &DenialTally, sink: &dyn NoticeSink) {
     let lines = tally.summary_lines();
     if !lines.is_empty() {
         sink.block(&lines);
@@ -137,8 +137,23 @@ pub(in crate::commands) fn print_summary(tally: &DenialTally, sink: &dyn NoticeS
 
 #[cfg(test)]
 mod tests {
-    use super::super::super::host_notices::Captured;
     use super::*;
+
+    /// A sink that keeps what it was given.
+    #[derive(Default)]
+    struct Captured(Mutex<Vec<String>>);
+
+    impl NoticeSink for Captured {
+        fn block(&self, lines: &[String]) {
+            self.0.lock().unwrap().extend_from_slice(lines);
+        }
+    }
+
+    impl Captured {
+        fn lines(&self) -> Vec<String> {
+            self.0.lock().unwrap().clone()
+        }
+    }
     use ed25519_dalek::SigningKey;
     use mvm_hostd::supervisor::audit_recorder::{EventCategory, Recorder};
 
