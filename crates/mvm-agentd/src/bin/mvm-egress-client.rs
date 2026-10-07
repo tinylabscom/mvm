@@ -253,7 +253,7 @@ fn run(addr: std::net::SocketAddr, host_port: u32) -> ExitCode {
     let deadline = std::time::Instant::now() + mvm_agentd::flowmux::CONNECT_RETRY_BUDGET;
     let mut attempt = 0u32;
     let client = loop {
-        let outcome = rt.block_on(FlowMuxReconnectClient::connect_with_ingress(
+        let outcome = rt.block_on(FlowMuxReconnectClient::connect_ingress_targets(
             move || async move {
                 connect_host_vsock(host_port)
                     .await

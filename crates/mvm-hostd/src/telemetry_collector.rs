@@ -299,7 +299,7 @@ where
         Ok(stream) => stream,
         Err(_) => return AttemptEnd::Failed("connect-failed"),
     };
-    let mut receiver = match TelemetryReceiver::connect_with_signer(
+    let mut receiver = match TelemetryReceiver::connect_authenticated(
         &mut stream,
         &config.host_anchor,
         &peer.key,

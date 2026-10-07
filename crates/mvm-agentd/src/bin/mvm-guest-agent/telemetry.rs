@@ -280,7 +280,7 @@ mod tests {
         std::thread::spawn(move || {
             let anchor = anchor_key.verifying_key();
             let mut receiver =
-                TelemetryReceiver::connect_with_signer(&mut stream, &anchor, &expected_guest, {
+                TelemetryReceiver::connect_authenticated(&mut stream, &anchor, &expected_guest, {
                     let signer = anchor_key.clone();
                     move |hello, ack| {
                         let bytes = handshake_signing_bytes(hello, ack, &signer.verifying_key())

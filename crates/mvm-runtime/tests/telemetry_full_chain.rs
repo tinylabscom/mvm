@@ -38,7 +38,7 @@ fn dial_serving_guest(
     let guest_half =
         std::thread::spawn(move || serve_telemetry_connection(&mut guest, guest_key, &anchor));
     let signer = anchor_key.clone();
-    let received = TelemetryReceiver::connect_with_signer(&mut host, &anchor, &expected, {
+    let received = TelemetryReceiver::connect_authenticated(&mut host, &anchor, &expected, {
         move |hello, ack| {
             let bytes =
                 handshake_signing_bytes(hello, ack, &signer.verifying_key()).map_err(|_| {

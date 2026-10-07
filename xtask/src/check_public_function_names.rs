@@ -1,77 +1,142 @@
-//! Ratchet public `f` / `f_with_*` sibling pairs down module by module.
+//! Reject public `f` / `f_with_*` siblings within the same Rust owner scope.
 
 use anyhow::{Result, bail};
-use regex::Regex;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
+use syn::{ImplItem, Item, TraitItem, Visibility};
 
-const MAX_SIBLING_PAIRS: usize = 14;
-const CLEARED_MODULES: &[&str] = &[
-    "crates/mvm-agentd/src/bin/mvm-guest-agent/config.rs",
-    "crates/mvm-agentd/src/guest_bootstrap.rs",
-    "crates/mvm-build/src/builder_backend_select.rs",
-    "crates/mvm-build/src/builder_vm_runtime.rs",
-    "crates/mvm-build/src/builderd.rs",
-    "crates/mvm-build/src/pipeline/build.rs",
-    "crates/mvm-build/src/pipeline/orchestrator.rs",
-    "crates/mvm-build/src/rootfs.rs",
-    "crates/mvm-cli/src/commands/deps/audit.rs",
-    "crates/mvm-cli/src/commands/env/builder_vm/vm_helpers.rs",
-    "crates/mvm-cli/src/commands/machine/prewarm.rs",
-    "crates/mvm-cli/src/commands/vm/console.rs",
-    "crates/mvm-cli/src/commands/vm/exec.rs",
-    "crates/mvm-cli/src/commands/vm/exec/preflight.rs",
-    "crates/mvm-cli/src/commands/vm/fs.rs",
-    "crates/mvm-cli/src/config_watcher.rs",
-    "crates/mvm-cli/src/exec.rs",
-    "crates/mvm-client/src/admission/policy_resolver.rs",
-    "crates/mvm-client/src/admission/run_network.rs",
-    "crates/mvm-contract/src/policy/network_policy.rs",
-    "crates/mvm-contract/src/protocol/network_flow/state.rs",
-    "crates/mvm-core/src/pii.rs",
-    "crates/mvm-core/src/protocol/broker_control.rs",
-    "crates/mvm-core/src/stream_client/console.rs",
-    "crates/mvm-fs/src/ext4/mod.rs",
-    "crates/mvm-fs/src/oci/unpack/mod.rs",
-    "crates/mvm-fs/tests/common/mod.rs",
-    "crates/mvm-fs/tests/oci_unpack_common/mod.rs",
-    "crates/mvm-hostd/src/broker/daemon.rs",
-    "crates/mvm-hostd/src/plan_admission.rs",
-    "crates/mvm-observability/src/logging.rs",
-    "crates/mvm-runtime/src/backend.rs",
-    "crates/mvm-runtime/src/microvm/boot_config.rs",
-    "crates/mvm-runtime/src/mock_guest_agent.rs",
-    "crates/mvm-runtime/src/vm/name_registry.rs",
-    "crates/mvm-runtime/src/warm_artifact_builder.rs",
-    "crates/mvm-runtime/src/warm_artifacts.rs",
-    "crates/mvm-sdk/src/runtime.rs",
-    "crates/mvm-vmm/src/quota/controller.rs",
-    "crates/mvm-vmm/src/vmm/run.rs",
-];
-
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct SiblingPair {
     path: String,
+    owner: String,
     base: String,
     extended: String,
 }
 
+// Temporary coordination exceptions for files owned by PR #4164. Exact entries
+// make additions fail, and `validate` rejects entries as soon as they go stale.
+const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "crates/mvm-cli/src/commands/ops/cache.rs",
+        "mod ckpt_fixture",
+        "ckpt",
+        "ckpt_with_parent_digest",
+    ),
+    (
+        "crates/mvm-core/src/protocol/vm_backend.rs",
+        "trait VmBackend",
+        "start",
+        "start_with_mode",
+    ),
+    (
+        "crates/mvm-vmm/src/driver/traits.rs",
+        "trait RunningVm",
+        "kill",
+        "kill_with_timing",
+    ),
+    (
+        "crates/mvm-runtime/src/checkpoint/mod.rs",
+        "module",
+        "capture_vm_full",
+        "capture_vm_full_with_snapshot_store",
+    ),
+    (
+        "crates/mvm-runtime/src/checkpoint/mod.rs",
+        "module",
+        "capture_vm_full",
+        "capture_vm_full_with_trusted_snapshot_backend",
+    ),
+];
+const EXPECTED_UNEXPLAINED_PAIRS: usize = 0;
+
 pub fn run(workspace: &Path) -> Result<()> {
     let pairs = sibling_pairs(workspace)?;
-    validate(&pairs, MAX_SIBLING_PAIRS, CLEARED_MODULES)?;
+    validate(&pairs, EXCEPTIONS, EXPECTED_UNEXPLAINED_PAIRS)?;
     eprintln!(
-        "check-public-function-names: {} sibling pairs remain; {} modules cleared",
-        pairs.len(),
-        CLEARED_MODULES.len()
+        "check-public-function-names: {} explained sibling pairs; zero unexplained",
+        pairs.len()
     );
     Ok(())
 }
 
+fn public(vis: &Visibility) -> bool {
+    !matches!(vis, Visibility::Inherited)
+}
+
+fn names_in_items(items: &[Item], path: &str, owner: &str, out: &mut Vec<SiblingPair>) {
+    let mut names = BTreeSet::new();
+    for item in items {
+        if let Item::Fn(function) = item
+            && public(&function.vis)
+        {
+            names.insert(function.sig.ident.to_string());
+        }
+    }
+    add_pairs(path, owner, &names, out);
+    for item in items {
+        match item {
+            Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    names_in_items(items, path, &format!("mod {}", module.ident), out);
+                }
+            }
+            Item::Impl(block) => {
+                let mut names = BTreeSet::new();
+                for item in &block.items {
+                    if let ImplItem::Fn(function) = item
+                        && public(&function.vis)
+                    {
+                        names.insert(function.sig.ident.to_string());
+                    }
+                }
+                let owner = format!("impl {}", quote_owner(&block.self_ty));
+                add_pairs(path, &owner, &names, out);
+            }
+            Item::Trait(trait_) => {
+                let names = trait_
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        TraitItem::Fn(f) => Some(f.sig.ident.to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                add_pairs(path, &format!("trait {}", trait_.ident), &names, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn quote_owner(ty: &syn::Type) -> String {
+    match ty {
+        syn::Type::Path(p) => p
+            .path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_else(|| "?".into()),
+        _ => "?".into(),
+    }
+}
+
+fn add_pairs(path: &str, owner: &str, names: &BTreeSet<String>, out: &mut Vec<SiblingPair>) {
+    for extended in names {
+        if let Some((base, _)) = extended.split_once("_with_")
+            && names.contains(base)
+        {
+            out.push(SiblingPair {
+                path: path.into(),
+                owner: owner.into(),
+                base: base.into(),
+                extended: extended.clone(),
+            });
+        }
+    }
+}
+
 fn sibling_pairs(workspace: &Path) -> Result<Vec<SiblingPair>> {
-    let function_pattern = Regex::new(
-        r#"(?m)^\s*pub(?:\([^)]*\))?\s+(?:(?:const|async|unsafe)\s+|extern\s+"[^"]+"\s+)*fn\s+([A-Za-z_][A-Za-z0-9_]*)"#,
-    )?;
-    let mut functions_by_file = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut pairs = Vec::new();
     crate::fs_walk::for_each_file(
         &workspace.join("crates"),
         Some("rs"),
@@ -79,132 +144,100 @@ fn sibling_pairs(workspace: &Path) -> Result<Vec<SiblingPair>> {
             let Ok(relative) = path.strip_prefix(workspace) else {
                 return;
             };
-            let names = functions_by_file
-                .entry(relative.to_string_lossy().into_owned())
-                .or_default();
-            for captures in function_pattern.captures_iter(contents) {
-                names.insert(captures[1].to_string());
+            let relative = relative.to_string_lossy();
+            if let Ok(file) = syn::parse_file(contents) {
+                names_in_items(&file.items, &relative, "module", &mut pairs);
             }
         },
     )?;
-
-    let mut pairs = Vec::new();
-    for (path, names) in functions_by_file {
-        for extended in &names {
-            let Some((base, _)) = extended.split_once("_with_") else {
-                continue;
-            };
-            if names.contains(base) {
-                pairs.push(SiblingPair {
-                    path: path.clone(),
-                    base: base.to_string(),
-                    extended: extended.clone(),
-                });
-            }
-        }
-    }
+    pairs.sort();
     Ok(pairs)
 }
 
-fn validate(pairs: &[SiblingPair], maximum: usize, cleared_modules: &[&str]) -> Result<()> {
-    let cleared_regressions: Vec<&SiblingPair> = pairs
+fn validate(
+    pairs: &[SiblingPair],
+    exceptions: &[(&str, &str, &str, &str)],
+    expected_unexplained: usize,
+) -> Result<()> {
+    let actual: BTreeSet<_> = pairs
         .iter()
-        .filter(|pair| cleared_modules.contains(&pair.path.as_str()))
+        .map(|p| {
+            (
+                p.path.as_str(),
+                p.owner.as_str(),
+                p.base.as_str(),
+                p.extended.as_str(),
+            )
+        })
         .collect();
-    if !cleared_regressions.is_empty() {
-        bail!(
-            "public function sibling pairs returned to a cleared module: {}",
-            format_pairs(cleared_regressions.into_iter())
-        );
+    let allowed: BTreeSet<_> = exceptions.iter().copied().collect();
+    let stale: Vec<_> = allowed.difference(&actual).collect();
+    if !stale.is_empty() {
+        bail!("stale public-function-name exceptions: {stale:?}");
     }
-    if pairs.len() > maximum {
+    let unexplained: Vec<_> = actual.difference(&allowed).collect();
+    if unexplained.len() != expected_unexplained {
         bail!(
-            "public function sibling pairs grew from the ratcheted maximum {maximum} to {}: {}",
-            pairs.len(),
-            format_pairs(pairs.iter())
+            "expected {expected_unexplained} unexplained public sibling pairs, found {}: {unexplained:?}",
+            unexplained.len()
         );
     }
     Ok(())
 }
 
-fn format_pairs<'a>(pairs: impl Iterator<Item = &'a SiblingPair>) -> String {
-    pairs
-        .map(|pair| format!("{}:{} / {}", pair.path, pair.base, pair.extended))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn write(path: &Path, contents: &str) {
-        std::fs::create_dir_all(path.parent().expect("test path has a parent"))
-            .expect("create test directory");
-        std::fs::write(path, contents).expect("write test fixture");
+    fn scan(source: &str) -> Vec<SiblingPair> {
+        let file = syn::parse_file(source).unwrap();
+        let mut out = Vec::new();
+        names_in_items(&file.items, "x.rs", "module", &mut out);
+        out
     }
-
     #[test]
-    fn finds_public_siblings_in_the_same_file() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        write(
-            &workspace.path().join("crates/demo/src/lib.rs"),
-            "pub fn open() {}\npub async fn open_with_policy() {}\nfn private_with_policy() {}\n",
-        );
-
+    fn detects_siblings_in_one_module_scope() {
         assert_eq!(
-            sibling_pairs(workspace.path()).expect("scan succeeds"),
-            vec![SiblingPair {
-                path: "crates/demo/src/lib.rs".to_string(),
-                base: "open".to_string(),
-                extended: "open_with_policy".to_string(),
-            }]
+            scan("pub fn open(){} pub fn open_with_policy(){} ").len(),
+            1
         );
     }
-
     #[test]
-    fn does_not_pair_functions_from_different_files() {
-        let workspace = tempfile::tempdir().expect("tempdir");
-        write(
-            &workspace.path().join("crates/demo/src/base.rs"),
-            "pub fn open() {}\n",
-        );
-        write(
-            &workspace.path().join("crates/demo/src/extended.rs"),
-            "pub fn open_with_policy() {}\n",
-        );
-
+    fn separates_module_and_impl_owners() {
         assert!(
-            sibling_pairs(workspace.path())
-                .expect("scan succeeds")
-                .is_empty()
+            scan("pub fn open(){} struct X; impl X { pub fn open_with_policy(){} }").is_empty()
         );
     }
-
     #[test]
-    fn rejects_growth_above_the_ratcheted_maximum() {
-        let pair = SiblingPair {
-            path: "crates/demo/src/lib.rs".to_string(),
-            base: "open".to_string(),
-            extended: "open_with_policy".to_string(),
+    fn separates_individual_impl_owners() {
+        assert!(scan("struct A; struct B; impl A { pub fn open(){} } impl B { pub fn open_with_policy(){} }").is_empty());
+    }
+    #[test]
+    fn detects_siblings_inside_one_impl() {
+        let pairs = scan("struct A; impl A { pub fn open(){} pub fn open_with_policy(){} }");
+        assert_eq!(pairs[0].owner, "impl A");
+    }
+    #[test]
+    fn rejects_unexpected_pairs() {
+        let p = SiblingPair {
+            path: "x".into(),
+            owner: "module".into(),
+            base: "a".into(),
+            extended: "a_with_b".into(),
         };
-        let error = validate(&[pair], 0, &[]).expect_err("growth must fail");
         assert!(
-            error
+            validate(&[p], &[], 0)
+                .unwrap_err()
                 .to_string()
-                .contains("grew from the ratcheted maximum")
+                .contains("unexplained")
         );
     }
-
     #[test]
-    fn rejects_a_pair_returning_to_a_cleared_module() {
-        let pair = SiblingPair {
-            path: "crates/demo/src/lib.rs".to_string(),
-            base: "open".to_string(),
-            extended: "open_with_policy".to_string(),
-        };
-        let error = validate(&[pair], 1, &["crates/demo/src/lib.rs"])
-            .expect_err("cleared module regression must fail");
-        assert!(error.to_string().contains("returned to a cleared module"));
+    fn rejects_stale_exceptions() {
+        assert!(
+            validate(&[], &[("x", "module", "a", "a_with_b")], 0)
+                .unwrap_err()
+                .to_string()
+                .contains("stale")
+        );
     }
 }
