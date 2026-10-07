@@ -323,7 +323,10 @@
           guest-function-app-path = pkgs.runCommand "guest-function-app-path" { } ''
             ${pkgs.e2fsprogs}/bin/debugfs -R 'stat /app' ${functionGuest} > app-stat.txt 2>&1
             ${pkgs.gnugrep}/bin/grep -Eq 'Type: *symlink' app-stat.txt
-            ${pkgs.gnugrep}/bin/grep -Fq 'Fast link dest: "${functionApp}"' app-stat.txt
+            ${pkgs.e2fsprogs}/bin/debugfs -R 'cat /app' ${functionGuest} > app-target.txt 2> app-target.err
+            test "$(cat app-target.txt)" = "${functionApp}"
+            ${pkgs.e2fsprogs}/bin/debugfs -R 'stat ${functionApp}/app.py' ${functionGuest} > app-file.txt 2>&1
+            ${pkgs.gnugrep}/bin/grep -Eq 'Type: *regular' app-file.txt
             touch "$out"
           '';
           guest-rootfs-file-modes = pkgs.runCommand "guest-rootfs-file-modes" { } ''
