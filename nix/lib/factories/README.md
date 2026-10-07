@@ -70,6 +70,9 @@ Returns the `{ extraFiles, servicePackages, service }` triple a
 downstream `mkGuest` composition layer consumes.
 
 `extraFiles` always contains:
+- `sourcePath` (default `/app`) → a build-time symlink to `appPkg`, present
+  before both legacy and sealed initramfs-agent boot. The guest does not
+  create it on a read-only rootfs.
 - `/etc/mvm/entrypoint` → `/usr/lib/mvm/wrappers/runner`
 - `/usr/lib/mvm/wrappers/runner` → the language's wrapper script
   (cold-tier `oneshot.*` or warm-tier `longrunning.*` depending on
