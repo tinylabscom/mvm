@@ -845,6 +845,126 @@ fn signalling_the_recorded_pid_stops_a_kept_endpoint() {
     vm.wait().unwrap();
 }
 
+/// Every thread of a serving endpoint runs confined — not only the thread that
+/// applied the confinement.
+///
+/// The endpoint is held mid-session, so its threads include the runtime
+/// workers and the blocking-pool thread serving the session, which is where
+/// guest bytes are parsed. The kernel's per-thread view in
+/// `/proc/<pid>/task/*/status` must show every one of them under the seccomp
+/// filter. Landlock has no per-thread status file, so its half is witnessed by
+/// the endpoint's own `runtime-threads` self-test probe, which opens a path
+/// outside the ruleset from a worker and from a blocking-pool thread and fails
+/// the launch unless both are refused; the log line shows it ran and passed.
+#[cfg(target_os = "linux")]
+#[test]
+fn every_endpoint_thread_serves_under_confinement() {
+    use base64::Engine as _;
+    use mvm_core::net::session::Session;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("network.sock");
+    let log = dir.path().join("endpoint.log");
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+    let host_verify = host_key.verifying_key();
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[29u8; 32]);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let cfg = EndpointConfig {
+        telemetry: None,
+        tenant_id: "local".into(),
+        instance_id: "test".into(),
+        secrets: vec![],
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        tools: Default::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        tls_intermediate: None,
+        network_policy: None,
+        network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
+        egress_mode: EgressMode::FlowMux,
+        resolver: ResolverBackend::default(),
+        session_marker: None,
+        session_ready_socket: None,
+        connector_uds_path: None,
+        approval_socket: None,
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "every-thread-confined".into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
+    };
+
+    let mut child = Command::new(BIN)
+        .env("MVM_HOME", dir.path().join("mvm-home"))
+        .env("HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&log).unwrap()))
+        .spawn()
+        .expect("spawn endpoint bin");
+    let pid = child.id();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let guard = Kill(child);
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(!line.trim().is_empty(), "no handshake; stderr:\n{stderr}");
+
+    // Hold a session open so its blocking-pool thread exists while we look.
+    let mut conn = UnixStream::connect(&sock).expect("connect to the endpoint");
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    Session::guest(&mut conn, guest_key, &host_verify).expect("session handshake");
+
+    let mut threads = Vec::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
+        let task = entry.unwrap().path();
+        let status = std::fs::read_to_string(task.join("status")).unwrap_or_default();
+        let comm = std::fs::read_to_string(task.join("comm")).unwrap_or_default();
+        let field = |name: &str| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix(name))
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default()
+        };
+        threads.push((
+            comm.trim().to_string(),
+            field("Seccomp:"),
+            field("NoNewPrivs:"),
+        ));
+    }
+    // The confining thread, two runtime workers, and the session's thread.
+    assert!(threads.len() >= 4, "threads: {threads:?}");
+    let unconfined: Vec<_> = threads
+        .iter()
+        .filter(|(_, seccomp, nnp)| seccomp != "2" || nnp != "1")
+        .collect();
+    assert!(
+        unconfined.is_empty(),
+        "threads outside the seccomp filter: {unconfined:?}\nall: {threads:?}"
+    );
+
+    assert!(
+        stderr.contains("confinement self-test passed") && stderr.contains("runtime-threads"),
+        "the runtime-thread probe did not run and pass; stderr:\n{stderr}"
+    );
+    drop(conn);
+    drop(guard);
+}
+
 /// The embedded telemetry collector runs inside the confined endpoint, so its
 /// I/O must fit the endpoint's confinement: on Linux a syscall the seccomp
 /// allowlist lacks kills the whole endpoint with SIGSYS, taking the guest's
