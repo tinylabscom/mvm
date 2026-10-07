@@ -1191,3 +1191,131 @@ fn a_missing_post_blob_is_corruption_not_a_silent_skip() {
         .expect_err("commit refuses");
     assert!(err.to_string().contains("missing"), "{err}");
 }
+
+#[test]
+fn crash_mid_undo_rolls_back_to_the_applied_tree() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("open store");
+    let applied = fixture.apply(&store);
+    let undo = store
+        .stage_undo(&fixture.source_dir)
+        .expect("stage undo")
+        .expect("an apply to undo");
+
+    // Simulate the crash window: one of the undo's host writes landed.
+    fs::write(fixture.source_dir.join("edit.txt"), "original edit\n").expect("partial undo");
+
+    let store = ApplyStore::open(&fixture.store_dir).expect("reopen store");
+    let rolled_back = store
+        .recover_source(&fixture.source_dir)
+        .expect("recover")
+        .expect("the interrupted undo");
+    assert_eq!(rolled_back, undo.id());
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+    assert_eq!(read(&fixture.source_dir.join("added.txt")), "guest added\n");
+    assert!(!fixture.source_dir.join("gone.txt").exists());
+    assert_eq!(
+        store.effective_applies().expect("effective"),
+        [applied.id()],
+        "the apply the undo targeted is still in force"
+    );
+}
+
+#[test]
+fn crash_after_undo_done_completes_the_undo() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("open store");
+    fixture.apply(&store);
+    let undo = store
+        .stage_undo(&fixture.source_dir)
+        .expect("stage undo")
+        .expect("an apply to undo");
+
+    // Every undo write landed and the done marker is durable, but the
+    // journal commit never happened.
+    fs::write(fixture.source_dir.join("edit.txt"), "original edit\n").expect("write");
+    fs::write(fixture.source_dir.join("gone.txt"), "original gone\n").expect("write");
+    fs::remove_file(fixture.source_dir.join("added.txt")).expect("remove");
+    let staging = fixture.store_dir.join("staging").join(undo.id());
+    fs::write(staging.join("done"), undo.id().as_bytes()).expect("done marker");
+
+    let store = ApplyStore::open(&fixture.store_dir).expect("reopen store");
+    assert!(
+        store
+            .journal_read()
+            .expect("journal")
+            .iter()
+            .any(|e| e.kind == JournalKind::Commit && e.apply == undo.id()),
+        "open completed the undo's commit"
+    );
+    assert_eq!(store.effective_applies().expect("effective"), [undo.id()]);
+    assert!(
+        store
+            .stage_redo(&fixture.source_dir)
+            .expect("stage redo")
+            .is_some(),
+        "the completed undo can be redone"
+    );
+}
+
+#[test]
+fn crash_mid_redo_rolls_back_to_the_undone_tree() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("open store");
+    fixture.apply(&store);
+    let undone = store
+        .undo_latest(&fixture.source_dir)
+        .expect("undo")
+        .expect("an apply to undo");
+    let redo = store
+        .stage_redo(&fixture.source_dir)
+        .expect("stage redo")
+        .expect("an undo to redo");
+    assert_eq!(
+        redo.relation().expect("a redo relation").target_id,
+        undone.target_id
+    );
+
+    // Simulate the crash window: one of the redo's host writes landed.
+    fs::write(fixture.source_dir.join("edit.txt"), "guest edit\n").expect("partial redo");
+
+    let store = ApplyStore::open(&fixture.store_dir).expect("reopen store");
+    let rolled_back = store
+        .recover_source(&fixture.source_dir)
+        .expect("recover")
+        .expect("the interrupted redo");
+    assert_eq!(rolled_back, redo.id());
+    assert_eq!(
+        read(&fixture.source_dir.join("edit.txt")),
+        "original edit\n"
+    );
+    assert_eq!(
+        read(&fixture.source_dir.join("gone.txt")),
+        "original gone\n"
+    );
+    assert!(!fixture.source_dir.join("added.txt").exists());
+    assert_eq!(
+        store.effective_applies().expect("effective"),
+        [undone.apply_id],
+        "the undo is still the newest effective apply"
+    );
+}
+
+#[test]
+fn a_staged_undo_names_its_target_and_writes_nothing() {
+    let fixture = Fixture::new();
+    let store = ApplyStore::open(&fixture.store_dir).expect("open store");
+    let applied = fixture.apply(&store);
+    let undo = store
+        .stage_undo(&fixture.source_dir)
+        .expect("stage undo")
+        .expect("an apply to undo");
+    let relation = undo.relation().expect("an undo relation");
+    assert_eq!(relation.target_id, applied.id());
+    assert_eq!(relation.apply_id, undo.id());
+    assert_eq!(read(&fixture.source_dir.join("edit.txt")), "guest edit\n");
+    assert!(
+        applied.relation().is_none(),
+        "a forward apply relates to nothing"
+    );
+}
