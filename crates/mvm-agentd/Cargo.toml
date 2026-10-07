@@ -151,24 +151,19 @@ doctest = false
 # agent, so the lean-agent closure stays schemars-free. Pulls
 # `mvm-core/schema` for the shared `AgentProfile`/`BackpressureReason` types.
 schema = ["dep:schemars", "mvm-core/schema"]
-# The async loopback addon/egress helper bins (`mvm-addon-dns`,
-# `mvm-addon-vsock-bridge`, `mvm-egress-client`) and their shared vsock
-# session helper. Off by default so the sealed agent's request-serving
-# path — vsock, worker_pool, runner — stays synchronous and pulls no
-# async runtime. The helper bins are separate processes launched by
+# The async FlowMux client, the loopback addon/egress helper bins
+# (`mvm-addon-dns`, `mvm-addon-vsock-bridge`, `mvm-egress-client`) and their
+# shared vsock session helper. Off by default so the sealed agent's
+# request-serving path — vsock, worker_pool, runner — stays synchronous and
+# pulls no async runtime. The helper bins are separate processes launched by
 # `/init`, never linked into `mvm-guest-agent`, so gating them here costs
 # the sealed agent nothing.
 addons = [
-    "flowmux-async",
+    "dep:tokio",
     "dep:hickory-proto",
     "dep:tokio-vsock",
     "dep:tracing-subscriber",
 ]
-# The reusable async FlowMux client itself needs Tokio but not the Linux-only
-# AF_VSOCK adapter or DNS helper binaries bundled by `addons`. Benchmark and
-# protocol fixtures enable this narrower surface so they do not pull a second
-# `nix` major through `tokio-vsock`.
-flowmux-async = ["dep:tokio"]
 
 [dependencies]
 mvm-core.workspace = true
@@ -226,7 +221,9 @@ seccompiler = { workspace = true }
 # Native async AF_VSOCK stream for the guest→host dial in the addon/egress
 # helper bins. Linux-only (AF_VSOCK is a Linux guest facility) and optional so
 # it enters only the `addons` closure — the sealed agent's default tree stays
-# tokio-free. Reuses the workspace tokio.
+# tokio-free. Reuses the workspace tokio. Cargo.lock holds its `vsock`
+# dependency at 0.5.1, the last release on the workspace's nix 0.29; later 0.5.x
+# releases move to nix 0.31, which `check-duplicate-majors` refuses.
 tokio-vsock = { version = "0.7", optional = true }
 # AF_VSOCK socket primitives for the guest's synchronous vsock leaf
 # (`vsock/sys.rs`): the blocking FlowMux dial, the one-shot exit reporter, and
