@@ -485,9 +485,13 @@ mod tests {
                 crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
             );
             assert_eq!(
-                trust.accepted_identities,
-                [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()]
+                trust.accepted_identities.first().map(String::as_str),
+                Some(crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY)
             );
+            assert!(trust.accepted_identities.iter().all(|identity| {
+                identity == crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+                    || identity == crate::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+            }));
         }
         assert!(loaded.policy.trust_for_namespace("mvm").is_err());
         assert!(loaded.policy.trust_for_namespace("community").is_err());
