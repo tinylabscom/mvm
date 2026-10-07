@@ -109,9 +109,10 @@ allow = ["git", "bash"]
 ask = ["git"]                            # every call asks the approver first
 deny = ["curl"]
 
-[tools.detail.bash]                      # per-tool restrictions
-argv = ["git *", "cargo *"]              # permitted command lines (glob)
-deny = ["rm *"]                          # refused whatever argv allows
+[tools.detail.git]                       # per-tool restrictions
+executable = "/usr/bin/git"             # exact guest path required for command mediation
+argv = ["/usr/bin/git status *"]         # permitted command lines (glob)
+deny = ["* --force*"]                    # refused whatever argv allows
 routes = ["github.com:443"]              # destinations only this tool may reach
 secrets = ["GITHUB_TOKEN"]               # stored secrets only this tool may use
 
@@ -186,7 +187,7 @@ These are the security contract of composition:
 | --- | --- |
 | Allows are unioned | Hosts, secrets, user-authored shares, env names and tools add up. A signed pack cannot add a host share. |
 | Tool `ask` sits between | `deny` beats `ask` beats `allow` for whole-tool decisions. |
-| Tool detail only narrows | A later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them; per-tool `deny` argv patterns union. |
+| Tool detail only narrows | A later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them; per-tool `deny` argv patterns union. An `executable` must be a normalized absolute guest path; later layers cannot add one to an existing detail or redirect it. |
 | Denies are unioned, and a deny beats an allow | Anything a deny covers is removed from the result, whichever layer allowed it. The note says which layer did what. |
 | Blocked network stays blocked | Once a layer sets `network.block = true`, every allowed host and route is dropped. A later `block = false` is an error, not a no-op. |
 | Required groups cannot be excluded | `groups.exclude` naming a required group that is already included is an error. |
@@ -445,6 +446,11 @@ missing one.
   in-guest command shims. A tool's routes and secrets are therefore withheld
   from everything but a declared `machine exec --tool` invocation; a workload
   that runs the same binary on its own gets neither.
+- `machine exec --tool` requires `[tools.detail.<name>].executable` to name
+  exactly the guest command path passed after `--`. A missing path, a relative
+  command, or a differently spelled path is denied and audited. This path
+  check does not prove the executable's bytes or protect writable libraries
+  and configuration; use immutable image-owned tools as described below.
 - A declared tool still runs under the workload's uid, so it shares the
   workload's files and the workload can signal it. A tool whose binary,
   libraries or configuration live anywhere the workload can write — its home,

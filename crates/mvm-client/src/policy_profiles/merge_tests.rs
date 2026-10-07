@@ -717,6 +717,14 @@ fn invalid_tool_detail_entries_are_refused() {
             "secrets",
             "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nsecrets = [\"has space\"]\n",
         ),
+        (
+            "executable",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nexecutable = \"/bin/../bin/bash\"\n",
+        ),
+        (
+            "executable",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nexecutable = \"bin/bash\"\n",
+        ),
     ] {
         let error = refused(&[user("a", body)]);
         assert!(
@@ -727,9 +735,34 @@ fn invalid_tool_detail_entries_are_refused() {
 }
 
 #[test]
+fn signed_executable_path_cannot_be_added_or_redirected_by_later_layers() {
+    let preserved = merged(&[
+        user(
+            "a",
+            "[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\nexecutable = \"/bin/bash\"\n",
+        ),
+        user("b", "[tools.detail.bash]\nexecutable = \"/bin/bash\"\n"),
+    ]);
+    assert_eq!(
+        preserved.policy.tools.detail["bash"].executable.as_deref(),
+        Some("/bin/bash")
+    );
+    for first in ["", "executable = \"/bin/bash\"\n"] {
+        let error = refused(&[
+            user(
+                "a",
+                &format!("[tools]\nallow = [\"bash\"]\n[tools.detail.bash]\n{first}"),
+            ),
+            user("b", "[tools.detail.bash]\nexecutable = \"/usr/bin/bash\"\n"),
+        ]);
+        assert_eq!(error.key.as_deref(), Some("tools.detail.bash.executable"));
+    }
+}
+
+#[test]
 fn tools_section_with_detail_round_trips_through_resolution() {
     let text = "[tools]\nallow = [\"bash\"]\nask = [\"git\"]\n\
-                [tools.detail.bash]\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n";
+                [tools.detail.bash]\nexecutable = \"/bin/bash\"\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n";
     let group: GroupFile = toml::from_str(text).expect("test body parses");
     let reparsed: GroupFile =
         toml::from_str(&toml::to_string_pretty(&group).expect("group serializes"))
@@ -743,13 +776,14 @@ fn tools_section_with_detail_round_trips_through_resolution() {
         .get("bash")
         .expect("bash detail survives");
     assert_eq!(detail.argv, ["git *"]);
+    assert_eq!(detail.executable.as_deref(), Some("/bin/bash"));
     assert_eq!(resolved.policy.tools.ask, ["git"]);
 }
 
 #[test]
 fn fold_carries_the_resolved_tools_as_contract_rules() {
     let text = "[tools]\nallow = [\"bash\"]\nask = [\"git\"]\ndeny = [\"curl\"]\n\
-                [tools.detail.bash]\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n\
+                [tools.detail.bash]\nexecutable = \"/bin/bash\"\nargv = [\"git *\"]\nroutes = [\"github.com:443\"]\n\
                 secrets = [\"GITHUB_TOKEN\"]\n";
     let resolved = merged(&[user("a", text)]);
     let folded = crate::policy_profiles::fold(
@@ -763,6 +797,7 @@ fn fold_carries_the_resolved_tools_as_contract_rules() {
     assert_eq!(rules.deny, ["curl"]);
     let detail = rules.detail.get("bash").expect("bash detail");
     assert_eq!(detail.argv, ["git *"]);
+    assert_eq!(detail.executable.as_deref(), Some("/bin/bash"));
     assert_eq!(detail.routes, ["github.com:443"]);
     assert_eq!(detail.secrets, ["GITHUB_TOKEN"]);
 }

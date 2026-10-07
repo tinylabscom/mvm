@@ -173,14 +173,13 @@ impl SubstitutionService {
     /// An absent gate or failed audit refuses the call.
     pub async fn decide_tool(
         &self,
-        tool: &str,
-        argv: &str,
+        request: &mvm_contract::protocol::network_flow::tool::ToolCheckRequest,
     ) -> anyhow::Result<crate::supervisor::tool_decision::ToolVerdict> {
         let gate = self
             .tool_gate
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
-        Ok(gate.decide(tool, argv).await?)
+        Ok(gate.decide(request).await?)
     }
 
     /// Decide one host-started invocation through this VM's admitted gate,
@@ -188,14 +187,13 @@ impl SubstitutionService {
     /// or failed audit refuses the call.
     pub async fn decide_tool_invocation(
         &self,
-        tool: &str,
-        argv: &str,
+        request: &mvm_contract::protocol::network_flow::tool::ToolCheckRequest,
     ) -> anyhow::Result<crate::supervisor::tool_decision::InvocationVerdict> {
         let gate = self
             .tool_gate
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
-        Ok(gate.decide_invocation(tool, argv).await?)
+        Ok(gate.decide_invocation(request).await?)
     }
 
     /// Retire a binding once its invocation has finished.

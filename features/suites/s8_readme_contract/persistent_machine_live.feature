@@ -29,14 +29,17 @@ Feature: README persistent machine lifecycle works end to end
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-tool-command"
     Then the command exits with code 0
-    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- sh -c 'echo mediated-ok'"
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- /bin/sh -c 'echo mediated-ok'"
     Then the command exits with code 0
     And the output contains "mediated-ok"
     When I run mvmctl in the isolated mvm home with "machine restart bdd-tool-command"
     Then the command exits with code 0
-    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- sh -c 'echo mediated-after-restart'"
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- /bin/sh -c 'echo mediated-after-restart'"
     Then the command exits with code 0
     And the output contains "mediated-after-restart"
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- sh -c 'echo alias-should-not-run'"
+    Then the command exits with code 1
+    And the output does not contain "alias-should-not-run"
     When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool unlisted -- sh -c 'echo should-not-run'"
     Then the command exits with code 1
     And the output does not contain "should-not-run"
