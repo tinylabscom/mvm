@@ -56,9 +56,18 @@ pub const MACHINE_RECONFIGURE: &str = "machine.reconfigure";
 /// `{"id", "expires_at": rfc3339 | null}`. Reply: `{}`. Errors when the
 /// machine is not registered.
 pub const MACHINE_SET_TTL: &str = "machine.set_ttl";
+/// Reports whether telemetry collection was provisioned for a machine's
+/// current boot and how its collector stands. Request: `{"id"}`. Reply: a
+/// `TelemetryStatus` (`collection`: `not_provisioned` | `provisioned`).
+pub const TELEMETRY_STATUS: &str = "telemetry.status";
+/// Reads one cursor-paged page of a machine's collected telemetry records,
+/// oldest first. Request: `{"id", "cursor": {"offset"}?, "limit"?}`. Reply:
+/// a `TelemetryReadResponse` carrying the records, the next cursor, the
+/// undecodable-line count, and whether the page reached the end.
+pub const TELEMETRY_RECORDS: &str = "telemetry.records";
 
 /// Every method this library answers through the client.
-pub const METHODS: [&str; 13] = [
+pub const METHODS: [&str; 15] = [
     MACHINE_LIST,
     MACHINE_INSPECT,
     MACHINE_LOGS,
@@ -72,6 +81,8 @@ pub const METHODS: [&str; 13] = [
     MACHINE_RESUME,
     MACHINE_RECONFIGURE,
     MACHINE_SET_TTL,
+    TELEMETRY_STATUS,
+    TELEMETRY_RECORDS,
 ];
 
 /// Whether `method` is one this library answers, checked before a client is
@@ -215,6 +226,33 @@ impl ReconfigurePatchRequest {
     }
 }
 
+/// A `telemetry.records` request: the machine, where to resume, and how
+/// many records at most. An absent cursor reads from the start of the
+/// stream; the limit is clamped by the seam.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TelemetryRecordsRequest {
+    id: String,
+    #[serde(default)]
+    cursor: Option<mvm_core::client::TelemetryCursor>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+impl TelemetryRecordsRequest {
+    fn read_request(&self) -> mvm_core::client::TelemetryReadRequest {
+        let mut request = mvm_core::client::TelemetryReadRequest::builder();
+        if let Some(cursor) = self.cursor {
+            request = request.cursor(cursor);
+        }
+        if let Some(limit) = self.limit {
+            request = request.limit(limit);
+        }
+        request.build()
+    }
+}
+
 /// A `machine.set_ttl` request.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Deserialize)]
@@ -311,6 +349,17 @@ async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<
         MACHINE_INVENTORY => {
             let _: Empty = parse_or_default_empty(request)?;
             Outcome::ok(&mvm_client::inventory::list_local_inventory(client).await?)
+        }
+        TELEMETRY_STATUS => {
+            let target: MachineRef = parse(request)?;
+            Outcome::ok(&client.telemetry_status(&MachineId(target.id)).await?)
+        }
+        TELEMETRY_RECORDS => {
+            let target: TelemetryRecordsRequest = parse(request)?;
+            let page = client
+                .telemetry_records(&MachineId(target.id.clone()), target.read_request())
+                .await?;
+            Outcome::ok(&page)
         }
         MACHINE_PAUSE => {
             let target: PauseRequest = parse(request)?;
@@ -460,6 +509,64 @@ mod tests {
             serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "follow": true })).unwrap();
         let outcome = run(dispatch(&client, MACHINE_LOGS, &request));
         assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    #[test]
+    fn telemetry_status_answers_for_a_known_machine_and_refuses_an_unknown_one() {
+        let (client, state) = with_machine("alpha");
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_STATUS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(
+            body(&outcome),
+            serde_json::json!({ "collection": "not_provisioned" }),
+            "the mock boots nothing, so nothing was provisioned"
+        );
+        let outcome = run(dispatch(&client, TELEMETRY_STATUS, br#"{"id":"nope"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+        let outcome = run(dispatch(
+            &client,
+            TELEMETRY_STATUS,
+            br#"{"id":"alpha","x":1}"#,
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+    }
+
+    #[test]
+    fn telemetry_records_pages_from_the_cursor_it_is_given() {
+        let (client, state) = with_machine("alpha");
+        let request = serde_json::to_vec(&serde_json::json!({
+            "id": state.id.0,
+            "cursor": { "offset": 96 },
+            "limit": 10,
+        }))
+        .unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(
+            body(&outcome),
+            serde_json::json!({
+                "records": [],
+                "next_cursor": { "offset": 96 },
+                "undecodable": 0,
+                "exhausted": true,
+            }),
+            "an empty page echoes the cursor so the caller keeps polling it"
+        );
+        // Without a cursor the page starts at the beginning.
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(body(&outcome)["next_cursor"]["offset"], 0);
+        // A cursor of the wrong shape is a request error, not a read.
+        let outcome = run(dispatch(
+            &client,
+            TELEMETRY_RECORDS,
+            br#"{"id":"alpha","cursor":"96"}"#,
+        ));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, br#"{"id":"nope"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
     }
 
     #[test]

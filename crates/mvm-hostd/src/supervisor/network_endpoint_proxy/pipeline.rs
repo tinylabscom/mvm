@@ -897,6 +897,7 @@ mod server_tests {
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
             expires_at: Utc::now() + Duration::minutes(5),
+            grant: Default::default(),
         }
     }
 

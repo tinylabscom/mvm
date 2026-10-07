@@ -1,67 +1,31 @@
 //! Egress refusals, shown to the person who started the workload.
 //!
-//! When the per-VM network endpoint refuses a workload's connection, the guest
-//! gets a refusal and the chain-signed audit log gets an entry naming the
-//! destination and a fixed reason. This module reads those entries back for
-//! one machine and turns each into a line that says what was blocked, why, and
-//! the exact remedy for that reason — or that there is none.
-//!
-//! It is observation only. The endpoint remains the single place an egress
-//! decision is made; nothing here is consulted by it or can change what it
-//! decides.
+//! The reading, classifying and counting live in `mvm_client::egress_denials`;
+//! this module points them at the local tenant's chain and at stderr:
 //!
 //! - live, while a foreground run or a followed machine's output is on
 //!   screen: [`PendingWatch`] / [`watch_machine`];
 //! - at exit: [`print_summary`], one block with counts and the flags to
 //!   allow what can be allowed;
-//! - after the fact: [`denials_in_window`], which `mvmctl explain` uses.
-
-pub(super) mod denial;
-mod reason;
-mod tally;
-mod watch;
+//! - after the fact: `mvmctl explain`, through `mvm_client::explain`.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use mvm_hostd::supervisor::PlanAuditEntry;
+pub(in crate::commands) use mvm_client::egress_denials::{
+    DenialTally, DenialWatch, DeniedDestination, Live, WatchTarget, latest_admission,
+    print_summary, verify_local_chain,
+};
 
-pub(in crate::commands) use tally::{DenialTally, DeniedDestination};
-pub(in crate::commands) use watch::{DenialWatch, Live, WatchTarget, print_summary};
-
-use super::audit_chain::{audit_path_for_tenant, default_audit_dir};
-use super::audit_follow::{ChainLine, parse_chain_line};
 use super::denial_review::ReviewOffer;
 use super::host_notices::{NoticeSink, Stderr};
-
-/// The tenant a local run is admitted under, and so the chain its endpoint
-/// records in.
-fn local_chain() -> Option<PathBuf> {
-    let dir = default_audit_dir().ok()?;
-    Some(audit_path_for_tenant(&dir, mvm_core::plan::DEFAULT_TENANT))
-}
-
-/// Verify the local chain before a live observation is allowed to propose a
-/// policy change. Watching remains best-effort display; authoring requires the
-/// stronger, signed source.
-pub(in crate::commands) fn verify_local_chain() -> Result<()> {
-    let path = local_chain().context("the local audit-chain path is unavailable")?;
-    let signer =
-        super::host_signer::load_or_init().context("loading the host signer for denial review")?;
-    mvm_hostd::supervisor::verify_audit_chain(&path, &signer.verifying)
-        .with_context(|| format!("verifying audit chain {}", path.display()))?;
-    Ok(())
-}
 
 /// Start watching `vm_name`'s refusals in the local tenant's chain. `None`
 /// when there is no home to read a chain from; the command runs regardless.
 pub(in crate::commands) fn watch_machine(vm_name: &str, live: Live) -> Option<DenialWatch> {
     Some(DenialWatch::start(WatchTarget {
-        chain: local_chain()?,
+        chain: mvm_client::egress_denials::local_chain()?,
         vm_name: vm_name.to_string(),
         live,
         sink: Arc::new(Stderr) as Arc<dyn NoticeSink>,
@@ -79,32 +43,6 @@ pub(in crate::commands) fn finish_and_summarize(
     let tally = watch.map(DenialWatch::finish).unwrap_or_default();
     super::denial_review::summarize_and_offer(&tally, review);
     tally
-}
-
-/// The plan id of the latest admission of machine `vm_name` in the local
-/// chain: the run `mvmctl explain` should be pointed at. `None` when the chain
-/// cannot be read or records no admission under that name.
-pub(in crate::commands) fn latest_admission(vm_name: &str) -> Option<String> {
-    let text = std::fs::read_to_string(local_chain()?).ok()?;
-    let entries = text
-        .lines()
-        .filter_map(|line| match parse_chain_line(line) {
-            ChainLine::Entry(entry) => Some(*entry),
-            ChainLine::Foreign(_) => None,
-        });
-    latest_admission_in(entries, vm_name)
-}
-
-/// An admission records the machine's name as its `image_name`.
-fn latest_admission_in(
-    entries: impl IntoIterator<Item = PlanAuditEntry>,
-    vm_name: &str,
-) -> Option<String> {
-    entries
-        .into_iter()
-        .filter(|entry| entry.event == "plan.admitted" && entry.image_name == vm_name)
-        .max_by_key(|entry| entry.timestamp)
-        .map(|entry| entry.plan_id.0)
 }
 
 /// A watch that starts once the machine's name exists.
@@ -169,103 +107,9 @@ impl PendingWatch {
     }
 }
 
-/// The refusals recorded for machine `vm_name` between `from` and `until`
-/// (open-ended when `None`), counted as a run's exit summary counts them.
-pub(in crate::commands) fn denials_in_window<'a>(
-    entries: impl IntoIterator<Item = &'a PlanAuditEntry>,
-    vm_name: &str,
-    from: DateTime<Utc>,
-    until: Option<DateTime<Utc>>,
-) -> DenialTally {
-    let mut tally = DenialTally::default();
-    for entry in entries {
-        if entry.timestamp < from || until.is_some_and(|end| entry.timestamp > end) {
-            continue;
-        }
-        if let Some(denial) = denial::EgressDenial::from_entry(entry, vm_name) {
-            tally.observe(denial);
-        }
-    }
-    tally
-}
-
 #[cfg(test)]
 mod tests {
-    use super::denial::tests::entry;
     use super::*;
-
-    fn at(entry: PlanAuditEntry, ts: &str) -> PlanAuditEntry {
-        PlanAuditEntry {
-            timestamp: ts.parse().unwrap(),
-            ..entry
-        }
-    }
-
-    fn refused(ts: &str, vm: &str, target: &str) -> PlanAuditEntry {
-        at(
-            entry(
-                "host.flow.denied",
-                &[
-                    ("vm_name", vm),
-                    ("target", target),
-                    ("reason", "policy_denied"),
-                ],
-            ),
-            ts,
-        )
-    }
-
-    #[test]
-    fn a_window_counts_only_its_machine_between_its_bounds() {
-        let entries = [
-            refused("2026-09-26T09:59:59Z", "vm-a", "before.example:443"),
-            refused("2026-09-26T10:00:01Z", "vm-a", "inside.example:443"),
-            refused("2026-09-26T10:00:02Z", "vm-b", "other.example:443"),
-            refused("2026-09-26T10:00:03Z", "vm-a", "inside.example:443"),
-            refused("2026-09-26T10:00:09Z", "vm-a", "after.example:443"),
-        ];
-        let tally = denials_in_window(
-            &entries,
-            "vm-a",
-            "2026-09-26T10:00:00Z".parse().unwrap(),
-            Some("2026-09-26T10:00:05Z".parse().unwrap()),
-        );
-        let rows = tally.destinations();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].destination, "inside.example:443");
-        assert_eq!(rows[0].count, 2);
-
-        let open = denials_in_window(
-            &entries,
-            "vm-a",
-            "2026-09-26T10:00:00Z".parse().unwrap(),
-            None,
-        );
-        assert_eq!(open.destinations().len(), 2);
-    }
-
-    fn admitted(ts: &str, vm: &str, plan: &str) -> PlanAuditEntry {
-        PlanAuditEntry {
-            image_name: vm.into(),
-            plan_id: mvm_core::plan::PlanId(plan.into()),
-            ..at(entry("plan.admitted", &[]), ts)
-        }
-    }
-
-    #[test]
-    fn the_run_explain_is_pointed_at_is_the_machines_latest_admission() {
-        let entries = [
-            admitted("2026-09-26T10:00:00Z", "vm-a", "plan-old"),
-            admitted("2026-09-26T10:00:05Z", "vm-b", "plan-other"),
-            refused("2026-09-26T10:00:06Z", "vm-a", "api.example:443"),
-            admitted("2026-09-26T10:00:07Z", "vm-a", "plan-new"),
-        ];
-        assert_eq!(
-            latest_admission_in(entries.clone(), "vm-a").as_deref(),
-            Some("plan-new")
-        );
-        assert_eq!(latest_admission_in(entries, "vm-c"), None);
-    }
 
     #[test]
     fn an_unarmed_watch_finishes_empty() {

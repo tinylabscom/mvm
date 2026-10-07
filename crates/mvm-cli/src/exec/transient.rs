@@ -245,18 +245,17 @@ pub(super) fn teardown_transient_vm(
     use crate::commands::vm::phase_timing::SubPhase;
 
     sub.start(SubPhase::StopTransient);
-    let (stopped, stop_timing) =
-        match backend.stop_transient_with_timing(&VmId(vm_name.to_string())) {
-            Ok(timing) => (true, timing),
-            Err(error) => {
-                tracing::warn!(
-                    error = %error,
-                    machine = vm_name,
-                    "transient stop failed; refusing to seal a potentially live session"
-                );
-                (false, None)
-            }
-        };
+    let (stopped, stop_timing) = match backend.stop_transient(&VmId(vm_name.to_string())) {
+        Ok(timing) => (true, timing),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                machine = vm_name,
+                "transient stop failed; refusing to seal a potentially live session"
+            );
+            (false, None)
+        }
+    };
     sub.finish(SubPhase::StopTransient);
     sub.record_stop_timing(stop_timing);
 

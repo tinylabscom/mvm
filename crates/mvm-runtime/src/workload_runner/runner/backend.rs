@@ -71,14 +71,28 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         let console_cleanup = console_started.elapsed();
         kill_result?;
 
-        Ok(StopTiming {
+        let timing = StopTiming {
             attach,
             endpoint_reaping,
             driver_kill,
             console_cleanup,
             total: total_started.elapsed(),
             driver_detail,
-        })
+        };
+        // Callers that only want the stop (and `stop_transient`, which
+        // reaches teardown through here) record one opaque total at most.
+        // Logging the breakdown on every stop keeps the bulk of a teardown
+        // attributable without asking each caller to carry the numbers.
+        tracing::debug!(
+            vm = %id.0,
+            attach_ms = timing.attach.as_secs_f64() * 1000.0,
+            endpoint_reaping_ms = timing.endpoint_reaping.as_secs_f64() * 1000.0,
+            driver_kill_ms = timing.driver_kill.as_secs_f64() * 1000.0,
+            console_cleanup_ms = timing.console_cleanup.as_secs_f64() * 1000.0,
+            total_ms = timing.total.as_secs_f64() * 1000.0,
+            "stop: teardown breakdown"
+        );
+        Ok(timing)
     }
 }
 
@@ -197,21 +211,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        let timing = self.stop_with_timing(id)?;
-        // `stop_transient` reaches teardown through here, and the launch sample
-        // records only the one opaque total for it. The breakdown is computed on
-        // every stop regardless, so dropping it left the majority of a teardown
-        // unattributable while the numbers already existed.
-        tracing::debug!(
-            vm = %id.0,
-            attach_ms = timing.attach.as_secs_f64() * 1000.0,
-            endpoint_reaping_ms = timing.endpoint_reaping.as_secs_f64() * 1000.0,
-            driver_kill_ms = timing.driver_kill.as_secs_f64() * 1000.0,
-            console_cleanup_ms = timing.console_cleanup.as_secs_f64() * 1000.0,
-            total_ms = timing.total.as_secs_f64() * 1000.0,
-            "stop: teardown breakdown"
-        );
-        Ok(())
+        self.stop_with_timing(id).map(|_| ())
     }
 
     fn stop_all(&self) -> Result<()> {

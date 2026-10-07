@@ -524,6 +524,15 @@ fn handle_client(
                 stream_input,
             } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input),
 
+            // The resident agent is the boot-validated entrypoint, so a prompt
+            // is served by the same handler, with the prompt as the agent's
+            // complete stdin. Never streamed: a prompt is one bounded input.
+            GuestRequest::AgentPrompt {
+                prompt,
+                timeout_secs,
+                env,
+            } => handle_run_entrypoint_request(&mut ctx, prompt, timeout_secs, env, false),
+
             GuestRequest::DriveOpen {
                 program_id: _,
                 cwd,

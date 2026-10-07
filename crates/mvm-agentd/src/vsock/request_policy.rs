@@ -57,6 +57,7 @@ impl GuestRequest {
             GuestRequest::MediatedExec(_) => Verb::MediatedExec,
             GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
+            GuestRequest::AgentPrompt { .. } => Verb::AgentPrompt,
             GuestRequest::DriveOpen { .. } => Verb::DriveOpen,
             GuestRequest::DriveFile { .. } => Verb::DriveFile,
             GuestRequest::RunExtension { .. } => Verb::RunExtension,
@@ -126,6 +127,12 @@ impl GuestRequest {
             | GuestRequest::ProbeStatus
             | GuestRequest::PrimedStatus
             | GuestRequest::RunEntrypoint { .. }
+            // A prompt runs the same boot-validated program `RunEntrypoint`
+            // does, with the prompt as its one-shot stdin. It names no program
+            // and opens no shell or PTY, so it is production surface; the
+            // signed `agent_verbs` grant is what decides whether a workload
+            // accepts prompts at all.
+            | GuestRequest::AgentPrompt { .. }
             | GuestRequest::DriveOpen { .. }
             | GuestRequest::DriveFile { .. }
             | GuestRequest::RunExtension { .. }
@@ -221,6 +228,7 @@ impl GuestRequest {
             "post-restore",
             "entrypoint-status",
             "run-entrypoint",
+            "agent-prompt",
             "drive-open",
             "drive-file",
             "run-extension",
@@ -295,6 +303,11 @@ mod tests {
                 timeout_secs: 1,
                 env: vec![],
                 stream_input: false,
+            },
+            GuestRequest::AgentPrompt {
+                prompt: b"hello".to_vec(),
+                timeout_secs: 1,
+                env: vec![],
             },
             GuestRequest::StreamInput(InputFrame {
                 seq: 0,
@@ -444,6 +457,7 @@ mod tests {
             "ProbeStatus",
             "PrimedStatus",
             "RunEntrypoint",
+            "AgentPrompt",
             "StreamInput",
             "CloseStreamInput",
             "PostRestore",
@@ -610,6 +624,11 @@ mod tests {
                 timeout_secs: 60,
                 env: vec![],
                 stream_input: false,
+            },
+            GuestRequest::AgentPrompt {
+                prompt: b"what changed?".to_vec(),
+                timeout_secs: 60,
+                env: vec![],
             },
             // A sealed workload's stdin is exactly what the host gate polices;
             // refusing the verb here would put the gate out of reach.

@@ -391,7 +391,7 @@ name_enum! {
         ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
         IntegrationStatus,
         CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, MediatedExec, ExecBatch, RunEntrypoint,
-        DriveOpen, DriveFile, RunExtension,
+        AgentPrompt, DriveOpen, DriveFile, RunExtension,
         CancelExtension,
         RunDetached,
         PostRestore,
@@ -496,6 +496,7 @@ impl Verb {
             | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::AgentPrompt
             | Self::DriveOpen
             | Self::DriveFile
             | Self::RunExtension
@@ -565,6 +566,7 @@ impl Verb {
             | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::AgentPrompt
             | Self::DriveOpen
             | Self::RunExtension
             | Self::RunDetached
@@ -678,6 +680,7 @@ impl Verb {
             Verb::MediatedExec => stream(&[R::ToolCheckRequired, R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::AgentPrompt => stream(&[R::EntrypointEvent]),
             Verb::DriveOpen => stream(&[R::DriveEvent, R::DriveRefused]),
             Verb::DriveFile => unary(&[R::FsResult, R::DriveRefused]),
             Verb::RunExtension => stream(&[R::EntrypointEvent]),
@@ -831,6 +834,8 @@ pub enum GuestCapability {
     IntegrationStatus,
     EntrypointStatus,
     RunEntrypoint,
+    /// `AgentPrompt`: one prompt to the image's resident agent.
+    AgentPrompt,
     Drive,
     RunExtension,
     FilesystemRpc,
@@ -877,6 +882,7 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::IntegrationStatus,
         GuestCapability::EntrypointStatus,
         GuestCapability::RunEntrypoint,
+        GuestCapability::AgentPrompt,
         GuestCapability::Drive,
         GuestCapability::RunExtension,
         GuestCapability::FilesystemRpc,
@@ -1835,6 +1841,7 @@ mod tests {
         assert_eq!(
             streaming,
             BTreeSet::from([
+                "AgentPrompt",
                 "DriveOpen",
                 "Exec",
                 "MediatedExec",
@@ -1934,7 +1941,11 @@ mod tests {
             if verb.spawns_workload_process()
                 && !matches!(
                     verb,
-                    Verb::MediatedExec | Verb::RunEntrypoint | Verb::DriveOpen | Verb::RunExtension
+                    Verb::MediatedExec
+                        | Verb::RunEntrypoint
+                        | Verb::AgentPrompt
+                        | Verb::DriveOpen
+                        | Verb::RunExtension
                 )
             {
                 assert!(verb.bypasses_tool_mediation(), "{}", verb.name());

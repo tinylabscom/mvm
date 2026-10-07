@@ -63,19 +63,17 @@ impl FlowMuxClient {
         let pump = SessionPump {
             stream: Box::pin(stream),
             session,
-            validator: SessionValidator::new_with_ingress(targets.iter().map(
-                |(&mapping, target)| {
-                    let kind = match target.protocol {
-                        mvm_contract::plan::IngressProtocol::Tcp => {
-                            mvm_contract::protocol::network_flow::IngressFlowKind::Tcp
-                        }
-                        mvm_contract::plan::IngressProtocol::Udp => {
-                            mvm_contract::protocol::network_flow::IngressFlowKind::Udp
-                        }
-                    };
-                    (mapping, kind)
-                },
-            )),
+            validator: SessionValidator::new(targets.iter().map(|(&mapping, target)| {
+                let kind = match target.protocol {
+                    mvm_contract::plan::IngressProtocol::Tcp => {
+                        mvm_contract::protocol::network_flow::IngressFlowKind::Tcp
+                    }
+                    mvm_contract::plan::IngressProtocol::Udp => {
+                        mvm_contract::protocol::network_flow::IngressFlowKind::Udp
+                    }
+                };
+                (mapping, kind)
+            })),
             client_rx,
             client_tx: client_tx.clone(),
             state_tx,

@@ -738,7 +738,10 @@ mod tests {
         // record_readiness only updates an existing entry, so register first.
         let rpath = registry_path();
         let mut reg = VmNameRegistry::default();
-        reg.register("api", "/tmp/api", "default", None, 0).unwrap();
+        reg.register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+            "api", "/tmp/api", "default",
+        ))
+        .unwrap();
         reg.save(&rpath).unwrap();
 
         let mut prober = HealthProber::new();

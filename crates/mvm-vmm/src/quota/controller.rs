@@ -39,33 +39,20 @@ pub struct VcpuQuota<H: VcpuHandle> {
 
 impl<H: VcpuHandle> VcpuQuota<H> {
     /// Start scheduling every vCPU in `handles` against `policy`, charging
-    /// `clock`.
+    /// `clock` and parking the vCPUs through `hold`.
     ///
     /// `clock` has to account for all of them. One reading a single thread of
     /// an SMP machine would see a quarter of a four-CPU guest's consumption and
     /// never throttle; [`SummedClock`](crate::quota::clock::SummedClock) is the
     /// multi-vCPU form.
-    pub fn start<C: ThreadCpuClock>(handles: Vec<H>, clock: C, policy: QuotaPolicy) -> Self {
-        Self::start_with_flag(handles, clock, policy, Arc::new(AtomicBool::new(false)))
-    }
-
-    /// Start against a hold flag the caller already owns.
     ///
-    /// An SMP machine's vCPU threads have to be given the flag before the
-    /// controller can exist: every vCPU reads it to know when to park, and the
-    /// controller cannot be started until every vCPU has been created and
-    /// contributed its CPU clock. Handing the flag in resolves that ordering
-    /// without letting a vCPU run for a window with no flag to read.
-    pub fn start_with_hold<C: ThreadCpuClock>(
-        handles: Vec<H>,
-        clock: C,
-        policy: QuotaPolicy,
-        hold: Arc<AtomicBool>,
-    ) -> Self {
-        Self::start_with_flag(handles, clock, policy, hold)
-    }
-
-    fn start_with_flag<C: ThreadCpuClock>(
+    /// The caller owns `hold` because an SMP machine's vCPU threads have to be
+    /// given the flag before the controller can exist: every vCPU reads it to
+    /// know when to park, and the controller cannot be started until every
+    /// vCPU has been created and contributed its CPU clock. Handing the flag in
+    /// resolves that ordering without letting a vCPU run for a window with no
+    /// flag to read.
+    pub fn start<C: ThreadCpuClock>(
         handles: Vec<H>,
         clock: C,
         policy: QuotaPolicy,
@@ -355,8 +342,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota =
-            VcpuQuota::start_with_flag(vec![handle], clock.clone(), policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock.clone(), policy, Arc::clone(&flag));
 
         assert!(
             clock.wait_for_reads(4, Duration::from_secs(5)),
@@ -383,7 +369,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         std::thread::sleep(Duration::from_millis(55));
         let _ = quota.stop();
@@ -406,7 +392,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         std::thread::sleep(Duration::from_millis(55));
         let _ = quota.stop();
@@ -435,7 +421,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         std::thread::sleep(Duration::from_millis(55));
         let _ = quota.stop();
@@ -482,7 +468,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         std::thread::sleep(Duration::from_millis(55));
         let _ = quota.stop();
@@ -509,7 +495,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         std::thread::sleep(Duration::from_millis(85));
         let achievement = quota.stop();
@@ -542,7 +528,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         // Long enough to run well past the script and sample the collapse.
         std::thread::sleep(Duration::from_millis(120));
@@ -572,7 +558,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         std::thread::sleep(Duration::from_millis(90));
         let achievement = quota.stop();
@@ -591,7 +577,7 @@ mod tests {
         let handle = MockHandle::new();
         let flag = Arc::new(AtomicBool::new(false));
         handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start_with_flag(vec![handle], clock, policy, Arc::clone(&flag));
+        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
 
         let achievement = quota.stop();
 

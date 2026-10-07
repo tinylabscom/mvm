@@ -1481,7 +1481,10 @@ mod accessible_gate_tests {
 
         let path = mvm_runtime::vm::name_registry::registry_path();
         let mut reg = mvm_runtime::vm::name_registry::VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+            "vm1", "/tmp/vm1", "default",
+        ))
+        .unwrap();
         reg.save(&path).unwrap();
         assert!(reg.lookup("vm1").unwrap().last_active.is_none());
 

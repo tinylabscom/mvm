@@ -36,7 +36,7 @@ provenance so admission can bind the files that are later booted.
 
 | Area | Representative modules |
 |---|---|
-| Pipeline | `pipeline`, `artifacts`, `run_image`, `packed_artifact` |
+| Pipeline | `pipeline`, `artifacts`, `run_image` |
 | Acquisition | `artifact_acquisition`, `kernel_fetch`, `release_signature` |
 | Builder VM | `builder_vm`, `builder_orchestrator`, `persistent_builder`, `builderd`, `builder_protocol` |
 | Guest images | `rootfs`, `initramfs`, `rootfs_inject`, `oci_runtime_inject` |
