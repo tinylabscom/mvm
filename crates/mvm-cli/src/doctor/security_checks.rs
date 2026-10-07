@@ -722,6 +722,29 @@ pub(super) fn security_deny_config_check() -> Check {
     }
 }
 
+/// Running machines whose signed plan grants attended display input. An
+/// attended run may have a human driving its display, and possibly typing a
+/// credential into it, so it is reported rather than left to be inferred.
+pub(super) fn security_attended_display_check() -> Check {
+    attended_display_check_from(&mvm_runtime::vm::attendance::attended_running_machines())
+}
+
+fn attended_display_check_from(attended: &[String]) -> Check {
+    Check {
+        name: "attended display",
+        category: "security",
+        ok: true,
+        info: if attended.is_empty() {
+            "no running machine is attended; display input is closed on every run".to_string()
+        } else {
+            format!(
+                "attended (display input granted to a human): {}",
+                attended.join(", ")
+            )
+        },
+    }
+}
+
 pub(super) fn security_default_network_check() -> Check {
     let path = mvm_core::dev_network::network_path("default");
     let exists = std::path::Path::new(&path).exists();
@@ -1015,6 +1038,20 @@ fn signing_check_from_probes(probes: &[(std::path::PathBuf, Option<bool>)]) -> C
 mod tests {
     use super::*;
     use mvm_hostd::jailer::LandlockSupport;
+
+    #[test]
+    fn attended_runs_are_named_in_doctor() {
+        let none = attended_display_check_from(&[]);
+        assert!(none.ok);
+        assert!(
+            none.info.contains("no running machine is attended"),
+            "{}",
+            none.info
+        );
+        let some = attended_display_check_from(&["driven".to_string(), "other".to_string()]);
+        assert!(some.ok);
+        assert!(some.info.contains("driven, other"), "{}", some.info);
+    }
 
     #[test]
     fn landlock_v2_or_newer_passes_doctor() {

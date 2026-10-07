@@ -11,6 +11,7 @@
 // rootfs snapshot helper.
 
 pub mod admission;
+pub mod attendance;
 pub mod exec_builder;
 pub mod human_credential;
 pub mod instance_snapshot;

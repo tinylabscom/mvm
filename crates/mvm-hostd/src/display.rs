@@ -52,6 +52,13 @@ impl DisplayAuthority {
         mvm_core::naming::validate_vm_name(vm).map_err(|error| {
             DisplayAuthorityError::Authority(anyhow::anyhow!("invalid machine name: {error}"))
         })?;
+        // No persisted plan is no admitted grant: a machine that was never
+        // admitted has nothing that could have granted it input.
+        let plan_path =
+            crate::audit::plan_persist::plan_path(vm).map_err(DisplayAuthorityError::Authority)?;
+        if !plan_path.exists() {
+            return Ok(None);
+        }
         let plan =
             crate::audit::plan_persist::read_plan(vm).map_err(DisplayAuthorityError::Authority)?;
         if mvm_contract::grants::display::display_input_grant(plan.grants.as_ref()).is_none() {
@@ -171,6 +178,97 @@ fn authority_error(message: &str) -> DisplayAuthorityError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_contract::grants::{DisplayInputGrant, Grants};
+    use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+    use mvm_core::util::test_env::TestEnv;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fn attended_plan(vm: &str) -> mvm_contract::plan::ExecutionPlan {
+        mvm_core::plan::test_support::PlanFixture::new()
+            .workload(vm)
+            .nonce([9; 16])
+            .grants(Some(Grants {
+                display_input: Some(DisplayInputGrant {
+                    attended: true,
+                    ..DisplayInputGrant::default()
+                }),
+                ..Grants::default()
+            }))
+            .build()
+    }
+
+    fn write_envelope(vm: &str, plan: &mvm_contract::plan::ExecutionPlan, verbs: &[&str]) {
+        let signer = crate::audit::host_keypair::load_or_init().unwrap();
+        let keystore =
+            crate::host_signer::keystore::Keystore::load_from_file(&signer.secret_path).unwrap();
+        let grant = crate::host_signer::mint_verb_grant(
+            &keystore,
+            vm,
+            &plan.nonce,
+            plan.valid_until,
+            verbs
+                .iter()
+                .map(|verb| mvm_contract::plan::VerbId::new(verb).unwrap())
+                .collect(),
+            None,
+            None,
+        )
+        .unwrap();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: hex::encode(signer.verifying.to_bytes()),
+            plan_nonce_hex: plan.nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant,
+        };
+        let path = mvm_core::config::vm_state_dir(vm).join("verb-grant.json");
+        std::fs::write(&path, serde_json::to_vec(&envelope).unwrap()).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn a_machine_without_a_display_input_grant_has_no_authority() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        assert!(
+            DisplayAuthority::load("never-admitted").unwrap().is_none(),
+            "a machine with no admitted plan has nothing that granted input"
+        );
+        let view_only = mvm_core::plan::test_support::PlanFixture::new()
+            .workload("view-only")
+            .build();
+        crate::audit::plan_persist::write_plan("view-only", &view_only).unwrap();
+        assert!(DisplayAuthority::load("view-only").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_sealed_machine_needs_a_signed_grant_naming_display_input() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let vm = "sealed-attended";
+        let plan = attended_plan(vm);
+        crate::audit::plan_persist::write_plan(vm, &plan).unwrap();
+
+        let unsigned = DisplayAuthority::load(vm)
+            .err()
+            .expect("a sealed machine with no signed grant is refused");
+        assert!(format!("{unsigned}").contains("sealed"), "{unsigned}");
+
+        write_envelope(vm, &plan, &["run-entrypoint"]);
+        let unnamed = DisplayAuthority::load(vm)
+            .err()
+            .expect("a signed grant without the verb is refused");
+        assert!(format!("{unnamed}").contains("display-input"), "{unnamed}");
+
+        write_envelope(vm, &plan, &["run-entrypoint", DISPLAY_INPUT_VERB]);
+        let authority = DisplayAuthority::load(vm)
+            .unwrap()
+            .expect("the signed grant names display input");
+        assert_eq!(authority.tier(), DisplayTier::Sealed);
+        assert!(authority.attended());
+    }
 
     #[test]
     fn an_unknown_tier_is_the_sealed_tier() {
