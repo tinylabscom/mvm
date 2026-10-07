@@ -1,0 +1,11 @@
+{
+  "collection": "provisioned",
+  "records_bytes": 1874,
+  "shed": 0,
+  "snapshot_age_ms": 640,
+  "state": {
+    "generation": 1,
+    "kind": "collecting"
+  },
+  "vm_name": "web"
+}

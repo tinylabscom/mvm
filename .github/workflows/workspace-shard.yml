@@ -2,6 +2,21 @@ name: Workspace shard worker
 run-name: workspace-shard / ${{ inputs.correlation }} / ${{ inputs.runner_kind }}
 
 on:
+  workflow_call:
+    inputs:
+      commit_sha:
+        required: true
+        type: string
+      shard:
+        required: true
+        type: string
+      runner_kind:
+        required: true
+        type: string
+      archive_run_id:
+        required: false
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       commit_sha:
@@ -14,7 +29,7 @@ on:
         type: choice
         options: ["1", "2"]
       runner_kind:
-        description: Runner pool selected by the parent broker
+        description: Runner pool for this shard
         required: true
         type: choice
         options: [github, hetzner]
@@ -38,7 +53,7 @@ jobs:
     # Archive workers on one persistent host share the build-time source path.
     # Serialize that pool; GitHub-hosted workers have separate filesystems.
     concurrency:
-      group: ${{ inputs.runner_kind == 'hetzner' && inputs.archive_run_id != '' && format('workspace-archive-{0}', inputs.archive_run_id) || format('workspace-shard-{0}', github.run_id) }}
+      group: ${{ inputs.runner_kind == 'hetzner' && inputs.archive_run_id != '' && format('workspace-archive-{0}', inputs.archive_run_id) || format('workspace-shard-{0}-{1}', github.run_id, inputs.shard) }}
       cancel-in-progress: false
     timeout-minutes: 55
     steps:

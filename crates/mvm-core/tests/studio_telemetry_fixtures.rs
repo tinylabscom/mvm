@@ -13,6 +13,9 @@
 //! deliberate schema change with:
 //! `MVM_REGENERATE_VECTORS=1 cargo test -p mvm-core --test studio_telemetry_fixtures -- --ignored`.
 
+use mvm_core::protocol::telemetry::served::{
+    CollectorState, ReceivedRecord, TelemetryCursor, TelemetryReadResponse, TelemetryStatus,
+};
 use mvm_core::protocol::telemetry::{
     Attribute, AttributeValue, Attributes, CoverageState, GuestLossStage, Level, LossReason,
     ProducerEpoch, RecordBody, SourceKind, TailState, TelemetryRecord,
@@ -22,6 +25,16 @@ const VECTOR_DIR: &str = "../../tests/vectors/studio-telemetry";
 
 /// The three scenario streams, in the order studio's fixtures list them.
 const SCENARIOS: [&str; 3] = ["healthy-boot", "lossy-flood", "restored-generation"];
+
+/// The served shapes the read seam answers with, frozen beside the streams:
+/// three status snapshots and one page of the healthy-boot stream as a
+/// consumer receives it.
+const SERVED: [&str; 4] = [
+    "status-not-provisioned",
+    "status-collecting",
+    "status-degraded",
+    "page-healthy-boot",
+];
 
 fn attr(key: &str, value: AttributeValue) -> Attribute {
     Attribute {
@@ -239,6 +252,76 @@ fn vector_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(VECTOR_DIR).join(format!("{name}.jsonl"))
 }
 
+/// The receive time the fixture page stamps on record `index`: one
+/// quarter-second apart, so the UI's wall-clock placement is visible.
+fn received_at_ms(index: usize) -> u64 {
+    1_700_000_000_000 + index as u64 * 250
+}
+
+/// A page of the healthy-boot stream exactly as the seam serves it from the
+/// start of the stream: every record in its envelope, the cursor one byte
+/// past the last persisted line, nothing undecodable, and the end reached.
+fn healthy_boot_page() -> TelemetryReadResponse {
+    let records = healthy_boot();
+    let persisted: u64 = records
+        .iter()
+        .enumerate()
+        .map(|(index, record)| {
+            ReceivedRecord::encode_line(received_at_ms(index), record)
+                .unwrap()
+                .len() as u64
+        })
+        .sum();
+    TelemetryReadResponse {
+        records: records
+            .into_iter()
+            .enumerate()
+            .map(|(index, record)| ReceivedRecord {
+                received_at_ms: Some(received_at_ms(index)),
+                record,
+            })
+            .collect(),
+        next_cursor: TelemetryCursor { offset: persisted },
+        undecodable: 0,
+        exhausted: true,
+    }
+}
+
+fn served(name: &str) -> serde_json::Value {
+    match name {
+        "status-not-provisioned" => serde_json::to_value(TelemetryStatus::NotProvisioned),
+        "status-collecting" => serde_json::to_value(TelemetryStatus::Provisioned {
+            vm_name: "web".into(),
+            state: CollectorState::Collecting { generation: 1 },
+            shed: 0,
+            snapshot_age_ms: Some(640),
+            records_bytes: 1_874,
+        }),
+        "status-degraded" => serde_json::to_value(TelemetryStatus::Provisioned {
+            vm_name: "web".into(),
+            state: CollectorState::Degraded {
+                code: "authentication-failed".into(),
+            },
+            shed: 37,
+            snapshot_age_ms: Some(1_020),
+            records_bytes: 0,
+        }),
+        "page-healthy-boot" => serde_json::to_value(healthy_boot_page()),
+        other => panic!("unknown served fixture {other}"),
+    }
+    .unwrap()
+}
+
+fn render_served(value: &serde_json::Value) -> String {
+    let mut out = serde_json::to_string_pretty(value).unwrap();
+    out.push('\n');
+    out
+}
+
+fn served_path(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(VECTOR_DIR).join(format!("{name}.json"))
+}
+
 #[test]
 fn studio_fixture_streams_match_the_committed_vectors() {
     for name in SCENARIOS {
@@ -251,6 +334,39 @@ fn studio_fixture_streams_match_the_committed_vectors() {
              with MVM_REGENERATE_VECTORS=1 (module docs)"
         );
     }
+}
+
+/// The served shapes are frozen the same way: produced by the contract
+/// types' own serde, compared byte-exact.
+#[test]
+fn studio_fixture_statuses_and_page_match_the_committed_vectors() {
+    for name in SERVED {
+        let expected = render_served(&served(name));
+        let committed = std::fs::read_to_string(served_path(name))
+            .unwrap_or_else(|e| panic!("reading {name}.json: {e}"));
+        assert_eq!(
+            committed, expected,
+            "{name}.json drifted from the generator; regenerate deliberately \
+             with MVM_REGENERATE_VECTORS=1 (module docs)"
+        );
+    }
+}
+
+/// Every served fixture decodes back through the contract types, and the
+/// page's records are the healthy-boot stream in its envelope — the two
+/// fixture families describe one stream.
+#[test]
+fn every_committed_served_fixture_decodes_through_the_contract() {
+    for name in SERVED.iter().filter(|n| n.starts_with("status-")) {
+        let committed = std::fs::read_to_string(served_path(name)).unwrap();
+        let status: TelemetryStatus =
+            serde_json::from_str(&committed).unwrap_or_else(|e| panic!("{name}.json: {e}"));
+        assert_eq!(serde_json::to_value(status).unwrap(), served(name));
+    }
+    let committed = std::fs::read_to_string(served_path("page-healthy-boot")).unwrap();
+    let page: TelemetryReadResponse = serde_json::from_str(&committed).unwrap();
+    let stream: Vec<TelemetryRecord> = page.records.into_iter().map(|r| r.record).collect();
+    assert_eq!(stream, healthy_boot());
 }
 
 /// Every fixture line must decode back through the real contract — the same
@@ -276,5 +392,8 @@ fn regenerate_the_frozen_fixture_streams() {
     std::fs::create_dir_all(VECTOR_DIR).unwrap();
     for name in SCENARIOS {
         std::fs::write(vector_path(name), render(&stream(name))).unwrap();
+    }
+    for name in SERVED {
+        std::fs::write(served_path(name), render_served(&served(name))).unwrap();
     }
 }
