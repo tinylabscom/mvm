@@ -183,6 +183,9 @@ pub struct MachineInventoryRecord {
     /// never names-with-values, never the values themselves.
     #[serde(default)]
     pub secret_ref_count: u32,
+    /// Whether the current running plan admits attended display input.
+    #[serde(default)]
+    pub attended: bool,
     /// The telemetry collector's status for this machine, when the host
     /// could read it: whether collection was provisioned for the current
     /// boot and how the collector stands. Absent for a machine with no
@@ -217,6 +220,7 @@ impl MachineInventoryRecord {
                 last_started_at: None,
                 volumes: Vec::new(),
                 secret_ref_count: 0,
+                attended: false,
                 telemetry: None,
             },
         }
@@ -341,6 +345,12 @@ impl MachineInventoryRecordBuilder {
     }
 
     #[must_use]
+    pub fn attended(mut self, attended: bool) -> Self {
+        self.record.attended = attended;
+        self
+    }
+
+    #[must_use]
     pub fn telemetry(
         mut self,
         telemetry: Option<crate::protocol::telemetry::served::TelemetryStatus>,
@@ -453,6 +463,7 @@ mod tests {
                 encrypted: true,
             }])
             .secret_ref_count(3)
+            .attended(true)
             .build()
     }
 
@@ -475,6 +486,7 @@ mod tests {
         assert!(record.status_detail.is_none());
         assert!(record.volumes.is_empty());
         assert_eq!(record.secret_ref_count, 0);
+        assert!(!record.attended);
         assert!(record.tags.is_empty());
     }
 
