@@ -1467,18 +1467,6 @@ impl AuditEmitter {
     }
 }
 
-/// Write `bytes` to `path` atomically: a same-directory temp file is written,
-/// made durable, then `rename`d over `path`. Inside [`AuditEmitter::batched`]
-/// the complete file is renamed first and its stable-storage wait joins the
-/// batch; every wait still completes before the batch returns. A concurrent
-/// reader sees either the old file or the complete new one, never a torn
-/// write. The temp name carries the pid so two publishers don't collide on
-/// it.
-/// [`write_atomic`], without the fsync.
-///
-/// Still atomic — the rename gives a reader either the whole old file or the
-/// whole new one. What is dropped is survival of power loss, which is the
-/// right trade only for something reconstructible from data already durable.
 /// Append one published root to `tenant`'s root history, durably.
 ///
 /// One JSON object per line, fsynced before returning: a root that is not on
