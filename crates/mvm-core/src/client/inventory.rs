@@ -183,6 +183,12 @@ pub struct MachineInventoryRecord {
     /// never names-with-values, never the values themselves.
     #[serde(default)]
     pub secret_ref_count: u32,
+    /// The telemetry collector's status for this machine, when the host
+    /// could read it: whether collection was provisioned for the current
+    /// boot and how the collector stands. Absent for a machine with no
+    /// state directory, or whose snapshot could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<crate::protocol::telemetry::served::TelemetryStatus>,
 }
 
 impl MachineInventoryRecord {
@@ -211,6 +217,7 @@ impl MachineInventoryRecord {
                 last_started_at: None,
                 volumes: Vec::new(),
                 secret_ref_count: 0,
+                telemetry: None,
             },
         }
     }
@@ -330,6 +337,15 @@ impl MachineInventoryRecordBuilder {
     #[must_use]
     pub fn secret_ref_count(mut self, count: u32) -> Self {
         self.record.secret_ref_count = count;
+        self
+    }
+
+    #[must_use]
+    pub fn telemetry(
+        mut self,
+        telemetry: Option<crate::protocol::telemetry::served::TelemetryStatus>,
+    ) -> Self {
+        self.record.telemetry = telemetry;
         self
     }
 

@@ -14,6 +14,11 @@
 //! it to `mvm_hostd::run::admit_and_boot_local`. A workload never boots on a
 //! path that skipped admission.
 
+mod state;
+
+pub(crate) use state::map_status;
+use state::to_state;
+
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -30,10 +35,12 @@ use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    PauseOpts, PauseOutcome, PortMapping, ResumeOpts, ResumeOutcome,
+    PauseOpts, PauseOutcome, ResumeOpts, ResumeOutcome,
 };
 use mvm_core::client::{BackendCapabilityReport, ClientOperationCapabilities};
-use mvm_core::client::{MvmClient, MvmError, Result};
+use mvm_core::client::{
+    MvmClient, MvmError, Result, TelemetryReadRequest, TelemetryReadResponse, TelemetryStatus,
+};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 #[cfg(feature = "test-support")]
@@ -43,7 +50,7 @@ use mvm_runtime::vm::instance_snapshot::{
     VsockPostRestoreSignal, VsockPrimedSignalSource, await_primed_barrier, describe_missing_reseed,
     pause_and_seal, signal_post_restore, verify_and_resume,
 };
-use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
+use mvm_runtime::vm::name_registry::VmNameRegistry;
 
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
 /// (auto-selected backend) or [`LocalBackend::with_hypervisor`].
@@ -229,7 +236,7 @@ impl LocalBackend {
                     Ok(summary) => summary,
                     Err(why) => {
                         return Err(refuse_resume(name, &why, || {
-                            backend.stop(&VmId(name.to_string()))
+                            backend.stop(&VmId(name.to_string())).map(|_timing| ())
                         }));
                     }
                 };
@@ -734,42 +741,6 @@ impl Default for LocalBackend {
     }
 }
 
-pub(crate) fn map_status(s: &VmStatus) -> MachineStatus {
-    match s {
-        VmStatus::Running => MachineStatus::Running,
-        VmStatus::Starting => MachineStatus::Starting,
-        VmStatus::Stopped => MachineStatus::Stopped,
-        // A paused VM stays distinct from stopped so it remains visible in a
-        // default listing rather than folding away.
-        VmStatus::Paused => MachineStatus::Paused,
-        VmStatus::Failed { .. } => MachineStatus::Failed,
-    }
-}
-
-/// The detail behind a non-happy status — currently the failure reason, which
-/// rides on [`MachineState::status_detail`] because [`MachineStatus::Failed`] is
-/// a unit variant.
-fn status_detail(s: &VmStatus) -> Option<String> {
-    match s {
-        VmStatus::Failed { reason } => Some(reason.clone()),
-        VmStatus::Running | VmStatus::Starting | VmStatus::Stopped | VmStatus::Paused => None,
-    }
-}
-
-/// Resolve the backend that owns a started VM by its state-dir marker, falling
-/// back to the platform default so the column is accurate for a marker-less VM.
-fn resolve_backend_name(vm_name: &str) -> String {
-    AnyBackend::for_started_vm(vm_name)
-        .map(|b| b.name().to_string())
-        .unwrap_or_else(|| {
-            if mvm_core::platform::current().is_hvf_default_tier() {
-                "hvf".to_string()
-            } else {
-                "firecracker".to_string()
-            }
-        })
-}
-
 /// Load the persistent VM name registry, degrading to empty when absent or
 /// unreadable so a listing falls back to backend-only rows rather than failing.
 fn load_name_registry() -> VmNameRegistry {
@@ -835,38 +806,6 @@ pub(crate) fn deregister_from_name_registry(name: &str) {
     if let Ok(mut registry) = VmNameRegistry::load(&path) {
         registry.deregister(name);
         let _ = registry.save(&path);
-    }
-}
-
-/// Build a [`MachineState`] from a backend `VmInfo` joined with its optional
-/// registry entry (tags / TTL / readiness) and its resolved owning backend.
-fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineState {
-    let backend = resolve_backend_name(&info.name);
-    MachineState {
-        id: MachineId(info.id.0),
-        status: map_status(&info.status),
-        status_detail: status_detail(&info.status),
-        backend,
-        guest_ip: info.guest_ip,
-        cpus: info.cpus,
-        memory_mib: info.memory_mib,
-        profile: info.profile,
-        revision: info.revision,
-        flake_ref: info.flake_ref,
-        ports: info
-            .ports
-            .into_iter()
-            .map(|p| PortMapping {
-                host: p.host,
-                guest: p.guest,
-            })
-            .collect(),
-        tags: reg.map(|r| r.tags.clone()).unwrap_or_default(),
-        expires_at: reg.and_then(|r| r.expires_at.clone()),
-        auto_resume: reg.map(|r| r.auto_resume).unwrap_or(true),
-        readiness: reg.and_then(|r| r.readiness.clone()),
-        last_readiness_change_at: reg.and_then(|r| r.last_readiness_change_at.clone()),
-        name: info.name,
     }
 }
 
@@ -1118,6 +1057,19 @@ pub(crate) fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<Str
     mvm_runtime::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
 }
 
+/// A telemetry read failure as the facade reports it: a stale cursor is the
+/// caller's to fix (start over), anything else is the host's.
+fn telemetry_err(e: crate::telemetry::TelemetryReadError) -> MvmError {
+    match e {
+        crate::telemetry::TelemetryReadError::CursorInvalid { .. } => MvmError::InvalidSpec {
+            reason: e.to_string(),
+        },
+        other => MvmError::Backend {
+            reason: other.to_string(),
+        },
+    }
+}
+
 #[async_trait]
 impl MvmClient for LocalBackend {
     async fn backend_capabilities(&self) -> Result<BackendCapabilityReport> {
@@ -1140,9 +1092,39 @@ impl MvmClient for LocalBackend {
                         .logs(true)
                         .reconfigure(true)
                         .set_ttl(true)
+                        .telemetry(true)
                         .build(),
                 ),
         )
+    }
+
+    async fn telemetry_status(&self, id: &MachineId) -> Result<TelemetryStatus> {
+        let reader = crate::telemetry::LocalTelemetryReader::for_machine(&id.0);
+        if !reader.state_dir_exists() {
+            // Defined but never booted is "not provisioned"; unknown is
+            // "not found". The inspect path already draws that line.
+            self.inspect_machine(id).await?;
+            return Ok(TelemetryStatus::NotProvisioned);
+        }
+        reader.status().map_err(telemetry_err)
+    }
+
+    async fn telemetry_records(
+        &self,
+        id: &MachineId,
+        request: TelemetryReadRequest,
+    ) -> Result<TelemetryReadResponse> {
+        let reader = crate::telemetry::LocalTelemetryReader::for_machine(&id.0);
+        if !reader.state_dir_exists() {
+            self.inspect_machine(id).await?;
+            return Ok(TelemetryReadResponse {
+                records: Vec::new(),
+                next_cursor: request.cursor(),
+                undecodable: 0,
+                exhausted: true,
+            });
+        }
+        reader.read(&request).map_err(telemetry_err)
     }
 
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
@@ -1309,7 +1291,7 @@ impl MvmClient for LocalBackend {
             // failed stop is still put on the record under its plan.
             crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
         }
-        result.map_err(backend_err)
+        result.map(|_timing| ()).map_err(backend_err)
     }
 
     async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
@@ -1673,7 +1655,11 @@ mod tests {
         let registry_path = mvm_runtime::vm::name_registry::registry_path();
         let mut registry = VmNameRegistry::default();
         registry
-            .register("vm-a", "/vms/vm-a", "default", None, 0)
+            .register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+                "vm-a",
+                "/vms/vm-a",
+                "default",
+            ))
             .expect("register");
         registry.save(&registry_path).expect("save registry");
 
@@ -1730,7 +1716,11 @@ mod tests {
         let registry_path = mvm_runtime::vm::name_registry::registry_path();
         let mut registry = VmNameRegistry::load(&registry_path).expect("registry");
         registry
-            .register(name, &format!("/vms/{name}"), "default", None, 0)
+            .register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+                name,
+                &format!("/vms/{name}"),
+                "default",
+            ))
             .expect("register");
         registry.save(&registry_path).expect("save registry");
         registry_path
@@ -2011,21 +2001,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn status_maps_all_variants() {
-        assert_eq!(map_status(&VmStatus::Running), MachineStatus::Running);
-        assert_eq!(map_status(&VmStatus::Starting), MachineStatus::Starting);
-        assert_eq!(map_status(&VmStatus::Stopped), MachineStatus::Stopped);
-        // Paused stays distinct from Stopped (it must remain visible by default).
-        assert_eq!(map_status(&VmStatus::Paused), MachineStatus::Paused);
-        assert_eq!(
-            map_status(&VmStatus::Failed {
-                reason: "boom".into()
-            }),
-            MachineStatus::Failed
-        );
-    }
-
     #[tokio::test]
     #[cfg(feature = "test-support")]
     async fn local_operation_report_omits_the_unwired_exec_seam() {
@@ -2039,86 +2014,6 @@ mod tests {
         assert!(operations.remove && operations.logs && operations.reconfigure);
         assert!(operations.set_ttl);
         assert!(!operations.exec);
-    }
-
-    #[test]
-    fn status_detail_carries_only_failure_reason() {
-        assert_eq!(
-            status_detail(&VmStatus::Failed {
-                reason: "boom".into()
-            }),
-            Some("boom".to_string())
-        );
-        assert_eq!(status_detail(&VmStatus::Running), None);
-        assert_eq!(status_detail(&VmStatus::Paused), None);
-    }
-
-    #[test]
-    fn to_state_joins_backend_info_with_registry_metadata() {
-        let info = VmInfo {
-            id: VmId("vm-1".into()),
-            name: "web".into(),
-            status: VmStatus::Running,
-            guest_ip: Some("172.16.0.2".into()),
-            cpus: 2,
-            memory_mib: 512,
-            profile: Some("worker".into()),
-            revision: None,
-            flake_ref: Some(".#worker".into()),
-            ports: vec![mvm_core::protocol::vm_backend::VmPortMapping {
-                host: 8080,
-                guest: 80,
-            }],
-        };
-        let mut registry = VmNameRegistry::default();
-        let mut tags = std::collections::BTreeMap::new();
-        tags.insert("env".to_string(), "prod".to_string());
-        registry
-            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
-                name: "web",
-                vm_dir: "/tmp/web",
-                network: "default",
-                guest_ip: Some("172.16.0.2"),
-                slot_index: 0,
-                tags,
-                expires_at: Some("2099-01-01T00:00:00Z".into()),
-                auto_resume: false,
-            })
-            .unwrap();
-
-        let state = to_state(info, registry.lookup("web"));
-        assert_eq!(state.name, "web");
-        assert_eq!(state.status, MachineStatus::Running);
-        assert_eq!(state.cpus, 2);
-        assert_eq!(state.memory_mib, 512);
-        assert_eq!(state.flake_ref.as_deref(), Some(".#worker"));
-        assert_eq!(
-            state.ports,
-            vec![PortMapping {
-                host: 8080,
-                guest: 80
-            }]
-        );
-        assert_eq!(state.tags.get("env").map(String::as_str), Some("prod"));
-        assert_eq!(state.expires_at.as_deref(), Some("2099-01-01T00:00:00Z"));
-        assert!(!state.auto_resume);
-        // No registry entry → metadata defaults (auto_resume true).
-        let bare = to_state(
-            VmInfo {
-                id: VmId("vm-2".into()),
-                name: "solo".into(),
-                status: VmStatus::Stopped,
-                guest_ip: None,
-                cpus: 0,
-                memory_mib: 0,
-                profile: None,
-                revision: None,
-                flake_ref: None,
-                ports: Vec::new(),
-            },
-            None,
-        );
-        assert!(bare.tags.is_empty() && bare.auto_resume && bare.expires_at.is_none());
     }
 
     #[tokio::test]
@@ -2320,6 +2215,133 @@ mod tests {
                 .iter()
                 .any(|m| m.name == "local-boot-from-image-path")
         );
+    }
+
+    /// The facade's telemetry read seam over the collector's files: an
+    /// unknown machine is not found, a known one with no snapshot was not
+    /// provisioned, and a staged snapshot and records file are served as the
+    /// typed status and a cursor-paged stream. A cursor the stream no longer
+    /// honors is the caller's error, not the host's.
+    #[tokio::test]
+    #[cfg(feature = "test-support")]
+    async fn telemetry_reads_serve_the_collector_files_beside_the_vm_state() {
+        use mvm_core::client::{CollectorState, TelemetryCursor, TelemetryStatus};
+        use mvm_core::protocol::telemetry::served::ReceivedRecord;
+        use mvm_core::protocol::telemetry::{
+            CoverageState, ProducerEpoch, RecordBody, SourceKind, TelemetryRecord,
+        };
+
+        let data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+
+        let unknown = MachineId("no-such-machine".into());
+        assert!(matches!(
+            be.telemetry_status(&unknown).await,
+            Err(MvmError::NotFound { .. })
+        ));
+        assert!(matches!(
+            be.telemetry_records(&unknown, TelemetryReadRequest::default())
+                .await,
+            Err(MvmError::NotFound { .. })
+        ));
+
+        // A machine the backend knows, booted without a collector.
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+        let booted = be
+            .run_machine(MachineSpec {
+                name: "telemetry-quiet".into(),
+                image: rootfs.to_string_lossy().parse().expect("a path parses"),
+                cpus: 1,
+                memory_mib: 128,
+                env: vec![],
+                grants: None,
+                assurance_campaign: None,
+            })
+            .await
+            .expect("in-process admitted boot");
+        assert_eq!(
+            be.telemetry_status(&booted.id).await.unwrap(),
+            TelemetryStatus::NotProvisioned
+        );
+        let page = be
+            .telemetry_records(&booted.id, TelemetryReadRequest::default())
+            .await
+            .unwrap();
+        assert!(page.records.is_empty() && page.exhausted);
+
+        // A collector's files staged where the embedded collector writes them.
+        let state_dir = vm_state_dir("telemetry-web");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let (status_path, records_path) = crate::telemetry::collector_files(&state_dir);
+        std::fs::write(
+            &status_path,
+            serde_json::to_vec(&mvm_hostd::telemetry_collector::CollectorStatusSnapshot {
+                vm_name: "telemetry-web".into(),
+                status: "collecting".into(),
+                generation: Some(3),
+                shed: 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let record = TelemetryRecord::builder()
+            .epoch(ProducerEpoch::new([4; 16]).unwrap())
+            .producer(1)
+            .sequence(1)
+            .monotonic_ns(5)
+            .source(SourceKind::GuestAgent)
+            .body(RecordBody::Coverage {
+                state: CoverageState::Started,
+                code: "guest-agent".try_into().unwrap(),
+            })
+            .build()
+            .unwrap();
+        let line = ReceivedRecord::encode_line(1_700_000_000_000, &record).unwrap();
+        std::fs::write(&records_path, [line.clone(), line.clone()].concat()).unwrap();
+
+        let id = MachineId("telemetry-web".into());
+        let TelemetryStatus::Provisioned {
+            vm_name,
+            state,
+            shed,
+            records_bytes,
+            ..
+        } = be.telemetry_status(&id).await.unwrap()
+        else {
+            panic!("provisioned");
+        };
+        assert_eq!(vm_name, "telemetry-web");
+        assert_eq!(state, CollectorState::Collecting { generation: 3 });
+        assert_eq!((shed, records_bytes), (1, line.len() as u64 * 2));
+
+        let first = be
+            .telemetry_records(&id, TelemetryReadRequest::builder().limit(1).build())
+            .await
+            .unwrap();
+        assert_eq!(first.records.len(), 1);
+        assert_eq!(first.records[0].received_at_ms, Some(1_700_000_000_000));
+        assert_eq!(first.records[0].record, record);
+        assert!(!first.exhausted);
+        let rest = be
+            .telemetry_records(
+                &id,
+                TelemetryReadRequest::builder()
+                    .cursor(first.next_cursor)
+                    .build(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rest.records.len(), 1);
+        assert!(rest.exhausted);
+
+        let stale = TelemetryReadRequest::builder()
+            .cursor(TelemetryCursor { offset: 3 })
+            .build();
+        assert!(matches!(
+            be.telemetry_records(&id, stale).await,
+            Err(MvmError::InvalidSpec { .. })
+        ));
     }
 
     #[tokio::test]

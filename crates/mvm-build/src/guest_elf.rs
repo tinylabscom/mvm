@@ -1,6 +1,6 @@
 //! Fixed-offset ELF header checks for the guest binaries.
 //!
-//! The guest artifacts are cross-compiled as `*-unknown-linux-musl` statics and
+//! The guest executables are cross-compiled as `*-unknown-linux-musl` statics and
 //! injected into a rootfs that has no dynamic loader. A dynamically linked or
 //! wrong-architecture binary therefore does not fail here — it fails inside the
 //! guest, after boot, as a silent PID 1 that never reaches the agent.
@@ -11,9 +11,15 @@
 //! allocation is driven by a field read out of the file. The inputs are our own
 //! build outputs under a mode-0700 cache, not registry or guest bytes, and this
 //! deliberately stays too small to be a parser.
+//!
+//! Guest shared objects are the other kind of artifact: loaded by the guest's
+//! own dynamic loader, so they must be dynamic, and must need nothing beyond
+//! the libc they were built for. Their `DT_NEEDED` list is read with
+//! [`mvm_fs::elf::needed_sonames`], the reader the SDK sidecar check uses.
 
 use std::path::Path;
 
+use mvm_contract::guest_libc::GuestLibc;
 use mvm_core::arch::GuestArch;
 
 const EI_CLASS: usize = 4;
@@ -23,6 +29,9 @@ const ELFDATA2LSB: u8 = 1;
 
 const EM_X86_64: u16 = 0x3E;
 const EM_AARCH64: u16 = 0xB7;
+
+const E_TYPE: usize = 16;
+const ET_DYN: u16 = 3;
 
 const PT_INTERP: u32 = 3;
 const PT_DYNAMIC: u32 = 2;
@@ -47,6 +56,31 @@ pub enum GuestElfError {
     Dynamic { path: String, kind: &'static str },
     #[error("{path}: ELF header is truncated")]
     Truncated { path: String },
+    #[error("{path}: ELF type {found} is not a shared object (ET_DYN)")]
+    NotSharedObject { path: String, found: u16 },
+    #[error("{path}: has a PT_INTERP segment, so it is an executable, not a shared object")]
+    ExecutableNotLibrary { path: String },
+    #[error("{path}: no libc to check a shared object against")]
+    UnknownLibc { path: String },
+    #[error("{path}: dynamic section unreadable: {reason}")]
+    DynamicUnreadable { path: String, reason: String },
+    #[error("{path}: a {libc} shared object must need {soname}, but it needs {found:?}")]
+    MissingLibc {
+        path: String,
+        libc: GuestLibc,
+        soname: &'static str,
+        found: Vec<String>,
+    },
+    #[error(
+        "{path}: needs {soname}, which a {libc} guest is not guaranteed to provide \
+         (allowed: {allowed:?})"
+    )]
+    UnexpectedNeeded {
+        path: String,
+        libc: GuestLibc,
+        soname: String,
+        allowed: Vec<&'static str>,
+    },
 }
 
 fn expected_machine(arch: GuestArch) -> u16 {
@@ -78,13 +112,10 @@ fn u64_at(b: &[u8], off: usize) -> Option<u64> {
     bytes_at::<8>(b, off).map(u64::from_le_bytes)
 }
 
-/// Reject anything the guest could not execute: a non-ELF, a 32-bit or
-/// big-endian ELF, the wrong machine, or a dynamically linked binary.
-pub fn validate_static_guest_elf(
-    bytes: &[u8],
-    path: &Path,
-    arch: GuestArch,
-) -> Result<(), GuestElfError> {
+/// The ELF64 little-endian identity and machine checks every guest artifact
+/// shares: a non-ELF, a 32-bit or big-endian ELF, or the wrong machine is
+/// refused before anything else is read.
+fn check_guest_elf_header(bytes: &[u8], path: &Path, arch: GuestArch) -> Result<(), GuestElfError> {
     let p = || path.display().to_string();
 
     if bytes.len() < 4 || bytes[..4] != [0x7f, b'E', b'L', b'F'] {
@@ -106,6 +137,18 @@ pub fn validate_static_guest_elf(
             expected: arch,
         });
     }
+    Ok(())
+}
+
+/// Reject anything the guest could not execute: a non-ELF, a 32-bit or
+/// big-endian ELF, the wrong machine, or a dynamically linked binary.
+pub fn validate_static_guest_elf(
+    bytes: &[u8],
+    path: &Path,
+    arch: GuestArch,
+) -> Result<(), GuestElfError> {
+    let p = || path.display().to_string();
+    check_guest_elf_header(bytes, path, arch)?;
 
     // Program header table: e_phoff@32 (u64), e_phentsize@54, e_phnum@56.
     let phoff = u64_at(bytes, 32).ok_or_else(|| GuestElfError::Truncated { path: p() })? as usize;
@@ -143,6 +186,100 @@ pub fn validate_static_guest_elf(
     }
 
     Ok(())
+}
+
+/// The sonames a guest shared object built for `libc` may need on `arch`.
+///
+/// glibc's list is what a cross-compiled Rust cdylib links against plus the
+/// arch's loader, which a native toolchain records instead of `libpthread`.
+/// Each is part of every glibc install. musl folds threads and the loader into
+/// `libc.so`, leaving only the unwinder beside it. Anything else is a library
+/// the guest may not carry, discovered only when `dlopen` fails inside it.
+pub fn allowed_shared_object_needs(arch: GuestArch, libc: GuestLibc) -> Vec<&'static str> {
+    let glibc_loader = match arch {
+        GuestArch::Aarch64 => "ld-linux-aarch64.so.1",
+        GuestArch::X86_64 => "ld-linux-x86-64.so.2",
+    };
+    match libc {
+        GuestLibc::Glibc => vec![
+            "libc.so.6",
+            "libpthread.so.0",
+            "libgcc_s.so.1",
+            glibc_loader,
+        ],
+        GuestLibc::Musl => vec!["libc.so", "libgcc_s.so.1"],
+        GuestLibc::Unknown => Vec::new(),
+    }
+}
+
+/// Reject anything a `libc` guest on `arch` could not `dlopen`: a non-ELF or
+/// wrong-machine object, an executable, or one whose `DT_NEEDED` list does not
+/// name `libc`'s soname or names a library outside
+/// [`allowed_shared_object_needs`].
+///
+/// The libc soname is the one witness of which libc an object was really
+/// linked against — a build that names a musl target can still link through a
+/// glibc driver — so it is required, not merely allowed.
+pub fn validate_guest_shared_object(
+    bytes: &[u8],
+    path: &Path,
+    arch: GuestArch,
+    libc: GuestLibc,
+) -> Result<(), GuestElfError> {
+    let p = || path.display().to_string();
+    check_guest_elf_header(bytes, path, arch)?;
+    let Some(libc_soname) = libc.libc_soname() else {
+        return Err(GuestElfError::UnknownLibc { path: p() });
+    };
+    let e_type = u16_at(bytes, E_TYPE).ok_or_else(|| GuestElfError::Truncated { path: p() })?;
+    if e_type != ET_DYN {
+        return Err(GuestElfError::NotSharedObject {
+            path: p(),
+            found: e_type,
+        });
+    }
+    if program_header_types(bytes).any(|p_type| p_type == PT_INTERP) {
+        return Err(GuestElfError::ExecutableNotLibrary { path: p() });
+    }
+    let needed =
+        mvm_fs::elf::needed_sonames(bytes).map_err(|e| GuestElfError::DynamicUnreadable {
+            path: p(),
+            reason: e.to_string(),
+        })?;
+    // Exact comparison: `libc.so` is a prefix of `libc.so.6`.
+    if !needed.iter().any(|name| name == libc_soname) {
+        return Err(GuestElfError::MissingLibc {
+            path: p(),
+            libc,
+            soname: libc_soname,
+            found: needed,
+        });
+    }
+    let allowed = allowed_shared_object_needs(arch, libc);
+    if let Some(unexpected) = needed
+        .into_iter()
+        .find(|name| !allowed.contains(&name.as_str()))
+    {
+        return Err(GuestElfError::UnexpectedNeeded {
+            path: p(),
+            libc,
+            soname: unexpected,
+            allowed,
+        });
+    }
+    Ok(())
+}
+
+/// The `p_type` of each program header, stopping at the first one that does
+/// not lie wholly inside `bytes`. Callers have checked the header first.
+fn program_header_types(bytes: &[u8]) -> impl Iterator<Item = u32> + '_ {
+    let phoff = u64_at(bytes, 32).map_or(usize::MAX, |v| v as usize);
+    let phentsize = u16_at(bytes, 54).map_or(0, usize::from);
+    let phnum = u16_at(bytes, 56).map_or(0, usize::from);
+    (0..phnum).map_while(move |i| {
+        let base = phoff.checked_add(i.saturating_mul(phentsize))?;
+        u32_at(bytes, base)
+    })
 }
 
 /// Whether the dynamic array at `off` carries a `DT_NEEDED` tag. Walks fixed
@@ -320,5 +457,142 @@ mod tests {
         bytes[56..58].copy_from_slice(&u16::MAX.to_le_bytes());
         bytes[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(validate_static_guest_elf(&bytes, p(), host()), Ok(()));
+    }
+
+    /// A shared object for `machine` recording `needed`.
+    fn shared_object(machine: u16, needed: &[&str]) -> Vec<u8> {
+        let mut bytes = mvm_fs::elf::test_fixture::shared_object(needed);
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    fn so_path() -> &'static Path {
+        Path::new("/cache/lib/libcuda.so.1")
+    }
+
+    #[test]
+    fn a_shared_object_needing_only_its_libc_is_accepted() {
+        let arch = host();
+        let loader = allowed_shared_object_needs(arch, GuestLibc::Glibc)[3];
+        for needed in [
+            vec!["libpthread.so.0", "libc.so.6"],
+            vec!["libgcc_s.so.1", "libc.so.6", loader],
+        ] {
+            let bytes = shared_object(host_machine(), &needed);
+            assert_eq!(
+                validate_guest_shared_object(&bytes, so_path(), arch, GuestLibc::Glibc),
+                Ok(()),
+                "{needed:?}"
+            );
+        }
+        for needed in [vec!["libc.so"], vec!["libgcc_s.so.1", "libc.so"]] {
+            let bytes = shared_object(host_machine(), &needed);
+            assert_eq!(
+                validate_guest_shared_object(&bytes, so_path(), arch, GuestLibc::Musl),
+                Ok(()),
+                "{needed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_shared_object_for_the_wrong_arch_is_rejected() {
+        let other = if host_machine() == EM_X86_64 {
+            EM_AARCH64
+        } else {
+            EM_X86_64
+        };
+        let bytes = shared_object(other, &["libc.so"]);
+        assert!(matches!(
+            validate_guest_shared_object(&bytes, so_path(), host(), GuestLibc::Musl),
+            Err(GuestElfError::WrongMachine { .. })
+        ));
+    }
+
+    #[test]
+    fn a_static_executable_offered_as_a_library_is_rejected() {
+        let bytes = elf(host_machine(), &[(1, 0, 0)]);
+        assert!(matches!(
+            validate_guest_shared_object(&bytes, so_path(), host(), GuestLibc::Musl),
+            Err(GuestElfError::NotSharedObject { found: 0, .. })
+        ));
+    }
+
+    /// A dynamic executable is ET_DYN too; its interpreter gives it away.
+    #[test]
+    fn a_dynamic_executable_offered_as_a_library_is_rejected() {
+        let mut bytes = shared_object(host_machine(), &["libc.so.6"]);
+        // Turn the PT_LOAD header into PT_INTERP.
+        bytes[64..68].copy_from_slice(&PT_INTERP.to_le_bytes());
+        assert!(matches!(
+            validate_guest_shared_object(&bytes, so_path(), host(), GuestLibc::Glibc),
+            Err(GuestElfError::ExecutableNotLibrary { .. })
+        ));
+    }
+
+    #[test]
+    fn a_shared_object_without_its_libc_is_rejected() {
+        let cases = [
+            (vec![], GuestLibc::Musl),
+            (vec!["libc.so.6"], GuestLibc::Musl),
+            (vec!["libc.so"], GuestLibc::Glibc),
+        ];
+        for (needed, libc) in cases {
+            let bytes = shared_object(host_machine(), &needed);
+            assert!(
+                matches!(
+                    validate_guest_shared_object(&bytes, so_path(), host(), libc),
+                    Err(GuestElfError::MissingLibc { .. })
+                ),
+                "{needed:?} as {libc}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_need_outside_the_allowlist_is_rejected_and_named() {
+        let cases = [
+            (
+                vec!["libc.so.6", "libssl.so.3"],
+                GuestLibc::Glibc,
+                "libssl.so.3",
+            ),
+            (
+                vec!["libc.so", "libpthread.so.0"],
+                GuestLibc::Musl,
+                "libpthread.so.0",
+            ),
+        ];
+        for (needed, libc, unexpected) in cases {
+            let bytes = shared_object(host_machine(), &needed);
+            let err = validate_guest_shared_object(&bytes, so_path(), host(), libc).unwrap_err();
+            assert!(
+                matches!(&err, GuestElfError::UnexpectedNeeded { soname, .. } if soname == unexpected),
+                "{err}"
+            );
+            assert!(err.to_string().contains("libcuda.so.1"), "{err}");
+        }
+    }
+
+    #[test]
+    fn the_glibc_allowlist_names_each_arch_its_own_loader() {
+        assert!(
+            allowed_shared_object_needs(GuestArch::Aarch64, GuestLibc::Glibc)
+                .contains(&"ld-linux-aarch64.so.1")
+        );
+        assert!(
+            allowed_shared_object_needs(GuestArch::X86_64, GuestLibc::Glibc)
+                .contains(&"ld-linux-x86-64.so.2")
+        );
+        assert!(allowed_shared_object_needs(GuestArch::X86_64, GuestLibc::Unknown).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_libc_is_rejected() {
+        let bytes = shared_object(host_machine(), &["libc.so"]);
+        assert!(matches!(
+            validate_guest_shared_object(&bytes, so_path(), host(), GuestLibc::Unknown),
+            Err(GuestElfError::UnknownLibc { .. })
+        ));
     }
 }

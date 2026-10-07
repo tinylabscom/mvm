@@ -65,7 +65,9 @@ fn auto_exec_node_script_emits_recording_and_compile_lowers_it() {
     let bytes = std::fs::read(&out_recording).unwrap();
     let recording: mvm_sdk::runtime::RuntimeRecording =
         serde_json::from_slice(&bytes).expect("recording JSON parses");
-    let workload = mvm_sdk::runtime::compile_recording(&recording).expect("lowering succeeds");
+    let workload = mvm_sdk::runtime::compile_recording(&recording)
+        .expect("lowering succeeds")
+        .workload;
 
     assert_eq!(workload.id, "etl-test-node");
     let app = &workload.apps[0];

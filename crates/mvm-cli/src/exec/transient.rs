@@ -245,11 +245,18 @@ pub(super) fn teardown_transient_vm(
     use crate::commands::vm::phase_timing::SubPhase;
 
     sub.start(SubPhase::StopTransient);
-    let (stop_error, stop_timing) =
-        match backend.stop_transient_with_timing(&VmId(vm_name.to_string())) {
-            Ok(timing) => (None, timing),
-            Err(error) => (Some(format!("{error:#}")), None),
-        };
+    let (stop_error, stop_timing) = match backend.stop_transient(&VmId(vm_name.to_string())) {
+        Ok(timing) => (None, timing),
+        Err(error) => {
+            let error = format!("{error:#}");
+            tracing::warn!(
+                error = %error,
+                machine = vm_name,
+                "transient stop failed; refusing to seal a potentially live session"
+            );
+            (Some(error), None)
+        }
+    };
     sub.finish(SubPhase::StopTransient);
     sub.record_stop_timing(stop_timing);
 
@@ -263,8 +270,6 @@ pub(super) fn teardown_transient_vm(
                 let _ = mvm_client::launch::record_transient_exit(exit_audit);
             }
         }
-    } else if let Some(error) = stop_error {
-        tracing::warn!(error = %error, machine = vm_name, "transient stop failed");
     }
 
     // Refilling the pool is not this VM's cleanup: it boots a standby parent
