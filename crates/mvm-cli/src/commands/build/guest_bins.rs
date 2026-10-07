@@ -39,7 +39,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let request = build_request(&args, workspace, cache_root);
     // A cold cache compiles every guest binary per architecture, which takes
     // minutes; the live line keeps that from looking like a hang.
-    let phase = mvm_runtime::ui::activity::start(format!(
+    let phase = crate::ui::activity::start(format!(
         "Building the guest binaries for {} from {}",
         arch_list(&request.arches),
         request.workspace_root.display()
