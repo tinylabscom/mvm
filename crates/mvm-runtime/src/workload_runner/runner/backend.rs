@@ -52,10 +52,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 
         let endpoint_started = Instant::now();
         let state_dir = vm_state_dir(&id.0);
-        reap_network_endpoint(&state_dir, &id.0);
-        mvm_vmm::host::gpu_endpoint_spawn::reap_gpu_endpoint(&state_dir);
-        mvm_vmm::host::broker_services_spawn::reap_broker_services(&state_dir);
-        mvm_vmm::host::host_agent_spawn::reap_host_agent_services_from_state(&state_dir, &id.0);
+        mvm_vmm::host::vm_helpers::reap_vm_host_helpers(&state_dir, &id.0);
         let endpoint_reaping = endpoint_started.elapsed();
 
         let kill_started = Instant::now();

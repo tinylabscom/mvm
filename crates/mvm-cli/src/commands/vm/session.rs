@@ -65,9 +65,9 @@ pub(in crate::commands) enum Cmd {
     Console(ConsoleArgs),
     /// Reap idle sessions: tear down the VM, mark each record
     /// `state = Reaped`, and seal its audit chain. The per-VM supervisor
-    /// does this on its own on libkrun and HVF, and most session verbs
-    /// sweep before their own work; this verb is for an explicit sweep on
-    /// the backends with no supervisor. Idempotent.
+    /// does this on its own on libkrun and HVF, the host agent runs this
+    /// verb on Firecracker and QEMU, and most session verbs sweep before
+    /// their own work; this verb is for an explicit sweep. Idempotent.
     Reap(ReapArgs),
 }
 

@@ -717,6 +717,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 handoff_socket: channels.handoff_socket,
                 handoff_root: channels.handoff_root,
                 handoff_verify_key: channels.handoff_verify_key,
+                handoff_accepted: channels.handoff_accepted,
                 cpu_millicores,
                 quota_record,
             },
@@ -787,6 +788,7 @@ struct RunInputs {
     handoff_socket: Option<PathBuf>,
     handoff_root: Option<PathBuf>,
     handoff_verify_key: Option<String>,
+    handoff_accepted: Option<mvm_vmm::hvf_handoff::HandoffAcceptedSender>,
     /// CPU share to enforce via the in-process vCPU quota scheduler.
     cpu_millicores: Option<u32>,
     /// Where to write the measured quota record on exit.
@@ -1442,6 +1444,7 @@ unsafe fn run(
         handoff_socket,
         handoff_root,
         handoff_verify_key,
+        handoff_accepted,
         cpu_millicores,
         quota_record,
     } = inputs;
@@ -1745,6 +1748,9 @@ unsafe fn run(
             .is_err()
             {
                 return Err(HvfError::SnapshotState("handoff control setup failed"));
+            }
+            if let Some(sender) = handoff_accepted {
+                v.publish_handoffs_to(sender);
             }
             // Start the dedicated host-I/O thread now that the agent/egress/console
             // sockets are wired: it services host→guest delivery on wall-clock time

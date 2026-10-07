@@ -107,7 +107,31 @@ pub fn start_session(
             record.id
         )),
     );
+    ensure_idle_timeout_owner(&record, &booted.admission.admitted.plan().tenant.0);
     Ok(record)
+}
+
+/// Make sure a process outlives this one to enforce `record`'s idle timeout.
+///
+/// On libkrun and HVF that is the VM's own supervisor, already running. The
+/// backends with no supervisor rely on the tenant's host agent, which this
+/// starts if it is not up. Best-effort: a session whose agent could not be
+/// started still runs, and the client sweep still reaps it.
+fn ensure_idle_timeout_owner(record: &SessionRecord, tenant: &str) {
+    let Some(kind) = mvm_runtime::AnyBackend::started_vm_kind(&record.vm_name) else {
+        return;
+    };
+    if !mvm_hostd::host_agent_sessions::host_agent_enforces_session_expiry(kind) {
+        return;
+    }
+    if let Err(e) = mvm_runtime::ensure_host_agent_daemon(tenant) {
+        tracing::warn!(
+            session = %record.id,
+            vm = %record.vm_name,
+            error = %format!("{e:#}"),
+            "no host agent to enforce the idle timeout; only a session command will reap it"
+        );
+    }
 }
 
 /// Read a session record by id.

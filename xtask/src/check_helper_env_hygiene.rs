@@ -571,7 +571,7 @@ const HELPER_SPAWNS: &[(&str, &str)] = &[
     ("crates/mvm-vmm/src/host/aux_bin.rs", "fn probe_contract("),
     (
         "crates/mvm-hostd/src/health_probe.rs",
-        "fn restart_command_for(",
+        "fn mvmctl_command_for(",
     ),
     (
         "crates/mvm-vmm/src/host/network_endpoint_spawn.rs",

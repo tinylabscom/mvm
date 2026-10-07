@@ -580,9 +580,9 @@ mod tests {
 
     #[test]
     fn handoff_signature_message_binds_channel_authority() {
-        let base = HvfHandoffRequest::signing_message(42, "child", 0b0011);
-        let other_pid = HvfHandoffRequest::signing_message(43, "child", 0b0011);
-        let other_channels = HvfHandoffRequest::signing_message(42, "child", 0b0111);
+        let base = HvfHandoffRequest::signing_message(42, "child", 0b0011, None);
+        let other_pid = HvfHandoffRequest::signing_message(43, "child", 0b0011, None);
+        let other_channels = HvfHandoffRequest::signing_message(42, "child", 0b0111, None);
         assert_ne!(base, other_pid);
         assert_ne!(base, other_channels);
     }

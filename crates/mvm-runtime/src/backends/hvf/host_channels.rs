@@ -85,4 +85,7 @@ pub struct HostChannels {
     pub handoff_root: Option<PathBuf>,
     /// Host identity public key pinned for handoff authentication.
     pub handoff_verify_key: Option<String>,
+    /// Where an accepted handoff is published, for a supervisor that has to
+    /// arm the claimed child's bounds.
+    pub handoff_accepted: Option<mvm_vmm::hvf_handoff::HandoffAcceptedSender>,
 }

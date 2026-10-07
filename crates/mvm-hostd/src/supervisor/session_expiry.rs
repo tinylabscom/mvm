@@ -34,8 +34,7 @@ use mvm_core::plan::ExecutionPlan;
 use mvm_core::session::{self, SessionId, SessionRecord, SessionState};
 
 use super::wall_clock::{
-    SupervisorExitKiller, SupervisorTimerInputs, WorkloadKiller, decode_admitted_plan,
-    supervisor_emitter,
+    SupervisorTimerInputs, WorkloadKiller, decode_admitted_plan, supervisor_emitter,
 };
 use crate::audit::emitter::AuditEmitter;
 use crate::audit::session::SealReason;
@@ -295,7 +294,7 @@ pub fn arm_for_supervisor(inputs: &SupervisorTimerInputs<'_>) -> bool {
         );
         return false;
     };
-    let killer = Box::new(SupervisorExitKiller::new(inputs.vm_state_dir.to_path_buf()));
+    let killer = Box::new(inputs.exit_killer());
     let mut watcher = SessionExpiryWatcher::new(vm_name, Utc::now(), killer);
     match decode_admitted_plan(plan_json).and_then(|plan| Ok((plan, supervisor_emitter(inputs)?))) {
         Ok((plan, emitter)) => watcher = watcher.sealing_under(plan, emitter),
@@ -535,6 +534,7 @@ mod tests {
             audit_dir: None,
             signing_key_path: None,
             vm_state_dir: dir.path(),
+            pid_file: &dir.path().join("vm.pid"),
         }));
     }
 }

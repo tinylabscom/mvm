@@ -66,6 +66,14 @@ pub struct ChildForkRequest<'a> {
     /// has no spawn left to bind and leaves the child on whatever bound that
     /// machine was started with.
     pub cpu_grant: Option<mvm_contract::grants::CpuGrant>,
+    /// The signed `ExecutionPlan` the claim admitted this child under, as the
+    /// claim carried it.
+    ///
+    /// A driver whose child is owned by a supervisor process hands this to
+    /// that process, which arms the bounds the plan declares — a resident
+    /// parent booted with no plan and would otherwise enforce none of them.
+    /// A driver with no such process has nowhere to deliver it.
+    pub admitted_plan: Option<&'a str>,
 }
 
 /// What a driver needs to boot a warm-pool factory parent. Grouped so the seam

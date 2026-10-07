@@ -2504,6 +2504,7 @@ mod tests {
             genid: sample_generation_token(),
             channels: &workload_channels(),
             cpu_grant: None,
+            admitted_plan: None,
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2529,6 +2530,7 @@ mod tests {
             genid: sample_generation_token(),
             channels: &workload_channels(),
             cpu_grant: None,
+            admitted_plan: None,
         };
 
         let err = FcDriver::new().fork_standby_child(&req).unwrap_err();
@@ -2564,6 +2566,7 @@ mod tests {
             genid: sample_generation_token(),
             channels: &channels,
             cpu_grant: None,
+            admitted_plan: None,
         };
 
         // The restore has no Firecracker to talk to and no device anchors to

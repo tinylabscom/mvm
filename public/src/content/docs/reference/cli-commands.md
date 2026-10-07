@@ -735,8 +735,14 @@ seconds), measured from its last call. On libkrun and HVF the per-VM
 supervisor enforces this with no command running: it marks the session
 `reaped`, records the reap in the audit log, seals the session's audit chain
 the way `machine stop` does, and stops the machine. Firecracker and QEMU have
-no per-VM supervisor, so there an expired session is stopped by the next
-`machine session` command, or by `machine session reap` run on a schedule.
+no per-VM supervisor; there the tenant's resident host agent, which a session
+start launches if it is not already running, watches the session and runs
+`machine session reap` once it expires. That sweep stops a Firecracker machine
+through the same `sudo` signal `machine stop` uses, and the host agent has no
+terminal, so it needs `sudo` that does not prompt; where `sudo` prompts, the
+session is stopped by the next `machine session` command instead. A session
+that stops this way leaves the same host state a `machine stop` does: its
+helper processes are stopped and no pid file is left behind.
 
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the

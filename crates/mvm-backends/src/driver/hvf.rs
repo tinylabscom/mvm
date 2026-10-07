@@ -659,21 +659,16 @@ impl VmmDriver for HvfDriver {
                 mask
             }
         });
-        let request = HvfHandoffRequest {
+        let mut request = HvfHandoffRequest {
             child_vm_name: req.child_vm_name.to_string(),
             parent_pid,
             channel_mask,
-            signature: hex::encode(
-                identity
-                    .signing
-                    .sign(&HvfHandoffRequest::signing_message(
-                        parent_pid,
-                        req.child_vm_name,
-                        channel_mask,
-                    ))
-                    .to_bytes(),
-            ),
+            // The parent booted with no plan; this is how it learns the bounds
+            // the child it becomes was admitted under.
+            admitted_plan: req.admitted_plan.map(str::to_string),
+            signature: String::new(),
         };
+        request.signature = hex::encode(identity.signing.sign(&request.message()).to_bytes());
         request_live_handoff(&parent_dir.join("hvf-handoff.sock"), &request)?;
 
         link_child_state(child_dir, &parent_dir)
@@ -1294,6 +1289,7 @@ mod tests {
             child_vm_name: "child".to_string(),
             parent_pid: 1,
             channel_mask: 0,
+            admitted_plan: None,
             signature: "00".repeat(64),
         }
     }

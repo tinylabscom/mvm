@@ -312,9 +312,15 @@ async fn run_worker_once(cfg: HostAgentConfig) -> Result<()> {
         registrations = restored,
         "mvm-host-agent registration journal restored"
     );
+    let watched_sessions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     tokio::spawn(mvm_hostd::host_agent_idle::run_idle_watcher(
         daemon.clone(),
+        watched_sessions.clone(),
         mvm_hostd::host_agent_idle::idle_timeout(),
+    ));
+    tokio::spawn(mvm_hostd::host_agent_idle::run_session_watcher(
+        cfg.tenant_id.clone(),
+        watched_sessions,
     ));
     tokio::spawn(mvm_hostd::host_agent_idle::run_health_watcher(
         daemon.clone(),

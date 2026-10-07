@@ -395,6 +395,7 @@ fn restore_child_and_read_random(
         // endpoints, so the child inherits the parent's empty channel set.
         channels: &[],
         cpu_grant: None,
+        admitted_plan: None,
     });
     if let Err(ref e) = resume_result {
         eprintln!("preloaded child resume failed: {e:#}");

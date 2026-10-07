@@ -474,6 +474,8 @@ pub struct VirtioVsock {
     handoff_verify_key: Option<VerifyingKey>,
     handoff_stop: Option<&'static AtomicBool>,
     handoff_used: bool,
+    /// Where an accepted handoff is published for the supervisor.
+    handoff_accepted: Option<crate::hvf_handoff::HandoffAcceptedSender>,
     /// Whether host I/O is parked for a pause. The device is shared by every
     /// vCPU of an SMP machine and each one that parks calls the snapshot hooks,
     /// so this is what makes the transition happen once per pause rather than
@@ -500,6 +502,7 @@ impl VirtioVsock {
             handoff_verify_key: None,
             handoff_stop: None,
             handoff_used: false,
+            handoff_accepted: None,
             snapshot_parked: false,
         }
     }
@@ -764,6 +767,12 @@ impl VirtioVsock {
         Ok(())
     }
 
+    /// Send the handoff this parent accepts to `sender`, so the process that
+    /// owns it learns which child it became and under what plan.
+    pub fn publish_handoffs_to(&mut self, sender: crate::hvf_handoff::HandoffAcceptedSender) {
+        self.handoff_accepted = Some(sender);
+    }
+
     pub fn start_io(&mut self, irq_line: Arc<dyn IrqLine>) {
         handoff_debug("start_io");
         if let Some(io) = self.io.take() {
@@ -910,9 +919,12 @@ impl VirtioVsock {
         };
         let result = self.accept_handoff(&request);
         match result {
-            Ok(()) => {
+            Ok(accepted) => {
                 let _ = stream.write_all(crate::hvf_handoff::HANDOFF_ACCEPTED);
                 self.handoff_used = true;
+                if let Some(sender) = &self.handoff_accepted {
+                    let _ = sender.send(accepted);
+                }
                 true
             }
             Err(error) => {
@@ -923,7 +935,10 @@ impl VirtioVsock {
         }
     }
 
-    fn accept_handoff(&mut self, line: &[u8]) -> std::io::Result<()> {
+    fn accept_handoff(
+        &mut self,
+        line: &[u8],
+    ) -> std::io::Result<crate::hvf_handoff::AcceptedHandoff> {
         let request: HvfHandoffRequest = serde_json::from_slice(line).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid handoff request")
         })?;
@@ -949,15 +964,7 @@ impl VirtioVsock {
                 "handoff verifier unavailable",
             )
         })?;
-        key.verify(
-            &HvfHandoffRequest::signing_message(
-                request.parent_pid,
-                &request.child_vm_name,
-                request.channel_mask,
-            ),
-            &signature,
-        )
-        .map_err(|_| {
+        key.verify(&request.message(), &signature).map_err(|_| {
             std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "handoff signature rejected",
@@ -987,7 +994,11 @@ impl VirtioVsock {
                 "handoff IRQ line unavailable",
             )
         })?;
-        self.rebind_host_channels(&bindings, irq_line)
+        self.rebind_host_channels(&bindings, irq_line)?;
+        Ok(crate::hvf_handoff::AcceptedHandoff {
+            child_vm_name: request.child_vm_name,
+            admitted_plan: request.admitted_plan,
+        })
     }
 
     fn fail_handoff(&self, _stream: Option<&mut UnixStream>, error: std::io::Error) {
@@ -2626,11 +2637,12 @@ mod tests {
         device.shutdown();
         assert!(device.io.is_none());
         assert_ne!(
-            HvfHandoffRequest::signing_message(42, "telemetry-child", 0),
+            HvfHandoffRequest::signing_message(42, "telemetry-child", 0, None),
             HvfHandoffRequest::signing_message(
                 42,
                 "telemetry-child",
-                crate::hvf_handoff::HANDOFF_TELEMETRY
+                crate::hvf_handoff::HANDOFF_TELEMETRY,
+                None
             ),
         );
     }
