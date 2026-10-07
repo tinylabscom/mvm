@@ -44,12 +44,13 @@
 //!
 //! The question travels over an abstract-namespace socket the agent binds as
 //! PID 1 before any workload runs. The egress client accepts an answer only
-//! from a listener PID 1 created, and the agent answers only uid 0, which is
-//! what the egress client runs as on this boot path. A guest booted by another
-//! init has no such listener, so its flows are never attributed and tool
-//! routes and secrets stay refused. The agent answers one question at a time,
-//! with a two-second deadline on each side, so a flood of proxy connections
-//! can delay attribution; a delayed answer is no answer, which refuses.
+//! from a listener PID 1 created, and the agent answers only the dedicated
+//! egress service identity (`EGRESS_CLIENT_IDENTITY`, uid/gid 989). Root, the
+//! workload and unrelated identities are refused. A guest booted by another
+//! init has no such listener, so its flows are never attributed and tool routes
+//! and secrets stay refused. The agent answers one question at a time, with a
+//! two-second deadline on each side, so a flood of proxy connections can delay
+//! attribution; a delayed answer is no answer, which refuses.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
