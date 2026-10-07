@@ -13,7 +13,7 @@ use super::reason::{DenialKind, ReasonInputs, Remedy};
 
 /// What was refused, in the shape the notice names it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(in crate::commands) enum Subject {
+pub enum Subject {
     /// A TCP connect to `host:port`.
     Tcp(String),
     /// A UDP datagram to `addr:port`.
@@ -28,7 +28,7 @@ pub(in crate::commands) enum Subject {
 
 impl Subject {
     /// The destination as `--allow-host` takes it, when one could admit it.
-    pub(in crate::commands) fn allow_target(&self) -> Option<&str> {
+    pub fn allow_target(&self) -> Option<&str> {
         match self {
             Self::Tcp(target) | Self::Request { target, .. } => Some(target),
             Self::Lookup(name) if !name.is_empty() => Some(name),
@@ -37,7 +37,7 @@ impl Subject {
     }
 
     /// Whether the destination carries an explicit port.
-    pub(in crate::commands) fn has_port(&self) -> bool {
+    pub fn has_port(&self) -> bool {
         !matches!(self, Self::Lookup(_))
     }
 
@@ -78,7 +78,7 @@ impl std::fmt::Display for Subject {
 
 /// One refusal the host recorded for the watched machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(in crate::commands) struct EgressDenial {
+pub struct EgressDenial {
     pub at: DateTime<Utc>,
     /// The audit event that recorded it.
     pub event: String,
@@ -90,7 +90,7 @@ pub(in crate::commands) struct EgressDenial {
 
 impl EgressDenial {
     /// The refusal `entry` records for machine `vm`, if it records one.
-    pub(in crate::commands) fn from_entry(entry: &PlanAuditEntry, vm: &str) -> Option<Self> {
+    pub fn from_entry(entry: &PlanAuditEntry, vm: &str) -> Option<Self> {
         if entry.labels.get(LABEL_VM_NAME).map(String::as_str) != Some(vm) {
             return None;
         }
@@ -148,12 +148,12 @@ impl EgressDenial {
         })
     }
 
-    pub(in crate::commands) fn remedy(&self) -> Remedy {
+    pub fn remedy(&self) -> Remedy {
         self.kind.remedy(self.subject.allow_target())
     }
 
     /// The live notice: what, why, and what to do.
-    pub(in crate::commands) fn notice(&self) -> String {
+    pub fn notice(&self) -> String {
         format!(
             "egress blocked: {} ({}) — {}",
             self.subject,
@@ -164,11 +164,11 @@ impl EgressDenial {
 }
 
 #[cfg(test)]
-pub(in crate::commands::vm) mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::BTreeMap;
 
-    pub(in crate::commands::vm) fn entry(event: &str, labels: &[(&str, &str)]) -> PlanAuditEntry {
+    pub(crate) fn entry(event: &str, labels: &[(&str, &str)]) -> PlanAuditEntry {
         PlanAuditEntry {
             timestamp: "2026-09-26T10:00:00Z".parse().unwrap(),
             tenant: mvm_core::plan::TenantId("local".into()),

@@ -7,9 +7,9 @@
 //! approval prompt waiting on an answer — takes [`hold`] and every notice
 //! queues behind it until the guard drops.
 //!
-//! The sink is a trait so a test can read exactly what a user would see, and
-//! so a renderer that keeps a live status line can take over: it only has to
-//! clear its line before writing and redraw it after.
+//! The sink is `mvm_client::notices::NoticeSink`, so a test can read exactly
+//! what a user would see, and so a renderer that keeps a live status line can
+//! take over: it only has to clear its line before writing and redraw it after.
 
 use std::io::Write as _;
 use std::sync::{Mutex, MutexGuard};
@@ -23,16 +23,7 @@ pub(in crate::commands) fn hold() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Where notices go.
-pub(in crate::commands) trait NoticeSink: Send + Sync {
-    /// Write `lines` as one block nothing else interleaves with.
-    fn block(&self, lines: &[String]);
-
-    /// Write one whole notice line.
-    fn line(&self, text: &str) {
-        self.block(&[text.to_string()]);
-    }
-}
+pub(in crate::commands) use mvm_client::notices::NoticeSink;
 
 /// The process's stderr, `[mvm]`-prefixed like the rest of the host's chrome.
 pub(in crate::commands) struct Stderr;

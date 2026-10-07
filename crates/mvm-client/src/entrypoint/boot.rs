@@ -334,7 +334,7 @@ pub(crate) fn stop_session_vm(vm: &SessionVm) -> Result<()> {
     // launched it. Falling back to the host default would send the stop to
     // the wrong VMM and leave the guest running.
     let backend = AnyBackend::for_started_vm(&vm.vm_name).unwrap_or_else(AnyBackend::auto_select);
-    backend.stop(&VmId(vm.vm_name.clone()))
+    backend.stop(&VmId(vm.vm_name.clone())).map(|_| ())
 }
 
 #[cfg(test)]

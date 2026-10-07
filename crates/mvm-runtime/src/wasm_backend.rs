@@ -266,6 +266,7 @@ fn wasm_grants_from_config(config: &VmStartConfig) -> Result<Grants> {
             wall_clock: None,
             egress: None,
             drive: None,
+            display_input: None,
         }),
     }
 }

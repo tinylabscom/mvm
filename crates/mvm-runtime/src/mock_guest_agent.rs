@@ -364,12 +364,12 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
         GuestRequest::FsMkdir { .. } => GuestResponse::FsResult(FsResult::Mkdir),
 
         // ── Exec / entrypoint (single terminal frame) ───────────────
-        // The mock answers the streaming Exec / RunEntrypoint verbs with one
+        // The mock answers the streaming Exec / RunEntrypoint / AgentPrompt verbs with one
         // terminal Exit frame so `call_streaming` completes after a single
         // read. Enough to exercise the host-side ExecBuilder pipelining; it
         // does not emit stdout/stderr chunks.
         GuestRequest::Exec { .. } => GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
-        GuestRequest::RunEntrypoint { .. } => {
+        GuestRequest::RunEntrypoint { .. } | GuestRequest::AgentPrompt { .. } => {
             GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 })
         }
         // One zero-exit outcome per command; stages are ignored.

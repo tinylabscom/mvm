@@ -768,6 +768,25 @@ impl MvmClient for GatewayBackend {
         }
     }
 
+    async fn telemetry_status(&self, _id: &MachineId) -> Result<crate::client::TelemetryStatus> {
+        // The collector's status and records live beside the VM on the host
+        // that owns it; the gateway exposes no telemetry endpoint yet. Refuse
+        // rather than report a health the courier cannot see.
+        Err(MvmError::Backend {
+            reason: "gateway telemetry read is not wired (no remote collector endpoint)".into(),
+        })
+    }
+
+    async fn telemetry_records(
+        &self,
+        _id: &MachineId,
+        _request: crate::client::TelemetryReadRequest,
+    ) -> Result<crate::client::TelemetryReadResponse> {
+        Err(MvmError::Backend {
+            reason: "gateway telemetry read is not wired (no remote collector endpoint)".into(),
+        })
+    }
+
     async fn pause_machine(&self, _id: &MachineId, _opts: PauseOpts) -> Result<PauseOutcome> {
         // Instance-snapshot pause/resume is a host-local operation (sealing the
         // vmstate + memory under a host key); the gateway exposes no snapshot
@@ -1129,6 +1148,23 @@ mod tests {
         ));
         assert!(matches!(
             be.resume_machine(&id, ResumeOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn telemetry_reads_fail_closed_until_wired() {
+        install_rustls_provider();
+        let be = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
+        let id = MachineId("sbx-1".into());
+        // No request is sent — the stub refuses before touching the network.
+        assert!(matches!(
+            be.telemetry_status(&id).await,
+            Err(MvmError::Backend { .. })
+        ));
+        assert!(matches!(
+            be.telemetry_records(&id, crate::client::TelemetryReadRequest::default())
+                .await,
             Err(MvmError::Backend { .. })
         ));
     }
