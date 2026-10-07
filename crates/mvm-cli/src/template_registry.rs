@@ -3,7 +3,7 @@
 //! The registry abstracts where a template comes from. Bundled templates
 //! ship inside the `mvmctl` binary and are always available offline.
 //! Remote templates live in a separate repository (e.g.
-//! `github:tinylabscom/mvm-templates`) and are fetched on first use,
+//! `github:tinylabscom/mvm-packs`) and are fetched on first use,
 //! then cached under `~/.mvm/templates/remote/`.
 //!
 //! Resolution order:
@@ -148,7 +148,7 @@ impl RegistryConfig {
         let registry_url = std::env::var("MVM_TEMPLATE_REGISTRY")
             .ok()
             .unwrap_or_else(|| {
-                "https://raw.githubusercontent.com/tinylabscom/mvm-templates/main".to_string()
+                "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main".to_string()
             });
         let cache_root = mvm_core::config::remote_templates_dir();
         Self {

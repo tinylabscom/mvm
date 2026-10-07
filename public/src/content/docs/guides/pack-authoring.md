@@ -1,14 +1,14 @@
 ---
 title: Author and publish a signed pack
-description: Write a policy pack as a group or a profile, check it locally, publish it through the mvm-templates signing workflow, and decide which publishers your hosts trust.
+description: Write and validate a policy pack, understand publisher trust, and prepare it for publication from mvm-packs.
 ---
 
 A pack is a named, versioned, signed bundle of policy and, optionally, a
 buildable workload image. It carries a policy group, a policy profile, or both,
 under a `namespace/name@version` reference,
 and `mvmctl` verifies its signature every time it is pulled and every time a
-policy that names it is loaded. The official registry is the
-[`mvm-templates`](https://github.com/tinylabscom/mvm-templates) repository.
+policy that names it is loaded. The registry source is the
+[`mvm-packs`](https://github.com/tinylabscom/mvm-packs) repository.
 
 This guide uses two published packs as its worked examples: `runtime/node`, a
 group, and `agent/codex`, a profile that includes it. For the policy language
@@ -16,7 +16,7 @@ itself, see [Policy and profiles](/guides/policy-and-profiles/).
 
 ## What a pack contains
 
-A pack source is a directory in `mvm-templates`:
+A pack source is a directory in `mvm-packs`:
 
 ```text
 pack-sources/runtime/node/
@@ -158,7 +158,7 @@ in full.
 
 ## Check it before you publish
 
-From a checkout of `mvm-templates`, validate each document with the client
+From a checkout of `mvm-packs`, validate each document with the client
 that will load it:
 
 ```sh
@@ -177,17 +177,24 @@ for a secret you have not stored.
 
 ## Publish
 
-Open a pull request against `mvm-templates` that adds or changes a directory
-under `pack-sources/`. Merging to `main` runs `.github/workflows/publish.yml`,
-which:
+Open a pull request against `mvm-packs` that adds or changes a directory
+under `pack-sources/`. The publish workflow builds the registry layout by:
 
-1. builds a manifest for each source pack, listing every payload file with its
+1. building a manifest for each source pack, listing every payload file with its
    SHA-256 digest and size;
-2. signs each manifest keyless with `cosign sign-blob`, under the workflow's
-   GitHub OIDC identity, and writes the Sigstore bundle beside it;
-3. regenerates the registry index, `packs/index.json`;
-4. checks the result with `scripts/validate-packs.py`;
-5. commits the published layout under `packs/`.
+2. signing each manifest keyless with `cosign sign-blob`, under the workflow's
+   GitHub OIDC identity, and writing the Sigstore bundle beside it;
+3. regenerating the registry index, `packs/index.json`;
+4. checking the result with `scripts/validate-packs.py`;
+5. committing the published layout under `packs/`.
+
+The repository rename changes that workflow's signing identity. The current
+CLI still trusts signatures from the old `mvm-templates` workflow only. Hold
+new signed publication until the signing-identity transition is approved and
+a client release explicitly trusts the new identity; a new bundle is not made
+trustworthy by the repository URL change. Existing signed versions retain
+their old identity. Official `mvm/` status additionally requires revocation
+enforcement and a published, verified pack.
 
 ```text
 packs/index.json
@@ -267,16 +274,18 @@ installed until `mvmctl pull` restores it.
 
 ## Decide who may publish
 
-With no trust policy file, `mvmctl` trusts exactly one signing identity, in
-every namespace: the official registry's publish workflow.
+With no trust policy file, `mvmctl` accepts the old publish workflow identity
+for the existing `agent/` and `runtime/` namespaces only:
 
 ```text
 https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main
 ```
 
-under the issuer `https://token.actions.githubusercontent.com`. To make your
-own decision, write `$MVM_HOME/registry/publishers.toml`. It replaces the
-default wholesale. This one keeps the official workflow for `runtime` packs
+under the issuer `https://token.actions.githubusercontent.com`. The renamed
+`mvm-packs` workflow has a different identity and is not trusted by this
+default. There is no default trust for `mvm/` or community namespaces. To
+make your own decision, write `$MVM_HOME/registry/publishers.toml`. It replaces
+the default wholesale. This one keeps the legacy workflow for `runtime` packs
 only:
 
 ```toml
@@ -309,10 +318,35 @@ MVM_PACK_REGISTRY=file:///srv/mvm-packs mvmctl search
 MVM_PACK_REGISTRY=file:///srv/mvm-packs mvmctl pull runtime/node
 ```
 
-A mirror of the official `packs/` tree verifies under the default trust
-policy, because the signatures are unchanged. Packs you sign yourself need
-your signing identity in `publishers.toml`, and they need the Sigstore bundle
-format cosign v3 writes, which is what the official workflow pins.
+A mirror of the previously published `packs/` tree verifies under the default
+trust policy for `agent/` and `runtime/`, because the signatures are unchanged.
+Packs you sign yourself need your signing identity in `publishers.toml`, and
+they need the Sigstore bundle format cosign v3 writes.
+
+## Repository rename and compatibility
+
+The source repository is now `tinylabscom/mvm-packs`. The CLI fetches both
+pack and remote-template indexes from its new `raw.githubusercontent.com` URL;
+it does not depend on a redirect from the old path. These are the behavior
+changes for existing installations:
+
+- `MVM_PACK_REGISTRY` and `MVM_TEMPLATE_REGISTRY` keep their names and can
+  override the new defaults. A mirror may keep serving an old signed artifact.
+- Previously published Sigstore bundles remain bound to the
+  `mvm-templates` workflow identity. Renaming the repository cannot rewrite
+  them. The default trust policy still accepts that identity for `agent/` and
+  `runtime/` while those versions remain in use.
+- A bundle newly signed by the `mvm-packs` workflow has a different identity
+  and fails under the current default trust policy. Default trust in that
+  identity waits for owner approval and a client release. Official `mvm/`
+  publication also waits for revocation enforcement.
+- Existing `agent/name` and `runtime/name` references and lock pins are not
+  rewritten. Future `mvm/name` references are distinct coordinates and need
+  an explicit pull and trust decision; no `mvm/` pack is published as official
+  by this rename.
+- An operator `publishers.toml` continues to replace the built-in policy
+  completely. Operators who intentionally trust more than one identity must
+  list each one explicitly and plan for rotation and revocation.
 
 The index is a small JSON document, and unknown fields in it are refused:
 

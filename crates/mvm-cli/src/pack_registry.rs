@@ -27,10 +27,10 @@ use mvm_core::registry_pack_store::{
 
 /// Environment override for the pack registry base URL.
 pub const PACK_REGISTRY_ENV: &str = "MVM_PACK_REGISTRY";
-/// Default registry: the mvm-templates repository, same source the template
+/// Default registry: the mvm-packs repository, same source the template
 /// registry uses.
 pub const DEFAULT_PACK_REGISTRY: &str =
-    "https://raw.githubusercontent.com/tinylabscom/mvm-templates/main";
+    "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main";
 
 const PACK_INDEX_SCHEMA_VERSION: u32 = 1;
 const PACKS_DIR: &str = "packs";
@@ -424,9 +424,10 @@ fn pull_one(
     let loaded = load_publisher_policy_or_official_default(&policy_path)?;
     if loaded.is_official_default() {
         crate::ui::info(&format!(
-            "no publisher policy at {}; using the built-in official registry policy \
-             (signed by {} in mvm-templates). Write that file to make your own trust \
-             decision.",
+            "no publisher policy at {}; using the built-in legacy signing \
+             identity {}. The registry URL now points to mvm-packs, but new \
+             signatures require a separate trust update. Write that file to \
+             make your own trust decision.",
             policy_path.display(),
             mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
         ));
