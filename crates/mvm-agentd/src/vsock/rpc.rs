@@ -216,11 +216,9 @@ pub fn call_streaming(
 /// what this does: the authenticated session handshake plus one `Ping`, both real
 /// I/O against the guest.
 ///
-/// Any answer means ready. A refusal (`Error`, an unsupported profile, a verb the
-/// session's grant withholds) still came from an agent that parsed, verified and
-/// replied to an authenticated frame, so the caller's next RPC reaches it too.
-/// Only a transport failure — EOF, timeout, a frame that won't decode — means
-/// "not yet"; callers poll on `Err`.
+/// Readiness requires the contracted `Pong`. An authenticated error or any
+/// unrelated response proves a peer exists, but not that it can serve the
+/// control protocol expected by the launch path.
 ///
 /// Unlike [`negotiate_protocol`], this is never satisfied by a host-local check:
 /// a probe that answers without touching the stream cannot tell a booting guest
@@ -228,8 +226,10 @@ pub fn call_streaming(
 pub fn probe_agent_ready(stream: &mut UnixStream) -> Result<()> {
     let mut session = connection::open_authenticated_session(stream)?;
     session.write(stream, &GuestRequest::Ping)?;
-    let _: GuestResponse = session.read(stream)?;
-    Ok(())
+    match session.read(stream)? {
+        GuestResponse::Pong => Ok(()),
+        other => bail!("guest agent answered readiness Ping with {other:?}, expected Pong"),
+    }
 }
 
 /// Validate guest-agent protocol version and capabilities on an
@@ -2205,6 +2205,47 @@ mod tests {
         });
 
         probe_agent_ready(&mut host).expect("a serving agent must read as ready");
+        guest_thread.join().unwrap();
+    }
+
+    #[test]
+    fn probe_agent_ready_rejects_an_authenticated_non_pong_response() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", home.path());
+        let host_key = seeded_host_signer(home.path());
+        let anchor = host_key.verifying_key();
+
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let mut guest_key_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut guest_key_seed);
+            let mut session = AuthenticatedSession::guest(
+                &mut guest,
+                SigningKey::from_bytes(&guest_key_seed),
+                &anchor,
+            )
+            .expect("guest handshake");
+            let req: GuestRequest = session.read(&mut guest).expect("read probe request");
+            assert!(matches!(req, GuestRequest::Ping), "got {req:?}");
+            session
+                .write(
+                    &mut guest,
+                    &GuestResponse::Error {
+                        message: "not serving".to_string(),
+                    },
+                )
+                .expect("write authenticated refusal");
+        });
+
+        let error = probe_agent_ready(&mut host)
+            .expect_err("an authenticated non-Pong response is not readiness");
+        assert!(error.to_string().contains("expected Pong"), "{error:#}");
         guest_thread.join().unwrap();
     }
 
