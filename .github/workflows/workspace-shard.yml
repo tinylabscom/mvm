@@ -149,7 +149,15 @@ jobs:
             --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst" \
             --workspace-remap "$archive_root" \
             --extract-to "$archive_root" \
-            --partition hash:${{ inputs.shard }}/2
+            --partition hash:${{ inputs.shard }}/2 || {
+              status=$?
+              ls -ld "$archive_root" "$archive_root/target" \
+                "$archive_root/target/debug/build" \
+                "$archive_root/target/debug/build/mvmctl" || true
+              find "$archive_root/target/debug/build/mvmctl" -maxdepth 3 \
+                -name 'audit_emissions_live-*' -print 2>/dev/null || true
+              exit "$status"
+            }
 
       - name: Remove archived workspace
         if: always() && inputs.archive_run_id != ''
