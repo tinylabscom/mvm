@@ -1,34 +1,42 @@
-//! The `mvm-guest-bins` artifact: the guest binaries an image build consumes,
-//! packaged with a manifest that pins their bytes.
+//! The `mvm-guest-bins` artifact: every guest artifact mvm owns, packaged
+//! with a manifest that pins its bytes.
 //!
-//! Image construction lives in `mvm-images`; the binaries that run inside the
-//! guest are compiled from this workspace, against the one `Cargo.lock` the
-//! host links too. This artifact is how they cross the repository boundary as
-//! bytes rather than as a source dependency: `mvm-images` pins the archive's
-//! sha256 and unpacks it.
+//! The programs and libraries that run inside a guest are compiled from this
+//! workspace, against the one `Cargo.lock` the host links too. This archive is
+//! the guest runtime as one versioned unit, and its consumer is `mvmctl`
+//! itself: it is meant to ship as a signed asset of each CLI release, version
+//! locked to the CLI, and `mvmctl` is to assemble the runtime overlay, the
+//! initramfs and the SDK sidecar from it. Neither half is wired yet; today the
+//! archive is produced by `mvmctl build guest-bins` and by the manually
+//! dispatched guest-bins workflow, and nothing reads it. `mvm-images` does not
+//! consume it: that repository builds only the Linux layer.
 //!
-//! The archive is a gzip tarball:
+//! The archive is a gzip tarball whose member paths spell each member's kind
+//! (see [`member`]):
 //!
 //! ```text
 //!   manifest.json
-//!   aarch64/mvm-guest-agent
-//!   aarch64/…
-//!   x86_64/mvm-guest-agent
-//!   x86_64/…
+//!   <arch>/bin/<name>                 static executables: the runtime-overlay
+//!                                     set, mvm-oci-entrypoint, mvm-setpriv
+//!   <arch>/initramfs/mvm-guest-agent  the initramfs's static agent
+//!   <arch>/lib/<glibc|musl>/<soname>  host-services cdylib and GPU shims
+//!   sdk-py/mvm/…                      the in-guest Python SDK
 //! ```
 //!
-//! The manifest records each member's sha256, the workspace version, and two
-//! source fingerprints of the producing tree — the guest-binary inputs and the
-//! host-services cdylib inputs — so a consumer can verify the bytes and
+//! The manifest records each member's sha256, the workspace version, the git
+//! commit of the producing checkout and whether its files matched that commit,
+//! and two source fingerprints — the guest-binary inputs and the host-services
+//! cdylib inputs — so a consumer can verify the bytes, name their source, and
 //! recognise an unchanged tree without rebuilding.
 //!
 //! The archive is deterministic: members are written in sorted order with
 //! zeroed timestamps and ownership, and the gzip header carries no time or
-//! name. The same binaries always produce the same archive sha256.
+//! name. The same inputs always produce the same archive sha256.
 //!
-//! Every binary is produced by the existing host-side guest builds in
-//! [`crate::guest_agent_build`] (the runtime-overlay set and the OCI runtime
-//! set); this module adds no compile path of its own.
+//! Every compiled member comes from a host-side `cargo zigbuild` through
+//! [`crate::guest_agent_build`]'s toolchain, target dir and locks: the
+//! runtime-overlay and OCI runtime sets it already builds, plus the
+//! [`extras`] it builds for this artifact.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -42,6 +50,15 @@ use sha2::{Digest, Sha256};
 use tar::{EntryType, Header};
 
 use crate::guest_agent_build::{self, GuestAgentBuildError};
+use crate::image_source::RepoIdentity;
+
+pub mod cdylib;
+pub mod extras;
+pub mod member;
+pub mod python_sdk;
+
+pub use cdylib::{GPU_SHIM_CDYLIBS, GuestCdylib, HOST_SERVICES_CDYLIB, guest_cdylibs};
+pub use member::{GuestBinsMember, MemberError};
 
 /// Name of the manifest member inside the archive.
 pub const GUEST_BINS_MANIFEST_FILE: &str = "manifest.json";
@@ -73,7 +90,11 @@ pub struct GuestBinsManifest {
     /// [`guest_agent_build::sdk_cdylib_source_fingerprint`] of the producing
     /// tree — the value the SDK sidecar's fetch-when-unchanged check compares.
     pub sdk_cdylib_source_fingerprint: String,
-    /// Archive-relative member path (`<arch>/<binary>`) → lowercase hex sha256.
+    /// The producing checkout: its commit, and whether its files matched it.
+    /// A dirty tree carries a fingerprint of its changes, so its bytes are
+    /// never attributed to the clean commit alone.
+    pub source: RepoIdentity,
+    /// Archive-relative member path → lowercase hex sha256.
     pub files: BTreeMap<String, String>,
 }
 
@@ -98,14 +119,20 @@ impl GuestBinsFingerprints {
 pub enum GuestBinsError {
     #[error("refusing to assemble a guest-bins artifact with no binaries")]
     Empty,
-    #[error("guest binary name {0:?} is not a plain file name")]
-    InvalidName(String),
-    #[error("guest binary {0} appears twice")]
+    #[error(transparent)]
+    Member(#[from] MemberError),
+    #[error("guest-bins member {0} appears twice")]
     DuplicateMember(String),
-    #[error("guest binary {member} is not a static guest executable: {reason}")]
-    InvalidBinary { member: String, reason: String },
+    #[error("{member} is refused: {reason}")]
+    InvalidMember { member: String, reason: String },
     #[error("build the guest binaries: {0}")]
     Build(#[from] GuestAgentBuildError),
+    #[error("read the producing checkout's commit: {0}")]
+    Source(String),
+    #[error("{} holds no Python SDK files", .0.display())]
+    EmptyPythonSdk(PathBuf),
+    #[error("{} is not a regular file or directory", .0.display())]
+    NonRegularSource(PathBuf),
     #[error("archive has no {GUEST_BINS_MANIFEST_FILE}")]
     MissingManifest,
     #[error(
@@ -134,59 +161,66 @@ pub enum GuestBinsError {
     Io(#[from] std::io::Error),
 }
 
-/// Archive-relative member path for one binary.
-fn member_path(arch: GuestArch, name: &str) -> String {
-    format!("{arch}/{name}")
-}
-
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
-/// A plain file name: non-empty, no separator, not a dot entry.
-fn is_plain_name(name: &str) -> bool {
-    !name.is_empty() && name != "." && name != ".." && !name.contains(['/', '\\'])
+/// One member's archived mode and bytes.
+#[derive(Debug)]
+struct MemberBytes {
+    mode: u32,
+    bytes: Vec<u8>,
 }
 
-/// Builder for one artifact. Collect binaries with [`Self::add`], then
+/// Builder for one artifact. Collect members with [`Self::add`], then
 /// [`Self::write`] the archive.
 #[derive(Debug)]
 pub struct GuestBinsArtifact {
     version: String,
     fingerprints: GuestBinsFingerprints,
-    members: BTreeMap<String, Vec<u8>>,
+    source: RepoIdentity,
+    members: BTreeMap<String, MemberBytes>,
 }
 
 impl GuestBinsArtifact {
-    pub fn new(version: impl Into<String>, fingerprints: GuestBinsFingerprints) -> Self {
+    pub fn new(
+        version: impl Into<String>,
+        fingerprints: GuestBinsFingerprints,
+        source: RepoIdentity,
+    ) -> Self {
         Self {
             version: version.into(),
             fingerprints,
+            source,
             members: BTreeMap::new(),
         }
     }
 
-    /// Add the binary at `path` as `<arch>/<name>`.
+    /// Add the file at `path` as `member`.
     ///
-    /// The bytes must be a static ELF for `arch`: a wrong-architecture or
-    /// dynamically linked binary would reach a guest with no loader and fail
-    /// there, far from the build that produced it.
-    pub fn add(&mut self, arch: GuestArch, name: &str, path: &Path) -> Result<(), GuestBinsError> {
-        if !is_plain_name(name) {
-            return Err(GuestBinsError::InvalidName(name.to_string()));
-        }
-        let member = member_path(arch, name);
-        if self.members.contains_key(&member) {
-            return Err(GuestBinsError::DuplicateMember(member));
+    /// The bytes must be what the member's kind requires — a static ELF for an
+    /// executable, a shared object needing only its libc for a library. A
+    /// wrong one would otherwise reach a guest and fail there, far from the
+    /// build that produced it.
+    pub fn add(&mut self, member: &GuestBinsMember, path: &Path) -> Result<(), GuestBinsError> {
+        let member_path = member.path();
+        if self.members.contains_key(&member_path) {
+            return Err(GuestBinsError::DuplicateMember(member_path));
         }
         let bytes = std::fs::read(path)?;
-        crate::guest_elf::validate_static_guest_elf(&bytes, path, arch).map_err(|e| {
-            GuestBinsError::InvalidBinary {
-                member: member.clone(),
-                reason: e.to_string(),
-            }
-        })?;
-        self.members.insert(member, bytes);
+        member
+            .validate(&bytes, path)
+            .map_err(|reason| GuestBinsError::InvalidMember {
+                member: member_path.clone(),
+                reason,
+            })?;
+        self.members.insert(
+            member_path,
+            MemberBytes {
+                mode: member.mode(),
+                bytes,
+            },
+        );
         Ok(())
     }
 
@@ -197,10 +231,11 @@ impl GuestBinsArtifact {
             version: self.version.clone(),
             guest_source_fingerprint: self.fingerprints.guest_source.clone(),
             sdk_cdylib_source_fingerprint: self.fingerprints.sdk_cdylib.clone(),
+            source: self.source.clone(),
             files: self
                 .members
                 .iter()
-                .map(|(member, bytes)| (member.clone(), sha256_hex(bytes)))
+                .map(|(member, entry)| (member.clone(), sha256_hex(&entry.bytes)))
                 .collect(),
         }
     }
@@ -220,8 +255,8 @@ impl GuestBinsArtifact {
             .write(Vec::new(), Compression::best());
         let mut tar = tar::Builder::new(gz);
         append_member(&mut tar, GUEST_BINS_MANIFEST_FILE, 0o644, &manifest)?;
-        for (member, bytes) in &self.members {
-            append_member(&mut tar, member, 0o755, bytes)?;
+        for (member, entry) in &self.members {
+            append_member(&mut tar, member, entry.mode, &entry.bytes)?;
         }
         Ok(tar.into_inner()?.finish()?)
     }
@@ -298,9 +333,9 @@ fn set_readable(_path: &Path) -> Result<(), GuestBinsError> {
 /// Verify an archive against the manifest it carries and return the manifest.
 ///
 /// Refuses an archive with no manifest, an unsupported schema, an empty file
-/// list, a listed member that is absent, a member the manifest does not list,
-/// a non-regular or duplicated entry, or any member whose bytes do not hash to
-/// the recorded digest.
+/// list, a member path outside the layout, a listed member that is absent, a
+/// member the manifest does not list, a non-regular or duplicated entry, or
+/// any member whose bytes do not hash to the recorded digest.
 pub fn verify_guest_bins_archive(path: &Path) -> Result<GuestBinsManifest, GuestBinsError> {
     let file = std::fs::File::open(path)?;
     let mut archive = tar::Archive::new(GzDecoder::new(file));
@@ -318,6 +353,7 @@ pub fn verify_guest_bins_archive(path: &Path) -> Result<GuestBinsManifest, Guest
             }
             manifest_bytes = Some(read_capped(entry, MAX_MANIFEST_BYTES, &member)?);
         } else {
+            GuestBinsMember::parse(&member)?;
             if digests.contains_key(&member) {
                 return Err(GuestBinsError::DuplicateMember(member));
             }
@@ -342,6 +378,9 @@ fn check_manifest_against(
     }
     if manifest.files.is_empty() {
         return Err(GuestBinsError::EmptyManifest);
+    }
+    for member in manifest.files.keys() {
+        GuestBinsMember::parse(member)?;
     }
     if let Some(extra) = digests.keys().find(|m| !manifest.files.contains_key(*m)) {
         return Err(GuestBinsError::UnlistedMember(extra.clone()));
@@ -404,20 +443,27 @@ pub struct GuestBinsBuild {
     pub out_dir: PathBuf,
 }
 
-/// Build (or reuse from cache) every guest binary for each requested
-/// architecture, and write the artifact.
+/// Build (or reuse from cache) every guest artifact for each requested
+/// architecture, add the Python SDK, and write the artifact.
 pub fn build_guest_bins(build: &GuestBinsBuild) -> Result<WrittenGuestBins, GuestBinsError> {
     let fingerprints = GuestBinsFingerprints::of_tree(&build.workspace_root)?;
-    let mut artifact = GuestBinsArtifact::new(&build.version, fingerprints);
+    // Read before anything compiles, so the identity names the tree the
+    // compiles read.
+    let source = crate::image_source::probe_identity(&build.workspace_root)
+        .map_err(GuestBinsError::Source)?;
+    let mut artifact = GuestBinsArtifact::new(&build.version, fingerprints, source);
     let arches: BTreeSet<GuestArch> = build.arches.iter().copied().collect();
     for arch in arches {
         add_arch(&mut artifact, build, arch)?;
     }
+    for (member, path) in python_sdk::python_sdk_members(&build.workspace_root)? {
+        artifact.add(&member, &path)?;
+    }
     artifact.write(&build.out_dir)
 }
 
-/// Every guest binary for `arch`: the runtime-overlay set, plus the OCI entry
-/// point that only the OCI runtime set carries.
+/// Every compiled member for `arch`: the runtime-overlay set, the OCI entry
+/// point that only the OCI runtime set carries, and the [`extras`].
 fn add_arch(
     artifact: &mut GuestBinsArtifact,
     build: &GuestBinsBuild,
@@ -430,7 +476,7 @@ fn add_arch(
         &build.workspace_root,
     )?;
     for (name, path) in overlay.artifacts() {
-        artifact.add(arch, name, path)?;
+        artifact.add(&GuestBinsMember::executable(arch, name)?, path)?;
     }
     let oci = guest_agent_build::resolve_or_build_guest_binaries(
         &build.cache_root,
@@ -438,19 +484,45 @@ fn add_arch(
         arch,
         &build.workspace_root,
     )?;
-    artifact.add(arch, "mvm-oci-entrypoint", &oci.entrypoint_runner)
+    artifact.add(
+        &GuestBinsMember::executable(arch, "mvm-oci-entrypoint")?,
+        &oci.entrypoint_runner,
+    )?;
+    let extras = extras::resolve_or_build_guest_extras(
+        &build.cache_root,
+        &build.version,
+        arch,
+        &build.workspace_root,
+    )?;
+    for (member, path) in extras {
+        artifact.add(&member, &path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::guest_agent_build::fake_static_elf;
+    use mvm_contract::guest_libc::GuestLibc;
+    use mvm_core::image_set::{GitCommit, WorktreeState};
 
     fn fingerprints() -> GuestBinsFingerprints {
         GuestBinsFingerprints {
             guest_source: "g".repeat(64),
             sdk_cdylib: "c".repeat(64),
         }
+    }
+
+    fn source() -> RepoIdentity {
+        RepoIdentity {
+            commit: GitCommit::new("a".repeat(40)).unwrap(),
+            worktree: WorktreeState::Clean,
+        }
+    }
+
+    fn new_artifact() -> GuestBinsArtifact {
+        GuestBinsArtifact::new("1.2.3", fingerprints(), source())
     }
 
     fn write_bin(dir: &Path, name: &str, arch: GuestArch) -> PathBuf {
@@ -460,15 +532,60 @@ mod tests {
         path
     }
 
+    fn exe(arch: GuestArch, name: &str) -> GuestBinsMember {
+        GuestBinsMember::executable(arch, name).unwrap()
+    }
+
+    fn lib(arch: GuestArch, libc: GuestLibc, soname: &str) -> GuestBinsMember {
+        GuestBinsMember::shared_object(arch, libc, soname).unwrap()
+    }
+
+    /// A shared object for `arch` recording `needed`, as a guest library.
+    fn shared_object(arch: GuestArch, needed: &[&str]) -> Vec<u8> {
+        let mut bytes = mvm_fs::elf::test_fixture::shared_object(needed);
+        let machine: u16 = match arch {
+            GuestArch::X86_64 => 0x3E,
+            GuestArch::Aarch64 => 0xB7,
+        };
+        bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+        bytes
+    }
+
+    fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// One member of every kind, for both architectures.
     fn two_arch_artifact(dir: &Path) -> GuestBinsArtifact {
-        let mut artifact = GuestBinsArtifact::new("1.2.3", fingerprints());
+        let mut artifact = new_artifact();
         for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
             for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
                 artifact
-                    .add(arch, name, &write_bin(dir, name, arch))
+                    .add(&exe(arch, name), &write_bin(dir, name, arch))
                     .unwrap();
             }
+            artifact
+                .add(
+                    &GuestBinsMember::InitramfsAgent { arch },
+                    &write_bin(dir, "initramfs-agent", arch),
+                )
+                .unwrap();
+            let so = write_file(
+                dir,
+                &format!("{arch}-libcuda-musl"),
+                &shared_object(arch, &["libgcc_s.so.1", "libc.so"]),
+            );
+            artifact
+                .add(&lib(arch, GuestLibc::Musl, "libcuda.so.1"), &so)
+                .unwrap();
         }
+        let py = write_file(dir, "host.py", b"def time(): pass\n");
+        artifact
+            .add(&GuestBinsMember::python_sdk("host.py").unwrap(), &py)
+            .unwrap();
         artifact
     }
 
@@ -505,17 +622,23 @@ mod tests {
             "mvm-guest-bins-v1.2.3.tar.gz"
         );
         assert_eq!(written.manifest.version, "1.2.3");
+        assert_eq!(written.manifest.source, source());
         assert_eq!(
             written.manifest.files.keys().collect::<Vec<_>>(),
             [
-                "aarch64/mvm-guest-agent",
-                "aarch64/mvm-guest-netinit",
-                "x86_64/mvm-guest-agent",
-                "x86_64/mvm-guest-netinit",
+                "aarch64/bin/mvm-guest-agent",
+                "aarch64/bin/mvm-guest-netinit",
+                "aarch64/initramfs/mvm-guest-agent",
+                "aarch64/lib/musl/libcuda.so.1",
+                "sdk-py/mvm/host.py",
+                "x86_64/bin/mvm-guest-agent",
+                "x86_64/bin/mvm-guest-netinit",
+                "x86_64/initramfs/mvm-guest-agent",
+                "x86_64/lib/musl/libcuda.so.1",
             ]
         );
         assert_eq!(
-            written.manifest.files["x86_64/mvm-guest-agent"],
+            written.manifest.files["x86_64/bin/mvm-guest-agent"],
             sha256_hex(&fake_static_elf(GuestArch::X86_64, b"mvm-guest-agent")),
             "the recorded digest is the digest of the bytes that went in"
         );
@@ -542,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn the_same_binaries_produce_the_same_archive_bytes() {
+    fn the_same_inputs_produce_the_same_archive_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         let first = two_arch_artifact(&tmp.path().join("a"));
         let second = two_arch_artifact(&tmp.path().join("b"));
@@ -570,18 +693,40 @@ mod tests {
     }
 
     #[test]
+    fn executables_are_archived_executable_and_libraries_and_sources_are_not() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bytes = two_arch_artifact(tmp.path()).to_bytes().unwrap();
+        let mut tar = tar::Archive::new(GzDecoder::new(bytes.as_slice()));
+        let modes: BTreeMap<String, u32> = tar
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.path().unwrap().to_string_lossy().into_owned(),
+                    entry.header().mode().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(modes["aarch64/bin/mvm-guest-agent"], 0o755);
+        assert_eq!(modes["aarch64/initramfs/mvm-guest-agent"], 0o755);
+        assert_eq!(modes["aarch64/lib/musl/libcuda.so.1"], 0o644);
+        assert_eq!(modes["sdk-py/mvm/host.py"], 0o644);
+    }
+
+    #[test]
     fn a_tampered_member_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         let written = two_arch_artifact(tmp.path()).write(tmp.path()).unwrap();
         rewrite(&written.archive, |members| {
             members
-                .get_mut("aarch64/mvm-guest-agent")
+                .get_mut("aarch64/lib/musl/libcuda.so.1")
                 .unwrap()
                 .push(0xff);
         });
         let err = verify_guest_bins_archive(&written.archive).unwrap_err();
         assert!(
-            matches!(&err, GuestBinsError::DigestMismatch { member, .. } if member == "aarch64/mvm-guest-agent"),
+            matches!(&err, GuestBinsError::DigestMismatch { member, .. } if member == "aarch64/lib/musl/libcuda.so.1"),
             "{err}"
         );
     }
@@ -591,11 +736,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let written = two_arch_artifact(tmp.path()).write(tmp.path()).unwrap();
         rewrite(&written.archive, |members| {
-            members.remove("x86_64/mvm-guest-netinit");
+            members.remove("x86_64/bin/mvm-guest-netinit");
         });
         let err = verify_guest_bins_archive(&written.archive).unwrap_err();
         assert!(
-            matches!(&err, GuestBinsError::MissingMember(m) if m == "x86_64/mvm-guest-netinit"),
+            matches!(&err, GuestBinsError::MissingMember(m) if m == "x86_64/bin/mvm-guest-netinit"),
             "{err}"
         );
     }
@@ -605,13 +750,47 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let written = two_arch_artifact(tmp.path()).write(tmp.path()).unwrap();
         rewrite(&written.archive, |members| {
-            members.insert("x86_64/extra".into(), b"smuggled".to_vec());
+            members.insert("x86_64/bin/extra".into(), b"smuggled".to_vec());
         });
         let err = verify_guest_bins_archive(&written.archive).unwrap_err();
         assert!(
-            matches!(&err, GuestBinsError::UnlistedMember(m) if m == "x86_64/extra"),
+            matches!(&err, GuestBinsError::UnlistedMember(m) if m == "x86_64/bin/extra"),
             "{err}"
         );
+    }
+
+    /// A member outside the layout is refused before its digest is compared,
+    /// including one listed in the manifest — the path itself is the hazard.
+    #[test]
+    fn a_member_outside_the_layout_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let written = two_arch_artifact(tmp.path()).write(tmp.path()).unwrap();
+        rewrite(&written.archive, |members| {
+            members.insert("x86_64/etc/profile".into(), b"x".to_vec());
+        });
+        assert!(matches!(
+            verify_guest_bins_archive(&written.archive),
+            Err(GuestBinsError::Member(MemberError::UnknownLayout(_)))
+        ));
+
+        let written = two_arch_artifact(tmp.path()).write(tmp.path()).unwrap();
+        let mut manifest = written.manifest.clone();
+        let digest = manifest.files["x86_64/bin/mvm-guest-agent"].clone();
+        manifest
+            .files
+            .insert("x86_64/mvm-guest-agent".into(), digest);
+        rewrite(&written.archive, |members| {
+            let agent = members["x86_64/bin/mvm-guest-agent"].clone();
+            members.insert("x86_64/mvm-guest-agent".into(), agent);
+            members.insert(
+                GUEST_BINS_MANIFEST_FILE.into(),
+                serde_json::to_vec(&manifest).unwrap(),
+            );
+        });
+        assert!(matches!(
+            verify_guest_bins_archive(&written.archive),
+            Err(GuestBinsError::Member(MemberError::UnknownLayout(_)))
+        ));
     }
 
     #[test]
@@ -647,51 +826,168 @@ mod tests {
 
     #[test]
     fn an_empty_artifact_is_refused() {
-        let artifact = GuestBinsArtifact::new("1.2.3", fingerprints());
-        assert!(matches!(artifact.to_bytes(), Err(GuestBinsError::Empty)));
+        assert!(matches!(
+            new_artifact().to_bytes(),
+            Err(GuestBinsError::Empty)
+        ));
     }
 
     #[test]
     fn a_wrong_architecture_binary_is_refused_at_add() {
         let tmp = tempfile::tempdir().unwrap();
         let x86 = write_bin(tmp.path(), "mvm-guest-agent", GuestArch::X86_64);
-        let mut artifact = GuestBinsArtifact::new("1.2.3", fingerprints());
-        let err = artifact
-            .add(GuestArch::Aarch64, "mvm-guest-agent", &x86)
+        let err = new_artifact()
+            .add(&exe(GuestArch::Aarch64, "mvm-guest-agent"), &x86)
             .unwrap_err();
-        assert!(matches!(err, GuestBinsError::InvalidBinary { .. }), "{err}");
+        assert!(matches!(err, GuestBinsError::InvalidMember { .. }), "{err}");
     }
 
     #[test]
-    fn a_duplicate_or_path_like_name_is_refused_at_add() {
+    fn a_duplicate_member_is_refused_at_add() {
         let tmp = tempfile::tempdir().unwrap();
         let bin = write_bin(tmp.path(), "mvm-guest-agent", GuestArch::X86_64);
-        let mut artifact = GuestBinsArtifact::new("1.2.3", fingerprints());
-        artifact
-            .add(GuestArch::X86_64, "mvm-guest-agent", &bin)
-            .unwrap();
+        let mut artifact = new_artifact();
+        let member = exe(GuestArch::X86_64, "mvm-guest-agent");
+        artifact.add(&member, &bin).unwrap();
         assert!(matches!(
-            artifact.add(GuestArch::X86_64, "mvm-guest-agent", &bin),
+            artifact.add(&member, &bin),
             Err(GuestBinsError::DuplicateMember(_))
-        ));
-        assert!(matches!(
-            artifact.add(GuestArch::X86_64, "../escape", &bin),
-            Err(GuestBinsError::InvalidName(_))
         ));
     }
 
-    fn write_fake_elves(arch: GuestArch, paths: &[&PathBuf]) {
-        for path in paths {
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(
-                path,
-                fake_static_elf(arch, path.to_string_lossy().as_bytes()),
-            )
-            .unwrap();
+    /// The library check, end to end through `add`: each refusal names the
+    /// member, and only a libc-matched object with allowed needs is admitted.
+    #[test]
+    fn shared_objects_are_checked_against_their_libc_and_arch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let add = |member: GuestBinsMember, bytes: Vec<u8>| {
+            let path = write_file(tmp.path(), "candidate.so", &bytes);
+            new_artifact().add(&member, &path)
+        };
+        let x86 = GuestArch::X86_64;
+        let glibc = lib(x86, GuestLibc::Glibc, "libmvm_host_services.so");
+        let musl = lib(x86, GuestLibc::Musl, "libmvm_host_services.so");
+
+        // Admitted: what the zig and Nix builds each produce.
+        add(
+            glibc.clone(),
+            shared_object(x86, &["libpthread.so.0", "libc.so.6"]),
+        )
+        .unwrap();
+        add(
+            glibc.clone(),
+            shared_object(x86, &["libgcc_s.so.1", "libc.so.6", "ld-linux-x86-64.so.2"]),
+        )
+        .unwrap();
+        add(musl.clone(), shared_object(x86, &["libc.so"])).unwrap();
+        add(
+            musl.clone(),
+            shared_object(x86, &["libgcc_s.so.1", "libc.so"]),
+        )
+        .unwrap();
+
+        let refusals = [
+            // Wrong architecture.
+            (
+                glibc.clone(),
+                shared_object(GuestArch::Aarch64, &["libc.so.6"]),
+                "machine",
+            ),
+            // A static executable offered as a library.
+            (
+                musl.clone(),
+                fake_static_elf(x86, b"exe"),
+                "not a shared object",
+            ),
+            // A glibc object filed as musl, and the reverse.
+            (musl.clone(), shared_object(x86, &["libc.so.6"]), "libc.so"),
+            (glibc.clone(), shared_object(x86, &["libc.so"]), "libc.so.6"),
+            // No libc at all.
+            (musl.clone(), shared_object(x86, &[]), "libc.so"),
+            // A need the guest may not carry.
+            (
+                glibc.clone(),
+                shared_object(x86, &["libc.so.6", "libssl.so.3"]),
+                "libssl.so.3",
+            ),
+            (
+                musl.clone(),
+                shared_object(x86, &["libc.so", "libpthread.so.0"]),
+                "libpthread.so.0",
+            ),
+            // Another arch's loader.
+            (
+                glibc.clone(),
+                shared_object(x86, &["libc.so.6", "ld-linux-aarch64.so.1"]),
+                "ld-linux-aarch64.so.1",
+            ),
+        ];
+        for (member, bytes, expected) in refusals {
+            let err = add(member.clone(), bytes).unwrap_err();
+            assert!(
+                matches!(&err, GuestBinsError::InvalidMember { member: m, .. } if *m == member.path()),
+                "{err}"
+            );
+            assert!(err.to_string().contains(expected), "{expected}: {err}");
         }
     }
 
-    /// Seed both guest-build caches the producer reads, so the test drives the
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    /// The manifest names the commit, and a tree that differs from it says so
+    /// instead of passing as that commit.
+    #[test]
+    fn the_manifest_records_the_commit_and_a_dirty_tree_as_dirty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        git(&repo, &["config", "user.email", "test@example.invalid"]);
+        git(&repo, &["config", "user.name", "test"]);
+        git(&repo, &["config", "commit.gpgsign", "false"]);
+        git(&repo, &["config", "core.hooksPath", "/dev/null"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&repo, &["add", "a.txt"]);
+        git(&repo, &["commit", "-q", "-m", "one"]);
+
+        let record = |dir: &Path| {
+            let source = crate::image_source::probe_identity(&repo).unwrap();
+            let mut artifact = GuestBinsArtifact::new("1.2.3", fingerprints(), source);
+            artifact
+                .add(
+                    &exe(GuestArch::X86_64, "mvm-guest-agent"),
+                    &write_bin(dir, "mvm-guest-agent", GuestArch::X86_64),
+                )
+                .unwrap();
+            let written = artifact.write(dir).unwrap();
+            verify_guest_bins_archive(&written.archive).unwrap()
+        };
+
+        let clean = record(&tmp.path().join("clean"));
+        assert_eq!(clean.source.worktree, WorktreeState::Clean);
+        assert_eq!(clean.source.commit.as_str().len(), 40);
+
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let dirty = record(&tmp.path().join("dirty"));
+        assert_eq!(dirty.source.commit, clean.source.commit);
+        assert!(dirty.source.worktree.is_dirty(), "{:?}", dirty.source);
+
+        let json = serde_json::to_value(&dirty).unwrap();
+        assert_eq!(json["source"]["worktree"]["state"], "dirty");
+        assert_eq!(json["source"]["commit"], clean.source.commit.as_str());
+    }
+
+    /// Seed every guest-build cache the producer reads, so the test drives the
     /// real resolution path without a cross-compile.
     fn seed_guest_caches(cache_root: &Path, version: &str, arch: GuestArch, workspace: &Path) {
         let fingerprint =
@@ -702,35 +998,53 @@ mod tests {
             arch,
             &fingerprint,
         );
-        write_fake_elves(
-            arch,
-            &[
-                &o.agent,
-                &o.netinit,
-                &o.seccomp_apply,
-                &o.display_bridge,
-                &o.runner,
-                &o.egress_client,
-                &o.addon_dns,
-                &o.exit_report,
-                &o.ping,
-            ],
-        );
         let key = guest_agent_build::source_cache_key(workspace).unwrap();
         let oci = guest_agent_build::GuestAgentLayout::under(cache_root, &key, arch);
-        write_fake_elves(
+        for path in [
+            &o.agent,
+            &o.netinit,
+            &o.seccomp_apply,
+            &o.display_bridge,
+            &o.runner,
+            &o.egress_client,
+            &o.addon_dns,
+            &o.exit_report,
+            &o.ping,
+            &oci.agent,
+            &oci.netinit,
+            &oci.egress_client,
+            &oci.entrypoint_runner,
+        ] {
+            write_file(
+                path.parent().unwrap(),
+                &path.file_name().unwrap().to_string_lossy(),
+                &fake_static_elf(arch, path.to_string_lossy().as_bytes()),
+            );
+        }
+        let extras = extras::GuestExtrasLayout::under(
+            cache_root,
+            version,
             arch,
-            &[
-                &oci.agent,
-                &oci.netinit,
-                &oci.egress_client,
-                &oci.entrypoint_runner,
-            ],
+            &extras::extras_source_fingerprint(workspace).unwrap(),
         );
+        for build in extras::extra_builds(arch).unwrap() {
+            let path = extras.path_of(&build.member);
+            let bytes = match &build.member {
+                GuestBinsMember::SharedObject { libc, .. } => {
+                    shared_object(arch, &[libc.libc_soname().unwrap()])
+                }
+                _ => fake_static_elf(arch, path.to_string_lossy().as_bytes()),
+            };
+            write_file(
+                path.parent().unwrap(),
+                &path.file_name().unwrap().to_string_lossy(),
+                &bytes,
+            );
+        }
     }
 
     #[test]
-    fn the_producer_records_the_producing_trees_fingerprints_and_every_binary() {
+    fn the_producer_records_the_producing_tree_and_every_member() {
         let workspace = guest_agent_build::detect_source_workspace()
             .expect("the test runs inside the mvm workspace");
         let tmp = tempfile::tempdir().unwrap();
@@ -756,8 +1070,15 @@ mod tests {
             written.manifest.guest_source_fingerprint,
             guest_agent_build::guest_source_fingerprint(&workspace).unwrap(),
         );
+        assert_eq!(
+            written.manifest.source.commit,
+            crate::image_source::probe_identity(&workspace)
+                .unwrap()
+                .commit
+        );
+        let files = &written.manifest.files;
         for arch in ["aarch64", "x86_64"] {
-            for name in [
+            let mut expected: Vec<String> = [
                 "mvm-guest-agent",
                 "mvm-guest-netinit",
                 "mvm-seccomp-apply",
@@ -768,21 +1089,37 @@ mod tests {
                 "mvm-exit-report",
                 "mvm-ping",
                 "mvm-oci-entrypoint",
-            ] {
+                "mvm-setpriv",
+            ]
+            .iter()
+            .map(|name| format!("{arch}/bin/{name}"))
+            .collect();
+            expected.push(format!("{arch}/initramfs/mvm-guest-agent"));
+            for libc in ["glibc", "musl"] {
+                for cdylib in guest_cdylibs() {
+                    expected.push(format!("{arch}/lib/{libc}/{}", cdylib.soname));
+                }
+            }
+            for member in &expected {
                 assert!(
-                    written
-                        .manifest
-                        .files
-                        .contains_key(&format!("{arch}/{name}")),
-                    "{arch}/{name} missing from {:?}",
-                    written.manifest.files.keys()
+                    files.contains_key(member),
+                    "{member} missing from {files:?}"
                 );
             }
+            assert_eq!(
+                files.keys().filter(|k| k.starts_with(arch)).count(),
+                expected.len(),
+                "a repeated --arch adds nothing"
+            );
         }
+        let python = files
+            .keys()
+            .filter(|k| k.starts_with("sdk-py/mvm/"))
+            .count();
         assert_eq!(
-            written.manifest.files.len(),
-            20,
-            "a repeated --arch adds nothing"
+            python,
+            python_sdk::python_sdk_members(&workspace).unwrap().len()
         );
+        assert!(files.contains_key("sdk-py/mvm/__init__.py"));
     }
 }

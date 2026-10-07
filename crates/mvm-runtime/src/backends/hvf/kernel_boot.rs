@@ -2006,7 +2006,7 @@ unsafe fn run(
                             .and_then(|millicores| QuotaConfig::for_share(millicores).ok())
                             .filter(|_| !clocks.is_empty())
                             .map(|config| {
-                                VcpuQuota::start_with_hold(
+                                VcpuQuota::start(
                                     handles,
                                     SummedClock::new(clocks),
                                     QuotaPolicy::new(config),

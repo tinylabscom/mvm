@@ -10,10 +10,10 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mvm_sdk::runtime::{compile_recording_with_findings, RuntimeRecording};
+use mvm_sdk::runtime::{compile_recording, RuntimeRecording};
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(rec) = serde_json::from_slice::<RuntimeRecording>(data) {
-        let _ = compile_recording_with_findings(&rec);
+        let _ = compile_recording(&rec);
     }
 });

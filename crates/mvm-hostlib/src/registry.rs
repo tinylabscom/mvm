@@ -21,12 +21,14 @@ use crate::dispatch::{
     MACHINE_EXEC, MACHINE_INSPECT, MACHINE_INVENTORY, MACHINE_LIST, MACHINE_LOGS, MACHINE_PAUSE,
     MACHINE_RECONFIGURE, MACHINE_RESUME, MACHINE_RM, MACHINE_SET_TTL, MACHINE_START, MACHINE_STOP,
     MachineRef, PauseRequest, ReconfigurePatchRequest, RemoveRequest as DispatchRemoveRequest,
-    ResumeRequest, SetTtlRequest, StopRequest,
+    ResumeRequest, SetTtlRequest, StopRequest, TELEMETRY_RECORDS, TELEMETRY_STATUS,
+    TelemetryRecordsRequest,
 };
 use crate::entrypoint::{
-    ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, SESSION_CALL, SESSION_INFO,
-    SESSION_START, SESSION_STOP, SessionCallRequest, SessionInfoReply, SessionRef,
-    SessionStartReply, SessionStartRequest,
+    ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, MACHINE_PROMPT,
+    MachinePromptReply, MachinePromptRequest, SESSION_CALL, SESSION_INFO, SESSION_START,
+    SESSION_STOP, SessionCallRequest, SessionInfoReply, SessionRef, SessionStartReply,
+    SessionStartRequest,
 };
 use crate::guest::{
     AcceptedReply, CP, CopyRequest, DataReply, FS_LIST, FS_MKDIR, FS_READ, FS_REMOVE, FS_RENAME,
@@ -146,6 +148,33 @@ fn inventory_records() -> SchemaAndDefs {
     }
 }
 
+/// The status behind `telemetry.status` is owned by the telemetry contract
+/// (`mvm_core::protocol::telemetry::served`) and read as untyped JSON, like
+/// the capability report: a tagged object whose `collection` is
+/// `not_provisioned` or `provisioned`.
+fn telemetry_status() -> SchemaAndDefs {
+    SchemaAndDefs {
+        root: serde_json::json!({
+            "type": "object",
+            "description": "A TelemetryStatus; the shape is owned by the telemetry contract. `collection` is always present: `not_provisioned`, or `provisioned` with `vm_name`, `state` (`kind`: connecting | collecting | degraded | stopped), `shed`, `records_bytes`, and `snapshot_age_ms` when known.",
+        }),
+        defs: Vec::new(),
+    }
+}
+
+/// The page behind `telemetry.records`, likewise owned by the telemetry
+/// contract: `records` (each `record` with its `received_at_ms`),
+/// `next_cursor`, `undecodable`, and `exhausted`.
+fn telemetry_page() -> SchemaAndDefs {
+    SchemaAndDefs {
+        root: serde_json::json!({
+            "type": "object",
+            "description": "A TelemetryReadResponse; the shape is owned by the telemetry contract. `records`, `next_cursor` (`offset`), `undecodable`, and `exhausted` are always present.",
+        }),
+        defs: Vec::new(),
+    }
+}
+
 /// Every method the ABI answers, in dotted-name order within each family.
 pub const REGISTRY: &[MethodDef] = &[
     MethodDef {
@@ -251,6 +280,15 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::ProdSafe,
         request: schema_of::<PauseRequest>,
         reply: schema_of::<PauseOutcome>,
+    },
+    MethodDef {
+        name: MACHINE_PROMPT,
+        key: "machine_prompt",
+        summary: "Sends one prompt to a running machine's resident agent, granted by its plan, \
+                  journaled, recorded encrypted and chain-audited.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<MachinePromptRequest>,
+        reply: schema_of::<MachinePromptReply>,
     },
     MethodDef {
         name: MACHINE_RECONFIGURE,
@@ -467,6 +505,22 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::DevOnly,
         request: schema_of::<WaitRequest>,
         reply: schema_of::<WaitReply>,
+    },
+    MethodDef {
+        name: TELEMETRY_RECORDS,
+        key: "telemetry_records",
+        summary: "Reads one cursor-paged page of a machine's collected telemetry records.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<TelemetryRecordsRequest>,
+        reply: telemetry_page,
+    },
+    MethodDef {
+        name: TELEMETRY_STATUS,
+        key: "telemetry_status",
+        summary: "Reports whether telemetry collection was provisioned for a machine and how its collector stands.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<MachineRef>,
+        reply: telemetry_status,
     },
 ];
 

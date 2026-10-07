@@ -60,6 +60,16 @@ pub fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// The current wall-clock time in milliseconds since the Unix epoch, the unit
+/// agent-session events are stamped in. Saturates at zero before 1970 and at
+/// `u64::MAX` past the representable range.
+pub fn now_unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
 pub fn parse_iso8601(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s)
         .ok()

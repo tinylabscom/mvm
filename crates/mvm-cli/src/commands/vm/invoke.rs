@@ -466,6 +466,45 @@ pub(in crate::commands) fn dispatch_into_session(
     Ok(outcome.exit_code())
 }
 
+/// Deliver one prompt to a machine's resident agent, writing the answer to
+/// this process's fds exactly as an entrypoint call's output is written.
+///
+/// # Errors
+/// The prompt was refused, could not be recorded or audited, or its delivery
+/// failed.
+pub(in crate::commands) fn prompt_machine(
+    prompt: &mvm_client::agent_prompt::AgentPrompt,
+    checkpointer: Option<&dyn mvm_client::agent_prompt::StepCheckpointer>,
+) -> Result<mvm_client::agent_prompt::PromptOutcome> {
+    let mut out = CallOutput::inherited();
+    let outcome = mvm_client::agent_prompt::send_prompt(prompt, &mut out, checkpointer);
+    flush_inherited();
+    outcome
+}
+
+/// Re-deliver a replay plan's recorded prompts onto the fork `vm_name`,
+/// writing each answer to this process's fds.
+///
+/// # Errors
+/// The fork does not grant prompts, or a delivery or its audit entry failed.
+pub(in crate::commands) fn replay_prompts(
+    vm_name: &str,
+    plan: &mvm_runtime::agent_session::replay::ReplayPlan,
+    inputs: &mvm_runtime::agent_session::replay_input::ReplayInputStore,
+    timeout_secs: u64,
+) -> Result<mvm_client::agent_prompt::replay::ReplayedPrompts> {
+    let mut out = CallOutput::inherited();
+    let replayed = mvm_client::agent_prompt::replay::replay_onto(
+        vm_name,
+        plan,
+        inputs,
+        timeout_secs,
+        &mut out,
+    );
+    flush_inherited();
+    replayed
+}
+
 /// Flush this process's stdout and stderr before a possible exit.
 fn flush_inherited() {
     let _ = std::io::stdout().flush();
