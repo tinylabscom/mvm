@@ -1698,7 +1698,9 @@ mod verification {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::image_set::verify::{ImageSetVerification, verify_checked, verify_image_set};
+    use crate::image_set::verify::{
+        ImageSetVerification, verify_checked, verify_checked_selected, verify_image_set,
+    };
     use crate::pack_trust::{PackTrustConfig, RevokedPack};
     use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus};
     use crate::plan::bundle::{KeyId, key_id_from_identity};
@@ -1809,6 +1811,118 @@ mod verification {
                 "an artifact must be reported where it was read: {artifact:?}"
             );
         }
+    }
+
+    #[test]
+    fn selected_artifact_verifies_without_other_member_files() {
+        let set = staged();
+        let selected = ArtifactName::new(set.first_artifact_name()).unwrap();
+        let manifest: ImageSetManifest = serde_json::from_slice(&set.manifest_bytes).unwrap();
+        let other = manifest
+            .members
+            .iter()
+            .flat_map(|member| &member.artifacts)
+            .find(|artifact| artifact.name != selected)
+            .unwrap();
+        std::fs::remove_file(set.path(other.name.as_str())).unwrap();
+
+        let verified = verify_checked_selected(
+            &set.request(),
+            std::slice::from_ref(&selected),
+            accept_signature,
+        )
+        .expect("only selected artifact bytes are required");
+        assert_eq!(verified.artifacts.len(), 1);
+        assert_eq!(verified.artifacts[0].name, selected);
+        assert!(matches!(
+            verify_checked(&set.request(), accept_signature),
+            Err(ImageSetError::ArtifactMissing { .. })
+        ));
+    }
+
+    #[test]
+    fn selected_artifact_rejects_empty_unknown_and_duplicate_names() {
+        let set = staged();
+        let selected = ArtifactName::new(set.first_artifact_name()).unwrap();
+        for (names, expected) in [
+            (vec![], "empty"),
+            (
+                vec![ArtifactName::new("not-in-manifest").unwrap()],
+                "unknown",
+            ),
+            (vec![selected.clone(), selected], "duplicate"),
+        ] {
+            let error = verify_checked_selected(&set.request(), &names, accept_signature)
+                .expect_err("invalid selection must fail");
+            assert_eq!(error.stage(), ImageSetStage::Selection, "{expected}");
+        }
+    }
+
+    #[test]
+    fn selected_artifact_rejects_symlink_and_wrong_bytes() {
+        let set = staged();
+        let selected = ArtifactName::new(set.first_artifact_name()).unwrap();
+        std::fs::write(set.path(selected.as_str()), b"wrong").unwrap();
+        assert!(matches!(
+            verify_checked_selected(
+                &set.request(),
+                std::slice::from_ref(&selected),
+                accept_signature
+            ),
+            Err(ImageSetError::ArtifactSizeMismatch { .. })
+        ));
+
+        std::fs::remove_file(set.path(selected.as_str())).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(set.path("elsewhere"), set.path(selected.as_str())).unwrap();
+            assert!(matches!(
+                verify_checked_selected(&set.request(), &[selected], accept_signature),
+                Err(ImageSetError::ArtifactNotRegularFile { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn selected_artifact_still_checks_set_revocation() {
+        let set = staged();
+        let selected = ArtifactName::new(set.first_artifact_name()).unwrap();
+        let revocations = revoking(&set.lock, &set.lock.manifest_sha256);
+        assert!(matches!(
+            verify_checked_selected(
+                &set.request().with_revocations(&revocations),
+                &[selected],
+                accept_signature
+            ),
+            Err(ImageSetError::SetRevoked { .. })
+        ));
+    }
+
+    #[test]
+    fn selected_artifact_still_requires_pinned_signed_manifest() {
+        fn reject_signature(_: &[u8], _: &[u8], _: &KeylessTrust) -> Result<(), ImageSetError> {
+            Err(ImageSetError::SignatureInvalid {
+                identity: "wrong release identity".to_string(),
+                reason: "signature does not verify".to_string(),
+            })
+        }
+
+        let mut set = staged();
+        let selected = ArtifactName::new(set.first_artifact_name()).unwrap();
+        assert!(matches!(
+            verify_checked_selected(
+                &set.request(),
+                std::slice::from_ref(&selected),
+                reject_signature
+            ),
+            Err(ImageSetError::SignatureInvalid { .. })
+        ));
+
+        set.manifest_bytes.push(b' ');
+        assert!(matches!(
+            verify_checked_selected(&set.request(), &[selected], accept_signature),
+            Err(ImageSetError::ManifestDigestMismatch { .. })
+        ));
     }
 
     #[test]

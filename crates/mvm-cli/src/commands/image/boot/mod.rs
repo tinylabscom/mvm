@@ -55,9 +55,12 @@ pub(in crate::commands) enum BootAction {
         /// binary — the bytes this CLI would itself accept
         #[arg(long, value_name = "FILE")]
         lock: Option<PathBuf>,
-        /// Directory holding every member artifact under its declared name
+        /// Directory holding the member artifacts to verify under their declared names
         #[arg(long, value_name = "DIR")]
         artifacts: PathBuf,
+        /// Verify only this declared artifact (repeatable); unselected artifacts are not verified
+        #[arg(long, value_name = "NAME")]
+        artifact: Vec<String>,
         /// Also refuse a set missing any member the current release train needs
         #[arg(long)]
         require_complete: bool,
@@ -77,6 +80,7 @@ pub(in crate::commands) fn run(action: BootAction) -> Result<()> {
             bundle,
             lock,
             artifacts,
+            artifact,
             require_complete,
             json,
         } => verify::run(&verify::VerifyRequest {
@@ -84,6 +88,7 @@ pub(in crate::commands) fn run(action: BootAction) -> Result<()> {
             bundle,
             lock,
             artifacts,
+            artifact,
             require_complete,
             json,
         }),
