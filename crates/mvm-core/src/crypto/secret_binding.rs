@@ -15,8 +15,8 @@
 //! both, so a binding cannot say one thing to the certificate and another to
 //! the enforcement.
 
+use crate::private_fs::set_mode;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -223,8 +223,7 @@ impl BindingStore for FileBindingStore {
         let path = self.path(tenant, name)?;
         let dir = path.parent().expect("path has tenant parent");
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("chmod 0700 {}", dir.display()))?;
+        set_mode(dir, 0o700).with_context(|| format!("chmod 0700 {}", dir.display()))?;
         let json = serde_json::to_vec_pretty(meta).context("serializing binding metadata")?;
         crate::atomic_io::write_private(&path, &json)
             .with_context(|| format!("writing {}", path.display()))
@@ -256,6 +255,7 @@ impl BindingStore for FileBindingStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::tempdir;
 
     fn meta() -> SecretBindingMeta {

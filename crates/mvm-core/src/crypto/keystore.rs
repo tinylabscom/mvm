@@ -23,7 +23,7 @@
 //! drop AND forbids accidental `Debug`/`Display` at compile time (you
 //! must explicitly call `.expose_secret()` to read the bytes).
 
-use std::os::unix::fs::PermissionsExt;
+use crate::private_fs::mode_bits;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -125,7 +125,7 @@ impl KeyProvider for FileKeyProvider {
         let path = self.keys_dir.join(format!("{tenant_id}.key"));
         let meta = std::fs::metadata(&path)
             .with_context(|| format!("stat key file {}", path.display()))?;
-        let mode = meta.permissions().mode() & 0o777;
+        let mode = mode_bits(&path, &meta)?;
         if mode != 0o600 && mode != 0o400 {
             anyhow::bail!(
                 "key file {} has mode 0{mode:o}; refuse to read (require 0600 or 0400)",

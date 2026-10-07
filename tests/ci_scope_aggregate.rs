@@ -172,6 +172,7 @@ impl Verdict {
             .env("FEATURES_RESULT", self.lanes)
             .env("FEATURES_SUPPORT_RESULT", self.lanes)
             .env("FEATURES_EMBED_RESULT", self.lanes)
+            .env("WINDOWS_RESULT", self.lanes)
             // The workspace suite's build, shards and once-only suites are three
             // jobs with one scope; each must be read back on its own.
             .env("WORKSPACE_BUILD_RESULT", self.lanes)

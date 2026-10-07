@@ -19,7 +19,6 @@
 //! length, and a public half that is present but does not match the secret.
 
 use std::io::Read as _;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -28,6 +27,7 @@ use rand::Rng as _;
 use zeroize::Zeroizing;
 
 use crate::atomic_io;
+use crate::private_fs::mode_bits;
 
 /// Required mode for the secret-half file.
 pub const SECRET_MODE: u32 = 0o600;
@@ -65,7 +65,7 @@ fn mint_seed() -> Zeroizing<Vec<u8>> {
 fn load_secret_half(secret_path: &Path) -> Result<SigningKey> {
     let meta = std::fs::metadata(secret_path)
         .with_context(|| format!("stat {}", secret_path.display()))?;
-    let mode = meta.permissions().mode() & 0o777;
+    let mode = mode_bits(secret_path, &meta)?;
     if mode != SECRET_MODE {
         bail!(
             "{} has mode {:04o}; expected {:04o}. Tighten with `chmod 0600 {}` or rotate.",
@@ -131,6 +131,7 @@ fn read_exact_key(path: &Path) -> Result<Zeroizing<[u8; KEY_BYTES]>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
     use std::sync::{Arc, Barrier};
 
     fn paths(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
