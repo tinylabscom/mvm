@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 5;
+export const ABI_MINOR = 6;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -65,6 +65,12 @@ export const MACHINE_LOGS_STREAM_OPEN = "machine.logs.stream.open";
  * uses one.
  */
 export const MACHINE_PAUSE = "machine.pause";
+
+/**
+ * Sends one prompt to a running machine's resident agent, granted by
+ * its plan, journaled, recorded encrypted and chain-audited.
+ */
+export const MACHINE_PROMPT = "machine.prompt";
 
 /** Patches a machine's resources and relaunches it when running. */
 export const MACHINE_RECONFIGURE = "machine.reconfigure";
@@ -147,6 +153,18 @@ export const GUEST_PROC_STREAM_OPEN = "guest.proc.stream.open";
 /** Waits for a guest process to end, returning its output. */
 export const GUEST_PROC_WAIT = "guest.proc.wait";
 
+/**
+ * Reads one cursor-paged page of a machine's collected telemetry
+ * records.
+ */
+export const TELEMETRY_RECORDS = "telemetry.records";
+
+/**
+ * Reports whether telemetry collection was provisioned for a machine
+ * and how its collector stands.
+ */
+export const TELEMETRY_STATUS = "telemetry.status";
+
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
   "entrypoint.call": { key: "entrypoint_call", classification: "prod_safe", summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan." },
@@ -161,6 +179,7 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "machine.logs.stream.next": { key: "machine_logs_stream_next", classification: "prod_safe", summary: "Returns the captured output that has arrived." },
   "machine.logs.stream.open": { key: "machine_logs_stream_open", classification: "prod_safe", summary: "Opens a stream over a machine's captured output, replayed then followed." },
   "machine.pause": { key: "machine_pause", classification: "prod_safe", summary: "Pauses a running machine, sealing a snapshot where the backend uses one." },
+  "machine.prompt": { key: "machine_prompt", classification: "prod_safe", summary: "Sends one prompt to a running machine's resident agent, granted by its plan, journaled, recorded encrypted and chain-audited." },
   "machine.reconfigure": { key: "machine_reconfigure", classification: "prod_safe", summary: "Patches a machine's resources and relaunches it when running." },
   "machine.resume": { key: "machine_resume", classification: "prod_safe", summary: "Resumes a paused machine, refusing a replayed snapshot." },
   "machine.run": { key: "machine_run", classification: "prod_safe", summary: "Boots a machine through the admitted local launch." },
@@ -188,4 +207,6 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "guest.proc.stream.next": { key: "guest_proc_stream_next", classification: "dev_only", summary: "Returns the process output that has arrived, and how it ended." },
   "guest.proc.stream.open": { key: "guest_proc_stream_open", classification: "dev_only", summary: "Opens a stream over a guest process's output." },
   "guest.proc.wait": { key: "guest_proc_wait", classification: "dev_only", summary: "Waits for a guest process to end, returning its output." },
+  "telemetry.records": { key: "telemetry_records", classification: "prod_safe", summary: "Reads one cursor-paged page of a machine's collected telemetry records." },
+  "telemetry.status": { key: "telemetry_status", classification: "prod_safe", summary: "Reports whether telemetry collection was provisioned for a machine and how its collector stands." },
 };

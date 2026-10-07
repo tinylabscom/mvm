@@ -63,6 +63,7 @@ impl Host {
             audit_dir: Some(&audit),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),

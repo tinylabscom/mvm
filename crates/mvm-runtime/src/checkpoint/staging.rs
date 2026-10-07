@@ -97,6 +97,18 @@ pub(super) struct StagedCapture<'a> {
 
 impl<'a> StagedCapture<'a> {
     /// Start a capture of `id`, removing any staging a dead process left.
+    /// [`begin`](Self::begin) a capture of `vm`, refused before anything is
+    /// staged when `vm`'s run carries an entered human credential: a
+    /// checkpoint, and every fork built from one, would copy that session.
+    pub(super) fn begin_for_vm(
+        store: &'a CheckpointStore,
+        id: &CheckpointId,
+        vm: &str,
+    ) -> Result<Self> {
+        crate::vm::human_credential::refuse_capture_after_entry(vm)?;
+        Self::begin(store, id)
+    }
+
     pub(super) fn begin(store: &'a CheckpointStore, id: &CheckpointId) -> Result<Self> {
         ensure_capturable_id(id)?;
         let staging_root = store.root().join(STAGING_DIR);

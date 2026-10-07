@@ -1,6 +1,6 @@
 ---
 title: Author and publish a signed pack
-description: Write a policy pack as a group or a profile, check it locally, publish it through the mvm-templates signing workflow, and decide which publishers your hosts trust.
+description: Write a policy pack as a group or a profile, check it locally, publish it through the mvm-packs signing workflow, and decide which publishers your hosts trust.
 ---
 
 A pack is a named, versioned, signed bundle of policy and, optionally, a
@@ -8,7 +8,7 @@ buildable workload image. It carries a policy group, a policy profile, or both,
 under a `namespace/name@version` reference,
 and `mvmctl` verifies its signature every time it is pulled and every time a
 policy that names it is loaded. The official registry is the
-[`mvm-templates`](https://github.com/tinylabscom/mvm-templates) repository.
+[`mvm-packs`](https://github.com/tinylabscom/mvm-packs) repository.
 
 This guide uses two published packs as its worked examples: `runtime/node`, a
 group, and `agent/codex`, a profile that includes it. For the policy language
@@ -16,7 +16,7 @@ itself, see [Policy and profiles](/guides/policy-and-profiles/).
 
 ## What a pack contains
 
-A pack source is a directory in `mvm-templates`:
+A pack source is a directory in `mvm-packs`:
 
 ```text
 pack-sources/runtime/node/
@@ -158,7 +158,7 @@ in full.
 
 ## Check it before you publish
 
-From a checkout of `mvm-templates`, validate each document with the client
+From a checkout of `mvm-packs`, validate each document with the client
 that will load it:
 
 ```sh
@@ -177,7 +177,7 @@ for a secret you have not stored.
 
 ## Publish
 
-Open a pull request against `mvm-templates` that adds or changes a directory
+Open a pull request against `mvm-packs` that adds or changes a directory
 under `pack-sources/`. Merging to `main` runs `.github/workflows/publish.yml`,
 which:
 
@@ -259,7 +259,7 @@ With no trust policy file, `mvmctl` trusts exactly one signing identity, in
 every namespace: the official registry's publish workflow.
 
 ```text
-https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main
+https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main
 ```
 
 under the issuer `https://token.actions.githubusercontent.com`. To make your
@@ -274,7 +274,7 @@ schema_version = 1
 namespace = "runtime"
 issuer = "https://token.actions.githubusercontent.com"
 accepted_identities = [
-  "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main",
+  "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main",
 ]
 ```
 

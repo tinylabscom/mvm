@@ -43,7 +43,13 @@ pub(in crate::commands) enum BuildCmd {
     /// Build one role of the MVM_IMAGES_DIR checkout into the local image cache
     #[command(name = "image-set")]
     ImageSet(image_set::Args),
-    /// Assemble the publishable mvm-guest-bins artifact from this checkout
+    /// Assemble mvmctl's guest-runtime archive (mvm-guest-bins) from this checkout
+    ///
+    /// Every guest artifact mvm owns, for each guest architecture.
+    ///
+    /// Its consumer is mvmctl; mvm-images does not consume it.
+    ///
+    /// Needs the pinned cross toolchain: `just payload::toolchain`.
     #[command(name = "guest-bins")]
     GuestBins(guest_bins::Args),
 }

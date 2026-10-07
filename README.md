@@ -243,7 +243,7 @@ with `mvmctl machine run --flake examples/<name>` (Nix) or `mvmctl build compile
 
 You can also scaffold a new project from a template instead of starting from
 an empty directory. A small core set ships with `mvmctl` and works offline;
-richer templates are fetched from the [`mvm-templates`](https://github.com/tinylabscom/mvm-templates)
+richer templates are fetched from the [`mvm-packs`](https://github.com/tinylabscom/mvm-packs)
 registry on first use and cached under `~/.mvm/templates/remote/`.
 
 ```bash
@@ -262,7 +262,7 @@ mvmctl template search pandas
 
 Templates can be Nix flakes or SDK-based. Nix templates ship a `flake.nix`;
 SDK templates ship source files (e.g. `app.py`) plus a generated `flake.nix`.
-See the [`mvm-templates` README](https://github.com/tinylabscom/mvm-templates/blob/main/README.md)
+See the [`mvm-packs` README](https://github.com/tinylabscom/mvm-packs/blob/main/README.md)
 for how to author one, including the optional `files` list that tells `mvmctl`
 which additional files to copy into the generated project.
 

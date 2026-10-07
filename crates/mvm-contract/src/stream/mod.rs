@@ -16,6 +16,7 @@
 
 pub mod chain;
 pub mod display;
+pub mod display_input;
 pub mod edge;
 pub mod input;
 pub mod record;
@@ -27,6 +28,10 @@ pub use display::{
     DISPLAY_FRAME_PORT, DISPLAY_VIEW_GRANT_SERVICE, DisplayFrame, DisplayFrameError, DisplayMime,
     MAX_DISPLAY_FRAME_BYTES, MAX_ENCODED_DISPLAY_FRAME_BYTES, grants_display_view,
     grants_display_view_for,
+};
+pub use display_input::{
+    DISPLAY_INPUT_VERB, DISPLAY_VIEW_VERB, DisplayInputEvent, DisplayInputFrame,
+    DisplayInputFrameError, PointerButton, display_verbs,
 };
 pub use edge::{
     ACK_RAW_EDGE_ENV, EdgeBackpressure, EdgeRedaction, StreamEdge, any_raw_edge, binding_names,

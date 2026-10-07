@@ -127,6 +127,7 @@ machine_logs_stream_close: MachineLogsStreamClose
 machine_logs_stream_next: MachineLogsStreamNext
 machine_logs_stream_open: MachineLogsStreamOpen
 machine_pause: MachinePause
+machine_prompt: MachinePrompt
 machine_reconfigure: MachineReconfigure
 machine_resume: MachineResume
 machine_rm: MachineRm
@@ -138,6 +139,8 @@ session_call: SessionCall
 session_info: SessionInfo
 session_start: SessionStart
 session_stop: SessionStop
+telemetry_records: TelemetryRecords
+telemetry_status: TelemetryStatus
 }
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
@@ -897,6 +900,64 @@ primed_barrier?: boolean
  */
 primed_timeout_secs?: (number | null)
 }
+export interface MachinePrompt {
+reply: MachinePromptReply
+request: MachinePromptRequest
+}
+/**
+ * The reply to `machine.prompt`.
+ */
+export interface MachinePromptReply {
+/**
+ * Set when the agent, not the workload, ended the call.
+ */
+agent_error?: (AgentErrorReply | null)
+/**
+ * False when a prompt under the same retry key was already accepted and nothing was sent.
+ */
+delivered: boolean
+/**
+ * The wrapper's error envelope, when the call failed with one.
+ */
+error?: (RemoteErrorReply | null)
+/**
+ * The workload's exit status, or the conventional status for how the agent ended the call (124 timeout, 137 crashed wrapper, 142 killed session, 75 not ready, 1 otherwise).
+ */
+exit_code?: number
+/**
+ * The agent-session journal cursor the prompt was accepted at.
+ */
+journal_cursor: number
+/**
+ * Output past the per-channel cap was dropped.
+ */
+output_truncated?: boolean
+stderr_b64?: string
+stdout_b64?: string
+}
+/**
+ * A `machine.prompt` request.
+ */
+export interface MachinePromptRequest {
+/**
+ * The running machine whose agent is prompted.
+ */
+id: string
+/**
+ * A prompt sent again under a key already accepted is not delivered twice; the request id when absent.
+ */
+idempotency_key?: (string | null)
+/**
+ * The prompt, base64.
+ */
+prompt_b64: string
+request_id?: (string | null)
+/**
+ * The agent session to journal under; the machine's name when absent.
+ */
+session_id?: (string | null)
+timeout_secs?: (number | null)
+}
 export interface MachineReconfigure {
 reply: MachineState3
 request: ReconfigurePatchRequest
@@ -1383,4 +1444,44 @@ export interface Empty12 {
  */
 export interface SessionRef1 {
 session_id: string
+}
+export interface TelemetryRecords {
+reply: TelemetryRecordsReply
+request: TelemetryRecordsRequest
+}
+/**
+ * A TelemetryReadResponse; the shape is owned by the telemetry contract. `records`, `next_cursor` (`offset`), `undecodable`, and `exhausted` are always present.
+ */
+export interface TelemetryRecordsReply {
+
+}
+/**
+ * A `telemetry.records` request: the machine, where to resume, and how many records at most. An absent cursor reads from the start of the stream; the limit is clamped by the seam.
+ */
+export interface TelemetryRecordsRequest {
+cursor?: (TelemetryCursor | null)
+id: string
+limit?: (number | null)
+}
+/**
+ * Position in a VM's record stream: the byte offset of the next line. A cursor is valid only against the file it came from; one that no longer lands on a line boundary is refused rather than guessed at, and the consumer starts over from the beginning.
+ */
+export interface TelemetryCursor {
+offset: number
+}
+export interface TelemetryStatus {
+reply: TelemetryStatusReply
+request: MachineRef2
+}
+/**
+ * A TelemetryStatus; the shape is owned by the telemetry contract. `collection` is always present: `not_provisioned`, or `provisioned` with `vm_name`, `state` (`kind`: connecting | collecting | degraded | stopped), `shed`, `records_bytes`, and `snapshot_age_ms` when known.
+ */
+export interface TelemetryStatusReply {
+
+}
+/**
+ * A request naming one machine.
+ */
+export interface MachineRef2 {
+id: string
 }

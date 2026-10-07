@@ -27,6 +27,8 @@ use mvm_build::builder_orchestrator::{
 };
 use mvm_build::builder_vm::BuilderVm;
 
+use mvm_core::plan::types::{BuildProvenance, InputKind};
+
 use crate::bundle::{BundleExportInputs, BundleSigner, DebugOutput, export_bundle_with_signer};
 
 const INITRD_NAME: &str = "initrd";
@@ -59,6 +61,19 @@ pub struct BuilderBundleRequest {
 }
 
 impl BuilderBundleRequest {
+    /// The flake attribute this request builds, pinned by the lock file the
+    /// build recorded, as the bundle's build input. The exporter binds it to
+    /// the digests of what it seals.
+    fn provenance(&self, built: &BuilderResult) -> BuildProvenance {
+        BuildProvenance {
+            input_kind: InputKind::NixFlake,
+            input_ref: format!("{}#{}", self.flake_ref, self.attr_path),
+            lock_digest: built.lock_hash.clone(),
+            builder_id: None,
+            artifacts: Default::default(),
+        }
+    }
+
     fn build_request(&self) -> BuildRequest {
         BuildRequest {
             workspace_root: self.workspace_root.clone(),
@@ -138,6 +153,9 @@ pub fn export_builder_result(
             resources: None,
             arch_label: &request.arch_label,
             label: request.label.clone(),
+            cmdline: None,
+            posture: None,
+            provenance: Some(request.provenance(built)),
             out: &request.bundle_out,
             debug_out: request.debug_out.clone(),
         },
@@ -307,6 +325,12 @@ mod tests {
         assert_eq!(manifest.workload_label.as_deref(), Some("app"));
         assert!(manifest.resources.is_none());
         assert!(manifest.verity.is_none());
+        let provenance = manifest.build_provenance().expect("provenance recorded");
+        assert_eq!(provenance.input_ref, "/work#packages.aarch64-linux.default");
+        assert_eq!(
+            provenance.artifacts.rootfs,
+            Some(mvm_core::plan::sha256_hex(b"rootfs"))
+        );
     }
 
     #[test]
