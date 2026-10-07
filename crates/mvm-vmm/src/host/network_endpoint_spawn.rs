@@ -1455,6 +1455,9 @@ pub fn reap_network_endpoint(state_dir: &Path, vm_name: &str) {
     // The endpoint's secrets are gone; the shapes the gate recognised them by
     // go with them, so a recycled VM name cannot inherit them.
     forget_secret_fingerprints(vm_name);
+    // A later boot under the same name must not inherit this endpoint's guest
+    // telemetry assertion.
+    let _ = super::telemetry_provisioning::record_boot_provisioning(state_dir, false);
 }
 
 // ── pid helpers (local copies — backend modules keep theirs private) ──
@@ -1814,7 +1817,11 @@ mod tests {
     fn reap_is_noop_when_nothing_exists() {
         let dir = std::env::temp_dir().join(format!("mvm-reap-noop-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
+        super::super::telemetry_provisioning::record_boot_provisioning(&dir, true).unwrap();
         reap_network_endpoint(&dir, "nonexistent-vm");
+        assert!(!super::super::telemetry_provisioning::boot_is_provisioned(
+            &dir
+        ));
         // Idempotent: a second call on the same empty dir is still clean.
         reap_network_endpoint(&dir, "nonexistent-vm");
         std::fs::remove_dir_all(&dir).ok();

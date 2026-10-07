@@ -76,6 +76,7 @@ pub mod migration;
 pub mod naming;
 pub mod net;
 pub mod observability;
+pub mod otlp_env;
 pub mod pack_cache;
 pub mod pack_revocation;
 pub mod pack_trust;
