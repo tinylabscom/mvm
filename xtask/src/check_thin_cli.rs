@@ -133,7 +133,7 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("vm/session.rs", RUNTIME),
     ("vm/volume.rs", RUNTIME),
     ("vm/workspace.rs", RUNTIME),
-    ("vm/workspace_apply.rs", BOTH),
+    ("vm/workspace_apply.rs", RUNTIME),
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
