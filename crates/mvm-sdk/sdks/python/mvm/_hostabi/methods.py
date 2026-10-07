@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 5
+ABI_MINOR: Final = 6
 
 
 class Classification(str, Enum):
@@ -193,6 +193,16 @@ GUEST_PROC_STREAM_OPEN: Final = "guest.proc.stream.open"
 GUEST_PROC_WAIT: Final = "guest.proc.wait"
 
 
+#: Reads one cursor-paged page of a machine's collected telemetry
+#: records.
+TELEMETRY_RECORDS: Final = "telemetry.records"
+
+
+#: Reports whether telemetry collection was provisioned for a machine
+#: and how its collector stands.
+TELEMETRY_STATUS: Final = "telemetry.status"
+
+
 METHODS: dict[str, Method] = {
     "backend.capabilities": Method(key="backend_capabilities", classification=Classification.PROD_SAFE, summary="Reports what the backend can do."),
     "entrypoint.call": Method(key="entrypoint_call", classification=Classification.PROD_SAFE, summary="Calls a workload's entrypoint in a transient microVM, admitted under a signed plan."),
@@ -234,6 +244,8 @@ METHODS: dict[str, Method] = {
     "guest.proc.stream.next": Method(key="guest_proc_stream_next", classification=Classification.DEV_ONLY, summary="Returns the process output that has arrived, and how it ended."),
     "guest.proc.stream.open": Method(key="guest_proc_stream_open", classification=Classification.DEV_ONLY, summary="Opens a stream over a guest process's output."),
     "guest.proc.wait": Method(key="guest_proc_wait", classification=Classification.DEV_ONLY, summary="Waits for a guest process to end, returning its output."),
+    "telemetry.records": Method(key="telemetry_records", classification=Classification.PROD_SAFE, summary="Reads one cursor-paged page of a machine's collected telemetry records."),
+    "telemetry.status": Method(key="telemetry_status", classification=Classification.PROD_SAFE, summary="Reports whether telemetry collection was provisioned for a machine and how its collector stands."),
 }
 
 __all__ = [
@@ -277,6 +289,8 @@ __all__ = [
     "GUEST_PROC_STREAM_NEXT",
     "GUEST_PROC_STREAM_OPEN",
     "GUEST_PROC_WAIT",
+    "TELEMETRY_RECORDS",
+    "TELEMETRY_STATUS",
     "ABI_MAJOR",
     "ABI_MINOR",
     "Classification",

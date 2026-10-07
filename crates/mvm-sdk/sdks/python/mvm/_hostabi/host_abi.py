@@ -667,6 +667,33 @@ class StreamName3(Enum):
 StreamName = Union[StreamName1, StreamName2, StreamName3]
 
 
+@dataclass
+class TelemetryCursor:
+    offset: int
+
+
+@dataclass
+class TelemetryRecordsReply:
+    pass
+
+
+@dataclass
+class TelemetryRecordsRequest:
+    id: str
+    cursor: Optional[TelemetryCursor] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class TelemetryStatusReply:
+    pass
+
+
+@dataclass
+class TelemetryStatusRequest:
+    id: str
+
+
 class Kind(Enum):
     exited = 'exited'
 
@@ -853,6 +880,18 @@ class SessionStart:
 class SessionStop:
     reply: SessionStopReply
     request: SessionStopRequest
+
+
+@dataclass
+class TelemetryRecords:
+    reply: TelemetryRecordsReply
+    request: TelemetryRecordsRequest
+
+
+@dataclass
+class TelemetryStatus:
+    reply: TelemetryStatusReply
+    request: TelemetryStatusRequest
 
 
 @dataclass
@@ -1230,3 +1269,5 @@ class HostAbi:
     session_info: SessionInfo
     session_start: SessionStart
     session_stop: SessionStop
+    telemetry_records: TelemetryRecords
+    telemetry_status: TelemetryStatus

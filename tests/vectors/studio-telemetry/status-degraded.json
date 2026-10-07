@@ -1,0 +1,11 @@
+{
+  "collection": "provisioned",
+  "records_bytes": 0,
+  "shed": 37,
+  "snapshot_age_ms": 1020,
+  "state": {
+    "code": "authentication-failed",
+    "kind": "degraded"
+  },
+  "vm_name": "web"
+}

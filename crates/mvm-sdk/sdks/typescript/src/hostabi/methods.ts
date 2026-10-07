@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 5;
+export const ABI_MINOR = 6;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -147,6 +147,18 @@ export const GUEST_PROC_STREAM_OPEN = "guest.proc.stream.open";
 /** Waits for a guest process to end, returning its output. */
 export const GUEST_PROC_WAIT = "guest.proc.wait";
 
+/**
+ * Reads one cursor-paged page of a machine's collected telemetry
+ * records.
+ */
+export const TELEMETRY_RECORDS = "telemetry.records";
+
+/**
+ * Reports whether telemetry collection was provisioned for a machine
+ * and how its collector stands.
+ */
+export const TELEMETRY_STATUS = "telemetry.status";
+
 export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "backend.capabilities": { key: "backend_capabilities", classification: "prod_safe", summary: "Reports what the backend can do." },
   "entrypoint.call": { key: "entrypoint_call", classification: "prod_safe", summary: "Calls a workload's entrypoint in a transient microVM, admitted under a signed plan." },
@@ -188,4 +200,6 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "guest.proc.stream.next": { key: "guest_proc_stream_next", classification: "dev_only", summary: "Returns the process output that has arrived, and how it ended." },
   "guest.proc.stream.open": { key: "guest_proc_stream_open", classification: "dev_only", summary: "Opens a stream over a guest process's output." },
   "guest.proc.wait": { key: "guest_proc_wait", classification: "dev_only", summary: "Waits for a guest process to end, returning its output." },
+  "telemetry.records": { key: "telemetry_records", classification: "prod_safe", summary: "Reads one cursor-paged page of a machine's collected telemetry records." },
+  "telemetry.status": { key: "telemetry_status", classification: "prod_safe", summary: "Reports whether telemetry collection was provisioned for a machine and how its collector stands." },
 };
