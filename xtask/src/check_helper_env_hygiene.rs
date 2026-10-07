@@ -263,13 +263,7 @@ const RAW_SITES: &[RawSite] = &[
     ),
     guest(
         "crates/mvm-agentd/src/guest_bootstrap.rs",
-        "spawn_one",
-        "Command::new(path)",
-        "guest init services and loopback setup, inside the guest",
-    ),
-    guest(
-        "crates/mvm-agentd/src/guest_bootstrap.rs",
-        "spawn_one_as",
+        "guest_helper_command",
         "Command::new(path)",
         "guest init services and loopback setup, inside the guest",
     ),

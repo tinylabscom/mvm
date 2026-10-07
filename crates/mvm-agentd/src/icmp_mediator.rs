@@ -1,15 +1,15 @@
 //! Guest-local ICMP mediator, served by the process that holds the FlowMux
 //! identity.
 //!
-//! The guest's signing key is root-only by construction (`/run/mvm`, mode
-//! 0400): the workload runs as uid 901 and must not be able to authenticate as
-//! its own guest. `mvm-ping` runs *as* the workload, so it cannot open a
-//! FlowMux session of its own — the same reason an ordinary workload reaches
-//! the network through the loopback SOCKS proxy and the loopback DNS stub
-//! rather than dialling the host itself.
+//! The guest's signing key is readable only by the egress client's own uid
+//! (`/run/mvm`, mode 0400): the workload runs as uid 901 and must not be able
+//! to authenticate as its own guest. `mvm-ping` runs *as* the workload, so it
+//! cannot open a FlowMux session of its own — the same reason an ordinary
+//! workload reaches the network through the loopback SOCKS proxy and the
+//! loopback DNS stub rather than dialling the host itself.
 //!
 //! So ICMP gets the third loopback mediator, beside those two and in the same
-//! root process: the workload speaks to [`ICMP_MEDIATOR_LISTEN`], and the
+//! egress-client process: the workload speaks to [`ICMP_MEDIATOR_LISTEN`], and the
 //! mediator performs the echo over the one authenticated session. Nothing new
 //! crosses the guest→host boundary — this is the guest's own loopback, and the
 //! request and reply on it are the same [`IcmpEchoRequest`] / [`IcmpEchoReply`]
