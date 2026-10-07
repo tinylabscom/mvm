@@ -794,6 +794,14 @@ text = "mvmctl release"
 reason = "\"the mvmctl release channel\" — a noun phrase"
 
 [[prose]]
+text = "mvmctl deb package"
+reason = "\"the mvmctl .deb package, so dpkg owns it\" — a noun phrase naming the distribution package"
+
+[[prose]]
+text = "mvmctl rpm package"
+reason = "\"the mvmctl .rpm package, so rpm owns it\" — a noun phrase naming the distribution package"
+
+[[prose]]
 text = "mvmctl does not"
 reason = "\"mvmctl does not yet cross-compile\" — a sentence about the tool"
 
