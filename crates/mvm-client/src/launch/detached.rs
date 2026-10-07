@@ -24,6 +24,43 @@ use crate::secret::MachineSecretRef;
 /// up. Matches what `machine run -d -- <argv>` has always waited.
 const AGENT_READY_SECS: u64 = 30;
 
+/// Failure to establish detached launch readiness.
+#[derive(Debug, thiserror::Error)]
+pub enum DetachedReadinessError {
+    /// The partial launch was terminated and its registry entry removed.
+    #[error(
+        "guest control for machine {name:?} did not become ready within {timeout_secs}s; \
+         the partial start was rolled back"
+    )]
+    RolledBack {
+        /// Machine name.
+        name: String,
+        /// Readiness timeout.
+        timeout_secs: u64,
+    },
+    /// The VMM may still own launch resources, so ownership must be retained.
+    #[error(
+        "guest control for machine {name:?} did not become ready within {timeout_secs}s; \
+         aborting the partial start also failed: {source:#}"
+    )]
+    AbortUnresolved {
+        /// Machine name.
+        name: String,
+        /// Readiness timeout.
+        timeout_secs: u64,
+        /// Backend abort failure.
+        #[source]
+        source: anyhow::Error,
+    },
+}
+
+impl DetachedReadinessError {
+    /// Whether the VMM may still own resources from this launch.
+    pub fn abort_is_unresolved(&self) -> bool {
+        matches!(self, Self::AbortUnresolved { .. })
+    }
+}
+
 /// A detached persistent launch is accepted only after the authenticated guest
 /// control plane completes a Ping/Pong. On failure the backend that performed
 /// the start owns rollback, including its VMM and host helpers.
@@ -31,13 +68,14 @@ pub fn require_serving_guest(
     name: &str,
     started: &crate::StartedVm,
     timeout: std::time::Duration,
-) -> Result<()> {
+) -> std::result::Result<(), DetachedReadinessError> {
     // The in-memory backend has no guest transport. It is a lifecycle test
     // double, not a production detached lane.
     let ready = started.backend().kind() == mvm_core::vm_backend::BackendKind::Mock
         || crate::readiness::wait_for_guest_agent_for(name, timeout);
     require_serving_guest_result(name, timeout, ready, || {
-        started.backend().stop(started.vm_id()).map(|_| ())
+        started.backend().abort_start(started.vm_id()).map(|_| ())?;
+        Ok(crate::local::remove_stopped_runtime_state(name)?)
     })
 }
 
@@ -46,23 +84,22 @@ fn require_serving_guest_result(
     timeout: std::time::Duration,
     ready: bool,
     rollback: impl FnOnce() -> Result<()>,
-) -> Result<()> {
+) -> std::result::Result<(), DetachedReadinessError> {
     if ready {
         return Ok(());
     }
-    rollback().with_context(|| {
-        format!(
-            "guest control for machine {name:?} did not become ready within {}s; \
-             rolling back the partial start also failed",
-            timeout.as_secs()
-        )
-    })?;
+    if let Err(source) = rollback() {
+        return Err(DetachedReadinessError::AbortUnresolved {
+            name: name.to_string(),
+            timeout_secs: timeout.as_secs(),
+            source,
+        });
+    }
     crate::local::deregister_from_name_registry(name);
-    bail!(
-        "guest control for machine {name:?} did not become ready within {}s; \
-         the partial start was rolled back",
-        timeout.as_secs()
-    )
+    Err(DetachedReadinessError::RolledBack {
+        name: name.to_string(),
+        timeout_secs: timeout.as_secs(),
+    })
 }
 
 /// Whether `name` is running on the backend this host selects.
@@ -485,5 +522,34 @@ mod tests {
             None,
             "no LaunchAccepted state survives rollback"
         );
+    }
+
+    #[test]
+    fn failed_abort_retains_registry_ownership_for_recovery() {
+        let (_env, _home) = isolated();
+        let name = "abort-unresolved";
+        crate::register_machine(&crate::MachineRegistration {
+            vm_dir: mvm_core::config::vm_state_dir(name)
+                .to_string_lossy()
+                .into_owned(),
+            ..crate::MachineRegistration::minimal(name, "default")
+        });
+
+        let error =
+            require_serving_guest_result(name, std::time::Duration::from_millis(1), false, || {
+                anyhow::bail!("VMM is still alive")
+            })
+            .expect_err("failed abort stays unresolved");
+
+        assert!(error.abort_is_unresolved());
+        let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(
+            &mvm_runtime::vm::name_registry::registry_path(),
+        )
+        .expect("load registry");
+        assert!(
+            registry.lookup(name).is_some(),
+            "registry ownership must survive until VMM death is proven"
+        );
+        assert!(format!("{error:#}").contains("VMM is still alive"));
     }
 }

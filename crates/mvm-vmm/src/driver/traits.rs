@@ -302,6 +302,10 @@ pub trait RunningVm: Send {
     }
     /// Block until the VM exits; returns its status.
     fn wait(&self) -> Result<VmExitStatus>;
+    /// Prepare a cooperative stop while the guest is still responsive.
+    fn prepare_stop(&self) -> Result<()> {
+        Ok(())
+    }
     /// Force-terminate the VM.
     fn kill(&self) -> Result<()>;
     /// Force-terminate the VM and report backend-specific teardown phases when

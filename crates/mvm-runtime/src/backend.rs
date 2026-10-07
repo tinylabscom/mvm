@@ -805,6 +805,15 @@ impl AnyBackend {
         }
     }
 
+    /// Abort a launch that never reached guest readiness. Unlike graceful
+    /// stop, this never waits for guest cooperation.
+    pub fn abort_start(&self, id: &VmId) -> Result<Option<StopTiming>> {
+        match self.abort_runner(id) {
+            Some(timing) => timing.map(Some),
+            None => self.inner().abort_start(id).map(|()| None),
+        }
+    }
+
     /// Fast teardown for an ephemeral transient run. See
     /// [`VmBackend::stop_transient`]. Runner-backed backends tear down
     /// through the same sequence as [`Self::stop`] and report its timings;
@@ -826,6 +835,19 @@ impl AnyBackend {
             Self::Qemu(backend) => Some(backend.stop_with_timing(id)),
             Self::Hvf(backend) => Some(backend.stop_with_timing(id)),
             Self::AppleContainer(backend) => Some(backend.stop_with_timing(id)),
+            #[cfg(feature = "test-support")]
+            Self::Mock(_) => None,
+            Self::Wasm(_) | Self::WebLinux(_) => None,
+        }
+    }
+
+    fn abort_runner(&self, id: &VmId) -> Option<Result<StopTiming>> {
+        match self {
+            Self::Firecracker(backend) => Some(backend.abort_start_with_timing(id)),
+            Self::Libkrun(backend) => Some(backend.abort_start_with_timing(id)),
+            Self::Qemu(backend) => Some(backend.abort_start_with_timing(id)),
+            Self::Hvf(backend) => Some(backend.abort_start_with_timing(id)),
+            Self::AppleContainer(backend) => Some(backend.abort_start_with_timing(id)),
             #[cfg(feature = "test-support")]
             Self::Mock(_) => None,
             Self::Wasm(_) | Self::WebLinux(_) => None,
