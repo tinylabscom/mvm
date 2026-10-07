@@ -971,104 +971,17 @@ jobs:
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     permissions:
-      actions: write
+      actions: read
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        # Each broker starts one shard on a fresh hosted runner. The
-        # persistent runner pool is reserved until its workspace tests can
-        # run without filesystem and privilege state leaking between jobs.
-        shard: [1, 2]
-    # The shard broker can wait longer than the 15-minute ubuntu-slim job cap.
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - name: Run shard on the first available runner
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMIT_SHA: ${{ github.sha }}
-          SHARD: ${{ matrix.shard }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-
-          api="https://api.github.com/repos/$REPOSITORY"
-          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json")
-          correlation="${RUN_ID}-${RUN_ATTEMPT}-${SHARD}"
-          candidates=(github)
-
-          run_ids=()
-          cleanup() {
-            for run_id in "${run_ids[@]}"; do
-              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
-            done
-          }
-          trap cleanup EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-
-          for candidate in "${candidates[@]}"; do
-            curl -fsS -X POST "${auth[@]}" \
-              "$api/actions/workflows/workspace-shard.yml/dispatches" \
-              -d "$(jq -nc \
-                --arg ref "$COMMIT_SHA" \
-                --arg shard "$SHARD" \
-                --arg runner "$candidate" \
-                --arg correlation "$correlation" \
-                '{ref:"main",inputs:{commit_sha:$ref,shard:$shard,runner_kind:$runner,correlation:$correlation}}')"
-          done
-
-          winner=
-          deadline=$((SECONDS + 3600))
-          while [ -z "$winner" ] && [ "$SECONDS" -lt "$deadline" ]; do
-            runs="$(curl -fsS "${auth[@]}" \
-              "$api/actions/workflows/workspace-shard.yml/runs?event=workflow_dispatch&per_page=50")"
-            mapfile -t run_ids < <(
-              jq -r --arg marker "$correlation" \
-                '.workflow_runs[] | select(.display_title | contains($marker)) | .id' \
-                <<<"$runs"
-            )
-            winner="$(jq -r --arg marker "$correlation" '
-              [.workflow_runs[]
-               | select(.display_title | contains($marker))
-               | select(.status == "in_progress" or .status == "completed")]
-              | sort_by(.run_started_at)
-              | first
-              | .id // empty
-            ' <<<"$runs")"
-            [ -n "$winner" ] || sleep 3
-          done
-          if [ -z "$winner" ]; then
-            echo "::error::no workspace shard candidate started within 60 minutes" >&2
-            exit 1
-          fi
-
-          for run_id in "${run_ids[@]}"; do
-            if [ "$run_id" != "$winner" ]; then
-              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
-            fi
-          done
-          run_ids=("$winner")
-
-          while :; do
-            run="$(curl -fsS "${auth[@]}" "$api/actions/runs/$winner")"
-            status="$(jq -r .status <<<"$run")"
-            if [ "$status" = completed ]; then
-              conclusion="$(jq -r .conclusion <<<"$run")"
-              url="$(jq -r .html_url <<<"$run")"
-              echo "workspace shard $SHARD completed on $(jq -r .display_title <<<"$run"): $url"
-              run_ids=()
-              if [ "$conclusion" != success ]; then
-                echo "::error::workspace shard $SHARD concluded $conclusion" >&2
-                exit 1
-              fi
-              exit 0
-            fi
-            sleep 5
-          done
+        shard: ['1', '2']
+    uses: ./.github/workflows/workspace-shard.yml
+    with:
+      commit_sha: ${{ github.sha }}
+      shard: ${{ matrix.shard }}
+      runner_kind: github
 
   test-workspace-aarch64:
     name: Test workspace (aarch64)
