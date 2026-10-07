@@ -2044,7 +2044,7 @@ fn pull_refuses_a_pack_whose_signature_does_not_verify_and_installs_nothing() {
 [[publishers]]
 namespace = "runtime"
 issuer = "https://token.actions.githubusercontent.com"
-accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main"]
+accepted_identities = ["https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"]
 "#,
     )
     .unwrap();
