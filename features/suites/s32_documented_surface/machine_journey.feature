@@ -117,6 +117,16 @@ Feature: The documented machine verbs operate a real guest
     Then the command exits with code 0
     Then the journey machine is still running
 
+  # The journey guest is admitted without a display input grant, so its
+  # display is view-only. Asking for input must be refused from the host's own
+  # record of the run, before any lease, viewer or guest request exists.
+  @live
+  Scenario: a view-only guest refuses attended display input
+    When I run mvmctl against the journey machine with "machine display bdd-journey --input"
+    Then the command exits with code 1
+    And the error output contains "view-only"
+    Then the journey machine is still running
+
   @live
   Scenario: the documented teardown removes the guest
     # Last, because it destroys the machine every scenario above shares.

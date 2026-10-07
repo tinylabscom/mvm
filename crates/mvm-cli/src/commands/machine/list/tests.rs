@@ -147,3 +147,18 @@ fn table_columns_align_across_rows() {
     let kind_col = |line: &str| line.find("persistent").expect("kind cell");
     assert_eq!(kind_col(lines[1]), kind_col(lines[2]));
 }
+
+#[test]
+fn an_attended_run_says_so_in_its_status() {
+    let mut running = record("driven", MachineKind::Persistent, MachineStatus::Running);
+    running.attended = true;
+    assert_eq!(status_cell(&running), "running (attended)");
+
+    // Attendance belongs to a run, so a stopped machine never shows it.
+    let mut stopped = record("idle", MachineKind::Persistent, MachineStatus::Stopped);
+    stopped.attended = true;
+    assert_eq!(status_cell(&stopped), "stopped");
+
+    let unattended = record("plain", MachineKind::Persistent, MachineStatus::Running);
+    assert_eq!(status_cell(&unattended), "running");
+}
