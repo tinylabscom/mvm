@@ -181,7 +181,8 @@ jobs:
       matrix:
         include:
           - witness: ci_live
-            timeout: 45
+            # Cold compilation needs about 35 minutes, then the lifecycle up to 40.
+            timeout: 90
           - witness: tool_live
             timeout: 60
     timeout-minutes: ${{ matrix.timeout }}
