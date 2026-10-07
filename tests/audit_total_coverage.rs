@@ -239,7 +239,7 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
 /// `deployments` is a read-only inventory of the local deploy store.
 const DEPLOYMENTS_SUB: &[(&str, AuditPosture)] = &[("ls", AuditPosture::ReadOnly)];
 
-// Plan 200 — beginner machine UX. `machine run` translates into the same
+// Beginner machine UX. `machine run` translates into the same
 // transient-runner path as top-level `run`, so it shares `run`'s
 // `InteractiveOrControl` posture (it streams guest output; the admitted
 // execution path emits via the inner plan/run protocol). The persistent-spec
@@ -248,9 +248,9 @@ const DEPLOYMENTS_SUB: &[(&str, AuditPosture)] = &[("ls", AuditPosture::ReadOnly
 // surfaces after first resolving the named machine.
 const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
+    ("ps", AuditPosture::ReadOnly),
     ("build", AuditPosture::Emits("TemplateBuild")),
     ("create", AuditPosture::Emits("ConfigChange")),
-    ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("ConfigChange")),
     ("reconfigure", AuditPosture::Emits("ConfigChange")),
@@ -268,7 +268,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // surface whose audit channel is the display input gate's own chain
     // entries (`display.granted`, `display.refused`, `display.input_event`).
     ("display", AuditPosture::InteractiveOrControl),
-    ("console", AuditPosture::InteractiveOrControl),
+    ("attach", AuditPosture::InteractiveOrControl),
     // Hangs up the client attached to a console session. The guest request is
     // recorded as an inbound RPC (`verb=console-detach`), and a detach that
     // disconnected someone closes their span with `ConsoleSessionEnd`.
