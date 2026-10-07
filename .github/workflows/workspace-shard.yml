@@ -68,7 +68,8 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Invalid archive run ID" >&2; exit 1; }
-          archive_root="/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          # The cleanup CLI test clears /tmp on Linux while this shard runs.
+          archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           rm -rf -- "$archive_root"
           mkdir -p -- "$archive_root"
           cp -a "$GITHUB_WORKSPACE/." "$archive_root/"
@@ -158,13 +159,21 @@ jobs:
           ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
         run: |
           set -euo pipefail
-          archive_root="/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           cd "$archive_root"
           cargo nextest run \
             --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst" \
             --workspace-remap "$archive_root" \
             --extract-to "$archive_root" \
-            --partition hash:${{ inputs.shard }}/2
+            --partition hash:${{ inputs.shard }}/2 || {
+              status=$?
+              ls -ld "$archive_root" "$archive_root/target" \
+                "$archive_root/target/debug/build" \
+                "$archive_root/target/debug/build/mvmctl" || true
+              find "$archive_root/target/debug/build/mvmctl" -maxdepth 3 \
+                -name 'audit_emissions_live-*' -print 2>/dev/null || true
+              exit "$status"
+            }
 
       - name: Remove archived workspace
         if: always() && inputs.archive_run_id != ''
@@ -173,7 +182,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
-          rm -rf -- "/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          rm -rf -- "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
 
       - name: Clean isolated state
         if: always()
@@ -190,4 +199,4 @@ jobs:
               chmod -R u+rwX -- "$base"
               rm -rf -- "$base"
             fi
-          fi
+            fi
