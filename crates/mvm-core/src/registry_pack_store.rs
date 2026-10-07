@@ -460,12 +460,14 @@ mod tests {
     }
 
     fn publisher_policy() -> RegistryPackPublisherPolicy {
-        RegistryPackPublisherPolicy::new(vec![RegistryPackPublisher::new(
-            "runtime",
-            "https://token.actions.githubusercontent.com",
-            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main".to_string()],
-        )
-        .unwrap()])
+        RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "runtime",
+                "https://token.actions.githubusercontent.com",
+                vec![crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
         .unwrap()
     }
 
@@ -475,18 +477,26 @@ mod tests {
         let path = home.path().join("config/policy/publishers.toml");
         let loaded = load_publisher_policy_or_official_default(&path).unwrap();
         assert!(loaded.is_official_default());
-        let trust = loaded
-            .policy
-            .trust_for_namespace("anything")
-            .expect("the wildcard default trusts official namespaces");
-        assert_eq!(
-            trust.issuer,
-            crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
-        );
-        assert_eq!(
-            trust.accepted_identities,
-            [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()]
-        );
+        for namespace in ["agent", "runtime"] {
+            let trust = loaded
+                .policy
+                .trust_for_namespace(namespace)
+                .expect("the default trusts published namespaces");
+            assert_eq!(
+                trust.issuer,
+                crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
+            );
+            assert_eq!(
+                trust.accepted_identities.first().map(String::as_str),
+                Some(crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY)
+            );
+            assert!(trust.accepted_identities.iter().all(|identity| {
+                identity == crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+                    || identity == crate::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+            }));
+        }
+        assert!(loaded.policy.trust_for_namespace("mvm").is_err());
+        assert!(loaded.policy.trust_for_namespace("community").is_err());
     }
 
     #[test]

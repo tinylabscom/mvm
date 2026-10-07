@@ -1,12 +1,17 @@
 //! Host-side OAuth token exchange and proactive refresh.
 //!
-//! An OAuth-bound secret's stored value is an [`OAuthTokenSet`]. The machine
-//! flow's client secret travels inside that same encrypted store entry, which
-//! binds it to the flow by the same (tenant, name) key the egress binding and
-//! the resolver share — one confidentiality boundary, one lifecycle, and no
-//! second name convention to keep in sync. The host-side refresher is the only
-//! component that ever reads it, and it only ever goes out as the HTTP Basic
-//! credential of the client-credentials grant.
+//! An OAuth-bound secret's stored value is an [`OAuthTokenSet`]. Its client
+//! secret, when the client has one, travels inside that same encrypted store
+//! entry, which binds it to the flow by the same (tenant, name) key the egress
+//! binding and the resolver share — one confidentiality boundary, one
+//! lifecycle, and no second name convention to keep in sync. The host-side
+//! token exchanges are the only components that ever read it, and it only
+//! ever goes out as the HTTP Basic client credential of a token request.
+//!
+//! The set records the grant it is renewed with ([`OAuthGrant`]). A machine
+//! flow is renewed by the client-credentials grant; a set a human consented
+//! to in a host browser (`keyholder::oauth_consent`) is renewed by the
+//! refresh-token grant, and a rotated refresh token replaces the stored one.
 //!
 //! The refresher runs inside the per-VM network endpoint — the one host
 //! process that already holds the binding-aware resolver — so a running VM
@@ -37,8 +42,10 @@ use mvm_core::plan::{SecretBinding, SecretSource};
 use mvm_http::resolve::Resolve;
 use tracing::{info, warn};
 
+use super::oauth_consent::AuthorizationCodeGrant;
 use super::resolver::{
-    CapturedOAuthToken, OAUTH_REFRESH_SKEW, OAuthSecretString, OAuthTokenSet, SecretResolver,
+    CapturedOAuthToken, OAUTH_REFRESH_SKEW, OAuthGrant, OAuthSecretString, OAuthTokenSet,
+    SecretResolver,
 };
 
 /// JSON pointer of the access token in a token response when the binding does
@@ -75,6 +82,76 @@ pub fn initial_token_set(client_secret: &str) -> OAuthTokenSet {
         refresh_token: None,
         client_secret: Some(OAuthSecretString::from(client_secret.to_owned())),
         expires_at: DateTime::UNIX_EPOCH,
+        grant: OAuthGrant::ClientCredentials,
+    }
+}
+
+/// The stored value for an OAuth binding a human has yet to consent to: no
+/// tokens, the client secret of a confidential client if it has one, and the
+/// authorization-code grant. Resolution refuses it and the refresher stops
+/// on it (there is no refresh token to exchange) until a consent lands.
+#[must_use]
+pub fn awaiting_consent_token_set(client_secret: Option<&str>) -> OAuthTokenSet {
+    OAuthTokenSet {
+        access_token: OAuthSecretString::from(String::new()),
+        refresh_token: None,
+        client_secret: client_secret.map(|secret| OAuthSecretString::from(secret.to_owned())),
+        expires_at: DateTime::UNIX_EPOCH,
+        grant: OAuthGrant::AuthorizationCode,
+    }
+}
+
+/// The token set a completed consent stores: the exchanged tokens, the
+/// client secret the exchange authenticated with, and the authorization-code
+/// grant, so the refresher renews it with the refresh token. A token whose
+/// expiry leaves no time to refresh ahead of the refusal skew is refused, as
+/// it is for every other exchange.
+pub fn consented_token_set(
+    captured: CapturedOAuthToken,
+    client_secret: Option<OAuthSecretString>,
+) -> anyhow::Result<OAuthTokenSet> {
+    let expires_at = require_schedulable_expiry(captured.expires_at, Utc::now())?;
+    Ok(OAuthTokenSet {
+        access_token: captured.access_token,
+        refresh_token: captured.refresh_token,
+        client_secret,
+        expires_at,
+        grant: OAuthGrant::AuthorizationCode,
+    })
+}
+
+/// The exchange that renews a stored set, borrowing the credentials it sends.
+enum Renewal<'a> {
+    ClientCredentials {
+        client_secret: &'a str,
+    },
+    RefreshToken {
+        refresh_token: &'a str,
+        client_secret: Option<&'a str>,
+    },
+}
+
+/// How a stored set is renewed, or why it cannot be. The reason is fixed
+/// text: it is logged, and never carries a value.
+fn renewal(token_set: &OAuthTokenSet) -> Result<Renewal<'_>, &'static str> {
+    let client_secret = token_set
+        .client_secret
+        .as_ref()
+        .map(OAuthSecretString::expose_secret);
+    match token_set.grant {
+        OAuthGrant::ClientCredentials => client_secret
+            .map(|client_secret| Renewal::ClientCredentials { client_secret })
+            .ok_or("stored token set has no client secret"),
+        OAuthGrant::AuthorizationCode => token_set
+            .refresh_token
+            .as_ref()
+            .map(|refresh_token| Renewal::RefreshToken {
+                refresh_token: refresh_token.expose_secret(),
+                client_secret,
+            })
+            .ok_or(
+                "stored token set has no refresh token; consent again with `mvmctl secret login`",
+            ),
     }
 }
 
@@ -112,34 +189,92 @@ pub(crate) fn parse_token_response(
     })
 }
 
-/// The form body of the client-credentials grant. Client authentication rides
-/// in the HTTP Basic credential, so the body carries only the grant type and
-/// the requested scopes.
-fn grant_body(scopes: &[String]) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("grant_type", "client_credentials");
-    if !scopes.is_empty() {
-        serializer.append_pair("scope", &scopes.join(" "));
-    }
-    serializer.finish()
+/// One token request (RFC 6749 §4.1.3, §4.4.2, §6). Each variant borrows the
+/// credential it exchanges; none of them is ever logged.
+enum GrantRequest<'a> {
+    ClientCredentials {
+        scopes: &'a [String],
+    },
+    RefreshToken {
+        refresh_token: &'a str,
+    },
+    AuthorizationCode {
+        code: &'a str,
+        redirect_uri: &'a str,
+        code_verifier: &'a str,
+    },
 }
 
-/// Refuse a token endpoint the client secret must not be sent to: anything but
-/// an absolute `https` URL naming a host. The grant carries the client secret
-/// as an HTTP Basic credential, so a cleartext endpoint would put it on the
-/// wire unprotected.
-pub(crate) fn require_https_token_url(token_url: &str) -> anyhow::Result<()> {
-    let url = url::Url::parse(token_url).context("token_url is not an absolute URL")?;
+impl GrantRequest<'_> {
+    /// What the request is, for error context.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::ClientCredentials { .. } => "client-credentials",
+            Self::RefreshToken { .. } => "refresh-token",
+            Self::AuthorizationCode { .. } => "authorization-code",
+        }
+    }
+
+    /// The form body. A confidential client authenticates with the HTTP Basic
+    /// credential, so its body never carries the client id; a public client
+    /// has no secret and identifies itself with `client_id` in the body
+    /// (RFC 6749 §3.2.1). A refresh omits `scope`, which keeps the scope the
+    /// set was granted with (§6).
+    fn form_body(&self, client_id: &str, public_client: bool) -> String {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        match self {
+            Self::ClientCredentials { scopes } => {
+                serializer.append_pair("grant_type", "client_credentials");
+                if !scopes.is_empty() {
+                    serializer.append_pair("scope", &scopes.join(" "));
+                }
+            }
+            Self::RefreshToken { refresh_token } => {
+                serializer.append_pair("grant_type", "refresh_token");
+                serializer.append_pair("refresh_token", refresh_token);
+            }
+            Self::AuthorizationCode {
+                code,
+                redirect_uri,
+                code_verifier,
+            } => {
+                serializer.append_pair("grant_type", "authorization_code");
+                serializer.append_pair("code", code);
+                serializer.append_pair("redirect_uri", redirect_uri);
+                serializer.append_pair("code_verifier", code_verifier);
+            }
+        }
+        if public_client {
+            serializer.append_pair("client_id", client_id);
+        }
+        serializer.finish()
+    }
+}
+
+/// Refuse an OAuth endpoint a credential must not be sent to: anything but an
+/// absolute `https` URL naming a host. `field` names the endpoint in the
+/// error.
+pub(crate) fn require_https_endpoint(field: &str, endpoint: &str) -> anyhow::Result<()> {
+    let url =
+        url::Url::parse(endpoint).with_context(|| format!("{field} is not an absolute URL"))?;
     if url.scheme() != "https" {
         anyhow::bail!(
-            "token_url scheme is `{}`; the client secret is only ever sent over https",
+            "{field} scheme is `{}`; oauth credentials are only ever sent over https",
             url.scheme()
         );
     }
     if url.host_str().is_none_or(str::is_empty) {
-        anyhow::bail!("token_url names no host");
+        anyhow::bail!("{field} names no host");
     }
     Ok(())
+}
+
+/// Refuse a token endpoint the client secret must not be sent to. The grants
+/// carry the client secret as an HTTP Basic credential, and a refresh token or
+/// authorization code in the body, so a cleartext endpoint would put them on
+/// the wire unprotected.
+pub(crate) fn require_https_token_url(token_url: &str) -> anyhow::Result<()> {
+    require_https_endpoint("token_url", token_url)
 }
 
 /// The host of a binding's token endpoint: the destination recorded in audit
@@ -249,28 +384,45 @@ impl From<mvm_http::Client> for TokenEndpointClient {
     }
 }
 
-/// POST the client-credentials grant to the binding's token endpoint and
-/// parse the token set out of the response. Any failure — a destination the
-/// client's check refuses, unreachable endpoint, non-success status,
-/// unparseable body, no access token — is an error and writes nothing: the
-/// caller's fail-closed behavior is to leave the stored set alone.
-pub async fn exchange_client_credentials(
+/// The client id and secret as RFC 6749 §2.3.1 sends them in HTTP Basic:
+/// each form-urlencoded before the pair is joined and base64-encoded, so a
+/// `:` in the id cannot shift the split and `+`, `%`, spaces or non-ASCII in
+/// the secret reach the server as the server decodes them.
+fn basic_client_credential(client_id: &str, client_secret: &str) -> (String, String) {
+    let encode =
+        |value: &str| url::form_urlencoded::byte_serialize(value.as_bytes()).collect::<String>();
+    (encode(client_id), encode(client_secret))
+}
+
+/// POST one grant to the binding's token endpoint and parse the token set out
+/// of the response. Any failure — a destination the client's check refuses,
+/// unreachable endpoint, non-success status, unparseable body, no access
+/// token — is an error and writes nothing: the caller's fail-closed behavior
+/// is to leave the stored set alone.
+async fn post_grant(
     client: &TokenEndpointClient,
     meta: &OAuthBindingMeta,
-    client_secret: &str,
+    grant: &GrantRequest<'_>,
+    client_secret: Option<&str>,
 ) -> anyhow::Result<CapturedOAuthToken> {
     client.admit(&meta.token_url).await?;
-    let response = client
+    let body = grant.form_body(&meta.client_id, client_secret.is_none());
+    let mut request = client
         .http
         .post(&meta.token_url)
-        .basic_auth(&meta.client_id, Some(client_secret))
         .header("content-type", "application/x-www-form-urlencoded")
-        .body(grant_body(&meta.scopes).into_bytes())
+        .header("accept", "application/json");
+    if let Some(client_secret) = client_secret {
+        let (user, password) = basic_client_credential(&meta.client_id, client_secret);
+        request = request.basic_auth(user, Some(password));
+    }
+    let response = request
+        .body(body.into_bytes())
         .timeout(EXCHANGE_TIMEOUT)
         .max_response_bytes(MAX_TOKEN_RESPONSE_BYTES)
         .send()
         .await
-        .context("posting the client-credentials grant to the token endpoint")?;
+        .with_context(|| format!("posting the {} grant to the token endpoint", grant.label()))?;
     if !response.status().is_success() {
         // The status is safe to log; the body is not — error pages can echo
         // the submitted credential.
@@ -282,6 +434,48 @@ pub async fn exchange_client_credentials(
         .context("parsing the token endpoint response body")?;
     parse_token_response(meta.response_access_token_pointer.as_deref(), &json)
         .ok_or_else(|| anyhow::anyhow!("token endpoint response carried no access token"))
+}
+
+/// Exchange the client secret for a fresh token set (RFC 6749 §4.4).
+pub async fn exchange_client_credentials(
+    client: &TokenEndpointClient,
+    meta: &OAuthBindingMeta,
+    client_secret: &str,
+) -> anyhow::Result<CapturedOAuthToken> {
+    let grant = GrantRequest::ClientCredentials {
+        scopes: &meta.scopes,
+    };
+    post_grant(client, meta, &grant, Some(client_secret)).await
+}
+
+/// Exchange a refresh token for a fresh token set (RFC 6749 §6). A confidential
+/// client authenticates with its client secret; a public client sends only
+/// its client id.
+pub async fn exchange_refresh_token(
+    client: &TokenEndpointClient,
+    meta: &OAuthBindingMeta,
+    refresh_token: &str,
+    client_secret: Option<&str>,
+) -> anyhow::Result<CapturedOAuthToken> {
+    let grant = GrantRequest::RefreshToken { refresh_token };
+    post_grant(client, meta, &grant, client_secret).await
+}
+
+/// Redeem the authorization code a consent returned, proving possession of
+/// the PKCE verifier the authorization request committed to (RFC 6749 §4.1.3,
+/// RFC 7636 §4.5).
+pub async fn exchange_authorization_code(
+    client: &TokenEndpointClient,
+    meta: &OAuthBindingMeta,
+    code: &AuthorizationCodeGrant,
+    client_secret: Option<&str>,
+) -> anyhow::Result<CapturedOAuthToken> {
+    let grant = GrantRequest::AuthorizationCode {
+        code: code.code(),
+        redirect_uri: code.redirect_uri(),
+        code_verifier: code.code_verifier(),
+    };
+    post_grant(client, meta, &grant, client_secret).await
 }
 
 /// True when `error` is a destination check's policy refusal.
@@ -381,9 +575,10 @@ pub fn discover_oauth_bindings(
     Ok(out)
 }
 
-/// Perform one client-credentials exchange for a bound secret and persist
-/// the fresh token set through the resolver's capture-persistence path (which
-/// preserves the stored client secret). This is the unit the refresh loop
+/// Renew a bound secret's token set with the grant it records and persist the
+/// fresh set through the resolver's capture-persistence path, which preserves
+/// the stored client secret and grant, and keeps the stored refresh token
+/// unless the response rotated it. This is the unit the refresh loop
 /// schedules; it is also the recovery handle for a secret whose token set is
 /// already past the refusal skew.
 pub async fn refresh_once(
@@ -395,17 +590,26 @@ pub async fn refresh_once(
     let token_set = resolver
         .oauth_token_set(name)
         .with_context(|| format!("loading stored oauth token set for `{name}`"))?;
-    let client_secret = token_set.client_secret.ok_or_else(|| {
-        anyhow::anyhow!("stored oauth token set for `{name}` has no client secret; the client-credentials grant cannot be driven")
+    let renewal = renewal(&token_set).map_err(|reason| {
+        anyhow::anyhow!("oauth token set for `{name}` cannot be renewed: {reason}")
     })?;
-    let captured = exchange_client_credentials(client, meta, client_secret.expose_secret()).await?;
+    let captured = match renewal {
+        Renewal::ClientCredentials { client_secret } => {
+            exchange_client_credentials(client, meta, client_secret).await?
+        }
+        Renewal::RefreshToken {
+            refresh_token,
+            client_secret,
+        } => exchange_refresh_token(client, meta, refresh_token, client_secret).await?,
+    };
     require_schedulable_expiry(captured.expires_at, Utc::now())?;
     resolver
         .store_captured_oauth_token(name, captured)
         .with_context(|| format!("persisting refreshed oauth token set for `{name}`"))
 }
 
-/// Refuse an exchanged token whose next refresh would already be due.
+/// Refuse an exchanged token whose next refresh would already be due, and
+/// return its expiry otherwise.
 ///
 /// Without an expiry the store keeps the previous one, and a lifetime inside
 /// the refusal skew plus the refresh lead leaves no time to refresh ahead of
@@ -414,7 +618,7 @@ pub async fn refresh_once(
 fn require_schedulable_expiry(
     expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<DateTime<Utc>> {
     let Some(expires_at) = expires_at else {
         anyhow::bail!("token endpoint response carried no expiry (`expires_in` or `expires_at`)");
     };
@@ -424,7 +628,7 @@ fn require_schedulable_expiry(
             OAUTH_REFRESH_SKEW.num_seconds()
         );
     }
-    Ok(())
+    Ok(expires_at)
 }
 
 /// Everything one refresh loop needs besides its binding. Cloned into each
@@ -573,14 +777,8 @@ async fn refresh_loop(settings: RefreshSettings, binding: OAuthRefreshBinding) {
                 continue;
             }
         };
-        if token_set.client_secret.is_none() {
-            settings
-                .stopped(
-                    &binding.name,
-                    &destination,
-                    "stored token set has no client secret",
-                )
-                .await;
+        if let Err(reason) = renewal(&token_set) {
+            settings.stopped(&binding.name, &destination, reason).await;
             return;
         }
         let wait = refresh_in(token_set.expires_at, Utc::now());
@@ -589,9 +787,10 @@ async fn refresh_loop(settings: RefreshSettings, binding: OAuthRefreshBinding) {
         {
             tokio::time::sleep(wait).await;
         }
-        // An expired set is due, not lost: the grant needs only the client
-        // secret. `require_schedulable_expiry` is what keeps a success from
-        // leaving the set due again, so this never exchanges back to back.
+        // An expired set is due, not lost: neither grant needs the access
+        // token it replaces. `require_schedulable_expiry` is what keeps a
+        // success from leaving the set due again, so this never exchanges
+        // back to back.
         match refresh_once(
             &settings.resolver,
             &settings.client,
@@ -705,6 +904,18 @@ mod tests {
             refresh_token: Some(OAuthSecretString::from(String::from("old-refresh-token"))),
             client_secret: client_secret.map(|value| OAuthSecretString::from(value.to_owned())),
             expires_at: Utc::now() + Duration::seconds(30),
+            grant: OAuthGrant::ClientCredentials,
+        }
+    }
+
+    /// A set a human consented to, inside the proactive window.
+    fn consented_expiring_set(refresh_token: &str, client_secret: Option<&str>) -> OAuthTokenSet {
+        OAuthTokenSet {
+            access_token: OAuthSecretString::from(String::from("stale-access-token")),
+            refresh_token: Some(OAuthSecretString::from(refresh_token.to_owned())),
+            client_secret: client_secret.map(|value| OAuthSecretString::from(value.to_owned())),
+            expires_at: Utc::now() + Duration::seconds(30),
+            grant: OAuthGrant::AuthorizationCode,
         }
     }
 
@@ -922,9 +1133,94 @@ mod tests {
     #[test]
     fn grant_body_carries_grant_type_and_scopes() {
         // form-urlencoding renders the RFC 6068-style space separator as `+`.
-        let body = grant_body(&["scope-a".into(), "scope b".into()]);
+        let scopes = ["scope-a".to_owned(), "scope b".to_owned()];
+        let body = GrantRequest::ClientCredentials { scopes: &scopes }.form_body("id", false);
         assert_eq!(body, "grant_type=client_credentials&scope=scope-a+scope+b");
-        assert_eq!(grant_body(&[]), "grant_type=client_credentials");
+        let body = GrantRequest::ClientCredentials { scopes: &[] }.form_body("id", false);
+        assert_eq!(body, "grant_type=client_credentials");
+    }
+
+    #[test]
+    fn refresh_and_code_bodies_follow_rfc_6749() {
+        let refresh = GrantRequest::RefreshToken {
+            refresh_token: "r/1",
+        };
+        // A confidential client authenticates in the Basic header; the body
+        // never names it. A refresh keeps the granted scope by omitting it.
+        assert_eq!(
+            refresh.form_body("the-client", false),
+            "grant_type=refresh_token&refresh_token=r%2F1"
+        );
+        // A public client has no secret and names itself in the body.
+        assert_eq!(
+            refresh.form_body("the-client", true),
+            "grant_type=refresh_token&refresh_token=r%2F1&client_id=the-client"
+        );
+        let code = GrantRequest::AuthorizationCode {
+            code: "c",
+            redirect_uri: "http://127.0.0.1:5000/callback",
+            code_verifier: "v",
+        };
+        assert_eq!(
+            code.form_body("the-client", true),
+            "grant_type=authorization_code&code=c&redirect_uri=http%3A%2F%2F127.0.0.1%3A5000%2Fcallback&code_verifier=v&client_id=the-client"
+        );
+    }
+
+    #[test]
+    fn a_consented_set_renews_by_refresh_token_never_by_client_credentials() {
+        let mut set = consented_token_set(
+            CapturedOAuthToken {
+                access_token: OAuthSecretString::from("a".to_owned()),
+                refresh_token: None,
+                expires_at: Some(Utc::now() + Duration::hours(1)),
+            },
+            Some(OAuthSecretString::from("the-client-secret".to_owned())),
+        )
+        .unwrap();
+        assert_eq!(set.grant, OAuthGrant::AuthorizationCode);
+        // A client secret alone must not turn a user's set into the
+        // application's: without a refresh token there is nothing to renew.
+        let reason = renewal(&set).err().unwrap();
+        assert!(reason.contains("refresh token"), "{reason}");
+        set.refresh_token = Some(OAuthSecretString::from("r".to_owned()));
+        assert!(matches!(
+            renewal(&set),
+            Ok(Renewal::RefreshToken {
+                refresh_token: "r",
+                client_secret: Some("the-client-secret")
+            })
+        ));
+    }
+
+    #[test]
+    fn a_consented_set_needs_a_schedulable_expiry() {
+        for expires_at in [None, Some(Utc::now() + Duration::seconds(30))] {
+            let err = consented_token_set(
+                CapturedOAuthToken {
+                    access_token: OAuthSecretString::from("a".to_owned()),
+                    refresh_token: Some(OAuthSecretString::from("r".to_owned())),
+                    expires_at,
+                },
+                None,
+            )
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("expiry"), "{err:#}");
+        }
+    }
+
+    #[test]
+    fn an_awaiting_consent_set_is_not_renewable_and_keeps_its_client_secret() {
+        let set = awaiting_consent_token_set(Some("the-client-secret"));
+        assert_eq!(set.grant, OAuthGrant::AuthorizationCode);
+        assert!(set.access_token.expose_secret().is_empty());
+        assert_eq!(
+            set.client_secret.as_ref().unwrap().expose_secret(),
+            "the-client-secret"
+        );
+        assert!(set.expires_at < Utc::now());
+        assert!(renewal(&set).is_err());
+        assert!(awaiting_consent_token_set(None).client_secret.is_none());
     }
 
     #[test]
@@ -1331,6 +1627,307 @@ mod tests {
             "a permission error from somewhere else",
         ));
         assert!(!is_policy_denial(&err));
+    }
+
+    #[test]
+    fn the_basic_client_credential_is_form_urlencoded_first() {
+        let (user, password) = basic_client_credential("id:with:colon", "a+b%c:d é");
+        assert_eq!(user, "id%3Awith%3Acolon");
+        assert_eq!(password, "a%2Bb%25c%3Ad+%C3%A9");
+        // Unreserved characters pass through, so plain credentials are unchanged.
+        let (user, password) = basic_client_credential("public-client-id", "the-client-secret");
+        assert_eq!(user, "public-client-id");
+        assert_eq!(password, "the-client-secret");
+    }
+
+    #[tokio::test]
+    async fn a_client_credential_with_reserved_characters_reaches_the_server_decodable() {
+        use base64::Engine as _;
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(
+            &consented_expiring_set("first-refresh-token", Some("a+b%c:d é")),
+            &token_url,
+        );
+        let mut meta = oauth_meta(&token_url);
+        meta.client_id = "id:with:colon".into();
+        refresh_once(
+            &resolver_over(&fixture),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
+            "oauth-secret",
+            &meta,
+        )
+        .await
+        .unwrap();
+        let requests = recorded.lock().unwrap_or_else(|error| error.into_inner());
+        let header = requests[0].authorization.as_deref().unwrap();
+        let encoded = header.strip_prefix("Basic ").unwrap();
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+        )
+        .unwrap();
+        // One unencoded `:` separates the pair, as RFC 6749 §2.3.1 requires.
+        assert_eq!(decoded, "id%3Awith%3Acolon:a%2Bb%25c%3Ad+%C3%A9");
+        let (user, password) = decoded.split_once(':').unwrap();
+        let decode = |value: &str| {
+            url::form_urlencoded::parse(format!("v={value}").as_bytes())
+                .next()
+                .unwrap()
+                .1
+                .into_owned()
+        };
+        assert_eq!(decode(user), "id:with:colon");
+        assert_eq!(decode(password), "a+b%c:d é");
+    }
+
+    // -- the refresh-token grant ---------------------------------------------
+
+    #[tokio::test]
+    async fn refresh_once_renews_a_consented_set_and_stores_the_rotated_refresh_token() {
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","refresh_token":"rotated-refresh-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(
+            &consented_expiring_set("first-refresh-token", Some("the-client-secret")),
+            &token_url,
+        );
+        let resolver = resolver_over(&fixture);
+        refresh_once(
+            &resolver,
+            &TokenEndpointClient::new(mvm_http::Client::new()),
+            "oauth-secret",
+            &oauth_meta(&token_url),
+        )
+        .await
+        .unwrap();
+
+        let requests = recorded.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(requests.len(), 1);
+        // A confidential client: Basic credential, refresh token in the body,
+        // and no scope, so the granted scope is kept.
+        assert_eq!(
+            requests[0].authorization.as_deref(),
+            Some("Basic cHVibGljLWNsaWVudC1pZDp0aGUtY2xpZW50LXNlY3JldA==")
+        );
+        assert_eq!(
+            requests[0].body,
+            "grant_type=refresh_token&refresh_token=first-refresh-token"
+        );
+        drop(requests);
+
+        let stored = stored_token_set(&fixture);
+        assert_eq!(stored.access_token.expose_secret(), "fresh-access-token");
+        assert_eq!(
+            stored.refresh_token.unwrap().expose_secret(),
+            "rotated-refresh-token"
+        );
+        assert_eq!(stored.grant, OAuthGrant::AuthorizationCode);
+        assert_eq!(
+            stored.client_secret.unwrap().expose_secret(),
+            "the-client-secret"
+        );
+        let secret = resolver
+            .resolve(&bearer_ref("oauth-secret", &["api.example.com"]))
+            .unwrap();
+        assert_eq!(secret.expose_secret().as_slice(), b"fresh-access-token");
+    }
+
+    #[tokio::test]
+    async fn a_public_client_refresh_names_itself_and_keeps_an_unrotated_refresh_token() {
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(
+            &consented_expiring_set("first-refresh-token", None),
+            &token_url,
+        );
+        refresh_once(
+            &resolver_over(&fixture),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
+            "oauth-secret",
+            &oauth_meta(&token_url),
+        )
+        .await
+        .unwrap();
+        let requests = recorded.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(requests[0].authorization.is_none());
+        assert_eq!(
+            requests[0].body,
+            "grant_type=refresh_token&refresh_token=first-refresh-token&client_id=public-client-id"
+        );
+        drop(requests);
+        let stored = stored_token_set(&fixture);
+        assert_eq!(
+            stored.refresh_token.unwrap().expose_secret(),
+            "first-refresh-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_consented_set_is_never_renewed_by_client_credentials() {
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"app-token","expires_in":3600}"#,
+        );
+        let mut set = consented_expiring_set("unused", Some("the-client-secret"));
+        set.refresh_token = None;
+        let fixture = fixture(&set, &token_url);
+        let err = refresh_once(
+            &resolver_over(&fixture),
+            &TokenEndpointClient::new(mvm_http::Client::new()),
+            "oauth-secret",
+            &oauth_meta(&token_url),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("refresh token"), "{err:#}");
+        assert!(
+            recorded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_destination_never_receives_the_refresh_token() {
+        let (token_url, recorded) =
+            spawn_mock_token_server("200 OK", r#"{"access_token":"fresh-access-token"}"#);
+        let fixture = fixture(
+            &consented_expiring_set("first-refresh-token", None),
+            &token_url,
+        );
+        let (recorder, signer) = capturing_recorder();
+        let driver = audited_driver(&fixture, recorder).with_destination_check(Arc::new(
+            RefusingCheck(std::io::ErrorKind::PermissionDenied),
+        ));
+        refresh_loop(driver.settings, binding_for(&token_url)).await;
+        assert!(
+            recorded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+        assert_eq!(refresh_outcomes(&signer), ["policy_denied", "stopped"]);
+    }
+
+    #[tokio::test]
+    async fn the_refresh_token_loop_records_its_refresh_and_no_credential() {
+        let (token_url, _recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"fresh-access-token","refresh_token":"rotated-refresh-token","expires_in":3600}"#,
+        );
+        let fixture = fixture(
+            &consented_expiring_set("first-refresh-token", Some("the-client-secret")),
+            &token_url,
+        );
+        let (recorder, signer) = capturing_recorder();
+        let _ = tokio::time::timeout(
+            StdDuration::from_secs(5),
+            refresh_loop(
+                audited_driver(&fixture, recorder).settings,
+                binding_for(&token_url),
+            ),
+        )
+        .await;
+        assert_eq!(refresh_outcomes(&signer), ["refreshed"]);
+        let chain = serde_json::to_string(&signer.entries()).unwrap();
+        for leaked in [
+            "first-refresh-token",
+            "rotated-refresh-token",
+            "fresh-access-token",
+            "the-client-secret",
+            "/token",
+        ] {
+            assert!(!chain.contains(leaked), "found `{leaked}` in {chain}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_consent_awaiting_set_stops_the_loop_without_contacting_the_endpoint() {
+        let (token_url, recorded) =
+            spawn_mock_token_server("200 OK", r#"{"access_token":"fresh-access-token"}"#);
+        let fixture = fixture(&awaiting_consent_token_set(None), &token_url);
+        let (recorder, signer) = capturing_recorder();
+        refresh_loop(
+            audited_driver(&fixture, recorder).settings,
+            binding_for(&token_url),
+        )
+        .await;
+        assert!(
+            recorded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
+        assert_eq!(refresh_outcomes(&signer), ["stopped"]);
+    }
+
+    // -- the authorization-code grant ----------------------------------------
+
+    #[tokio::test]
+    async fn exchange_authorization_code_sends_the_code_verifier_and_redirect() {
+        let (token_url, recorded) = spawn_mock_token_server(
+            "200 OK",
+            r#"{"access_token":"consented-access-token","refresh_token":"consented-refresh-token","expires_in":3600}"#,
+        );
+        let request =
+            crate::keyholder::oauth_consent::ConsentRequest::new(&oauth_meta(&token_url), 50123)
+                .unwrap();
+        let grant = request.into_grant(OAuthSecretString::from("the-code".to_owned()));
+        let verifier = grant.code_verifier().to_owned();
+        let captured = exchange_authorization_code(
+            &TokenEndpointClient::new(mvm_http::Client::new()),
+            &oauth_meta(&token_url),
+            &grant,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            captured.access_token.expose_secret(),
+            "consented-access-token"
+        );
+        let requests = recorded.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(requests[0].authorization.is_none());
+        let body: std::collections::BTreeMap<String, String> =
+            url::form_urlencoded::parse(requests[0].body.as_bytes())
+                .into_owned()
+                .collect();
+        assert_eq!(body["grant_type"], "authorization_code");
+        assert_eq!(body["code"], "the-code");
+        assert_eq!(body["redirect_uri"], "http://127.0.0.1:50123/callback");
+        assert_eq!(body["code_verifier"], verifier);
+        assert_eq!(body["client_id"], "public-client-id");
+    }
+
+    #[tokio::test]
+    async fn a_refused_destination_never_receives_the_authorization_code() {
+        let (token_url, recorded) =
+            spawn_mock_token_server("200 OK", r#"{"access_token":"a","expires_in":3600}"#);
+        let grant =
+            crate::keyholder::oauth_consent::ConsentRequest::new(&oauth_meta(&token_url), 1)
+                .unwrap()
+                .into_grant(OAuthSecretString::from("the-code".to_owned()));
+        let client = TokenEndpointClient::new(mvm_http::Client::new()).with_destination_check(
+            Arc::new(RefusingCheck(std::io::ErrorKind::PermissionDenied)),
+        );
+        let err = exchange_authorization_code(&client, &oauth_meta(&token_url), &grant, None)
+            .await
+            .unwrap_err();
+        assert!(is_policy_denial(&err), "{err:#}");
+        assert!(
+            recorded
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .is_empty()
+        );
     }
 
     // -- the proactive loop ------------------------------------------------

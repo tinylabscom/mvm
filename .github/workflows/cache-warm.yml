@@ -5,10 +5,8 @@ name: Warm the Rust build cache
 # read, and every job in every validation cycle compiles the dependency graph
 # from scratch.
 #
-# This is the one writer. It builds the workspace once per merge so that every
-# pull-request job and, more importantly, every merge-queue job starts from a
-# warm target directory. The queue is the throughput bottleneck and its refs are
-# ephemeral, so main is the only place a cache useful to it can come from.
+# This is the trusted-main writer for PR lint caches. Merge groups run only
+# scope and the required aggregate, so they do not consume the Rust cache.
 #
 # It costs one build per merge and saves several per validation cycle. Its
 # entries are keyed to the stable 1.97.1 toolchain, so they serve the lanes that

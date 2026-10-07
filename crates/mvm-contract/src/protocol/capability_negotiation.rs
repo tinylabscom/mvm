@@ -325,6 +325,9 @@ pub struct ClientOperationCapabilities {
     pub exec: bool,
     pub reconfigure: bool,
     pub set_ttl: bool,
+    /// `telemetry_status` and `telemetry_records`: the per-machine collector
+    /// read seam.
+    pub telemetry: bool,
 }
 
 impl ClientOperationCapabilities {
@@ -364,6 +367,7 @@ impl ClientOperationCapabilitiesBuilder {
     operation_setter!(exec);
     operation_setter!(reconfigure);
     operation_setter!(set_ttl);
+    operation_setter!(telemetry);
 
     /// Finish the declaration.
     #[must_use]

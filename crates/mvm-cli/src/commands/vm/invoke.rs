@@ -159,42 +159,50 @@ impl EntrypointStdin {
 
 pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     if call.attach {
-        // Dispatch into an already-running workload by name (booted by
-        // `machine run --name <NAME>`), reusing its substitution endpoint and
-        // boot-minted placeholders. No transient boot, no teardown — the VM is
-        // the user's to reap.
-        if call.stdin.is_streaming() {
-            // The grant lives on the plan the *boot* was admitted under, and
-            // that admission happened in whatever process ran `machine run
-            // --name`. This one holds no admitted plan for the VM, so there is
-            // nothing here that could authorize a write — and a message saying
-            // so beats a refusal from three layers down.
-            anyhow::bail!(
-                "streamed stdin needs the run that boots the workload: the input grant \
-                 rides on the plan admitted at boot, and `--attach` dispatches into a \
-                 machine another invocation admitted — drop `--attach`, or pipe a \
-                 complete payload with `--stdin <PATH>`"
-            );
-        }
-        ui::info(&format!(
-            "entrypoint: dispatching into running workload '{}'",
-            call.source
-        ));
-        let mut denials = CallDenials::new(call.show_denials, ReviewSource::admitted_elsewhere());
-        denials.arm(&call.source);
-        let outcome = dispatch(EntrypointDispatch {
-            vm_name: &call.source,
-            stdin: DispatchStdin::OneShot(call.stdin.prologue()),
-            timeout_secs: call.timeout,
-            session_id: None,
-        });
-        denials.finish();
-        let exit_code = outcome?;
+        let exit_code = dispatch_attached(call)?;
         if exit_code != 0 {
             mvm_observability::exit(exit_code);
         }
         return Ok(());
     }
+    run_booted_entrypoint(call)
+}
+
+/// Dispatch into an already-running workload by name (booted by `machine run
+/// --name <NAME>`), reusing its substitution endpoint and boot-minted
+/// placeholders, and return the entrypoint's exit status. No transient boot,
+/// no teardown — the VM is the user's to reap.
+pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32> {
+    if call.stdin.is_streaming() {
+        // The grant lives on the plan the *boot* was admitted under, and
+        // that admission happened in whatever process ran `machine run
+        // --name`. This one holds no admitted plan for the VM, so there is
+        // nothing here that could authorize a write — and a message saying
+        // so beats a refusal from three layers down.
+        anyhow::bail!(
+            "streamed stdin needs the run that boots the workload: the input grant \
+             rides on the plan admitted at boot, and `--attach` dispatches into a \
+             machine another invocation admitted — drop `--attach`, or pipe a \
+             complete payload with `--stdin <PATH>`"
+        );
+    }
+    ui::info(&format!(
+        "entrypoint: dispatching into running workload '{}'",
+        call.source
+    ));
+    let mut denials = CallDenials::new(call.show_denials, ReviewSource::admitted_elsewhere());
+    denials.arm(&call.source);
+    let outcome = dispatch(EntrypointDispatch {
+        vm_name: &call.source,
+        stdin: DispatchStdin::OneShot(call.stdin.prologue()),
+        timeout_secs: call.timeout,
+        session_id: None,
+    });
+    denials.finish();
+    outcome
+}
+
+fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
     warn_accepted_but_inert(&call);
 
     // The entrypoint action targets a manifest slot, resolved through the same
@@ -464,6 +472,45 @@ pub(in crate::commands) fn dispatch_into_session(
         mvm_client::entrypoint::call_session(id, record, payload, timeout_secs, &mut out)?;
     flush_inherited();
     Ok(outcome.exit_code())
+}
+
+/// Deliver one prompt to a machine's resident agent, writing the answer to
+/// this process's fds exactly as an entrypoint call's output is written.
+///
+/// # Errors
+/// The prompt was refused, could not be recorded or audited, or its delivery
+/// failed.
+pub(in crate::commands) fn prompt_machine(
+    prompt: &mvm_client::agent_prompt::AgentPrompt,
+    checkpointer: Option<&dyn mvm_client::agent_prompt::StepCheckpointer>,
+) -> Result<mvm_client::agent_prompt::PromptOutcome> {
+    let mut out = CallOutput::inherited();
+    let outcome = mvm_client::agent_prompt::send_prompt(prompt, &mut out, checkpointer);
+    flush_inherited();
+    outcome
+}
+
+/// Re-deliver a replay plan's recorded prompts onto the fork `vm_name`,
+/// writing each answer to this process's fds.
+///
+/// # Errors
+/// The fork does not grant prompts, or a delivery or its audit entry failed.
+pub(in crate::commands) fn replay_prompts(
+    vm_name: &str,
+    plan: &mvm_runtime::agent_session::replay::ReplayPlan,
+    inputs: &mvm_runtime::agent_session::replay_input::ReplayInputStore,
+    timeout_secs: u64,
+) -> Result<mvm_client::agent_prompt::replay::ReplayedPrompts> {
+    let mut out = CallOutput::inherited();
+    let replayed = mvm_client::agent_prompt::replay::replay_onto(
+        vm_name,
+        plan,
+        inputs,
+        timeout_secs,
+        &mut out,
+    );
+    flush_inherited();
+    replayed
 }
 
 /// Flush this process's stdout and stderr before a possible exit.

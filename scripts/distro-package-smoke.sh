@@ -20,11 +20,13 @@ fail() { echo "distro-package-smoke: $*" >&2; exit 1; }
 
 case "${package}" in
   *.deb)
+    format=deb
     apt-get update -qq >/dev/null
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${package}" >/dev/null
     remove() { DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq mvmctl >/dev/null; }
     ;;
   *.rpm)
+    format=rpm
     dnf install -y -q "${package}" >/dev/null
     remove() { dnf remove -y -q mvmctl >/dev/null; }
     ;;
@@ -44,10 +46,15 @@ case "${reported}" in
 esac
 mvmctl --help >/dev/null
 sha256sum -c --quiet "${sums}" || fail "installed files differ from the release tarball"
+# The marker `mvmctl env update` reads to refuse replacing package-owned files.
+marker=/usr/share/mvmctl/package-managed
+[ "$(cat "${marker}" 2>/dev/null)" = "${format}" ] \
+  || fail "${marker} does not name ${format}; mvmctl env update would overwrite the package's files"
 echo "installed ${package}: ${reported}; $(wc -l < "${sums}") files match the tarball"
 
 remove
 while read -r _ path; do
   [ ! -e "${path}" ] || fail "${path} is left behind after removal"
 done < "${sums}"
+[ ! -e "${marker}" ] || fail "${marker} is left behind after removal"
 echo "removed cleanly"

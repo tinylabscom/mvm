@@ -24,7 +24,7 @@ the guest kernel.
 | No nested runtime work | k3s embeds containerd; containers run against the guest kernel. |
 
 Plan: `specs/plans/2026-09-20-kubernetes-in-microvm.md`. The guest template
-is tracked in the template registry (`tinylabscom/mvm-templates#1`) and the
+is tracked in the template registry (`tinylabscom/mvm-packs#1`) and the
 workload-kernel audit in the image train (`tinylabscom/mvm-images#9`);
 runtime tracking is `tinylabscom/mvm#3554`.
 

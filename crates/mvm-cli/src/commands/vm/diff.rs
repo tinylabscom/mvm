@@ -230,6 +230,30 @@ fn image_for(store: &CheckpointStore, workspace: &Workspace, side: &Side) -> Res
     }
 }
 
+/// What the guest changed in `workspace` since it began, rendered the way
+/// `machine diff` prints it. `None` when nothing changed.
+pub(in crate::commands) fn workspace_changes_text(workspace: &Workspace) -> Result<Option<String>> {
+    let diff = diff_images(
+        &baseline_image(workspace)?,
+        &workspace.image,
+        DiffLimits::default(),
+    )
+    .with_context(|| format!("diffing workspace volume {:?}", workspace.volume))?;
+    if diff.stats.changed() == 0 {
+        return Ok(None);
+    }
+    let views = [VolumeDiff {
+        prefix: "",
+        diff: &diff,
+    }];
+    let mut text = render::unified(&views);
+    if let Some(notice) = render::truncation_notice(&views) {
+        text.push_str(&notice);
+        text.push('\n');
+    }
+    Ok(Some(text))
+}
+
 /// Ask the running guest to flush its writes before its volume image is read.
 pub(in crate::commands) fn flush_guest(name: &str) -> Result<()> {
     #[cfg(feature = "test-support")]

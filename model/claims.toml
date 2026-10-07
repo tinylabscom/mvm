@@ -503,3 +503,30 @@ witnesses = [
     "fn:benign_trees_collect_under_the_default_policy",
     "fn:key_material_classes_refuse_at_any_depth",
 ]
+
+[[claim]]
+id = "MVM-SEC-24"
+level = "build"
+witness_kinds = ["fn"]
+suite = "display_input"
+statement = "A workload's display is view-only unless the signed plan grants input; display input on a sealed workload needs an attended grant; and a run into which a human credential was typed cannot be checkpointed or forked"
+# Preview. Viewing is the `host.display.view.v1` service token; input is the
+# separate `grants.display_input` grant, so a view-only plan carries no input
+# authority at all. The witnesses are unit tests of the host gate, admission,
+# the guest bridge's fixed CDP translation and the capture refusal; no CI lane
+# boots a guest browser and drives it end to end. Permanent limits: a
+# credential typed into a guest is inside that guest, since the workload owns
+# the browser the bridge drives; frames defeat text redaction, so only the
+# operator-marked credential-entry window goes unrecorded; and an attended run
+# is a different tier from an unattended one, which `machine ls` and `doctor`
+# report rather than hide. Registered here ahead of an ADR-001 ledger row,
+# as claims 22 and 23 are.
+witnesses = [
+    "fn:display_view_grant_opens_no_input_route",
+    "fn:display_frames_never_leave_loopback",
+    "fn:display_input_refused_without_grant",
+    "fn:display_refused_on_sealed_tier_without_attended_grant",
+    "fn:fork_refused_after_human_credential_entry",
+    "fn:frames_inside_a_credential_entry_window_are_never_recorded",
+    "fn:admitted_input_becomes_only_the_fixed_input_methods",
+]

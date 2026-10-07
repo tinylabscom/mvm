@@ -205,7 +205,7 @@ pub enum ControlRequest {
 /// signature over its JCS canonical bytes by the host signer key.
 ///
 /// Sign/verify live in `mvm_core::protocol::broker_control` as free functions
-/// (`sign`, `sign_with_key_bytes`, `verify`) — this type cannot carry them as
+/// (`sign`, `verify`) — this type cannot carry them as
 /// inherent methods since `serde_jcs`/`ed25519-dalek` signing is host-only and
 /// the orphan rule forbids `mvm-core` from adding inherent `impl`s to a
 /// foreign type.

@@ -95,7 +95,7 @@ That direct Nix command is only for users who intentionally manage their own Nix
 | `vcpus`, `memory_mib` | `int` (optional) | Resource defaults; `mvm.toml` overrides at run time. |
 | `dev` | `bool` (optional) | Explicit accessible-vs-sealed image default. Inferred from entrypoint by default; the launch profile and run shape still decide agent-verb grants. |
 | `uids` | `attrs` (optional) | `{ agent = 990; entrypoint = 0|1000; }` — privilege model override. See [Rootless workloads](#rootless-workloads) below. |
-| `extraFiles` | `attrs` (optional) | `{ "/abs/path" = { content; mode?; }; }` baked into the rootfs at build time. |
+| `extraFiles` | `attrs` (optional) | `{ "/abs/path" = { content; mode?; }; }` writes text, `{ source; mode?; }` copies a file, and `{ link; }` makes a symlink to a Nix store path. All are baked into the rootfs at build time. |
 
 SSH is not a template capability. `mkGuest` fails Nix evaluation if `packages`
 or `extraFiles` try to add SSH clients, SSH servers, SSH config, host keys,

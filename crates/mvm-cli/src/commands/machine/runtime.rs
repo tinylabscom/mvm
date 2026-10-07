@@ -2,7 +2,7 @@ use super::*;
 use crate::commands::shared;
 use crate::commands::vm::denial_review::{ReviewOffer, ReviewSource};
 use crate::commands::vm::egress_denials::{DenialWatch, finish_and_summarize};
-use crate::commands::vm::{invoke, logs};
+use crate::commands::vm::{invoke, logs, workspace_apply};
 
 pub(super) fn resolve_persistent_spec(
     args: &MachineRunArgs,
@@ -460,7 +460,7 @@ fn run_entrypoint_action(
     // transient argv path does, so a baked entrypoint enforces the same posture.
     let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
     crate::approval::configure(crate::commands::vm::run_routes::launch_approval(&args.run)?);
-    let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
+    let network_policy = shared::resolve_run_network_policy(
         args.run.net,
         args.run.network_preset,
         &routes.with_allow_host(&args.run.allow_host),
@@ -469,7 +469,8 @@ fn run_entrypoint_action(
     .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget))
     .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
-    invoke::run_entrypoint(invoke::EntrypointCall {
+    let exit_apply = exit_apply_request(&args);
+    let call = invoke::EntrypointCall {
         source,
         stdin,
         timeout: args.run.timeout.unwrap_or(30),
@@ -491,7 +492,29 @@ fn run_entrypoint_action(
         review_source,
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
-    })
+    };
+    if !call.attach {
+        return invoke::run_entrypoint(call);
+    }
+    // A run on a named machine ends here, and that machine may carry a
+    // workspace the entrypoint wrote. Its changes are offered back before the
+    // entrypoint's own exit status is handed on.
+    let machine = call.source.clone();
+    let exit_code = invoke::dispatch_attached(call)?;
+    workspace_apply::offer_at_exit(&machine, exit_apply)?;
+    if exit_code != 0 {
+        mvm_observability::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// What the end of an attached run does with the machine's workspace changes.
+fn exit_apply_request(args: &MachineRunArgs) -> mvm_client::workspace_apply::ExitApplyRequest {
+    mvm_client::workspace_apply::ExitApplyRequest {
+        apply: args.apply,
+        json: args.run.json,
+        operator_at_terminal: crate::approval::operator_at_terminal(),
+    }
 }
 
 fn show_entrypoint_denials(args: &MachineRunArgs) -> bool {
@@ -573,16 +596,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
     // The manifest that policy came from, for reviewing the run's refusals.
-    // Read now, while the arguments still name the flake directory.
+    // Read now, while the arguments still name the flake directory; the
+    // transient lanes carry it on the run arguments.
     let review_source = ReviewSource::for_launch(&args.run)?;
+    args.run.review_source = Some(review_source.clone());
     check_pack_entrypoint(&args)?;
-    let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
-        let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
-        args.run.manifest = Some(slot_hash.clone());
-        Some(slot_hash)
-    } else {
-        None
-    };
+    let resolved_flake_slot = crate::commands::vm::exec::build_flake_slot(&mut args.run)?;
     let local_deployment = args
         .run
         .deployment
@@ -637,7 +656,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -671,7 +690,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
     }
 }

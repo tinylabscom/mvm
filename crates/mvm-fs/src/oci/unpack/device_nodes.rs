@@ -258,6 +258,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -278,6 +279,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -299,6 +301,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -321,6 +324,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -354,6 +358,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -388,6 +393,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
