@@ -20,7 +20,7 @@ use mvm_core::session::{
     self, MAX_IDLE_TIMEOUT_SECS, SessionId, SessionMode, SessionRecord, SessionState,
 };
 
-use super::boot::{SessionVm, tear_down_session_vm};
+use super::boot::{SessionVm, stop_session_vm};
 use super::call::{AGENT_WAIT_SECS, EntrypointVm, boot_entrypoint_vm, bump_invoke_count};
 use super::dispatch::{CallObserver, CallOutcome, DispatchStdin, EntrypointDispatch, dispatch};
 use crate::launch::runtime_source::PairArtifactSource;
@@ -84,8 +84,20 @@ pub fn start_session(
     record.idle_timeout_secs = idle_timeout_secs;
     record.ephemeral = ephemeral;
     if let Err(e) = session::write_session(&record) {
-        tear_down_session_vm(booted.vm);
-        return Err(anyhow::anyhow!("registering session: {e}"));
+        let err = anyhow::anyhow!("registering session: {e}");
+        // The boot was admitted, so its session ends here, as a failed start.
+        match stop_session_vm(&booted.vm) {
+            Ok(()) => crate::admission::emit_failed(&booted.admission, "session-register", &err),
+            Err(stop) => crate::launch::record_unsealed_end(
+                Some((&booted.admission.emitter, booted.admission.admitted.plan())),
+                crate::launch::UnsealedEnd::new(
+                    &booted.vm.vm_name,
+                    crate::launch::UnsealedReason::StopFailed,
+                )
+                .error(format!("{stop:#}")),
+            ),
+        }
+        return Err(err);
     }
     audit_emit(
         LocalAuditKind::SessionStart,
@@ -192,9 +204,7 @@ pub fn call_session(
     .with_context(|| format!("dispatching into session {id}"))?;
     bump_invoke_count(id);
     if record.ephemeral {
-        tear_down_session_vm(SessionVm {
-            vm_name: record.vm_name.clone(),
-        });
+        end_session_vm(&record.vm_name);
         let _ = session::update_session(id, |r| {
             r.state = SessionState::Reaped;
             Ok(())
@@ -203,7 +213,8 @@ pub fn call_session(
     Ok(outcome)
 }
 
-/// Kill a running session: mark it `Killed`, then tear its VM down.
+/// Kill a running session: mark it `Killed`, then tear its VM down and seal
+/// its audit session as `stopped`.
 ///
 /// The order is load-bearing. A call in flight sees its connection drop and
 /// re-reads the record; if it already says `Killed` the call reports the kill
@@ -225,9 +236,7 @@ pub fn kill_session(raw_id: &str) -> Result<SessionRecord> {
         Ok(())
     })
     .context("updating session record before kill")?;
-    tear_down_session_vm(SessionVm {
-        vm_name: record.vm_name.clone(),
-    });
+    end_session_vm(&record.vm_name);
     audit_emit(
         LocalAuditKind::SessionKill,
         Some(&record.vm_name),
@@ -238,7 +247,7 @@ pub fn kill_session(raw_id: &str) -> Result<SessionRecord> {
 }
 
 /// Tear down every session whose idle timeout has lapsed, mark it `Reaped`,
-/// and seal its audit chain, returning the ids reaped.
+/// and seal its audit chain once its VM is down, returning the ids reaped.
 ///
 /// The per-VM supervisor enforces the same timeout on its own on the backends
 /// that have one; this sweep is what catches the rest when a session verb
@@ -270,18 +279,46 @@ pub fn reap_expired_sessions() -> Vec<SessionId> {
                 continue;
             }
         };
-        // Read before the teardown: the plan lives in the state dir it removes.
-        let plan = mvm_hostd::audit::plan_persist::read_plan(&record.vm_name).ok();
-        tear_down_session_vm(SessionVm {
-            vm_name: record.vm_name.clone(),
-        });
-        if let Some(plan) = plan {
-            crate::launch::seal_stopped_session(&plan, &record.vm_name);
-        }
+        end_session_vm(&record.vm_name);
         forget_call_lock(&id);
         reaped.push(id);
     }
     reaped
+}
+
+/// Stop a session's VM and seal its audit session as `stopped`: the end of a
+/// session that was killed, reaped, or used up, where no workload exit was
+/// observed. Best-effort, because the reaper calls this where nobody is
+/// waiting for an error.
+///
+/// The plan is read before the stop, which removes the state dir it lives in.
+/// A VM whose stop failed may still be running, so its session is left
+/// unsealed rather than closed over a guest that can still extend it; `trust
+/// audit verify` then reports it `UNSEALED`. Either way the end is on the
+/// record: an unsealed end writes why, chain-signed when there is a plan.
+fn end_session_vm(vm_name: &str) {
+    end_session_vm_with(vm_name, stop_session_vm);
+}
+
+/// [`end_session_vm`] with the stop supplied, so the refusal to seal after a
+/// failed stop can be tested without a VM that refuses to die.
+fn end_session_vm_with(vm_name: &str, stop: impl FnOnce(&SessionVm) -> Result<()>) {
+    let plan = mvm_hostd::audit::plan_persist::read_plan(vm_name).ok();
+    let vm = SessionVm {
+        vm_name: vm_name.to_string(),
+    };
+    if let Err(e) = stop(&vm) {
+        crate::launch::record_session_stop_failure(plan.as_ref(), vm_name, &format!("{e:#}"));
+        return;
+    }
+    match plan {
+        Some(plan) => crate::launch::seal_stopped_session(&plan, vm_name),
+        None => crate::launch::record_unsealed_end(
+            None,
+            crate::launch::UnsealedEnd::new(vm_name, crate::launch::UnsealedReason::NoVerifiedPlan)
+                .error("no admitted plan persisted beside the VM"),
+        ),
+    }
 }
 
 /// A session's new idle timeout, and what its guest agent made of it.
@@ -533,6 +570,103 @@ mod tests {
         .expect("chain");
         assert!(chain.contains("session.sealed"), "got: {chain}");
         assert!(chain.contains("\"stopped\""), "got: {chain}");
+    }
+
+    /// Admit `plan` on the host chain and persist it beside `vm`, as a
+    /// session boot does.
+    fn admitted_session_plan(vm: &str) -> mvm_core::plan::ExecutionPlan {
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+        let emitter = mvm_hostd::audit::emitter::AuditEmitter::new(signer.signing).expect("chain");
+        emitter.emit_admitted(&plan, "host:test").expect("admitted");
+        emitter.emit_launched(&plan, "mock").expect("launched");
+        mvm_hostd::audit::plan_persist::write_plan(vm, &plan).expect("persist plan");
+        plan
+    }
+
+    /// The seal reasons on `plan`'s session, from a verified chain.
+    fn seal_reasons(
+        plan: &mvm_core::plan::ExecutionPlan,
+    ) -> Vec<mvm_hostd::audit::session::SealReason> {
+        let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+        let report = mvm_hostd::audit::session::verify_session(
+            &mvm_core::config::mvm_audit_dir(),
+            &plan.tenant.0,
+            &plan.plan_id.0,
+            &signer.verifying,
+        );
+        assert_eq!(
+            report.verdict,
+            mvm_hostd::audit::session::Verdict::Verified,
+            "{report:?}"
+        );
+        report.seals.iter().map(|check| check.seal.reason).collect()
+    }
+
+    #[test]
+    fn killing_a_session_seals_its_audit_chain_as_stopped() {
+        let _home = isolated();
+        let plan = admitted_session_plan("vm-killed-sealed");
+        let record = running("vm-killed-sealed", SessionMode::Prod);
+
+        kill_session(record.id.as_str()).expect("killed");
+
+        assert_eq!(
+            seal_reasons(&plan),
+            vec![mvm_hostd::audit::session::SealReason::Stopped]
+        );
+    }
+
+    #[test]
+    fn a_session_whose_vm_would_not_stop_is_left_unsealed() {
+        let _home = isolated();
+        let plan = admitted_session_plan("vm-wont-stop");
+
+        end_session_vm_with("vm-wont-stop", |_| Err(anyhow::anyhow!("still running")));
+
+        let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+        let report = mvm_hostd::audit::session::verify_session(
+            &mvm_core::config::mvm_audit_dir(),
+            &plan.tenant.0,
+            &plan.plan_id.0,
+            &signer.verifying,
+        );
+        assert_eq!(
+            report.verdict,
+            mvm_hostd::audit::session::Verdict::Unsealed,
+            "{report:?}"
+        );
+        let chain = std::fs::read_to_string(mvm_hostd::audit::emitter::audit_path_for_tenant(
+            &mvm_core::config::mvm_audit_dir(),
+            &plan.tenant.0,
+        ))
+        .expect("chain");
+        assert!(chain.contains("plan.teardown_failed"), "{chain}");
+        assert!(chain.contains("stop-failed"), "{chain}");
+        assert!(chain.contains("still running"), "{chain}");
+    }
+
+    #[test]
+    fn a_session_with_no_persisted_plan_records_why_it_has_no_seal() {
+        let _home = isolated();
+        let plan = admitted_session_plan("vm-other");
+        let record = running("vm-no-plan", SessionMode::Prod);
+
+        kill_session(record.id.as_str()).expect("killed");
+
+        let chain = std::fs::read_to_string(mvm_hostd::audit::emitter::audit_path_for_tenant(
+            &mvm_core::config::mvm_audit_dir(),
+            &plan.tenant.0,
+        ))
+        .expect("chain");
+        assert!(
+            !chain.contains("session.sealed"),
+            "nothing to bind a seal to: {chain}"
+        );
+        let local =
+            std::fs::read_to_string(mvm_core::audit::default_audit_log()).expect("local audit log");
+        assert!(local.contains("session_unsealed"), "{local}");
+        assert!(local.contains("no-verified-plan"), "{local}");
     }
 
     #[test]

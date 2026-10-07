@@ -1272,6 +1272,11 @@ impl MvmClient for LocalBackend {
         // the user can see what happened. A persistent machine's spec is
         // never touched by stop — only remove deletes a definition.
         if result.is_ok() {
+            // Seal first: the session ended with the stop, and nothing below
+            // may skip recording that.
+            if let Some(plan) = &stopped_session {
+                crate::launch::seal_stopped_session(plan, &id.0);
+            }
             deregister_from_name_registry(&id.0);
             // Release the stopped owner's volume-attachment leases (re-sealing
             // any just-in-time unlocked volume). Best-effort: the stop itself
@@ -1281,9 +1286,10 @@ impl MvmClient for LocalBackend {
                 tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
             }
             remove_stopped_runtime_state(&id.0)?;
-            if let Some(plan) = stopped_session {
-                crate::launch::seal_stopped_session(&plan, &id.0);
-            }
+        } else if let (Err(e), Some(plan)) = (&result, &stopped_session) {
+            // The machine may still be running, so its session stays open; the
+            // failed stop is still put on the record under its plan.
+            crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
         }
         result.map(|_timing| ()).map_err(backend_err)
     }
