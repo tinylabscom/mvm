@@ -121,26 +121,42 @@ fn machine_check_artifact_help_names_bundle_verification_controls() {
     }
 }
 
-/// `build guest-bins` is the producer of the artifact mvm-images pins; its
-/// help names the output directory and the per-architecture selector.
-#[test]
-fn build_guest_bins_help_names_output_and_arch_controls() {
+/// `mvmctl <argv>`'s stdout with runs of whitespace collapsed to one space.
+fn help_text(argv: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["build", "guest-bins", "--help"])
+        .args(argv)
         .output()
-        .expect("run build guest-bins help");
+        .expect("run mvmctl help");
     assert!(
         out.status.success(),
         "help must succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    for expected in ["--out", "--arch", "mvm-guest-bins-v"] {
-        assert!(
-            stdout.contains(expected),
-            "help missing {expected}: {stdout}"
-        );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `build guest-bins` produces mvmctl's guest-runtime archive; its help names
+/// the output directory, the per-architecture selector, and whose archive it
+/// is, and its long help says mvm-images is not a consumer.
+#[test]
+fn build_guest_bins_help_names_output_and_arch_controls() {
+    let short = help_text(&["build", "guest-bins", "--help"]);
+    for expected in [
+        "--out",
+        "--arch",
+        "mvm-guest-bins-v",
+        "mvmctl's guest-runtime archive",
+    ] {
+        assert!(short.contains(expected), "help missing {expected}: {short}");
     }
+    let long = help_text(&["help", "build", "guest-bins"]);
+    assert!(
+        long.contains("Its consumer is mvmctl; mvm-images does not consume it"),
+        "{long}"
+    );
 }
 
 /// An unknown architecture is a parse error, not a silent fallback to the
@@ -2159,7 +2175,7 @@ fn pull_refuses_a_pack_whose_signature_does_not_verify_and_installs_nothing() {
 [[publishers]]
 namespace = "runtime"
 issuer = "https://token.actions.githubusercontent.com"
-accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main"]
+accepted_identities = ["https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"]
 "#,
     )
     .unwrap();

@@ -460,7 +460,7 @@ fn run_entrypoint_action(
     // transient argv path does, so a baked entrypoint enforces the same posture.
     let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
     crate::approval::configure(crate::commands::vm::run_routes::launch_approval(&args.run)?);
-    let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
+    let network_policy = shared::resolve_run_network_policy(
         args.run.net,
         args.run.network_preset,
         &routes.with_allow_host(&args.run.allow_host),
@@ -660,7 +660,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -694,7 +694,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
     }
 }

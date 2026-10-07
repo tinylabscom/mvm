@@ -212,7 +212,7 @@ impl VmBackend for MockBackend {
         // fs/proc still want the VM to come up. The fs/proc tests
         // will see a clearer "connect failed" error than they
         // would from a missing agent.
-        match MockGuestAgent::start(&vm_dir) {
+        match MockGuestAgent::start(&vm_dir, None) {
             Ok(agent) => {
                 if let Ok(mut agents) = self.agents.lock() {
                     agents.insert(config.name.clone(), agent);
