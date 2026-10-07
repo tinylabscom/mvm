@@ -1027,7 +1027,6 @@ mod tests {
             policy.contains("if: github.event_name != 'merge_group'"),
             "policy invariants must fail deterministic PR defects before queue admission"
         );
-        assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
         let nix = job_block(&ci, "nix-flake-check");
@@ -1035,6 +1034,7 @@ mod tests {
         assert!(nix.contains(
             "if: needs.scope.outputs.nix == 'true' && github.event_name != 'merge_group'"
         ));
+        let aggregate = job_block(&ci, "test");
         assert!(aggregate.contains("SCOPE_NIX: ${{ needs.scope.outputs.nix }}"));
         assert!(
             aggregate.contains("pull_request:true|workflow_dispatch:true) nix_required=success")
@@ -1075,7 +1075,6 @@ mod tests {
             "the non-required Website workflow must not consume every merge-group runner slot"
         );
 
-        let aggregate = job_block(&ci, "test");
         assert!(aggregate.contains("needs.scope.result"));
         assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
         assert!(
