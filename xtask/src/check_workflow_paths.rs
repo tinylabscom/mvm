@@ -763,7 +763,8 @@ mod tests {
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
              lint-features-test-support, lint-features-embed, \
-             test-workspace, test-workspace-aarch64, test-linux, \
+             test-workspace-build, test-workspace, test-workspace-extras, \
+             test-workspace-aarch64, test-linux, \
              test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
              bdd-conformance, boot-latency, nix-flake-check]"
         ));
@@ -794,7 +795,9 @@ mod tests {
             "lint-features-test-support",
             "lint-features-embed",
             "bdd-conformance",
+            "test-workspace-build",
             "test-workspace",
+            "test-workspace-extras",
             "test-workspace-aarch64",
             "test-release-witness",
             "test-musl-confinement",
@@ -819,7 +822,9 @@ mod tests {
         // `bdd-conformance` joined the loop when it took the Gherkin suite, and
         // the `code` scope, off the Linux lane.
         for expected in [
+            "\"$WORKSPACE_BUILD_RESULT\"",
             "\"$WORKSPACE_RESULT\"",
+            "\"$WORKSPACE_EXTRAS_RESULT\"",
             "\"$CORE_RESULT\"",
             "\"$POLICY_RESULT\"",
             "\"$FEATURES_RESULT\"",
@@ -879,6 +884,7 @@ mod tests {
 
         let test_workspace = job_block(&workflow, "test-workspace");
         assert!(!test_workspace.contains("uses: actions/cache@v5"));
+        assert_workspace_suite_compiles_once_and_runs_everything(&workflow);
         for expected in [
             "permissions:",
             "actions: read",
@@ -896,16 +902,24 @@ mod tests {
         assert!(!test_workspace.contains("actions: write"));
         assert!(!test_workspace.contains("workflow_dispatch"));
         let workspace_worker = self::workflow("workspace-shard.yml");
+        let safe_archive_root = "archive_root=\"$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}\"";
+        assert!(
+            workflow.contains(safe_archive_root) && workspace_worker.contains(safe_archive_root),
+            "archive build and shard must stay outside /tmp, which mvmctl cleanup tests clear"
+        );
+        assert!(!workflow.contains("archive_root=\"/tmp/mvm-workspace-"));
+        assert!(!workspace_worker.contains("/tmp/mvm-workspace-"));
         for expected in [
             "workflow_call:",
             "workflow_dispatch:",
             "fromJSON('[\"self-hosted\",\"Linux\",\"X64\",\"mvm\",\"hetzner\",\"kvm\"]')",
-            "if: inputs.runner_kind == 'github'",
-            "if: inputs.runner_kind == 'hetzner'",
+            "if: inputs.runner_kind == 'github' && inputs.archive_run_id == ''",
             "key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}",
+            "archive_run_id:",
+            "--archive-file \"$RUNNER_TEMP/workspace-tests.tar.zst\"",
+            "--partition hash:${{ inputs.shard }}/2",
             "cargo nextest run -p xtask --features man",
             "cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2",
-            "archive_run_id:",
             "actions: read",
             "workspace-archive-{0}",
             "workspace-shard-{0}-{1}",
@@ -979,6 +993,75 @@ mod tests {
         );
     }
 
+    /// The workspace suite is compiled by one job and run by the shards out of
+    /// its archive. Pin the parts whose loss would shrink coverage without
+    /// turning anything red: the archive's target selection, the shards'
+    /// dependency on it and their partition of all of it, and the suites that
+    /// run exactly once.
+    fn assert_workspace_suite_compiles_once_and_runs_everything(workflow: &str) {
+        let build = job_block(workflow, "test-workspace-build");
+        assert!(
+            build.contains("cargo nextest archive --workspace --all-targets"),
+            "the archive must hold the whole workspace's tests, every target"
+        );
+        assert!(
+            build.contains("cargo run -p xtask -- check-nextest-groups"),
+            "the nextest override filters must be validated once, where the suite compiles"
+        );
+        let upload = build
+            .find("uses: actions/upload-artifact@")
+            .expect("the build job must hand the archive on");
+        assert!(build[upload..].contains("name: workspace-tests"));
+
+        let shards = job_block(workflow, "test-workspace");
+        assert!(
+            shards.contains("needs: [scope, test-workspace-build]")
+                && shards.contains("needs.scope.outputs.code == 'true'")
+                && shards.contains("github.event_name != 'merge_group'"),
+            "the shards must wait for the archive and keep the scope gate"
+        );
+        assert!(
+            !shards.contains("cargo build")
+                && !shards.contains("cargo nextest archive")
+                && !shards.contains("--features"),
+            "a shard must run the archive it was handed, not compile its own"
+        );
+        for expected in [
+            "uses: ./.github/workflows/workspace-shard.yml",
+            "archive_run_id: ${{ github.run_id }}",
+            "shard: ['1', '2']",
+        ] {
+            assert!(
+                shards.contains(expected),
+                "the caller must start two archive-backed shards: missing {expected:?}"
+            );
+        }
+
+        let extras = job_block(workflow, "test-workspace-extras");
+        for expected in [
+            "cargo nextest run -p xtask --features man",
+            "cargo nextest run -p mvm-agentd --features addons",
+            "cargo test --workspace --doc",
+        ] {
+            assert!(
+                extras.contains(expected),
+                "the once-only workspace suites must keep running: missing {expected:?}"
+            );
+        }
+        // The addons suite also runs on the stable toolchain in Lint feature
+        // coverage, so only these two are unique to this job.
+        for once in [
+            "cargo nextest run -p xtask --features man",
+            "cargo test --workspace --doc",
+        ] {
+            assert_eq!(
+                workflow.matches(once).count(),
+                1,
+                "{once:?} must run exactly once in ci.yml"
+            );
+        }
+    }
+
     #[test]
     fn feature_coverage_tail_uses_existing_test_support_runner() {
         let workflow = ci_workflow();
@@ -1050,7 +1133,8 @@ mod tests {
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
-            "test-workspace",
+            "test-workspace-build",
+            "test-workspace-extras",
             "test-release-witness",
             "test-musl-confinement",
             "test-linux",

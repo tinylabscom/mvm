@@ -49,6 +49,8 @@ let
         && lib.isAttrs out.extraFiles
         && (out.extraFiles ? "/etc/mvm/entrypoint")
         && (out.extraFiles ? "/usr/lib/mvm/wrappers/runner")
+        && (out.extraFiles ? "/app")
+        && out.extraFiles."/app".link == appPkg
         && out ? servicePackages
         && lib.isList out.servicePackages
         && out ? service
@@ -60,7 +62,10 @@ let
 
   # Each language entry in the registry should evaluate via the
   # unified factory. Adding a language is appending its name here.
-  languageResults = map testLanguage [ "python" "node" ];
+  languageResults = map testLanguage [
+    "python"
+    "node"
+  ];
   languageAllOk = builtins.all (r: lib.hasInfix ": ok" r) languageResults;
 
   factory_shape =
@@ -148,7 +153,9 @@ let
 
   workload_shape =
     if workloadOk then
-      "workload_shape: ok (name=${meta.name or "<missing>"}, entrypointKind=${meta.entrypointKind or "<missing>"}, sealed=${if (meta.sealed or false) then "true" else "false"})"
+      "workload_shape: ok (name=${meta.name or "<missing>"}, entrypointKind=${
+        meta.entrypointKind or "<missing>"
+      }, sealed=${if (meta.sealed or false) then "true" else "false"})"
     else
       "workload_shape: FAIL — ${builtins.toJSON meta}";
 in
