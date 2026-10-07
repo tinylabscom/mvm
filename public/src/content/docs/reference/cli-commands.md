@@ -1026,11 +1026,11 @@ existing console/down paths for the running VM. `machine reconfigure <name>`
 patches a subset of the stored config (`net`, `allow_host`, `cpus`, `memory`, and the CLI-only `mem_initial`) and relaunches the machine — auto stop + start when running,
 persist-only when stopped; identity, image, and volumes are preserved.
 `machine check-artifact` is the read-only gate for a signed `.mvmpkg`: it
-verifies the signed manifest, every artifact's size and hash, the size caps
-(2 GiB per entry, 4 GiB in total), the declared posture's coherence (a
-`sealed-prod` posture must cover a dm-verity rootfs and require
-authentication), and the host architecture before printing a preview. The
-older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
+streams verification of the signed manifest and every artifact's size and hash,
+enforces the size caps (2 GiB per entry, 4 GiB in total), checks posture
+coherence (a `sealed-prod` posture must cover a dm-verity rootfs and require
+authentication), and confirms the host architecture before printing a preview.
+The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
 to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
@@ -1531,7 +1531,7 @@ running microVM.
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
 | `mvmctl bundle export <t> --posture <p> --allow-egress` / `--allow-volumes` / `--allow-unauthenticated` | Open one ceiling of the declared posture. `--allow-unauthenticated` is refused for `sealed-prod`                                                                   |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
-| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`                                                                  |
+| `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`, streaming each artifact through its hash check rather than loading the archive into memory                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
 | `mvmctl bundle gc`                                        | Prune installed bundles — a specific `<SHA>` or `--all`                                                                                                           |
 | `mvmctl artifact pack`                                    | Alias of `mvmctl bundle export`; takes the same arguments                                                                                                         |

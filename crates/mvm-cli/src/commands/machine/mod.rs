@@ -148,7 +148,7 @@ pub(in crate::commands) enum MachineAction {
     /// Disconnect the client attached to a VM's console; the session keeps running
     #[command(display_order = 13)]
     Detach(super::vm::console::DetachArgs),
-    /// Verify a portable `.mvm` artifact without booting
+    /// Verify a signed `.mvmpkg` bundle without booting
     #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
     /// Show and verify checkpoint or image lineage
