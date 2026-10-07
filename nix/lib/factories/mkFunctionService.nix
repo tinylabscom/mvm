@@ -38,28 +38,33 @@
 #   servicePackages — extra packages required in the rootfs
 #   service         — `services.<workloadId>` entry for mkGuest
 
-{ pkgs
-, language
-, workloadId
-, module
-, function
-, format
-, appPkg
-, sourcePath ? "/app"
-, concurrency ? null
-, # Pre-merged per-phase hook command lists. The
+{
+  pkgs,
+  language,
+  workloadId,
+  module,
+  function,
+  format,
+  appPkg,
+  sourcePath ? "/app",
+  concurrency ? null,
+  # Pre-merged per-phase hook command lists. The
   # caller passes the launch.hooks JSON object verbatim; each phase
   # is `{ kind = "shell"; line = …; }` or `{ kind = "argv"; argv = […]; }`
   # entries. Empty / absent phases are no-ops. Defaults to all-empty
   # so workloads without `@mvm.app(before_start=…)` need no change.
-  hooks ? { before_build = [ ]; before_start = [ ]; after_start = [ ]; before_stop = [ ]; }
-, # Declarative files to bake into the rootfs. Each entry is
+  hooks ? {
+    before_build = [ ];
+    before_start = [ ];
+    after_start = [ ];
+    before_stop = [ ];
+  },
+  # Declarative files to bake into the rootfs. Each entry is
   # `{ path, bytes_b64, mode? }`. The bytes are base64-decoded at BUILD
   # time into a store path; the rootfs packer lands the file at `path`
   # with `mode` (default `0644`). Nothing decodes in a guest shell.
   # Defaults to empty so workloads that declare no files need no change.
-  files ? [ ]
-,
+  files ? [ ],
 }:
 
 let
@@ -114,20 +119,19 @@ let
   # consumers can `test -x /etc/mvm/hooks/<phase>.sh && exec …` on
   # one stable path — no branch on existence. The empty-phase script
   # is a no-op (`exit 0`).
-  renderHookCmd = cmd:
+  renderHookCmd =
+    cmd:
     if cmd.kind or "shell" == "argv" then
-      "${pkgs.coreutils}/bin/env -- " + (builtins.concatStringsSep " "
-        (map (a: pkgs.lib.escapeShellArg a) cmd.argv))
+      "${pkgs.coreutils}/bin/env -- "
+      + (builtins.concatStringsSep " " (map (a: pkgs.lib.escapeShellArg a) cmd.argv))
     else
       "${pkgs.runtimeShell} -c " + (pkgs.lib.escapeShellArg cmd.line);
 
-  hookScriptFor = phase: cmds:
+  hookScriptFor =
+    phase: cmds:
     let
       lines = map renderHookCmd cmds;
-      body =
-        if cmds == [ ]
-        then ":"
-        else builtins.concatStringsSep "\n" lines;
+      body = if cmds == [ ] then ":" else builtins.concatStringsSep "\n" lines;
     in
     pkgs.writeShellScript "${workloadId}-hook-${phase}" ''
       set -eu
@@ -141,20 +145,13 @@ let
     before_stop = hookScriptFor "before-stop" (hooks.before_stop or [ ]);
   };
 
-  # PID 1 boot command for the agent-dispatched (cold-tier) function
-  # model. Passed to mkGuest's `bootCommand` (→ /etc/mvm/boot), which is
-  # deliberately distinct from /etc/mvm/entrypoint: that file is the
-  # agent's per-call marker (the single-shot wrapper at
-  # /usr/lib/mvm/wrappers/runner). PID 1 must NOT be that wrapper — it
-  # exits after one call and the kernel panics. So PID 1 stages the
-  # source, runs the before_start hook, then idles; the agent execs the
-  # wrapper per RunEntrypoint. Single source of truth for the boot
-  # script — both the SDK flake codegen and nix/lib/mkFunctionWorkload.nix
-  # consume `bootCommand` instead of re-rolling it.
+  # The legacy boot command and the sealed initramfs-agent path both use
+  # the source tree symlink staged into the immutable rootfs. PID 1 must
+  # not be the single-shot wrapper: it exits after one call. The agent
+  # execs that wrapper per RunEntrypoint.
   bootScript = pkgs.writeShellScript "${workloadId}-boot" ''
     set -eu
-    ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname ${pkgs.lib.escapeShellArg sourcePath})"
-    ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${pkgs.lib.escapeShellArg sourcePath}
+    test "$(${pkgs.coreutils}/bin/readlink ${pkgs.lib.escapeShellArg sourcePath})" = ${pkgs.lib.escapeShellArg (toString appPkg)}
     /etc/mvm/hooks/before_start.sh
     exec ${pkgs.coreutils}/bin/sleep infinity
   '';
@@ -164,8 +161,8 @@ let
   # requested path with the requested mode. Nothing decodes in a guest
   # shell. `escapeShellArg` on a STANDARD-base64 token is belt-and-
   # suspenders (the alphabet carries no shell metacharacters) but correct.
-  materializedFiles = builtins.listToAttrs (map
-    (f: {
+  materializedFiles = builtins.listToAttrs (
+    map (f: {
       name = f.path;
       value = {
         source = pkgs.runCommand "mvm-file-${builtins.hashString "sha256" f.path}" { } ''
@@ -173,8 +170,8 @@ let
         '';
         mode = f.mode or "0644";
       };
-    })
-    files);
+    }) files
+  );
 in
 {
   # User-declared files merge UNDER the reserved /etc/mvm + /usr/lib/mvm
@@ -182,6 +179,11 @@ in
   # path (e.g. one aimed at /etc/mvm/hooks/before_start.sh) lose to the
   # reserved entry, so a declared file can never clobber the boot wiring.
   extraFiles = materializedFiles // {
+    # The sealed initramfs-agent path does not run /etc/mvm/boot. Make the
+    # source tree available before PID 1 starts, including on read-only images.
+    ${sourcePath} = {
+      link = appPkg;
+    };
     "/etc/mvm/entrypoint" = {
       content = "/usr/lib/mvm/wrappers/runner";
       mode = "0644";
@@ -245,7 +247,7 @@ in
   # call; no long-running service is needed. The `service` slot stays
   # populated for `mkGuest`'s shape — it requires every workload-id
   # key to declare a service block — but the command is a no-op idle
-  # loop. preStart wires the appPkg symlink as today.
+  # loop. The application path is already present in the rootfs.
   service = {
     command = pkgs.writeShellScript "${workloadId}-noop" ''
       #!${pkgs.stdenv.shell}
@@ -253,8 +255,7 @@ in
     '';
     preStart = pkgs.writeShellScript "${workloadId}-prestart" ''
       set -eu
-      ${pkgs.coreutils}/bin/mkdir -p "$(${pkgs.coreutils}/bin/dirname ${sourcePath})"
-      ${pkgs.coreutils}/bin/ln -sfn ${appPkg} ${sourcePath}
+      test "$(${pkgs.coreutils}/bin/readlink ${pkgs.lib.escapeShellArg sourcePath})" = ${pkgs.lib.escapeShellArg (toString appPkg)}
     '';
     env = { };
   };

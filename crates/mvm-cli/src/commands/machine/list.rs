@@ -72,10 +72,13 @@ pub(super) fn query_from_args(args: &MachineListArgs) -> Result<InventoryQuery> 
 }
 
 /// STATUS cell: the typed wire label, with a failure reason kept visible
-/// beside it rather than dropped.
+/// beside it rather than dropped, and an attended run marked as one.
 pub(super) fn status_cell(record: &MachineInventoryRecord) -> String {
     match (&record.status, &record.status_detail) {
         (MachineStatus::Failed, Some(reason)) => format!("failed ({reason})"),
+        (MachineStatus::Running, _) if record.attended => {
+            format!("{} (attended)", record.status.wire_label())
+        }
         (status, _) => status.wire_label().to_string(),
     }
 }

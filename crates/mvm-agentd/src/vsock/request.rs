@@ -4,6 +4,7 @@
 
 use super::*;
 use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
+use mvm_contract::stream::DisplayInputFrame;
 use mvm_contract::stream::input::{CloseInput, InputFrame};
 use serde::{Deserialize, Serialize};
 
@@ -548,6 +549,17 @@ pub enum GuestRequest {
     /// trailing bytes go first, because they are the writer's last ones and
     /// the close is what proved they were only ever a prefix of a secret.
     CloseStreamInput(CloseInput),
+
+    /// Deliver one host-admitted batch of display input to the display
+    /// bridge.
+    ///
+    /// Production-safe for the same reason as `StreamInput`: the host's
+    /// display input gate refuses it unless the signed plan grants display
+    /// input — attended, on a sealed image — and records every batch by kind
+    /// and count before sending it. A pinned verb grant must also name
+    /// `display-input`. The guest checks only what it can see: that the frame
+    /// is well formed and its `seq` does not go backwards.
+    DisplayInput(DisplayInputFrame),
 }
 
 /// One declared command. The checked command line is derived from `argv` on
@@ -648,6 +660,7 @@ impl GuestRequest {
             Self::RunCode { .. } => "run-code",
             Self::StreamInput(_) => "stream-input",
             Self::CloseStreamInput(_) => "close-stream-input",
+            Self::DisplayInput(_) => mvm_contract::stream::DISPLAY_INPUT_VERB,
         }
     }
 }
@@ -1448,6 +1461,13 @@ mod tests {
             (
                 GuestRequest::CloseStreamInput(CloseInput::default()),
                 "close-stream-input",
+            ),
+            (
+                GuestRequest::DisplayInput(DisplayInputFrame {
+                    seq: 0,
+                    events: Vec::new(),
+                }),
+                "display-input",
             ),
             (
                 GuestRequest::PostRestore {

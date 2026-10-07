@@ -72,6 +72,8 @@ pub(crate) use atomic_write::write_atomic_batched;
 pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 
 mod session_events;
+mod stream_input_refusal;
+use stream_input_refusal::input_refused_labels;
 mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
@@ -86,96 +88,7 @@ pub mod image_audit;
 pub mod instruction_audit;
 pub use instruction_audit::InstructionTrustEvent;
 
-/// Wire-stable event name and label keys for the workload output-stream audit
-/// entries. Shared so the emitter (writer) and any reader cannot drift on a
-/// string.
-///
-/// One entry per *attach*, never per record. Signing every chunk would cost a
-/// signature per write and — worse — turn the audit chain into a second copy
-/// of the workload's output. Who started reading, and from where in the
-/// chain, is the decision worth signing; the bytes stay in the transcript.
-pub mod stream_audit {
-    /// Emitted when a follower attaches to a VM's output stream.
-    pub const SUBSCRIBED_EVENT: &str = "stream.subscribed";
-    /// Label: the VM whose stream was attached to.
-    pub const LABEL_VM_NAME: &str = "vm_name";
-    /// Label: the broker-assigned reader id, unique within one broker.
-    pub const LABEL_READER_ID: &str = "stream_reader_id";
-    /// Label: the stream sequence number the reader starts at. Records
-    /// before it were produced before the attach and are not delivered.
-    pub const LABEL_FROM_SEQ: &str = "stream_from_seq";
-    /// Label on `plan.admitted`: the retention mode the plan was admitted
-    /// under, so a later reader can tell a run that kept no transcript from a
-    /// run whose transcript went missing.
-    pub const LABEL_RETENTION: &str = "stream_retention";
-
-    /// Emitted when a writer is admitted to a workload's stdin.
-    ///
-    /// Output capture needs no authorization and so audits only the attach;
-    /// input is the direction that changes what the workload does, so the
-    /// admission itself is the fact worth signing. Without it the chain would
-    /// record every writer that was turned away and nothing about the one that
-    /// got in.
-    pub const INPUT_GRANTED_EVENT: &str = "stream.input_granted";
-    /// Emitted whenever the input gate turns a writer away.
-    pub const INPUT_REFUSED_EVENT: &str = "stream.input_refused";
-    /// Label: which writer holds — or was refused because somebody else holds
-    /// — the single-writer input lease.
-    pub const LABEL_HOLDER: &str = "stream_input_holder";
-    /// Label: why the gate refused, as a wire-stable reason word.
-    pub const LABEL_REASON: &str = "stream_input_reason";
-    /// Label: which category of known secret was recognised in the refused
-    /// bytes. The category name, never the matched value — a refusal that
-    /// quoted the secret to explain itself would ship exactly what it stopped.
-    pub const LABEL_SECRET_CATEGORY: &str = "stream_input_secret_category";
-    /// Label: the `seq` an out-of-order frame carried. A position, not a
-    /// payload — it says which frame the writer sent out of turn and nothing
-    /// about what was in it.
-    pub const LABEL_SEQ: &str = "stream_input_seq";
-    /// Label: the highest `seq` the session had already accepted when the
-    /// out-of-order frame arrived.
-    pub const LABEL_AFTER_SEQ: &str = "stream_input_after_seq";
-}
-
-/// The label set for one input refusal: the binding, the reason word, and
-/// whatever that reason needs to be actionable.
-///
-/// Written as one exhaustive match so a refusal variant added later cannot
-/// reach the chain unlabelled — and so the compiler is the thing checking that
-/// no arm reaches for the bytes.
-fn input_refused_labels(
-    vm_name: &str,
-    refusal: &crate::stream::InputRefusal,
-) -> Vec<(String, String)> {
-    use crate::stream::InputRefusal as R;
-    use stream_audit as k;
-
-    let mut labels = vec![
-        (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
-        (k::LABEL_REASON.to_string(), refusal.reason().to_string()),
-    ];
-    match refusal {
-        // `Unauditable` is here for completeness: by definition the chain it
-        // would be written to is the one that just failed, so this label set
-        // is what a *later* best-effort attempt carries if the failure was
-        // transient.
-        R::NotGranted | R::LeaseExpired | R::Unauditable => {}
-        R::LeaseHeld { holder } => {
-            labels.push((k::LABEL_HOLDER.to_string(), holder.clone()));
-        }
-        R::SecretMaterial { category } => {
-            labels.push((
-                k::LABEL_SECRET_CATEGORY.to_string(),
-                (*category).to_string(),
-            ));
-        }
-        R::OutOfOrder { seq, after } => {
-            labels.push((k::LABEL_SEQ.to_string(), seq.to_string()));
-            labels.push((k::LABEL_AFTER_SEQ.to_string(), after.to_string()));
-        }
-    }
-    labels
-}
+pub mod stream_audit;
 
 /// Extract the `image.created` label set from a node's provenance attributes.
 /// The parent hash-link is recorded as provenance; nothing here is a trust
@@ -1845,58 +1758,6 @@ mod tests {
             .expect("prompt entries are chain-signed");
     }
 
-    /// Every refusal variant reaches the chain under its own reason word, and
-    /// no variant's labels can grow a key that is not on the allow-list here.
-    ///
-    /// The label builder is one exhaustive match, so a variant added later
-    /// fails to compile there; this pins the other half — that what the match
-    /// emits stays a binding, a reason, and positional metadata, never bytes.
-    #[test]
-    fn every_input_refusal_variant_is_labelled_with_its_reason_and_nothing_more() {
-        use crate::stream::InputRefusal as R;
-        use stream_audit as k;
-
-        let allowed = [
-            k::LABEL_VM_NAME,
-            k::LABEL_REASON,
-            k::LABEL_HOLDER,
-            k::LABEL_SECRET_CATEGORY,
-            k::LABEL_SEQ,
-            k::LABEL_AFTER_SEQ,
-        ];
-        for refusal in [
-            R::NotGranted,
-            R::Unauditable,
-            R::LeaseExpired,
-            R::LeaseHeld {
-                holder: "plan-1#0".to_string(),
-            },
-            R::SecretMaterial {
-                category: "host-secret",
-            },
-            R::OutOfOrder { seq: 3, after: 9 },
-        ] {
-            let labels = input_refused_labels("vm-1", &refusal);
-            let by_key: std::collections::BTreeMap<&str, &str> = labels
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            assert_eq!(by_key.len(), labels.len(), "no duplicate keys: {labels:?}");
-            assert_eq!(by_key.get(k::LABEL_VM_NAME), Some(&"vm-1"));
-            assert_eq!(by_key.get(k::LABEL_REASON), Some(&refusal.reason()));
-            for key in by_key.keys() {
-                assert!(
-                    allowed.contains(key),
-                    "unexpected label {key} on {refusal:?}"
-                );
-            }
-        }
-
-        let ordered = input_refused_labels("vm-1", &R::OutOfOrder { seq: 3, after: 9 });
-        assert!(ordered.contains(&(k::LABEL_SEQ.to_string(), "3".to_string())));
-        assert!(ordered.contains(&(k::LABEL_AFTER_SEQ.to_string(), "9".to_string())));
-    }
-
     /// A structured refusal carries the stage, a human-readable reason, and
     /// the host signer as the authorizer principal, so an auditor can answer
     /// "who refused this and why?" from the signed chain alone.
@@ -2329,6 +2190,39 @@ mod tests {
                 crate::supervisor::VerifyError::EntryCanonicalMismatch { .. }
             ),
             "expected EntryCanonicalMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn emit_teardown_failed_records_why_a_session_has_no_seal() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
+        let plan = fixture_plan("local", "plan-T");
+        emitter
+            .emit_teardown_failed(&plan, "stop-failed", "vmm did not exit")
+            .unwrap();
+
+        let content =
+            std::fs::read_to_string(dir.path().join("local.jsonl")).expect("audit file exists");
+        assert!(content.contains("plan.teardown_failed"), "{content}");
+        assert!(content.contains("\"reason\":\"stop-failed\""), "{content}");
+        assert!(content.contains("vmm did not exit"), "{content}");
+        assert!(!content.contains("session.sealed"), "{content}");
+        assert_eq!(
+            verify_audit_chain(&dir.path().join("local.jsonl"), &vk).unwrap(),
+            1
+        );
+        // The record of why a session ended unsealed is a terminal outcome and
+        // must be on disk before the call returns.
+        assert_eq!(
+            crate::supervisor::audit_file::sync_policy_for("plan.teardown_failed"),
+            crate::supervisor::audit_file::SyncPolicy::Barrier
         );
     }
 

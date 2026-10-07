@@ -61,6 +61,12 @@ The three honesty levels (R2):
 | --- | --- | --- | --- |
 | `MVM-SEC-22` | `build` | A signed execution plan may carry cumulative per-VM action budgets over host-observable seams; absent keeps existing plan bytes identical, present rides signed so a launcher cannot widen a checked ceiling | `fn:action_budget_defaults_to_no_limits`, `fn:action_budget_roundtrips_each_dimension_through_serde`, `fn:action_budget_absent_preserves_existing_plan_bytes`, `fn:action_budget_extracted_from_signed_envelope` |
 
+## display_input
+
+| ID | Level | Statement | Witnesses |
+| --- | --- | --- | --- |
+| `MVM-SEC-24` | `build` | A workload's display is view-only unless the signed plan grants input; display input on a sealed workload needs an attended grant; and a run into which a human credential was typed cannot be checkpointed or forked | `fn:display_view_grant_opens_no_input_route`, `fn:display_frames_never_leave_loopback`, `fn:display_input_refused_without_grant`, `fn:display_refused_on_sealed_tier_without_attended_grant`, `fn:fork_refused_after_human_credential_entry`, `fn:frames_inside_a_credential_entry_window_are_never_recorded`, `fn:admitted_input_becomes_only_the_fixed_input_methods` |
+
 ## egress_substitution
 
 | ID | Level | Statement | Witnesses |

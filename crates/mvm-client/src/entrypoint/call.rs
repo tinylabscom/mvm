@@ -24,7 +24,9 @@ use super::dispatch::{
 };
 use crate::admission::{AdmissionContext, emit_failed, emit_launched};
 use crate::launch::runtime_source::PairArtifactSource;
-use crate::launch::{TransientEnd, seal_transient_end};
+use crate::launch::{
+    TransientEnd, UnsealedEnd, UnsealedReason, record_unsealed_end, seal_transient_end,
+};
 
 /// How long a freshly booted VM's agent has to answer.
 pub const AGENT_WAIT_SECS: u64 = 30;
@@ -282,10 +284,10 @@ impl CallEnd {
 /// sealed over a guest that can still act.
 fn end_transient_call(booted: &BootedEntrypoint, backend: &str, end: CallEnd) {
     if let Err(e) = stop_session_vm(&booted.vm) {
-        tracing::warn!(
-            vm = %booted.vm.vm_name,
-            err = %e,
-            "transient call stop failed; refusing to seal a potentially live session"
+        record_unsealed_end(
+            Some((&booted.admission.emitter, booted.admission.admitted.plan())),
+            UnsealedEnd::new(&booted.vm.vm_name, UnsealedReason::StopFailed)
+                .error(format!("{e:#}")),
         );
         return;
     }
@@ -295,9 +297,10 @@ fn end_transient_call(booted: &BootedEntrypoint, backend: &str, end: CallEnd) {
 /// Write `plan.exited` and the seal for a stopped transient call, under the
 /// plan it was admitted with. Best-effort: the call already happened, and a
 /// session that could not be sealed is reported `UNSEALED` by
-/// `trust audit verify` rather than failing the call.
+/// `trust audit verify` rather than failing the call. `seal_transient_end`
+/// records why it could not seal, so the error is not reported again here.
 fn close_call_session(ctx: &AdmissionContext, vm_name: &str, backend: &str, end: CallEnd) {
-    let closed = seal_transient_end(
+    let _ = seal_transient_end(
         &ctx.emitter,
         ctx.admitted.plan(),
         TransientEnd {
@@ -307,9 +310,6 @@ fn close_call_session(ctx: &AdmissionContext, vm_name: &str, backend: &str, end:
             completed: end.completed,
         },
     );
-    if let Err(e) = closed {
-        tracing::warn!(vm = vm_name, err = %e, "could not seal the transient call's session");
-    }
 }
 
 /// Register a session record for a call. `None` when the record could not be
