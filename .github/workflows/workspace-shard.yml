@@ -4,6 +4,10 @@ run-name: workspace-shard / ${{ inputs.correlation }} / ${{ inputs.runner_kind }
 on:
   workflow_call:
     inputs:
+      maintenance_mode:
+        required: false
+        type: string
+        default: none
       commit_sha:
         required: true
         type: string
@@ -19,6 +23,12 @@ on:
         default: ''
   workflow_dispatch:
     inputs:
+      maintenance_mode:
+        description: Inspect or reclaim generated files on the persistent Hetzner runner
+        required: false
+        type: choice
+        default: none
+        options: [none, inspect, cleanup]
       commit_sha:
         description: Exact commit to test
         required: true
@@ -48,6 +58,7 @@ permissions:
 
 jobs:
   test:
+    if: inputs.maintenance_mode == 'none'
     name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
     runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-latest' }}
     # Archive workers on one persistent host share the build-time source path.
@@ -159,3 +170,74 @@ jobs:
           set -euo pipefail
           [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
           rm -rf -- "/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+
+  maintenance:
+    if: inputs.maintenance_mode != 'none' && github.event_name == 'workflow_dispatch'
+    name: Maintain Hetzner disk
+    runs-on: [self-hosted, Linux, X64, mvm, hetzner, kvm]
+    timeout-minutes: 20
+    steps:
+      - name: Measure runner disk usage
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'Filesystem space:'
+          df -h / "$HOME" "$RUNNER_TEMP" /tmp
+          echo 'Top-level usage:'
+          for root in "$HOME" "$RUNNER_WORKSPACE" "$RUNNER_TEMP" /tmp; do
+            if [ -d "$root" ]; then
+              echo "$root"
+              du -x -h -d 1 -- "$root" 2>/dev/null | sort -h | tail -30 || true
+            fi
+          done
+          echo 'Known generated paths:'
+          for path in \
+            "$GITHUB_WORKSPACE/target" \
+            "$GITHUB_WORKSPACE/.mvm-test/target" \
+            "$HOME/.cargo/registry/cache" \
+            "$HOME/.cache/sccache"; do
+            if [ -d "$path" ]; then
+              du -s -h -- "$path"
+            fi
+          done
+          find /tmp "$RUNNER_TEMP" -mindepth 1 -maxdepth 1 -type d \
+            -name 'mvm-workspace-*' -print0 | xargs -0 -r du -s -h --
+
+      - name: Reclaim generated files
+        if: inputs.maintenance_mode == 'cleanup'
+        shell: bash
+        run: |
+          set -euo pipefail
+          workspace=$(realpath -e -- "$GITHUB_WORKSPACE")
+          runner_workspace=$(realpath -e -- "$RUNNER_WORKSPACE")
+          home=$(realpath -e -- "$HOME")
+          runner_temp=$(realpath -e -- "$RUNNER_TEMP")
+          [[ "$workspace" == "$runner_workspace/mvm" ]] || exit 1
+          [[ "$home" != / && "$runner_temp" != / ]] || exit 1
+
+          remove_generated_dir() {
+            local path=$1
+            if [[ ! -e "$path" && ! -L "$path" ]]; then
+              return
+            fi
+            [[ -d "$path" && ! -L "$path" ]] || exit 1
+            [[ "$(stat -c %u -- "$path")" == "$(id -u)" ]] || exit 1
+            echo "Removing $path"
+            chmod -R u+rwX -- "$path"
+            rm -rf -- "$path"
+          }
+
+          remove_generated_dir "$workspace/target"
+          remove_generated_dir "$workspace/.mvm-test/target"
+          remove_generated_dir "$home/.cargo/registry/cache"
+          remove_generated_dir "$home/.cache/sccache"
+
+          for root in /tmp "$runner_temp"; do
+            while IFS= read -r -d '' path; do
+              name=${path##*/}
+              [[ "$name" =~ ^mvm-workspace-[0-9]+(-[0-9]+-[12])?$ ]] || exit 1
+              remove_generated_dir "$path"
+            done < <(find "$root" -mindepth 1 -maxdepth 1 -type d \
+              -name 'mvm-workspace-*' -print0)
+          done
+          df -h / "$home" "$runner_temp" /tmp
