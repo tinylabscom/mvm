@@ -256,25 +256,14 @@ pub enum IngressFlowKind {
 }
 
 impl SessionValidator {
-    /// A validator for a session whose plan declared `ingress_mappings`.
+    /// A validator for a session whose plan declared `ingress_mappings`,
+    /// each with the transport its listener was signed for.
     ///
     /// The mapping set comes from the admitted plan, never from guest bytes:
     /// it is the list of listeners that were signed for, and an `InboundOpen`
     /// naming anything outside it is refused.
     #[must_use]
-    pub fn new(ingress_mappings: impl IntoIterator<Item = u16>) -> Self {
-        Self::new_with_ingress(
-            ingress_mappings
-                .into_iter()
-                .map(|mapping| (mapping, IngressFlowKind::Tcp)),
-        )
-    }
-
-    /// A validator with each signed ingress mapping's transport projected in.
-    #[must_use]
-    pub fn new_with_ingress(
-        ingress_mappings: impl IntoIterator<Item = (u16, IngressFlowKind)>,
-    ) -> Self {
+    pub fn new(ingress_mappings: impl IntoIterator<Item = (u16, IngressFlowKind)>) -> Self {
         Self {
             session: SessionState::AwaitingHello,
             streams: BTreeMap::new(),
@@ -944,7 +933,7 @@ mod tests {
 
     #[test]
     fn a_host_ingress_open_on_an_odd_stream_is_refused() {
-        let mut v = SessionValidator::new([7u16]);
+        let mut v = SessionValidator::new([(7u16, IngressFlowKind::Tcp)]);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
         v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
@@ -960,7 +949,7 @@ mod tests {
 
     #[test]
     fn the_two_parities_keep_independent_watermarks() {
-        let mut v = SessionValidator::new([7u16]);
+        let mut v = SessionValidator::new([(7u16, IngressFlowKind::Tcp)]);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
         v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
@@ -977,7 +966,8 @@ mod tests {
 
     #[test]
     fn an_inbound_open_naming_an_undeclared_mapping_is_refused() {
-        let mut v = SessionValidator::new([1u16, 2]);
+        let mut v =
+            SessionValidator::new([(1u16, IngressFlowKind::Tcp), (2, IngressFlowKind::Tcp)]);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
         v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
@@ -990,7 +980,7 @@ mod tests {
 
     #[test]
     fn an_inbound_open_naming_no_mapping_is_refused() {
-        let mut v = SessionValidator::new([1u16]);
+        let mut v = SessionValidator::new([(1u16, IngressFlowKind::Tcp)]);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
         v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
@@ -1003,7 +993,7 @@ mod tests {
 
     #[test]
     fn declared_udp_ingress_uses_datagram_frames_after_readiness() {
-        let mut v = SessionValidator::new_with_ingress([(9_u16, IngressFlowKind::Udp)]);
+        let mut v = SessionValidator::new([(9_u16, IngressFlowKind::Udp)]);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
         v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
@@ -1022,7 +1012,7 @@ mod tests {
 
     #[test]
     fn declared_udp_ingress_refuses_byte_stream_frames() {
-        let mut v = SessionValidator::new_with_ingress([(9_u16, IngressFlowKind::Udp)]);
+        let mut v = SessionValidator::new([(9_u16, IngressFlowKind::Udp)]);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
         v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
@@ -1055,7 +1045,7 @@ mod tests {
 
     #[test]
     fn a_declared_inbound_open_walks_to_ready() {
-        let mut v = SessionValidator::new([5u16]);
+        let mut v = SessionValidator::new([(5u16, IngressFlowKind::Tcp)]);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
         v.admit(&FrameFacts::new(H, Opcode::HelloAck, 0))
@@ -1391,7 +1381,9 @@ mod tests {
 
     #[test]
     fn the_ingress_listener_ceiling_is_enforced() {
-        let declared: Vec<u16> = (0..MAX_INGRESS_LISTENERS as u16).collect();
+        let declared: Vec<(u16, IngressFlowKind)> = (0..MAX_INGRESS_LISTENERS as u16)
+            .map(|mapping| (mapping, IngressFlowKind::Tcp))
+            .collect();
         let mut v = SessionValidator::new(declared);
         v.admit(&FrameFacts::new(G, Opcode::Hello, 0))
             .expect("hello");
