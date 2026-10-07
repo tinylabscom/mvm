@@ -45,7 +45,7 @@ The workload pack CLI becomes `mvmctl pack info|verify|pull|run|ls|rm|update`.
 The attested builder/runtime/image-project cache moves under `pack system`,
 with existing verbs retained temporarily as compatibility aliases. The
 extension-pack protocol keeps its qualified name. Internal Rust modules may
-migrate incrementally from `registry_pack` to `workload_pack` after public
+migrate incrementally from `registry_pack` to workload-pack naming after public
 behavior is stable.
 
 Pack policy is a signed, versioned payload. Effective grants are bounded by
