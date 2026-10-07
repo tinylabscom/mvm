@@ -174,7 +174,7 @@ tier = "live"
 [[command]]
 path = "machine check-artifact"
 tier = "parse"
-reason = "names a signed .mvm artifact that only a real build produces"
+reason = "names a signed .mvmpkg bundle that only a real build produces"
 
 [[command]]
 path = "machine checkpoint create"
@@ -792,6 +792,14 @@ reason = "\"a mvmctl built with pack support\" — a noun phrase"
 [[prose]]
 text = "mvmctl release"
 reason = "\"the mvmctl release channel\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl deb package"
+reason = "\"the mvmctl .deb package, so dpkg owns it\" — a noun phrase naming the distribution package"
+
+[[prose]]
+text = "mvmctl rpm package"
+reason = "\"the mvmctl .rpm package, so rpm owns it\" — a noun phrase naming the distribution package"
 
 [[prose]]
 text = "mvmctl does not"
