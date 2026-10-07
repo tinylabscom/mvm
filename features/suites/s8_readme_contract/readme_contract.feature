@@ -61,7 +61,7 @@ Feature: README CLI contract
     And the help output lists the "reconfigure" verb
     And the help output lists the "stop" verb
     And the help output lists the "rm" verb
-    And the help output lists the "ls" verb
+    And the help output lists the "ps" verb
     And the help output lists the "inspect" verb
 
   Scenario: reviewed workspace apply and rollback are discoverable

@@ -1349,6 +1349,12 @@ impl RunningVm for FcRunningVm {
         if !self.flush_via_agent {
             return Ok(());
         }
+        let Some(pid) = self.pid else {
+            return Ok(());
+        };
+        if !crate::fc::is_firecracker_pid_running(pid)? {
+            return Ok(());
+        }
         let started = Instant::now();
         let result = prepare_guest_filesystems_for_stop(&self.vsock_uds);
         tracing::debug!(
@@ -2101,8 +2107,23 @@ mod tests {
                 mvm_vmm::host::shell::mock::MockResponse::ok("no")
             }
         });
+        vm.prepare_stop().expect("stopped guest needs no flush");
         vm.kill().unwrap();
         assert!(!pid_file.exists(), "pid marker must be removed on kill");
+    }
+
+    #[test]
+    fn stop_preparation_skips_guest_flush_without_a_host_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = FcRunningVm {
+            id: VmId("never-started-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: dir.path().join("fc.pid"),
+            pid: None,
+            vsock_uds: "/state/never-started-vm/runtime/v.sock".into(),
+            flush_via_agent: true,
+        };
+        vm.prepare_stop().expect("there is no guest to flush");
     }
 
     #[test]
