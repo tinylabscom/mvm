@@ -39,7 +39,7 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
         super::builder_vm::ensure_workload_kernel,
     )?;
     ui::success(&format!(
-        "\nBootstrap complete. Builder VM, host helpers, workload kernel, runtime overlay, SDK sidecars, initramfs, and OCI guest shims are ready.\nFuture machine runs will reuse these artifacts.\nWorkload kernel: {kernel}"
+        "\nBootstrap complete. Builder VM, host helpers, workload kernel, runtime overlay, initramfs, and OCI guest shims are ready.\nSDK sidecars are assembled on demand when a workload needs one. Future machine runs will reuse prepared artifacts.\nWorkload kernel: {kernel}"
     ));
     Ok(())
 }
@@ -121,13 +121,56 @@ fn prepare_launch_runtime_artifacts() -> Result<()> {
         }
     }
 
-    mvm_build::initramfs::resolve_or_build_local_initramfs(
-        &mvm_runtime::build_env::RuntimeBuildEnv,
-        &cache_root.join("initramfs"),
-        version,
-        arch,
+    prepare_initramfs_for_mode_with(
+        mode,
+        || {
+            let workspace_root =
+                mvm_client::launch::runtime_overlay::runtime_overlay_source_checkout_root()
+                    .context("source guest runtime checkout is unavailable for initramfs")?;
+            let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+                &cache_root,
+                version,
+                arch,
+                &workspace_root,
+            )
+            .context("resolving shared guest runtime for initramfs")?;
+            mvm_build::initramfs::build_initramfs_from_guest_runtime(
+                &cache_root.join("initramfs"),
+                version,
+                arch,
+                &runtime,
+            )
+            .context("assembling initramfs from shared guest runtime")?;
+            Ok(())
+        },
+        || {
+            mvm_build::initramfs::resolve_or_build_local_initramfs(
+                &mvm_runtime::build_env::RuntimeBuildEnv,
+                &cache_root.join("initramfs"),
+                version,
+                arch,
+            )?;
+            Ok(())
+        },
     )?;
     Ok(())
+}
+
+fn prepare_initramfs_for_mode_with<S, P>(
+    mode: mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode,
+    source: S,
+    published: P,
+) -> Result<()>
+where
+    S: FnOnce() -> Result<()>,
+    P: FnOnce() -> Result<()>,
+{
+    use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
+
+    match mode {
+        RuntimeOverlayAcquireMode::BuildFromSourceCheckout => source(),
+        RuntimeOverlayAcquireMode::DownloadPublishedArtifact => published(),
+    }
 }
 
 /// Resolve — building from this checkout when a helper is missing or older
@@ -205,10 +248,10 @@ fn launch_helper_specs() -> Vec<mvm_vmm::host::aux_bin::AuxBin<'static>> {
 fn prepare_pair_launch_artifacts() -> Result<()> {
     super::builder_vm::with_pair_artifact_source(|pair| match pair {
         Some(pair) => {
-            ui::info("Preparing pair-stamped runtime overlay and SDK sidecars...");
+            ui::info("Preparing pair-stamped runtime overlay...");
             mvm_client::launch::runtime_source::prepare_pair_launch_artifacts(pair)
-                .context("installing the pair-stamped runtime overlay and SDK sidecars")?;
-            ui::success("Pair-stamped runtime overlay and SDK sidecars ready.");
+                .context("installing the pair-stamped runtime overlay")?;
+            ui::success("Pair-stamped runtime overlay ready.");
             Ok(())
         }
         None => Ok(()),
@@ -238,9 +281,44 @@ pub(super) fn run_steps(production: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        acquire_bootstrap_artifacts_with, launch_helper_specs, prewarm_host_aux_helpers_for,
+        acquire_bootstrap_artifacts_with, launch_helper_specs, prepare_initramfs_for_mode_with,
+        prewarm_host_aux_helpers_for,
     };
+    use mvm_client::launch::runtime_overlay::RuntimeOverlayAcquireMode;
     use std::cell::RefCell;
+
+    #[test]
+    fn source_bootstrap_uses_archive_initramfs_without_legacy_builder() {
+        let calls = RefCell::new(Vec::new());
+        prepare_initramfs_for_mode_with(
+            RuntimeOverlayAcquireMode::BuildFromSourceCheckout,
+            || {
+                calls.borrow_mut().push("archive initramfs");
+                Ok(())
+            },
+            || {
+                calls.borrow_mut().push("legacy cargo builder");
+                anyhow::bail!("legacy initramfs builder must not run for source checkout")
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.into_inner(), ["archive initramfs"]);
+    }
+
+    #[test]
+    fn published_bootstrap_retains_published_initramfs_resolution() {
+        let calls = RefCell::new(Vec::new());
+        prepare_initramfs_for_mode_with(
+            RuntimeOverlayAcquireMode::DownloadPublishedArtifact,
+            || anyhow::bail!("source guest runtime must not build in published mode"),
+            || {
+                calls.borrow_mut().push("published initramfs");
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls.into_inner(), ["published initramfs"]);
+    }
 
     #[test]
     fn bootstrap_acquires_every_artifact_in_launch_path_order() {

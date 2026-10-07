@@ -43,6 +43,8 @@ pub enum GuestRuntimeError {
     Version { expected: String, actual: String },
     #[error("guest runtime archive is missing required member {0}")]
     MissingRequired(String),
+    #[error("guest runtime archive includes an SDK member absent from this source checkout: {0}")]
+    UnexpectedSourceSdkMember(String),
     #[error("guest runtime archive includes another architecture's member {0}")]
     ForeignArchitecture(String),
     #[error("guest runtime tree member {member} has sha256 {actual}, expected {expected}")]
@@ -119,7 +121,7 @@ pub fn resolve_or_build_source_guest_runtime(
     let pointer = base.join("sources").join(&fingerprint);
     if pointer.exists() {
         let digest = fs::read_to_string(&pointer)?;
-        return load_cached(&base, digest.trim(), version, arch);
+        return load_cached_source(&base, digest.trim(), version, arch, workspace_root);
     }
     let build_dir = tempfile::Builder::new()
         .prefix(".build-")
@@ -137,6 +139,7 @@ pub fn resolve_or_build_source_guest_runtime(
         ));
     }
     let runtime = install_archive(&base, &written.archive, version, arch)?;
+    validate_source_sdk_members(&runtime.manifest, workspace_root)?;
     fs::create_dir_all(base.join("sources"))?;
     mvm_core::util::atomic_io::atomic_write(&pointer, format!("{}\n", runtime.digest).as_bytes())
         .map_err(|error| GuestRuntimeError::Cache(error.to_string()))?;
@@ -159,10 +162,54 @@ pub fn cached_source_guest_runtime(
     let fingerprint = source_fingerprint(version, arch, workspace_root)?;
     let pointer = base.join("sources").join(fingerprint);
     match fs::read_to_string(pointer) {
-        Ok(digest) => load_cached(&base, digest.trim(), version, arch).map(Some),
+        Ok(digest) => {
+            load_cached_source(&base, digest.trim(), version, arch, workspace_root).map(Some)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
+}
+
+fn load_cached_source(
+    base: &Path,
+    digest: &str,
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &Path,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    let runtime = load_cached(base, digest, version, arch)?;
+    validate_source_sdk_members(&runtime.manifest, workspace_root)?;
+    Ok(runtime)
+}
+
+/// A source-built archive must carry the complete Python package from that
+/// checkout, even when its manifest and tarball agree with each other.
+fn validate_source_sdk_members(
+    manifest: &GuestBinsManifest,
+    workspace_root: &Path,
+) -> Result<(), GuestRuntimeError> {
+    let expected: BTreeSet<String> = guest_bins::python_sdk::python_sdk_members(workspace_root)?
+        .into_iter()
+        .map(|(member, _)| member.path())
+        .collect();
+    let actual: BTreeSet<&str> = manifest
+        .files
+        .keys()
+        .map(String::as_str)
+        .filter(|member| member.starts_with("sdk-py/"))
+        .collect();
+    if let Some(missing) = expected
+        .iter()
+        .find(|member| !actual.contains(member.as_str()))
+    {
+        return Err(GuestRuntimeError::MissingRequired(missing.clone()));
+    }
+    if let Some(extra) = actual.iter().find(|member| !expected.contains(**member)) {
+        return Err(GuestRuntimeError::UnexpectedSourceSdkMember(
+            (*extra).to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn source_fingerprint(
@@ -475,6 +522,19 @@ mod tests {
         }
     }
 
+    fn fixture_manifest_with_source_sdk(
+        arch: GuestArch,
+        workspace_root: &Path,
+    ) -> GuestBinsManifest {
+        let mut manifest = fixture_manifest(arch);
+        for (member, _) in guest_bins::python_sdk::python_sdk_members(workspace_root).unwrap() {
+            manifest
+                .files
+                .insert(member.path(), hex::encode(Sha256::digest(b"fixture")));
+        }
+        manifest
+    }
+
     fn append(tar: &mut tar::Builder<flate2::write::GzEncoder<File>>, name: &str, bytes: &[u8]) {
         let mut header = tar::Header::new_gnu();
         header.set_path(name).unwrap();
@@ -530,6 +590,39 @@ mod tests {
         assert!(matches!(
             install_archive(&temp.path().join("cache"), &input, "1.2.3", GuestArch::X86_64),
             Err(GuestRuntimeError::MissingRequired(member)) if member == "x86_64/bin/mvm-setpriv"
+        ));
+    }
+
+    #[test]
+    fn source_runtime_rejects_an_incomplete_or_extra_python_sdk() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let arch = GuestArch::X86_64;
+        let mut manifest = fixture_manifest_with_source_sdk(arch, &workspace);
+        manifest.files.remove("sdk-py/mvm/host.py");
+        let input = archive(temp.path(), &manifest);
+        let base = temp.path().join("cache");
+        let runtime = install_archive(&base, &input, "1.2.3", arch).unwrap();
+        assert!(matches!(
+            validate_source_sdk_members(&runtime.manifest, &workspace),
+            Err(GuestRuntimeError::MissingRequired(member)) if member == "sdk-py/mvm/host.py"
+        ));
+        assert!(matches!(
+            load_cached_source(&base, &runtime.digest, "1.2.3", arch, &workspace),
+            Err(GuestRuntimeError::MissingRequired(member)) if member == "sdk-py/mvm/host.py"
+        ));
+
+        let mut complete = fixture_manifest_with_source_sdk(arch, &workspace);
+        complete.files.insert(
+            "sdk-py/mvm/stale.py".to_string(),
+            hex::encode(Sha256::digest(b"fixture")),
+        );
+        assert!(matches!(
+            validate_source_sdk_members(&complete, &workspace),
+            Err(GuestRuntimeError::UnexpectedSourceSdkMember(member))
+                if member == "sdk-py/mvm/stale.py"
         ));
     }
 
@@ -633,7 +726,7 @@ mod tests {
             guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
                 .unwrap();
         let arch = GuestArch::X86_64;
-        let manifest = fixture_manifest(arch);
+        let manifest = fixture_manifest_with_source_sdk(arch, &workspace);
         let input = archive(temp.path(), &manifest);
         let cache_root = temp.path().join("cache");
         let base = cache_root.join("guest-runtime/v1");
