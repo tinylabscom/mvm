@@ -205,6 +205,51 @@ Feature: Encrypted block volume lifecycle and attachment
     Then the command exits with code 0
     And the output contains "nothing to undo"
 
+  # The end of a foreground run on a named machine offers the guest's
+  # workspace changes back through the same reviewed apply. The suite drives
+  # mvmctl with captured stdio and no controlling terminal, so it reaches the
+  # two branches that need none: the printed command, and `--apply`. The
+  # terminal prompt is unit-tested against a scripted terminal. The entrypoint
+  # script stands in for an agent: it deletes the seeded marker and writes a
+  # file, giving the apply one removal and one write.
+  @live @workload_kernel @guest_bins
+  Scenario: a run that ends without a terminal applies nothing and names the command
+    Given an isolated mvm home
+    And a cached live workload kernel
+    When I run mvmctl in the isolated mvm home with "machine create bdd-exit-pointer --image alpine"
+    Then the command exits with code 0
+    When I register host directory volume "exitptr" read-write at "/data/exitptr" for machine "bdd-exit-pointer"
+    Then the command exits with code 0
+    When I run mvmctl in an isolated live home with "machine start bdd-exit-pointer"
+    Then the command exits with code 0
+    When the entrypoint of machine "bdd-exit-pointer" runs attached with script "rm /data/exitptr/marker && echo agent-wrote > /data/exitptr/agent.txt" and flags ""
+    Then the command exits with code 0
+    And the output contains "nothing was applied"
+    And the output contains "mvmctl machine apply bdd-exit-pointer"
+    And host directory volume "exitptr" has file "marker" containing "dir-volume-visible"
+    And host directory volume "exitptr" has no file "agent.txt"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-exit-pointer --yes"
+    Then the command exits with code 0
+
+  @live @workload_kernel @guest_bins
+  Scenario: a run that ends with --apply applies the workspace without asking
+    Given an isolated mvm home
+    And a cached live workload kernel
+    When I run mvmctl in the isolated mvm home with "machine create bdd-exit-apply --image alpine"
+    Then the command exits with code 0
+    When I register host directory volume "exitapply" read-write at "/data/exitapply" for machine "bdd-exit-apply"
+    Then the command exits with code 0
+    When I run mvmctl in an isolated live home with "machine start bdd-exit-apply"
+    Then the command exits with code 0
+    When the entrypoint of machine "bdd-exit-apply" runs attached with script "rm /data/exitapply/marker && echo agent-wrote > /data/exitapply/agent.txt" and flags "--apply"
+    Then the command exits with code 0
+    And the output contains "applied 2 change(s)"
+    And the output does not contain "Review and apply with"
+    And host directory volume "exitapply" has file "agent.txt" containing "agent-wrote"
+    And host directory volume "exitapply" has no file "marker"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-exit-apply --yes"
+    Then the command exits with code 0
+
   # Replay (PS-08): re-run recorded input from a checkpoint. The full
   # fork-boot-reexec flow needs a live VM; these scenarios pin the
   # fail-closed surface. Selection and the input journal itself are

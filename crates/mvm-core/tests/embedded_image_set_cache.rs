@@ -19,8 +19,8 @@ use mvm_core::kernel_format::KernelFormat;
 use mvm_core::packs::{FlakeLockIdentity, SbomReference, Sha256Hex, SourceRevisionIdentity};
 use mvm_core::plan::bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, BundleMember,
-    BundleRegistry, FsTrustStore, VerifiedBundle, bundle_sha256, key_id_from_pubkey,
-    read_and_verify_bundle, sha256_hex, write_bundle,
+    BundleRegistry, FsTrustStore, VerifiedBundle, VerifiedBundleFile, bundle_sha256,
+    key_id_from_pubkey, read_and_verify_bundle, sha256_hex, verify_bundle_file, write_bundle,
 };
 
 fn member_artifact(name: &str, format: ArtifactFormat) -> (MemberArtifact, Vec<u8>) {
@@ -225,8 +225,9 @@ struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
     registry: BundleRegistry,
+    archive: PathBuf,
     verified: VerifiedBundle,
-    sha: String,
+    verified_file: VerifiedBundleFile,
 }
 
 impl Fixture {
@@ -241,14 +242,19 @@ impl Fixture {
             sk.verifying_key().to_bytes(),
         )
         .expect("enrol publisher");
-        let archive = embedded_bundle(&sk);
-        let verified =
-            read_and_verify_bundle(&archive, &FsTrustStore::new(&trust_dir)).expect("verify");
+        let bytes = embedded_bundle(&sk);
+        let trust = FsTrustStore::new(&trust_dir);
+        let verified = read_and_verify_bundle(&bytes, &trust).expect("verify");
         assert_eq!(verified.embedded_image_sets.len(), 1);
+        let archive = root.join("app.mvmpkg");
+        std::fs::write(&archive, &bytes).expect("write archive");
+        let verified_file = verify_bundle_file(&archive, &trust).expect("verify file");
+        assert_eq!(verified_file.bundle_sha256, bundle_sha256(&bytes));
         Self {
             registry: BundleRegistry::new(root.join("bundles")),
-            sha: bundle_sha256(&archive),
+            archive,
             verified,
+            verified_file,
             root,
             _dir: dir,
         }
@@ -256,7 +262,7 @@ impl Fixture {
 
     fn cache(&self) -> Result<(), String> {
         self.registry
-            .cache_embedded_image_sets(&self.verified, &self.sha)
+            .cache_embedded_image_sets_from_file(&self.archive, &self.verified_file)
             .map_err(|error| error.to_string())
     }
 

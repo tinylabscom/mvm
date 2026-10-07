@@ -343,6 +343,8 @@ uncovered = [
     "mvmctl machine redo coding-agent",
     "mvmctl machine restore ckpt-alpine-dev-1720000000 --as alpine-dev-from-checkpoint",
     "mvmctl machine run --entrypoint --manifest ./app --stdin -",
+    "mvmctl machine run --entrypoint --attach --name coding-agent",
+    "mvmctl machine run --entrypoint --attach --name coding-agent --apply",
     "mvmctl machine run --flake . --cpus 2 --memory 1024",
     "mvmctl machine run --flake . --cpus 4 --memory 1G -- ./benchmark.sh",
     "mvmctl machine run --flake . --cpus 4 --memory 2G -d",

@@ -53,7 +53,7 @@ use mvm_core::image_lineage::{
     ImageBuildIdentity, ImageCanonicalId, ImageIdentity, ImageNode, ImageProvenance,
 };
 use mvm_core::manifest::{PersistedManifest, slot_revision_dir};
-use mvm_core::plan::{ExecutionPlan, SynthesisInput, synthesize_plan};
+use mvm_core::plan::ExecutionPlan;
 use mvm_core::template::TemplateRevision;
 use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::load_or_init;
@@ -61,6 +61,8 @@ use mvm_runtime::image_lineage::{ImageChainAnchor, ImageStore};
 
 use crate::commands::vm::checkpoint::SignedChainAnchor;
 use crate::ui;
+
+pub(in crate::commands) use mvm_client::event_plan::build_event_plan;
 
 /// The audit-emit capability [`record_image_node`] depends on, narrowed to the
 /// single `image.created` emit so a test can inject a failing emitter and
@@ -403,65 +405,6 @@ fn flake_node_inputs(
             lock_digest: Some(revision.flake_lock_hash.clone()),
         },
     }
-}
-
-/// Synthesize the audit-envelope plan a host-side image-lineage chain entry
-/// (`image.created` / `image.reverted`) binds to. Such an event is not a
-/// workload admission, so this plan is only the tenant / plan-id / image binding
-/// the chain entry carries — it is never signed, admitted, or booted. Tenant is
-/// the local host tenant (`DEFAULT_TENANT`); `workload` / `intent` label the
-/// operation (build vs restore). `image_sha256` must be a 64-char lowercase hex
-/// digest. Shared with the revert engine so both host-side markers use one
-/// synthesis path.
-pub(in crate::commands) fn build_event_plan(
-    workload: &str,
-    intent: &str,
-    image_name: &str,
-    image_sha256: &str,
-) -> Result<ExecutionPlan> {
-    let input = SynthesisInput {
-        outputs: Vec::new(),
-        grants: None,
-        stream_edges: Vec::new(),
-        kernel_sha256: None,
-        network_mode: Default::default(),
-        ingress: Vec::new(),
-        vm_name: workload,
-        tenant: None,
-        backend_name: workload,
-        image_name,
-        image_sha256,
-        image_cosign_bundle: None,
-        intent: Some(intent),
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        network_policy_ref: None,
-        fs_policy_ref: None,
-        egress_policy_ref: None,
-        tool_policy_ref: None,
-        secret_release: mvm_core::plan::SecretReleasePolicy::None,
-        secrets: Vec::new(),
-        audit_event_prefix: None,
-        cpus: 1,
-        mem_mib: 64,
-        disk_mib: 0,
-        boot_timeout_secs: 1,
-        destroy_on_exit: true,
-        bundle_pin: None,
-        deps_volume: None,
-        shares: Vec::new(),
-        assets: Vec::new(),
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
-        tools: Default::default(),
-        caller_commitment: None,
-        audit_labels: Default::default(),
-        agent_verbs: None,
-        services: Vec::new(),
-        extensions: Vec::new(),
-        stream_retention: Default::default(),
-        attestation_mode: mvm_contract::plan::AttestationMode::Noop,
-    };
-    synthesize_plan(&input).context("synthesizing the image-lineage audit-envelope plan")
 }
 
 /// Record an audited image-lineage node for a completed flake build.

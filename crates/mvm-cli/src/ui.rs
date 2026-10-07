@@ -6,6 +6,7 @@
 //! gated [`info`] so it follows the same toggle.
 
 pub type Spinner = mvm_runtime::ui::Spinner;
+pub use mvm_runtime::ui::activity;
 
 // ---------------------------------------------------------------------------
 // Message helpers (delegate to mvm_runtime::ui)
@@ -40,7 +41,7 @@ pub fn warn(msg: &str) {
 
 /// Print an always-on notice line: `[mvm]` message. Unlike [`info`], this is
 /// *not* gated on verbosity. For a phase that takes a while, prefer
-/// [`mvm_runtime::ui::activity::start`], which also keeps a live line going.
+/// [`activity::start`], which also keeps a live line going.
 pub fn notice(msg: &str) {
     mvm_runtime::ui::notice(msg);
 }

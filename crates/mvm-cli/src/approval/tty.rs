@@ -46,6 +46,24 @@ pub trait Terminal {
     }
 }
 
+/// Ask one question on `terminal` and read the answer typed for it. Input
+/// already queued is discarded before the question is drawn, and again after
+/// the arming window, so neither type-ahead nor a key pressed while the
+/// question was appearing can answer it. `None` when nothing arrives within
+/// `wait`. Every operator review that asks on the terminal goes through here.
+pub fn ask_armed(
+    terminal: &mut dyn Terminal,
+    prompt: &str,
+    wait: Duration,
+    max_bytes: usize,
+) -> std::io::Result<Option<String>> {
+    terminal.discard_input()?;
+    terminal.write(prompt)?;
+    terminal.pause(ARMING_WINDOW);
+    terminal.discard_input()?;
+    terminal.read_line(Instant::now() + wait, max_bytes)
+}
+
 /// Where the prompt is drawn, and how it interleaves with the run's own
 /// output. The default frames it on its own lines on the terminal. The
 /// live-denial lines (PS-04) are expected to share this seam so a prompt and

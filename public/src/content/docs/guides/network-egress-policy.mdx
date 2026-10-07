@@ -284,12 +284,13 @@ cancelling, a missing terminal, and every non-grantable refusal leave the file
 unchanged. Metadata, loopback, link-local, SSH and operational failures are
 never offered as grants.
 
-The review edits only the manifest the run was admitted under. When a
-`machine run` lane has no terminal, or its run has no project manifest this
-invocation admitted it under — no `mvm.toml` beside the flake, a policy from a
-verified pack or `--plan`, an `--attach`, or a machine that was already
-running — it does not prompt. The exit summary ends with the command that opens
-the same review later instead:
+The review edits only the manifest the run's policy was read from — for
+`--flake DIR`, that is `DIR`'s `mvm.toml`, wherever the command is run from.
+When a run has no terminal, or no project manifest this invocation admitted it
+under — no `mvm.toml` named by `--manifest` or beside the `--flake`, a policy
+from a verified pack or `--plan`, an `--attach`, or a machine that was already
+running — it does not prompt and does not create a manifest. The exit summary
+ends with the command that opens the same review later instead:
 
 ```text
 [mvm] no terminal to review these refusals on; to grant any of them later, run:
