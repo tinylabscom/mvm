@@ -377,8 +377,12 @@ pub fn start_persistent_oci_machine(
     // Detached callers must not observe success until the authenticated guest
     // control plane is actually serving; failure rolls the partial start back
     // before any launch acceptance, lease commit, or launched audit record.
-    super::detached::require_serving_guest(name, &started, std::time::Duration::from_secs(30))
-        .inspect_err(|err| emit_failed(&admission, "guest-readiness", err))?;
+    super::detached::require_serving_guest(
+        name,
+        &started,
+        std::time::Duration::from_secs(30),
+        &admission,
+    )?;
     // After the start, because a cgroup quota is read back off a process that
     // does not exist until then. This is the call that puts the backend's
     // `apply_grants` on the path `mvmctl` boots: without it the tier is
