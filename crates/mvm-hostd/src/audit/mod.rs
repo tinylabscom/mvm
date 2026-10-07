@@ -29,6 +29,7 @@ pub mod receipt_store;
 /// Per-session seals, the session ledger derived from them, and the
 /// per-session verdict.
 pub mod session;
+pub mod unsealed;
 pub mod witness;
 
 /// Content-addressed derived store for decision records.

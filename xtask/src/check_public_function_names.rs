@@ -5,8 +5,10 @@ use regex::Regex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-const MAX_SIBLING_PAIRS: usize = 24;
+const MAX_SIBLING_PAIRS: usize = 14;
 const CLEARED_MODULES: &[&str] = &[
+    "crates/mvm-agentd/src/bin/mvm-guest-agent/config.rs",
+    "crates/mvm-agentd/src/guest_bootstrap.rs",
     "crates/mvm-build/src/builder_backend_select.rs",
     "crates/mvm-build/src/builder_vm_runtime.rs",
     "crates/mvm-build/src/builderd.rs",
@@ -26,7 +28,13 @@ const CLEARED_MODULES: &[&str] = &[
     "crates/mvm-client/src/admission/run_network.rs",
     "crates/mvm-contract/src/policy/network_policy.rs",
     "crates/mvm-contract/src/protocol/network_flow/state.rs",
+    "crates/mvm-core/src/pii.rs",
+    "crates/mvm-core/src/protocol/broker_control.rs",
+    "crates/mvm-core/src/stream_client/console.rs",
     "crates/mvm-fs/src/ext4/mod.rs",
+    "crates/mvm-fs/src/oci/unpack/mod.rs",
+    "crates/mvm-fs/tests/common/mod.rs",
+    "crates/mvm-fs/tests/oci_unpack_common/mod.rs",
     "crates/mvm-hostd/src/broker/daemon.rs",
     "crates/mvm-hostd/src/plan_admission.rs",
     "crates/mvm-observability/src/logging.rs",

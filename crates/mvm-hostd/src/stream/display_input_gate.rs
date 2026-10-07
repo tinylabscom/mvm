@@ -266,6 +266,26 @@ impl DisplayInputGate {
         )
     }
 
+    /// Open under a running machine's re-verified display authority.
+    ///
+    /// Crate-visible only: a caller outside the host boundary obtains a
+    /// [`crate::display::DisplayAuthority`], which is what re-reads the plan,
+    /// checks the host-signed grant and decides the tier.
+    pub(crate) fn open_authority(
+        authority: &crate::display::DisplayAuthority,
+    ) -> Result<DisplayInputSession, DisplayInputRefusal> {
+        Self::open_authorized(
+            authority.plan(),
+            OpenParams {
+                vm: authority.vm().to_string(),
+                tier: authority.tier(),
+                audit: Arc::new(DisplayAudit::new(authority.audit())),
+                markers: Arc::new(RunMarkers),
+                lease_ttl: bound_lease_ttl(authority.vm()),
+            },
+        )
+    }
+
     fn open_authorized(
         plan: &ExecutionPlan,
         params: OpenParams,
@@ -544,6 +564,26 @@ fn record_refusal(
     }
 }
 
+/// A granted session over a fixture plan, recording into a sink that accepts
+/// everything and marking nothing — for tests of what sits on top of a session.
+#[cfg(test)]
+pub(crate) fn open_for_test(
+    plan: &ExecutionPlan,
+    vm: &str,
+    tier: DisplayTier,
+) -> Result<DisplayInputSession, DisplayInputRefusal> {
+    DisplayInputGate::open_authorized(
+        plan,
+        OpenParams {
+            vm: vm.to_string(),
+            tier,
+            audit: Arc::new(tests::RecordingSink::default()),
+            markers: Arc::new(tests::MemoryMarkers::default()),
+            lease_ttl: Duration::from_secs(30),
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::num::NonZeroU32;
@@ -560,7 +600,7 @@ mod tests {
 
     /// Everything a sink was asked to record, as `(event, detail)` pairs.
     #[derive(Default)]
-    struct RecordingSink {
+    pub(crate) struct RecordingSink {
         entries: Mutex<Vec<(String, String)>>,
         fail_events: bool,
     }
@@ -625,7 +665,7 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MemoryMarkers {
+    pub(crate) struct MemoryMarkers {
         log: Mutex<Vec<&'static str>>,
         fail: bool,
     }

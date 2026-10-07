@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
+use mvm_client::admission::InheritedBundle;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::config::{machine_state_dir, vm_state_dir};
 use mvm_core::vm_backend::SnapshotCapability;
@@ -1060,6 +1061,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
+    let parent_bundle = InheritedBundle::of_parent_vm(&parent_meta.vm_name)?;
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
     let user_cfg = mvm_core::user_config::load(None);
@@ -1134,7 +1136,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         keys_dir: None,
         audit_dir: None,
         policy_dir: None,
-        bundle_pin: None,
+        bundle_pin: parent_bundle.as_ref().map(InheritedBundle::pin),
         bundle_posture: None,
         deps_volume: None,
         shares: Vec::new(),

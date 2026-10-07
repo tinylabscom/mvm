@@ -200,6 +200,16 @@ fn package_in_filter(filter: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
+/// The `cargo nextest list` arguments for one override filter.
+///
+/// `--all-targets` is the selection the workspace suite runs, so the filters
+/// are checked against the tests they actually govern, and the listing reuses
+/// the artifacts that suite's build left behind. Without it cargo also builds
+/// every example in non-test mode, a compile the suite never needed.
+fn list_args(filter: &str) -> [&str; 4] {
+    ["--workspace", "--all-targets", "-E", filter]
+}
+
 fn list_matching_tests(workspace: &Path, filter: &str) -> Result<usize> {
     let current_dir = workspace
         .as_os_str()
@@ -207,9 +217,7 @@ fn list_matching_tests(workspace: &Path, filter: &str) -> Result<usize> {
         .with_context(|| format!("workspace path is not UTF-8: {}", workspace.display()))?;
     let summary = NextestList::new()
         .current_dir(current_dir)
-        .add_arg("--workspace")
-        .add_arg("-E")
-        .add_arg(filter)
+        .add_args(list_args(filter))
         .exec()
         .with_context(|| format!("cargo nextest list failed for filter '{filter}'"))?;
     Ok(summary.test_count)
@@ -224,6 +232,19 @@ mod tests {
         assert_eq!(
             package_in_filter("package(mvm-vmm) and test(/foo/)"),
             Some("mvm-vmm".to_string())
+        );
+    }
+
+    #[test]
+    fn listing_selects_the_whole_suite_and_passes_the_filter_last() {
+        assert_eq!(
+            list_args("package(mvm-vmm) and test(/foo/)"),
+            [
+                "--workspace",
+                "--all-targets",
+                "-E",
+                "package(mvm-vmm) and test(/foo/)"
+            ]
         );
     }
 

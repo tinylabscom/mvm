@@ -7,6 +7,28 @@ use clap::Parser;
 use std::path::Path;
 
 #[test]
+fn installed_pack_inspection_commands_parse() {
+    let info = Cli::try_parse_from(["mvmctl", "pack", "info", "runtime/go", "--json"])
+        .expect("pack info parse");
+    assert!(matches!(
+        info.command,
+        Commands::Pack(pack::Args {
+            action: pack::PackAction::Info { reference, json: true }
+        }) if reference == "runtime/go"
+    ));
+    let verify = Cli::try_parse_from(["mvmctl", "pack", "verify", "runtime/go@1.0.0"])
+        .expect("pack verify parse");
+    assert!(matches!(
+        verify.command,
+        Commands::Pack(pack::Args {
+            action: pack::PackAction::Verify { reference, json: false }
+        }) if reference == "runtime/go@1.0.0"
+    ));
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "info"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "verify"]).is_err());
+}
+
+#[test]
 fn help_output_truncates_long_lines() {
     let help =
         "  command  A long description that must wrap before it exceeds the fixed output width";

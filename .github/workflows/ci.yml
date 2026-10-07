@@ -230,6 +230,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt -- --check
 
+      - name: Verify locked Cargo metadata
+        run: cargo metadata --locked --format-version 1 --no-deps >/dev/null
+
       - name: Shellcheck install.sh + uninstall.sh + release-asset verifier
         run: |
           sudo apt-get install -y shellcheck
@@ -617,6 +620,7 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
           cargo nextest run -p mvm-cli --features manifest-verify --test signed_registry_pack
+          cargo nextest run -p mvm-hostd --features manifest-verify -E 'test(/real_signed_pack_identity_is_reverified_at_host_admission/)'
 
       # The other half: a build without the verifier must refuse every signature
       # and say why. The workspace lane unifies the verifier in, so those tests
@@ -836,11 +840,10 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
-    # The queue aggregate only inspects `needs` results, so use the small,
-    # fast-starting image. Pull requests still need the full image for the
-    # admission smoke below.
-    runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-latest' }}
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    # Every admission check runs in an upstream lane; this aggregate only
+    # inspects their results, so it needs no checkout or full hosted image.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
       - name: Require CI scope to pass
@@ -851,20 +854,6 @@ jobs:
             echo "CI scope did not pass: $SCOPE_RESULT"
             exit 1
           fi
-
-      - uses: actions/checkout@v6
-        if: github.event_name == 'pull_request'
-
-      # Keep these cheap admission checks explicit even though the full matrix
-      # below also runs on pull requests.
-      - name: PR admission smoke
-        if: github.event_name == 'pull_request'
-        run: |
-          set -euo pipefail
-          cargo fmt -- --check
-          cargo metadata --locked --format-version 1 --no-deps >/dev/null
-          bash scripts/cargo-target-dir-guard.test.sh
-          bash scripts/dev-run-guard.test.sh
 
       - name: Require every validation lane to pass
         env:
@@ -877,7 +866,9 @@ jobs:
           FEATURES_RESULT: ${{ needs.lint-features.result }}
           FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
           FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
+          WORKSPACE_BUILD_RESULT: ${{ needs.test-workspace-build.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
+          WORKSPACE_EXTRAS_RESULT: ${{ needs.test-workspace-extras.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
@@ -913,7 +904,8 @@ jobs:
           fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
-            "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
+            "$WORKSPACE_BUILD_RESULT" "$WORKSPACE_RESULT" "$WORKSPACE_EXTRAS_RESULT" \
+            "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
             "$RELEASE_WITNESS_RESULT" "$MUSL_CONFINEMENT_RESULT" "$EBPF_RESULT" \
             "$BDD_RESULT"; do
             if [ "$result" != "$required" ]; then
@@ -942,7 +934,7 @@ jobs:
 
   test-workspace:
     name: Test workspace
-    needs: [scope]
+    needs: [scope, test-workspace-build]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     permissions:
       actions: read
@@ -956,6 +948,104 @@ jobs:
       commit_sha: ${{ github.sha }}
       shard: ${{ matrix.shard }}
       runner_kind: github
+      archive_run_id: ${{ github.run_id }}
+
+  test-workspace-build:
+    name: Build workspace tests
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: Build the workspace test archive
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Some workspace tests clear /tmp on Linux; keep their own binaries safe.
+          archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          mkdir -p -- "$archive_root"
+          cp -a "$GITHUB_WORKSPACE/." "$archive_root/"
+          cd "$archive_root"
+          cargo nextest archive --workspace --all-targets \
+            --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst"
+          ls -lh "$RUNNER_TEMP/workspace-tests.tar.zst"
+          du -sh target
+          df -h /
+
+      - name: Upload the workspace test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests
+          path: ${{ runner.temp }}/workspace-tests.tar.zst
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
+
+      - name: Validate nextest override filters
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: |
+          cd "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          cargo run -p xtask -- check-nextest-groups
+
+      - name: Remove archived workspace
+        if: always()
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: rm -rf -- "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+
+  test-workspace-extras:
+    name: Test workspace (doctests + feature suites)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+
+      - name: xtask man-page tests
+        run: cargo nextest run -p xtask --features man
+
+      - name: Run addon/egress helper tests
+        run: cargo nextest run -p mvm-agentd --features addons
+
+      - name: Run doctests
+        run: cargo test --workspace --doc
 
   test-workspace-aarch64:
     name: Test workspace (aarch64)

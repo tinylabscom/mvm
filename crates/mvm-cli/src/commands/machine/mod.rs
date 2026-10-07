@@ -148,7 +148,7 @@ pub(in crate::commands) enum MachineAction {
     /// Disconnect the client attached to a VM's console; the session keeps running
     #[command(display_order = 13)]
     Detach(super::vm::console::DetachArgs),
-    /// Verify a portable `.mvm` artifact without booting
+    /// Verify a signed `.mvmpkg` bundle without booting
     #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
     /// Show and verify checkpoint or image lineage
@@ -309,6 +309,9 @@ pub(in crate::commands) struct MachineRunArgs {
         conflicts_with_all = ["image", "manifest", "flake", "deployment", "fresh", "reset", "detach"]
     )]
     pub attach: bool,
+    /// Apply the machine's workspace changes at exit without asking.
+    #[arg(long, requires = "attach", conflicts_with = "json")]
+    pub apply: bool,
 }
 
 /// The same values clap fills in when a flag is absent, for the same reason
@@ -339,6 +342,7 @@ impl Default for MachineRunArgs {
             reset: false,
             stdin: None,
             attach: false,
+            apply: false,
         }
     }
 }

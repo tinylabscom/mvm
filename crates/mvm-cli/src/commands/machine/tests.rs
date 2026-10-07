@@ -71,6 +71,55 @@ fn named_transient_with_registered_volume_explains_the_mount_is_not_attached() {
     assert!(warning.contains("Use `--mount` to attach one here"));
 }
 
+#[test]
+fn apply_is_accepted_on_a_run_attached_to_a_named_machine() {
+    let args = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--attach",
+        "--name",
+        "coding-agent",
+        "--apply",
+    ])
+    .expect("--apply parses on an attached run");
+    assert!(args.apply);
+    assert!(args.attach);
+    assert!(
+        !parse_run(&["run", "--entrypoint", "--attach", "--name", "coding-agent"])
+            .expect("parses")
+            .apply,
+        "nothing is applied unless asked"
+    );
+}
+
+#[test]
+fn apply_needs_a_run_on_a_named_machine() {
+    // A fresh boot has no workspace to apply: its image is discarded at exit.
+    let error = parse_run(&["run", "--entrypoint", "--manifest", "slot", "--apply"])
+        .expect_err("--apply without --attach is refused");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn apply_and_json_are_mutually_exclusive() {
+    // Machine-readable output never applies: it gets the command to run
+    // instead, so the two flags cannot both be meant.
+    let error = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--attach",
+        "--name",
+        "coding-agent",
+        "--apply",
+        "--json",
+    ])
+    .expect_err("--apply with --json is refused");
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
 fn parse_fork(argv: &[&str]) -> Result<MachineForkArgs, clap::Error> {
     parse(argv).map(|action| match action {
         MachineAction::Fork(f) => f,
