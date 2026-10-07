@@ -1803,7 +1803,7 @@ fn nix_flake_exports_the_guest_recipes_for_the_linux_systems() {
     );
     assert!(
         flake.contains(
-            "// nixpkgs.lib.optionalAttrs (builtins.elem system systems) (guestPackagesFor system));"
+            "// nixpkgs.lib.optionalAttrs (builtins.elem system systems) (guestPackagesFor system)"
         ),
         "the guest recipes must be exported under packages for the Linux image systems only"
     );
