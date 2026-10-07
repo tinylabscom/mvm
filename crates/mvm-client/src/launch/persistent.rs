@@ -394,6 +394,15 @@ pub fn start_persistent_oci_machine(
             );
         } else {
             emit_failed(&admission, "guest-readiness", &error);
+            // The failure record and session seal live under the runtime
+            // state directory, so cleanup must follow audit finalization.
+            if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
+                tracing::warn!(
+                    error = %cleanup_error,
+                    machine = name,
+                    "removing runtime state after completed launch abort failed"
+                );
+            }
         }
         return Err(error);
     }

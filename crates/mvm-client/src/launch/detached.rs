@@ -74,8 +74,7 @@ pub fn require_serving_guest(
     let ready = started.backend().kind() == mvm_core::vm_backend::BackendKind::Mock
         || crate::readiness::wait_for_guest_agent_for(name, timeout);
     require_serving_guest_result(name, timeout, ready, || {
-        started.backend().abort_start(started.vm_id()).map(|_| ())?;
-        Ok(crate::local::remove_stopped_runtime_state(name)?)
+        started.backend().abort_start(started.vm_id()).map(|_| ())
     })
 }
 
