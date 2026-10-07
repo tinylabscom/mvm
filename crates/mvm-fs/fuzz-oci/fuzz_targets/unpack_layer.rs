@@ -68,7 +68,12 @@ fn run_unpack(archive: &[u8]) {
         Err(_) => return,
     };
 
-    let _ = unpack_layer(Cursor::new(archive), tmp.path(), &UnpackOptions::default());
+    let _ = unpack_layer(
+        Cursor::new(archive),
+        tmp.path(),
+        &UnpackOptions::default(),
+        None,
+    );
 
     // Property: nothing the unpacker wrote escapes the tempdir. We
     // walk the resulting tree with `symlink_metadata` (so a

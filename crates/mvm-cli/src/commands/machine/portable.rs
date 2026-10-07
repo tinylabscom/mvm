@@ -3,14 +3,13 @@
 //!
 //! Read-only: no install, no extraction, no boot, no audit-chain emission.
 //! The run path (`machine run --manifest <app.mvmpkg>`) verifies the same
-//! archive through the same `read_and_verify_bundle`.
+//! archive through the same streaming verifier.
 
 use anyhow::Result;
 use mvm_core::arch::GuestArch;
 use mvm_core::image_set::BackendImageSupport;
-use mvm_core::plan::{
-    BundleManifest, FsTrustStore, check_embedded_image_set_for_backend, read_and_verify_bundle,
-};
+use mvm_core::plan::bundle::verify_bundle_file;
+use mvm_core::plan::{BundleManifest, FsTrustStore, check_embedded_image_set_for_backend};
 use std::path::PathBuf;
 
 #[derive(clap::Args, Debug, Clone)]
@@ -37,13 +36,11 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
             args.path.display()
         );
     }
-    let bytes = std::fs::read(&args.path)
-        .map_err(|error| anyhow::anyhow!("reading {}: {error}", args.path.display()))?;
     let trust = match &args.trust_store {
         Some(path) => FsTrustStore::new(path),
         None => FsTrustStore::default_path()?,
     };
-    let verified = read_and_verify_bundle(&bytes, &trust)
+    let verified = verify_bundle_file(&args.path, &trust)
         .map_err(|error| anyhow::anyhow!("{}: {error}", args.path.display()))?;
     let host_arch = GuestArch::require_host(&verified.manifest.arch)
         .map_err(|error| anyhow::anyhow!("{}: not runnable here: {error}", args.path.display()))?;
@@ -64,7 +61,7 @@ pub(in crate::commands) fn run_check_artifact(args: CheckArtifactArgs) -> Result
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "path": args.path.display().to_string(),
-                "bundle_sha256": mvm_core::plan::bundle_sha256(&bytes),
+                "bundle_sha256": verified.bundle_sha256,
                 "arch": verified.manifest.arch,
                 "runnable_here": true,
                 "artifact_count": verified.manifest.artifacts.len(),

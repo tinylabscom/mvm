@@ -691,6 +691,8 @@ mod tests {
         assert!(
             lint_core.contains("./scripts/cargo-stable.sh clippy --all-targets -- -D warnings")
         );
+        assert!(lint_core.contains("cargo fmt -- --check"));
+        assert!(lint_core.contains("cargo metadata --locked --format-version 1 --no-deps"));
         let lint_policy = job_block(&workflow, "lint-policy");
         assert!(lint_policy.contains("name: Invariant"));
         assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
@@ -699,6 +701,8 @@ mod tests {
         // Asserting a particular gate's step here again would just be the
         // sixty-step list in another file.
         assert!(lint_policy.contains("cargo run -p xtask -- check-all"));
+        assert!(lint_policy.contains("bash scripts/cargo-target-dir-guard.test.sh"));
+        assert!(lint_policy.contains("bash scripts/dev-run-guard.test.sh"));
         assert!(lint_policy.contains("Policy gates (check-abi-layout) (single-network-path)"));
         assert!(
             crate::check_all::GATES
@@ -748,17 +752,17 @@ mod tests {
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
         assert!(test.contains("if: ${{ always() }}"));
+        assert!(test.contains("runs-on: ubuntu-slim"));
         assert!(
             test.contains("name: Require CI scope to pass")
                 && test.contains("CI scope did not pass: $SCOPE_RESULT"),
             "the required test context must fail closed when classification fails"
         );
         assert!(
-            test.contains("name: PR admission smoke")
-                && test.contains("cargo fmt -- --check")
-                && test.contains("cargo metadata --locked --format-version 1 --no-deps")
+            !test.contains("actions/checkout")
+                && !test.contains("cargo ")
                 && test.contains("name: Require every validation lane to pass"),
-            "pull requests must publish the required context after the full validation matrix"
+            "the aggregate must publish the required context without another full runner"
         );
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \

@@ -82,5 +82,4 @@ pub use reference::ImageReference;
 pub use registry::{BearerRefusal, ClientConfig, ClientProtocol, RegistryAuthConfig};
 pub use unpack::{
     RefusalReason, RefusedEntry, UnpackError, UnpackOptions, UnpackReport, unpack_layer,
-    unpack_layer_with_prior_paths,
 };
