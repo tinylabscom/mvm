@@ -39,8 +39,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
     if args.input {
-        let authority = mvm_hostd::display::DisplayAuthority::load(&args.name)
-            .with_context(|| format!("load the display input authority for {:?}", args.name))?
+        let authority = mvm_client::display_input::load_authority(&args.name)?
             .with_context(|| {
                 format!(
                     "microVM {:?} was admitted without a display input grant; its display is view-only",
