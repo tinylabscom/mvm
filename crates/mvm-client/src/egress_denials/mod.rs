@@ -27,6 +27,8 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use mvm_hostd::supervisor::PlanAuditEntry;
 
+use crate::audit::follow::{ChainLine, parse_chain_line};
+
 pub use tally::{DenialTally, DeniedDestination};
 pub use watch::{DenialWatch, Live, WatchTarget, print_summary};
 
@@ -39,6 +41,32 @@ pub fn local_chain() -> Option<PathBuf> {
         &dir,
         mvm_core::plan::DEFAULT_TENANT,
     ))
+}
+
+/// The plan id of the latest admission of machine `vm_name` in the local
+/// chain: the run `mvmctl explain` should be pointed at. `None` when the chain
+/// cannot be read or records no admission under that name.
+pub fn latest_admission(vm_name: &str) -> Option<String> {
+    let text = std::fs::read_to_string(local_chain()?).ok()?;
+    let entries = text
+        .lines()
+        .filter_map(|line| match parse_chain_line(line) {
+            ChainLine::Entry(entry) => Some(*entry),
+            ChainLine::Foreign(_) => None,
+        });
+    latest_admission_in(entries, vm_name)
+}
+
+/// An admission records the machine's name as its `image_name`.
+fn latest_admission_in(
+    entries: impl IntoIterator<Item = PlanAuditEntry>,
+    vm_name: &str,
+) -> Option<String> {
+    entries
+        .into_iter()
+        .filter(|entry| entry.event == "plan.admitted" && entry.image_name == vm_name)
+        .max_by_key(|entry| entry.timestamp)
+        .map(|entry| entry.plan_id.0)
 }
 
 /// Verify the local chain under this host's signing key. Watching is
@@ -97,6 +125,29 @@ mod tests {
             ),
             ts,
         )
+    }
+
+    fn admitted(ts: &str, vm: &str, plan: &str) -> PlanAuditEntry {
+        PlanAuditEntry {
+            image_name: vm.into(),
+            plan_id: mvm_core::plan::PlanId(plan.into()),
+            ..at(entry("plan.admitted", &[]), ts)
+        }
+    }
+
+    #[test]
+    fn the_run_explain_is_pointed_at_is_the_machines_latest_admission() {
+        let entries = [
+            admitted("2026-09-26T10:00:00Z", "vm-a", "plan-old"),
+            admitted("2026-09-26T10:00:05Z", "vm-b", "plan-other"),
+            refused("2026-09-26T10:00:06Z", "vm-a", "api.example:443"),
+            admitted("2026-09-26T10:00:07Z", "vm-a", "plan-new"),
+        ];
+        assert_eq!(
+            latest_admission_in(entries.clone(), "vm-a").as_deref(),
+            Some("plan-new")
+        );
+        assert_eq!(latest_admission_in(entries, "vm-c"), None);
     }
 
     #[test]
