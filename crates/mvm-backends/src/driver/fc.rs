@@ -1291,6 +1291,7 @@ fn prepare_guest_filesystems_for_stop(vsock_uds: &str) -> Result<()> {
 /// guest flush and the kill-and-wait have unrelated costs and unrelated fixes —
 /// a vsock round-trip the guest controls, versus a signal plus a host-side poll
 /// loop. Without the split, a slow teardown cannot be attributed to either.
+#[cfg(test)]
 fn stop_after_guest_flush(
     prepare: impl FnOnce() -> Result<()>,
     terminate: impl FnOnce() -> Result<()>,
@@ -1316,6 +1317,7 @@ fn stop_after_guest_flush(
 /// Stop a guest, flushing through its agent only when it has one. Requiring the
 /// flush of an agentless guest would make it unkillable: the connect fails and
 /// the error returns before the process is ever signalled.
+#[cfg(test)]
 fn stop_firecracker_guest(
     flush_via_agent: bool,
     prepare: impl FnOnce() -> Result<()>,
@@ -1343,6 +1345,26 @@ impl RunningVm for FcRunningVm {
         ))
     }
 
+    fn prepare_stop(&self) -> Result<()> {
+        if !self.flush_via_agent {
+            return Ok(());
+        }
+        let Some(pid) = self.pid else {
+            return Ok(());
+        };
+        if !crate::fc::is_firecracker_pid_running(pid)? {
+            return Ok(());
+        }
+        let started = Instant::now();
+        let result = prepare_guest_filesystems_for_stop(&self.vsock_uds);
+        tracing::debug!(
+            ms = started.elapsed().as_secs_f64() * 1000.0,
+            ok = result.is_ok(),
+            "fc stop: guest filesystem flush"
+        );
+        result
+    }
+
     fn kill(&self) -> Result<()> {
         // Firecracker is sudo-launched and runs as root, so the libkrun
         // running-VM's plain `libc::kill` would return EPERM from a non-root
@@ -1357,11 +1379,7 @@ impl RunningVm for FcRunningVm {
             remove_pid_marker_if_matches(&self.pid_file, pid);
             return Ok(());
         }
-        stop_firecracker_guest(
-            self.flush_via_agent,
-            || prepare_guest_filesystems_for_stop(&self.vsock_uds),
-            || terminate_firecracker_pid(&self.id.0, pid, &self.pid_file),
-        )
+        terminate_firecracker_pid(&self.id.0, pid, &self.pid_file)
     }
 
     fn pause(&self) -> Result<()> {
@@ -2089,8 +2107,23 @@ mod tests {
                 mvm_vmm::host::shell::mock::MockResponse::ok("no")
             }
         });
+        vm.prepare_stop().expect("stopped guest needs no flush");
         vm.kill().unwrap();
         assert!(!pid_file.exists(), "pid marker must be removed on kill");
+    }
+
+    #[test]
+    fn stop_preparation_skips_guest_flush_without_a_host_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let vm = FcRunningVm {
+            id: VmId("never-started-vm".into()),
+            state_dir: dir.path().to_path_buf(),
+            pid_file: dir.path().join("fc.pid"),
+            pid: None,
+            vsock_uds: "/state/never-started-vm/runtime/v.sock".into(),
+            flush_via_agent: true,
+        };
+        vm.prepare_stop().expect("there is no guest to flush");
     }
 
     #[test]

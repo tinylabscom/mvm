@@ -43,7 +43,8 @@ pub use api::{
     workload_is_primed_at,
 };
 pub use connection::{
-    HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_once, send_request,
+    HOST_CID, connect_host_vsock, connect_to, connect_to_port, connect_to_port_before,
+    connect_to_port_once, connect_unix_before, run_with_stream_deadline, send_request,
     send_request_stream, vsock_uds_path,
 };
 pub use framing::{
