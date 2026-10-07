@@ -375,6 +375,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             audit_dir: None,
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -587,7 +588,7 @@ fn stop_child_after_restore_failure(child_vm_name: &str, error: anyhow::Error) -
     match mvm_runtime::backend::AnyBackend::for_started_vm(child_vm_name) {
         Some(backend) => match backend.stop(&mvm_core::vm_backend::VmId(child_vm_name.to_string()))
         {
-            Ok(()) => error.context(format!(
+            Ok(_timing) => error.context(format!(
                 "stopped forked child '{child_vm_name}' after restore completion failure"
             )),
             Err(stop_error) => error.context(format!(
@@ -981,6 +982,10 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let home = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(home.path());
+        let launcher = home.path().join("systemd-run");
+        std::fs::write(&launcher, b"").unwrap();
+        env.set("PATH", home.path());
+        env.set("DBUS_SESSION_BUS_ADDRESS", "unix:path=/unused-test-bus");
 
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path().join("store"));

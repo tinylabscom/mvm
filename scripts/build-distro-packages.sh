@@ -13,7 +13,9 @@
 # The asset lists live in the root Cargo.toml ([package.metadata.deb] and
 # [package.metadata.generate-rpm]) and read from target/distro-pkg/, which
 # this script fills: bin/ with every file at the top of the archive except the
-# README, doc/ with the README, man/ with the man pages. Writes into <out-dir>
+# README, doc/ with the README, man/ with the man pages, and package-managed/
+# with one marker per format, naming it, which each package installs as
+# /usr/share/mvmctl/package-managed. Writes into <out-dir>
 # the two packages and one `<package>.sha256` per package, the format the
 # release's combined checksum manifest is assembled from, plus
 # `payload-<target>.sha256sums`: a `sha256sum -c` manifest of the files the
@@ -60,10 +62,12 @@ if [ "$(uname -s)/$(uname -m)" = "Linux/${host_arch}" ]; then
 fi
 
 rm -rf "${stage}"
-mkdir -p "${stage}/bin" "${stage}/doc" "${stage}/man"
+mkdir -p "${stage}/bin" "${stage}/doc" "${stage}/man" "${stage}/package-managed"
 find "${src}" -maxdepth 1 -type f ! -name README.md -exec cp -p {} "${stage}/bin/" \;
 cp -p "${src}/README.md" "${stage}/doc/"
 cp -p "${src}"/man/*.1 "${stage}/man/"
+printf '%s\n' deb > "${stage}/package-managed/deb"
+printf '%s\n' rpm > "${stage}/package-managed/rpm"
 
 # Reproducible payload timestamps: the commit being packaged, not the clock.
 SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"

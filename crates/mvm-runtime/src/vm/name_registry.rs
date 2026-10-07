@@ -103,29 +103,9 @@ impl VmNameRegistry {
             .with_context(|| format!("Failed to write VM name registry: {}", path.display()))
     }
 
-    /// Register a VM name. Returns an error if the name is already taken.
-    pub fn register(
-        &mut self,
-        name: &str,
-        vm_dir: &str,
-        network: &str,
-        guest_ip: Option<&str>,
-        slot_index: u8,
-    ) -> Result<()> {
-        self.register_with_metadata(RegisterParams {
-            name,
-            vm_dir,
-            network,
-            guest_ip,
-            slot_index,
-            tags: BTreeMap::new(),
-            expires_at: None,
-            auto_resume: true,
-        })
-    }
-
-    /// Register a VM with the full set of sandbox metadata fields.
-    pub fn register_with_metadata(&mut self, params: RegisterParams<'_>) -> Result<()> {
+    /// Register a VM name with its sandbox metadata. Returns an error if the
+    /// name is already taken. [`RegisterParams::minimal`] is the common shape.
+    pub fn register(&mut self, params: RegisterParams<'_>) -> Result<()> {
         if self.vms.contains_key(params.name) {
             bail!("VM name {:?} is already registered", params.name);
         }
@@ -288,7 +268,7 @@ impl VmNameRegistry {
     }
 }
 
-/// Builder-style params for `register_with_metadata`.
+/// Builder-style params for [`VmNameRegistry::register`].
 pub struct RegisterParams<'a> {
     pub name: &'a str,
     pub vm_dir: &'a str,
@@ -542,8 +522,11 @@ mod tests {
     #[test]
     fn test_register_and_lookup() {
         let mut reg = VmNameRegistry::default();
-        reg.register("myvm", "/tmp/vms/myvm", "default", Some("172.16.0.2"), 0)
-            .unwrap();
+        reg.register(RegisterParams {
+            guest_ip: Some("172.16.0.2"),
+            ..RegisterParams::minimal("myvm", "/tmp/vms/myvm", "default")
+        })
+        .unwrap();
 
         assert_eq!(reg.len(), 1);
         let info = reg.lookup("myvm").unwrap();
@@ -555,18 +538,21 @@ mod tests {
     #[test]
     fn test_register_duplicate_fails() {
         let mut reg = VmNameRegistry::default();
-        reg.register("myvm", "/tmp/vms/myvm", "default", None, 0)
+        reg.register(RegisterParams::minimal("myvm", "/tmp/vms/myvm", "default"))
             .unwrap();
         assert!(
-            reg.register("myvm", "/tmp/vms/myvm2", "default", None, 1)
-                .is_err()
+            reg.register(RegisterParams {
+                slot_index: 1,
+                ..RegisterParams::minimal("myvm", "/tmp/vms/myvm2", "default")
+            })
+            .is_err()
         );
     }
 
     #[test]
     fn test_deregister() {
         let mut reg = VmNameRegistry::default();
-        reg.register("myvm", "/tmp/vms/myvm", "default", None, 0)
+        reg.register(RegisterParams::minimal("myvm", "/tmp/vms/myvm", "default"))
             .unwrap();
         let removed = reg.deregister("myvm");
         assert!(removed.is_some());
@@ -583,7 +569,7 @@ mod tests {
     #[test]
     fn set_vm_dir_fills_existing_reservation() {
         let mut reg = VmNameRegistry::default();
-        reg.register_with_metadata(RegisterParams::minimal("myvm", "", "default"))
+        reg.register(RegisterParams::minimal("myvm", "", "default"))
             .unwrap();
 
         assert!(reg.set_vm_dir("myvm", "/tmp/mvm/vms/myvm").unwrap());
@@ -602,10 +588,16 @@ mod tests {
     #[test]
     fn test_serde_roundtrip() {
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vms/vm1", "default", Some("172.16.0.2"), 0)
-            .unwrap();
-        reg.register("vm2", "/tmp/vms/vm2", "isolated", None, 1)
-            .unwrap();
+        reg.register(RegisterParams {
+            guest_ip: Some("172.16.0.2"),
+            ..RegisterParams::minimal("vm1", "/tmp/vms/vm1", "default")
+        })
+        .unwrap();
+        reg.register(RegisterParams {
+            slot_index: 1,
+            ..RegisterParams::minimal("vm2", "/tmp/vms/vm2", "isolated")
+        })
+        .unwrap();
 
         let json = serde_json::to_string(&reg).unwrap();
         let parsed: VmNameRegistry = serde_json::from_str(&json).unwrap();
@@ -620,8 +612,11 @@ mod tests {
         let path = tmp.path().join("vm-names.json");
 
         let mut reg = VmNameRegistry::default();
-        reg.register("myvm", "/tmp/vms/myvm", "default", Some("172.16.0.2"), 0)
-            .unwrap();
+        reg.register(RegisterParams {
+            guest_ip: Some("172.16.0.2"),
+            ..RegisterParams::minimal("myvm", "/tmp/vms/myvm", "default")
+        })
+        .unwrap();
         reg.save(&path).unwrap();
 
         let loaded = VmNameRegistry::load(&path).unwrap();
@@ -656,10 +651,13 @@ mod tests {
     #[test]
     fn test_names_list() {
         let mut reg = VmNameRegistry::default();
-        reg.register("alpha", "/tmp/alpha", "default", None, 0)
+        reg.register(RegisterParams::minimal("alpha", "/tmp/alpha", "default"))
             .unwrap();
-        reg.register("beta", "/tmp/beta", "default", None, 1)
-            .unwrap();
+        reg.register(RegisterParams {
+            slot_index: 1,
+            ..RegisterParams::minimal("beta", "/tmp/beta", "default")
+        })
+        .unwrap();
         let mut names = reg.names();
         names.sort();
         assert_eq!(names, vec!["alpha", "beta"]);
@@ -668,7 +666,7 @@ mod tests {
     #[test]
     fn legacy_registration_defaults_new_fields() {
         let mut reg = VmNameRegistry::default();
-        reg.register("legacy", "/tmp/legacy", "default", None, 0)
+        reg.register(RegisterParams::minimal("legacy", "/tmp/legacy", "default"))
             .unwrap();
         let r = reg.lookup("legacy").unwrap();
         assert!(r.tags.is_empty());
@@ -677,11 +675,11 @@ mod tests {
     }
 
     #[test]
-    fn register_with_metadata_persists_fields() {
+    fn register_persists_metadata_fields() {
         let mut reg = VmNameRegistry::default();
         let mut tags = BTreeMap::new();
         tags.insert("job".to_string(), "etl".to_string());
-        reg.register_with_metadata(RegisterParams {
+        reg.register(RegisterParams {
             name: "fancy",
             vm_dir: "/tmp/fancy",
             network: "default",
@@ -709,14 +707,16 @@ mod tests {
     #[test]
     fn last_active_defaults_none_on_new_registration() {
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         assert!(reg.lookup("vm1").unwrap().last_active.is_none());
     }
 
     #[test]
     fn touch_last_active_sets_timestamp_and_returns_false_for_unknown() {
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         assert!(
             reg.touch_last_active("vm1", "2026-01-01T00:00:00Z")
                 .unwrap()
@@ -745,7 +745,8 @@ mod tests {
     fn last_active_roundtrips_and_legacy_json_defaults_none() {
         // Roundtrip a touched record.
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         reg.touch_last_active("vm1", "2026-01-01T00:00:00Z")
             .unwrap();
         let json = serde_json::to_string(&reg).unwrap();
@@ -764,7 +765,8 @@ mod tests {
     #[test]
     fn set_expires_at_updates_existing() {
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         assert!(
             reg.set_expires_at("vm1", Some("2099-01-01T00:00:00Z".to_string()))
                 .unwrap()
@@ -784,7 +786,7 @@ mod tests {
         let mut a_tags = BTreeMap::new();
         a_tags.insert("job".to_string(), "etl".to_string());
         a_tags.insert("env".to_string(), "prod".to_string());
-        reg.register_with_metadata(RegisterParams {
+        reg.register(RegisterParams {
             name: "a",
             vm_dir: "/tmp/a",
             network: "default",
@@ -798,7 +800,7 @@ mod tests {
         let mut b_tags = BTreeMap::new();
         b_tags.insert("job".to_string(), "etl".to_string());
         b_tags.insert("env".to_string(), "dev".to_string());
-        reg.register_with_metadata(RegisterParams {
+        reg.register(RegisterParams {
             name: "b",
             vm_dir: "/tmp/b",
             network: "default",
@@ -838,7 +840,8 @@ mod tests {
     #[test]
     fn set_paused_flips_flag() {
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         assert!(!reg.lookup("vm1").unwrap().paused);
         assert!(reg.set_paused("vm1", true).unwrap());
         assert!(reg.lookup("vm1").unwrap().paused);
@@ -900,7 +903,8 @@ mod tests {
     #[test]
     fn set_readiness_updates_both_fields_atomically() {
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         assert_eq!(reg.lookup("vm1").unwrap().readiness, None);
 
         assert!(
@@ -934,7 +938,8 @@ mod tests {
     #[test]
     fn clear_readiness_resets_both_fields() {
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         reg.set_readiness("vm1", InstanceReadiness::AgentReady, "2025-01-01T00:00:00Z")
             .unwrap();
 
@@ -953,7 +958,8 @@ mod tests {
         let path = tmp.path().join("vm-names.json");
 
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/tmp/vm1", "default"))
+            .unwrap();
         reg.set_readiness(
             "vm1",
             InstanceReadiness::ServicesStarting {
@@ -992,7 +998,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vm-names.json");
         let mut reg = VmNameRegistry::default();
-        reg.register("vm1", "/d/vm1", "default", None, 0).unwrap();
+        reg.register(RegisterParams::minimal("vm1", "/d/vm1", "default"))
+            .unwrap();
         reg.save(&path).unwrap();
 
         let changed = update_registry(&path, |reg| reg.set_paused("vm1", true)).unwrap();
@@ -1048,7 +1055,7 @@ mod tests {
 
         let name = "hc-test";
         let mut reg = VmNameRegistry::default();
-        reg.register(name, "/tmp/vms/hc-test", "default", None, 0)
+        reg.register(RegisterParams::minimal(name, "/tmp/vms/hc-test", "default"))
             .unwrap();
         reg.save(&registry_path()).unwrap();
 

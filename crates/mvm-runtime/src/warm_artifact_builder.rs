@@ -112,11 +112,11 @@ impl WarmArtifactWorker {
         let resolve_plan = Arc::clone(&self.resolve_plan);
         let verify_readiness = Arc::clone(&self.verify_readiness);
         self.queue
-            .process_next_with_readiness(
+            .process_next(
                 |source, key, staging_root| {
                     let plan =
                         resolve_plan(source, key).context("resolve warm artifact source plan")?;
-                    plan.prepare(key, staging_root)
+                    plan.prepare(key, staging_root, None)
                 },
                 |source, key, staging_root| verify_readiness(source, key, staging_root),
             )
@@ -157,57 +157,32 @@ impl WarmArtifactWorker {
 }
 
 impl WarmArtifactBuildPlan {
-    /// Resolve/build support artifacts, copy every boot input into the worker
-    /// staging directory, and return verified publication inputs.
+    /// Copy every boot input into the worker staging directory and return
+    /// verified publication inputs.
+    ///
+    /// `support` names support artifacts that are already resolved — the seam
+    /// platform-specific source adapters use after resolving an OCI image or
+    /// another immutable rootfs source. `None` resolves the local universal
+    /// initramfs and runtime overlay, building them if they are not cached.
     pub fn prepare(
         &self,
         key: &WarmArtifactKey,
         staging_root: &Path,
+        support: Option<&WarmArtifactSupportPaths>,
     ) -> Result<Vec<WarmArtifactInput>> {
         key.validate().map_err(anyhow::Error::new)?;
         ensure_regular_file(&self.rootfs_path, "rootfs.ext4")?;
         ensure_regular_file(&self.kernel_path, "kernel")?;
-
-        let initramfs_cache = self.cache_root.join("initramfs");
-        let initramfs = mvm_build::initramfs::resolve_or_build_local_initramfs(
-            &HostShellEnvironment,
-            &initramfs_cache,
-            env!("CARGO_PKG_VERSION"),
-            self.arch,
-        )
-        .context("resolve or build universal initramfs")?;
-
-        let overlay_cache = self.cache_root.join("runtime-overlay");
-        let overlay = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-            &overlay_cache,
-            env!("CARGO_PKG_VERSION"),
-            self.arch,
-        )
-        .context("resolve or build runtime overlay")?;
-
-        let support = WarmArtifactSupportPaths {
-            initramfs_path: initramfs.image_path,
-            overlay_ext4: overlay.overlay_ext4,
-            overlay_verity: overlay.sidecar,
-            overlay_roothash: overlay.roothash_file,
+        let resolved;
+        let support = match support {
+            Some(support) => support,
+            None => {
+                resolved = self.resolve_support_paths()?;
+                &resolved
+            }
         };
-        self.prepare_with_support_paths(key, staging_root, &support)
-    }
-
-    /// Stage a set of already-resolved support artifacts. This is also the
-    /// seam used by platform-specific source adapters after they have resolved
-    /// an OCI image or another immutable rootfs source.
-    pub fn prepare_with_support_paths(
-        &self,
-        key: &WarmArtifactKey,
-        staging_root: &Path,
-        support: &WarmArtifactSupportPaths,
-    ) -> Result<Vec<WarmArtifactInput>> {
-        key.validate().map_err(anyhow::Error::new)?;
         fs::create_dir_all(staging_root)
             .with_context(|| format!("create warm staging root {}", staging_root.display()))?;
-        ensure_regular_file(&self.rootfs_path, "rootfs.ext4")?;
-        ensure_regular_file(&self.kernel_path, "kernel")?;
         let sources = [
             ("rootfs.ext4", self.rootfs_path.as_path()),
             ("kernel", self.kernel_path.as_path()),
@@ -239,6 +214,34 @@ impl WarmArtifactBuildPlan {
             inputs.push(input);
         }
         Ok(inputs)
+    }
+
+    /// Resolve the local universal initramfs and runtime overlay for this
+    /// plan's architecture, building whichever is not cached.
+    fn resolve_support_paths(&self) -> Result<WarmArtifactSupportPaths> {
+        let initramfs_cache = self.cache_root.join("initramfs");
+        let initramfs = mvm_build::initramfs::resolve_or_build_local_initramfs(
+            &HostShellEnvironment,
+            &initramfs_cache,
+            env!("CARGO_PKG_VERSION"),
+            self.arch,
+        )
+        .context("resolve or build universal initramfs")?;
+
+        let overlay_cache = self.cache_root.join("runtime-overlay");
+        let overlay = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
+            &overlay_cache,
+            env!("CARGO_PKG_VERSION"),
+            self.arch,
+        )
+        .context("resolve or build runtime overlay")?;
+
+        Ok(WarmArtifactSupportPaths {
+            initramfs_path: initramfs.image_path,
+            overlay_ext4: overlay.overlay_ext4,
+            overlay_verity: overlay.sidecar,
+            overlay_roothash: overlay.roothash_file,
+        })
     }
 }
 
@@ -285,7 +288,7 @@ mod tests {
             runtime_overlay_sha256: Some("e".repeat(64)),
         };
         let error = plan
-            .prepare(&key, staging.path())
+            .prepare(&key, staging.path(), None)
             .expect_err("missing rootfs fails");
         assert!(
             error
@@ -341,15 +344,15 @@ mod tests {
             ),
         };
         let inputs = plan
-            .prepare_with_support_paths(
+            .prepare(
                 &key,
                 staging.path(),
-                &WarmArtifactSupportPaths {
+                Some(&WarmArtifactSupportPaths {
                     initramfs_path: paths[2].clone(),
                     overlay_ext4: paths[3].clone(),
                     overlay_verity: paths[4].clone(),
                     overlay_roothash: paths[5].clone(),
-                },
+                }),
             )
             .expect("staging succeeds");
         assert_eq!(inputs.len(), 6);

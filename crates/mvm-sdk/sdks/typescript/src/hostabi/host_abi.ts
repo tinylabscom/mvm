@@ -127,6 +127,7 @@ machine_logs_stream_close: MachineLogsStreamClose
 machine_logs_stream_next: MachineLogsStreamNext
 machine_logs_stream_open: MachineLogsStreamOpen
 machine_pause: MachinePause
+machine_prompt: MachinePrompt
 machine_reconfigure: MachineReconfigure
 machine_resume: MachineResume
 machine_rm: MachineRm
@@ -898,6 +899,64 @@ primed_barrier?: boolean
  * Seconds to wait for that signal. Defaults to the client's own default.
  */
 primed_timeout_secs?: (number | null)
+}
+export interface MachinePrompt {
+reply: MachinePromptReply
+request: MachinePromptRequest
+}
+/**
+ * The reply to `machine.prompt`.
+ */
+export interface MachinePromptReply {
+/**
+ * Set when the agent, not the workload, ended the call.
+ */
+agent_error?: (AgentErrorReply | null)
+/**
+ * False when a prompt under the same retry key was already accepted and nothing was sent.
+ */
+delivered: boolean
+/**
+ * The wrapper's error envelope, when the call failed with one.
+ */
+error?: (RemoteErrorReply | null)
+/**
+ * The workload's exit status, or the conventional status for how the agent ended the call (124 timeout, 137 crashed wrapper, 142 killed session, 75 not ready, 1 otherwise).
+ */
+exit_code?: number
+/**
+ * The agent-session journal cursor the prompt was accepted at.
+ */
+journal_cursor: number
+/**
+ * Output past the per-channel cap was dropped.
+ */
+output_truncated?: boolean
+stderr_b64?: string
+stdout_b64?: string
+}
+/**
+ * A `machine.prompt` request.
+ */
+export interface MachinePromptRequest {
+/**
+ * The running machine whose agent is prompted.
+ */
+id: string
+/**
+ * A prompt sent again under a key already accepted is not delivered twice; the request id when absent.
+ */
+idempotency_key?: (string | null)
+/**
+ * The prompt, base64.
+ */
+prompt_b64: string
+request_id?: (string | null)
+/**
+ * The agent session to journal under; the machine's name when absent.
+ */
+session_id?: (string | null)
+timeout_secs?: (number | null)
 }
 export interface MachineReconfigure {
 reply: MachineState3

@@ -546,7 +546,8 @@ impl RegistryPackPublisherPolicy {
 /// Keyless signing identity of the official pack registry's publish workflow.
 ///
 /// Packs published from `tinylabscom/mvm-packs` are signed keyless in
-/// `.github/workflows/publish.yml` on the main branch.
+/// `.github/workflows/publish.yml` on the main branch; trust decisions check
+/// this identity under the GitHub OIDC issuer.
 pub const OFFICIAL_PACK_SIGNING_IDENTITY: &str =
     "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main";
 
@@ -1355,12 +1356,14 @@ mod tests {
     }
 
     fn publisher_policy() -> RegistryPackPublisherPolicy {
-        RegistryPackPublisherPolicy::new(vec![RegistryPackPublisher::new(
-            "runtime",
-            "https://token.actions.githubusercontent.com",
-            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main".to_string()],
-        )
-        .unwrap()])
+        RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "runtime",
+                "https://token.actions.githubusercontent.com",
+                vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
         .unwrap()
     }
 
@@ -1457,6 +1460,10 @@ mod tests {
         }
         assert!(policy.trust_for_namespace("mvm").is_err());
         assert!(policy.trust_for_namespace("community").is_err());
+        assert_eq!(
+            OFFICIAL_PACK_SIGNING_IDENTITY,
+            "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"
+        );
     }
 
     #[test]

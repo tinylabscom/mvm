@@ -52,7 +52,9 @@ fn recording_json_round_trips_through_compile_pipeline() {
 
     // Lower into Workload. This is the boundary the CLI's
     // `--from-recording` flag crosses.
-    let workload = compile_recording(&recording).expect("lowering succeeds");
+    let workload = compile_recording(&recording)
+        .expect("lowering succeeds")
+        .workload;
     assert_eq!(workload.id, "etl");
     assert_eq!(workload.apps.len(), 1);
     let app = &workload.apps[0];

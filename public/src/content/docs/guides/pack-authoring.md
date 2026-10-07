@@ -1,6 +1,6 @@
 ---
 title: Author and publish a signed pack
-description: Write and validate a policy pack, understand publisher trust, and prepare it for publication from mvm-packs.
+description: Write and validate a policy pack, publish it through mvm-packs, and decide which publishers your hosts trust.
 ---
 
 A pack is a named, versioned, signed bundle of policy and, optionally, a
@@ -178,7 +178,8 @@ for a secret you have not stored.
 ## Publish
 
 Open a pull request against `mvm-packs` that adds or changes a directory
-under `pack-sources/`. The publish workflow builds the registry layout by:
+under `pack-sources/`. Merging to `main` runs `.github/workflows/publish.yml`,
+which builds the registry layout by:
 
 1. building a manifest for each source pack, listing every payload file with its
    SHA-256 digest and size;
@@ -296,7 +297,7 @@ schema_version = 1
 namespace = "runtime"
 issuer = "https://token.actions.githubusercontent.com"
 accepted_identities = [
-  "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main",
+  "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main",
 ]
 ```
 

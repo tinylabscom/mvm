@@ -371,6 +371,11 @@ than silently widening trust. One publisher may use the `*` namespace to
 accept a signing identity for every namespace, and an exact
 `namespace = ...` entry always wins over the wildcard.
 
+The repository rename changed its workflow identity. Packs signed under the
+former repository identity fail closed under the built-in default; re-pull a
+version published under the current workflow identity. The built-in policy
+does not automatically trust both identities.
+
 ## Commands
 
 | Command | What it does |

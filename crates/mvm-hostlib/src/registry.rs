@@ -25,9 +25,10 @@ use crate::dispatch::{
     TelemetryRecordsRequest,
 };
 use crate::entrypoint::{
-    ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, SESSION_CALL, SESSION_INFO,
-    SESSION_START, SESSION_STOP, SessionCallRequest, SessionInfoReply, SessionRef,
-    SessionStartReply, SessionStartRequest,
+    ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, MACHINE_PROMPT,
+    MachinePromptReply, MachinePromptRequest, SESSION_CALL, SESSION_INFO, SESSION_START,
+    SESSION_STOP, SessionCallRequest, SessionInfoReply, SessionRef, SessionStartReply,
+    SessionStartRequest,
 };
 use crate::guest::{
     AcceptedReply, CP, CopyRequest, DataReply, FS_LIST, FS_MKDIR, FS_READ, FS_REMOVE, FS_RENAME,
@@ -279,6 +280,15 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::ProdSafe,
         request: schema_of::<PauseRequest>,
         reply: schema_of::<PauseOutcome>,
+    },
+    MethodDef {
+        name: MACHINE_PROMPT,
+        key: "machine_prompt",
+        summary: "Sends one prompt to a running machine's resident agent, granted by its plan, \
+                  journaled, recorded encrypted and chain-audited.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<MachinePromptRequest>,
+        reply: schema_of::<MachinePromptReply>,
     },
     MethodDef {
         name: MACHINE_RECONFIGURE,
