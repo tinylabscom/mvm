@@ -97,6 +97,10 @@ pub enum DispatchStdin<'a> {
         /// Where the bytes come from.
         reader: Box<dyn Read + Send>,
     },
+    /// A prompt for the resident agent, carried in an `AgentPrompt` request
+    /// rather than `RunEntrypoint`. The guest runs the same boot-validated
+    /// program; what differs is the verb the signed plan has to grant.
+    Prompt(Vec<u8>),
 }
 
 /// Decide what a call's stdin may be, now that the boot's admission is known.
@@ -427,50 +431,76 @@ fn dispatch_inner(
     // to hand frames to only once the entrypoint's child exists, and the pump
     // is built to ride out that window. Opening afterwards would mean opening
     // it from inside the loop that is streaming the workload's output.
-    let (payload, streamed) = match stdin {
-        DispatchStdin::OneShot(bytes) => (bytes, None),
+    let (payload, streamed, prompt) = match stdin {
+        DispatchStdin::OneShot(bytes) => (bytes, None, false),
         // The bytes travel as frames, not in the request.
         DispatchStdin::Streaming { admitted, reader } => (
             Vec::new(),
             Some(open_streamed_stdin(vm_name, admitted, reader)?),
+            false,
         ),
+        DispatchStdin::Prompt(bytes) => (bytes, None, true),
     };
     let stream_input = streamed.is_some();
+    // Every workload routes through the guest's one loopback proxy; a
+    // secret-bearing one carries its minted placeholders alongside.
     let env = workload_egress_env(vm_name);
-    crate::guest::emit_vsock_rpc_audit(
-        vm_name,
-        &GuestRequest::RunEntrypoint {
+    let audited = if prompt {
+        GuestRequest::AgentPrompt {
+            prompt: Vec::new(),
+            timeout_secs,
+            env: Vec::new(),
+        }
+    } else {
+        GuestRequest::RunEntrypoint {
             stdin: Vec::new(),
             timeout_secs,
             env: Vec::new(),
             stream_input,
-        },
-    );
+        }
+    };
+    crate::guest::emit_vsock_rpc_audit(vm_name, &audited);
 
     // The entrypoint half of the VM's output capture, for this call only.
     let mut capture = EntrypointSink::for_vm(vm_name);
     let recorded = capture.is_recorded();
     let mut divergence = RecordedDivergence::default();
-    let terminal = mvm_agentd::vsock::send_run_entrypoint_while(
-        &mut stream,
-        mvm_agentd::vsock::RunEntrypointCall {
-            stdin: payload,
-            timeout_secs,
-            // Every workload routes through the guest's one loopback proxy; a
-            // secret-bearing one carries its minted placeholders alongside.
-            env,
-            // A one-shot dispatch writes its payload once and has no writer
-            // behind it, so the guest closes stdin and a read-to-EOF workload
-            // exits. A streamed one keeps the pipe open, because the EOF is
-            // the host's to send when the caller's own stdin ends.
-            stream_input,
-        },
-        |event| route_event(event, &mut capture, &mut divergence, observer),
-        // Consulted only when the stream has gone quiet. A guest that dies
-        // mid-stream leaves the host socket open, so without this the read
-        // blocks forever and the call never returns.
-        || mvm_runtime::checkpoint::vm_is_running(vm_name),
-    );
+    let on_event = |event: &EntrypointEvent| {
+        route_event(event, &mut capture, &mut divergence, observer);
+    };
+    // Consulted only when the stream has gone quiet. A guest that dies
+    // mid-stream leaves the host socket open, so without this the read
+    // blocks forever and the call never returns.
+    let still_alive = || mvm_runtime::checkpoint::vm_is_running(vm_name);
+    let terminal = if prompt {
+        mvm_agentd::vsock::send_agent_prompt_while(
+            &mut stream,
+            mvm_agentd::vsock::AgentPromptCall {
+                prompt: payload,
+                timeout_secs,
+                env,
+            },
+            on_event,
+            still_alive,
+        )
+    } else {
+        mvm_agentd::vsock::send_run_entrypoint_while(
+            &mut stream,
+            mvm_agentd::vsock::RunEntrypointCall {
+                stdin: payload,
+                timeout_secs,
+                env,
+                // A one-shot dispatch writes its payload once and has no writer
+                // behind it, so the guest closes stdin and a read-to-EOF
+                // workload exits. A streamed one keeps the pipe open, because
+                // the EOF is the host's to send when the caller's own stdin
+                // ends.
+                stream_input,
+            },
+            on_event,
+            still_alive,
+        )
+    };
     drop(capture);
     // Before the `?`, not after: a call that failed truncated the caller's
     // stdin just as surely as one that succeeded, and propagating first would
@@ -478,7 +508,16 @@ fn dispatch_inner(
     if let Some(streamed) = streamed {
         observer.streamed_input(vm_name, &streamed.finish());
     }
-    let terminal = terminal.context("Streaming RunEntrypoint response")?;
+    let terminal = terminal.with_context(|| {
+        format!(
+            "Streaming {} response",
+            if prompt {
+                "AgentPrompt"
+            } else {
+                "RunEntrypoint"
+            }
+        )
+    })?;
     let outcome = CallOutcome {
         terminal: CallTerminal::from_event(&terminal),
         capture: Some(CaptureReport {
@@ -676,10 +715,28 @@ mod tests {
     }
 
     #[test]
+    fn the_largest_prompt_fits_the_frame_after_json_expansion() {
+        let request = GuestRequest::AgentPrompt {
+            prompt: vec![0xFF; crate::agent_prompt::MAX_PROMPT_BYTES],
+            timeout_secs: u64::MAX,
+            env: mvm_core::guest_netd::proxy_env_vars(
+                mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN,
+            ),
+        };
+        let body = serde_json::to_vec(&request).expect("encodes");
+        assert!(
+            body.len() <= mvm_agentd::vsock::MAX_FRAME_SIZE,
+            "{} bytes",
+            body.len()
+        );
+    }
+
+    #[test]
     fn a_one_shot_payload_needs_nothing_from_the_boot() {
         match authorize_stdin(CallStdin::OneShot(b"[[], {}]".to_vec()), None) {
             Ok(DispatchStdin::OneShot(bytes)) => assert_eq!(bytes, b"[[], {}]"),
             Ok(DispatchStdin::Streaming { .. }) => panic!("a one-shot call must not stream"),
+            Ok(DispatchStdin::Prompt(_)) => panic!("a function call is not a prompt"),
             Err(e) => panic!("a one-shot payload asks for no authority: {e:#}"),
         }
     }

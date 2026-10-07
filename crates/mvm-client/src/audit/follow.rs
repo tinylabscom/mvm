@@ -23,13 +23,13 @@ use mvm_hostd::supervisor::{PlanAuditEntry, SignedEnvelope};
 /// One line of a chain file: the entry it carries, or the raw text of a line
 /// that is not a signed envelope.
 #[derive(Debug, Clone)]
-pub(in crate::commands) enum ChainLine {
+pub enum ChainLine {
     Entry(Box<PlanAuditEntry>),
     Foreign(String),
 }
 
 /// Parse one chain line through the chain's own envelope type.
-pub(in crate::commands) fn parse_chain_line(line: &str) -> ChainLine {
+pub fn parse_chain_line(line: &str) -> ChainLine {
     match serde_json::from_str::<SignedEnvelope>(line) {
         Ok(envelope) => ChainLine::Entry(Box::new(envelope.entry)),
         Err(_) => ChainLine::Foreign(line.to_string()),
@@ -67,7 +67,7 @@ impl Cursor {
 
 /// Follows a tenant's live chain file, returning each complete line appended
 /// since the previous poll.
-pub(in crate::commands) struct ChainFollower {
+pub struct ChainFollower {
     path: PathBuf,
     cursor: Option<Cursor>,
     /// A line the writer had not finished when it was read. Held until its
@@ -79,7 +79,7 @@ impl ChainFollower {
     /// Follow from the file's current end: only entries written from now on.
     /// A file that does not exist yet is followed from its first byte once it
     /// appears.
-    pub(in crate::commands) fn from_end(path: PathBuf) -> Self {
+    pub fn from_end(path: PathBuf) -> Self {
         let cursor = Cursor::open_at(&path, true);
         Self {
             path,
@@ -89,7 +89,7 @@ impl ChainFollower {
     }
 
     /// Complete lines appended since the last poll, across a rotation.
-    pub(in crate::commands) fn poll(&mut self) -> Vec<String> {
+    pub fn poll(&mut self) -> Vec<String> {
         let mut bytes = std::mem::take(&mut self.partial);
         match self.cursor.as_mut() {
             Some(cursor) => cursor.drain(&mut bytes),

@@ -512,14 +512,10 @@ pub(in crate::commands) fn run_receipt(
     }
 }
 
-pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig) -> Result<()> {
-    run_secure_with_source(cli, args, cfg, None)
-}
-
 /// `mvmctl run`: peel off the SDK transport, then fall through to the ordinary
 /// transient run every other caller uses.
 ///
-/// The peel happens here rather than inside `run_secure_with_source` so the
+/// The peel happens here rather than inside `run_secure` so the
 /// shared execution path never sees the transport flags, which is what lets
 /// `RunArgs` be flattened into `machine run` without dragging them along.
 pub(in crate::commands) fn run_transient(
@@ -557,14 +553,14 @@ pub(in crate::commands) fn run_transient(
         )?;
         args.run.manifest = Some(slot_hash);
     }
-    run_secure(cli, args.run, cfg)
+    run_secure(cli, args.run, cfg, None)
 }
 
 /// Run a transient workload through the normal admitted path, optionally
 /// overriding the user-facing image lookup with an already-verified source.
 /// The override is used only by content-addressed restore, where following a
 /// mutable template pointer would boot the wrong revision.
-pub(in crate::commands) fn run_secure_with_source(
+pub(in crate::commands) fn run_secure(
     cli: &Cli,
     mut args: RunArgs,
     cfg: &MvmConfig,
@@ -577,7 +573,7 @@ pub(in crate::commands) fn run_secure_with_source(
     // through the plan-mode admission dry-run.
     validate_run_profile(&args)?;
     if args.dry_run {
-        let summary = RunPreflightSummary::from_args(&args)?;
+        let summary = RunPreflightSummary::from_args(&args, None)?;
         if args.json {
             println!(
                 "{}",
@@ -818,7 +814,7 @@ pub(in crate::commands) fn run_secure_with_source(
             &oci_provenance,
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let result = crate::exec::run_captured_with_posture(req, Some(&admit), &posture);
+        let result = crate::exec::run_captured(req, Some(&admit), Some(&posture));
         let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
@@ -967,7 +963,7 @@ fn run_run_args(
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
-    let result = crate::exec::run_with_posture(req, audit.admit, &posture);
+    let result = crate::exec::run(req, audit.admit, Some(&posture));
     let refused = audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs
@@ -1329,7 +1325,7 @@ use receipt_verify::verify_run_receipt;
 
 impl ReceiptInput {
     fn from_run_args(args: &RunArgs, backend: &str) -> Result<Self> {
-        let policy = super::shared::resolve_run_network_policy_with_preset_and_peers(
+        let policy = super::shared::resolve_run_network_policy(
             args.net,
             args.network_preset,
             &args.allow_host,
@@ -1520,24 +1516,15 @@ impl From<ReceiptMount> for RunSecurityMount {
     }
 }
 
+/// `preflight_backend` overrides the backend the preflight resolves, for a
+/// fixture whose receipt names a backend this host would not auto-select.
 #[cfg(test)]
 pub(in crate::commands) fn test_run_security_summary(
     args: &RunArgs,
+    preflight_backend: Option<&str>,
     receipt_backend: &str,
 ) -> Result<RunSecuritySummary> {
-    let preflight = RunPreflightSummary::from_args(args)?;
-    let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
-    test_run_security_summary_from_parts(preflight, receipt)
-}
-
-#[cfg(test)]
-pub(in crate::commands) fn test_run_security_summary_with_preflight_backend(
-    args: &RunArgs,
-    preflight_backend: &str,
-    receipt_backend: &str,
-) -> Result<RunSecuritySummary> {
-    let preflight =
-        RunPreflightSummary::from_args_with_backend_override(args, Some(preflight_backend))?;
+    let preflight = RunPreflightSummary::from_args(args, preflight_backend)?;
     let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
     test_run_security_summary_from_parts(preflight, receipt)
 }
@@ -1620,17 +1607,17 @@ mod tests {
     fn dry_run_posture_reflects_resolved_policy() {
         // Default: deny-all.
         let mut args = run_args(RunProfile::Standard);
-        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        let s = RunPreflightSummary::from_args(&args, None).expect("preflight");
         assert_eq!(s.invocation.network_posture, "deny-all");
 
         // --net → dev preset.
         args.net = true;
-        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        let s = RunPreflightSummary::from_args(&args, None).expect("preflight");
         assert_eq!(s.invocation.network_posture, "preset:dev");
 
         // --allow-host wins over --net and defaults the port.
         args.allow_host = vec!["a.com".into(), "b.com:8443".into()];
-        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        let s = RunPreflightSummary::from_args(&args, None).expect("preflight");
         assert_eq!(
             s.invocation.network_posture,
             "allow-list:a.com:443,b.com:8443"
@@ -1648,7 +1635,7 @@ mod tests {
         let mut args = run_args(RunProfile::Standard);
         args.allow_host = vec!["a.com".into()];
         args.hypervisor = Some("libkrun".to_string());
-        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        let s = RunPreflightSummary::from_args(&args, None).expect("preflight");
         assert_eq!(s.invocation.egress_enforcement, "libkrun:l4-host-port");
     }
 
@@ -2377,7 +2364,7 @@ mod tests {
         args.mounts.push("/private/project:/work:ro".to_string());
         args.receipt = Some(PathBuf::from("/tmp/run-receipt.json"));
 
-        let summary = RunPreflightSummary::from_args(&args).expect("preflight summary");
+        let summary = RunPreflightSummary::from_args(&args, None).expect("preflight summary");
         let json = serde_json::to_string(&summary).expect("serialize summary");
 
         assert!(summary.dry_run);
@@ -2400,7 +2387,7 @@ mod tests {
         args.dry_run = true;
         args.env.push("1BAD=value".to_string());
 
-        let err = RunPreflightSummary::from_args(&args).expect_err("invalid env key");
+        let err = RunPreflightSummary::from_args(&args, None).expect_err("invalid env key");
         assert!(err.to_string().contains("KEY must match"));
     }
 

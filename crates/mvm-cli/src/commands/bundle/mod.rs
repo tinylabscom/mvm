@@ -29,7 +29,7 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 
-mod export;
+pub(super) mod export;
 pub(super) mod fetch;
 mod gc;
 mod install;

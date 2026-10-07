@@ -1,9 +1,10 @@
 //! Signed-bundle DTOs — the pure, wire-shape half of the portable image
 //! bundle (`.mvmpkg`) contract.
 //!
-//! `KeyId`, `ArtifactRole`, `BundleArtifact`, `BundleResources`,
-//! `VerityInfo`, `BundleManifest`, `PlanArtifact`, the schema/filename
-//! consts, and the base64 signature helpers live here. The crypto (Ed25519,
+//! `KeyId`, `ArtifactRole`, `BundleArtifact`, `BundleMember`,
+//! `BundleSecurityPosture`, `BundleResources`, `VerityInfo`,
+//! `BundleManifest`, `PlanArtifact`, the schema/filename consts, the size
+//! caps, and the base64 signature helpers live here. The crypto (Ed25519,
 //! SHA-256), filesystem, tar-archive, resolver, registry, and trust-store
 //! logic — everything that reads or writes a real `.mvmpkg` archive — stays
 //! in `mvm_core::plan::bundle`, which re-exports every type in this module
@@ -20,6 +21,9 @@ use alloc::vec::Vec;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use serde::{Deserialize, Serialize};
+
+use crate::plan::types::BuildProvenance;
+use crate::policy::security::AgentProfile;
 
 /// Highest bundle-manifest schema version this build understands.
 /// Verifiers fail closed on a future bump rather than silently
@@ -124,12 +128,32 @@ pub struct BundleArtifact {
     pub size_bytes: u64,
 }
 
+/// Largest single artifact a bundle may carry (2 GiB). Verification refuses a
+/// manifest that declares more, and an archive entry whose header claims more,
+/// before reading its bytes.
+pub const MAX_BUNDLE_ENTRY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Largest total payload a bundle may carry (4 GiB), summed over every archive
+/// entry. Any workload image fits well inside it; an archive past it is
+/// refused before it can exhaust the host's memory or disk.
+pub const MAX_BUNDLE_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Longest kernel command line a [`BundleMember::KernelCmdline`] may carry.
+/// Matches the arm64 kernel's `COMMAND_LINE_SIZE`, the larger of the two
+/// supported guest architectures.
+pub const MAX_KERNEL_CMDLINE_BYTES: usize = 2048;
+
 /// A typed, backend-neutral member carried by a portable bundle.
 ///
 /// Member classes describe how a group of ordinary [`BundleArtifact`] files
-/// is interpreted. They never name a host backend. A future sealed-checkpoint
-/// class can therefore evolve independently without changing the image-set
-/// contract or duplicating its artifact bytes.
+/// is interpreted, or carry a small signed declaration about the workload.
+/// They never name a host backend. A future sealed-checkpoint class can
+/// therefore evolve independently without changing the image-set contract or
+/// duplicating its artifact bytes.
+///
+/// A bundle carries at most one member of each declaration class
+/// (`kernel_cmdline`, `security_posture`, `build_provenance`); verification
+/// refuses a second one rather than picking between them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "class", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BundleMember {
@@ -138,6 +162,40 @@ pub enum BundleMember {
     /// manifest must also appear as an ordinary bundle artifact with the same
     /// name, size, and SHA-256.
     EmbeddedImageSet { manifest_artifact: String },
+    /// The kernel command line the publisher built and tested the workload
+    /// with. Advisory: the launcher derives the command line it boots with,
+    /// so a bundle cannot use this to switch off dm-verity or redirect init.
+    /// Bounded by [`MAX_KERNEL_CMDLINE_BYTES`], printable ASCII only.
+    KernelCmdline { cmdline: String },
+    /// What the publisher allows the workload to do. A launch may only
+    /// narrow it: admission refuses a run that asks for more than the
+    /// posture permits.
+    SecurityPosture(BundleSecurityPosture),
+    /// What the workload was built from and what the build produced. The
+    /// artifact digests it records must match the bundle's own artifacts.
+    BuildProvenance(BuildProvenance),
+}
+
+/// The publisher's declared security posture for a bundled workload.
+///
+/// Every flag is a ceiling, never a grant: `allows_egress = true` does not
+/// open the network, it only stops admission from refusing a run whose
+/// policy does. A bundle without this member places no ceiling of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BundleSecurityPosture {
+    /// Guest-agent profile baked into the image.
+    pub profile: AgentProfile,
+    /// The rootfs is dm-verity protected. Must agree with the manifest's
+    /// [`VerityInfo`]: claiming verity without a binding is malformed.
+    pub verity_protected: bool,
+    /// The guest agent requires authenticated vsock frames.
+    pub requires_auth: bool,
+    /// The workload may be launched with host shares or volumes attached.
+    pub allows_volumes: bool,
+    /// The workload may be launched with a network policy other than
+    /// deny-all.
+    pub allows_egress: bool,
 }
 
 /// Resource expectations the bundle publisher recorded at build
@@ -242,6 +300,30 @@ impl BundleManifest {
     /// Find an artifact by exact name.
     pub fn find_by_name(&self, name: &str) -> Option<&BundleArtifact> {
         self.artifacts.iter().find(|a| a.name == name)
+    }
+
+    /// The declared kernel command line, when the bundle carries one.
+    pub fn kernel_cmdline(&self) -> Option<&str> {
+        self.members.iter().find_map(|member| match member {
+            BundleMember::KernelCmdline { cmdline } => Some(cmdline.as_str()),
+            _ => None,
+        })
+    }
+
+    /// The publisher's security posture, when the bundle declares one.
+    pub fn security_posture(&self) -> Option<&BundleSecurityPosture> {
+        self.members.iter().find_map(|member| match member {
+            BundleMember::SecurityPosture(posture) => Some(posture),
+            _ => None,
+        })
+    }
+
+    /// The recorded build provenance, when the bundle carries it.
+    pub fn build_provenance(&self) -> Option<&BuildProvenance> {
+        self.members.iter().find_map(|member| match member {
+            BundleMember::BuildProvenance(provenance) => Some(provenance),
+            _ => None,
+        })
     }
 }
 
@@ -351,6 +433,99 @@ mod tests {
             serde_json::from_value::<BundleMember>(value).expect("deserialize member"),
             member
         );
+    }
+
+    fn posture() -> BundleSecurityPosture {
+        BundleSecurityPosture {
+            profile: AgentProfile::SealedProd,
+            verity_protected: true,
+            requires_auth: true,
+            allows_volumes: false,
+            allows_egress: true,
+        }
+    }
+
+    #[test]
+    fn declaration_members_round_trip_with_their_class_tag() {
+        let provenance: BuildProvenance = serde_json::from_value(serde_json::json!({
+            "input_kind": "nix_flake",
+            "input_ref": ".#app",
+            "artifacts": { "kernel": "ab" },
+        }))
+        .expect("provenance fixture");
+        let cases = [
+            (
+                BundleMember::KernelCmdline {
+                    cmdline: "console=ttyS0 quiet".to_string(),
+                },
+                "kernel_cmdline",
+            ),
+            (BundleMember::SecurityPosture(posture()), "security_posture"),
+            (
+                BundleMember::BuildProvenance(provenance),
+                "build_provenance",
+            ),
+        ];
+        for (member, class) in cases {
+            let value = serde_json::to_value(&member).expect("serialize member");
+            assert_eq!(value["class"], class);
+            assert_eq!(
+                serde_json::from_value::<BundleMember>(value).expect("deserialize member"),
+                member
+            );
+        }
+    }
+
+    #[test]
+    fn posture_member_serializes_its_fields_flat_and_kebab_case() {
+        let value = serde_json::to_value(BundleMember::SecurityPosture(posture())).unwrap();
+        assert_eq!(value["profile"], "sealed-prod");
+        assert_eq!(value["allows_egress"], true);
+    }
+
+    #[test]
+    fn posture_member_refuses_unknown_and_missing_fields() {
+        let mut value = serde_json::to_value(BundleMember::SecurityPosture(posture())).unwrap();
+        value["allows_everything"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<BundleMember>(value).is_err());
+
+        let mut value = serde_json::to_value(BundleMember::SecurityPosture(posture())).unwrap();
+        value.as_object_mut().unwrap().remove("allows_egress");
+        assert!(
+            serde_json::from_value::<BundleMember>(value).is_err(),
+            "a posture missing a ceiling must not default it open"
+        );
+    }
+
+    #[test]
+    fn manifest_accessors_find_each_declaration() {
+        let mut manifest: BundleManifest = serde_json::from_value(serde_json::json!({
+            "schema_version": 3,
+            "publisher": "p",
+            "key_id": "0".repeat(32),
+            "arch": "x86_64",
+            "created_at": "2026-01-01T00:00:00Z",
+            "artifacts": [],
+        }))
+        .unwrap();
+        assert!(manifest.security_posture().is_none());
+        assert!(manifest.kernel_cmdline().is_none());
+        assert!(manifest.build_provenance().is_none());
+
+        manifest.members = alloc::vec![
+            BundleMember::KernelCmdline {
+                cmdline: "quiet".to_string()
+            },
+            BundleMember::SecurityPosture(posture()),
+        ];
+        assert_eq!(manifest.kernel_cmdline(), Some("quiet"));
+        assert_eq!(manifest.security_posture(), Some(&posture()));
+    }
+
+    #[test]
+    fn size_caps_are_two_and_four_gib() {
+        assert_eq!(MAX_BUNDLE_ENTRY_BYTES, 1 << 31);
+        assert_eq!(MAX_BUNDLE_TOTAL_BYTES, 1 << 32);
     }
 
     #[test]

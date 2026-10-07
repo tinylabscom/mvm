@@ -195,6 +195,7 @@ fn provision_boot_grant(spec: &BenchSpec, config: &VmStartConfig) -> Result<()> 
         &mvm_hostd::plan_admission::InMemoryNonceLedger::new(),
         None,
         None,
+        None,
         mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
     )
     .context("admitting the bench verb-grant plan")?;
@@ -566,7 +567,7 @@ fn measure_one(spec: &BenchSpec, name: String) -> Result<BootMeasurement> {
     let stop_started = Instant::now();
     let stop_result = backend.stop(&id);
     let stop = match stop_result {
-        Ok(()) => Some(stop_started.elapsed()),
+        Ok(_timing) => Some(stop_started.elapsed()),
         Err(e) => {
             eprintln!("[runtime_boot_bench] warning: failed to stop {name}: {e}");
             None

@@ -5,16 +5,14 @@
 //! durable event is fsync'd before extension execution, and those events carry
 //! only the prompt digest and committed state transitions.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use mvm_contract::assurance::{AiSessionInput, AssuranceId, Sha256Digest};
 use mvm_contract::protocol::agent_session::{
-    AgentRequestId, AgentSessionCommand, AgentSessionCursor, AgentSessionEvent,
-    AgentSessionEventEnvelope, AgentSessionId, AgentSessionJournal, AgentSessionState,
-    DurableAgentSessionEvent, IdempotencyKey, PromptResult, RetentionPolicy,
+    AgentRequestId, AgentSessionCommand, AgentSessionId, AgentSessionState, IdempotencyKey,
+    PromptResult,
 };
 use sha2::{Digest, Sha256};
 
@@ -23,13 +21,12 @@ use crate::assurance_session::{
 };
 use crate::audit::emitter::write_atomic;
 use crate::plan_admission::AdmittedPlan;
+use mvm_runtime::agent_session::history::DurableHistory;
 use mvm_runtime::agent_session::replay_input::{
     ReplayInputBinding, ReplayInputRef, ReplayInputStore,
 };
 
-const MAX_DURABLE_HISTORY_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_CANCELLATION_EVIDENCE_BYTES: u64 = 16 * 1024;
-const HISTORY_PAGE: u32 = 256;
 
 /// Everything an extension executor receives after prompt admission.
 pub struct ExtensionExecution<'a> {
@@ -154,11 +151,6 @@ impl CancellationBindingIdentity {
     }
 }
 
-struct AdapterDurableState {
-    journal: AgentSessionJournal,
-    persisted_sequence: u64,
-}
-
 /// Durable prompt adapter for one admission-bound session.
 pub struct AssurancePromptAdapter {
     vm: String,
@@ -166,11 +158,10 @@ pub struct AssurancePromptAdapter {
     expected_request_id: AgentRequestId,
     expected_idempotency_key: IdempotencyKey,
     expected_cancellation_identity: CancellationBindingIdentity,
-    history_path: PathBuf,
     cancellation_path: PathBuf,
     replay_inputs: ReplayInputStore,
     replay_session_id: AgentSessionId,
-    durable: Mutex<AdapterDurableState>,
+    durable: Mutex<DurableHistory>,
     cancel_gate: Mutex<()>,
 }
 
@@ -220,29 +211,9 @@ impl AssurancePromptAdapter {
         let replay_session_id = session_id.clone();
         let replay_inputs = ReplayInputStore::at(directory.join("replay-inputs"), keys_dir);
 
-        let (journal, persisted_sequence) = if history_path.exists() {
-            let history = load_history(&history_path)?;
-            verify_opening_identity(&history, &session_id, workload_digest)?;
-            let persisted_sequence = history
-                .last()
-                .and_then(|event| event.durable_sequence)
-                .ok_or_else(|| anyhow::anyhow!("agent-session history has no durable sequence"))?;
-            (
-                AgentSessionJournal::from_history(session_id, history, RetentionPolicy::default())
-                    .context("recovering assurance agent-session journal")?,
-                persisted_sequence,
-            )
-        } else {
-            let (journal, opened) = AgentSessionJournal::open(
-                session_id,
-                workload_digest,
-                now_unix_ms,
-                RetentionPolicy::default(),
-            )
-            .context("opening assurance agent-session journal")?;
-            create_history(&history_path, &opened)?;
-            (journal, opened.durable_sequence.unwrap_or(0))
-        };
+        let history =
+            DurableHistory::open(&history_path, &session_id, workload_digest, now_unix_ms)
+                .context("opening assurance agent-session history")?;
 
         Ok(Self {
             vm: vm.to_string(),
@@ -250,14 +221,10 @@ impl AssurancePromptAdapter {
             expected_request_id,
             expected_idempotency_key,
             expected_cancellation_identity,
-            history_path,
             cancellation_path,
             replay_inputs,
             replay_session_id,
-            durable: Mutex::new(AdapterDurableState {
-                journal,
-                persisted_sequence,
-            }),
+            durable: Mutex::new(history),
             cancel_gate: Mutex::new(()),
         })
     }
@@ -330,7 +297,7 @@ impl AssurancePromptAdapter {
                     request.now_unix_ms,
                 )
                 .context("accepting assurance prompt")?;
-            persist_new_events(&self.history_path, &mut durable)?;
+            durable.persist()?;
             outcome
         };
         if !outcome.applied && outcome.state != AgentSessionState::Running {
@@ -376,7 +343,7 @@ impl AssurancePromptAdapter {
                             request.now_unix_ms,
                         )
                         .context("completing assurance prompt")?;
-                    persist_new_events(&self.history_path, &mut durable)?;
+                    durable.persist()?;
                 }
                 Ok(PromptExecutionOutcome::Completed(result))
             }
@@ -394,7 +361,7 @@ impl AssurancePromptAdapter {
                             request.now_unix_ms,
                         )
                         .context("recording failed assurance prompt")?;
-                    persist_new_events(&self.history_path, &mut durable)?;
+                    durable.persist()?;
                 }
                 Err(error.context("assurance extension execution failed"))
             }
@@ -436,7 +403,7 @@ impl AssurancePromptAdapter {
                     request.now_unix_ms,
                 )
                 .context("accepting assurance cancellation")?;
-            persist_new_events(&self.history_path, &mut durable)?;
+            durable.persist()?;
             if !matches!(
                 outcome.state,
                 AgentSessionState::Canceling | AgentSessionState::Canceled
@@ -481,7 +448,7 @@ impl AssurancePromptAdapter {
                 .journal
                 .confirm_cancel(now_unix_ms)
                 .context("confirming assurance cancellation")?;
-            persist_new_events(&self.history_path, &mut durable)?;
+            durable.persist()?;
         }
         Ok(())
     }
@@ -537,28 +504,6 @@ fn load_cancellation_evidence(path: &Path) -> Result<CancellationEvidence> {
     serde_json::from_slice(&body).context("parsing durable cancellation evidence")
 }
 
-fn persist_new_events(path: &Path, durable: &mut AdapterDurableState) -> Result<()> {
-    let mut cursor = Some(AgentSessionCursor {
-        session_id: durable.journal.session_id().clone(),
-        durable_sequence: durable.persisted_sequence,
-    });
-    loop {
-        let page = durable
-            .journal
-            .history(cursor, HISTORY_PAGE)
-            .context("reading new assurance agent-session events")?;
-        if page.events.is_empty() {
-            return Ok(());
-        }
-        append_history(path, &page.events)?;
-        durable.persisted_sequence = page.next_cursor.durable_sequence;
-        if !page.has_more {
-            return Ok(());
-        }
-        cursor = Some(page.next_cursor);
-    }
-}
-
 fn digest_bytes(digest: &Sha256Digest) -> Result<[u8; 32]> {
     let raw = digest
         .as_str()
@@ -567,48 +512,6 @@ fn digest_bytes(digest: &Sha256Digest) -> Result<[u8; 32]> {
     let mut bytes = [0u8; 32];
     hex::decode_to_slice(raw, &mut bytes).context("decoding workload digest")?;
     Ok(bytes)
-}
-
-fn verify_opening_identity(
-    history: &[AgentSessionEventEnvelope],
-    session_id: &AgentSessionId,
-    workload_digest: [u8; 32],
-) -> Result<()> {
-    let Some(first) = history.first() else {
-        anyhow::bail!("assurance agent-session history is empty");
-    };
-    if &first.session_id != session_id
-        || !matches!(
-            &first.event,
-            AgentSessionEvent::Durable {
-                event: DurableAgentSessionEvent::Opened {
-                    workload_digest: recorded,
-                }
-            } if *recorded == workload_digest
-        )
-    {
-        anyhow::bail!("assurance agent-session history identity does not match admission");
-    }
-    Ok(())
-}
-
-fn load_history(path: &Path) -> Result<Vec<AgentSessionEventEnvelope>> {
-    let metadata = std::fs::symlink_metadata(path)
-        .with_context(|| format!("reading agent-session metadata {}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("assurance agent-session history must be a non-symlink file");
-    }
-    if metadata.len() > MAX_DURABLE_HISTORY_BYTES {
-        anyhow::bail!("assurance agent-session history exceeds its size limit");
-    }
-    let body = std::fs::read_to_string(path)
-        .with_context(|| format!("reading agent-session history {}", path.display()))?;
-    body.lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| {
-            serde_json::from_str(line).context("parsing durable assurance agent-session event")
-        })
-        .collect()
 }
 
 fn prepare_session_directory(directory: &Path, vm: &str) -> Result<()> {
@@ -629,41 +532,6 @@ fn prepare_session_directory(directory: &Path, vm: &str) -> Result<()> {
             .with_context(|| format!("restricting assurance agent-session state for {vm}"))?;
     }
     Ok(())
-}
-
-fn create_history(path: &Path, opened: &AgentSessionEventEnvelope) -> Result<()> {
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt as _;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path).with_context(|| {
-        format!(
-            "creating assurance agent-session history {}",
-            path.display()
-        )
-    })?;
-    write_event(&mut file, opened)?;
-    file.sync_all().context("committing opened agent session")
-}
-
-fn append_history(path: &Path, events: &[AgentSessionEventEnvelope]) -> Result<()> {
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(path)
-        .with_context(|| format!("opening assurance agent-session history {}", path.display()))?;
-    for event in events {
-        write_event(&mut file, event)?;
-    }
-    file.sync_all().context("committing agent-session events")
-}
-
-fn write_event(file: &mut std::fs::File, event: &AgentSessionEventEnvelope) -> Result<()> {
-    serde_json::to_writer(&mut *file, event).context("encoding durable agent-session event")?;
-    file.write_all(b"\n")
-        .context("terminating durable agent-session event")
 }
 
 #[cfg(test)]
@@ -857,7 +725,8 @@ mod tests {
                 .expect("prompt completes"),
             PromptExecutionOutcome::Completed(_)
         ));
-        let history = std::fs::read_to_string(&adapter.history_path).expect("history");
+        let history = std::fs::read_to_string(adapter.durable.lock().expect("durable").path())
+            .expect("history");
         assert!(history.contains("prompt_digest"), "{history}");
         assert!(!history.contains("attempt the declared process effect"));
         assert!(!history.contains("synthetic.invalid"));
@@ -908,7 +777,7 @@ mod tests {
                 1_000_001,
             )
             .expect("prompt accepted");
-        persist_new_events(&first.history_path, &mut durable).expect("acceptance committed");
+        durable.persist().expect("acceptance committed");
         drop(durable);
         drop(first);
 
@@ -1111,7 +980,8 @@ mod tests {
         );
         assert_eq!(harness.cancel_calls.load(Ordering::SeqCst), 1);
 
-        let history = std::fs::read_to_string(&adapter.history_path).expect("history");
+        let history = std::fs::read_to_string(adapter.durable.lock().expect("durable").path())
+            .expect("history");
         assert!(history.contains("cancel_requested"), "{history}");
         assert!(history.contains("canceled"), "{history}");
         assert!(!history.contains("attempt the declared process effect"));
@@ -1142,8 +1012,7 @@ mod tests {
                     1_000_001,
                 )
                 .expect("cancellation accepted");
-            persist_new_events(&first.history_path, &mut durable)
-                .expect("cancellation request committed");
+            durable.persist().expect("cancellation request committed");
         }
         drop(first);
 
