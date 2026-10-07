@@ -248,7 +248,11 @@ fn start_vsock_egress() -> Result<(), EgressClientMissing> {
         );
         return Err(EgressClientMissing);
     };
-    spawn_one(&egress_client, "egress-client");
+    spawn_one_as(
+        &egress_client,
+        "egress-client",
+        crate::guest_mount::EGRESS_CLIENT_IDENTITY,
+    );
     Ok(())
 }
 
@@ -526,6 +530,9 @@ pub fn provision_egress_ca() {
 /// Copy this boot's FlowMux identity out of the host-attached drive into
 /// `/run/mvm`, so the egress client can authenticate its session.
 ///
+/// The signing key is handed to the egress client's uid, the one process that
+/// reads it. It stays mode 0400, so neither the workload nor the agent can.
+///
 /// Best-effort here, deliberately: this runs on every guest boot, including
 /// ones whose policy admits no egress and which therefore get no identity
 /// drive. The refusal belongs where egress is actually required — the egress
@@ -534,8 +541,9 @@ pub fn provision_egress_ca() {
 /// never wanted networking.
 pub fn provision_flowmux_identity() {
     #[cfg(target_os = "linux")]
-    if let Err(error) = crate::flowmux_drive::provision_identity_from_drive()
-        && let Some(warning) = error.boot_warning()
+    if let Err(error) = crate::flowmux_drive::provision_identity_from_drive_for_uid(
+        crate::guest_mount::EGRESS_CLIENT_IDENTITY.uid(),
+    ) && let Some(warning) = error.boot_warning()
     {
         eprintln!("mvm-init: FlowMux identity not provisioned: {warning}");
     }
@@ -612,7 +620,14 @@ pub fn run_one(path: Option<PathBuf>, label: &str) {
     }
 }
 
-pub fn spawn_one(path: &Path, label: &str) {
+/// Start a long-lived helper under its own identity.
+///
+/// There is deliberately no variant that keeps the caller's identity. Every
+/// helper this starts is started by PID 1 while it is still root, before the
+/// agent drops privilege, and a helper spawned as-is would keep uid 0 and the
+/// full capability set for the life of the guest.
+#[cfg(target_os = "linux")]
+pub fn spawn_one_as(path: &Path, label: &str, identity: crate::guest_mount::ServiceIdentity) {
     if !is_executable(path) {
         eprintln!(
             "mvm-guest-init: no executable {label} at {}",
@@ -620,37 +635,27 @@ pub fn spawn_one(path: &Path, label: &str) {
         );
         return;
     }
-    let mut cmd = Command::new(path);
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
-    match cmd.spawn() {
-        Ok(child) => eprintln!("mvm-guest-init: spawned {label} pid={}", child.id()),
+    match guest_helper_command(path, identity).spawn() {
+        Ok(child) => eprintln!(
+            "mvm-guest-init: spawned {label} pid={} uid={} gid={}",
+            child.id(),
+            identity.uid(),
+            identity.gid()
+        ),
         Err(e) => eprintln!("mvm-guest-init: spawn {label} at {}: {e}", path.display()),
     }
 }
 
-/// Spawn a helper the way `spawn_one` does, but as an unprivileged user.
-///
-/// The guest agent is started this way because it serves the verbs that run
-/// workload code, and every one of those spawn sites inherits the agent's
-/// identity rather than setting its own. On the pid-1 boot path the agent
-/// drops privilege itself once its mounts are done; on this path the init
-/// owns the mounts, so the agent never needs root and is handed the workload
-/// identity from the start. Both paths converge on the same posture: nothing
-/// that executes workload code runs as uid 0.
+/// The command a helper is started with: no stdin, the init's stdout and
+/// stderr, every descriptor above stderr closed, and `identity` assumed in the
+/// child before exec.
 #[cfg(target_os = "linux")]
-pub fn spawn_one_as(path: &Path, label: &str, uid: u32, gid: u32) {
+pub(crate) fn guest_helper_command(
+    path: &Path,
+    identity: crate::guest_mount::ServiceIdentity,
+) -> Command {
     use std::os::unix::process::CommandExt;
 
-    if !is_executable(path) {
-        eprintln!(
-            "mvm-guest-init: no executable {label} at {}",
-            path.display()
-        );
-        return;
-    }
     let mut cmd = Command::new(path);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::inherit())
@@ -658,17 +663,11 @@ pub fn spawn_one_as(path: &Path, label: &str, uid: u32, gid: u32) {
     crate::fd_hygiene::configure_close_fds(&mut cmd, 3, None);
     // SAFETY: the hook runs in the forked child before exec. It calls only
     // async-signal-safe syscalls and allocates nothing, which is what
-    // `drop_guest_agent_privilege_raw` exists to guarantee.
+    // `ServiceIdentity::assume` exists to guarantee.
     unsafe {
-        cmd.pre_exec(move || crate::guest_mount::drop_guest_agent_privilege_raw(uid, gid));
+        cmd.pre_exec(move || identity.assume());
     }
-    match cmd.spawn() {
-        Ok(child) => eprintln!(
-            "mvm-guest-init: spawned {label} pid={} uid={uid} gid={gid}",
-            child.id()
-        ),
-        Err(e) => eprintln!("mvm-guest-init: spawn {label} at {}: {e}", path.display()),
-    }
+    cmd
 }
 
 pub fn cmdline() -> String {

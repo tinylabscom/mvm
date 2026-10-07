@@ -1204,7 +1204,8 @@ jobs:
           grep -q "test result: ok. 4 passed" helper.log
           for witness in harden_init_process_narrows_bounding_set_and_sets_no_new_privs \
                          drop_guest_agent_privilege_reaches_the_agent_identity_from_root \
-                         drop_crng_reseed_helper_privilege_keeps_only_sys_admin_from_root; do
+                         drop_crng_reseed_helper_privilege_keeps_only_sys_admin_from_root \
+                         the_egress_client_is_spawned_as_its_own_uid_holding_only_net_bind_service; do
             sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" --exact "guest_mount::privilege_tests::$witness" 2>&1 | tee witness.log
             grep -q "1 passed" witness.log
           done
