@@ -982,6 +982,41 @@ mod tests {
     }
 
     #[test]
+    fn feature_coverage_tail_uses_existing_test_support_runner() {
+        let workflow = ci_workflow();
+        let core = job_block(&workflow, "lint-features");
+        let support = job_block(&workflow, "lint-features-test-support");
+
+        for expected in [
+            "name: wasm-backend feature tests (wasmtime tier)",
+            "cargo nextest run -p mvm-runtime --features wasm-backend",
+            "cargo nextest run -p mvm-hostd --features wasm-backend --test wasm_egress_witness",
+            "name: release artifact acquisition contract",
+            "cargo check -p mvm-cli --features release-artifact-bootstrap --lib",
+            "cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib",
+            "cargo test -p mvm-build --features release-channel --lib",
+            "name: Assert auto-detect still picks libkrun off Linux/HVF",
+            "name: In-process pure ext4 materialize tests",
+        ] {
+            assert!(
+                support.contains(expected),
+                "test-support must retain {expected:?}"
+            );
+            assert!(
+                !core.contains(expected),
+                "core feature lane must not repeat {expected:?}"
+            );
+            if expected.starts_with("name:") {
+                assert_eq!(
+                    workflow.matches(expected).count(),
+                    1,
+                    "feature coverage must run {expected:?} exactly once"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn merge_group_ci_reuses_pr_proof_and_runs_only_the_integration_scope() {
         let ci = ci_workflow();
         let scope = job_block(&ci, "scope");
