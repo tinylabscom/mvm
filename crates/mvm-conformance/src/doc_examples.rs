@@ -959,6 +959,19 @@ impl TierPolicy {
     }
 }
 
+/// Single files in the documentation set, relative to the repository root.
+///
+/// CI's `docs` scope classifier in `.github/workflows/ci.yml` names the same
+/// roots, so a change confined to any of them still runs the suite that reads
+/// them. A test holds the two lists together.
+pub const DOCUMENTATION_FILES: [&str; 2] = ["README.md", "AGENTS.md"];
+
+/// Directories whose Markdown is part of the documentation set, relative to
+/// the repository root. Kept in step with CI's `docs` scope, as
+/// [`DOCUMENTATION_FILES`] is.
+pub const DOCUMENTATION_TREES: [&str; 3] =
+    ["public/src/content/docs", "crates/mvm-sdk/sdks", "examples"];
+
 /// Walk the user-facing documentation set.
 ///
 /// The website content root plus the Markdown the README links to as
@@ -967,13 +980,13 @@ impl TierPolicy {
 /// set is defined by "does a reader follow this", not by directory.
 pub fn documentation_files(repo_root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    for standalone in ["README.md", "AGENTS.md"] {
+    for standalone in DOCUMENTATION_FILES {
         let path = repo_root.join(standalone);
         if path.is_file() {
             files.push(path);
         }
     }
-    for tree in ["public/src/content/docs", "crates/mvm-sdk/sdks", "examples"] {
+    for tree in DOCUMENTATION_TREES {
         collect_markdown(&repo_root.join(tree), &mut files);
     }
     files.sort();
@@ -1631,6 +1644,77 @@ mod corpus_tests {
         let files = documentation_files(root.path());
 
         assert_eq!(files, vec![sdk.join("README.md")]);
+    }
+
+    /// The `docs=` line's pattern in CI's scope classifier, as the list of
+    /// alternatives inside its `^(...)` group.
+    fn ci_docs_scope_roots() -> Vec<String> {
+        let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/ci.yml"))
+            .expect("read .github/workflows/ci.yml");
+        let lines: Vec<&str> = workflow.lines().collect();
+        let output = lines
+            .iter()
+            .position(|line| line.contains(r#"echo "docs=true""#))
+            .expect("ci.yml's scope job must emit docs=true");
+        let grep = lines[..output]
+            .iter()
+            .rev()
+            .find(|line| line.contains("grep -zE"))
+            .expect("the docs=true output must follow its grep");
+        let pattern = grep
+            .split_once("'^(")
+            .and_then(|(_, rest)| rest.split_once(")'"))
+            .map(|(alternatives, _)| alternatives)
+            .unwrap_or_else(|| panic!("the docs grep must be an anchored group: {grep}"));
+        pattern
+            .split('|')
+            .map(|root| root.replace(r"\.", "."))
+            .collect()
+    }
+
+    /// CI decides whether a change runs this suite by its paths. A root the
+    /// suite reads but the classifier does not name is a root whose edits
+    /// merge unchecked; a root named only in CI runs the suite for nothing.
+    #[test]
+    fn ci_docs_scope_names_exactly_the_documentation_roots() {
+        let mut expected: Vec<String> = DOCUMENTATION_FILES
+            .iter()
+            .map(|file| format!("{file}$"))
+            .chain(DOCUMENTATION_TREES.iter().map(|tree| format!("{tree}/")))
+            .collect();
+        expected.sort();
+        let mut actual = ci_docs_scope_roots();
+        actual.sort();
+        assert_eq!(
+            actual, expected,
+            "ci.yml's docs scope and documentation_files() must name the same roots"
+        );
+    }
+
+    /// The features that read the corpus are the ones the docs-only CI path
+    /// selects. Each carries the tag on its `Feature:` line, so the selection
+    /// cannot lose a scenario added later.
+    #[test]
+    fn corpus_features_carry_the_docs_tag_on_the_feature_line() {
+        for feature in [
+            "features/suites/s29_doc_examples/doc_examples.feature",
+            "features/suites/s8_readme_contract/readme_contract.feature",
+        ] {
+            let body = std::fs::read_to_string(repo_root().join(feature))
+                .unwrap_or_else(|error| panic!("read {feature}: {error}"));
+            let header: Vec<&str> = body
+                .lines()
+                .take_while(|line| !line.starts_with("Feature:"))
+                .filter(|line| line.starts_with('@'))
+                .collect();
+            let tag = format!("@{}", crate::DOCS_TAG);
+            assert!(
+                header
+                    .iter()
+                    .any(|line| line.split_whitespace().any(|word| word == tag)),
+                "{feature} must be tagged {tag} above its Feature: line"
+            );
+        }
     }
 
     #[test]
