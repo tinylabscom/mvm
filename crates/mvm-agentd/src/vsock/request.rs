@@ -122,6 +122,31 @@ pub enum GuestRequest {
         #[serde(default)]
         stream_input: bool,
     },
+    /// Deliver one prompt to the agent resident in the guest and stream its
+    /// response back.
+    ///
+    /// The resident agent is the program the image names in
+    /// `/etc/mvm/entrypoint`, validated at boot exactly as for
+    /// `RunEntrypoint`: there is no argv, no shell and no program selection
+    /// on the wire. The prompt is the agent's complete stdin, which is closed
+    /// after it is written. The response is the same `EntrypointEvent`
+    /// stream `RunEntrypoint` produces.
+    ///
+    /// A verb of its own rather than a `RunEntrypoint` call so the signed
+    /// plan grants prompts separately: a plan whose `agent_verbs` omits
+    /// `agent-prompt` refuses every prompt while still serving its
+    /// function calls.
+    AgentPrompt {
+        /// The prompt bytes, written to the agent's stdin.
+        prompt: Vec<u8>,
+        /// Wall-clock timeout for the call, in seconds.
+        timeout_secs: u64,
+        /// Env vars injected into the agent after `env_clear()`: the
+        /// host-synthesized egress settings and secret placeholders, never a
+        /// raw secret value.
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
     /// Start the one plan-selected program under its drive grant. The host
     /// echoes the opaque program identity from the admitted plan; the guest
     /// compares it with the independently verified pinned grant before it
@@ -586,6 +611,7 @@ impl GuestRequest {
             Self::MediatedExec(_) => "mediated-exec",
             Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
+            Self::AgentPrompt { .. } => "agent-prompt",
             Self::DriveOpen { .. } => "drive-open",
             Self::DriveFile { .. } => "drive-file",
             Self::RunExtension { .. } => "run-extension",
@@ -892,6 +918,11 @@ mod tests {
             GuestRequest::RunCode {
                 code: "print('hello')".into(),
                 timeout_secs: Some(30),
+            },
+            GuestRequest::AgentPrompt {
+                prompt: b"summarize the diff".to_vec(),
+                timeout_secs: 30,
+                env: vec![("HTTPS_PROXY".into(), "http://127.0.0.1:3128".into())],
             },
             GuestRequest::ReadinessStatus,
         ];
@@ -1398,6 +1429,14 @@ mod tests {
                     stream_input: false,
                 },
                 "run-entrypoint",
+            ),
+            (
+                GuestRequest::AgentPrompt {
+                    prompt: Vec::new(),
+                    timeout_secs: 0,
+                    env: Vec::new(),
+                },
+                "agent-prompt",
             ),
             (
                 GuestRequest::StreamInput(InputFrame {

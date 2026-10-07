@@ -807,7 +807,30 @@ mod tests {
         );
     }
 
-    /// Files under this crate's `src/` mentioning any of `needles`, excluding
+    /// Whether `src` names `ident` as a whole identifier. A substring would
+    /// also match an unrelated name that merely contains it, such as a
+    /// `ReplayInputBinding` for an `InputBinding`.
+    fn names_identifier(src: &str, ident: &str) -> bool {
+        let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        src.match_indices(ident).any(|(at, _)| {
+            let before = src[..at].chars().next_back();
+            let after = src[at + ident.len()..].chars().next();
+            !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+        })
+    }
+
+    #[test]
+    fn a_name_that_only_contains_the_identifier_is_not_naming_it() {
+        assert!(names_identifier("use x::InputBinding;", "InputBinding"));
+        assert!(names_identifier(
+            "b.with_fingerprint(f)",
+            "with_fingerprint"
+        ));
+        assert!(!names_identifier("ReplayInputBinding {", "InputBinding"));
+        assert!(!names_identifier("InputBindings", "InputBinding"));
+    }
+
+    /// Files under this crate's `src/` naming any of `needles`, excluding
     /// this test's own source (which names them to assert their absence).
     fn cli_sources_naming(needles: &[&str]) -> Vec<String> {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -831,7 +854,7 @@ mod tests {
             .filter(|path| path.file_name().is_some_and(|n| n != "stdin_stream.rs"))
             .filter(|path| {
                 std::fs::read_to_string(path)
-                    .is_ok_and(|src| needles.iter().any(|needle| src.contains(needle)))
+                    .is_ok_and(|src| needles.iter().any(|needle| names_identifier(&src, needle)))
             })
             .map(|path| path.display().to_string())
             .collect()

@@ -1,0 +1,228 @@
+{
+  "exhausted": true,
+  "next_cursor": {
+    "offset": 1830
+  },
+  "records": [
+    {
+      "received_at_ms": 1700000000000,
+      "record": {
+        "body": {
+          "code": "guest-agent",
+          "kind": "coverage",
+          "state": "started"
+        },
+        "epoch": [
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17
+        ],
+        "format": "mvm.telemetry.v1",
+        "monotonic_ns": 1000000,
+        "producer": 1,
+        "sequence": 1,
+        "source": "guest_agent"
+      }
+    },
+    {
+      "received_at_ms": 1700000000250,
+      "record": {
+        "body": {
+          "attributes": [
+            {
+              "key": "port",
+              "value": {
+                "type": "unsigned",
+                "value": 5253
+              }
+            }
+          ],
+          "context": null,
+          "kind": "event",
+          "level": "info",
+          "name": "vsock control plane bound"
+        },
+        "epoch": [
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17
+        ],
+        "format": "mvm.telemetry.v1",
+        "monotonic_ns": 5250000,
+        "producer": 1,
+        "sequence": 2,
+        "source": "guest_agent"
+      }
+    },
+    {
+      "received_at_ms": 1700000000500,
+      "record": {
+        "body": {
+          "attributes": [
+            {
+              "key": "entrypoint",
+              "value": {
+                "type": "text",
+                "value": "/usr/bin/app"
+              }
+            },
+            {
+              "key": "cached",
+              "value": {
+                "type": "bool",
+                "value": true
+              }
+            }
+          ],
+          "context": null,
+          "kind": "event",
+          "level": "info",
+          "name": "workload entrypoint validated"
+        },
+        "epoch": [
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17
+        ],
+        "format": "mvm.telemetry.v1",
+        "monotonic_ns": 9500000,
+        "producer": 1,
+        "sequence": 3,
+        "source": "guest_agent"
+      }
+    },
+    {
+      "received_at_ms": 1700000000750,
+      "record": {
+        "body": {
+          "attributes": [
+            {
+              "key": "standby",
+              "value": {
+                "type": "signed",
+                "value": 2
+              }
+            },
+            {
+              "key": "fill_ratio",
+              "value": {
+                "type": "float",
+                "value": 0.5
+              }
+            }
+          ],
+          "context": null,
+          "kind": "event",
+          "level": "info",
+          "name": "warm pool ready"
+        },
+        "epoch": [
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17
+        ],
+        "format": "mvm.telemetry.v1",
+        "monotonic_ns": 2100000000,
+        "producer": 1,
+        "sequence": 4,
+        "source": "guest_agent"
+      }
+    },
+    {
+      "received_at_ms": 1700000001000,
+      "record": {
+        "body": {
+          "attributes": [
+            {
+              "key": "attempt",
+              "value": {
+                "type": "unsigned",
+                "value": 2
+              }
+            }
+          ],
+          "context": null,
+          "kind": "event",
+          "level": "warn",
+          "name": "host beacon retry"
+        },
+        "epoch": [
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17,
+          17
+        ],
+        "format": "mvm.telemetry.v1",
+        "monotonic_ns": 4800000000,
+        "producer": 1,
+        "sequence": 5,
+        "source": "guest_agent"
+      }
+    }
+  ],
+  "undecodable": 0
+}

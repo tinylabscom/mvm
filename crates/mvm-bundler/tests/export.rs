@@ -5,12 +5,15 @@ use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use mvm_bundler::{
-    BundleExportInputs, BundleSigner, DebugOutput, ExportedBundle, export_bundle_with_signer,
+    BundleExportInputs, BundleSigner, DebugOutput, ExportedBundle, PostureInputs,
+    export_bundle_with_signer,
 };
 use mvm_core::plan::bundle::{
-    ArtifactRole, BundleVerifyError, KeyId, TrustStore, VerifiedBundle, bundle_sha256,
-    key_id_from_pubkey, read_and_verify_bundle,
+    ArtifactRole, BundleVerifyError, KeyId, MAX_BUNDLE_ENTRY_BYTES, TrustStore, VerifiedBundle,
+    bundle_sha256, key_id_from_pubkey, read_and_verify_bundle, sha256_hex,
 };
+use mvm_core::plan::types::{ArtifactDigests, BuildProvenance, InputKind};
+use mvm_core::policy::security::AgentProfile;
 
 const KERNEL: &[u8] = b"kernel bytes";
 const ROOTFS: &[u8] = b"rootfs bytes";
@@ -474,4 +477,119 @@ fn no_debug_summary_is_written_unless_asked_for() {
         .map(|entry| entry.expect("entry").file_name())
         .collect();
     assert_eq!(written, ["app.mvmpkg"]);
+}
+
+#[test]
+fn an_export_without_declarations_carries_no_members() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+
+    export(
+        &BundleExportInputs::new(&vmlinux, &rootfs, "aarch64", &out),
+        &signer,
+    );
+
+    let manifest = verify(&out, &signer).expect("the export verifies").manifest;
+    assert!(manifest.members.is_empty());
+}
+
+#[test]
+fn a_sealed_posture_records_the_verity_the_export_carries() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
+        .verity(VERITY, ROOTHASH)
+        .cmdline("console=ttyS0 quiet\n")
+        .posture(PostureInputs::new(AgentProfile::SealedProd).allows_egress(true));
+
+    export(&inputs, &signer);
+
+    let manifest = verify(&out, &signer).expect("the export verifies").manifest;
+    let posture = manifest.security_posture().expect("posture recorded");
+    assert_eq!(posture.profile, AgentProfile::SealedProd);
+    assert!(posture.verity_protected);
+    assert!(posture.requires_auth);
+    assert!(posture.allows_egress);
+    assert!(!posture.allows_volumes);
+    assert_eq!(manifest.kernel_cmdline(), Some("console=ttyS0 quiet"));
+}
+
+#[test]
+fn a_sealed_posture_without_verity_is_refused_and_writes_nothing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs = BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out)
+        .posture(PostureInputs::new(AgentProfile::SealedProd));
+
+    let err = export_bundle_with_signer(&inputs, &signer).expect_err("no verity to seal");
+
+    assert!(format!("{err:#}").contains("dm-verity"), "{err:#}");
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn a_cmdline_with_a_control_byte_is_refused_and_writes_nothing() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let inputs =
+        BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out).cmdline("quiet\ninit=/bin/sh");
+
+    export_bundle_with_signer(&inputs, &signer).expect_err("newline in cmdline");
+
+    assert_nothing_written(&out);
+}
+
+#[test]
+fn provenance_records_the_digests_of_the_bytes_sealed() {
+    let slot = Slot::new();
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+    let claimed = BuildProvenance {
+        input_kind: InputKind::NixFlake,
+        input_ref: ".#app".to_string(),
+        lock_digest: Some("lock".to_string()),
+        builder_id: None,
+        artifacts: ArtifactDigests {
+            kernel: Some("not the kernel that ships".to_string()),
+            mvm_init: Some("init".to_string()),
+            ..Default::default()
+        },
+    };
+    let inputs =
+        BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out).provenance(claimed.clone());
+
+    export(&inputs, &signer);
+
+    let manifest = verify(&out, &signer).expect("the export verifies").manifest;
+    let recorded = manifest.build_provenance().expect("provenance recorded");
+    assert_eq!(recorded.input_ref, claimed.input_ref);
+    assert_eq!(recorded.lock_digest, claimed.lock_digest);
+    assert_eq!(recorded.artifacts.kernel, Some(sha256_hex(KERNEL)));
+    assert_eq!(recorded.artifacts.rootfs, Some(sha256_hex(ROOTFS)));
+    assert_eq!(recorded.artifacts.initramfs, None);
+    assert_eq!(recorded.artifacts.mvm_init.as_deref(), Some("init"));
+}
+
+#[test]
+fn a_rootfs_over_the_entry_cap_is_refused_before_it_is_read() {
+    let slot = Slot::new();
+    // Sparse: the length is real, the disk blocks are not.
+    std::fs::File::create(slot.dir.path().join("rootfs.ext4"))
+        .and_then(|file| file.set_len(MAX_BUNDLE_ENTRY_BYTES + 1))
+        .expect("sparse rootfs");
+    let (vmlinux, rootfs, out) = (slot.path("vmlinux"), slot.path("rootfs.ext4"), slot.out());
+    let signer = TestSigner::new(7);
+
+    let err = export_bundle_with_signer(
+        &BundleExportInputs::new(&vmlinux, &rootfs, "x86_64", &out),
+        &signer,
+    )
+    .expect_err("oversized rootfs");
+
+    assert!(format!("{err:#}").contains("per-entry limit"), "{err:#}");
+    assert_nothing_written(&out);
 }

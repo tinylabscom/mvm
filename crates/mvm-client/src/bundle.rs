@@ -11,7 +11,7 @@ use ed25519_dalek::{Signer, VerifyingKey};
 use mvm_hostd::audit::host_keypair::{self, HostSigner};
 
 pub use mvm_bundler::{
-    BundleExportInputs, BundleSigner, DebugFormat, DebugOutput, ExportedBundle,
+    BundleExportInputs, BundleSigner, DebugFormat, DebugOutput, ExportedBundle, PostureInputs,
     export_bundle_with_signer,
 };
 

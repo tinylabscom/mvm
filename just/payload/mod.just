@@ -1,8 +1,9 @@
 set working-directory := "../.."
 
 # The Linux host binaries are built with it — by a release `cargo build`, or by an `mvmctl` built without them: the
-# exact zig from the `ziglang` PyPI package, the musl rust targets, and the
-# pinned cargo-zigbuild. Homebrew's `zig` drifts to newer, incompatible releases
+# exact zig from the `ziglang` PyPI package, the musl and glibc rust targets
+# (glibc for the guest shared objects `mvmctl build guest-bins` packages), and
+# the pinned cargo-zigbuild. Homebrew's `zig` drifts to newer, incompatible releases
 # (fails downstream with `CacheCheckFailed`); the `ziglang`-installed zig is
 # auto-detected instead. Run once per machine (or after a toolchain pin bump).
 
@@ -13,14 +14,15 @@ toolchain:
     RUST=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['rust'])")
     ZIG=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['zig'])")
     ZIGBUILD=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['cargo-zigbuild'])")
-    echo "installing pinned Rust ${RUST} + zig ${ZIG} (ziglang) + musl targets + cargo-zigbuild ${ZIGBUILD}"
+    echo "installing pinned Rust ${RUST} + zig ${ZIG} (ziglang) + musl/glibc targets + cargo-zigbuild ${ZIGBUILD}"
     python3 -m pip install --quiet "ziglang==${ZIG}"
     rustup toolchain install "${RUST}" --profile minimal
-    rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl --toolchain "${RUST}"
+    rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
+        aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu --toolchain "${RUST}"
     if [[ "$(cargo-zigbuild --version 2>/dev/null || true)" != "cargo-zigbuild ${ZIGBUILD}" ]]; then
       cargo install cargo-zigbuild --version "${ZIGBUILD}" --locked
     fi
-    echo "embed toolchain ready: Rust ${RUST} + zig ${ZIG} + aarch64/x86_64 musl targets + cargo-zigbuild ${ZIGBUILD}"
+    echo "embed toolchain ready: Rust ${RUST} + zig ${ZIG} + aarch64/x86_64 musl and glibc targets + cargo-zigbuild ${ZIGBUILD}"
 
 # Build the per-VM host helper bins into `target/<profile>/`, where
 # `aux_bin::resolve` looks for them. Optional: a contributor mvmctl run from
