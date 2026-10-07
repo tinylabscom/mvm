@@ -22,6 +22,9 @@ use zeroize::Zeroizing;
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
 use mvm_core::atomic_io::write_private;
 
+mod stderr_log;
+use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
+
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
 /// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
 /// AF_VSOCK listener; Firecracker/libkrun route guest→host through a per-port
@@ -397,7 +400,7 @@ fn wait_for_endpoint_session_with_timeout(
         return Ok(());
     };
     if let EndpointState::Exited(exit) = endpoint_state(pid) {
-        bail!("{}", endpoint_exited_message(vm_name, exit));
+        bail!("{}", endpoint_exited_message(vm_name, state_dir, exit));
     }
 
     let socket = session_ready_socket_path(state_dir);
@@ -407,7 +410,9 @@ fn wait_for_endpoint_session_with_timeout(
                 "VM {vm_name}: connect to network endpoint session readiness socket {}: {e}",
                 socket.display()
             ),
-            EndpointState::Exited(exit) => anyhow!("{}", endpoint_exited_message(vm_name, exit)),
+            EndpointState::Exited(exit) => {
+                anyhow!("{}", endpoint_exited_message(vm_name, state_dir, exit))
+            }
         }
     })?;
     stream
@@ -437,10 +442,13 @@ fn wait_for_endpoint_session_with_timeout(
             // status trails the close by a moment, and it is the one thing
             // that says why.
             if let Some(exit) = await_child_exit(pid, EXIT_STATUS_GRACE) {
-                bail!("{}", endpoint_exited_message(vm_name, Some(exit)));
+                bail!(
+                    "{}",
+                    endpoint_exited_message(vm_name, state_dir, Some(exit))
+                );
             }
             if let EndpointState::Exited(exit) = endpoint_state(pid) {
-                bail!("{}", endpoint_exited_message(vm_name, exit));
+                bail!("{}", endpoint_exited_message(vm_name, state_dir, exit));
             }
             return Err(anyhow!(
                 "VM {vm_name}: waiting for the network endpoint's authenticated session: {e}"
@@ -492,7 +500,9 @@ pub fn refuse_launch_without_endpoint_session(
              authenticated against it — the workload has no network. Check that the \
              guest found its FlowMux identity drive."
         ),
-        EndpointState::Exited(exit) => bail!("{}", endpoint_exited_message(vm_name, exit)),
+        EndpointState::Exited(exit) => {
+            bail!("{}", endpoint_exited_message(vm_name, state_dir, exit))
+        }
     }
 }
 
@@ -528,12 +538,12 @@ fn endpoint_state(pid: libc::pid_t) -> EndpointState {
 
 /// The refusal for a launch whose endpoint is gone: how it ended when that is
 /// known, and what it last wrote to its stderr log.
-fn endpoint_exited_message(vm_name: &str, exit: Option<HelperExit>) -> String {
+fn endpoint_exited_message(vm_name: &str, state_dir: &Path, exit: Option<HelperExit>) -> String {
     let how = exit.map(|exit| format!(". It {exit}")).unwrap_or_default();
     format!(
         "VM {vm_name}: the network endpoint exited before any guest authenticated \
          against it — the workload has no network{how}{}",
-        stderr_note(&endpoint_stderr_log_path(vm_name))
+        stderr_note(&endpoint_stderr_log_path(state_dir))
     )
 }
 /// Default bound on the endpoint's ready handshake.
@@ -600,12 +610,6 @@ fn stderr_note(log: &Path) -> String {
         Some(tail) => format!("; its stderr said: {tail}"),
         None => format!("; it wrote nothing to {}", log.display()),
     }
-}
-
-/// Where a VM's endpoint stderr is captured. Per VM and truncated on each
-/// spawn, so the tail always belongs to the endpoint the launch is reporting.
-fn endpoint_stderr_log_path(vm_name: &str) -> PathBuf {
-    PathBuf::from("/tmp").join(format!("mvm-network-endpoint-{vm_name}.log"))
 }
 
 /// Last `max_bytes` of `path`, collapsed onto one line so it survives an error
@@ -1206,20 +1210,10 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
 
     let bin = resolve_network_endpoint_path()?;
 
-    // Capture endpoint diagnostics to /tmp so hangs/refusals are observable.
-    // The file is per-VM and truncated each run; stderr was previously /dev/null.
-    let stderr_log = endpoint_stderr_log_path(vm_name);
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&stderr_log)
-        .map_err(|e| {
-            anyhow!(
-                "open substitution endpoint stderr log {}: {e}",
-                stderr_log.display()
-            )
-        })?;
+    // Keep endpoint diagnostics inside the VM state directory. The file is
+    // truncated each run; stderr was previously /dev/null.
+    let stderr_log = endpoint_stderr_log_path(state_dir);
+    let log_file = open_endpoint_stderr_log(state_dir)?;
 
     let mut cmd = mvm_core::env_hygiene::helper_command(&bin);
     select_lifetime(&mut cmd, lifetime, state_dir);
@@ -1925,7 +1919,7 @@ mod tests {
     fn a_launch_names_an_endpoint_that_seccomp_killed_and_quotes_its_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let vm_name = format!("seccomp-kill-test-{}", std::process::id());
-        let log = endpoint_stderr_log_path(&vm_name);
+        let log = endpoint_stderr_log_path(dir.path());
         std::fs::write(
             &log,
             "mvm-network-endpoint: seccomp refused x86_64 syscall 2 during self-test probe \"file-append\"\n",
