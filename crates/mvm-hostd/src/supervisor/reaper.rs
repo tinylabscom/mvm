@@ -302,7 +302,7 @@ mod tests {
 
     fn registry_with_one(expires_at: Option<&str>) -> VmNameRegistry {
         let mut reg = VmNameRegistry::default();
-        reg.register_with_metadata(RegisterParams {
+        reg.register(RegisterParams {
             name: "vm1",
             vm_dir: "/tmp/vm1",
             network: "default",
@@ -498,7 +498,7 @@ mod tests {
             tags.insert(IDLE_TIMEOUT_TAG.to_string(), t.to_string());
         }
         let mut reg = VmNameRegistry::default();
-        reg.register_with_metadata(RegisterParams {
+        reg.register(RegisterParams {
             name: "vm1",
             vm_dir: "/tmp/vm1",
             network: "default",

@@ -80,17 +80,21 @@ impl MockGuestAgent {
     /// stale socket file at the target path. The accept loop runs
     /// on a background thread; callers must hold the returned handle
     /// for the agent's lifetime.
-    pub fn start(vm_dir: &Path) -> Result<Self> {
-        let host_key_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
-        Self::start_with_host_signer(vm_dir, &host_key_path)
-    }
-
-    /// Start a mock agent using the host signer at `host_signer_path`.
     ///
-    /// This is useful when the client runs with an isolated `MVM_HOME`, such
-    /// as a subprocess test sandbox. The mock and client must use the same
-    /// signer so the guest-side trust anchor validates the host handshake.
-    pub fn start_with_host_signer(vm_dir: &Path, host_signer_path: &Path) -> Result<Self> {
+    /// The agent trusts the host signer at `host_signer_path`, or the one
+    /// under this process's `MVM_HOME` when `None`. Name it explicitly when
+    /// the client runs with a different `MVM_HOME`, such as a subprocess test
+    /// sandbox: the mock and client must use the same signer so the
+    /// guest-side trust anchor validates the host handshake.
+    pub fn start(vm_dir: &Path, host_signer_path: Option<&Path>) -> Result<Self> {
+        let default_path;
+        let host_signer_path = match host_signer_path {
+            Some(path) => path,
+            None => {
+                default_path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
+                &default_path
+            }
+        };
         let host_key_bytes = load_host_signer(host_signer_path)?;
         let host_key = SigningKey::from_bytes(&host_key_bytes).verifying_key();
         Self::start_with_host_key(vm_dir, host_key)
@@ -360,12 +364,12 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
         GuestRequest::FsMkdir { .. } => GuestResponse::FsResult(FsResult::Mkdir),
 
         // ── Exec / entrypoint (single terminal frame) ───────────────
-        // The mock answers the streaming Exec / RunEntrypoint verbs with one
+        // The mock answers the streaming Exec / RunEntrypoint / AgentPrompt verbs with one
         // terminal Exit frame so `call_streaming` completes after a single
         // read. Enough to exercise the host-side ExecBuilder pipelining; it
         // does not emit stdout/stderr chunks.
         GuestRequest::Exec { .. } => GuestResponse::ExecEvent(ExecEvent::Exit { code: 0 }),
-        GuestRequest::RunEntrypoint { .. } => {
+        GuestRequest::RunEntrypoint { .. } | GuestRequest::AgentPrompt { .. } => {
             GuestResponse::EntrypointEvent(EntrypointEvent::Exit { code: 0 })
         }
         // One zero-exit outcome per command; stages are ignored.

@@ -12,7 +12,7 @@ use mvm_core::config;
 use mvm_core::vm_backend::WarmPrewarmSource;
 use mvm_runtime::{
     WarmArtifactBuildPlan, WarmArtifactKey, WarmArtifactPlanResolver, WarmArtifactStore,
-    WarmArtifactWorker, WarmGoldenVmFactory, WarmGoldenVmReadinessVerifier,
+    WarmArtifactWorker, WarmGoldenVmFactory,
 };
 
 /// Resolve a host-path-free prewarm source into concrete boot inputs. The
@@ -56,20 +56,11 @@ pub fn resolve_warm_artifact_plan(
     }
 }
 
-/// Construct the runtime worker with the CLI's source resolver. The caller
-/// must provide a backend-specific authenticated golden-VM readiness verifier.
+/// Construct the runtime worker with the CLI's source resolver and the shared
+/// authenticated golden-VM readiness verifier. The factory remains
+/// backend-specific because only the selected VMM can assemble and boot its
+/// disposable golden VM.
 pub fn warm_artifact_worker(
-    store: WarmArtifactStore,
-    verify_readiness: WarmGoldenVmReadinessVerifier,
-) -> WarmArtifactWorker {
-    let resolver: WarmArtifactPlanResolver = Arc::new(resolve_warm_artifact_plan);
-    WarmArtifactWorker::new(store, resolver, verify_readiness)
-}
-
-/// Construct the worker with the shared authenticated readiness verifier. The
-/// factory remains backend-specific because only the selected VMM can assemble
-/// and boot its disposable golden VM.
-pub fn warm_artifact_worker_with_factory(
     store: WarmArtifactStore,
     factory: WarmGoldenVmFactory,
 ) -> WarmArtifactWorker {

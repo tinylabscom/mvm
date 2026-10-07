@@ -440,7 +440,7 @@ async fn ttl_reaper_stops_and_cleans_expired_transients_only() {
 
     let short = transient_request(&rootfs)
         .name("t-ttl")
-        .ttl_seconds(1)
+        .ttl_seconds(3600)
         .build()
         .unwrap();
     client.launch(short).await.expect("launch with ttl");
@@ -461,7 +461,7 @@ async fn ttl_reaper_stops_and_cleans_expired_transients_only() {
     );
 
     // Past expiry the transient is stopped + cleaned; the definition stays.
-    let later = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let later = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
     let reaped = client.reap_expired_transients(&later).expect("reap");
     assert_eq!(reaped, vec!["t-ttl".to_string()]);
     assert!(!listed_names(&client).await.contains(&"t-ttl".to_string()));

@@ -401,6 +401,49 @@ fn refuse_versioned_install(current_exe: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Refuse to update a binary the system package manager owns. Replacing
+/// `/usr/bin/mvmctl` behind dpkg's or rpm's back leaves its database recording
+/// files and digests that are no longer on disk, and the next package upgrade
+/// or removal acts on that stale record.
+fn refuse_package_install(current_exe: &Path) -> Result<()> {
+    match crate::install_layout::package_install_of(current_exe) {
+        Some(install) => bail!(package_install_refusal(&install)),
+        None => Ok(()),
+    }
+}
+
+/// What to tell a user whose mvmctl came from a distribution package.
+fn package_install_refusal(install: &crate::install_layout::PackageInstall) -> String {
+    use crate::install_layout::PackageFormat;
+    let releases = format!("https://github.com/{GITHUB_REPO}/releases");
+    let (origin, upgrade) = match install.format {
+        Some(PackageFormat::Deb) => (
+            "the mvmctl .deb package, so dpkg owns it".to_string(),
+            format!(
+                "download the new .deb from {releases} and run: \
+                 sudo apt install ./mvmctl_<version>-1_<arch>.deb"
+            ),
+        ),
+        Some(PackageFormat::Rpm) => (
+            "the mvmctl .rpm package, so rpm owns it".to_string(),
+            format!(
+                "download the new .rpm from {releases} and run: \
+                 sudo dnf install ./mvmctl-<version>-1.<arch>.rpm"
+            ),
+        ),
+        None => (
+            "a system package, so its package manager owns it".to_string(),
+            "upgrade it with the package manager that installed it".to_string(),
+        ),
+    };
+    format!(
+        "this mvmctl was installed from {origin} (marker: {marker}). Replacing it here \
+         would leave the package database describing files that are no longer on disk. \
+         To upgrade, {upgrade}",
+        marker = install.marker.display(),
+    )
+}
+
 /// Extract the archive and install the binary, adjacent helpers, and resources.
 fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Result<()> {
     let archive_name = format!("mvmctl-{}.tar.gz", target);
@@ -863,6 +906,15 @@ fn install_announcement(current: &str, latest: &str) -> InstallAnnouncement {
 }
 
 pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
+    // An install this command must not touch is refused before any network
+    // traffic: the answer does not depend on what the latest release is.
+    let current_exe =
+        std::env::current_exe().context("Failed to determine path of current executable")?;
+    if !check_only {
+        refuse_versioned_install(&current_exe)?;
+        refuse_package_install(&current_exe)?;
+    }
+
     let current = current_version();
     ui::info(&format!("Current version: {}", current));
 
@@ -914,9 +966,6 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
         return Ok(());
     }
 
-    let current_exe =
-        std::env::current_exe().context("Failed to determine path of current executable")?;
-    refuse_versioned_install(&current_exe)?;
     let current_exe = current_exe.canonicalize().unwrap_or(current_exe);
 
     let target = detect_target()?;
@@ -1087,6 +1136,71 @@ mod tests {
         std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
         std::fs::write(&loose, "").unwrap();
         assert!(refuse_versioned_install(&loose).is_ok());
+    }
+
+    // --- distribution packages ---
+
+    /// `<root>/usr/bin/mvmctl` with the package marker holding `content`.
+    fn packaged_binary(content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        use crate::install_layout::PACKAGE_MARKER;
+        let root = tempfile::tempdir().unwrap();
+        let usr = root.path().join("usr");
+        std::fs::create_dir_all(usr.join("bin")).unwrap();
+        std::fs::write(usr.join("bin/mvmctl"), "").unwrap();
+        let marker = usr.join(PACKAGE_MARKER);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(marker, content).unwrap();
+        let exe = usr.join("bin/mvmctl");
+        (root, exe)
+    }
+
+    #[test]
+    fn update_refuses_a_binary_a_deb_installed_and_names_apt() {
+        let (_root, exe) = packaged_binary("deb\n");
+        let error = refuse_package_install(&exe).unwrap_err().to_string();
+        assert!(error.contains("mvmctl .deb package"), "{error}");
+        assert!(error.contains("dpkg owns it"), "{error}");
+        assert!(
+            error.contains("sudo apt install ./mvmctl_<version>-1_<arch>.deb"),
+            "{error}"
+        );
+        assert!(error.contains("share/mvmctl/package-managed"), "{error}");
+        assert!(
+            error.contains("https://github.com/tinylabscom/mvm/releases"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn update_refuses_a_binary_an_rpm_installed_and_names_dnf() {
+        let (_root, exe) = packaged_binary("rpm\n");
+        let error = refuse_package_install(&exe).unwrap_err().to_string();
+        assert!(error.contains("rpm owns it"), "{error}");
+        assert!(
+            error.contains("sudo dnf install ./mvmctl-<version>-1.<arch>.rpm"),
+            "{error}"
+        );
+        assert!(!error.contains("apt"), "{error}");
+    }
+
+    #[test]
+    fn update_refuses_an_unrecognised_package_marker_without_guessing_the_tool() {
+        let (_root, exe) = packaged_binary("something-else\n");
+        let error = refuse_package_install(&exe).unwrap_err().to_string();
+        assert!(
+            error.contains("package manager that installed it"),
+            "{error}"
+        );
+        assert!(!error.contains("apt") && !error.contains("dnf"), "{error}");
+    }
+
+    #[test]
+    fn update_proceeds_for_a_binary_no_package_owns() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = root.path().join("usr/bin/mvmctl");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        assert!(refuse_package_install(&exe).is_ok());
     }
 
     // --- smoke test ---
@@ -1686,6 +1800,15 @@ mod tests {
     fn extract_and_install_uses_sudo_for_a_host_owned_install_dir() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let sudo = bin.join("sudo");
+        std::fs::write(
+            &sudo,
+            b"#!/bin/sh\nprintf 'called\\n' >> \"$MVM_TEST_SUDO_MARKER\"\n/bin/chmod u+w \"$MVM_TEST_INSTALL_DIR\"\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
         let work = tmp.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
         let archive = build_release_archive(tmp.path(), "unit-test", true, true);
@@ -1697,10 +1820,17 @@ mod tests {
         std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
         std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
+        let marker = tmp.path().join("sudo-called");
+        let mut env = TestEnv::new();
+        env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        env.set("MVM_TEST_SUDO_MARKER", &marker);
+        env.set("MVM_TEST_INSTALL_DIR", &install_dir);
+
         let result = extract_and_install("unit-test", &work, &current_exe);
 
         std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         result.expect("the sudo arm installs into a host-owned directory");
+        assert!(marker.is_file(), "the sudo arm must be invoked");
         assert!(
             std::fs::read_to_string(&current_exe)
                 .unwrap()
