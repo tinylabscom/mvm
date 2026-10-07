@@ -72,6 +72,8 @@ pub(crate) use atomic_write::write_atomic_batched;
 pub(crate) use atomic_write::{write_atomic, write_atomic_unsynced};
 
 mod session_events;
+mod stream_input_refusal;
+use stream_input_refusal::input_refused_labels;
 mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
@@ -135,46 +137,6 @@ pub mod stream_audit {
     /// Label: the highest `seq` the session had already accepted when the
     /// out-of-order frame arrived.
     pub const LABEL_AFTER_SEQ: &str = "stream_input_after_seq";
-}
-
-/// The label set for one input refusal: the binding, the reason word, and
-/// whatever that reason needs to be actionable.
-///
-/// Written as one exhaustive match so a refusal variant added later cannot
-/// reach the chain unlabelled — and so the compiler is the thing checking that
-/// no arm reaches for the bytes.
-fn input_refused_labels(
-    vm_name: &str,
-    refusal: &crate::stream::InputRefusal,
-) -> Vec<(String, String)> {
-    use crate::stream::InputRefusal as R;
-    use stream_audit as k;
-
-    let mut labels = vec![
-        (k::LABEL_VM_NAME.to_string(), vm_name.to_string()),
-        (k::LABEL_REASON.to_string(), refusal.reason().to_string()),
-    ];
-    match refusal {
-        // `Unauditable` is here for completeness: by definition the chain it
-        // would be written to is the one that just failed, so this label set
-        // is what a *later* best-effort attempt carries if the failure was
-        // transient.
-        R::NotGranted | R::LeaseExpired | R::Unauditable => {}
-        R::LeaseHeld { holder } => {
-            labels.push((k::LABEL_HOLDER.to_string(), holder.clone()));
-        }
-        R::SecretMaterial { category } => {
-            labels.push((
-                k::LABEL_SECRET_CATEGORY.to_string(),
-                (*category).to_string(),
-            ));
-        }
-        R::OutOfOrder { seq, after } => {
-            labels.push((k::LABEL_SEQ.to_string(), seq.to_string()));
-            labels.push((k::LABEL_AFTER_SEQ.to_string(), after.to_string()));
-        }
-    }
-    labels
 }
 
 /// Extract the `image.created` label set from a node's provenance attributes.
@@ -1855,58 +1817,6 @@ mod tests {
 
         verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
             .expect("prompt entries are chain-signed");
-    }
-
-    /// Every refusal variant reaches the chain under its own reason word, and
-    /// no variant's labels can grow a key that is not on the allow-list here.
-    ///
-    /// The label builder is one exhaustive match, so a variant added later
-    /// fails to compile there; this pins the other half — that what the match
-    /// emits stays a binding, a reason, and positional metadata, never bytes.
-    #[test]
-    fn every_input_refusal_variant_is_labelled_with_its_reason_and_nothing_more() {
-        use crate::stream::InputRefusal as R;
-        use stream_audit as k;
-
-        let allowed = [
-            k::LABEL_VM_NAME,
-            k::LABEL_REASON,
-            k::LABEL_HOLDER,
-            k::LABEL_SECRET_CATEGORY,
-            k::LABEL_SEQ,
-            k::LABEL_AFTER_SEQ,
-        ];
-        for refusal in [
-            R::NotGranted,
-            R::Unauditable,
-            R::LeaseExpired,
-            R::LeaseHeld {
-                holder: "plan-1#0".to_string(),
-            },
-            R::SecretMaterial {
-                category: "host-secret",
-            },
-            R::OutOfOrder { seq: 3, after: 9 },
-        ] {
-            let labels = input_refused_labels("vm-1", &refusal);
-            let by_key: std::collections::BTreeMap<&str, &str> = labels
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.as_str()))
-                .collect();
-            assert_eq!(by_key.len(), labels.len(), "no duplicate keys: {labels:?}");
-            assert_eq!(by_key.get(k::LABEL_VM_NAME), Some(&"vm-1"));
-            assert_eq!(by_key.get(k::LABEL_REASON), Some(&refusal.reason()));
-            for key in by_key.keys() {
-                assert!(
-                    allowed.contains(key),
-                    "unexpected label {key} on {refusal:?}"
-                );
-            }
-        }
-
-        let ordered = input_refused_labels("vm-1", &R::OutOfOrder { seq: 3, after: 9 });
-        assert!(ordered.contains(&(k::LABEL_SEQ.to_string(), "3".to_string())));
-        assert!(ordered.contains(&(k::LABEL_AFTER_SEQ.to_string(), "9".to_string())));
     }
 
     /// A structured refusal carries the stage, a human-readable reason, and
