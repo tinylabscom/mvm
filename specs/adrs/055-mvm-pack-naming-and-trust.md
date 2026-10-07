@@ -34,13 +34,13 @@ The owner renamed `tinylabscom/mvm-templates` to `tinylabscom/mvm-packs` on
 2026-10-06. The repository already publishes signed packs, while its
 remaining unsigned templates become examples or pack-aware scaffolds. The
 rename changes the publish workflow's keyless identity; it does not change
-the identity in existing signature bundles. The old identity remains the
-only built-in authority until an explicit trust migration is approved and
-shipped. A transition may accept the new identity for legacy `agent/` and
-`runtime/` references while retaining the old one only for a documented
-cutoff period, or may re-sign existing artifacts first. Neither path grants
-`mvm/` trust before revocation enforcement. A URL redirect is not signing
-authority.
+the identity in existing signature bundles. On 2026-10-07 the owner approved
+built-in trust in both exact workflow identities for legacy `agent/` and
+`runtime/` references. The former identity expires at 2026-11-06 00:00 UTC;
+verification after that instant accepts only the renamed workflow identity.
+An operator policy file still replaces built-in trust wholesale. This
+transition does not grant `mvm/` trust before revocation enforcement. A URL
+redirect is not signing authority.
 
 The workload pack CLI becomes `mvmctl pack info|verify|pull|run|ls|rm|update`.
 The attested builder/runtime/image-project cache moves under `pack system`,
@@ -64,6 +64,8 @@ The new namespace and CLI verbs require migration guidance for existing
 lockfiles, `run --policy` references and the current `pack registry` syntax.
 Existing signatures remain bound to the old workflow identity until a
 verified rotation or re-publication. A new-identity publish must not replace
-the legacy registry before compatible client trust ships; official `mvm/`
-publication also requires revocation enforcement. ADR-054's pack producer is
-the renamed repository; its Linux-layer boundary is unchanged.
+the legacy registry before compatible client trust ships. After the cutoff,
+legacy-only bundles fail built-in verification unless re-signed under the new
+identity; explicit operator trust remains a separate decision. Official
+`mvm/` publication also requires revocation enforcement. ADR-054's pack
+producer is the renamed repository; its Linux-layer boundary is unchanged.

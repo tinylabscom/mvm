@@ -360,10 +360,11 @@ bounds are ceilings, and `env.readmit` and `shares.mount` entries the pack
 carries are stripped with notes, never honoured.
 
 Legacy pack trust is the default: with no publisher policy file, packs
-signed by the old `mvm-templates` publish workflow verify only in `agent/`
-and `runtime/`. The renamed workflow's new identity and the `mvm/` namespace
-are not built-in trust authorities yet. To make your own trust decision — pin
-other publishers, or refuse packs outright — write
+signed by the old `mvm-templates` or renamed `mvm-packs` publish workflow
+verify only in `agent/` and `runtime/`. The former identity expires from
+built-in trust at 2026-11-06 00:00 UTC; `mvm/` has no built-in trust until
+revocation enforcement exists. To make your own trust decision — pin other
+publishers, or refuse packs outright — write
 `$MVM_HOME/registry/publishers.toml`; it
 replaces the default wholesale, and a malformed file fails closed rather
 than silently widening trust. One publisher may use the `*` namespace to

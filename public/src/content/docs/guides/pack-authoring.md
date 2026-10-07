@@ -188,13 +188,14 @@ under `pack-sources/`. The publish workflow builds the registry layout by:
 4. checking the result with `scripts/validate-packs.py`;
 5. committing the published layout under `packs/`.
 
-The repository rename changes that workflow's signing identity. The current
-CLI still trusts signatures from the old `mvm-templates` workflow only. Hold
-new signed publication until the signing-identity transition is approved and
-a client release explicitly trusts the new identity; a new bundle is not made
-trustworthy by the repository URL change. Existing signed versions retain
-their old identity. Official `mvm/` status additionally requires revocation
-enforcement and a published, verified pack.
+The repository rename changes that workflow's signing identity. The built-in
+policy accepts both exact workflow identities for legacy `agent/` and
+`runtime/` packs until 2026-11-06 00:00 UTC, when the former identity expires.
+Publish newly signed bundles only after a client release with that policy is
+available; a repository URL change alone does not make a bundle trustworthy.
+Existing signed versions retain their old identity unless re-signed. Official
+`mvm/` status additionally requires revocation enforcement and a published,
+verified pack.
 
 ```text
 packs/index.json
@@ -274,19 +275,19 @@ installed until `mvmctl pull` restores it.
 
 ## Decide who may publish
 
-With no trust policy file, `mvmctl` accepts the old publish workflow identity
-for the existing `agent/` and `runtime/` namespaces only:
+With no trust policy file, `mvmctl` accepts the renamed publish workflow
+identity for the existing `agent/` and `runtime/` namespaces only:
 
 ```text
-https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main
+https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main
 ```
 
-under the issuer `https://token.actions.githubusercontent.com`. The renamed
-`mvm-packs` workflow has a different identity and is not trusted by this
-default. There is no default trust for `mvm/` or community namespaces. To
-make your own decision, write `$MVM_HOME/registry/publishers.toml`. It replaces
-the default wholesale. This one keeps the legacy workflow for `runtime` packs
-only:
+under the issuer `https://token.actions.githubusercontent.com`. The former
+`mvm-templates` workflow identity is also accepted until 2026-11-06 00:00
+UTC, after which its bundles fail under built-in trust. There is no default
+trust for `mvm/` or community namespaces. To make your own decision, write
+`$MVM_HOME/registry/publishers.toml`. It replaces the default wholesale. This
+one keeps the former workflow for `runtime` packs only:
 
 ```toml
 schema_version = 1
@@ -334,19 +335,21 @@ changes for existing installations:
   override the new defaults. A mirror may keep serving an old signed artifact.
 - Previously published Sigstore bundles remain bound to the
   `mvm-templates` workflow identity. Renaming the repository cannot rewrite
-  them. The default trust policy still accepts that identity for `agent/` and
-  `runtime/` while those versions remain in use.
-- A bundle newly signed by the `mvm-packs` workflow has a different identity
-  and fails under the current default trust policy. Default trust in that
-  identity waits for owner approval and a client release. Official `mvm/`
-  publication also waits for revocation enforcement.
+  them. Built-in trust accepts that identity for `agent/` and `runtime/` only
+  before 2026-11-06 00:00 UTC, including when reopening an installed pack.
+- A bundle newly signed by the `mvm-packs` workflow has a different identity.
+  The built-in policy accepts it for legacy `agent/` and `runtime/` packs, but
+  the publisher must wait until that client policy is released before replacing
+  the old bundles. Official `mvm/` publication still waits for revocation
+  enforcement.
 - Existing `agent/name` and `runtime/name` references and lock pins are not
   rewritten. Future `mvm/name` references are distinct coordinates and need
   an explicit pull and trust decision; no `mvm/` pack is published as official
   by this rename.
 - An operator `publishers.toml` continues to replace the built-in policy
-  completely. Operators who intentionally trust more than one identity must
-  list each one explicitly and plan for rotation and revocation.
+  completely. Its explicitly listed identities are not changed by the built-in
+  cutoff; operators who intentionally keep the former identity must own that
+  trust and its revocation plan.
 
 The index is a small JSON document, and unknown fields in it are refused:
 
