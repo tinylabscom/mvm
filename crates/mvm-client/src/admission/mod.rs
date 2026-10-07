@@ -367,12 +367,12 @@ pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionCon
     // Hashing a freshly built root filesystem for the plan reads every byte
     // of it; later boots are served from the digest cache and stay silent.
     let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
-    let admitted = admit_plan_for_boot_with_ingress(p, Vec::new())?;
+    let admitted = admit_plan_for_boot_configured_ingress(p, Vec::new())?;
     phase.finish();
     Ok(admitted)
 }
 
-pub fn admit_plan_for_boot_with_ingress(
+pub fn admit_plan_for_boot_configured_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {

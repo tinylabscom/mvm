@@ -80,7 +80,7 @@ fn receiver_authenticates_with_a_signer_owned_outside_the_collector() {
         let mut sender = TelemetrySender::connect(&mut guest, guest_key, &host_anchor).unwrap();
         sender.send(&mut guest, &record()).unwrap();
     });
-    let mut receiver = TelemetryReceiver::connect_with_signer(
+    let mut receiver = TelemetryReceiver::connect_authenticated(
         &mut host,
         &host_anchor,
         &guest_anchor,
@@ -107,7 +107,7 @@ fn external_signer_failure_or_wrong_signature_cannot_authenticate_a_collector() 
         let guest_anchor = guest_key.verifying_key();
         let producer =
             thread::spawn(move || TelemetrySender::connect(&mut guest, guest_key, &host_anchor));
-        let result = TelemetryReceiver::connect_with_signer(
+        let result = TelemetryReceiver::connect_authenticated(
             &mut host,
             &host_anchor,
             &guest_anchor,
@@ -135,11 +135,15 @@ fn an_unregistered_guest_never_reaches_the_external_signer() {
     let producer =
         thread::spawn(move || TelemetrySender::connect(&mut guest, stranger, &host_anchor));
     let mut called = false;
-    let result =
-        TelemetryReceiver::connect_with_signer(&mut host, &host_anchor, &expected_guest, |_, _| {
+    let result = TelemetryReceiver::connect_authenticated(
+        &mut host,
+        &host_anchor,
+        &expected_guest,
+        |_, _| {
             called = true;
             Err(SessionError::Io(std::io::ErrorKind::BrokenPipe.into()))
-        });
+        },
+    );
     assert!(matches!(result, Err(TelemetryError::Authentication)));
     assert!(!called);
     drop(host);

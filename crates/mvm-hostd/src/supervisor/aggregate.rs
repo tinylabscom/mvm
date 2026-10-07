@@ -1075,7 +1075,7 @@ pub fn build_inspector_chain(
 /// Refuses unknown `pii.mode` / `pii.categories[i]` values via
 /// `PiiPolicyError` so a typo fails the boot loudly at admission
 /// rather than silently scanning fewer categories than intended.
-pub fn build_inspector_chain_with_pii(
+pub fn build_pii_inspector_chain(
     egress: &EgressPolicy,
     pii: &mvm_core::policy::PiiPolicy,
     breakers: Option<Arc<InspectorReporter>>,
@@ -2375,18 +2375,18 @@ mod tests {
     }
 
     #[test]
-    fn build_inspector_chain_with_pii_default_matches_default_chain() {
+    fn build_pii_inspector_chain_default_matches_default_chain() {
         // No PII policy override → chain length matches the lenient
         // 5-inspector default. Proves the new function is a strict
         // superset of `build_inspector_chain`'s shape.
         let egress = dev_egress_policy(false);
         let pii = dev_pii_policy();
-        let chain = build_inspector_chain_with_pii(&egress, &pii, None).expect("default ok");
+        let chain = build_pii_inspector_chain(&egress, &pii, None).expect("default ok");
         assert_eq!(chain.len(), 5);
     }
 
     #[test]
-    fn build_inspector_chain_with_pii_drops_inspector_when_mode_disabled() {
+    fn build_pii_inspector_chain_drops_inspector_when_mode_disabled() {
         // `pii.mode = "disabled"` is the operator-natural kill-switch;
         // semantically equivalent to adding `"pii_redactor"` to
         // `disabled_inspectors`. The chain shrinks to 4.
@@ -2395,12 +2395,12 @@ mod tests {
             mode: Some("disabled".to_string()),
             categories: vec![],
         };
-        let chain = build_inspector_chain_with_pii(&egress, &pii, None).expect("disabled ok");
+        let chain = build_pii_inspector_chain(&egress, &pii, None).expect("disabled ok");
         assert_eq!(chain.len(), 4);
     }
 
     #[test]
-    fn build_inspector_chain_with_pii_honors_redact_mode() {
+    fn build_pii_inspector_chain_honors_redact_mode() {
         // `pii.mode = "redact"` keeps the inspector in the chain but
         // its internal Mode flips to Redact. We can't easily inspect
         // the internal Mode through the InspectorChain trait surface,
@@ -2417,13 +2417,13 @@ mod tests {
     }
 
     #[test]
-    fn build_inspector_chain_with_pii_refuses_unknown_mode() {
+    fn build_pii_inspector_chain_refuses_unknown_mode() {
         let egress = dev_egress_policy(false);
         let pii = mvm_core::policy::PiiPolicy {
             mode: Some("paranoid".to_string()),
             categories: vec![],
         };
-        let err = build_inspector_chain_with_pii(&egress, &pii, None).expect_err("typo");
+        let err = build_pii_inspector_chain(&egress, &pii, None).expect_err("typo");
         match err {
             crate::supervisor::pii_redactor::PiiPolicyError::UnknownMode { value, valid } => {
                 assert_eq!(value, "paranoid");
@@ -2435,13 +2435,13 @@ mod tests {
     }
 
     #[test]
-    fn build_inspector_chain_with_pii_refuses_unknown_category() {
+    fn build_pii_inspector_chain_refuses_unknown_category() {
         let egress = dev_egress_policy(false);
         let pii = mvm_core::policy::PiiPolicy {
             mode: Some("detect".to_string()),
             categories: vec!["email".to_string(), "license_plate".to_string()],
         };
-        let err = build_inspector_chain_with_pii(&egress, &pii, None).expect_err("typo");
+        let err = build_pii_inspector_chain(&egress, &pii, None).expect_err("typo");
         match err {
             crate::supervisor::pii_redactor::PiiPolicyError::UnknownCategory {
                 index,

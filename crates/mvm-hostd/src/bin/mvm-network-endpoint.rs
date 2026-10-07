@@ -38,7 +38,7 @@ use mvm_hostd::supervisor::flowmux::{
 };
 use mvm_hostd::supervisor::network_endpoint::{
     EgressMode, EndpointConfig, EndpointHandshake, EndpointNetworkProjection, EndpointTransport,
-    ResolverBackend, assemble_with_projection, fingerprint_bound_secrets, parse,
+    ResolverBackend, assemble_projected, fingerprint_bound_secrets, parse,
 };
 
 fn read_stdin_blocking() -> Result<Vec<u8>> {
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
     // placeholder with nothing to resolve it.
     let network_projection = EndpointNetworkProjection::from_config(&cfg);
     let (assembled, oauth_refresh) = {
-        let (service, handed, oauth_refresh) = assemble_with_projection(&cfg, &network_projection)
+        let (service, handed, oauth_refresh) = assemble_projected(&cfg, &network_projection)
             .context("assembling substitution service")?;
         (Some((service, handed)), oauth_refresh)
     };

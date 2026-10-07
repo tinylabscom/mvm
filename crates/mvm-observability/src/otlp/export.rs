@@ -292,7 +292,7 @@ pub(crate) fn start(config: &OtlpConfig) -> std::io::Result<(SpanQueue, ExportGu
         resource: ResourceInfo::current(config.service_name()),
         endpoint: endpoint_for_report(config.endpoint()),
     };
-    start_with_sink(worker, QUEUE_CAPACITY, config.timeout())
+    start_injected_sink(worker, QUEUE_CAPACITY, config.timeout())
 }
 
 /// The endpoint as a failure report may print it: without the query or
@@ -313,7 +313,7 @@ pub(crate) struct Worker<K> {
     pub(crate) endpoint: String,
 }
 
-pub(crate) fn start_with_sink<K: BatchSink>(
+pub(crate) fn start_injected_sink<K: BatchSink>(
     worker: Worker<K>,
     capacity: usize,
     wait: Duration,
@@ -497,7 +497,7 @@ mod tests {
     fn dropping_the_guard_flushes_queued_spans_in_bounded_batches() {
         let sink = Capture::default();
         let (queue, guard) =
-            start_with_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
+            start_injected_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
         for id in 1..=(MAX_BATCH as u64 + 10) {
             queue.offer(span(id));
         }
@@ -520,7 +520,8 @@ mod tests {
     }
 
     fn installed_slot(sink: Capture, spans: u64) -> ExportSlot {
-        let (queue, guard) = start_with_sink(worker(sink), 4096, Duration::from_secs(5)).unwrap();
+        let (queue, guard) =
+            start_injected_sink(worker(sink), 4096, Duration::from_secs(5)).unwrap();
         (1..=spans).for_each(|id| queue.offer(span(id)));
         let slot = ExportSlot::new();
         slot.install(guard);
@@ -560,7 +561,7 @@ mod tests {
             resource: ResourceInfo::current("test"),
             endpoint: "https://collector.example.com/v1/traces".into(),
         };
-        let (queue, guard) = start_with_sink(worker, 16, Duration::from_secs(30)).unwrap();
+        let (queue, guard) = start_injected_sink(worker, 16, Duration::from_secs(30)).unwrap();
         queue.offer(span(1));
         let slot = ExportSlot::new();
         slot.install(guard);
@@ -578,7 +579,7 @@ mod tests {
     fn a_guard_flushed_explicitly_does_not_flush_again_when_dropped() {
         let sink = Capture::default();
         let (queue, mut guard) =
-            start_with_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
+            start_injected_sink(worker(sink.clone()), 4096, Duration::from_secs(5)).unwrap();
         queue.offer(span(1));
         assert!(guard.flush_within(Duration::from_secs(5)));
         assert!(!guard.flush_within(Duration::from_secs(5)));

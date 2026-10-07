@@ -254,7 +254,7 @@ pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
 /// content) moves its mtime and forces a re-hash, so a stale digest can never
 /// be admitted. A read-only cache dir simply means the next boot re-hashes.
 pub fn sha256_file_cached(path: &Path) -> io::Result<String> {
-    sha256_file_cached_with_source(path).map(|(hex, _)| hex)
+    sha256_file_cached_report_source(path).map(|(hex, _)| hex)
 }
 
 /// Where a [`sha256_file_cached`] digest came from.
@@ -273,7 +273,7 @@ pub enum DigestSource {
 
 /// [`sha256_file_cached`], reporting whether the sidecar served the digest.
 #[tracing::instrument(name = "sha256_file.cached", skip_all, fields(path = %path.display()))]
-pub fn sha256_file_cached_with_source(path: &Path) -> io::Result<(String, DigestSource)> {
+pub fn sha256_file_cached_report_source(path: &Path) -> io::Result<(String, DigestSource)> {
     let meta = fs::metadata(path)?;
     let size = meta.len();
     let mtime_nanos = meta
@@ -398,14 +398,14 @@ mod tests {
         let sidecar = sha256_cache_path(&p);
         let _ = fs::remove_file(&sidecar);
 
-        let (miss, miss_source) = sha256_file_cached_with_source(&p).expect("cached miss");
+        let (miss, miss_source) = sha256_file_cached_report_source(&p).expect("cached miss");
         assert_eq!(
             miss_source,
             DigestSource::Hashed(body.len() as u64),
             "a sidecar miss reads the whole artifact"
         );
 
-        let (hit, hit_source) = sha256_file_cached_with_source(&p).expect("cached hit");
+        let (hit, hit_source) = sha256_file_cached_report_source(&p).expect("cached hit");
         assert_eq!(hit, miss, "a hit serves the digest the miss computed");
         assert_eq!(
             hit_source,
@@ -417,7 +417,7 @@ mod tests {
         // than serve the digest of content that is gone.
         f.write_all(b" jumps").expect("append");
         f.flush().expect("flush");
-        let (fresh, fresh_source) = sha256_file_cached_with_source(&p).expect("after rewrite");
+        let (fresh, fresh_source) = sha256_file_cached_report_source(&p).expect("after rewrite");
         assert_ne!(fresh, miss, "content changed, so the digest must change");
         assert!(
             matches!(fresh_source, DigestSource::Hashed(_)),

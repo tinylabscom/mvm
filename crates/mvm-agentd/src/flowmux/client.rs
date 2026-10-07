@@ -17,11 +17,11 @@ impl FlowMuxClient {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        Self::connect_with_ingress(stream, guest_signing_key, host_anchor, Vec::new()).await
+        Self::connect_ingress_targets(stream, guest_signing_key, host_anchor, Vec::new()).await
     }
 
     /// Connect with the signed plan's guest-loopback ingress targets.
-    pub async fn connect_with_ingress<S>(
+    pub async fn connect_ingress_targets<S>(
         stream: S,
         guest_signing_key: SigningKey,
         host_anchor: VerifyingKey,

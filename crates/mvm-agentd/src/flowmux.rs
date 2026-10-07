@@ -975,7 +975,7 @@ mod tests {
             }
         });
 
-        let _client = FlowMuxClient::connect_with_ingress(
+        let _client = FlowMuxClient::connect_ingress_targets(
             guest_stream,
             guest_key,
             host_anchor,
@@ -1037,7 +1037,7 @@ mod tests {
             assert!(!reason.is_empty());
         });
 
-        let _client = FlowMuxClient::connect_with_ingress(
+        let _client = FlowMuxClient::connect_ingress_targets(
             guest_stream,
             guest_key,
             host_anchor,
@@ -1110,7 +1110,7 @@ mod tests {
             assert_eq!(body, b"udp-response");
         });
 
-        let _client = FlowMuxClient::connect_with_ingress(
+        let _client = FlowMuxClient::connect_ingress_targets(
             guest_stream,
             guest_key,
             host_anchor,
