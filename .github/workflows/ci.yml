@@ -979,20 +979,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each broker races one shard across eligible runner pools. The worker
-        # that actually starts first owns the shard; its queued sibling is
-        # cancelled. A matrix in this workflow cannot provide that semantic,
-        # because Actions waits for every matrix child, including the loser.
+        # Each broker starts one shard on a fresh hosted runner. The
+        # persistent runner pool is reserved until its workspace tests can
+        # run without filesystem and privilege state leaking between jobs.
         shard: [1, 2]
-    runs-on: ubuntu-slim
-    timeout-minutes: 60
+    # The shard broker can wait longer than the 15-minute ubuntu-slim job cap.
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
     steps:
       - name: Run shard on the first available runner
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           COMMIT_SHA: ${{ github.sha }}
           SHARD: ${{ matrix.shard }}
-          ALLOW_SELF_HOSTED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -1003,9 +1002,6 @@ jobs:
           auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json")
           correlation="${RUN_ID}-${RUN_ATTEMPT}-${SHARD}"
           candidates=(github)
-          if [ "$ALLOW_SELF_HOSTED" = true ]; then
-            candidates+=(hetzner)
-          fi
 
           run_ids=()
           cleanup() {
@@ -1030,7 +1026,7 @@ jobs:
           done
 
           winner=
-          deadline=$((SECONDS + 600))
+          deadline=$((SECONDS + 1800))
           while [ -z "$winner" ] && [ "$SECONDS" -lt "$deadline" ]; do
             runs="$(curl -fsS "${auth[@]}" \
               "$api/actions/workflows/workspace-shard.yml/runs?event=workflow_dispatch&per_page=50")"
@@ -1050,7 +1046,7 @@ jobs:
             [ -n "$winner" ] || sleep 3
           done
           if [ -z "$winner" ]; then
-            echo "::error::no workspace shard candidate started within 10 minutes" >&2
+            echo "::error::no workspace shard candidate started within 30 minutes" >&2
             exit 1
           fi
 

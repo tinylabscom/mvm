@@ -863,11 +863,11 @@ mod tests {
         for expected in [
             "permissions:",
             "actions: write",
-            "runs-on: ubuntu-slim",
-            "ALLOW_SELF_HOSTED:",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 90",
             "actions/workflows/workspace-shard.yml/dispatches",
             "candidates=(github)",
-            "candidates+=(hetzner)",
+            "deadline=$((SECONDS + 1800))",
             "actions/runs/$run_id/cancel",
             "--arg archive_run_id \"$RUN_ID\"",
         ] {
@@ -876,6 +876,7 @@ mod tests {
                 "workspace runner broker must contain {expected:?}"
             );
         }
+        assert!(!test_workspace.contains("candidates+=(hetzner)"));
         let workspace_worker = self::workflow("workspace-shard.yml");
         for expected in [
             "fromJSON('[\"self-hosted\",\"Linux\",\"X64\",\"mvm\",\"hetzner\",\"kvm\"]')",
