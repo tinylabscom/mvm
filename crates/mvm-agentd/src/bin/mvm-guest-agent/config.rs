@@ -53,19 +53,9 @@ pub(crate) fn print_usage() {
     );
 }
 
+/// Parse the command line and the config file it names, and record the
+/// resolved path for the SIGHUP reload.
 pub(crate) fn parse_config() -> AgentConfig {
-    let (cfg, resolved_path) = parse_config_with_path();
-    // Stash the resolved config path so the SIGHUP handler's
-    // `apply_reload` re-reads the same file the operator launched
-    // against (handles `--config <path>` overrides).
-    let _ = crate::globals::AGENT_CONFIG_PATH.set(resolved_path);
-    cfg
-}
-
-/// Test seam — returns the resolved path the file was read from
-/// (or the default path if nothing was found) alongside the
-/// parsed config. Production goes through [`parse_config`].
-pub(crate) fn parse_config_with_path() -> (AgentConfig, PathBuf) {
     let args: Vec<String> = std::env::args().collect();
     let mut config_path: Option<String> = None;
     let mut cli_port: Option<u32> = None;
@@ -159,5 +149,9 @@ pub(crate) fn parse_config_with_path() -> (AgentConfig, PathBuf) {
     let resolved = config_path
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
-    (cfg, resolved)
+    // Stash the resolved config path so the SIGHUP handler's
+    // `apply_reload` re-reads the same file the operator launched
+    // against (handles `--config <path>` overrides).
+    let _ = crate::globals::AGENT_CONFIG_PATH.set(resolved);
+    cfg
 }

@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_core::plan::bundle::{BundleManifest, bundle_sha256};
+use mvm_core::plan::bundle::BundleManifest;
 use serde::Serialize;
 
 /// The encoding of a debug summary.
@@ -39,17 +39,23 @@ struct DebugSummary<'a> {
     manifest: &'a BundleManifest,
 }
 
-/// Render the summary of `archive`, as written to `bundle_path`.
+/// The written archive's digest and size.
+pub(crate) struct ArchiveIdentity {
+    pub sha256: String,
+    pub size_bytes: u64,
+}
+
+/// Render the summary of the archive written to `bundle_path`.
 pub(crate) fn render(
     format: DebugFormat,
     bundle_path: &Path,
-    archive: &[u8],
+    archive: ArchiveIdentity,
     manifest: &BundleManifest,
 ) -> Result<Vec<u8>> {
     let summary = DebugSummary {
         bundle_path: bundle_path.display().to_string(),
-        bundle_sha256: bundle_sha256(archive),
-        size_bytes: archive.len() as u64,
+        bundle_sha256: archive.sha256,
+        size_bytes: archive.size_bytes,
         manifest,
     };
     match format {

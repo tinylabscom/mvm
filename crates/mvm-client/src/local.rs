@@ -29,7 +29,7 @@ use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
-    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer_with_prior_paths,
+    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer,
 };
 use mvm_runtime::AnyBackend;
 
@@ -1024,18 +1024,18 @@ fn unpack_one_layer(
 ) -> Result<UnpackReport> {
     let mt = &layer.media_type;
     let report = if mt.ends_with("+gzip") || mt.ends_with(".gzip") || mt.contains("tar.gzip") {
-        unpack_layer_with_prior_paths(
+        unpack_layer(
             GzDecoder::new(Cursor::new(bytes)),
             dest,
             &UnpackOptions::default(),
-            prior_layer_paths,
+            Some(prior_layer_paths),
         )
     } else {
-        unpack_layer_with_prior_paths(
+        unpack_layer(
             Cursor::new(bytes),
             dest,
             &UnpackOptions::default(),
-            prior_layer_paths,
+            Some(prior_layer_paths),
         )
     }
     .map_err(|e| backend_err(format!("unpack layer {}: {e}", layer.digest)))?;
@@ -1272,6 +1272,11 @@ impl MvmClient for LocalBackend {
         // the user can see what happened. A persistent machine's spec is
         // never touched by stop — only remove deletes a definition.
         if result.is_ok() {
+            // Seal first: the session ended with the stop, and nothing below
+            // may skip recording that.
+            if let Some(plan) = &stopped_session {
+                crate::launch::seal_stopped_session(plan, &id.0);
+            }
             deregister_from_name_registry(&id.0);
             // Release the stopped owner's volume-attachment leases (re-sealing
             // any just-in-time unlocked volume). Best-effort: the stop itself
@@ -1281,9 +1286,10 @@ impl MvmClient for LocalBackend {
                 tracing::warn!(error = %e, machine = %id.0, "releasing volume leases after stop failed");
             }
             remove_stopped_runtime_state(&id.0)?;
-            if let Some(plan) = stopped_session {
-                crate::launch::seal_stopped_session(&plan, &id.0);
-            }
+        } else if let (Err(e), Some(plan)) = (&result, &stopped_session) {
+            // The machine may still be running, so its session stays open; the
+            // failed stop is still put on the record under its plan.
+            crate::launch::record_session_stop_failure(Some(plan), &id.0, &format!("{e:#}"));
         }
         result.map(|_timing| ()).map_err(backend_err)
     }

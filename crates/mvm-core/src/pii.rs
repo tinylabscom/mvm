@@ -306,19 +306,12 @@ impl PiiRedactor {
         hits
     }
 
-    /// Validated match byte ranges (`[start, end)`) across all rules. Same
-    /// precision as `scan`/`redact` (a match failing its validator is excluded).
-    /// For callers that need positions, not just category names — e.g. the name
-    /// detector's co-occurrence signal ("a name adjacent to other PII").
-    pub fn match_spans(&self, body: &[u8]) -> Vec<(usize, usize)> {
-        self.match_spans_with_categories(body)
-            .into_iter()
-            .map(|m| (m.start, m.end))
-            .collect()
-    }
-
-    /// Validated match byte ranges with their category names.
-    pub fn match_spans_with_categories(&self, body: &[u8]) -> Vec<PiiMatch> {
+    /// Validated match byte ranges (`[start, end)`) across all rules, with
+    /// the category that matched. Same precision as `scan`/`redact` (a match
+    /// failing its validator is excluded). For callers that need positions,
+    /// not just category names — e.g. the name detector's co-occurrence signal
+    /// ("a name adjacent to other PII").
+    pub fn match_spans(&self, body: &[u8]) -> Vec<PiiMatch> {
         let candidate_indices: Vec<usize> = self.set.matches(body).into_iter().collect();
         let mut spans = Vec::new();
         for idx in candidate_indices {

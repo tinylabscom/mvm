@@ -1,6 +1,6 @@
 //! Step definitions for OCI image layer materialization scenarios.
 //!
-//! These steps exercise `mvm_fs::oci::unpack_layer_with_prior_paths` directly
+//! These steps exercise `mvm_fs::oci::unpack_layer` directly
 //! so multi-layer semantics stay covered without requiring a live registry or
 //! a full microVM boot for every scenario.
 
@@ -92,11 +92,11 @@ fn unpack_layer(world: &mut CliWorld, step: &cucumber::gherkin::Step) {
         .expect("layer entries must be given as a data table");
     let tar_bytes = build_layer_tar(table);
 
-    let report = mvm_fs::oci::unpack_layer_with_prior_paths(
+    let report = mvm_fs::oci::unpack_layer(
         Cursor::new(tar_bytes),
         root,
         &mvm_fs::oci::UnpackOptions::default(),
-        &world.prior_layer_paths,
+        Some(&world.prior_layer_paths),
     )
     .expect("layer unpack should succeed");
 

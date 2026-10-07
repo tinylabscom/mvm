@@ -9,12 +9,8 @@ use std::path::Path;
 use tar::{Builder, EntryType, Header};
 
 /// Append one regular file entry to `builder` at `path` with
-/// `contents`. Mode defaults to 0644.
-pub fn add_file(builder: &mut Builder<Vec<u8>>, path: &str, contents: &[u8]) {
-    add_file_with_mode(builder, path, contents, 0o644);
-}
-
-pub fn add_file_with_mode(builder: &mut Builder<Vec<u8>>, path: &str, contents: &[u8], mode: u32) {
+/// `contents` and `mode`.
+pub fn add_file(builder: &mut Builder<Vec<u8>>, path: &str, contents: &[u8], mode: u32) {
     let mut header = Header::new_gnu();
     header.set_size(contents.len() as u64);
     header.set_mode(mode);

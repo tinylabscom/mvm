@@ -1653,6 +1653,7 @@ mod injected_ownership_tests {
             builder.into_inner().unwrap().as_slice(),
             tree.path(),
             &mvm_fs::oci::unpack::UnpackOptions::default(),
+            None,
         )
         .unwrap();
         let mut owners = mvm_fs::ownership::OwnerTable::new();
@@ -1780,6 +1781,7 @@ mod tree_only_materialization_loss_tests {
             builder.into_inner().unwrap().as_slice(),
             tree.path(),
             &mvm_fs::oci::unpack::UnpackOptions::default(),
+            None,
         )
         .unwrap();
         let mut owners = mvm_fs::ownership::OwnerTable::new();

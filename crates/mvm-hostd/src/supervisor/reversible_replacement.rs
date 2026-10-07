@@ -407,17 +407,14 @@ impl ReplacementFlow {
             ));
         }
         if self.action.handles_class(SensitiveClass::Pii) {
-            spans.extend(
-                self.pii
-                    .match_spans_with_categories(payload)
-                    .into_iter()
-                    .map(|PiiMatch { name, start, end }| DetectedSpan {
-                        class: SensitiveClass::Pii,
-                        category: name,
-                        start,
-                        end,
-                    }),
-            );
+            spans.extend(self.pii.match_spans(payload).into_iter().map(
+                |PiiMatch { name, start, end }| DetectedSpan {
+                    class: SensitiveClass::Pii,
+                    category: name,
+                    start,
+                    end,
+                },
+            ));
         }
         spans.sort_by(|left, right| {
             left.start

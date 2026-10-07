@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use mvm_client::policy_profiles::{LayerOrigin, PolicyRef, PolicyStore};
-use mvm_core::registry_pack::{RegistryPackPublisher, RegistryPackPublisherPolicy};
+use mvm_core::registry_pack::{
+    LEGACY_PACK_SIGNING_CUTOFF, RegistryPackPublisher, RegistryPackPublisherPolicy,
+};
 use mvm_core::registry_pack_store::{
     load_pack_lockfile, open_installed_registry_pack, save_publisher_policy,
 };
@@ -77,17 +79,26 @@ fn isolated_registry(temp: &TempDir, manifest: &[u8], group: &[u8]) -> TestEnv {
 }
 
 #[test]
-fn the_builtin_default_does_not_trust_the_historical_fixture_identity() {
+fn the_builtin_default_bounds_trust_in_the_historical_fixture_identity() {
     let temp = TempDir::new().expect("tempdir");
     let _env = isolated_registry(&temp, MANIFEST, GROUP);
     std::fs::remove_file(mvm_core::config::registry_pack_publisher_policy_path())
         .expect("remove explicit fixture trust");
 
-    let error = mvm_cli::pack_registry::pull("runtime/go")
-        .expect_err("former publisher must not be trusted by default");
-    assert!(format!("{error:#}").contains("signature"));
+    let cutoff = chrono::DateTime::parse_from_rfc3339(LEGACY_PACK_SIGNING_CUTOFF)
+        .expect("built-in cutoff is RFC 3339")
+        .with_timezone(&chrono::Utc);
+    let result = mvm_cli::pack_registry::pull("runtime/go");
     let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
-    assert!(lock.pins().is_empty());
+    if chrono::Utc::now() < cutoff {
+        let summary = result.expect("former publisher is trusted before the cutoff");
+        assert_eq!(summary.manifest_sha256, MANIFEST_SHA256);
+        assert_eq!(lock.pins().len(), 1);
+    } else {
+        let error = result.expect_err("former publisher must be refused after the cutoff");
+        assert!(format!("{error:#}").contains("signature"));
+        assert!(lock.pins().is_empty());
+    }
 }
 
 #[test]

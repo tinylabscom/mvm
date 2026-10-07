@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mvm_client::approval_broker::display_safe;
@@ -19,7 +19,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 use super::egress_denials::{DenialTally, DeniedDestination};
 use super::exec::RunArgs;
 use super::host_notices::{NoticeSink, Stderr};
-use crate::approval::tty::{ARMING_WINDOW, ControllingTty, Terminal};
+use crate::approval::tty::{ControllingTty, Terminal, ask_armed};
 
 const ANSWER_LIMIT: usize = 32;
 const DISPLAY_LIMIT: usize = 200;
@@ -63,18 +63,6 @@ fn candidate(denial: &DeniedDestination) -> Option<GrantCandidate> {
         description: denial.description.clone(),
         requires_explicit_name: denial.requires_explicit_name(),
     })
-}
-
-/// Open the controlling terminal and run the two-stage review, after verifying
-/// the local audit chain. `Ok(false)` means no terminal, no candidates, or the
-/// operator declined the write.
-pub(in crate::commands) fn review(tally: &DenialTally, manifest: &Path) -> Result<bool> {
-    review_with(
-        &tally.destinations(),
-        manifest,
-        &mut LocalHost::verifying_chain(),
-    )
-    .map(ReviewOutcome::wrote)
 }
 
 /// Review denials recovered after the run from the verified audit chain.
@@ -189,6 +177,12 @@ impl ReviewOffer {
 /// says why.
 pub(in crate::commands) fn summarize_and_offer(tally: &DenialTally, offer: &ReviewOffer) {
     summarize_and_offer_with(tally, offer, &mut LocalHost::verifying_chain());
+}
+
+/// Offer a finished run's grantable refusals for review, for a lane that has
+/// already printed its exit summary.
+pub(in crate::commands) fn offer(tally: &DenialTally, offer: &ReviewOffer) {
+    offer_with(tally, offer, &mut LocalHost::verifying_chain());
 }
 
 fn summarize_and_offer_with(tally: &DenialTally, offer: &ReviewOffer, host: &mut dyn ReviewHost) {
@@ -399,15 +393,9 @@ fn review_with_terminal(
     Ok(true)
 }
 
-/// Read one armed answer. Only the first ASCII word is relevant; everything
-/// typed before the prompt or during its arming window is discarded.
+/// Read one armed answer, lowercased.
 fn ask(terminal: &mut dyn Terminal, prompt: &str) -> Result<Option<String>> {
-    terminal.discard_input()?;
-    terminal.write(prompt)?;
-    terminal.pause(ARMING_WINDOW);
-    terminal.discard_input()?;
-    Ok(terminal
-        .read_line(Instant::now() + REVIEW_TIMEOUT, ANSWER_LIMIT)?
+    Ok(ask_armed(terminal, prompt, REVIEW_TIMEOUT, ANSWER_LIMIT)?
         .map(|line| line.trim().to_ascii_lowercase()))
 }
 
@@ -535,7 +523,7 @@ mod tests {
         }
         fn read_line(
             &mut self,
-            _deadline: Instant,
+            _deadline: std::time::Instant,
             _max_bytes: usize,
         ) -> std::io::Result<Option<String>> {
             Ok(self.answers.pop_front())
@@ -674,7 +662,7 @@ mod tests {
         }
         fn read_line(
             &mut self,
-            deadline: Instant,
+            deadline: std::time::Instant,
             max_bytes: usize,
         ) -> std::io::Result<Option<String>> {
             self.0.borrow_mut().read_line(deadline, max_bytes)

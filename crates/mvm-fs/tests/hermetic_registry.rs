@@ -27,7 +27,7 @@ async fn manifest_fetch_round_trip_against_hermetic_registry() {
     let (manifest_bytes, _layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
 
     let manifest_digest = reg
-        .register_manifest_with_digest_path("library/test", "v1", MANIFEST_MEDIA, &manifest_bytes)
+        .register_manifest("library/test", "v1", MANIFEST_MEDIA, &manifest_bytes)
         .await;
 
     let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
@@ -51,7 +51,7 @@ async fn manifest_fetch_accepts_missing_docker_content_digest_header() {
     let (manifest_bytes, _layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
 
     let manifest_digest = reg
-        .register_manifest_without_digest_header_with_digest_path(
+        .register_manifest_without_digest_header(
             "library/test",
             "v1",
             MANIFEST_MEDIA,
@@ -74,7 +74,7 @@ async fn manifest_fetch_pinned_digest_still_verifies_without_digest_header() {
     let (manifest_bytes, _layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
 
     let manifest_digest = reg
-        .register_manifest_without_digest_header_with_digest_path(
+        .register_manifest_without_digest_header(
             "library/test",
             "v1",
             MANIFEST_MEDIA,
@@ -229,7 +229,7 @@ async fn manifest_layers_extracts_single_layer() {
     let layer_bytes = b"hello-mvm-layer-bytes";
     let (manifest_bytes, expected_layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
 
-    reg.register_manifest_with_digest_path("library/test", "v1", MANIFEST_MEDIA, &manifest_bytes)
+    reg.register_manifest("library/test", "v1", MANIFEST_MEDIA, &manifest_bytes)
         .await;
 
     let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
@@ -250,7 +250,7 @@ async fn platform_manifest_fetch_follows_matching_linux_index_entry() {
     let (child_manifest_bytes, expected_layer_digest) =
         minimal_image_manifest(layer_bytes, LAYER_MEDIA);
     let child_digest = reg
-        .register_manifest_with_digest_path(
+        .register_manifest(
             "library/alpine",
             "child",
             MANIFEST_MEDIA,
@@ -276,7 +276,7 @@ async fn platform_manifest_fetch_follows_matching_linux_index_entry() {
         ]
     });
     let index_bytes = serde_json::to_vec(&index).expect("index serializes");
-    reg.register_manifest_with_digest_path(
+    reg.register_manifest(
         "library/alpine",
         "3.20",
         "application/vnd.oci.image.index.v1+json",
@@ -310,7 +310,7 @@ async fn platform_manifest_fetch_accepts_arm64_without_variant_for_v8_request() 
     let (child_manifest_bytes, expected_layer_digest) =
         minimal_image_manifest(layer_bytes, LAYER_MEDIA);
     let child_digest = reg
-        .register_manifest_with_digest_path(
+        .register_manifest(
             "library/alpine",
             "child-no-variant",
             MANIFEST_MEDIA,
@@ -336,7 +336,7 @@ async fn platform_manifest_fetch_accepts_arm64_without_variant_for_v8_request() 
         ]
     });
     let index_bytes = serde_json::to_vec(&index).expect("index serializes");
-    reg.register_manifest_with_digest_path(
+    reg.register_manifest(
         "library/alpine",
         "3.21",
         "application/vnd.oci.image.index.v1+json",
@@ -656,7 +656,7 @@ async fn layer_fetch_round_trip_manifest_to_layers_to_blob() {
     // Construct a manifest pointing at layer A only; multi-layer
     // fan-out is exercised separately with the unpack orchestrator.
     let (manifest_bytes, expected_digest_a) = minimal_image_manifest(&layer_bytes_a, LAYER_MEDIA);
-    reg.register_manifest_with_digest_path("library/multi", "v1", MANIFEST_MEDIA, &manifest_bytes)
+    reg.register_manifest("library/multi", "v1", MANIFEST_MEDIA, &manifest_bytes)
         .await;
 
     let manifest_fetcher = OciManifestFetcher::with_config(client_config_for(&reg));

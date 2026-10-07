@@ -12,8 +12,7 @@ use flate2::read::GzDecoder;
 use mvm_build::rootfs::MaterializeExt4Input;
 use mvm_core::domain::manifest::canonical_key_for_path;
 use mvm_fs::oci::{
-    UnpackOptions, current_linux_platform, read_oci_archive, stream_oci_archive,
-    unpack_layer_with_prior_paths,
+    UnpackOptions, current_linux_platform, read_oci_archive, stream_oci_archive, unpack_layer,
 };
 
 use super::cache::sha256_hex;
@@ -127,18 +126,18 @@ fn ingest_archive_streamed<R: Read + std::io::Seek>(
     let mut owners = mvm_fs::ownership::OwnerTable::new();
     let metadata = stream_oci_archive(reader, &platform, |descriptor, raw| {
         let report = if is_gzip_layer(&descriptor.media_type) {
-            unpack_layer_with_prior_paths(
+            unpack_layer(
                 GzDecoder::new(raw),
                 &tmp_path,
                 &UnpackOptions::default(),
-                &prior_layer_paths,
+                Some(&prior_layer_paths),
             )
         } else {
-            unpack_layer_with_prior_paths(
+            unpack_layer(
                 raw,
                 &tmp_path,
                 &UnpackOptions::default(),
-                &prior_layer_paths,
+                Some(&prior_layer_paths),
             )
         }
         .map_err(|e| mvm_fs::oci::OciError::Registry(e.to_string()))?;
