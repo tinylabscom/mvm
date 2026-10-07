@@ -30,8 +30,11 @@ use crate::ui;
 pub(in crate::commands) mod detect;
 pub(in crate::commands) use detect::{Inference, resolve_run_source};
 mod network_access;
+mod review_source;
 mod run_mode;
 use network_access::NetworkAccess;
+pub(in crate::commands) use review_source::build_flake_slot;
+use review_source::offer_review;
 pub(in crate::commands) use run_mode::resolve_run_mode;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -349,6 +352,10 @@ pub(in crate::commands) struct RunArgs {
     /// Internal: backend used to resolve a backend-conditioned policy.
     #[arg(skip)]
     pub policy_backend: Option<mvm_core::protocol::vm_backend::BackendKind>,
+    /// Internal: where the run's policy came from, for reviewing its egress
+    /// refusals. Settled before a `--flake` is built into a slot.
+    #[arg(skip)]
+    pub review_source: Option<super::denial_review::ReviewSource>,
 }
 
 /// Every flag that authors policy. A resolved manifest is the whole policy,
@@ -544,14 +551,8 @@ pub(in crate::commands) fn run_transient(
              for a launch document, or `mvmctl machine run -d` to boot a machine with no command."
         );
     }
-    if !args.run.dry_run
-        && let Some(flake_ref) = args.run.flake.take()
-    {
-        let slot_hash = super::super::build::build::build_flake_to_slot(
-            &flake_ref,
-            args.run.flake_profile.as_deref(),
-        )?;
-        args.run.manifest = Some(slot_hash);
+    if !args.run.dry_run {
+        build_flake_slot(&mut args.run)?;
     }
     run_secure(cli, args.run, cfg, None)
 }
@@ -585,15 +586,13 @@ pub(in crate::commands) fn run_secure(
         }
         return Ok(());
     }
-    let review_manifest = if args.json {
+    // `--json` offers no review: its document carries the refusals instead.
+    let review_source = if args.json {
         None
     } else {
-        match super::run_routes::project_manifest(&args)? {
-            Some((path, _)) => Some(path),
-            None => {
-                let cwd = std::env::current_dir().context("resolving policy review directory")?;
-                Some(super::denial_review::manifest_path(&cwd)?)
-            }
+        match args.review_source.take() {
+            Some(source) => Some(source),
+            None => Some(super::denial_review::ReviewSource::for_launch(&args)?),
         }
     };
     // Prepare outputs before admission binds them to the grant.
@@ -851,11 +850,7 @@ pub(in crate::commands) fn run_secure(
         if !json_requested {
             network_access.announce_exit(output.exit_code, &super::host_notices::Stderr);
         }
-        if let Some(manifest) = review_manifest.as_deref()
-            && let Err(error) = super::denial_review::review(&refused, manifest)
-        {
-            ui::warn(&format!("could not review denied egress: {error:#}"));
-        }
+        offer_review(&refused, &denials, review_source.as_ref());
         if output.exit_code != 0 {
             mvm_observability::exit(output.exit_code);
         }
@@ -881,7 +876,7 @@ pub(in crate::commands) fn run_secure(
             outputs: &outputs,
             denials: &denials,
             network: network_access,
-            review_manifest: review_manifest.as_deref(),
+            review_source: review_source.as_ref(),
         },
     )
 }
@@ -928,8 +923,9 @@ struct RunAudit<'a> {
     denials: &'a super::egress_denials::PendingWatch,
     /// Whether the run could reach the network at all.
     network: NetworkAccess,
-    /// The single project manifest an explicitly confirmed draft updates.
-    review_manifest: Option<&'a Path>,
+    /// Where the run's policy came from; `None` for `--json`, which offers no
+    /// review.
+    review_source: Option<&'a super::denial_review::ReviewSource>,
 }
 
 /// Carries the OCI provenance labels from image resolution to the admission
@@ -981,11 +977,7 @@ fn run_run_args(
     audit
         .network
         .announce_exit(exit_code, &super::host_notices::Stderr);
-    if let Some(manifest) = audit.review_manifest
-        && let Err(error) = super::denial_review::review(&refused, manifest)
-    {
-        ui::warn(&format!("could not review denied egress: {error:#}"));
-    }
+    offer_review(&refused, audit.denials, audit.review_source);
     if exit_code != 0 {
         mvm_observability::exit(exit_code);
     }

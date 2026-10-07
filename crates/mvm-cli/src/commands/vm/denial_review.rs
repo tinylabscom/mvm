@@ -65,18 +65,6 @@ fn candidate(denial: &DeniedDestination) -> Option<GrantCandidate> {
     })
 }
 
-/// Open the controlling terminal and run the two-stage review, after verifying
-/// the local audit chain. `Ok(false)` means no terminal, no candidates, or the
-/// operator declined the write.
-pub(in crate::commands) fn review(tally: &DenialTally, manifest: &Path) -> Result<bool> {
-    review_with(
-        &tally.destinations(),
-        manifest,
-        &mut LocalHost::verifying_chain(),
-    )
-    .map(ReviewOutcome::wrote)
-}
-
 /// Review denials recovered after the run from the verified audit chain.
 pub(in crate::commands) fn review_destinations(
     denials: &[DeniedDestination],
@@ -189,6 +177,12 @@ impl ReviewOffer {
 /// says why.
 pub(in crate::commands) fn summarize_and_offer(tally: &DenialTally, offer: &ReviewOffer) {
     summarize_and_offer_with(tally, offer, &mut LocalHost::verifying_chain());
+}
+
+/// Offer a finished run's grantable refusals for review, for a lane that has
+/// already printed its exit summary.
+pub(in crate::commands) fn offer(tally: &DenialTally, offer: &ReviewOffer) {
+    offer_with(tally, offer, &mut LocalHost::verifying_chain());
 }
 
 fn summarize_and_offer_with(tally: &DenialTally, offer: &ReviewOffer, host: &mut dyn ReviewHost) {
