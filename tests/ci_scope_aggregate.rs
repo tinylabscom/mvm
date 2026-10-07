@@ -69,6 +69,8 @@ struct Verdict {
     event_name: &'static str,
     scope_result: &'static str,
     code: &'static str,
+    /// The documentation-corpus scope. It brings only the BDD lane into scope.
+    docs: &'static str,
     nix_scope: &'static str,
     policy: &'static str,
     lanes: &'static str,
@@ -86,6 +88,7 @@ impl Verdict {
             event_name: "pull_request",
             scope_result: "success",
             code: "true",
+            docs: "false",
             nix_scope: "true",
             policy: "success",
             lanes: "success",
@@ -95,12 +98,14 @@ impl Verdict {
         }
     }
 
-    /// A docs-only run: every lane it should skips.
+    /// A run touching nothing any lane reads — a plan, a site asset: every
+    /// scoped lane skips.
     fn out_of_scope() -> Self {
         Self {
             event_name: "pull_request",
             scope_result: "success",
             code: "false",
+            docs: "false",
             nix_scope: "false",
             policy: "success",
             lanes: "skipped",
@@ -133,6 +138,25 @@ impl Verdict {
         }
     }
 
+    /// A change confined to the documentation corpus: the BDD lane runs its
+    /// documentation scenarios, and every other scoped lane skips.
+    fn docs_only() -> Self {
+        Self {
+            docs: "true",
+            bdd: "success",
+            ..Self::out_of_scope()
+        }
+    }
+
+    /// The same change at the head of a merge group, which reuses the PR's
+    /// BDD result rather than running the lane again.
+    fn queue_docs_only() -> Self {
+        Self {
+            docs: "true",
+            ..Self::queue_out_of_scope()
+        }
+    }
+
     /// `true` when the aggregate admits this combination.
     fn accepts(&self) -> bool {
         let mut child = Command::new("bash")
@@ -141,6 +165,7 @@ impl Verdict {
             .env("EVENT_NAME", self.event_name)
             .env("SCOPE_RESULT", self.scope_result)
             .env("SCOPE_CODE", self.code)
+            .env("SCOPE_DOCS", self.docs)
             .env("SCOPE_NIX", self.nix_scope)
             .env("CORE_RESULT", self.lanes)
             .env("POLICY_RESULT", self.policy)
@@ -197,6 +222,70 @@ fn a_fully_in_scope_green_run_is_admitted() {
         }
         .accepts()
     );
+}
+
+/// A documentation-only change has to pay for the suite that reads the
+/// documentation, and only for that: on the PR the BDD lane runs and
+/// everything else skips, and the merge group reuses that result. The
+/// required `Test` verdict is green on both events.
+#[test]
+fn a_docs_only_run_requires_the_bdd_lane_and_nothing_else() {
+    assert!(Verdict::docs_only().accepts());
+    assert!(Verdict::queue_docs_only().accepts());
+    // Code and docs together is just a code run; `docs` adds nothing to it.
+    assert!(
+        Verdict {
+            docs: "true",
+            ..Verdict::in_scope()
+        }
+        .accepts()
+    );
+    assert!(
+        Verdict {
+            docs: "true",
+            ..Verdict::queue_in_scope()
+        }
+        .accepts()
+    );
+}
+
+/// The failure the docs scope exists for, plus the ways it could be widened
+/// into a rubber stamp.
+#[test]
+fn a_docs_only_run_is_refused_when_its_lane_does_not_pass() {
+    let cases: [(&str, Verdict); 4] = [
+        (
+            "a docs-only change whose BDD lane skipped",
+            Verdict {
+                bdd: "skipped",
+                ..Verdict::docs_only()
+            },
+        ),
+        (
+            "a docs-only merge group that ran the BDD lane again",
+            Verdict {
+                bdd: "success",
+                ..Verdict::queue_docs_only()
+            },
+        ),
+        (
+            "a docs-only change whose BDD lane failed",
+            Verdict {
+                bdd: "failure",
+                ..Verdict::docs_only()
+            },
+        ),
+        (
+            "a docs-only change that ran the compile and test lanes",
+            Verdict {
+                lanes: "success",
+                ..Verdict::docs_only()
+            },
+        ),
+    ];
+    for (what, verdict) in cases {
+        assert!(!verdict.accepts(), "the aggregate must refuse {what}");
+    }
 }
 
 /// The gate must not have been widened into a rubber stamp. Each of these is a
@@ -328,5 +417,98 @@ fn an_unparseable_scope_is_refused() {
         }
         .accepts(),
         "an empty code scope must not be treated as a valid classification"
+    );
+    for docs in ["", "yes"] {
+        assert!(
+            !Verdict {
+                docs,
+                ..Verdict::docs_only()
+            }
+            .accepts(),
+            "docs scope {docs:?} must not be treated as a valid classification"
+        );
+    }
+}
+
+/// Lift the docs classifier's `grep -zE` pattern out of the scope job.
+fn docs_classifier_pattern() -> String {
+    let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
+        .expect("failed to read .github/workflows/ci.yml");
+    let lines: Vec<&str> = workflow.lines().collect();
+    let output = lines
+        .iter()
+        .position(|line| line.contains(r#"echo "docs=true""#))
+        .expect("the scope job must emit docs=true");
+    let grep = lines[..output]
+        .iter()
+        .rev()
+        .find(|line| line.contains("grep -zE"))
+        .expect("docs=true must follow its grep");
+    grep.split_once("grep -zE '")
+        .and_then(|(_, rest)| rest.split_once('\''))
+        .map(|(pattern, _)| pattern.to_string())
+        .unwrap_or_else(|| panic!("the docs grep must carry a single-quoted pattern: {grep}"))
+}
+
+/// `true` when the docs classifier marks a diff naming `paths` as docs.
+fn classified_as_docs(paths: &[&str]) -> bool {
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let mut child = Command::new("grep")
+        .arg("-zE")
+        .arg(docs_classifier_pattern())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to spawn grep");
+    {
+        use std::io::Write as _;
+        child
+            .stdin
+            .take()
+            .expect("grep stdin")
+            .write_all(&input)
+            .expect("write the changed-file list");
+    }
+    child.wait().expect("grep did not exit").success()
+}
+
+/// Runs the classifier's real pattern against the NUL-separated list
+/// `git diff --name-only -z` produces, so an anchoring or escaping mistake in
+/// the YAML shows up here rather than as a lane that never runs.
+#[test]
+fn the_docs_classifier_matches_the_corpus_and_nothing_near_it() {
+    for path in [
+        "README.md",
+        "AGENTS.md",
+        "public/src/content/docs/guides/troubleshooting.md",
+        "crates/mvm-sdk/sdks/python/README.md",
+        "examples/python/hello-app-with-deps/README.md",
+    ] {
+        assert!(classified_as_docs(&[path]), "{path} must set docs=true");
+    }
+    for path in [
+        "READMEXmd",
+        "README.md.orig",
+        "crates/mvm-cli/README.md",
+        "public/src/pages/index.astro",
+        "specs/plans/example.md",
+        "features/suites/s29_doc_examples/docs_coverage.toml",
+    ] {
+        assert!(
+            !classified_as_docs(&[path]),
+            "{path} must not set docs=true"
+        );
+    }
+    assert!(
+        classified_as_docs(&[
+            "specs/plans/example.md",
+            "public/src/content/docs/index.mdx"
+        ]),
+        "one documentation path anywhere in the diff must set docs=true"
     );
 }
