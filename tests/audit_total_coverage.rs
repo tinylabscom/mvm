@@ -318,6 +318,12 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("cp", AuditPosture::Emits("VmFileCopy")),
     ("fs", AuditPosture::Emits("VmFsMutate")),
     ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
+    // Chain-signs the delivery and completion of every prompt, and binds each
+    // step checkpoint with `checkpoint.created`.
+    (
+        "prompt",
+        AuditPosture::Emits("CheckpointCreated+agent.prompt_delivered"),
+    ),
     ("diff", AuditPosture::ReadOnly),
     // Reviewed workspace apply: snapshots the host tree it overwrites,
     // journals the apply, and emits the manifest Merkle root.
@@ -398,6 +404,12 @@ const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
     ("park", AuditPosture::Emits("session.parked")),
     ("resume", AuditPosture::Emits("session.resumed")),
     ("renew", AuditPosture::Emits("session.renewed")),
+    // Fork-boots a session checkpoint and re-delivers its recorded prompts,
+    // each as a chain-signed `agent.prompt_delivered` entry.
+    (
+        "replay",
+        AuditPosture::Emits("CheckpointForked+agent.prompt_delivered"),
+    ),
 ];
 
 const PROC_SUB: &[(&str, AuditPosture)] = &[
