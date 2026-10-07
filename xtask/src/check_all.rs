@@ -327,7 +327,7 @@ mod tests {
         ),
         (
             "check-nextest-groups",
-            "needs cargo-nextest; runs in the test job",
+            "needs cargo-nextest and the compiled suite; runs in CI's workspace test build",
         ),
         (
             "check-release-evidence",
