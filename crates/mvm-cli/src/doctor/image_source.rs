@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn a_release_build_says_so_instead_of_a_commit() {
         let c = image_source_line(&Ok(ImageSource::Released), &MvmOrigin::ReleaseBuild, None);
-        assert!(c.info.ends_with("mvm release build"), "{}", c.info);
+        assert!(c.info.contains(" — mvm release build"), "{}", c.info);
     }
 
     #[test]

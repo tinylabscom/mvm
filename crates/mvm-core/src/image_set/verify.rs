@@ -23,6 +23,7 @@
 //! one: the entry point runs all of them, and the optional inputs only add
 //! checks.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -112,6 +113,17 @@ pub struct VerifiedImageSet {
     pub artifacts: Vec<VerifiedArtifact>,
 }
 
+/// A signed, lock-pinned release whose listed artifact bytes alone were checked.
+/// Unlisted artifacts are not verified and this value must not authorize booting them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedSelectedArtifacts {
+    pub manifest: ImageSetManifest,
+    pub release: ReleaseProducer,
+    pub manifest_sha256: Sha256Hex,
+    pub signer_key_id: KeyId,
+    pub artifacts: Vec<VerifiedArtifact>,
+}
+
 impl VerifiedImageSet {
     /// Always [`ImageTrustTier::VerifiedRelease`]: a value of this type exists
     /// only once a signed, lock-pinned manifest has verified.
@@ -141,6 +153,15 @@ pub fn verify_image_set(
     verify_checked(request, check_keyless_signature)
 }
 
+/// Verify only the named artifacts under the same signed, lock-pinned manifest.
+/// This does not certify any other member artifact in the image set.
+pub fn verify_image_set_artifacts(
+    request: &ImageSetVerification<'_>,
+    selected: &[ArtifactName],
+) -> Result<VerifiedSelectedArtifacts, ImageSetError> {
+    verify_checked_selected(request, selected, check_keyless_signature)
+}
+
 /// How the detached signature over the manifest bytes is checked.
 ///
 /// A parameter of [`verify_checked`] rather than a fixed call so the stages
@@ -155,6 +176,29 @@ pub(super) fn verify_checked(
     request: &ImageSetVerification<'_>,
     check_signature: SignatureChecker,
 ) -> Result<VerifiedImageSet, ImageSetError> {
+    let checked = verify_checked_scope(request, None, check_signature)?;
+    Ok(VerifiedImageSet {
+        manifest: checked.manifest,
+        release: checked.release,
+        manifest_sha256: checked.manifest_sha256,
+        signer_key_id: checked.signer_key_id,
+        artifacts: checked.artifacts,
+    })
+}
+
+pub(super) fn verify_checked_selected(
+    request: &ImageSetVerification<'_>,
+    selected: &[ArtifactName],
+    check_signature: SignatureChecker,
+) -> Result<VerifiedSelectedArtifacts, ImageSetError> {
+    verify_checked_scope(request, Some(selected), check_signature)
+}
+
+fn verify_checked_scope(
+    request: &ImageSetVerification<'_>,
+    selected: Option<&[ArtifactName]>,
+    check_signature: SignatureChecker,
+) -> Result<VerifiedSelectedArtifacts, ImageSetError> {
     let lock = request.lock;
     check_lock_schema_version(lock)?;
 
@@ -177,19 +221,60 @@ pub(super) fn verify_checked(
         check_protocol_compatibility(&manifest, host)?;
     }
 
-    let artifacts = verify_artifacts(&manifest, request.artifact_dir)?;
+    let artifacts = match selected {
+        Some(names) => verify_selected_artifacts(&manifest, request.artifact_dir, names)?,
+        None => verify_artifacts(&manifest, request.artifact_dir)?,
+    };
     let signer_key_id = locked_signer_key_id(lock);
     if let Some(revocations) = request.revocations {
         check_revocations(&manifest, &manifest_sha256, &signer_key_id, revocations)?;
     }
 
-    Ok(VerifiedImageSet {
+    Ok(VerifiedSelectedArtifacts {
         manifest,
         release,
         manifest_sha256,
         signer_key_id,
         artifacts,
     })
+}
+
+fn verify_selected_artifacts(
+    manifest: &ImageSetManifest,
+    dir: &Path,
+    selected: &[ArtifactName],
+) -> Result<Vec<VerifiedArtifact>, ImageSetError> {
+    if selected.is_empty() {
+        return Err(ImageSetError::EmptyArtifactSelection);
+    }
+    let mut seen = HashSet::new();
+    let mut chosen = Vec::with_capacity(selected.len());
+    for name in selected {
+        if !seen.insert(name.as_str()) {
+            return Err(ImageSetError::DuplicateSelectedArtifact { name: name.clone() });
+        }
+        let mut matching = manifest
+            .members
+            .iter()
+            .flat_map(|member| {
+                member
+                    .artifacts
+                    .iter()
+                    .map(move |artifact| (member, artifact))
+            })
+            .filter(|(_, artifact)| artifact.name == *name);
+        let Some((member, artifact)) = matching.next() else {
+            return Err(ImageSetError::UnknownSelectedArtifact { name: name.clone() });
+        };
+        if matching.next().is_some() {
+            return Err(ImageSetError::DuplicateSelectedArtifact { name: name.clone() });
+        }
+        chosen.push((member, artifact));
+    }
+    chosen
+        .into_iter()
+        .map(|(member, artifact)| verify_member_artifact(member, artifact, dir))
+        .collect()
 }
 
 /// Accept the manifest only if one of the lock's identities signed these exact

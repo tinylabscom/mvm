@@ -55,7 +55,10 @@ pub use validate::{
     check_protocol_compatibility, require_complete, select_member, select_workload_image,
     validate_structure,
 };
-pub use verify::{ImageSetVerification, VerifiedArtifact, VerifiedImageSet, verify_image_set};
+pub use verify::{
+    ImageSetVerification, VerifiedArtifact, VerifiedImageSet, VerifiedSelectedArtifacts,
+    verify_image_set, verify_image_set_artifacts,
+};
 
 pub const IMAGE_SET_SCHEMA_VERSION: u32 = 2;
 
