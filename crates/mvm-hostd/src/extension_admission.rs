@@ -233,7 +233,8 @@ mod tests {
                 version: ExtensionVersion::parse("1.0.0").expect("version"),
                 protocol: ExtensionProtocolRange {
                     min_mvm_version: ExtensionVersion::parse("0.18.0").expect("min"),
-                    max_mvm_version: ExtensionVersion::parse("0.22.9").expect("max"),
+                    max_mvm_version: ExtensionVersion::parse(env!("CARGO_PKG_VERSION"))
+                        .expect("max"),
                     min_protocol: 1,
                     max_protocol: 1,
                 },

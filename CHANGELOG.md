@@ -2,6 +2,171 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.23.0] — 2026-10-07
+
+### Added
+- **builder-vm**: Prefer published builder image; opt-in local build …
+- **bundler**: Add mvm-bundler, a signer-agnostic .mvmpkg export
+- **cli**: Mvmctl image dev ensure — fetch-when-unchanged for the dev default image
+- **cli**: Author OAuth-bound secrets via mvmctl secret set
+- **client**: Build a flake and export a signed .mvmpkg from the library
+- **bench**: Grant-provisioned boots so graceful stops are measurable
+- **agentd**: Guest telemetry capture core with bounded non-waiting emission
+- **cli**: Expose reviewed workspace apply verbs
+- **workspace**: Sign pre-apply snapshot before host writes
+- **release**: The release e2e boots the pinned image set
+- **build**: Register HVF and Firecracker builders outside mvmctl
+- **bundler**: Let a signer that never releases its key sign a .mvmpkg
+- **pack**: Pull verified profile dependencies
+- **hostlib**: Answer machine.pause, resume, reconfigure and set_ttl
+- **agentd**: Capture session + subscriber install in the sealed agent (W3 steps 2–3, #3422)
+- **sdk**: Pin generated image sources for pack publication
+- **checkpoint**: Reclaim unreferenced chunk objects in cache prune
+- **build**: Mvmctl build guest-bins — publishable guest-binary artifact
+- **checkpoint**: Key captured chunks to the admitted plan's tenant
+- **ci**: Share instruction signing as a composite action
+- **cli**: Boot a signed .mvmpkg with `machine run --manifest <path>`
+- **release**: Publish signed .deb and .rpm packages for Linux
+- **hostd,vmm,runtime**: Per-VM telemetry collector process, provisioned opt-in at boot (W4, #3423)
+- Race workspace tests across runner pools
+- **secret**: Host-browser OAuth consent with PKCE and refresh-token renewal
+- **client,hostlib**: Telemetry read seam on the MvmClient facade (W4, #3423)
+- **bundle**: Carry cmdline, posture, provenance and size caps in .mvmpkg; retire .mvm
+- **agent-prompt**: Deliver prompts to a machine's resident agent
+- **build**: The guest-bins archive carries every guest artifact mvm owns
+- **display**: Gate host-to-guest display input behind its own grant
+- **admission**: Refuse a launch that asks for more than its bundle's posture
+- **workspace**: Offer workspace changes back when an attached run ends
+- **xtask**: Add check-thin-cli, a shrink-only gate on commands reaching below mvm-client
+- **bundle**: Stream .mvmpkg export, verify and install
+- **display**: Carry attended display input to the guest browser
+- **packs**: Define trust and inspect signed workload packs
+
+### Changed
+- Drop stale dependency allowlist entries; pin that a published overlay download is never a cold build
+- **image-set**: Pin image-set/v0.2.4
+- **core**: Delete the parked SEV-SNP, TDX and Apple attestation features
+- **cli**: Compile builder-VM orchestration and the pure ext4 writer unconditionally
+- **nix**: Bump the libkrunfw kernel to Linux 6.12.112
+- **checkpoint**: Refuse the retired whole-blob checkpoint layout
+- **ci**: Retire redundant Actions work
+
+### Documentation
+- **plans**: Tick W8's ABI-1 pin item — image-set/v0.2.3 is pinned
+- **policy**: Correct stale [tools] enforcement comment
+- Add agent pack client guides and a pack-authoring guide
+- **delivery**: W12 measured acceptance on Apple Silicon
+- **plans**: Record the merge-queue levers and the post-lever wall
+- Correct namespaced recipe guidance
+- **nix**: Run the dev shell tier check and correct the prebuilt pin claim
+- **specs**: Telemetry bookkeeping for W4 collector worker and 2026-09-29 decisions
+- Lead with hardware-isolated agent sandbox
+- **plan**: Measure mvm history and record the W9 no-rewrite decision
+- **blog**: The portal said no, and the agent kept going
+- Record the image boundary (mvm-images builds only the Linux layer)
+
+### Fixed
+- **policy**: Confine signed-pack policy references to trusted sources
+- **deps**: Upgrade wasmtime to 49.0.2 to fix security vulnerabilities
+- **policy**: A --policy root may name a group, not only a profile
+- **launch**: Record the admitted budget charge on the CLI boot path
+- **hvf**: Keep warm standbys claimable through a failed handoff
+- **ci**: Validate changes before merge queue admission
+- Deny runtime approvals when chain audit is unavailable
+- Bind secret approval requirements into signed plans
+- Chain-sign MCP tool gate decisions
+- **build**: Carry the image-set signature verifier in the default build
+- **hostd**: Hold the OAuth refresher to the secret egress policy
+- **launch**: Machine run builds cold caches, announced; fail-fast is opt-in
+- **runtime**: Build the wasm tier against wasmtime 49 and gate it in CI
+- **network**: Require signed audit for endpoint route decisions
+- **security**: Close host helper environment bypasses
+- **policy**: Align why with tool and route enforcement
+- **policy**: Report denials before persistent command exit
+- **policy**: Report baked-entrypoint denials from boot
+- **audit**: Seal admitted transient runs on exit
+- **security**: Make the scheduled Security lane green
+- **workspace**: Preserve staged host path kinds for restore
+- **contract**: Find a placeholder behind a bare secret prefix
+- **workspace**: Reconcile signed apply audit across errors and crashes
+- **image-source**: Keep launch-derived files from evicting pair-cache entries
+- **build**: Keep Python tool caches out of the workspace source key
+- **replay**: Bind fork execution to audited source and prove live replay
+- **cache**: Remove a replaced or removed artifact's digest sidecar
+- **build**: Compile rustls with LLVM on the fast path so Linux links
+- **build**: Fingerprints cover mvm-setpriv
+- **cli**: Replace stale `mvmctl up` references with current verbs
+- **just**: Make lint and the tests module recipes runnable
+- **workspace**: Restore host tree when signed apply audit is unverifiable
+- **policy**: Prevent signed packs from granting host shares
+- **ci**: Make the Extended CI lanes buildable again
+- **mcp**: Negotiate the initialize protocol version instead of refusing it
+- **instructions**: Scan the image a transient --mount attaches
+- **conformance**: Read slash alternation only at a subcommand position
+- **hostd**: Stop recording a terminated tunnel's close as a refusal
+- Retire the remaining `mvmctl up` references and its dead config knob
+- **hostd**: Stop lib tests reading each other's MVM_HOME
+- **jailer**: Name seccomp refusals and self-test the filter at startup
+- **image-source**: Build the builder kernel config into a pair-built set
+- **release**: Derive the crates.io publish set and order from the manifests
+- **cli**: Offer the denial review on every foreground machine-run lane
+- **sdk**: Publish manylinux/musllinux wheels and per-platform npm packages
+- **site**: Split oversized WebLinux preload
+- Make merge queue reuse PR validation
+- **site**: Restore light code contrast
+- **security**: Route every host spawn through the environment filter
+- **sessions**: Enforce the session idle timeout from the per-VM supervisor
+- **agentd**: Stop crediting a FlowMux stream after resetting it
+- **core**: Publish host keys whole and first-writer-wins
+- **admission**: Pin and re-verify an installed bundle booted by sha256
+- **volumes**: Build writable workspace images with free space
+- **ci**: Guard singleton merge queue policy
+- **audit**: Seal a transient entrypoint call's session when it ends
+- **ci**: Budget live lifecycle for cold compilation
+- **guest**: Preserve sealed rootfs file modes
+- **cli**: Refuse to self-update an mvmctl a .deb or .rpm installed
+- **ci**: Isolate persistent workspace shard state
+- **packs**: Follow renamed registry and publisher identity
+- **nix**: Stage function app in sealed rootfs
+- **admission**: Re-verify the parent's bundle when forking or restoring a child
+- **cli**: Review transient runs against the manifest their policy came from
+- **audit**: Record unsealed session ends
+
+### Other
+- Repair HVF OCI vsock-egress smoke
+- Bind signed registry-pack images to workload admission
+- Persist tool-command policy on named machines and add a live witness
+- Run a tool-mediated transient command through the mediated path; remove the unused supervisor tool gate
+
+### Performance
+- **ci**: Balance feature checks across existing runners
+
+### Refactored
+- **cli**: Route bundle export through mvm-bundler
+- **build**: Collapse mvm-build f/f_with_X sibling pairs
+- **client**: Move explain and egress-denial reading into mvm-client
+- **vmm**: Collapse VcpuQuota::start / start_with_hold
+- **audit**: Split stream label constants from emitter
+- **agentd**: Collapse parse_config and bring_loopback_up pairs
+- **runtime**: Collapse mvm-runtime f/f_with_X sibling pairs
+- **contract**: Collapse SessionValidator::new / new_with_ingress
+- **sdk**: Collapse compile_recording / compile_recording_with_findings
+- **hostd**: Collapse HostAgentDaemon::new and admit_plan_for_run pairs
+- **cli**: Collapse mvm-cli f/f_with_X sibling pairs
+- **client**: Collapse validate_policy_refs and resolve_run_network_policy pairs
+- **fs**: Collapse unpack_layer and the mvm-fs test-fixture pairs
+
+### Testing
+- Exercise real terminal approval I/O
+- **bench**: Gate grant-provisioned graceful stops in CI
+- **hostd**: Make two shared-process test flakes deterministic
+- **pack**: Verify a published signed pull offline
+- Prove signed pack policy composes in project launches
+- **hostd**: Compare eviction cost across depths instead of a wall clock
+- **agentd**: Bind guest-agent test sockets under /tmp
+- **checkpoint**: Pin the index digest as the chain-anchored content address
+- **cli**: Serialize image-source git probe with env changes
+
 ## [0.22.0] — 2026-10-02
 
 ### Added
