@@ -1192,6 +1192,7 @@ dependencies = [
  "hex",
  "libc",
  "mvm-contract",
+ "mvm-core",
  "mvm-http",
  "rustix",
  "secrecy",

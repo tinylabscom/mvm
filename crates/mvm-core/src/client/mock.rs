@@ -52,6 +52,7 @@ fn all_mock_operations() -> ClientOperationCapabilities {
         .exec(true)
         .reconfigure(true)
         .set_ttl(true)
+        .telemetry(true)
         .build()
 }
 
@@ -109,6 +110,35 @@ impl MvmClient for MockBackend {
                 .expect("mock operation capability lock poisoned")
                 .clone(),
         ))
+    }
+
+    async fn telemetry_status(&self, id: &MachineId) -> Result<crate::client::TelemetryStatus> {
+        // The mock boots nothing, so no collector is ever provisioned; a
+        // known machine answers honestly and an unknown one is not found.
+        let all = self.machines.lock().unwrap();
+        if all.iter().any(|m| m.id == *id) {
+            Ok(crate::client::TelemetryStatus::NotProvisioned)
+        } else {
+            Err(MvmError::NotFound { id: id.0.clone() })
+        }
+    }
+
+    async fn telemetry_records(
+        &self,
+        id: &MachineId,
+        request: crate::client::TelemetryReadRequest,
+    ) -> Result<crate::client::TelemetryReadResponse> {
+        let all = self.machines.lock().unwrap();
+        if all.iter().any(|m| m.id == *id) {
+            Ok(crate::client::TelemetryReadResponse {
+                records: Vec::new(),
+                next_cursor: request.cursor(),
+                undecodable: 0,
+                exhausted: true,
+            })
+        } else {
+            Err(MvmError::NotFound { id: id.0.clone() })
+        }
     }
 
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {

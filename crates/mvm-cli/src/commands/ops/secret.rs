@@ -1,4 +1,4 @@
-//! `mvmctl secret put/set/get/ls/rm` CLI surface.
+//! `mvmctl secret put/set/login/get/ls/rm` CLI surface.
 //!
 //! Thin flag layer over the canonical write-only secret lifecycle service
 //! ([`mvm_client::secret::SecretService`]) — the same orchestration local UI
@@ -9,7 +9,9 @@
 //!
 //! `set` is `put` plus an egress binding: it records the auth-type and
 //! destination allow-list for a secret whose value the host egress proxy
-//! substitutes toward bound destinations only (never the guest). `ls`
+//! substitutes toward bound destinations only (never the guest). `login`
+//! runs an OAuth-bound secret's consent in a browser on this host and stores
+//! the resulting token set; the guest never takes part in it. `ls`
 //! surfaces that binding (type + hosts) but never the value. `rm` refuses
 //! while a persistent machine still references the secret.
 //!
@@ -36,11 +38,13 @@
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use mvm_client::secret::{
-    PutOutcome, SecretApproval, SecretBindingMeta, SecretService, SecretValueInput,
+    DEFAULT_CONSENT_TIMEOUT, OAuthLoginOptions, PutOutcome, SecretApproval, SecretBindingMeta,
+    SecretService, SecretValueInput,
 };
 use mvm_contract::ir::{AuthType, Sigv4Params};
 use mvm_contract::service_catalog;
@@ -156,6 +160,27 @@ pub(in crate::commands) enum SecretAction {
         /// op://vault/item/field or bw://item/field. Resolved once, now.
         #[arg(long, value_name = "REF", conflicts_with = "value")]
         from: Option<String>,
+    },
+
+    /// Consent to an OAuth-bound secret's flow in a browser on this host,
+    /// and store the token set it yields. The host runs the
+    /// authorization-code grant with PKCE: the browser is redirected back to
+    /// a loopback listener on 127.0.0.1, and the code is redeemed at the
+    /// binding's token endpoint. The guest never sees the consent, the
+    /// session, or the tokens; the host renews the access token with the
+    /// refresh token for as long as the provider allows.
+    Login {
+        /// Name of a secret defined with `secret set --oauth-*`.
+        name: String,
+        /// Local namespace.
+        #[arg(long, default_value = "local")]
+        tenant: String,
+        /// Print the authorization URL without trying to open a browser.
+        #[arg(long)]
+        no_browser: bool,
+        /// Seconds to wait for the consent to complete.
+        #[arg(long, value_name = "SECONDS", default_value_t = DEFAULT_CONSENT_TIMEOUT.as_secs())]
+        timeout: u64,
     },
 
     /// List the built-in service providers `--provider` accepts. Static
@@ -286,6 +311,20 @@ pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args)
                 },
             },
         ),
+        SecretAction::Login {
+            name,
+            tenant,
+            no_browser,
+            timeout,
+        } => cmd_login(
+            service,
+            &tenant,
+            &name,
+            ConsentUi {
+                open_browser: !no_browser,
+                timeout: Duration::from_secs(timeout),
+            },
+        ),
         SecretAction::Get { name, tenant } => cmd_get(service, tenant, name),
         SecretAction::Providers { search } => cmd_providers(search.as_deref()),
         SecretAction::Ls { tenant } => cmd_ls(service, tenant),
@@ -374,6 +413,12 @@ pub(in crate::commands) struct OAuthSetFlags {
         conflicts_with_all = ["value", "value_file", "from", "client_secret"]
     )]
     client_secret_file: Option<PathBuf>,
+    /// Consent to the flow in a browser on this host now, as `secret login`
+    /// does, instead of storing a value. With `--oauth-client-secret` the
+    /// client is confidential and authenticates the exchange; without it the
+    /// client is public.
+    #[arg(long = "oauth-login", conflicts_with_all = ["value", "value_file", "from"])]
+    login: bool,
 }
 
 /// The `--oauth-*` inputs of `secret set`, after clap parsing. The three
@@ -388,6 +433,24 @@ struct OAuthArgs {
     scopes: Vec<String>,
     response_access_token_pointer: Option<String>,
     client_secret: Option<OAuthClientSecretSource>,
+    /// Run the consent once the secret is defined.
+    login: Option<ConsentUi>,
+}
+
+/// How a consent is put in front of the human.
+#[derive(Debug, Clone, Copy)]
+struct ConsentUi {
+    open_browser: bool,
+    timeout: Duration,
+}
+
+impl Default for ConsentUi {
+    fn default() -> Self {
+        Self {
+            open_browser: true,
+            timeout: DEFAULT_CONSENT_TIMEOUT,
+        }
+    }
 }
 
 /// Where the OAuth client secret comes from. The inline form accepts `-`
@@ -411,6 +474,7 @@ impl OAuthArgs {
             response_access_token_pointer,
             client_secret,
             client_secret_file,
+            login,
         } = flags;
         let client_secret = match (client_secret, client_secret_file) {
             (Some(secret), None) => Some(OAuthClientSecretSource::Inline(secret)),
@@ -429,6 +493,7 @@ impl OAuthArgs {
             scopes,
             response_access_token_pointer,
             client_secret,
+            login: login.then(ConsentUi::default),
         })
     }
 }
@@ -484,6 +549,13 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         );
     }
     let oauth = resolve_oauth_params(resolved.auth_type, &oauth_args)?;
+    if oauth_args.login.is_some()
+        && (value.value.is_some() || value.value_file.is_some() || value.from.is_some())
+    {
+        // The consent writes the value; a source given alongside it would be
+        // silently discarded.
+        anyhow::bail!("--oauth-login writes the value itself and takes no value source");
+    }
     if oauth.is_some() && value.from.is_some() {
         // Token sets are written by the host flows (the refresher's first
         // exchange, the browser consent flow), never imported from another
@@ -491,17 +563,23 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         // channel the rest of the design refuses to have.
         anyhow::bail!("--from cannot be combined with the --oauth-* binding flags");
     }
-    // A client secret writes its own value: the initial token set the
-    // host-side refresher exchanges from. Any other value source would be
-    // clobbered, so clap conflicts them at parse time; --value/--value-file
-    // remain meaningful for staging a pre-obtained token set by hand.
-    let input = match resolve_client_secret(&oauth_args)? {
-        Some(secret) => {
-            let token_set = mvm_hostd::keyholder::oauth::initial_token_set(&secret);
-            let json = serde_json::to_string(&token_set)
-                .context("serializing the initial oauth token set")?;
-            SecretValueInput::new(json)
-        }
+    // A consent or a client secret writes its own value: a set awaiting the
+    // consent, or the initial token set the host-side refresher exchanges
+    // from. Any other value source would be clobbered, so clap conflicts them
+    // at parse time; --value/--value-file remain meaningful for staging a
+    // pre-obtained token set by hand.
+    let client_secret = resolve_client_secret(&oauth_args)?;
+    let token_set = match (oauth_args.login, client_secret) {
+        (Some(_), client_secret) => Some(mvm_hostd::keyholder::oauth::awaiting_consent_token_set(
+            client_secret.as_deref(),
+        )),
+        (None, Some(secret)) => Some(mvm_hostd::keyholder::oauth::initial_token_set(&secret)),
+        (None, None) => None,
+    };
+    let input = match token_set {
+        Some(token_set) => SecretValueInput::new(
+            serde_json::to_string(&token_set).context("serializing the initial oauth token set")?,
+        ),
         None => value.resolve(&name)?,
     };
     service.put(&tenant, &name, input)?;
@@ -521,6 +599,63 @@ fn cmd_set(service: &SecretService, set: SetArgs) -> Result<()> {
         },
     )?;
     eprintln!("Defined secret '{name}' for tenant '{tenant}'.");
+    if let Some(ui) = oauth_args.login {
+        cmd_login(service, &tenant, &name, ui).with_context(|| {
+            format!(
+                "secret '{name}' is defined and awaits consent; retry with `mvmctl secret login {name} --tenant {tenant}`"
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Run the consent for an OAuth-bound secret and report what was stored —
+/// expiry and renewability only, never a value.
+fn cmd_login(service: &SecretService, tenant: &str, name: &str, ui: ConsentUi) -> Result<()> {
+    let options = OAuthLoginOptions::default().with_timeout(ui.timeout);
+    let present = |url: &str| present_authorization_url(url, ui.open_browser);
+    let outcome = service.oauth_login(tenant, name, &options, &present)?;
+    let expires_at = outcome.expires_at.to_rfc3339();
+    if outcome.renewable {
+        eprintln!(
+            "Stored the consented token set for '{name}'. The access token expires at {expires_at}; the host renews it with the refresh token."
+        );
+    } else {
+        eprintln!(
+            "Stored the consented token set for '{name}'. The access token expires at {expires_at}, and the provider issued no refresh token: run `mvmctl secret login {name}` again once it expires."
+        );
+    }
+    Ok(())
+}
+
+/// Put the authorization URL in front of the human: always printed, and
+/// handed to the desktop's URL opener unless the operator declined.
+fn present_authorization_url(url: &str, open_browser: bool) {
+    eprintln!("Open this URL in a browser on this host to grant access:\n\n  {url}\n");
+    if open_browser && let Err(error) = open_in_browser(url) {
+        eprintln!("Could not open a browser ({error}); open the URL above yourself.");
+    }
+    eprintln!("Waiting for the consent to complete...");
+}
+
+/// Hand `url` to the desktop's URL opener. The URL is a single argument, never
+/// a shell string. The opener is reaped on a background thread so it neither
+/// blocks the wait for the redirect nor lingers as a zombie.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = mvm_core::env_hygiene::helper_command(opener)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 
@@ -722,12 +857,14 @@ fn resolve_oauth_params(auth_type: AuthType, args: &OAuthArgs) -> Result<Option<
     ];
     let riders_present = !args.scopes.is_empty()
         || args.response_access_token_pointer.is_some()
-        || args.client_secret.is_some();
+        || args.client_secret.is_some()
+        || args.login.is_some();
     let present = core.iter().flatten().count();
     if present == 0 {
         if riders_present {
             anyhow::bail!(
-                "the --oauth-scope/--oauth-response-access-token-pointer/--oauth-client-secret*                  flags require --oauth-authorization-url, --oauth-token-url and --oauth-client-id"
+                "the --oauth-scope/--oauth-response-access-token-pointer/--oauth-client-secret*/--oauth-login \
+                 flags require --oauth-authorization-url, --oauth-token-url and --oauth-client-id"
             );
         }
         return Ok(None);
@@ -1687,6 +1824,7 @@ mod tests {
             scopes: vec!["scope-a".into()],
             response_access_token_pointer: None,
             client_secret,
+            login: None,
         }
     }
 
@@ -1847,6 +1985,178 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("--from"), "got: {err}");
+    }
+
+    /// A consent nobody completes: no browser, and a wait short enough for a
+    /// test.
+    fn abandoned_consent() -> Option<ConsentUi> {
+        Some(ConsentUi {
+            open_browser: false,
+            timeout: Duration::from_millis(100),
+        })
+    }
+
+    #[test]
+    fn login_and_oauth_login_parse_and_refuse_a_value_source() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Probe {
+            #[command(subcommand)]
+            action: SecretAction,
+        }
+        let login = Probe::try_parse_from([
+            "probe",
+            "login",
+            "github",
+            "--no-browser",
+            "--timeout",
+            "30",
+        ])
+        .unwrap();
+        assert!(matches!(
+            login.action,
+            SecretAction::Login {
+                no_browser: true,
+                timeout: 30,
+                ..
+            }
+        ));
+        let defaults = Probe::try_parse_from(["probe", "login", "github"]).unwrap();
+        assert!(matches!(
+            defaults.action,
+            SecretAction::Login {
+                no_browser: false,
+                timeout: 300,
+                ..
+            }
+        ));
+
+        let flow = [
+            "probe",
+            "set",
+            "github",
+            "--host",
+            "api.github.com",
+            "--type",
+            "bearer",
+            "--oauth-authorization-url",
+            "https://github.com/login/oauth/authorize",
+            "--oauth-token-url",
+            "https://github.com/login/oauth/access_token",
+            "--oauth-client-id",
+            "Iv1.abc",
+            "--oauth-login",
+        ];
+        assert!(Probe::try_parse_from(flow).is_ok());
+        for source in [
+            ["--value", "v"],
+            ["--value-file", "/tmp/v"],
+            ["--from", "env://V"],
+        ] {
+            let mut args = flow.to_vec();
+            args.extend(source);
+            assert!(
+                Probe::try_parse_from(args).is_err(),
+                "--oauth-login with {} must be refused",
+                source[0]
+            );
+        }
+    }
+
+    #[test]
+    fn oauth_login_flag_without_the_flow_is_refused() {
+        let args = OAuthArgs {
+            login: abandoned_consent(),
+            ..Default::default()
+        };
+        let err = resolve_oauth_params(AuthType::Bearer, &args).unwrap_err();
+        assert!(err.to_string().contains("--oauth-login"), "got: {err}");
+    }
+
+    #[test]
+    fn set_with_oauth_login_defines_the_secret_awaiting_consent_when_none_arrives() {
+        let f = fixture();
+        let mut args = oauth_args(Some(OAuthClientSecretSource::Inline(
+            "the-client-secret".into(),
+        )));
+        args.login = abandoned_consent();
+        let err = set_oauth(&f, "oauth-secret", args).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("mvmctl secret login oauth-secret"),
+            "got: {err:#}"
+        );
+
+        // Defined and bound, holding a set that awaits consent: no tokens,
+        // the confidential client's secret, and the consent grant — never
+        // the client-credentials grant the secret alone would have selected.
+        let binding = f
+            .service
+            .metadata("local", "oauth-secret")
+            .unwrap()
+            .unwrap()
+            .binding
+            .unwrap();
+        assert!(binding.oauth.is_some());
+        let stored = stored_token_set(&f);
+        assert_eq!(
+            stored.grant,
+            mvm_hostd::keyholder::resolver::OAuthGrant::AuthorizationCode
+        );
+        assert!(stored.access_token.expose_secret().is_empty());
+        assert!(stored.refresh_token.is_none());
+        assert_eq!(
+            stored.client_secret.unwrap().expose_secret(),
+            "the-client-secret"
+        );
+        let log = audit_text(&f);
+        assert!(log.contains("\"action\":\"oauth_login\""), "got: {log}");
+        assert!(!log.contains("the-client-secret"), "got: {log}");
+    }
+
+    #[test]
+    fn set_with_oauth_login_refuses_a_value_source_before_storing() {
+        let f = fixture();
+        let mut args = oauth_args(None);
+        args.login = abandoned_consent();
+        let err = cmd_set(
+            &f.service,
+            SetArgs {
+                tenant: "local".into(),
+                name: "oauth-secret".into(),
+                provider: None,
+                hosts: vec!["api.example.com".into()],
+                auth_type: Some(AuthType::Bearer),
+                inject: Default::default(),
+                aws_access_key_id: None,
+                region: None,
+                service: None,
+                approve: SecretApproval::Never,
+                oauth: args,
+                value: inline("a-token-set".into()),
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("--oauth-login"), "got: {err}");
+        assert!(f.service.list("local").unwrap().is_empty());
+    }
+
+    #[test]
+    fn login_refuses_a_secret_without_an_oauth_binding() {
+        let f = fixture();
+        set(
+            &f,
+            "plain",
+            &["api.example.com"],
+            AuthType::Bearer,
+            "sk-plain",
+        )
+        .unwrap();
+        let err =
+            cmd_login(&f.service, "local", "plain", abandoned_consent().unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("not bound to an oauth flow"),
+            "got: {err}"
+        );
     }
 
     #[test]

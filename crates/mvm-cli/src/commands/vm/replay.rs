@@ -153,7 +153,21 @@ fn plan_replay(
         )
     })?;
     let selected = input_journal::select_after_cursor(&entries, cursor);
-    let restored_name = match &args.as_name {
+    let restored_name = fork_name(&meta.id, args.as_name.as_deref())?;
+    Ok(ReplayPlan {
+        restored_name,
+        entries: selected,
+        step_checkpoints: args.step_checkpoints,
+    })
+}
+
+/// The name a replay's fork boots under: `as_name` when it is a valid name
+/// no machine holds, otherwise one derived from the checkpoint and the time.
+pub(in crate::commands) fn fork_name(
+    from: &mvm_core::checkpoint::CheckpointId,
+    as_name: Option<&str>,
+) -> Result<String> {
+    match as_name {
         Some(name) => {
             validate_vm_name(name).with_context(|| format!("Invalid VM name: {name:?}"))?;
             if vm_is_running(name) {
@@ -162,15 +176,14 @@ fn plan_replay(
             if mvm_runtime::machine::persist::load_machine_spec(name).is_ok() {
                 bail!("a machine named {name:?} already exists; pick another --as name");
             }
-            name.clone()
+            Ok(name.to_string())
         }
-        None => format!("replay-{}-{}", meta.id.as_str(), checkpoint::now_unix()),
-    };
-    Ok(ReplayPlan {
-        restored_name,
-        entries: selected,
-        step_checkpoints: args.step_checkpoints,
-    })
+        None => Ok(format!(
+            "replay-{}-{}",
+            from.as_str(),
+            checkpoint::now_unix()
+        )),
+    }
 }
 
 fn print_plan(plan: &ReplayPlan) {

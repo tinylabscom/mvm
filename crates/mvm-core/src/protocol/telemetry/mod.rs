@@ -7,6 +7,7 @@
 
 mod bounded;
 mod record;
+pub mod served;
 mod witness;
 
 pub use bounded::{BoundedList, Text};

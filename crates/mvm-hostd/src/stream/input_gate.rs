@@ -422,7 +422,18 @@ struct Bound {
     idle_flush_after: Duration,
 }
 
-/// The single-writer claim on one VM's stdin.
+/// Which host-to-guest channel a lease arbitrates.
+///
+/// Stdin and display input are separate byte streams into the guest, so one
+/// writer on each does not interleave anything. Both are leased from the same
+/// table so they share one expiry rule and one holder-id sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum LeaseChannel {
+    Stdin,
+    Display,
+}
+
+/// The single-writer claim on one VM's input channel.
 struct Lease {
     holder: String,
     expires_at: Instant,
@@ -439,7 +450,7 @@ impl Lease {
 #[derive(Default)]
 struct GateState {
     bindings: HashMap<String, Bound>,
-    leases: HashMap<String, Lease>,
+    leases: HashMap<(LeaseChannel, String), Lease>,
     next_holder: u64,
 }
 
@@ -521,7 +532,9 @@ impl InputGate {
     pub fn unbind(vm: &str) {
         let mut state = gate();
         state.bindings.remove(vm);
-        state.leases.remove(vm);
+        for channel in [LeaseChannel::Stdin, LeaseChannel::Display] {
+            state.leases.remove(&(channel, vm.to_string()));
+        }
     }
 
     /// Take the input lease on `vm` under the authority of `admitted`.
@@ -586,7 +599,7 @@ impl InputGate {
             return Err(InputRefusal::NotGranted);
         }
 
-        let holder = match claim_lease(vm, plan, resolved.lease_ttl) {
+        let holder = match claim_lease(LeaseChannel::Stdin, vm, plan, resolved.lease_ttl) {
             Ok(holder) => holder,
             Err(refusal) => {
                 audit_refused(audit.as_ref(), plan, vm, &refusal);
@@ -600,7 +613,7 @@ impl InputGate {
         // have failed transiently, and a refusal nobody can see is the same
         // defect one layer down.
         if let Err(err) = audit.record_granted(plan, vm, &holder) {
-            release_lease(vm, &holder);
+            release_lease(LeaseChannel::Stdin, vm, &holder);
             tracing::warn!(vm = %vm, error = %err, "workload input refused: grant not recorded");
             audit_refused(audit.as_ref(), plan, vm, &InputRefusal::Unauditable);
             return Err(InputRefusal::Unauditable);
@@ -631,7 +644,7 @@ impl InputGate {
         let now = Instant::now();
         gate()
             .leases
-            .get(vm)
+            .get(&(LeaseChannel::Stdin, vm.to_string()))
             .filter(|lease| lease.is_live(now))
             .map(|lease| lease.holder.clone())
     }
@@ -785,7 +798,7 @@ impl InputSession {
         self.check_live()?;
         let mut trailing = std::mem::take(&mut self.outbox);
         trailing.extend_from_slice(&self.scanner.flush());
-        release_lease(&self.vm, &self.holder);
+        release_lease(LeaseChannel::Stdin, &self.vm, &self.holder);
         Ok(CloseInput {
             after_seq: self.highest_accepted_seq,
             trailing,
@@ -838,20 +851,7 @@ impl InputSession {
 
     /// Re-take our own lease, or find out we lost it.
     fn renew_lease(&mut self) -> Result<(), InputRefusal> {
-        let now = Instant::now();
-        let renewed = {
-            let mut state = gate();
-            match state.leases.get_mut(&self.vm) {
-                Some(lease) if lease.holder == self.holder && lease.is_live(now) => {
-                    lease.expires_at = now + self.lease_ttl;
-                    true
-                }
-                // Lapsed and reaped, or lapsed and taken by somebody else:
-                // either way this writer no longer speaks for the VM.
-                _ => false,
-            }
-        };
-        if renewed {
+        if renew_lease(LeaseChannel::Stdin, &self.vm, &self.holder, self.lease_ttl) {
             Ok(())
         } else {
             Err(self.latch(InputRefusal::LeaseExpired))
@@ -882,7 +882,7 @@ impl Drop for InputSession {
     /// the heap; the withheld tail is zeroized by the scanner's own `Drop`.
     fn drop(&mut self) {
         self.outbox.zeroize();
-        release_lease(&self.vm, &self.holder);
+        release_lease(LeaseChannel::Stdin, &self.vm, &self.holder);
     }
 }
 
@@ -917,11 +917,26 @@ fn resolve(vm: &str) -> Resolved {
     }
 }
 
-/// Take the lease on `vm`, or say who has it.
-fn claim_lease(vm: &str, plan: &ExecutionPlan, ttl: Duration) -> Result<String, InputRefusal> {
+/// How long `vm`'s binding lets a lease survive without a write: the bound
+/// lifetime, or [`DEFAULT_LEASE_TTL`] for an unbound VM.
+pub(crate) fn bound_lease_ttl(vm: &str) -> Duration {
+    gate()
+        .bindings
+        .get(vm)
+        .map_or(DEFAULT_LEASE_TTL, |bound| bound.lease_ttl)
+}
+
+/// Take the `channel` lease on `vm`, or say who has it.
+pub(crate) fn claim_lease(
+    channel: LeaseChannel,
+    vm: &str,
+    plan: &ExecutionPlan,
+    ttl: Duration,
+) -> Result<String, InputRefusal> {
     let now = Instant::now();
+    let key = (channel, vm.to_string());
     let mut state = gate();
-    if let Some(lease) = state.leases.get(vm)
+    if let Some(lease) = state.leases.get(&key)
         && lease.is_live(now)
     {
         return Err(InputRefusal::LeaseHeld {
@@ -933,7 +948,7 @@ fn claim_lease(vm: &str, plan: &ExecutionPlan, ttl: Duration) -> Result<String, 
     let holder = format!("{}#{}", plan.plan_id.0, state.next_holder);
     state.next_holder = state.next_holder.saturating_add(1);
     state.leases.insert(
-        vm.to_string(),
+        key,
         Lease {
             holder: holder.clone(),
             expires_at: now + ttl,
@@ -942,15 +957,31 @@ fn claim_lease(vm: &str, plan: &ExecutionPlan, ttl: Duration) -> Result<String, 
     Ok(holder)
 }
 
+/// Extend `holder`'s `channel` lease on `vm`, or report that it lapsed or
+/// changed hands. Either way a `false` means this writer no longer speaks for
+/// the VM.
+pub(crate) fn renew_lease(channel: LeaseChannel, vm: &str, holder: &str, ttl: Duration) -> bool {
+    let now = Instant::now();
+    let mut state = gate();
+    match state.leases.get_mut(&(channel, vm.to_string())) {
+        Some(lease) if lease.holder == holder && lease.is_live(now) => {
+            lease.expires_at = now + ttl;
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Give back the lease, but only if it is still ours.
-fn release_lease(vm: &str, holder: &str) {
+pub(crate) fn release_lease(channel: LeaseChannel, vm: &str, holder: &str) {
+    let key = (channel, vm.to_string());
     let mut state = gate();
     if state
         .leases
-        .get(vm)
+        .get(&key)
         .is_some_and(|lease| lease.holder == holder)
     {
-        state.leases.remove(vm);
+        state.leases.remove(&key);
     }
 }
 

@@ -3,7 +3,7 @@
 //! The registry abstracts where a template comes from. Bundled templates
 //! ship inside the `mvmctl` binary and are always available offline.
 //! Remote templates live in a separate repository (e.g.
-//! `github:tinylabscom/mvm-templates`) and are fetched on first use,
+//! `github:tinylabscom/mvm-packs`) and are fetched on first use,
 //! then cached under `~/.mvm/templates/remote/`.
 //!
 //! Resolution order:
@@ -15,6 +15,9 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+
+const DEFAULT_TEMPLATE_REGISTRY: &str =
+    "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main";
 
 /// A resolved template ready to scaffold.
 #[derive(Debug, Clone)]
@@ -147,9 +150,7 @@ impl RegistryConfig {
     pub fn load() -> Self {
         let registry_url = std::env::var("MVM_TEMPLATE_REGISTRY")
             .ok()
-            .unwrap_or_else(|| {
-                "https://raw.githubusercontent.com/tinylabscom/mvm-templates/main".to_string()
-            });
+            .unwrap_or_else(|| DEFAULT_TEMPLATE_REGISTRY.to_string());
         let cache_root = mvm_core::config::remote_templates_dir();
         Self {
             registry_url,
@@ -414,6 +415,14 @@ fn sanitize_cache_key(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_template_registry_points_to_the_official_packs_repository() {
+        assert_eq!(
+            DEFAULT_TEMPLATE_REGISTRY,
+            "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main"
+        );
+    }
 
     #[test]
     fn a_policy_table_parses_into_a_template_policy() {

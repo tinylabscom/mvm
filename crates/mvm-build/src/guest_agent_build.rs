@@ -213,6 +213,27 @@ pub fn musl_target_triple(arch: GuestArch) -> &'static str {
     }
 }
 
+/// The glibc target triple the guest shared objects are cross-compiled to for
+/// `arch`. A shared object is loaded by the guest's own dynamic loader, so it
+/// is built against the libc the guest userland runs rather than statically.
+pub fn gnu_target_triple(arch: GuestArch) -> &'static str {
+    match arch {
+        GuestArch::Aarch64 => "aarch64-unknown-linux-gnu",
+        GuestArch::X86_64 => "x86_64-unknown-linux-gnu",
+    }
+}
+
+/// Every Rust std target the guest builds compile against: musl and glibc for
+/// both guest architectures.
+pub fn guest_rust_targets() -> [&'static str; 4] {
+    [
+        musl_target_triple(GuestArch::Aarch64),
+        musl_target_triple(GuestArch::X86_64),
+        gnu_target_triple(GuestArch::Aarch64),
+        gnu_target_triple(GuestArch::X86_64),
+    ]
+}
+
 /// Spec for the `cargo zigbuild` invocation that produces the guest
 /// binaries. Pure data; [`build_guest_binaries`] runs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -510,7 +531,7 @@ pub fn sdk_cdylib_source_fingerprint(
 /// Fold each declared input into `hasher`, failing closed on one that is
 /// missing. A fingerprint that quietly skipped an absent input would collide
 /// with the tree that still has it.
-fn hash_inputs(
+pub(crate) fn hash_inputs(
     hasher: &mut Sha256,
     workspace_root: &Path,
     inputs: &[&str],
@@ -684,6 +705,61 @@ pub fn runtime_overlay_source_checkout_fingerprint(
     guest_source_fingerprint(workspace_root)
 }
 
+/// Runtime-overlay binaries built without `mvm-agentd/addons`: the sealed
+/// agent and the helpers it launches, none of which may link an async runtime.
+pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 7] = [
+    "mvm-guest-agent",
+    "mvm-guest-netinit",
+    "mvm-seccomp-apply",
+    "mvm-display-bridge",
+    "mvm-ping",
+    "mvm-runner",
+    "mvm-exit-report",
+];
+
+/// Runtime-overlay binaries that need `mvm-agentd/addons`: the async loopback
+/// helpers, which are separate processes and never part of the agent.
+pub const RUNTIME_OVERLAY_ADDON_BINS: [&str; 2] = ["mvm-egress-client", "mvm-addon-dns"];
+
+/// The feature that gates `mvm-agentd`'s async helper binaries.
+pub const MVM_AGENTD_ADDONS_FEATURE: &str = "mvm-agentd/addons";
+
+/// `-p <package>` followed by a `--bin` per name.
+pub(crate) fn package_bin_args(package: &str, bins: &[&str]) -> Vec<String> {
+    let mut args = vec!["-p".to_string(), package.to_string()];
+    for bin in bins {
+        args.push("--bin".to_string());
+        args.push((*bin).to_string());
+    }
+    args
+}
+
+/// The overlay's two `cargo zigbuild` argument lists, sealed bins first.
+///
+/// Two invocations rather than one because cargo unifies features across
+/// everything a single invocation builds: naming an addon bin beside the agent
+/// would compile the agent with `addons` too, pulling tokio into the sealed
+/// agent's closure. The image recipes build the same way.
+fn runtime_overlay_zigbuild_args(triple: &str) -> [Vec<String>; 2] {
+    let release = |selection: Vec<String>| {
+        let mut args = vec![
+            "zigbuild".to_string(),
+            "--release".to_string(),
+            "--target".to_string(),
+            triple.to_string(),
+        ];
+        args.extend(selection);
+        args
+    };
+    let mut addons = package_bin_args("mvm-agentd", &RUNTIME_OVERLAY_ADDON_BINS);
+    addons.push("--features".to_string());
+    addons.push(MVM_AGENTD_ADDONS_FEATURE.to_string());
+    [
+        release(package_bin_args("mvm-agentd", &RUNTIME_OVERLAY_SEALED_BINS)),
+        release(addons),
+    ]
+}
+
 fn build_runtime_overlay_guest_binaries_into_cache(
     cache_root: &Path,
     layout: &RuntimeOverlayGuestLayout,
@@ -696,39 +772,12 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         arch,
         guest_build_target_dir(cache_root, workspace_root),
     );
-    let triple = spec.target_triple();
-    let prod_args = vec![
-        "zigbuild".to_string(),
-        "--release".to_string(),
-        "--target".to_string(),
-        triple.to_string(),
-        "-p".to_string(),
-        "mvm-agentd".to_string(),
-        "--bin".to_string(),
-        "mvm-guest-agent".to_string(),
-        "--bin".to_string(),
-        "mvm-guest-netinit".to_string(),
-        "--bin".to_string(),
-        "mvm-seccomp-apply".to_string(),
-        "--bin".to_string(),
-        "mvm-display-bridge".to_string(),
-        "--bin".to_string(),
-        "mvm-ping".to_string(),
-        "--bin".to_string(),
-        "mvm-runner".to_string(),
-        "--bin".to_string(),
-        "mvm-egress-client".to_string(),
-        "--bin".to_string(),
-        "mvm-addon-dns".to_string(),
-        "--bin".to_string(),
-        "mvm-exit-report".to_string(),
-        // mvm-egress-client + mvm-addon-dns are the async loopback helper
-        // bins gated behind mvm-agentd's `addons` feature (see its
-        // Cargo.toml) so the sealed agent's default build stays tokio-free.
-        "--features".to_string(),
-        "mvm-agentd/addons".to_string(),
-    ];
-    run_zigbuild(&spec, &prod_args)?;
+    // Held across both builds and the copies out of the shared output
+    // directory, so another guest build cannot replace a binary in between.
+    let zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
+    for args in runtime_overlay_zigbuild_args(spec.target_triple()) {
+        run_zigbuild(&zigbuild_lock, &spec, &args, &[])?;
+    }
     let output_dir = spec.output_dir();
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent)?;
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
@@ -746,9 +795,16 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     Ok(layout.binaries())
 }
 
-fn run_zigbuild(spec: &GuestAgentBuildSpec, args: &[String]) -> Result<(), GuestAgentBuildError> {
+/// Run one `cargo zigbuild` with `args`, adding `env` on top of the pinned
+/// guest-build environment. The caller holds the zigbuild lock — the borrow
+/// is the proof — for as long as it needs the outputs to stay put.
+pub(crate) fn run_zigbuild(
+    _held: &mvm_core::util::atomic_io::FileLock,
+    spec: &GuestAgentBuildSpec,
+    args: &[String],
+    env: &[(String, String)],
+) -> Result<(), GuestAgentBuildError> {
     let started = std::time::Instant::now();
-    let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let (cargo, rustc) = zigbuild_tools(spec)?;
     tracing::info!(
         ?args,
@@ -759,6 +815,7 @@ fn run_zigbuild(spec: &GuestAgentBuildSpec, args: &[String]) -> Result<(), Guest
     cmd.args(zigbuild_args_for_output(args))
         .current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec, rustc.as_deref())?;
+    cmd.envs(env.iter().map(|(key, value)| (key, value)));
     // Cargo inherits stdio. Quiet mode suppresses routine progress while still
     // surfacing compiler errors; the CLI's verbose mode preserves raw output.
     let status = cmd
@@ -788,7 +845,7 @@ fn write_exec(dst: &Path, bytes: &[u8]) -> Result<(), GuestAgentBuildError> {
     set_exec(dst)
 }
 
-fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
+pub(crate) fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
     if !src.is_file() {
         return Err(GuestAgentBuildError::OutputMissing(src.to_path_buf()));
     }
@@ -910,7 +967,7 @@ fn zig_global_cache_dir(target_dir: &Path) -> PathBuf {
 /// compiling the same entry is producing exactly what this one needs, so the
 /// caller queues behind it with a status line naming it, then re-checks the
 /// entry before building anything itself.
-fn acquire_guest_build_lock(
+pub(crate) fn acquire_guest_build_lock(
     layout_dir: &Path,
     what: &str,
 ) -> Result<std::fs::File, GuestAgentBuildError> {
@@ -936,7 +993,7 @@ fn scoped_tool_cache_dir(tool: &str, target_dir: &Path) -> PathBuf {
         .join(tool)
 }
 
-fn acquire_guest_zigbuild_lock(
+pub(crate) fn acquire_guest_zigbuild_lock(
     target_dir: &Path,
 ) -> Result<mvm_core::util::atomic_io::FileLock, GuestAgentBuildError> {
     mvm_core::util::atomic_io::FileLock::acquire(&scoped_tool_cache_dir(
@@ -993,6 +1050,36 @@ fn zigbuild_tools(
     Ok((cargo, Some(rustc)))
 }
 
+/// Fail fast, naming the fix, when the pinned toolchain lacks a std target the
+/// build needs; otherwise cargo reports it minutes later as a missing `core`.
+/// A spec with an explicit cargo (tests) has no pinned rustc to ask.
+pub(crate) fn ensure_rust_targets(
+    spec: &GuestAgentBuildSpec,
+    targets: &[&str],
+) -> Result<(), GuestAgentBuildError> {
+    let (_, Some(rustc)) = zigbuild_tools(spec)? else {
+        return Ok(());
+    };
+    let rustc = rustc.display().to_string();
+    let missing: Vec<&str> = targets
+        .iter()
+        .copied()
+        .filter(|target| !crate::embed_toolchain::rustc_has_target(&rustc, target))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let toolchain = pinned_rust_toolchain(&spec.workspace_root)?;
+    Err(GuestAgentBuildError::BuildFailed {
+        reason: format!(
+            "Rust {toolchain} has no std for {}; install the guest targets with \
+             `just payload::toolchain`, or with `rustup target add {} --toolchain {toolchain}`",
+            missing.join(", "),
+            guest_rust_targets().join(" "),
+        ),
+    })
+}
+
 fn pinned_rust_toolchain(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
     let manifest = workspace_root.join("Cargo.toml");
     let contents = std::fs::read_to_string(&manifest)?;
@@ -1025,11 +1112,13 @@ fn rustup_tool(toolchain: &str, tool: &str) -> Result<PathBuf, GuestAgentBuildEr
             reason: format!("resolve {tool} from Rust {toolchain}: {e}"),
         })?;
     if !output.status.success() {
+        let targets = guest_rust_targets().join(" ");
         return Err(GuestAgentBuildError::BuildFailed {
             reason: format!(
                 "Rust {toolchain} is required for guest binaries; install it with \
-                 `rustup toolchain install {toolchain} --profile minimal` and add the required \
-                 musl target"
+                 `just payload::toolchain`, or with `rustup toolchain install {toolchain} \
+                 --profile minimal` followed by `rustup target add {targets} \
+                 --toolchain {toolchain}`"
             ),
         });
     }
@@ -1301,6 +1390,65 @@ mod tests {
             ]
         );
         assert!(argv.contains(&"mvm-agentd".to_string()));
+    }
+
+    fn bins_of(args: &[String]) -> Vec<&str> {
+        args.windows(2)
+            .filter_map(|pair| (pair[0] == "--bin").then_some(pair[1].as_str()))
+            .collect()
+    }
+
+    fn features_of(args: &[String]) -> Vec<&str> {
+        args.windows(2)
+            .filter_map(|pair| (pair[0] == "--features").then_some(pair[1].as_str()))
+            .collect()
+    }
+
+    /// Cargo unifies features across one invocation, so the sealed agent stays
+    /// free of the async runtime only if no invocation that builds it also
+    /// enables `addons`. Only the two loopback helpers may get the feature.
+    #[test]
+    fn only_the_addon_helpers_are_built_with_addons() {
+        let [sealed, addons] = runtime_overlay_zigbuild_args("x86_64-unknown-linux-musl");
+        assert_eq!(
+            bins_of(&sealed),
+            [
+                "mvm-guest-agent",
+                "mvm-guest-netinit",
+                "mvm-seccomp-apply",
+                "mvm-display-bridge",
+                "mvm-ping",
+                "mvm-runner",
+                "mvm-exit-report",
+            ]
+        );
+        assert!(features_of(&sealed).is_empty(), "{sealed:?}");
+        assert_eq!(bins_of(&addons), ["mvm-egress-client", "mvm-addon-dns"]);
+        assert_eq!(features_of(&addons), ["mvm-agentd/addons"]);
+        for args in [&sealed, &addons] {
+            assert_eq!(
+                &args[..4],
+                [
+                    "zigbuild",
+                    "--release",
+                    "--target",
+                    "x86_64-unknown-linux-musl"
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn guest_rust_targets_cover_both_libcs_for_both_arches() {
+        assert_eq!(
+            guest_rust_targets(),
+            [
+                "aarch64-unknown-linux-musl",
+                "x86_64-unknown-linux-musl",
+                "aarch64-unknown-linux-gnu",
+                "x86_64-unknown-linux-gnu",
+            ]
+        );
     }
 
     #[test]
