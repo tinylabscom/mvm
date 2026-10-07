@@ -8,7 +8,7 @@ use ed25519_dalek::SigningKey;
 use mvm_core::util::test_env::TestEnv;
 
 use super::admit_plan_tests::{pinning_params, write_rootfs};
-use super::policy::bundle_pin_tests::make_bundle_for_pin;
+use super::policy::bundle_pin_tests::{make_bundle_for_pin, make_bundle_for_pin_with};
 use super::*;
 
 /// Enrol the publisher of `sk` in `<MVM_HOME>/trusted-publishers/`, the
@@ -52,7 +52,7 @@ fn a_bundle_without_an_image_set_admits_before_a_backend_is_chosen() {
     let mut params = pinning_params(&rootfs, &ledger);
     params.keys_dir = Some(&keys_dir);
     params.audit_dir = Some(&audit_dir);
-    params.bundle_pin = Some(&bundle_path);
+    params.bundle_pin = Some(BundlePin::boots(&bundle_path));
     assert!(params.backend_kind.is_none());
 
     let ctx = admit_plan_for_boot(params).expect("a plain bundle admits without a backend");
@@ -77,12 +77,16 @@ struct InstalledFixture {
 
 impl InstalledFixture {
     fn new() -> Self {
+        Self::with_members(Vec::new())
+    }
+
+    fn with_members(members: Vec<mvm_core::plan::BundleMember>) -> Self {
         let home = tempfile::tempdir().expect("mvm home");
         let mut env = TestEnv::new();
         env.isolate_mvm_home(home.path());
         let sk = SigningKey::from_bytes(&[9; 32]);
         trust_publisher(home.path(), &sk);
-        let (archive, _) = make_bundle_for_pin(&sk);
+        let (archive, _) = make_bundle_for_pin_with(&sk, members);
         let trust = mvm_core::plan::FsTrustStore::default_path().expect("trust store");
         let installed = mvm_core::plan::BundleRegistry::default_path()
             .expect("registry")
@@ -125,7 +129,7 @@ impl InstalledFixture {
         params.kernel_path = with_kernel.then_some(kernel.as_path());
         params.keys_dir = Some(&keys_dir);
         params.audit_dir = Some(&audit_dir);
-        params.bundle_pin = Some(&archive);
+        params.bundle_pin = Some(BundlePin::boots(&archive));
         admit_plan_for_boot(params)
     }
 
@@ -284,6 +288,197 @@ fn an_installed_bundle_whose_publisher_is_no_longer_trusted_is_refused() {
     assert!(format!("{err:#}").contains("verifying bundle"), "{err:#}");
 }
 
+/// A VM booted from the installed bundle, its plan persisted the way a boot
+/// leaves it, so a fork or restore of it can read which bundle it ran.
+struct BundleBootedParent {
+    fixture: InstalledFixture,
+    vm_name: &'static str,
+}
+
+impl BundleBootedParent {
+    fn new() -> Self {
+        Self::from_fixture(InstalledFixture::new())
+    }
+
+    fn from_fixture(fixture: InstalledFixture) -> Self {
+        let ctx = fixture.admit().expect("the parent boots its bundle");
+        let vm_name = "bundle-parent";
+        mvm_hostd::audit::plan_persist::write_plan(vm_name, ctx.admitted.plan())
+            .expect("persist the parent's plan");
+        Self { fixture, vm_name }
+    }
+
+    /// Admit a child the way fork and restore do: the child boots its own
+    /// copy of the parent's disk, which is no member of the bundle, under the
+    /// pin it inherits from the parent's plan.
+    fn admit_child(&self) -> Result<AdmissionContext> {
+        self.admit_child_with_network_policy(mvm_core::network_policy::NetworkPolicy::deny_all())
+    }
+
+    fn admit_child_with_network_policy(
+        &self,
+        network_policy: mvm_core::network_policy::NetworkPolicy,
+    ) -> Result<AdmissionContext> {
+        let inherited = InheritedBundle::of_parent_vm(self.vm_name)?
+            .expect("a bundle-booted parent's plan names its bundle");
+        let child_dir = self.fixture.home.path().join("child");
+        std::fs::create_dir_all(&child_dir).expect("child dir");
+        let rootfs = write_rootfs(&child_dir, b"the parent's disk, as captured");
+        let keys_dir = self.fixture.home.path().join("keys");
+        let audit_dir = self.fixture.audit_dir();
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.vm_name = "bundle-child";
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.bundle_pin = Some(inherited.pin());
+        params.network_policy = network_policy;
+        admit_plan_for_boot(params)
+    }
+
+    fn archive(&self) -> std::path::PathBuf {
+        mvm_core::config::bundles_dir().join(format!("{}.mvmpkg", self.fixture.sha256))
+    }
+}
+
+/// The child inherits the parent's pin: its own plan names the parent's
+/// bundle, though the disk it boots is the parent's captured state.
+#[test]
+fn a_child_of_a_bundle_booted_parent_is_admitted_under_the_parents_bundle() {
+    let parent = BundleBootedParent::new();
+
+    let ctx = parent
+        .admit_child()
+        .expect("an untouched bundle admits the child");
+
+    let pin = ctx
+        .admitted
+        .plan()
+        .bundle
+        .as_ref()
+        .expect("the child's plan pins the parent's bundle");
+    assert_eq!(pin.bundle_sha256, parent.fixture.sha256);
+}
+
+/// A child resumes the parent's workload, but cannot widen the posture that
+/// the parent bundle signed even though its root filesystem is a captured copy.
+#[test]
+fn a_child_cannot_widen_its_inherited_bundle_posture() {
+    let fixture =
+        InstalledFixture::with_members(vec![mvm_core::plan::BundleMember::SecurityPosture(
+            posture(false),
+        )]);
+    let parent = BundleBootedParent::from_fixture(fixture);
+
+    let err = parent
+        .admit_child_with_network_policy(mvm_core::network_policy::NetworkPolicy::unrestricted())
+        .expect_err("inherited no-egress posture must refuse the child");
+
+    assert!(format!("{err:#}").contains("allows no egress"), "{err:#}");
+    let chain = parent.fixture.chain();
+    assert!(chain.contains("plan.failed"), "{chain}");
+    assert!(chain.contains("bundle-posture-exceeded"), "{chain}");
+}
+
+/// Files of the bundle changed after the parent booted refuse the child, and
+/// the refusal is recorded against the child's plan.
+#[test]
+fn a_bundle_changed_after_the_parent_booted_refuses_its_child() {
+    let parent = BundleBootedParent::new();
+    parent.fixture.flip_first_byte("artifacts/rootfs.ext4");
+
+    let err = parent
+        .admit_child()
+        .expect_err("a tampered bundle must not admit a child");
+
+    parent
+        .fixture
+        .assert_refused_and_audited(&err, "installed artifact");
+}
+
+/// An archive replaced by a different bundle, even one a trusted publisher
+/// signed, is not the bundle the parent ran.
+#[test]
+fn a_parent_archive_replaced_by_another_trusted_bundle_refuses_the_child() {
+    let parent = BundleBootedParent::new();
+    let other = SigningKey::from_bytes(&[3; 32]);
+    trust_publisher(parent.fixture.home.path(), &other);
+    let (replacement, _) = make_bundle_for_pin(&other);
+    std::fs::write(parent.archive(), replacement).expect("replace archive");
+
+    let err = parent
+        .admit_child()
+        .expect_err("a different bundle must not stand in for the parent's");
+
+    parent
+        .fixture
+        .assert_refused_and_audited(&err, "the bundle changed after the parent booted");
+}
+
+/// A bundle uninstalled since the parent booted refuses its child rather than
+/// letting it boot unpinned.
+#[test]
+fn a_bundle_uninstalled_after_the_parent_booted_refuses_its_child() {
+    let parent = BundleBootedParent::new();
+    std::fs::remove_file(parent.archive()).expect("remove archive");
+
+    let err = parent
+        .admit_child()
+        .expect_err("a child of an uninstalled bundle must not boot");
+
+    assert!(
+        format!("{err:#}").contains("reading bundle archive"),
+        "{err:#}"
+    );
+}
+
+/// A parent that booted no bundle, or left no plan behind, gives its child no
+/// pin, so those forks admit exactly as before.
+#[test]
+fn a_parent_without_a_bundle_gives_its_child_no_pin() {
+    let home = tempfile::tempdir().expect("mvm home");
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+
+    assert_eq!(InheritedBundle::of_parent_vm("never-booted").unwrap(), None);
+
+    let rootfs = write_rootfs(home.path(), b"plain rootfs");
+    let keys_dir = home.path().join("keys");
+    let audit_dir = home.path().join("audit");
+    let ledger = InMemoryNonceLedger::new();
+    let mut params = pinning_params(&rootfs, &ledger);
+    params.keys_dir = Some(&keys_dir);
+    params.audit_dir = Some(&audit_dir);
+    let ctx = admit_plan_for_boot(params).expect("an unpinned boot admits");
+    assert!(ctx.admitted.plan().bundle.is_none());
+    mvm_hostd::audit::plan_persist::write_plan("plain-parent", ctx.admitted.plan())
+        .expect("persist plan");
+
+    assert_eq!(InheritedBundle::of_parent_vm("plain-parent").unwrap(), None);
+}
+
+/// A parent plan that exists but cannot be read is not evidence of "no
+/// bundle"; reading it as such would admit the child unpinned.
+#[test]
+fn an_unreadable_parent_plan_refuses_rather_than_dropping_the_pin() {
+    let home = tempfile::tempdir().expect("mvm home");
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(home.path());
+    let path = mvm_hostd::audit::plan_persist::plan_path("corrupt-parent").expect("plan path");
+    std::fs::create_dir_all(path.parent().expect("state dir")).expect("state dir");
+    std::fs::write(&path, b"{ not a plan").expect("write corrupt plan");
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+        .expect("tighten plan");
+
+    let err = InheritedBundle::of_parent_vm("corrupt-parent")
+        .expect_err("an unreadable plan must not read as unpinned");
+
+    assert!(
+        format!("{err:#}").contains("refusing to admit a child"),
+        "{err:#}"
+    );
+}
+
 fn posture(allows_egress: bool) -> mvm_core::plan::BundleSecurityPosture {
     mvm_core::plan::BundleSecurityPosture {
         profile: mvm_core::security::AgentProfile::Dev,
@@ -371,7 +566,7 @@ fn a_pinned_bundle_posture_is_enforced() {
     let mut params = pinning_params(&rootfs, &ledger);
     params.keys_dir = Some(&keys_dir);
     params.audit_dir = Some(&audit_dir);
-    params.bundle_pin = Some(&bundle_path);
+    params.bundle_pin = Some(BundlePin::boots(&bundle_path));
     params.network_policy = mvm_core::network_policy::NetworkPolicy::unrestricted();
 
     let err = admit_plan_for_boot(params).expect_err("pinned posture refuses egress");

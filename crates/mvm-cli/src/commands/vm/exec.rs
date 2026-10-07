@@ -734,7 +734,7 @@ pub(in crate::commands) fn run_secure(
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: bundle_archive,
+            bundle_pin: bundle_archive.map(mvm_client::admission::BundlePin::boots),
             bundle_posture: admit_bundle_posture,
             deps_volume: None,
             // The grants come from the launch config's own volume list, so the
