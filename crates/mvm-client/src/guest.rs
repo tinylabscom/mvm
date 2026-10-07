@@ -14,9 +14,12 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
+use mvm_agentd::vsock::{
+    ControlSession, FsResult, GuestCapability, GuestRequest, GuestResponse, ProcResult,
+};
 /// The payloads these operations return, so a caller names them from here.
 pub use mvm_agentd::vsock::{FsEntry, FsEntryKind, FsStat, ProcInfo, ProcState, ProcWaitEvent};
-use mvm_agentd::vsock::{FsResult, GuestRequest, ProcResult};
+use mvm_core::net::session::SessionError;
 
 /// Record the host→guest RPC in the audit chain, before it is sent.
 ///
@@ -53,6 +56,66 @@ fn mock_agent_dir(name: &str) -> Option<String> {
 
 fn connect(name: &str) -> Result<std::os::unix::net::UnixStream> {
     mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+}
+
+/// Flush the guest only when the local machine is currently running.
+pub fn sync_filesystems_if_running(name: &str) -> Result<()> {
+    if mvm_runtime::checkpoint::vm_is_running(name) {
+        sync_filesystems(name)?;
+    }
+    Ok(())
+}
+
+/// Flush buffered guest filesystem writes before a host-side image read.
+///
+/// Only a hangup during the authenticated handshake is retried: no request
+/// could have reached the guest in that state. An EOF after authentication is
+/// returned without replaying a potentially completed request.
+pub fn sync_filesystems(name: &str) -> Result<()> {
+    validate(name)?;
+    if let Some(dir) = mock_agent_dir(name) {
+        let socket = std::path::Path::new(&dir).join("runtime").join("v.sock");
+        let mut stream = mvm_agentd::vsock::connect_to(&socket.to_string_lossy(), 10)?;
+        return mvm_agentd::vsock::sync_filesystems_on(&mut stream);
+    }
+    with_initial_handshake_retry(
+        || {
+            let mut stream = connect(name)?;
+            mvm_agentd::vsock::require_capabilities(
+                &mut stream,
+                &[GuestCapability::FilesystemRpc],
+            )?;
+            let session = ControlSession::open(&mut stream)?;
+            Ok((stream, session))
+        },
+        |(mut stream, mut session)| match session
+            .call_unary(&mut stream, &GuestRequest::SyncFilesystems)?
+        {
+            GuestResponse::FilesystemsSynced => Ok(()),
+            other => bail!("unexpected response to SyncFilesystems: {other:?}"),
+        },
+    )
+}
+
+fn with_initial_handshake_retry<S, T>(
+    mut open: impl FnMut() -> Result<S>,
+    request: impl FnOnce(S) -> Result<T>,
+) -> Result<T> {
+    let session = match open() {
+        Err(error) if is_handshake_peer_hangup(&error) => {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            open()?
+        }
+        result => result?,
+    };
+    request(session)
+}
+
+fn is_handshake_peer_hangup(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<SessionError>())
+        .is_some_and(SessionError::is_peer_hangup)
 }
 
 // ── processes ────────────────────────────────────────────────────────────
@@ -432,6 +495,82 @@ pub fn rename(name: &str, from: &str, to: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+    use std::io::{Error, ErrorKind};
+
+    fn handshake_hangup() -> anyhow::Error {
+        anyhow::Error::new(SessionError::Io(Error::from(ErrorKind::UnexpectedEof)))
+            .context("host session handshake failed")
+    }
+
+    #[test]
+    fn a_peer_hangup_before_authentication_is_retried_once() {
+        let attempts = Cell::new(0);
+        let requests = Cell::new(0);
+        let value = with_initial_handshake_retry(
+            || {
+                attempts.set(attempts.get() + 1);
+                if attempts.get() == 1 {
+                    Err(handshake_hangup())
+                } else {
+                    Ok(7)
+                }
+            },
+            |value| {
+                requests.set(requests.get() + 1);
+                Ok(value)
+            },
+        )
+        .expect("second connection succeeds");
+
+        assert_eq!(value, 7);
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(requests.get(), 1);
+    }
+
+    #[test]
+    fn an_eof_after_authentication_is_not_replayed() {
+        let opens = Cell::new(0);
+        let requests = Cell::new(0);
+        let error = with_initial_handshake_retry(
+            || {
+                opens.set(opens.get() + 1);
+                Ok(())
+            },
+            |()| {
+                requests.set(requests.get() + 1);
+                Err::<(), _>(
+                    anyhow::Error::new(SessionError::Io(Error::from(ErrorKind::UnexpectedEof)))
+                        .context("control frame read failed"),
+                )
+            },
+        )
+        .expect_err("post-request EOF must be returned");
+
+        assert_eq!(opens.get(), 1);
+        assert_eq!(requests.get(), 1);
+        assert!(error.to_string().contains("control frame read failed"));
+    }
+
+    #[test]
+    fn a_second_handshake_hangup_is_bounded() {
+        let attempts = Cell::new(0);
+        let requests = Cell::new(0);
+        with_initial_handshake_retry(
+            || {
+                attempts.set(attempts.get() + 1);
+                Err::<(), _>(handshake_hangup())
+            },
+            |()| {
+                requests.set(requests.get() + 1);
+                Ok(())
+            },
+        )
+        .expect_err("the retry budget must be bounded");
+
+        assert_eq!(attempts.get(), 2);
+        assert_eq!(requests.get(), 0);
+    }
 
     #[test]
     fn a_read_request_preserves_the_symlink_policy() {
