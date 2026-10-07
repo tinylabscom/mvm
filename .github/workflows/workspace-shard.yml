@@ -22,22 +22,44 @@ on:
         description: Parent run/shard correlation key
         required: true
         type: string
+      archive_run_id:
+        description: Parent run containing a shared workspace test archive
+        required: false
+        type: string
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   test:
     name: Workspace shard ${{ inputs.shard }} (${{ inputs.runner_kind }})
     runs-on: ${{ inputs.runner_kind == 'hetzner' && fromJSON('["self-hosted","Linux","X64","mvm","hetzner","kvm"]') || 'ubuntu-latest' }}
+    # Archive workers on one persistent host share the build-time source path.
+    # Serialize that pool; GitHub-hosted workers have separate filesystems.
+    concurrency:
+      group: ${{ inputs.runner_kind == 'hetzner' && inputs.archive_run_id != '' && format('workspace-archive-{0}', inputs.archive_run_id) || format('workspace-shard-{0}', github.run_id) }}
+      cancel-in-progress: false
     timeout-minutes: 55
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.commit_sha }}
 
+      - name: Prepare archived workspace
+        if: inputs.archive_run_id != ''
+        env:
+          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || { echo "Invalid archive run ID" >&2; exit 1; }
+          archive_root="/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          rm -rf -- "$archive_root"
+          mkdir -p -- "$archive_root"
+          cp -a "$GITHUB_WORKSPACE/." "$archive_root/"
+
       - uses: ./.github/actions/free-disk
-        if: inputs.runner_kind == 'github'
+        if: inputs.runner_kind == 'github' && inputs.archive_run_id == ''
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -58,6 +80,7 @@ jobs:
           command -v ld.lld
 
       - uses: ./.github/actions/rust-cache
+        if: inputs.archive_run_id == ''
         with:
           key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}
 
@@ -67,21 +90,57 @@ jobs:
           tool: nextest
 
       - name: Build
+        if: inputs.archive_run_id == ''
         run: cargo build --all-targets
 
       - name: Validate nextest override filters
+        if: inputs.archive_run_id == ''
         run: cargo run -p xtask -- check-nextest-groups
 
       - name: xtask man-page tests
+        if: inputs.archive_run_id == ''
         run: cargo nextest run -p xtask --features man
 
       - name: Run tests
+        if: inputs.archive_run_id == ''
         run: cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2
 
       - name: Run addon/egress helper tests
-        if: inputs.shard == '1'
+        if: inputs.archive_run_id == '' && inputs.shard == '1'
         run: cargo nextest run -p mvm-agentd --features addons
 
       - name: Run doctests
-        if: inputs.shard == '1'
+        if: inputs.archive_run_id == '' && inputs.shard == '1'
         run: cargo test --workspace --doc
+
+      - name: Download shared workspace test archive
+        if: inputs.archive_run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: workspace-tests
+          run-id: ${{ inputs.archive_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ${{ runner.temp }}
+
+      - name: Run archived workspace tests
+        if: inputs.archive_run_id != ''
+        env:
+          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
+        run: |
+          set -euo pipefail
+          archive_root="/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          cd "$archive_root"
+          cargo nextest run \
+            --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst" \
+            --workspace-remap "$archive_root" \
+            --extract-to "$archive_root" \
+            --partition hash:${{ inputs.shard }}/2
+
+      - name: Remove archived workspace
+        if: always() && inputs.archive_run_id != ''
+        env:
+          ARCHIVE_RUN_ID: ${{ inputs.archive_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$ARCHIVE_RUN_ID" =~ ^[0-9]+$ ]] || exit 1
+          rm -rf -- "/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
