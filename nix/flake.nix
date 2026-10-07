@@ -81,11 +81,12 @@
   };
 
   outputs =
-    { self
-    , nixpkgs
-    , microvm
-    , mvm-workspace
-    , ...
+    {
+      self,
+      nixpkgs,
+      microvm,
+      mvm-workspace,
+      ...
     }:
     let
       systems = [
@@ -105,13 +106,15 @@
       ];
 
       # Helper: construct a NixOS configuration for the named profile.
-      mkProfile = system: profileName: nixpkgs.lib.nixosSystem {
-        inherit system;
-        modules = [
-          microvm.nixosModules.microvm
-          (./profiles + "/${profileName}.nix")
-        ];
-      };
+      mkProfile =
+        system: profileName:
+        nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [
+            microvm.nixosModules.microvm
+            (./profiles + "/${profileName}.nix")
+          ];
+        };
 
       forAllSystems = nixpkgs.lib.genAttrs systems;
 
@@ -144,9 +147,13 @@
         else
           mvm-workspace;
 
-      libFor = import ./lib { inherit nixpkgs microvm; mvmSrc = workspaceSrc; };
+      libFor = import ./lib {
+        inherit nixpkgs microvm;
+        mvmSrc = workspaceSrc;
+      };
 
-      hostPackagesFor = system:
+      hostPackagesFor =
+        system:
         import ./packages {
           pkgs = nixpkgs.legacyPackages.${system};
           mvmSrc = workspaceSrc;
@@ -167,7 +174,8 @@
       # image repository that pins this flake). Called with the same package
       # set the image flakes import, so a derivation is identical whichever
       # side evaluates it.
-      guestPackagesFor = system:
+      guestPackagesFor =
+        system:
         import ./packages/guest.nix {
           pkgs = import nixpkgs { inherit system; };
           mvmSrc = workspaceSrc;
@@ -183,7 +191,8 @@
       # `lib.<system>.mkGuest` remains the user image API. The package
       # recipes are intentionally source-only; they do not download
       # mvm-published release artifacts.
-      overlays.default = final: _prev:
+      overlays.default =
+        final: _prev:
         let
           hostPackages = import ./packages {
             pkgs = final;
@@ -205,28 +214,29 @@
       #
       # `hostBinaries` is the manifest of the host-side binaries mvmctl
       # embeds and a builder image installs; it is data, not a recipe.
-      lib = forAllSystems (system:
+      lib = forAllSystems (
+        system:
         libFor { inherit system; }
         // {
           hostBinaries = import ./lib/mvm-host-binaries.nix;
-        });
+        }
+      );
 
       # ── Internal: nixosConfigurations.minimal ────────────────────
       #
       # Test fixture pinned by `tests/nix_flake_structure.rs`. NOT a
       # starter template — users write their own flake. The `internal` namespace makes
       # the boundary unambiguous so CI lints can grep for it.
-      nixosConfigurations.internal-minimal-x86_64-linux =
-        mkProfile "x86_64-linux" "minimal";
-      nixosConfigurations.internal-minimal-aarch64-linux =
-        mkProfile "aarch64-linux" "minimal";
+      nixosConfigurations.internal-minimal-x86_64-linux = mkProfile "x86_64-linux" "minimal";
+      nixosConfigurations.internal-minimal-aarch64-linux = mkProfile "aarch64-linux" "minimal";
 
       # Top-level package output mirroring the internal fixture so
       # `nix build .#internal-minimal-runner` works on Linux CI
       # runners. Same INTERNAL boundary — not consumed by user
       # flakes; if you find yourself running this command, you're
       # working on mvm itself, not a user project.
-      packages = nixpkgs.lib.genAttrs hostSystems (system:
+      packages = nixpkgs.lib.genAttrs hostSystems (
+        system:
         let
           hostPackages = hostPackagesFor system;
         in
@@ -244,11 +254,11 @@
           inherit (hostPackages) libkrun libkrunfw mvmctl-native-libkrun;
         }
         // nixpkgs.lib.optionalAttrs (builtins.elem system systems) {
-          internal-minimal-runner =
-            (mkProfile system "minimal").config.microvm.declaredRunner;
+          internal-minimal-runner = (mkProfile system "minimal").config.microvm.declaredRunner;
         }
         # Guest recipes: the interface image flakes build through.
-        // nixpkgs.lib.optionalAttrs (builtins.elem system systems) (guestPackagesFor system));
+        // nixpkgs.lib.optionalAttrs (builtins.elem system systems) (guestPackagesFor system)
+      );
 
       # ── CI-provable no-glibc closure gate ─────────────────────────
       #
@@ -268,7 +278,8 @@
       # `sdk-sidecar-carries-glibc`. Green across all three means no
       # ordinary guest carries glibc, and the workloads that need the SDK
       # get it from a disk they were admitted to mount.
-      checks = nixpkgs.lib.genAttrs systems (system:
+      checks = nixpkgs.lib.genAttrs systems (
+        system:
         let
           pkgs = import nixpkgs { inherit system; };
           guest = (libFor { inherit system; }).mkGuest {
@@ -285,8 +296,36 @@
               };
             };
           };
+          functionApp = pkgs.runCommand "function-app-probe" { } ''
+            mkdir -p "$out"
+            printf 'def runtime(): return 42\n' > "$out/app.py"
+          '';
+          functionService = (libFor { inherit system; }).mkFunctionService {
+            inherit pkgs;
+            language = "python";
+            workloadId = "sealed-app-probe";
+            module = "app";
+            function = "runtime";
+            format = "json";
+            appPkg = functionApp;
+            sourcePath = "/app";
+          };
+          functionGuest = (libFor { inherit system; }).mkGuest {
+            name = "sealed-app-probe";
+            packages = [ functionApp ] ++ functionService.servicePackages;
+            uids.entrypoint = 0;
+            entrypoint.command = functionService.bootCommand;
+            bootCommand = functionService.bootCommand;
+            extraFiles = functionService.extraFiles;
+          };
         in
         {
+          guest-function-app-path = pkgs.runCommand "guest-function-app-path" { } ''
+            ${pkgs.e2fsprogs}/bin/debugfs -R 'stat /app' ${functionGuest} > app-stat.txt 2>&1
+            ${pkgs.gnugrep}/bin/grep -Eq 'Type: *symlink' app-stat.txt
+            ${pkgs.gnugrep}/bin/grep -Fq 'Fast link dest: "${functionApp}"' app-stat.txt
+            touch "$out"
+          '';
           guest-rootfs-file-modes = pkgs.runCommand "guest-rootfs-file-modes" { } ''
             ${pkgs.e2fsprogs}/bin/debugfs -R 'stat /usr/lib/mvm/wrappers/runner' ${guest} > runner-mode.txt 2>&1
             ${pkgs.gnugrep}/bin/grep -Eq 'Mode: *0555' runner-mode.txt
@@ -317,8 +356,7 @@
           # static BusyBox and the static privilege-drop helper. The CA bundle
           # is copied into /etc rather than retaining its source store path.
           guest-rootfs-package-budget =
-            pkgs.runCommand "guest-rootfs-package-budget"
-              { closure = guest.passthru.rootfsClosureInfo; }
+            pkgs.runCommand "guest-rootfs-package-budget" { closure = guest.passthru.rootfsClosureInfo; }
               ''
                 package_count=$(wc -l < "$closure/store-paths")
                 if [ "$package_count" -gt 2 ]; then
@@ -328,6 +366,7 @@
                 fi
                 echo "$package_count" > "$out"
               '';
-        });
+        }
+      );
     };
 }
