@@ -306,16 +306,17 @@ fn classify_plan_refs<'a>(
 /// Validate a plan's four policy refs and return the bundle used by the
 /// live host bridge. Local-default plans carry no bundle and therefore
 /// retain the bridge's mandatory-deny posture.
-pub fn validate_policy_refs(plan: &ExecutionPlan) -> Result<ValidatedPolicy, ResolveError> {
-    validate_policy_refs_with_dir(plan, &default_policy_dir())
-}
-
-/// Test seam for [`validate_policy_refs`] with a caller-supplied policy
-/// directory instead of `$HOME/.mvm/policies`.
-pub fn validate_policy_refs_with_dir(
+///
+/// `policy_dir` overrides `~/.mvm/policies`; `None` resolves the default.
+pub fn validate_policy_refs(
     plan: &ExecutionPlan,
-    base_dir: &std::path::Path,
+    policy_dir: Option<&std::path::Path>,
 ) -> Result<ValidatedPolicy, ResolveError> {
+    let base_dir = policy_dir.map_or_else(
+        || std::borrow::Cow::Owned(default_policy_dir()),
+        std::borrow::Cow::Borrowed,
+    );
+    let base_dir = base_dir.as_ref();
     let PolicyRef(network) = &plan.network_policy;
     let FsPolicyRef(fs) = &plan.fs_policy;
     let PolicyRef(egress) = &plan.egress_policy;
@@ -509,7 +510,8 @@ mod tests {
 
     #[test]
     fn policy_validation_accepts_local_default_without_a_bundle() {
-        let validated = validate_policy_refs(&fixture_plan()).expect("local-default must validate");
+        let validated =
+            validate_policy_refs(&fixture_plan(), None).expect("local-default must validate");
         assert_eq!(validated.kind, PolicyResolutionKind::LocalDefault);
         assert!(validated.bundle.is_none());
     }
@@ -532,7 +534,7 @@ mod tests {
         // with a clear path so operators know exactly where to put it.
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
-        let err = match validate_policy_refs(&plan) {
+        let err = match validate_policy_refs(&plan, None) {
             Err(e) => e,
             Ok(_) => panic!("tenant-scoped ref without bundle must be refused"),
         };
@@ -560,7 +562,7 @@ mod tests {
         // bogus) to land on the Unrecognized branch.
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "bogus");
-        let err = match validate_policy_refs(&plan) {
+        let err = match validate_policy_refs(&plan, None) {
             Err(e) => e,
             Ok(_) => panic!("unrecognized ref must be refused"),
         };
@@ -583,7 +585,7 @@ mod tests {
         // local-default, the resolver refuses with MixedRefs.
         let mut plan = fixture_plan();
         plan.tool_policy = PolicyRef("acme:tools-v1".to_string());
-        let err = match validate_policy_refs(&plan) {
+        let err = match validate_policy_refs(&plan, None) {
             Err(e) => e,
             Ok(_) => panic!("mixed refs must be refused"),
         };
@@ -608,7 +610,7 @@ mod tests {
         // disagrees with the others, MixedRefs fires.
         let mut plan = fixture_plan();
         plan.fs_policy = FsPolicyRef("typo-default".to_string());
-        let err = match validate_policy_refs(&plan) {
+        let err = match validate_policy_refs(&plan, None) {
             Err(e) => e,
             Ok(_) => panic!("mixed fs ref must be refused"),
         };
@@ -681,7 +683,7 @@ port_hi  = {port}
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
 
-        let err = match validate_policy_refs_with_dir(&plan, tmp.path()) {
+        let err = match validate_policy_refs(&plan, Some(tmp.path())) {
             Err(e) => e,
             Ok(_) => panic!("bad CIDR must be refused"),
         };
@@ -719,7 +721,7 @@ port_hi  = {port}
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
 
-        let err = match validate_policy_refs_with_dir(&plan, tmp.path()) {
+        let err = match validate_policy_refs(&plan, Some(tmp.path())) {
             Err(e) => e,
             Ok(_) => panic!("unknown proto must be refused"),
         };
@@ -775,7 +777,7 @@ disabled_inspectors = [{list}]
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
 
-        let validated = validate_policy_refs_with_dir(&plan, tmp.path()).expect("resolve ok");
+        let validated = validate_policy_refs(&plan, Some(tmp.path())).expect("resolve ok");
         assert_eq!(validated.kind, PolicyResolutionKind::BundleValidated);
         let bundle = validated
             .bundle
@@ -791,7 +793,7 @@ disabled_inspectors = [{list}]
         // A local-default plan has no per-tenant policy → None (the bridge
         // enforces mandatory-deny only); the policy dir is never touched.
         let plan = fixture_plan();
-        let result = validate_policy_refs_with_dir(&plan, std::path::Path::new("/nonexistent"))
+        let result = validate_policy_refs(&plan, Some(std::path::Path::new("/nonexistent")))
             .expect("resolve ok");
         assert_eq!(result.kind, PolicyResolutionKind::LocalDefault);
         assert!(result.bundle.is_none());
@@ -813,7 +815,7 @@ disabled_inspectors = [{list}]
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
 
-        let err = match validate_policy_refs_with_dir(&plan, tmp.path()) {
+        let err = match validate_policy_refs(&plan, Some(tmp.path())) {
             Err(e) => e,
             Ok(_) => panic!("typo in disabled_inspectors must be refused"),
         };
@@ -861,7 +863,7 @@ disabled_inspectors = [{list}]
         );
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
-        let _validated = validate_policy_refs_with_dir(&plan, tmp.path())
+        let _validated = validate_policy_refs(&plan, Some(tmp.path()))
             .unwrap_or_else(|e| panic!("known names should resolve: {e}"));
     }
 
@@ -919,7 +921,7 @@ bundle_version = 1
         );
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
-        let _validated = validate_policy_refs_with_dir(&plan, tmp.path())
+        let _validated = validate_policy_refs(&plan, Some(tmp.path()))
             .unwrap_or_else(|e| panic!("redact + subset must resolve: {e}"));
     }
 
@@ -935,7 +937,7 @@ bundle_version = 1
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
 
-        let err = match validate_policy_refs_with_dir(&plan, tmp.path()) {
+        let err = match validate_policy_refs(&plan, Some(tmp.path())) {
             Err(e) => e,
             Ok(_) => panic!("unknown pii.mode must be refused"),
         };
@@ -977,7 +979,7 @@ bundle_version = 1
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
 
-        let err = match validate_policy_refs_with_dir(&plan, tmp.path()) {
+        let err = match validate_policy_refs(&plan, Some(tmp.path())) {
             Err(e) => e,
             Ok(_) => panic!("unknown pii category must be refused"),
         };
@@ -1046,7 +1048,7 @@ stream_destinations = [{list}]
         );
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
-        let _validated = validate_policy_refs_with_dir(&plan, tmp.path())
+        let _validated = validate_policy_refs(&plan, Some(tmp.path()))
             .unwrap_or_else(|e| panic!("known schemes must resolve: {e}"));
     }
 
@@ -1068,7 +1070,7 @@ stream_destinations = [{list}]
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
 
-        let err = match validate_policy_refs_with_dir(&plan, tmp.path()) {
+        let err = match validate_policy_refs(&plan, Some(tmp.path())) {
             Err(e) => e,
             Ok(_) => panic!("typo in audit URL must be refused"),
         };
@@ -1109,7 +1111,7 @@ stream_destinations = [{list}]
         );
         let mut plan = fixture_plan();
         set_all_refs(&mut plan, "acme:web-worker");
-        let err = match validate_policy_refs_with_dir(&plan, tmp.path()) {
+        let err = match validate_policy_refs(&plan, Some(tmp.path())) {
             Err(e) => e,
             Ok(_) => panic!("scheme-less audit URL must be refused"),
         };

@@ -34,7 +34,7 @@ pub(crate) fn error_chain_has_permission_denied(err: &(dyn Error + 'static)) -> 
 
 #[cfg(all(test, feature = "test-support"))]
 pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
-    match MockGuestAgent::start(vm_dir) {
+    match MockGuestAgent::start(vm_dir, None) {
         Ok(agent) => Some(agent),
         Err(err) if error_chain_has_permission_denied(err.as_ref()) => {
             eprintln!(

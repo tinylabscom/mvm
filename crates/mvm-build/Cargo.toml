@@ -153,11 +153,6 @@ mvm-fs = { workspace = true, features = ["test-support"] }
 # constructor from a raw key. Already in the build graph via mvm-core; workspace-
 # pinned. Not used by any non-test code here.
 base64.workspace = true
-# `packed_artifact::tests` generate Ed25519
-# keypairs for round-trip tests. ed25519-dalek's
-# `SigningKey::generate` takes any `CryptoRng + RngCore`; the
-# concrete `OsRng` lives in `rand`.
-rand.workspace = true
 # Builder-daemon readiness-probe tests bind a real UnixListener under a
 # temp dir to drive `serve_connection` end-to-end.
 tempfile.workspace = true

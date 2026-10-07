@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+pub mod history;
 pub mod replay;
 pub mod replay_input;
 
@@ -520,6 +521,37 @@ pub struct RenewRequest {
 }
 
 impl AgentSessionRecord {
+    /// The record of a session that has just opened: generation 1, active,
+    /// at journal cursor 0.
+    ///
+    /// Generation 1, not 0: a generation counts periods of sandbox residency
+    /// and this record opens the first one. The approval head, tier, park
+    /// reason and retention are the park transition's to write; an active
+    /// session that never parked has none of them.
+    #[must_use]
+    pub fn opened(
+        session_id: AgentSessionId,
+        members: Vec<String>,
+        parent_checkpoint: Option<mvm_core::checkpoint::CheckpointDigest>,
+        now_unix: u64,
+    ) -> Self {
+        Self {
+            session_id,
+            generation: 1,
+            state: SandboxResidency::Active,
+            members,
+            parent_checkpoint,
+            created_unix: now_unix,
+            updated_unix: now_unix,
+            journal_cursor: 0,
+            approval_head: None,
+            storage_tier: None,
+            park_reason: None,
+            retain_until_unix: None,
+            last_transition: None,
+        }
+    }
+
     /// Suspend a residency. Returns the parked record; does not write it.
     ///
     /// The generation is deliberately unchanged: it identifies one period of
@@ -730,10 +762,17 @@ impl AgentSessionStore {
         &self.root
     }
 
+    /// The directory holding one session's record and everything recorded
+    /// beside it: its event history and its encrypted replay inputs.
+    ///
+    /// `AgentSessionId::parse` already refuses `/`, `..`, and leading or
+    /// trailing dots, so the id cannot escape the root.
+    pub fn session_dir(&self, id: &AgentSessionId) -> PathBuf {
+        self.root.join(id.as_str())
+    }
+
     fn record_path(&self, id: &AgentSessionId) -> PathBuf {
-        // `AgentSessionId::parse` already refuses `/`, `..`, and leading or
-        // trailing dots, so the id cannot escape the root.
-        self.root.join(id.as_str()).join(RECORD_FILE)
+        self.session_dir(id).join(RECORD_FILE)
     }
 
     /// Whether a record file is present for `id`.
@@ -831,6 +870,53 @@ impl AgentSessionStore {
         }
         current.parent_checkpoint = Some(checkpoint.meta_digest.clone());
         current.journal_cursor = input.binding.journal_cursor;
+        current.updated_unix = now_unix;
+        self.write(&current)?;
+        Ok(current)
+    }
+
+    /// Commit a session's first resume point: a `vm_full` checkpoint bound to
+    /// the session at its current journal cursor, captured before any step.
+    ///
+    /// A replay can only start from a checkpoint that a step descends from,
+    /// so without a base the first recorded step could never be replayed.
+    /// The base carries no input — nothing was delivered to reach it — and
+    /// is refused once the session already has a resume point, so it can
+    /// never displace a recorded timeline.
+    pub fn commit_session_base(
+        &self,
+        checkpoints: &crate::checkpoint::CheckpointStore,
+        checkpoint: &mvm_core::checkpoint::CheckpointMeta,
+        now_unix: u64,
+    ) -> Result<AgentSessionRecord> {
+        let durable_checkpoint = checkpoints
+            .by_digest(&checkpoint.meta_digest)?
+            .context("base checkpoint is not durable in the checkpoint store")?;
+        if durable_checkpoint != *checkpoint {
+            bail!("base checkpoint does not match its durable record");
+        }
+        if checkpoint.class != mvm_core::checkpoint::CheckpointClass::VmFull {
+            bail!("a session base requires a vm_full checkpoint");
+        }
+        let binding = checkpoint
+            .session
+            .as_ref()
+            .context("base checkpoint has no durable agent-session binding")?;
+        let mut current = self.load(&binding.session_id)?;
+        if current.state != SandboxResidency::Active {
+            bail!("only an active agent session can commit a base checkpoint");
+        }
+        if current.parent_checkpoint.is_some() || checkpoint.parent.is_some() {
+            bail!("the agent session already has a resume point");
+        }
+        if binding.generation != current.generation
+            || binding.journal_cursor < current.journal_cursor
+            || binding.replay_input_digest.is_some()
+        {
+            bail!("base checkpoint binding does not match the active session");
+        }
+        current.parent_checkpoint = Some(checkpoint.meta_digest.clone());
+        current.journal_cursor = binding.journal_cursor;
         current.updated_unix = now_unix;
         self.write(&current)?;
         Ok(current)
@@ -1171,6 +1257,58 @@ mod tests {
                 .commit_replayable_step(&checkpoints, &inputs, &input, &checkpoint, 22)
                 .is_err(),
             "the same cursor must not commit twice"
+        );
+    }
+
+    #[test]
+    fn a_session_base_is_committed_once_and_never_over_a_timeline() {
+        let temp = tempfile::tempdir().unwrap();
+        let sessions = AgentSessionStore::at(temp.path().join("sessions"));
+        let checkpoints = crate::checkpoint::CheckpointStore::at(temp.path().join("checkpoints"));
+        let current = record("base-session");
+        sessions.write(&current).unwrap();
+        let base = |input: Option<String>| {
+            CheckpointMeta::builder(
+                CheckpointId::new("base-session-1"),
+                CheckpointClass::VmFull,
+                "vm-alpha",
+            )
+            .created_unix(20)
+            .supervisor_config_digest("config")
+            .session(Some(SessionBinding {
+                session_id: current.session_id.clone(),
+                generation: current.generation,
+                journal_cursor: 1,
+                approval_head: ApprovalHead::parse(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                replay_input_digest: input,
+            }))
+            .build()
+        };
+
+        let carrying_input = base(Some(format!("sha256:{}", "c".repeat(64))));
+        checkpoints.write_meta(&carrying_input).unwrap();
+        assert!(
+            sessions
+                .commit_session_base(&checkpoints, &carrying_input, 21)
+                .is_err(),
+            "a base reached by no delivery carries no input"
+        );
+
+        let checkpoint = base(None);
+        checkpoints.write_meta(&checkpoint).unwrap();
+        let committed = sessions
+            .commit_session_base(&checkpoints, &checkpoint, 21)
+            .unwrap();
+        assert_eq!(committed.journal_cursor, 1);
+        assert_eq!(
+            committed.parent_checkpoint.as_ref(),
+            Some(&checkpoint.meta_digest)
+        );
+        assert!(
+            sessions
+                .commit_session_base(&checkpoints, &checkpoint, 22)
+                .is_err(),
+            "a second base would displace the recorded timeline"
         );
     }
 

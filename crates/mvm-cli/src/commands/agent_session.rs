@@ -51,6 +51,7 @@ impl Args {
             AgentSessionAction::Park(a) => a.retry.json,
             AgentSessionAction::Resume(a) => a.retry.json,
             AgentSessionAction::Renew(a) => a.retry.json,
+            AgentSessionAction::Replay(_) => false,
         }
     }
 }
@@ -70,6 +71,9 @@ pub(in crate::commands) enum AgentSessionAction {
     Resume(ResumeArgs),
     /// Extend a parked session's retention deadline; never shortens it
     Renew(RenewArgs),
+    /// Fork one of the session's checkpoints and re-deliver the prompts it
+    /// recorded after it to the fork's agent
+    Replay(super::vm::prompt_replay::ReplayArgs),
 }
 
 /// What it takes to bring a session into existence.
@@ -247,6 +251,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             resume(&AgentSessionStore::open(), &CheckpointStore::open(), &a)
         }
         AgentSessionAction::Renew(a) => renew(&AgentSessionStore::open(), &a),
+        AgentSessionAction::Replay(a) => super::vm::prompt_replay::run(&a),
     }
 }
 
@@ -293,26 +298,7 @@ fn open_record(store: &AgentSessionStore, args: &OpenArgs) -> Result<AgentSessio
         args.session_id
     );
     let now = mvm_core::util::time::now_unix_secs();
-    let record = AgentSessionRecord {
-        session_id: id,
-        // Generation 1, not 0: a generation counts periods of sandbox
-        // residency and this record opens the first one.
-        generation: 1,
-        state: SandboxResidency::Active,
-        members: args.members.clone(),
-        parent_checkpoint,
-        created_unix: now,
-        updated_unix: now,
-        journal_cursor: 0,
-        // Both are the park transition's to write. An active session has not
-        // parked, so it has no tier, no reason, and no head it was parked
-        // under.
-        approval_head: None,
-        storage_tier: None,
-        park_reason: None,
-        retain_until_unix: None,
-        last_transition: None,
-    };
+    let record = AgentSessionRecord::opened(id, args.members.clone(), parent_checkpoint, now);
     store.write(&record)?;
     Ok(record)
 }

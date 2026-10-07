@@ -34,9 +34,14 @@
 //!    *Unknown `key_id` → reject before reading any artifact bytes.*
 //! 3. Ed25519-verify the signature over the canonical manifest
 //!    bytes. *Mismatch → reject.*
-//! 4. For each artifact, re-hash its bytes and compare against the
+//! 4. Check what the manifest declares: every entry within the size caps
+//!    (2 GiB each, 4 GiB in total — archive entries are counted before
+//!    their bytes are read), at most one kernel command line, posture, and
+//!    provenance member, a posture that agrees with the verity binding, and
+//!    provenance digests that match the artifacts. *Incoherent → reject.*
+//! 5. For each artifact, re-hash its bytes and compare against the
 //!    SHA-256 declared in the signed manifest. *Mismatch → reject.*
-//! 5. dm-verity gives independent per-block integrity inside the
+//! 6. dm-verity gives independent per-block integrity inside the
 //!    rootfs at boot — the bundle layer covers tamper detection at
 //!    extract time.
 //!
@@ -71,8 +76,9 @@ use thiserror::Error;
 
 pub use mvm_contract::plan::bundle::{
     ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
-    BundleMember, BundleResources, KeyId, MANIFEST_FILENAME, PlanArtifact, SIGNATURE_FILENAME,
-    VerityInfo, signature_from_base64, signature_to_base64,
+    BundleMember, BundleResources, BundleSecurityPosture, KeyId, MANIFEST_FILENAME,
+    MAX_BUNDLE_ENTRY_BYTES, MAX_BUNDLE_TOTAL_BYTES, MAX_KERNEL_CMDLINE_BYTES, PlanArtifact,
+    SIGNATURE_FILENAME, VerityInfo, signature_from_base64, signature_to_base64,
 };
 
 use crate::arch::GuestArch;
@@ -83,8 +89,14 @@ use crate::image_set::{
 };
 use crate::packs::Sha256Hex;
 
+mod declarations;
+mod lookup;
 mod signer;
+mod verify_error;
+pub use declarations::BundleSizeBudget;
+pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
 pub use signer::ManifestSigner;
+pub use verify_error::{BundleVerifyError, ensure_safe_path};
 
 /// Derive the key_id from a verifying-key's bytes.
 ///
@@ -120,83 +132,6 @@ pub fn canonical_manifest_bytes(manifest: &BundleManifest) -> Result<Vec<u8>> {
 /// hex-digest pattern used in `mvm-core::manifest::canonical_key_for_path`.
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
-}
-
-/// Look up bundle archive bytes by SHA-256 at admit time.
-///
-/// The supervisor calls this on every admission whose `ExecutionPlan`
-/// carries a `PlanArtifact`. Production impls read from
-/// `~/.mvm/bundles/<bundle_sha256>.mvmpkg`; tests inject in-memory
-/// resolvers. The trait stays in `mvm_plan` rather than alongside
-/// `FsTrustStore` so the supervisor doesn't need a filesystem dep
-/// to consume admissions.
-pub trait BundleResolver: Send + Sync {
-    /// Fetch the archive bytes for `bundle_sha256`. Returns
-    /// `Err(MissingBundle)` when the bundle isn't cached locally;
-    /// `Err(Io(_))` when it's there but unreadable.
-    fn resolve(&self, bundle_sha256: &str) -> Result<Vec<u8>, BundleResolveError>;
-}
-
-/// Errors specific to bundle resolution at admit time. Distinct
-/// from [`BundleVerifyError`] so the supervisor can surface
-/// "we don't have the bundle locally" differently from "we have
-/// it but the bytes don't verify."
-#[derive(Debug, Error)]
-pub enum BundleResolveError {
-    #[error("no cached bundle for sha256 {bundle_sha256}")]
-    MissingBundle { bundle_sha256: String },
-
-    #[error("reading cached bundle {bundle_sha256}: {reason}")]
-    Io {
-        bundle_sha256: String,
-        reason: String,
-    },
-}
-
-/// Filesystem-backed resolver rooted at `~/.mvm/bundles/`.
-/// `<bundle_sha256>.mvmpkg` is the on-disk filename — content-
-/// addressed so two bundles with the same bytes share a cache
-/// entry. The cache is populated by `mvmctl bundle fetch` once
-/// the registry-replacement follow-up lands; until then,
-/// publishers write the file by hand.
-pub struct FsBundleResolver {
-    root: PathBuf,
-}
-
-impl FsBundleResolver {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { root: dir.into() }
-    }
-
-    /// Default path: `~/.mvm/bundles/`. Same shape as
-    /// `FsTrustStore::default_path` so admission code can resolve
-    /// both with no extra plumbing.
-    pub fn default_path() -> anyhow::Result<Self> {
-        let p = crate::config::mvm_home_strict()?.join("bundles");
-        Ok(Self::new(p))
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-}
-
-impl BundleResolver for FsBundleResolver {
-    fn resolve(&self, bundle_sha256: &str) -> Result<Vec<u8>, BundleResolveError> {
-        let path = self.root.join(format!("{bundle_sha256}.mvmpkg"));
-        match std::fs::read(&path) {
-            Ok(bytes) => Ok(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Err(BundleResolveError::MissingBundle {
-                    bundle_sha256: bundle_sha256.to_string(),
-                })
-            }
-            Err(e) => Err(BundleResolveError::Io {
-                bundle_sha256: bundle_sha256.to_string(),
-                reason: e.to_string(),
-            }),
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -891,116 +826,6 @@ fn extract_manifest_signature(archive: &[u8]) -> Result<[u8; 64], String> {
     Err(format!("{SIGNATURE_FILENAME} not present in archive"))
 }
 
-/// Errors that can fall out of bundle verification.
-///
-/// Each variant carries enough detail to debug a specific failure
-/// without exposing artifact bytes to log sinks.
-#[derive(Debug, Error)]
-pub enum BundleVerifyError {
-    #[error("trust store has no entry for key_id {key_id}")]
-    UnknownKey { key_id: String },
-
-    #[error("publisher key file at {path} is malformed: {reason}")]
-    MalformedPubkey { path: PathBuf, reason: String },
-
-    #[error("signature does not verify under trusted key {key_id}: {reason}")]
-    SignatureInvalid { key_id: String, reason: String },
-
-    #[error("schema version {found} is newer than this build supports ({supported})")]
-    UnsupportedSchema { found: u32, supported: u32 },
-
-    #[error("manifest JSON parse failed: {0}")]
-    ManifestParse(String),
-
-    #[error("manifest declares key_id {declared} but trust store entry is for {actual}")]
-    KeyIdMismatch { declared: String, actual: String },
-
-    #[error("artifact {name} sha256 mismatch: manifest says {declared}, actual {actual}")]
-    ArtifactSha256Mismatch {
-        name: String,
-        declared: String,
-        actual: String,
-    },
-
-    #[error("artifact {name} size mismatch: manifest says {declared}, actual {actual}")]
-    ArtifactSizeMismatch {
-        name: String,
-        declared: u64,
-        actual: u64,
-    },
-
-    #[error(
-        "archive entry path is unsafe: {path:?} (absolute paths, `..` traversal, and \
-         backslash separators are rejected)"
-    )]
-    UnsafePath { path: String },
-
-    #[error("manifest references artifact {name} but it is missing from the archive")]
-    ArtifactMissing { name: String },
-
-    #[error("signature blob is the wrong size: expected 64 bytes, got {got}")]
-    MalformedSignature { got: usize },
-
-    #[error("bundle member references image-set manifest artifact {name}, but it is not declared")]
-    ImageSetManifestArtifactMissing { name: String },
-
-    #[error("embedded image-set manifest {name} is not valid JSON: {reason}")]
-    ImageSetManifestParse { name: String, reason: String },
-
-    #[error("embedded image-set manifest {name} was refused: {reason}")]
-    ImageSetRefused {
-        name: String,
-        #[source]
-        reason: ImageSetError,
-    },
-
-    #[error("embedded image set names artifact {name}, but the bundle does not declare it")]
-    ImageSetArtifactMissing { name: String },
-
-    #[error(
-        "embedded image-set artifact {name} digest differs from its bundle artifact: image set {image_set}, bundle {bundle}"
-    )]
-    ImageSetArtifactDigestMismatch {
-        name: String,
-        image_set: String,
-        bundle: String,
-    },
-
-    #[error(
-        "embedded image-set artifact {name} size differs from its bundle artifact: image set {image_set}, bundle {bundle}"
-    )]
-    ImageSetArtifactSizeMismatch {
-        name: String,
-        image_set: u64,
-        bundle: u64,
-    },
-
-    #[error("bundle declares artifact name {name} more than once")]
-    DuplicateArtifactName { name: String },
-
-    #[error("bundle schema v{found} cannot declare typed members; members require schema v3")]
-    MembersRequireSchemaV3 { found: u32 },
-}
-
-/// Validate that an archive-relative path is safe to extract: no
-/// absolute roots, no `..` traversal, no backslash separators.
-///
-/// Returns `Ok(())` if safe; `BundleVerifyError::UnsafePath`
-/// otherwise. Surfaced as a free function so the archive reader and
-/// the manifest validator both apply the same rule.
-pub fn ensure_safe_path(path: &str) -> Result<(), BundleVerifyError> {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.contains('\\')
-        || path.split('/').any(|seg| seg == ".." || seg == ".")
-    {
-        return Err(BundleVerifyError::UnsafePath {
-            path: path.to_string(),
-        });
-    }
-    Ok(())
-}
-
 /// Build a sealed bundle archive from manifest + artifact byte blobs.
 ///
 /// The caller supplies the manifest (already populated with per-
@@ -1027,6 +852,7 @@ pub fn write_bundle(
     // bundles from ever leaving the build host.
     let verifying_key = signer.verifying_key();
     let derived = key_id_from_pubkey(&verifying_key);
+    declarations::validate_declarations(manifest).context("refusing to seal the bundle")?;
     anyhow::ensure!(
         manifest.key_id == derived,
         "manifest key_id ({}) does not match signing key derivation ({})",
@@ -1103,59 +929,6 @@ fn append_bytes<W: Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) -
         .with_context(|| format!("write tar entry {path:?}"))
 }
 
-/// Lookup interface for finding a publisher's verifying key by `key_id`.
-///
-/// Production impl reads `~/.mvm/trusted-publishers/<key_id>.pub`;
-/// tests inject an in-memory map. Kept narrow so the verifier
-/// doesn't grow a filesystem dependency.
-pub trait TrustStore {
-    /// Return the verifying key for `key_id`, or `None` if the
-    /// consumer has not enrolled this publisher.
-    fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey>;
-}
-
-/// Filesystem-backed trust store rooted at `~/.mvm/trusted-publishers/`
-/// (or any directory). Pubkey files are named `<key_id>.pub` and
-/// hold the 32 raw Ed25519 public-key bytes (no PEM, no headers).
-///
-/// Production consumers populate this via `mvmctl trust add`
-/// (shipped in a follow-up). For now the format is documented here
-/// so out-of-band enrolment via plain file copy works too.
-pub struct FsTrustStore {
-    root: PathBuf,
-}
-
-impl FsTrustStore {
-    /// Construct rooted at `dir`.
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { root: dir.into() }
-    }
-
-    /// Default path: `~/.mvm/trusted-publishers/`. Errors when
-    /// `$HOME` is unset.
-    pub fn default_path() -> Result<Self> {
-        let p = crate::config::mvm_home_strict()?.join("trusted-publishers");
-        Ok(Self::new(p))
-    }
-
-    /// Underlying directory.
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-}
-
-impl TrustStore for FsTrustStore {
-    fn lookup(&self, key_id: &KeyId) -> Option<VerifyingKey> {
-        if !key_id.is_well_formed() {
-            return None;
-        }
-        let path = self.root.join(format!("{}.pub", key_id.0));
-        let bytes = std::fs::read(&path).ok()?;
-        let arr: [u8; 32] = bytes.as_slice().try_into().ok()?;
-        VerifyingKey::from_bytes(&arr).ok()
-    }
-}
-
 /// Verified bundle handle: the parsed manifest, the bytes for each
 /// artifact, and the `key_id` that signed it.
 ///
@@ -1226,6 +999,7 @@ pub fn read_and_verify_bundle(
     // modest in size (≤ a few hundred MiB); a chunked impl can come
     // when that stops being true.
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut budget = declarations::BundleSizeBudget::default();
     let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
     for entry in archive
         .entries()
@@ -1239,6 +1013,7 @@ pub fn read_and_verify_bundle(
             .to_string_lossy()
             .into_owned();
         ensure_safe_path(&path)?;
+        budget.admit(&path, entry.size())?;
         let mut buf = Vec::new();
         entry
             .read_to_end(&mut buf)
@@ -1329,6 +1104,7 @@ pub fn read_and_verify_bundle(
             found: manifest.schema_version,
         });
     }
+    declarations::validate_declarations(&manifest)?;
 
     // ----- Step 6: per-artifact hash + size check -----
     let mut artifacts_out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -1387,11 +1163,13 @@ fn verify_embedded_image_sets(
     bundle
         .members
         .iter()
-        .map(|member| match member {
-            BundleMember::EmbeddedImageSet { manifest_artifact } => {
-                verify_embedded_image_set(bundle, artifacts, manifest_artifact)
-            }
+        .filter_map(|member| match member {
+            BundleMember::EmbeddedImageSet { manifest_artifact } => Some(manifest_artifact),
+            BundleMember::KernelCmdline { .. }
+            | BundleMember::SecurityPosture(_)
+            | BundleMember::BuildProvenance(_) => None,
         })
+        .map(|manifest_artifact| verify_embedded_image_set(bundle, artifacts, manifest_artifact))
         .collect()
 }
 
@@ -3131,5 +2909,144 @@ mod tests {
             vec![valid],
             "only a 64-char lowercase-hex directory is an installed bundle"
         );
+    }
+
+    fn sealed_posture() -> BundleSecurityPosture {
+        BundleSecurityPosture {
+            profile: crate::policy::security::AgentProfile::SealedProd,
+            verity_protected: true,
+            requires_auth: true,
+            allows_volumes: false,
+            allows_egress: false,
+        }
+    }
+
+    /// A kernel + rootfs + verity bundle carrying `members`, signed by `sk`
+    /// without going through [`write_bundle`]'s refusal — what a publisher
+    /// with other tooling could hand a consumer.
+    fn hand_sealed_bundle(sk: &SigningKey, members: Vec<BundleMember>) -> Vec<u8> {
+        let payload = [
+            ("artifacts/vmlinux", ArtifactRole::Kernel, b"k".as_slice()),
+            ("artifacts/rootfs.ext4", ArtifactRole::Rootfs, b"r"),
+            (
+                "artifacts/rootfs.verity",
+                ArtifactRole::VerityHashSidecar,
+                b"v",
+            ),
+        ];
+        let mut manifest = make_manifest(
+            key_id_from_pubkey(&sk.verifying_key()),
+            payload
+                .iter()
+                .map(|(path, role, bytes)| {
+                    art(path.rsplit('/').next().unwrap(), role.clone(), path, bytes)
+                })
+                .collect(),
+        );
+        manifest.verity = Some(VerityInfo {
+            roothash: "a".repeat(64),
+            sidecar_artifact: "rootfs.verity".to_string(),
+        });
+        manifest.members = members;
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
+        let sig = sk.sign(&manifest_bytes).to_bytes();
+        let mut tar = tar::Builder::new(Vec::new());
+        append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
+        append_bytes(&mut tar, SIGNATURE_FILENAME, &sig).unwrap();
+        for (path, _, bytes) in payload {
+            append_bytes(&mut tar, path, bytes).unwrap();
+        }
+        tar.into_inner().unwrap()
+    }
+
+    #[test]
+    fn declarations_survive_sign_and_verify() {
+        let sk = fresh_key();
+        let members = vec![
+            BundleMember::KernelCmdline {
+                cmdline: "console=ttyS0".to_string(),
+            },
+            BundleMember::SecurityPosture(sealed_posture()),
+        ];
+        let archive = hand_sealed_bundle(&sk, members);
+        let verified = read_and_verify_bundle(&archive, &trust(&sk)).expect("coherent bundle");
+        assert_eq!(verified.manifest.kernel_cmdline(), Some("console=ttyS0"));
+        assert_eq!(
+            verified.manifest.security_posture(),
+            Some(&sealed_posture())
+        );
+        assert!(verified.embedded_image_sets.is_empty());
+    }
+
+    #[test]
+    fn a_signed_but_malformed_posture_is_refused_at_verify() {
+        let sk = fresh_key();
+        let unauthenticated = BundleSecurityPosture {
+            requires_auth: false,
+            ..sealed_posture()
+        };
+        let archive = hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(unauthenticated)]);
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::MalformedPosture { .. })
+        ));
+    }
+
+    #[test]
+    fn widening_a_signed_posture_breaks_the_signature() {
+        let sk = fresh_key();
+        let archive =
+            hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(sealed_posture())]);
+        let needle = br#""allows_egress":false"#;
+        let at = archive
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .expect("posture is in the manifest bytes");
+        let mut tampered = archive.clone();
+        tampered[at..at + needle.len()].copy_from_slice(br#""allows_egress":true "#);
+        assert!(matches!(
+            read_and_verify_bundle(&tampered, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn write_bundle_refuses_to_seal_a_malformed_posture() {
+        let sk = fresh_key();
+        let mut manifest = make_manifest(
+            key_id_from_pubkey(&sk.verifying_key()),
+            vec![art(
+                "vmlinux",
+                ArtifactRole::Kernel,
+                "artifacts/vmlinux",
+                b"k",
+            )],
+        );
+        manifest.members = vec![BundleMember::SecurityPosture(sealed_posture())];
+        let err = write_bundle(
+            &manifest,
+            &sk,
+            vec![("artifacts/vmlinux".to_string(), b"k".to_vec())],
+        )
+        .expect_err("sealed-prod posture without verity");
+        assert!(format!("{err:#}").contains("verity"), "{err:#}");
+    }
+
+    #[test]
+    fn an_entry_header_over_the_cap_is_refused_before_its_bytes_are_read() {
+        // The header claims 3 GiB; the archive holds a few bytes. Reading the
+        // body would fail with a short read; the cap must fire first.
+        let mut header = tar::Header::new_gnu();
+        header.set_path("artifacts/rootfs.ext4").unwrap();
+        header.set_size(3 * 1024 * 1024 * 1024);
+        header.set_mode(0o644);
+        header.set_cksum();
+        let mut archive = header.as_bytes().to_vec();
+        archive.extend_from_slice(&[0u8; 512]);
+        let sk = fresh_key();
+        assert!(matches!(
+            read_and_verify_bundle(&archive, &trust(&sk)),
+            Err(BundleVerifyError::EntryTooLarge { size, .. }) if size == 3 * 1024 * 1024 * 1024
+        ));
     }
 }
