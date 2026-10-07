@@ -828,8 +828,9 @@ needs `--features bdd`, and without it the same broken tree reports zero
 errors — and on macOS it cannot compile `cfg(target_os = "linux")` files at
 all, including Linux-gated _test_ files, which `just check::linux` misses too
 because that recipe is `--lib` only. `just check::gated` covers both. Skipping
-it surfaces in CI as `check-nextest-groups` failing with "cargo nextest list
-failed", a message that names neither the file nor the field.
+it costs a CI round trip: the break surfaces there as a compile error in the
+"Build workspace tests" job, which compiles every workspace test target on
+Linux.
 
 **Always pass `--all` to `cargo fmt`.** Without it, fmt only checks the
 manifest crate (whichever one the manifest points at), silently missing
