@@ -4,7 +4,7 @@
 //! would form a dependency cycle: `mvm-client` depends on this crate.
 
 fn cargo_tree(args: &[&str]) -> String {
-    let out = std::process::Command::new(env!("CARGO"))
+    let out = std::process::Command::new("cargo")
         .args(args)
         .output()
         .expect("cargo tree runs");

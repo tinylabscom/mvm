@@ -1,14 +1,23 @@
-//! View-only CDP screencast bridge.
+//! CDP screencast bridge, view-only unless started with input.
 //!
-//! The bridge constructs the four CDP messages it needs itself. Nothing read
-//! from the host is ever forwarded to Chrome, so this is not a raw DevTools
+//! The bridge constructs every CDP message it sends itself. Nothing read from
+//! the host is ever forwarded to Chrome verbatim, so this is not a raw DevTools
 //! tunnel: a caller cannot turn the display path into `Runtime.evaluate`,
-//! cookie mutation, request interception, or input dispatch.
+//! cookie mutation or request interception.
+//!
+//! Without an input source the bridge issues only the four screencast methods.
+//! With one — the display input FIFO, which carries frames the host's display
+//! input gate admitted — each typed event becomes one of three fixed input
+//! methods, built from the event's fields. Credential-entry markers are host
+//! bookkeeping and produce no CDP message.
 
 use std::io::{self, BufRead, Write};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
-use mvm_contract::stream::{DisplayFrame, DisplayFrameError, DisplayMime};
+use mvm_contract::stream::{
+    DisplayFrame, DisplayFrameError, DisplayInputEvent, DisplayMime, PointerButton,
+};
 use serde_json::{Value, json};
 use thiserror::Error;
 
@@ -16,13 +25,23 @@ const PAGE_ENABLE_ID: u64 = 1;
 const START_SCREENCAST_ID: u64 = 2;
 const FIRST_ACK_ID: u64 = 3;
 const MAX_CDP_MESSAGE_BYTES: usize = 3 * 1024 * 1024;
+/// Input commands number from here, far above any acknowledgement id, so the
+/// two command streams sharing one pipe never reuse an id.
+const FIRST_INPUT_ID: u64 = 1 << 40;
 
-/// The only CDP methods this bridge can issue.
+/// The only CDP methods this bridge can issue without an input source.
 pub const ALLOWED_CDP_METHODS: &[&str] = &[
     CdpMethod::Enable.as_str(),
     CdpMethod::StartScreencast.as_str(),
     CdpMethod::ScreencastFrameAck.as_str(),
     CdpMethod::StopScreencast.as_str(),
+];
+
+/// The only CDP methods admitted display input can become.
+pub const ALLOWED_CDP_INPUT_METHODS: &[&str] = &[
+    CdpMethod::DispatchMouseEvent.as_str(),
+    CdpMethod::DispatchKeyEvent.as_str(),
+    CdpMethod::InsertText.as_str(),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +50,9 @@ enum CdpMethod {
     StartScreencast,
     ScreencastFrameAck,
     StopScreencast,
+    DispatchMouseEvent,
+    DispatchKeyEvent,
+    InsertText,
 }
 
 impl CdpMethod {
@@ -40,7 +62,116 @@ impl CdpMethod {
             Self::StartScreencast => "Page.startScreencast",
             Self::ScreencastFrameAck => "Page.screencastFrameAck",
             Self::StopScreencast => "Page.stopScreencast",
+            Self::DispatchMouseEvent => "Input.dispatchMouseEvent",
+            Self::DispatchKeyEvent => "Input.dispatchKeyEvent",
+            Self::InsertText => "Input.insertText",
         }
+    }
+}
+
+/// Build the CDP command for one admitted input event, or nothing for the
+/// credential-entry markers. Every field of the command comes from a typed
+/// event field; the method comes from [`CdpMethod`].
+#[must_use]
+pub fn input_command(event: &DisplayInputEvent, id: u64) -> Option<Vec<u8>> {
+    let (method, params) = match event {
+        DisplayInputEvent::PointerMove { x, y } => (
+            CdpMethod::DispatchMouseEvent,
+            json!({"type": "mouseMoved", "x": x, "y": y}),
+        ),
+        DisplayInputEvent::PointerButton {
+            x,
+            y,
+            button,
+            pressed,
+        } => (
+            CdpMethod::DispatchMouseEvent,
+            json!({
+                "type": if *pressed { "mousePressed" } else { "mouseReleased" },
+                "x": x,
+                "y": y,
+                "button": button_name(*button),
+                "clickCount": 1,
+            }),
+        ),
+        DisplayInputEvent::Wheel {
+            x,
+            y,
+            delta_x,
+            delta_y,
+        } => (
+            CdpMethod::DispatchMouseEvent,
+            json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": delta_x, "deltaY": delta_y}),
+        ),
+        DisplayInputEvent::Key { key, pressed } => {
+            let mut params =
+                json!({"type": if *pressed { "keyDown" } else { "keyUp" }, "key": key});
+            // A single printable character also carries `text`, which is what
+            // makes a key-down type that character into the focused field.
+            if *pressed && key.chars().count() == 1 && !key.chars().any(char::is_control) {
+                params["text"] = json!(key);
+            }
+            (CdpMethod::DispatchKeyEvent, params)
+        }
+        DisplayInputEvent::Text { text } | DisplayInputEvent::Paste { text } => {
+            (CdpMethod::InsertText, json!({"text": text}))
+        }
+        DisplayInputEvent::CredentialEntryBegin | DisplayInputEvent::CredentialEntryEnd => {
+            return None;
+        }
+    };
+    Some(encode_cdp(id, method, params))
+}
+
+fn button_name(button: PointerButton) -> &'static str {
+    match button {
+        PointerButton::Left => "left",
+        PointerButton::Middle => "middle",
+        PointerButton::Right => "right",
+    }
+}
+
+/// Turn every admitted input frame read from `source` into CDP input commands
+/// on `cdp_writer`, until `source` ends.
+///
+/// # Errors
+/// Reading `source` or writing to Chrome failed.
+pub fn forward_input<W: Write>(
+    mut source: impl BufRead,
+    cdp_writer: &SharedCdpWriter<W>,
+) -> Result<(), BridgeError> {
+    let mut next_id = FIRST_INPUT_ID;
+    while let Some(frame) = crate::display_input::read_frame(&mut source)? {
+        for event in &frame.events {
+            if let Some(command) = input_command(event, next_id) {
+                next_id = next_id.saturating_add(1);
+                cdp_writer.send(&command)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Chrome's debugging pipe, shared between the screencast loop and the input
+/// forwarder. One message is written whole under the lock, so the two never
+/// interleave inside a NUL-framed message.
+pub struct SharedCdpWriter<W>(Arc<Mutex<W>>);
+
+impl<W> Clone for SharedCdpWriter<W> {
+    fn clone(&self) -> Self {
+        Self(Arc::clone(&self.0))
+    }
+}
+
+impl<W: Write> SharedCdpWriter<W> {
+    #[must_use]
+    pub fn new(writer: W) -> Self {
+        Self(Arc::new(Mutex::new(writer)))
+    }
+
+    fn send(&self, message: &[u8]) -> Result<(), BridgeError> {
+        let mut writer = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        write_cdp(&mut *writer, message)
     }
 }
 
@@ -145,17 +276,30 @@ pub fn write_frame(mut writer: impl Write, frame: &DisplayFrame) -> Result<(), B
 /// Run one fixed-method screencast session over Chrome's NUL-framed remote
 /// debugging pipe and the guest-to-host display stream.
 ///
-/// The host side is write-only here. Commands sent to Chrome are constructed
-/// locally and cannot be supplied by the host, which is the boundary that
-/// keeps the display stream from becoming a raw debugging tunnel.
-pub fn bridge_session(
+/// The host frame stream is write-only here. Commands sent to Chrome are
+/// constructed locally and cannot be supplied by the host, which is the
+/// boundary that keeps the display stream from becoming a raw debugging
+/// tunnel. With an `input` source, admitted display input is translated on its
+/// own thread by [`forward_input`]; the session ends when Chrome's pipe does.
+pub fn bridge_session<W: Write + Send + 'static>(
     mut cdp_reader: impl BufRead,
-    mut cdp_writer: impl Write,
+    cdp_writer: SharedCdpWriter<W>,
     mut host_writer: impl Write,
     step_id: Option<String>,
+    input: Option<Box<dyn BufRead + Send>>,
 ) -> Result<(), BridgeError> {
     for setup in CdpScreencastBridge::setup_messages() {
-        write_cdp(&mut cdp_writer, &setup)?;
+        cdp_writer.send(&setup)?;
+    }
+    if let Some(source) = input {
+        let input_writer = cdp_writer.clone();
+        std::thread::Builder::new()
+            .name("mvm-display-input".into())
+            .spawn(move || {
+                if let Err(error) = forward_input(source, &input_writer) {
+                    tracing::warn!(error = %error, "display input forwarding stopped");
+                }
+            })?;
     }
     let mut bridge = CdpScreencastBridge::new(step_id);
     loop {
@@ -174,12 +318,12 @@ pub fn bridge_session(
         message.pop();
         if let Some(bridged) = bridge.handle_message(&message)? {
             write_frame(&mut host_writer, &bridged.frame)?;
-            write_cdp(&mut cdp_writer, &bridged.acknowledgement)?;
+            cdp_writer.send(&bridged.acknowledgement)?;
         }
     }
 }
 
-fn write_cdp(writer: &mut impl Write, message: &[u8]) -> Result<(), BridgeError> {
+fn write_cdp(writer: &mut (impl Write + ?Sized), message: &[u8]) -> Result<(), BridgeError> {
     writer.write_all(message)?;
     writer.write_all(&[0])?;
     writer.flush()?;
@@ -288,17 +432,18 @@ mod tests {
     fn a_pipe_session_constructs_setup_and_ack_messages_and_only_writes_frames_hostward() {
         let mut input = event("Page.screencastFrame");
         input.push(0);
-        let mut cdp_output = Vec::new();
+        let cdp_output = SharedCdpWriter::new(Vec::new());
         let mut host_output = Vec::new();
         bridge_session(
             std::io::Cursor::new(input),
-            &mut cdp_output,
+            cdp_output.clone(),
             &mut host_output,
             Some("step-pipe".into()),
+            None,
         )
         .unwrap();
 
-        let commands = cdp_output
+        let commands = written(&cdp_output)
             .split(|byte| *byte == 0)
             .filter(|message| !message.is_empty())
             .map(|message| serde_json::from_slice::<Value>(message).unwrap())
@@ -318,11 +463,98 @@ mod tests {
         let oversized = vec![b'x'; MAX_CDP_MESSAGE_BYTES + 1];
         let error = bridge_session(
             std::io::Cursor::new(oversized),
+            SharedCdpWriter::new(Vec::new()),
             Vec::new(),
-            Vec::new(),
+            None,
             None,
         )
         .unwrap_err();
         assert!(matches!(error, BridgeError::CdpMessageTooLarge));
+    }
+
+    fn written(writer: &SharedCdpWriter<Vec<u8>>) -> Vec<u8> {
+        writer.0.lock().unwrap().clone()
+    }
+
+    fn commands(writer: &SharedCdpWriter<Vec<u8>>) -> Vec<Value> {
+        written(writer)
+            .split(|byte| *byte == 0)
+            .filter(|message| !message.is_empty())
+            .map(|message| serde_json::from_slice::<Value>(message).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn admitted_input_becomes_only_the_fixed_input_methods() {
+        let frame = mvm_contract::stream::DisplayInputFrame {
+            seq: 0,
+            events: vec![
+                DisplayInputEvent::CredentialEntryBegin,
+                DisplayInputEvent::PointerButton {
+                    x: 10,
+                    y: 20,
+                    button: PointerButton::Left,
+                    pressed: true,
+                },
+                DisplayInputEvent::Wheel {
+                    x: 1,
+                    y: 2,
+                    delta_x: 0,
+                    delta_y: -120,
+                },
+                DisplayInputEvent::Key {
+                    key: "a".into(),
+                    pressed: true,
+                },
+                DisplayInputEvent::Key {
+                    key: "Enter".into(),
+                    pressed: true,
+                },
+                DisplayInputEvent::Text {
+                    text: "hunter2".into(),
+                },
+                DisplayInputEvent::CredentialEntryEnd,
+            ],
+        };
+        let line = crate::display_input::encode_frame(&frame).unwrap();
+        let writer = SharedCdpWriter::new(Vec::new());
+        forward_input(std::io::Cursor::new(line), &writer).unwrap();
+
+        let sent = commands(&writer);
+        assert_eq!(sent.len(), 5, "credential markers produce no CDP message");
+        for command in &sent {
+            let method = command["method"].as_str().unwrap();
+            assert!(ALLOWED_CDP_INPUT_METHODS.contains(&method), "{method}");
+            assert!(command["id"].as_u64().unwrap() >= FIRST_INPUT_ID);
+        }
+        assert_eq!(sent[0]["params"]["type"], "mousePressed");
+        assert_eq!(sent[0]["params"]["button"], "left");
+        assert_eq!(sent[1]["params"]["deltaY"], -120);
+        assert_eq!(sent[2]["params"]["text"], "a");
+        assert!(
+            sent[3]["params"].get("text").is_none(),
+            "a named key types nothing"
+        );
+        assert_eq!(sent[4]["method"], "Input.insertText");
+        assert_eq!(sent[4]["params"]["text"], "hunter2");
+    }
+
+    #[test]
+    fn a_session_without_input_never_issues_an_input_method() {
+        let mut input = event("Page.screencastFrame");
+        input.push(0);
+        let writer = SharedCdpWriter::new(Vec::new());
+        bridge_session(
+            std::io::Cursor::new(input),
+            writer.clone(),
+            Vec::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        for command in commands(&writer) {
+            let method = command["method"].as_str().unwrap();
+            assert!(ALLOWED_CDP_METHODS.contains(&method), "{method}");
+        }
     }
 }

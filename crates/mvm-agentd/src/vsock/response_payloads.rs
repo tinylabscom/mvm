@@ -84,6 +84,39 @@ pub enum StreamInputRefusal {
     WorkloadGone,
 }
 
+/// Outcome of one `DisplayInput` frame.
+///
+/// About delivery to the display bridge only. Whether the input was allowed
+/// was decided by the host's display input gate before the frame was sent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DisplayInputResult {
+    /// The bridge took the frame, or already had it under this `seq`.
+    Accepted,
+    /// Nothing was delivered, and why.
+    Refused {
+        kind: DisplayDeliveryRefusal,
+        message: String,
+    },
+}
+
+/// Why the agent would not deliver a display input frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum DisplayDeliveryRefusal {
+    /// No display bridge is reading input. Retryable once one starts with
+    /// `--input`.
+    NoBridge,
+    /// `seq` went backwards past the last delivered frame.
+    OutOfOrder,
+    /// The frame breaks the contract's bounds.
+    Malformed,
+    /// The bridge did not read the frame within the delivery deadline.
+    Busy,
+}
+
 /// Per-process metadata returned by `ProcList`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

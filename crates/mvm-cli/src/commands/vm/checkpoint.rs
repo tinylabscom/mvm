@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
+use mvm_client::admission::InheritedBundle;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointDigest, CheckpointId, CheckpointMeta};
 use mvm_core::config::{machine_state_dir, vm_state_dir};
 use mvm_core::vm_backend::SnapshotCapability;
@@ -33,6 +34,8 @@ use admitted::admitted_capture_for;
 mod admitted;
 mod fork_vm_full;
 mod lineage;
+mod prompt_step;
+pub(in crate::commands) use prompt_step::VmFullStepCheckpointer;
 mod revert;
 mod timeline;
 mod vm_state;
@@ -361,6 +364,15 @@ struct CaptureVmFullArgs<'a> {
     id: CheckpointId,
     tag: Option<String>,
     created_unix: u64,
+    /// The agent-session step this capture records, if it is one.
+    step: Option<SessionStep>,
+}
+
+/// The session lineage a step checkpoint carries: the resume point it extends
+/// and the session, cursor and recorded input it is bound to.
+struct SessionStep {
+    parent: Option<CheckpointDigest>,
+    session: mvm_core::checkpoint::SessionBinding,
 }
 
 /// Capture the vm_full triple for the running VM through the pause/save/resume
@@ -378,6 +390,10 @@ fn capture_vm_full_for_running_vm(
         )
     })?;
     let admitted = admitted_capture_for(args.name)?;
+    let (parent, session) = match args.step {
+        Some(step) => (step.parent, Some(step.session)),
+        None => (None, None),
+    };
     let params = CaptureVmFullParams {
         id: args.id,
         vm_name: args.name.to_string(),
@@ -392,10 +408,10 @@ fn capture_vm_full_for_running_vm(
         created_unix: args.created_unix,
         retain_paused: false,
         grants: admitted.grants,
+        parent,
+        session,
         // Frozen in the same pause window, so `vm diff --from/--to` can
         // compare what the workspace held at each checkpoint.
-        parent: None,
-        session: None,
         workspace_volumes: super::workspace::capture_set(&super::workspace::workspaces_of(
             args.name,
         )?),
@@ -427,6 +443,7 @@ fn create_vm_full(name: &str, tag: Option<String>, json: bool) -> Result<()> {
         id,
         tag,
         created_unix: now,
+        step: None,
     })
     .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
     let meta = seal_machine_input_cursor(&store, &meta, input_cursor)?;
@@ -471,6 +488,7 @@ pub(in crate::commands) fn capture_vm_full_for_machine(
         id: id.clone(),
         tag,
         created_unix: now,
+        step: None,
     })
     .with_context(|| format!("capturing vm_full checkpoint of {name:?}"))?;
     let meta = seal_machine_input_cursor(&store, &meta, input_cursor)?;
@@ -1043,6 +1061,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     AnyBackend::require_hypervisor_selectable(&effective_hypervisor)?;
     let parent_agent_verbs = parent_agent_verb_override(p.parent_checkpoint, p.store);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
+    let parent_bundle = InheritedBundle::of_parent_vm(&parent_meta.vm_name)?;
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
     let user_cfg = mvm_core::user_config::load(None);
@@ -1117,7 +1136,8 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         keys_dir: None,
         audit_dir: None,
         policy_dir: None,
-        bundle_pin: None,
+        bundle_pin: parent_bundle.as_ref().map(InheritedBundle::pin),
+        bundle_posture: None,
         deps_volume: None,
         shares: Vec::new(),
         assets: Vec::new(),

@@ -375,8 +375,17 @@ pub fn verify_recording_digest(bytes: &[u8], expected_hex: &str) -> Result<(), L
     Ok(())
 }
 
+/// A [`RuntimeRecording`] lowered into a `Workload`, with the
+/// preview-vs-ship divergences the lowering found.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledRecording {
+    pub workload: Workload,
+    pub findings: Vec<Divergence>,
+}
+
 /// Lower a [`RuntimeRecording`] into a `Workload`, collecting
-/// divergence findings in the process.
+/// divergence findings in the process. Admission paths gate on
+/// [`CompiledRecording::findings`].
 ///
 /// The exact shape is documented at the top of the module. In one
 /// line: the *final* `CommandStart` is the entrypoint, every prior
@@ -385,9 +394,7 @@ pub fn verify_recording_digest(bytes: &[u8], expected_hex: &str) -> Result<(), L
 /// a shell hook), and `Kill` ops are dropped (emitting a
 /// [`Divergence::KillDropped`] finding). `FilesWrite` ops after the
 /// final `CommandStart` emit [`Divergence::FilesWriteAfterEntrypoint`].
-pub fn compile_recording_with_findings(
-    rec: &RuntimeRecording,
-) -> Result<(Workload, Vec<Divergence>), LowerError> {
+pub fn compile_recording(rec: &RuntimeRecording) -> Result<CompiledRecording, LowerError> {
     if rec.ops.len() > MAX_RECORDED_OPS {
         return Err(LowerError::TooManyOps {
             count: rec.ops.len(),
@@ -517,8 +524,8 @@ pub fn compile_recording_with_findings(
         files: materialized_files,
     };
 
-    Ok((
-        Workload {
+    Ok(CompiledRecording {
+        workload: Workload {
             schema_version: SCHEMA_VERSION.to_string(),
             id: rec.workload_id.clone(),
             apps: vec![app],
@@ -526,14 +533,7 @@ pub fn compile_recording_with_findings(
             extensions: BTreeMap::new(),
         },
         findings,
-    ))
-}
-
-/// Findings-agnostic wrapper kept for callers that only need the
-/// Workload (tests, tooling). Admission paths use
-/// [`compile_recording_with_findings`] and gate on the findings.
-pub fn compile_recording(rec: &RuntimeRecording) -> Result<Workload, LowerError> {
-    compile_recording_with_findings(rec).map(|(wl, _)| wl)
+    })
 }
 
 #[cfg(test)]
@@ -590,7 +590,9 @@ mod tests {
                 env: BTreeMap::new(),
             }],
         };
-        let workload = compile_recording(&rec).expect("pinned OCI image must lower");
+        let workload = compile_recording(&rec)
+            .expect("pinned OCI image must lower")
+            .workload;
         assert_eq!(
             workload.apps[0].image,
             Image::OciBase {
@@ -671,7 +673,7 @@ mod tests {
                 },
             ],
         };
-        let wl = compile_recording(&rec).unwrap();
+        let wl = compile_recording(&rec).unwrap().workload;
         let app = &wl.apps[0];
         match &app.entrypoints[0] {
             Entrypoint::Command { command, .. } => {
@@ -692,7 +694,9 @@ mod tests {
     #[test]
     fn files_write_lowers_to_materialized_file_not_a_hook() {
         let ops = vec![write_op("/app/conf.toml", b"a=1"), start_op(&["/bin/true"])];
-        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
+        let wl = compile_recording(&rec_with_ops(ops))
+            .expect("must lower")
+            .workload;
         let app = &wl.apps[0];
         // No before_start hook is emitted for FilesWrite anymore.
         assert!(
@@ -713,7 +717,9 @@ mod tests {
         // data field, never interpolated into a shell command.
         let hostile = "/app/x'; rm -rf /tmp/pwn; echo '";
         let ops = vec![write_op(hostile, b"x"), start_op(&["/bin/true"])];
-        let wl = compile_recording(&rec_with_ops(ops)).expect("must lower");
+        let wl = compile_recording(&rec_with_ops(ops))
+            .expect("must lower")
+            .workload;
         assert!(wl.apps[0].hooks.before_start.is_empty());
         assert_eq!(wl.apps[0].files[0].path, hostile);
     }
@@ -753,7 +759,7 @@ mod tests {
                 RecordedOp::Kill,
             ],
         };
-        let wl = compile_recording(&rec).unwrap();
+        let wl = compile_recording(&rec).unwrap().workload;
         let app = &wl.apps[0];
         assert!(app.hooks.before_start.is_empty());
         assert!(
@@ -792,7 +798,7 @@ mod tests {
                 env: BTreeMap::new(),
             }],
         };
-        let wl = compile_recording(&rec).unwrap();
+        let wl = compile_recording(&rec).unwrap().workload;
         let app = &wl.apps[0];
         assert_eq!(app.env, env);
         match &app.source {
@@ -816,7 +822,7 @@ mod tests {
                 env: BTreeMap::new(),
             }],
         };
-        let wl = compile_recording(&rec).unwrap();
+        let wl = compile_recording(&rec).unwrap().workload;
         let app = &wl.apps[0];
         assert_eq!(app.resources.cpu_cores, 1);
         assert_eq!(app.resources.memory_mb, 256);
@@ -833,7 +839,7 @@ mod tests {
                 env: BTreeMap::new(),
             }],
         };
-        let wl = compile_recording(&rec).unwrap();
+        let wl = compile_recording(&rec).unwrap().workload;
         match &wl.apps[0].source {
             Source::LocalPath { include, .. } => assert_eq!(include, &vec!["**".to_string()]),
             other => panic!("expected LocalPath, got {other:?}"),
@@ -908,8 +914,8 @@ mod tests {
     #[test]
     fn kill_op_yields_divergence_finding() {
         let ops = vec![start_op(&["/bin/true"]), RecordedOp::Kill];
-        let (_, findings) =
-            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        let CompiledRecording { findings, .. } =
+            compile_recording(&rec_with_ops(ops)).expect("must lower");
         assert_eq!(findings.len(), 1);
         assert!(matches!(
             findings[0],
@@ -926,8 +932,10 @@ mod tests {
             start_op(&["/bin/server"]),
             write_op("/app/late.txt", b"late"),
         ];
-        let (wl, findings) =
-            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        let CompiledRecording {
+            workload: wl,
+            findings,
+        } = compile_recording(&rec_with_ops(ops)).expect("must lower");
         assert!(matches!(
             &findings[0],
             Divergence::FilesWriteAfterEntrypoint { op_index: 1, path } if path == "/app/late.txt"
@@ -942,21 +950,9 @@ mod tests {
     #[test]
     fn clean_recording_yields_no_findings() {
         let ops = vec![write_op("/app/a.txt", b"a"), start_op(&["/bin/true"])];
-        let (_, findings) =
-            compile_recording_with_findings(&rec_with_ops(ops)).expect("must lower");
+        let CompiledRecording { findings, .. } =
+            compile_recording(&rec_with_ops(ops)).expect("must lower");
         assert!(findings.is_empty(), "got {findings:?}");
-    }
-
-    #[test]
-    fn compile_recording_is_findings_agnostic_back_compat() {
-        let ops = vec![start_op(&["/bin/true"]), RecordedOp::Kill];
-        let rec = rec_with_ops(ops);
-        let plain = compile_recording(&rec).expect("plain must lower");
-        let (with, _) = compile_recording_with_findings(&rec).expect("must lower");
-        assert_eq!(
-            plain, with,
-            "the two entry points must produce identical Workloads"
-        );
     }
 
     #[test]
@@ -975,7 +971,7 @@ mod tests {
                 },
             ],
         };
-        let wl = compile_recording(&rec).unwrap();
+        let wl = compile_recording(&rec).unwrap().workload;
         let json = serde_json::to_string(&wl).unwrap();
         let back: Workload = serde_json::from_str(&json).unwrap();
         assert_eq!(wl, back);

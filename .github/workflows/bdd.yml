@@ -2,6 +2,14 @@ name: BDD conformance gate
 
 on:
   workflow_call:
+    inputs:
+      # CI's scope job sets this when a change touches the documentation corpus
+      # and nothing that compiles. Release and publish callers leave it unset
+      # and always get the full suite.
+      docs_only:
+        description: Run only the @docs features and the documented Rust examples
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,6 +27,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Set up uv
+        if: ${{ !inputs.docs_only }}
         uses: astral-sh/setup-uv@v8.2.0
         with:
           version: "0.12.5"
@@ -65,11 +74,17 @@ jobs:
       - uses: ./.github/actions/rust-cache
 
       - name: Run BDD conformance suite
+        if: ${{ !inputs.docs_only }}
         run: just bdd::run
+
+      - name: Run the documentation scenarios
+        if: ${{ inputs.docs_only }}
+        run: just bdd::docs
 
       # The Python and TypeScript SDKs each carry a unit suite that no cargo
       # target reaches, so until now nothing in CI ran either. They belong on
       # this lane: it is the one already scoped to `crates/mvm-sdk/`, and it
       # already installs uv, Node and the TypeScript dependencies.
       - name: Run the language SDK unit suites
+        if: ${{ !inputs.docs_only }}
         run: just sdk::test

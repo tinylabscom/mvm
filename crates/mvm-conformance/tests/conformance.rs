@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
-use mvm_conformance::{RuntimeCaps, ScenarioGate, scenario_gate_for_selection};
+use mvm_conformance::{RuntimeCaps, ScenarioGate, inherited_tags, scenario_gate_for_selection};
 use world::CliWorld;
 
 #[tokio::main]
@@ -175,9 +175,14 @@ fn newest_source(root: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
 /// supplies the real host capabilities. An absent required capability yields a
 /// clean skip, never a failure — so the suite stays green on hosts without KVM
 /// (GitHub-hosted ARM runners, or any dev box lacking `/dev/kvm`).
-fn should_run(_feature: &Feature, _rule: Option<&Rule>, scenario: &Scenario) -> bool {
+fn should_run(feature: &Feature, rule: Option<&Rule>, scenario: &Scenario) -> bool {
     let only_tag = std::env::var("MVM_BDD_ONLY_TAG").ok();
-    let gate = scenario_gate_for_selection(&scenario.tags, probe_caps(), only_tag.as_deref());
+    let tags = inherited_tags(
+        &feature.tags,
+        rule.map_or(&[][..], |rule| &rule.tags),
+        &scenario.tags,
+    );
+    let gate = scenario_gate_for_selection(&tags, probe_caps(), only_tag.as_deref());
     record_gate(gate);
     matches!(gate, ScenarioGate::Run)
 }

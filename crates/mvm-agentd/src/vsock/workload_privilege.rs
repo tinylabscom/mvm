@@ -123,6 +123,7 @@ mod tests {
                 "MediatedExec",
                 "ExecBatch",
                 "RunEntrypoint",
+                "AgentPrompt",
                 "DriveOpen",
                 "RunExtension",
                 "RunDetached",

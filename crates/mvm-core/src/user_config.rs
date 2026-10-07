@@ -185,6 +185,7 @@ impl MvmConfig {
                 .map(|secs| mvm_contract::grants::WallClockGrant::Secs { secs }),
             egress: None,
             drive: None,
+            display_input: None,
         }
     }
 

@@ -27,10 +27,10 @@ use mvm_core::registry_pack_store::{
 
 /// Environment override for the pack registry base URL.
 pub const PACK_REGISTRY_ENV: &str = "MVM_PACK_REGISTRY";
-/// Default registry: the mvm-templates repository, same source the template
+/// Default registry: the mvm-packs repository, same source the template
 /// registry uses.
 pub const DEFAULT_PACK_REGISTRY: &str =
-    "https://raw.githubusercontent.com/tinylabscom/mvm-templates/main";
+    "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main";
 
 const PACK_INDEX_SCHEMA_VERSION: u32 = 1;
 const PACKS_DIR: &str = "packs";
@@ -424,9 +424,9 @@ fn pull_one(
     let loaded = load_publisher_policy_or_official_default(&policy_path)?;
     if loaded.is_official_default() {
         crate::ui::info(&format!(
-            "no publisher policy at {}; using the built-in official registry policy \
-             (signed by {} in mvm-templates). Write that file to make your own trust \
-             decision.",
+            "no publisher policy at {}; using built-in trust for agent/ and runtime/ \
+             signed by {} (or the former identity until 2026-11-06 UTC). \
+             Write that file to make your own trust decision.",
             policy_path.display(),
             mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
         ));
@@ -531,6 +531,14 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_registry_points_to_the_official_packs_repository() {
+        assert_eq!(
+            DEFAULT_PACK_REGISTRY,
+            "https://raw.githubusercontent.com/tinylabscom/mvm-packs/main"
+        );
+    }
 
     fn entry(namespace: &str, name: &str, versions: &[&str]) -> PackIndexEntry {
         PackIndexEntry {

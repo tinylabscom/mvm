@@ -186,12 +186,9 @@ mod tests {
         }
 
         let tar_bytes = build_tar(|b| {
-            add_file_with_pax_xattrs(
-                b,
-                "bin/tool",
-                b"run\n",
-                &[("SCHILY.xattr.user.mvm.test", b"ok".as_slice())],
-            );
+            TarFile::new("bin/tool", b"run\n")
+                .pax_xattrs(&[("SCHILY.xattr.user.mvm.test", b"ok".as_slice())])
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -199,6 +196,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -219,12 +217,9 @@ mod tests {
     #[test]
     fn denied_xattr_is_dropped_with_warning() {
         let tar_bytes = build_tar(|b| {
-            add_file_with_pax_xattrs(
-                b,
-                "bin/tool",
-                b"run\n",
-                &[("SCHILY.xattr.trusted.overlay.opaque", b"y".as_slice())],
-            );
+            TarFile::new("bin/tool", b"run\n")
+                .pax_xattrs(&[("SCHILY.xattr.trusted.overlay.opaque", b"y".as_slice())])
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -232,6 +227,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -251,12 +247,9 @@ mod tests {
     #[test]
     fn drop_all_xattr_policy_drops_allowlisted_xattr() {
         let tar_bytes = build_tar(|b| {
-            add_file_with_pax_xattrs(
-                b,
-                "bin/tool",
-                b"run\n",
-                &[("SCHILY.xattr.user.mvm.test", b"ok".as_slice())],
-            );
+            TarFile::new("bin/tool", b"run\n")
+                .pax_xattrs(&[("SCHILY.xattr.user.mvm.test", b"ok".as_slice())])
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -264,7 +257,7 @@ mod tests {
             xattr_policy: XattrPolicy::DropAll,
             ..UnpackOptions::default()
         };
-        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts)
+        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts, None)
             .expect("unpack ok");
 
         assert_eq!(report.files_written, 1);

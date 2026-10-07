@@ -290,13 +290,9 @@ async fn run_worker_once(cfg: HostAgentConfig) -> Result<()> {
 
     let registration_journal = registration_journal_path(&cfg)?;
     let daemon = Arc::new(Mutex::new(
-        HostAgentDaemon::new_with_signer_helper(
-            cfg.tenant_id.clone(),
-            verifying_key,
-            cfg.signer_helper_uds_path.clone(),
-            cfg.max_frame_bytes,
-        )
-        .with_registration_journal(registration_journal),
+        HostAgentDaemon::new(cfg.tenant_id.clone(), verifying_key, cfg.max_frame_bytes)
+            .with_signer_helper(cfg.signer_helper_uds_path.clone())
+            .with_registration_journal(registration_journal),
     ));
     let (ready_tx, ready_rx) = oneshot::channel();
     tokio::spawn(supervise_signer_helper(

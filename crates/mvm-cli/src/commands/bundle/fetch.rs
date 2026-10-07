@@ -10,17 +10,18 @@
 //! makes traffic observable, and consumers often have no idea they typed the
 //! wrong scheme.
 //!
-//! Every source ends in the same place: the bytes go to
-//! `read_and_verify_bundle` and the local trust store decides. A registry
-//! only moves bytes; the digests it is held to prove it moved the right
-//! ones, not that they are trustworthy.
+//! Every source ends in the same place: a file on disk that
+//! `verify_bundle_file` streams through, and the local trust store decides.
+//! A local path is read where it is; a download lands in a temporary file
+//! first. A registry only moves bytes; the digests it is held to prove it
+//! moved the right ones, not that they are trustworthy.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, bundle_sha256, read_and_verify_bundle};
+use mvm_core::plan::bundle::{BundleRegistry, FsTrustStore, verify_bundle_file};
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::oci::ImageReference;
 
@@ -107,12 +108,34 @@ pub(in crate::commands) struct LoadOptions {
     pub prod: bool,
 }
 
-/// Archive bytes plus, for a registry source, the digest they came from.
+/// The archive on disk plus, for a registry source, the digest it came from.
 pub(in crate::commands) struct LoadedBundle {
-    pub bytes: Vec<u8>,
+    archive: ArchiveFile,
     /// Digest-pinned reference the bytes were pulled at. A pull by tag
     /// records here which manifest the tag named at the time.
     pub resolved: Option<ImageReference>,
+}
+
+/// Where a loaded archive lives: the user's own file, or a temporary file
+/// removed when the bundle is dropped.
+enum ArchiveFile {
+    Local(PathBuf),
+    Temporary(tempfile::TempPath),
+}
+
+impl LoadedBundle {
+    /// The archive's path, for streaming verification and install.
+    pub fn path(&self) -> &Path {
+        match &self.archive {
+            ArchiveFile::Local(path) => path,
+            ArchiveFile::Temporary(path) => path,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn bytes(&self) -> Vec<u8> {
+        std::fs::read(self.path()).expect("read loaded archive")
+    }
 }
 
 /// Load a bundle from any source, honouring its transport rules. Shared by
@@ -136,10 +159,16 @@ fn load_archive(
             "--prod refuses --allow-http: a production bundle is never fetched over plain HTTP"
         );
     }
-    let bytes = match src {
-        BundleSource::File(path) => std::fs::read(path)
-            .with_context(|| format!("reading bundle archive at {}", path.display()))?,
-        BundleSource::HttpsUrl(url) => download_to_bytes(url)?,
+    let archive = match src {
+        BundleSource::File(path) => {
+            anyhow::ensure!(
+                path.is_file(),
+                "reading bundle archive at {}: no such file",
+                path.display()
+            );
+            ArchiveFile::Local(path.clone())
+        }
+        BundleSource::HttpsUrl(url) => download_to_file(url)?,
         BundleSource::HttpUrl(url) => {
             if !options.allow_http {
                 anyhow::bail!(
@@ -154,32 +183,38 @@ fn load_archive(
                  Signature verification still applies; traffic metadata is visible to anyone \
                  on the wire."
             ));
-            download_to_bytes(url)?
+            download_to_file(url)?
         }
         BundleSource::Registry(reference) => {
             admit_registry_source(reference, options.prod, options.allow_http)?;
             let pulled = pull_bundle(reference, &transport_for(reference)?)?;
             return Ok(LoadedBundle {
-                bytes: pulled.bytes,
+                archive: spool_to_file(&pulled.bytes)?,
                 resolved: Some(pulled.resolved),
             });
         }
     };
     Ok(LoadedBundle {
-        bytes,
+        archive,
         resolved: None,
     })
 }
 
-fn download_to_bytes(url: &str) -> Result<Vec<u8>> {
-    // Write to a temp file then read back. Two passes is fine for
-    // v1 — bundles are modest in size, and the second read covers
-    // the disk-cache-warm path the verifier would walk anyway.
+/// Download straight to a temporary file; the archive is never read whole.
+fn download_to_file(url: &str) -> Result<ArchiveFile> {
     let tmp = tempfile::NamedTempFile::new().context("creating temp file for bundle download")?;
     crate::http::download_file(url, tmp.path())
         .with_context(|| format!("downloading bundle from {url}"))?;
-    std::fs::read(tmp.path())
-        .with_context(|| format!("reading downloaded bundle from {}", tmp.path().display()))
+    Ok(ArchiveFile::Temporary(tmp.into_temp_path()))
+}
+
+/// A registry pull arrives as bytes; spool them to a file so verification
+/// and install take the same streaming path as every other source.
+fn spool_to_file(bytes: &[u8]) -> Result<ArchiveFile> {
+    let mut tmp =
+        tempfile::NamedTempFile::new().context("creating temp file for the pulled bundle")?;
+    std::io::Write::write_all(&mut tmp, bytes).context("spooling the pulled bundle")?;
+    Ok(ArchiveFile::Temporary(tmp.into_temp_path()))
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
@@ -190,17 +225,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             prod: args.prod,
         },
     )?;
-    let bytes = loaded.bytes;
-
     let trust = match args.trust_store {
         Some(p) => FsTrustStore::new(p),
         None => FsTrustStore::default_path()
             .context("resolving default trust-store path (~/.mvm/trusted-publishers/)")?,
     };
 
-    let verified = read_and_verify_bundle(&bytes, &trust)
+    let verified = verify_bundle_file(loaded.path(), &trust)
         .with_context(|| format!("verifying bundle from {}", args.source))?;
-    let sha = bundle_sha256(&bytes);
+    let sha = verified.bundle_sha256.clone();
     if !verified.embedded_image_sets.is_empty() {
         let registry = match args.registry {
             Some(path) => BundleRegistry::new(path),
@@ -208,7 +241,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 .context("resolving default bundle registry root (~/.mvm/bundles/)")?,
         };
         registry
-            .cache_embedded_image_sets(&verified, &sha)
+            .cache_embedded_image_sets_from_file(loaded.path(), &verified)
             .with_context(|| format!("caching embedded image set from {}", args.source))?;
     }
 
@@ -275,6 +308,7 @@ mod tests {
     use super::*;
     use crate::commands::bundle::registry::publish_bundle;
     use ed25519_dalek::SigningKey;
+    use mvm_core::plan::bundle::read_and_verify_bundle;
     use mvm_core::plan::bundle::{
         ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, key_id_from_pubkey,
         sha256_hex, write_bundle,
@@ -416,7 +450,7 @@ mod tests {
         std::fs::write(tmp.path(), b"hello-bundle").unwrap();
         let src = BundleSource::File(tmp.path().to_path_buf());
         let loaded = load_archive(&src, LoadOptions::default(), no_transport).expect("reads");
-        assert_eq!(loaded.bytes, b"hello-bundle");
+        assert_eq!(loaded.bytes(), b"hello-bundle");
         assert!(loaded.resolved.is_none());
     }
 
@@ -547,9 +581,9 @@ mod tests {
 
         let by_tag = load_archive(&source(&registry, ":v1"), LoadOptions::default(), with_http)
             .expect("fetch by tag");
-        assert_eq!(by_tag.bytes, archive);
+        assert_eq!(by_tag.bytes(), archive);
         assert_eq!(by_tag.resolved.as_ref(), Some(&pushed.reference));
-        read_and_verify_bundle(&by_tag.bytes, &publisher.trust()).expect("verifies");
+        read_and_verify_bundle(&by_tag.bytes(), &publisher.trust()).expect("verifies");
 
         let pinned = format!("@{}", pushed.manifest_digest);
         let by_digest = load_archive(
@@ -558,7 +592,7 @@ mod tests {
             with_http,
         )
         .expect("fetch by digest");
-        read_and_verify_bundle(&by_digest.bytes, &publisher.trust()).expect("verifies");
+        read_and_verify_bundle(&by_digest.bytes(), &publisher.trust()).expect("verifies");
     }
 
     #[test]
@@ -732,7 +766,7 @@ mod tests {
         )
         .expect("the pull falls back to the anonymous exchange");
 
-        assert_eq!(loaded.bytes, archive);
+        assert_eq!(loaded.bytes(), archive);
         assert!(
             registry
                 .requests()
@@ -806,7 +840,7 @@ mod tests {
 
         let loaded = load_archive(&source(&registry, ":v1"), LoadOptions::default(), with_http)
             .expect("the transport itself succeeds");
-        let err = read_and_verify_bundle(&loaded.bytes, &consumer.trust())
+        let err = read_and_verify_bundle(&loaded.bytes(), &consumer.trust())
             .expect_err("an untrusted publisher must be refused");
 
         assert!(err.to_string().to_lowercase().contains("key"), "{err}");
@@ -823,7 +857,7 @@ mod tests {
         let loaded = load_archive(&source(&registry, ":v1"), LoadOptions::default(), with_http)
             .expect("the transport itself succeeds");
         assert!(
-            read_and_verify_bundle(&loaded.bytes, &consumer.trust()).is_err(),
+            read_and_verify_bundle(&loaded.bytes(), &consumer.trust()).is_err(),
             "a bundle without a signature must be refused"
         );
     }

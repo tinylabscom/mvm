@@ -67,6 +67,10 @@ pub fn default_agent_verbs(
         .iter()
         .filter(|n| has_shares || !VOLUME_VERBS.contains(*n))
         .filter(|n| grants_input || !INPUT_VERBS.contains(*n))
+        // Never part of the default: the host signer adds it from the plan's
+        // display input grant, so the signed plan is the only thing that can
+        // put it in a grant.
+        .filter(|n| **n != mvm_contract::stream::DISPLAY_INPUT_VERB)
         .map(|n| VerbId::new(n).expect("prod_safe_verb_names entries are valid kebab verbs"))
         .collect();
     Some(set)
@@ -148,6 +152,18 @@ mod tests {
         }
         // And nothing else moved with it.
         assert!(with.iter().any(|v| v.as_str() == "run-entrypoint"));
+    }
+
+    #[test]
+    fn the_default_grant_never_names_display_input() {
+        for (shares, input) in [(false, false), (true, true)] {
+            let set = default_agent_verbs(true, shares, input).unwrap();
+            assert!(
+                set.iter()
+                    .all(|verb| verb.as_str() != mvm_contract::stream::DISPLAY_INPUT_VERB),
+                "{set:?}"
+            );
+        }
     }
 
     #[test]

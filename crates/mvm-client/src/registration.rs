@@ -63,7 +63,7 @@ pub fn register_machine(reg: &MachineRegistration) {
     let path = mvm_runtime::vm::name_registry::registry_path();
     if let Ok(mut registry) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path) {
         registry.deregister(&reg.name);
-        let _ = registry.register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
+        let _ = registry.register(mvm_runtime::vm::name_registry::RegisterParams {
             name: &reg.name,
             vm_dir: &reg.vm_dir,
             network: &reg.network,

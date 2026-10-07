@@ -88,11 +88,21 @@ pub fn claim_expired_session(id: &SessionId, now: DateTime<Utc>) -> Result<Optio
 /// Seal a session that ended because its machine was stopped, then publish the
 /// closing root over it, so the root covers the seal.
 ///
+/// A root that fails to publish is logged rather than returned: the session is
+/// sealed by then, and reporting the call as failed would record a sealed
+/// session as an unsealed one.
+///
 /// # Errors
-/// The chain could not be read, or the seal or root could not be written.
+/// The chain could not be read, or the seal could not be written.
 pub fn seal_stopped_session(emitter: &AuditEmitter, plan: &ExecutionPlan) -> Result<()> {
     emitter.seal_session(plan, SealReason::Stopped)?;
-    emitter.publish_root(&plan.tenant.0)?;
+    if let Err(e) = emitter.publish_root(&plan.tenant.0) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            plan = %plan.plan_id.0,
+            "could not publish an audit root after the stop seal; the session is sealed"
+        );
+    }
     Ok(())
 }
 
@@ -241,16 +251,23 @@ impl SessionExpiryWatcher {
     }
 
     /// Best-effort: the guest is stopped either way, and a missing seal is
-    /// reported by `trust audit verify` as `UNSEALED` rather than hidden.
+    /// reported by `trust audit verify` as `UNSEALED` rather than hidden. A
+    /// session left unsealed has the reason recorded, so its end is always on
+    /// the record.
     fn seal(&self) {
+        use crate::audit::unsealed::{UnsealedEnd, UnsealedReason, record_unsealed_end};
         let Some(sealer) = &self.sealer else {
+            record_unsealed_end(
+                None,
+                UnsealedEnd::new(&self.vm_name, UnsealedReason::SealFailed)
+                    .error("the supervisor could not open the audit chain"),
+            );
             return;
         };
         if let Err(e) = seal_stopped_session(&sealer.emitter, &sealer.plan) {
-            tracing::warn!(
-                vm = %self.vm_name,
-                error = %format!("{e:#}"),
-                "could not seal the expired session"
+            record_unsealed_end(
+                Some((&sealer.emitter, &sealer.plan)),
+                UnsealedEnd::new(&self.vm_name, UnsealedReason::SealFailed).error(format!("{e:#}")),
             );
         }
     }

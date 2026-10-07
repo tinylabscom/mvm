@@ -63,6 +63,21 @@ stream_input?: boolean
 timeout_secs: number
 }
 } | {
+AgentPrompt: {
+/**
+ * Env vars injected into the agent after `env_clear()`: the host-synthesized egress settings and secret placeholders, never a raw secret value.
+ */
+env?: [string, string][]
+/**
+ * The prompt bytes, written to the agent's stdin.
+ */
+prompt: number[]
+/**
+ * Wall-clock timeout for the call, in seconds.
+ */
+timeout_secs: number
+}
+} | {
 DriveOpen: {
 cwd: string
 /**
@@ -286,6 +301,8 @@ timeout_secs?: (number | null)
 StreamInput: InputFrame
 } | {
 CloseStreamInput: CloseInput
+} | {
+DisplayInput: DisplayInputFrame
 })
 /**
  * Reverse-DNS-like service identifier with a mandatory version segment.
@@ -322,7 +339,7 @@ export type VolumeConfigKind = ("virtio_fs" | "block")
 /**
  * Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.
  */
-export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "mediated_exec" | "unix_socket_forward" | "readiness")
+export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "agent_prompt" | "mediated_exec" | "unix_socket_forward" | "readiness")
 /**
  * Filesystem operations exposed by the grant-gated production drive surface. Deliberately excludes mkdir, remove, and move: the issue's authority is the smallest useful read/write/list/stat set, while the wider `Fs*` family remains DevOnly.
  */
@@ -360,6 +377,44 @@ path: string
  * Stored in its wire form rather than as `[u8; 32]` so that a digest which round-trips through this contract is byte-identical to the one the counterparty computed, including its hex case. Equality is over those exact bytes, which is what the identity checks downstream depend on.
  */
 export type Sha256Digest = string
+/**
+ * One input event bound for the guest display.
+ */
+export type DisplayInputEvent = ({
+kind: "pointer-move"
+x: number
+y: number
+} | {
+button: PointerButton
+kind: "pointer-button"
+pressed: boolean
+x: number
+y: number
+} | {
+delta_x: number
+delta_y: number
+kind: "wheel"
+x: number
+y: number
+} | {
+key: string
+kind: "key"
+pressed: boolean
+} | {
+kind: "text"
+text: string
+} | {
+kind: "paste"
+text: string
+} | {
+kind: "credential-entry-begin"
+} | {
+kind: "credential-entry-end"
+})
+/**
+ * Which pointer button an event names.
+ */
+export type PointerButton = ("left" | "middle" | "right")
 /**
  * Response from guest vsock agent to host.
  * 
@@ -549,6 +604,8 @@ previous_secs: number
 }
 } | {
 StreamInputResult: StreamInputResult
+} | {
+DisplayInputResult: DisplayInputResult
 })
 /**
  * Required remediation for a host/guest protocol mismatch.
@@ -802,6 +859,21 @@ message: string
  * Why the agent would not deliver an input frame.
  */
 export type StreamInputRefusal = ("no_workload" | "out_of_order" | "queue_full" | "cap_exceeded" | "workload_gone")
+/**
+ * Outcome of one `DisplayInput` frame.
+ * 
+ * About delivery to the display bridge only. Whether the input was allowed was decided by the host's display input gate before the frame was sent.
+ */
+export type DisplayInputResult = ("Accepted" | {
+Refused: {
+kind: DisplayDeliveryRefusal
+message: string
+}
+})
+/**
+ * Why the agent would not deliver a display input frame.
+ */
+export type DisplayDeliveryRefusal = ("no_bridge" | "out_of_order" | "malformed" | "busy")
 
 /**
  * Schema root: both wire directions under one document so the shared `$defs` (`FsResult`, `ProcResult`, `EntrypointEvent`, …) are emitted once and the generated clients reference a single definition set.
@@ -1151,6 +1223,15 @@ after_seq?: (number | null)
  * Bytes the gate cleared but held back, released here because closing proves they were a proper prefix of a secret and not a secret.
  */
 trailing: number[]
+}
+/**
+ * One host-to-guest batch of display input.
+ * 
+ * `seq` orders one writer's frames exactly as the stdin plane's `InputFrame` does: the gate refuses a frame that does not advance past the last one it accepted rather than reordering it.
+ */
+export interface DisplayInputFrame {
+events: DisplayInputEvent[]
+seq: number
 }
 /**
  * Full state report for a single integration (returned by guest agent).
