@@ -123,7 +123,7 @@ fn wait_with_probe(
     let mut attempt: u32 = 0;
     while std::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        if probe(remaining) {
+        if probe(remaining) && std::time::Instant::now() < deadline {
             return true;
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -161,5 +161,16 @@ mod tests {
             |_| false
         ));
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn readiness_rejects_a_probe_that_finishes_after_the_deadline() {
+        assert!(!wait_with_probe(
+            std::time::Duration::from_millis(10),
+            |_| {
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                true
+            }
+        ));
     }
 }
