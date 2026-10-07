@@ -15,7 +15,7 @@ use mvm_core::plan::ExecutionPlan;
 pub const GRANTED_EVENT: &str = "display.granted";
 /// A display input writer or frame was turned away.
 pub const REFUSED_EVENT: &str = "display.refused";
-/// A batch of display input events was admitted for delivery to the guest.
+/// A batch of display input events was delivered toward the guest.
 pub const INPUT_EVENT: &str = "display.input_event";
 /// A human began typing a credential; recording pauses from here.
 pub const CREDENTIAL_ENTRY_BEGIN_EVENT: &str = "display.credential_entry_begin";
@@ -74,7 +74,7 @@ impl AuditEmitter {
         )
     }
 
-    /// Emit `display.input_event` for one admitted batch: how many events of
+    /// Emit `display.input_event` for one delivered batch: how many events of
     /// each kind, never what they carried.
     pub fn emit_display_input_events(
         &self,

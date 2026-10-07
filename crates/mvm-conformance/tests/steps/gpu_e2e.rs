@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cucumber::{given, then, when};
+// The shims staged for the probe: every GPU shim, under the soname a workload
+// links, from the table the guest-bins artifact is built from.
+use mvm_build::guest_bins::GPU_SHIM_CDYLIBS as STAGED_SHIMS;
 
 use crate::steps::cli::run_mvmctl_isolated_live_home_argv;
 use crate::world::CliWorld;
@@ -27,17 +30,15 @@ use crate::world::CliWorld;
 /// Placeholder the feature text uses where the host staging path belongs.
 const STAGING_PLACEHOLDER: &str = "@STAGING@";
 
-/// Sonames the staging dir must carry — the drop-in names a workload links.
-const STAGED_SHIMS: [(&str, &str); 2] = [
-    ("libcuda.so", "libcuda.so.1"),
-    ("libnvidia_ml.so", "libnvidia-ml.so.1"),
-];
-
 #[given(expr = "a gpu probe staging dir")]
 fn gpu_probe_staging(world: &mut CliWorld) {
     let staging = tempfile::tempdir().expect("create gpu probe staging dir");
     let target = guest_target_triple();
     let out_dir = staging.path().join("target");
+    let mut shims = vec!["zigbuild", "--release", "--target", &target];
+    for shim in &STAGED_SHIMS {
+        shims.extend(["-p", shim.package]);
+    }
     // Two invocations: a `--example` flag narrows cargo's build to the
     // example's package, so the shims build separately.
     let invocations = [
@@ -51,16 +52,7 @@ fn gpu_probe_staging(world: &mut CliWorld) {
             "--example",
             "gpu_guest_probe",
         ],
-        vec![
-            "zigbuild",
-            "--release",
-            "--target",
-            &target,
-            "-p",
-            "mvm-gpu-cuda-shim",
-            "-p",
-            "mvm-gpu-nvml-shim",
-        ],
+        shims,
     ];
     for invocation in invocations {
         let mut cmd = Command::new("cargo");
@@ -89,8 +81,9 @@ fn gpu_probe_staging(world: &mut CliWorld) {
         bin_dir.join("gpu_guest_probe"),
     )
     .expect("copy the guest probe binary into staging");
-    for (artifact, soname) in STAGED_SHIMS {
-        std::fs::copy(release.join(artifact), bin_dir.join(soname))
+    for shim in &STAGED_SHIMS {
+        let artifact = shim.cargo_output_file();
+        std::fs::copy(release.join(&artifact), bin_dir.join(shim.soname))
             .unwrap_or_else(|error| panic!("copy {artifact} into staging: {error}"));
     }
     world.gpu_probe_staging = Some(staging);

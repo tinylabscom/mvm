@@ -259,8 +259,8 @@ fn export_file(
         bail!("live dependency capture source `{guest_path}` is not a regular file");
     }
     reserve(state, stat.size, guest_path)?;
-    let bytes = crate::commands::vm::fs::read_guest_chunks_with_symlink_policy(
-        vm, guest_path, 0, stat.size, false,
+    let bytes = mvm_client::guest::read_file_chunks(
+        vm, guest_path, 0, stat.size, /* follow_symlinks = */ false,
     )?;
     let actual = u64::try_from(bytes.len()).expect("host buffer length fits u64");
     if actual != stat.size {

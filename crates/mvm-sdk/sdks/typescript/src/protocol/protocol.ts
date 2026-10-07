@@ -63,6 +63,21 @@ stream_input?: boolean
 timeout_secs: number
 }
 } | {
+AgentPrompt: {
+/**
+ * Env vars injected into the agent after `env_clear()`: the host-synthesized egress settings and secret placeholders, never a raw secret value.
+ */
+env?: [string, string][]
+/**
+ * The prompt bytes, written to the agent's stdin.
+ */
+prompt: number[]
+/**
+ * Wall-clock timeout for the call, in seconds.
+ */
+timeout_secs: number
+}
+} | {
 DriveOpen: {
 cwd: string
 /**
@@ -324,7 +339,7 @@ export type VolumeConfigKind = ("virtio_fs" | "block")
 /**
  * Guest-agent control protocol capability. Closed enum so host and guest fail loudly on drift instead of accepting arbitrary strings.
  */
-export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "mediated_exec" | "unix_socket_forward" | "readiness")
+export type GuestCapability = (("ping" | "resource_usage" | "integration_status" | "entrypoint_status" | "run_entrypoint" | "drive" | "run_extension" | "filesystem_rpc" | "process_rpc" | "console" | "volume_mount" | "update_idle_timeout") | "agent_prompt" | "mediated_exec" | "unix_socket_forward" | "readiness")
 /**
  * Filesystem operations exposed by the grant-gated production drive surface. Deliberately excludes mkdir, remove, and move: the issue's authority is the smallest useful read/write/list/stat set, while the wider `Fs*` family remains DevOnly.
  */

@@ -1165,11 +1165,8 @@ fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture
     let vm_dir = sandbox.mvm_root().join("mock-vms").join(name);
     std::fs::create_dir_all(&vm_dir).expect("mkdir mock vm_dir");
     let host_signer = sandbox.mvm_root().join("keys").join("host-signer.ed25519");
-    let agent = mvm_runtime::mock_guest_agent::MockGuestAgent::start_with_host_signer(
-        &vm_dir,
-        &host_signer,
-    )
-    .expect("start mock guest agent");
+    let agent = mvm_runtime::mock_guest_agent::MockGuestAgent::start(&vm_dir, Some(&host_signer))
+        .expect("start mock guest agent");
     MockVmAgentFixture { _agent: agent }
 }
 
@@ -1314,7 +1311,7 @@ fn resume_emits_workload_wake_audit_entry() {
         .expect("load fixture registry");
     if registry.lookup("resume-vm").is_none() {
         registry
-            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+            .register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
                 "resume-vm",
                 "",
                 "none",
