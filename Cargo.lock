@@ -2918,7 +2918,6 @@ dependencies = [
  "mvm-sdk",
  "mvm-vmm",
  "nix",
- "rand 0.10.2",
  "serde",
  "serde_jcs",
  "serde_json",

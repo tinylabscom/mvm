@@ -282,9 +282,25 @@ pub fn apply_secret_ref_counts(records: &mut [MachineInventoryRecord]) {
     }
 }
 
+/// Back-fill each record's telemetry status from the collector snapshot
+/// beside its VM state. A machine with no state directory stays `None`:
+/// nothing was ever booted, so there is no collector fact to report. An
+/// unreadable snapshot also stays `None` here — the per-machine read seam
+/// reports that as a typed error; a list does not fail over one machine.
+pub fn apply_telemetry_status(records: &mut [MachineInventoryRecord]) {
+    for record in records {
+        let reader = crate::telemetry::LocalTelemetryReader::for_machine(&record.name);
+        record.telemetry = reader
+            .state_dir_exists()
+            .then(|| reader.status().ok())
+            .flatten();
+    }
+}
+
 /// The full local inventory: every persisted machine definition joined with
-/// every live VM `client` can see, readiness back-filled from the registry
-/// and secret-reference counts from the per-machine sidecars.
+/// every live VM `client` can see, readiness back-filled from the registry,
+/// secret-reference counts from the per-machine sidecars, and telemetry
+/// status from each collector's snapshot.
 /// Read-only — no state dir, registry entry, or audit log is mutated.
 /// Filter with [`InventoryQuery::matches`]; the unfiltered stream includes
 /// stopped and expired machines so callers own visibility policy.
@@ -295,6 +311,7 @@ pub async fn list_local_inventory(client: &dyn MvmClient) -> Result<Vec<MachineI
     let mut records = inventory_with_specs(client, specs).await?;
     apply_registry_readiness(&mut records);
     apply_secret_ref_counts(&mut records);
+    apply_telemetry_status(&mut records);
     Ok(records)
 }
 
@@ -652,6 +669,61 @@ mod tests {
         )
         .unwrap();
         assert_eq!(secret_ref_count_of(tmp.path(), "web"), 0);
+    }
+
+    #[tokio::test]
+    async fn list_local_inventory_joins_each_machine_with_its_telemetry_status() {
+        use mvm_core::client::{CollectorState, TelemetryStatus};
+        let _home = IsolatedHome::new();
+        persist::save_machine_spec(&spec("web"), false).expect("save spec");
+        persist::save_machine_spec(&spec("quiet"), false).expect("save spec");
+        persist::save_machine_spec(&spec("never-booted"), false).expect("save spec");
+        // `web` booted with a collector; `quiet` booted without one.
+        let web = mvm_core::config::vm_state_dir("web");
+        std::fs::create_dir_all(&web).unwrap();
+        let (status_path, _) = crate::telemetry::collector_files(&web);
+        std::fs::write(
+            status_path,
+            serde_json::to_vec(&mvm_hostd::telemetry_collector::CollectorStatusSnapshot {
+                vm_name: "web".into(),
+                status: "collecting".into(),
+                generation: Some(2),
+                shed: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(mvm_core::config::vm_state_dir("quiet")).unwrap();
+
+        let mock = MockBackend::default();
+        let records = list_local_inventory(&mock).await.expect("inventory");
+        let by_name = |name: &str| {
+            records
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap_or_else(|| panic!("{name} listed"))
+        };
+        assert!(matches!(
+            by_name("web").telemetry,
+            Some(TelemetryStatus::Provisioned {
+                state: CollectorState::Collecting { generation: 2 },
+                ..
+            })
+        ));
+        assert_eq!(
+            by_name("quiet").telemetry,
+            Some(TelemetryStatus::NotProvisioned)
+        );
+        assert_eq!(
+            by_name("never-booted").telemetry,
+            None,
+            "no state dir means no telemetry fact"
+        );
+        let json = serde_json::to_value(by_name("never-booted")).unwrap();
+        assert!(
+            json.get("telemetry").is_none(),
+            "an absent status stays off the wire"
+        );
     }
 
     #[tokio::test]

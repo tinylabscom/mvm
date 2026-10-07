@@ -17,11 +17,15 @@
 //! never the host CLI executable.
 //!
 //! A second section ([`check_overlay_parity`]) holds the runtime overlay's
-//! own binary lists — the overlay zigbuild list and `install_one` pairs, and
+//! own binary lists — the two overlay build lists (sealed bins, and the
+//! `addons` bins built in their own invocation), the `install_one` pairs, and
 //! the Rust staging array — in the same lockstep, and rejects an orphaned
-//! `--bin` flag left behind by a removed binary name. The published overlay is
-//! built in mvm-images, which stages from these same bins through its `mvm`
-//! input and guards its own flake.
+//! `--bin` flag left behind by a removed binary name. It also holds the split
+//! itself: the `addons` list must be exactly the overlay bins whose `[[bin]]`
+//! requires `addons`, and only that invocation may enable the feature, so
+//! cargo's feature unification cannot hand the sealed agent an async runtime.
+//! The published overlay is built in mvm-images, which stages from these same
+//! bins through its `mvm` input and guards its own flake.
 
 use anyhow::{Context, Result, bail};
 use regex::Regex;
@@ -121,13 +125,29 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
         );
     }
 
-    let argv_block = slice_between(
-        &gab,
-        "fn build_runtime_overlay_guest_binaries_into_cache",
-        "run_zigbuild(&spec, &prod_args)",
-        GUEST_AGENT_BUILD,
-    )?;
-    let overlay_bins = extract_bin_flags(argv_block);
+    let sealed_bins = extract_const_names(&gab, SEALED_BINS_CONST)?;
+    let addon_bins = extract_const_names(&gab, ADDON_BINS_CONST)?;
+    check_overlay_invocations(&gab)?;
+    if let Some(both) = sealed_bins.intersection(&addon_bins).next() {
+        bail!(
+            "{both} is in both {SEALED_BINS_CONST} and {ADDON_BINS_CONST}; it would be built \
+             twice, once with `addons`"
+        );
+    }
+    let requires_addons = addon_bin_universe(workspace)?;
+    let overlay_bins: BTreeSet<String> = sealed_bins.union(&addon_bins).cloned().collect();
+    let expected_addons: BTreeSet<String> = overlay_bins
+        .intersection(&requires_addons)
+        .cloned()
+        .collect();
+    if addon_bins != expected_addons {
+        bail!(
+            "{ADDON_BINS_CONST} = {addon_bins:?}, but the overlay bins whose `[[bin]]` requires \
+             `addons` are {expected_addons:?}. Only those may be built with the feature: cargo \
+             unifies features across an invocation, so a sealed bin listed there links tokio, \
+             and an addon bin listed with the sealed set does not build"
+        );
+    }
 
     // `install_one(&output_dir.join("mvm-x"), &layout.field)` — bin ↔ field.
     // Whitespace-tolerant: rustfmt wraps a long call across lines.
@@ -150,7 +170,7 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
         .collect();
 
     for (label, len) in [
-        ("overlay zigbuild bin list", overlay_bins.len()),
+        ("overlay build lists", overlay_bins.len()),
         ("install_one pairs", bin_to_field.len()),
         ("runtime_overlay.rs staging array", field_to_staged.len()),
     ] {
@@ -164,7 +184,7 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
     let install_bins: BTreeSet<String> = bin_to_field.keys().cloned().collect();
     if install_bins != overlay_bins {
         bail!(
-            "runtime-overlay binary lists drift:\n  overlay zigbuild list = {overlay_bins:?}\n  install_one bin set = {install_bins:?}"
+            "runtime-overlay binary lists drift:\n  overlay build lists = {overlay_bins:?}\n  install_one bin set = {install_bins:?}"
         );
     }
     let installed_fields: BTreeSet<&String> = bin_to_field.values().collect();
@@ -197,6 +217,48 @@ fn check_overlay_parity(workspace: &Path, universe: &BTreeSet<String>) -> Result
     Ok(overlay_bins.len())
 }
 
+const SEALED_BINS_CONST: &str = "RUNTIME_OVERLAY_SEALED_BINS";
+const ADDON_BINS_CONST: &str = "RUNTIME_OVERLAY_ADDON_BINS";
+const ADDONS_FEATURE_CONST: &str = "MVM_AGENTD_ADDONS_FEATURE";
+const OVERLAY_ARGS_FN: &str = "fn runtime_overlay_zigbuild_args";
+
+/// The quoted `mvm-*` names in `pub const <name>: [&str; N] = [ ... ];`.
+fn extract_const_names(src: &str, name: &str) -> Result<BTreeSet<String>> {
+    let block = slice_between(src, &format!("pub const {name}:"), "];", GUEST_AGENT_BUILD)?;
+    let re = Regex::new(r#""(mvm-[a-z0-9-]+)""#).unwrap();
+    let names: BTreeSet<String> = re.captures_iter(block).map(|c| c[1].to_string()).collect();
+    if names.is_empty() {
+        bail!("no binary names extracted from {name}; the list moved — update this check");
+    }
+    Ok(names)
+}
+
+/// The overlay's argument builder must build each list in its own invocation
+/// and enable `addons` in exactly one of them; which one is pinned by
+/// `mvm-build`'s own test of that function.
+fn check_overlay_invocations(src: &str) -> Result<()> {
+    let body = slice_between(src, OVERLAY_ARGS_FN, "\n}\n", GUEST_AGENT_BUILD)?;
+    for list in [SEALED_BINS_CONST, ADDON_BINS_CONST] {
+        if body.matches(&format!("&{list}")).count() != 1 {
+            bail!("{OVERLAY_ARGS_FN} must build {list} exactly once, in its own invocation");
+        }
+    }
+    let features = body.matches(ADDONS_FEATURE_CONST).count();
+    if features != 1 {
+        bail!(
+            "{OVERLAY_ARGS_FN} enables {ADDONS_FEATURE_CONST} {features} times; exactly one \
+             invocation (the addon bins') may enable it"
+        );
+    }
+    if !src.contains(&format!(
+        "for args in {}(",
+        OVERLAY_ARGS_FN.trim_start_matches("fn ")
+    )) {
+        bail!("the overlay build no longer runs every invocation {OVERLAY_ARGS_FN} returns");
+    }
+    Ok(())
+}
+
 /// The tail of `guest_agent_build.rs` from the overlay build function on, so
 /// the `install_one` extraction cannot match the unrelated OCI install block.
 fn argv_block_to_end(src: &str) -> &str {
@@ -227,6 +289,42 @@ fn guest_bin_universe(workspace: &Path) -> Result<BTreeSet<String>> {
     let path = workspace.join("crates/mvm-agentd/Cargo.toml");
     let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     Ok(parse_bin_names(&src))
+}
+
+/// `mvm-agentd` `[[bin]]`s that declare `required-features` naming `addons`.
+fn addon_bin_universe(workspace: &Path) -> Result<BTreeSet<String>> {
+    let path = workspace.join("crates/mvm-agentd/Cargo.toml");
+    let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+    Ok(parse_bins_requiring(&src, "addons"))
+}
+
+/// `[[bin]]` names whose `required-features` list includes `feature`.
+fn parse_bins_requiring(manifest: &str, feature: &str) -> BTreeSet<String> {
+    let name_re = Regex::new(r#"^\s*name\s*=\s*"([^"]+)""#).unwrap();
+    let mut out = BTreeSet::new();
+    let mut in_bin = false;
+    let mut name: Option<String> = None;
+    let quoted = format!("\"{feature}\"");
+    for line in manifest.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_bin = t == "[[bin]]";
+            name = None;
+            continue;
+        }
+        if !in_bin {
+            continue;
+        }
+        if let Some(c) = name_re.captures(line) {
+            name = Some(c[1].to_string());
+        } else if t.starts_with("required-features")
+            && t.contains(&quoted)
+            && let Some(name) = &name
+        {
+            out.insert(name.clone());
+        }
+    }
+    out
 }
 
 /// `[[bin]] name = "..."` names in a Cargo.toml. A `name =` line counts only when
@@ -385,7 +483,37 @@ name = "mvm-oci-entrypoint"
         );
     }
 
-    fn overlay_fixture(root: &Path, gab_bins: &str, staging: &str) {
+    const FIXTURE_MANIFEST: &str = r#"
+[package]
+name = "mvm-agentd"
+
+[[bin]]
+name = "mvm-guest-agent"
+
+[[bin]]
+name = "mvm-ping"
+
+[[bin]]
+name = "mvm-egress-client"
+required-features = ["addons"]
+"#;
+
+    const FIXTURE_ARGS_FN: &str = "fn runtime_overlay_zigbuild_args(triple: &str) -> [Vec<String>; 2] {\n\
+         let mut addons = package_bin_args(\"mvm-agentd\", &RUNTIME_OVERLAY_ADDON_BINS);\n\
+         addons.push(MVM_AGENTD_ADDONS_FEATURE.to_string());\n\
+         [release(package_bin_args(\"mvm-agentd\", &RUNTIME_OVERLAY_SEALED_BINS)), release(addons)]\n\
+         }\n";
+
+    /// A `guest_agent_build.rs` with the given sealed and addon lists, the
+    /// given argument builder, and `installs`; a staging array of `staging`.
+    fn overlay_fixture_with(
+        root: &Path,
+        sealed: &str,
+        addons: &str,
+        args_fn: &str,
+        installs: &str,
+        staging: &str,
+    ) {
         let write = |rel: &str, text: &str| {
             let path = root.join(rel);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -394,113 +522,228 @@ name = "mvm-oci-entrypoint"
         write(
             GUEST_AGENT_BUILD,
             &format!(
-                "fn build_runtime_overlay_guest_binaries_into_cache() {{\n\
-                 let prod_args = vec![{gab_bins}];\n\
-                 run_zigbuild(&spec, &prod_args)?;\n\
-                 install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
-                 install_one(&output_dir.join(\"mvm-ping\"), &layout.ping)?;\n}}\n"
+                "pub const RUNTIME_OVERLAY_SEALED_BINS: [&str; 2] = [{sealed}];\n\
+                 pub const RUNTIME_OVERLAY_ADDON_BINS: [&str; 1] = [{addons}];\n\
+                 {args_fn}\
+                 fn build_runtime_overlay_guest_binaries_into_cache() {{\n\
+                 for args in runtime_overlay_zigbuild_args(spec.target_triple()) {{\n\
+                 run_zigbuild(&lock, &spec, &args, &[])?;\n}}\n\
+                 {installs}}}\n"
             ),
         );
         write(
             RUNTIME_OVERLAY_RS,
             &format!("let binaries = [{staging}];\n"),
         );
+        write("crates/mvm-agentd/Cargo.toml", FIXTURE_MANIFEST);
     }
 
-    const FIXTURE_BINS: &str = r#""--bin".to_string(), "mvm-guest-agent".to_string(), "--bin".to_string(), "mvm-ping".to_string()"#;
-    const FIXTURE_STAGING: &str =
-        r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("ping"))"#;
+    const FIXTURE_SEALED: &str = r#""mvm-guest-agent", "mvm-ping""#;
+    const FIXTURE_ADDONS: &str = r#""mvm-egress-client""#;
+    const FIXTURE_INSTALLS: &str = "install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
+         install_one(&output_dir.join(\"mvm-ping\"), &layout.ping)?;\n\
+         install_one(&output_dir.join(\"mvm-egress-client\"), &layout.egress_client)?;\n";
+    const FIXTURE_STAGING: &str = r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("ping")), (&bins.egress_client, root.join("egress-client"))"#;
+
+    fn overlay_fixture(root: &Path) {
+        overlay_fixture_with(
+            root,
+            FIXTURE_SEALED,
+            FIXTURE_ADDONS,
+            FIXTURE_ARGS_FN,
+            FIXTURE_INSTALLS,
+            FIXTURE_STAGING,
+        );
+    }
 
     fn fixture_universe() -> BTreeSet<String> {
-        BTreeSet::from(["mvm-guest-agent".to_string(), "mvm-ping".to_string()])
+        BTreeSet::from([
+            "mvm-guest-agent".to_string(),
+            "mvm-ping".to_string(),
+            "mvm-egress-client".to_string(),
+        ])
+    }
+
+    fn parity_error(root: &Path) -> String {
+        check_overlay_parity(root, &fixture_universe())
+            .unwrap_err()
+            .to_string()
     }
 
     #[test]
     fn rustfmt_wrapped_install_calls_are_still_extracted() {
         let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(tmp.path(), FIXTURE_BINS, FIXTURE_STAGING);
-        // Rewrite the build file with one call wrapped the way rustfmt wraps
-        // a long line; extraction must not depend on single-line calls.
-        std::fs::write(
-            tmp.path().join(GUEST_AGENT_BUILD),
-            format!(
-                "fn build_runtime_overlay_guest_binaries_into_cache() {{\n\
-                 let prod_args = vec![{FIXTURE_BINS}];\n\
-                 run_zigbuild(&spec, &prod_args)?;\n\
-                 install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
-                 install_one(\n    &output_dir.join(\"mvm-ping\"),\n    &layout.ping,\n)?;\n}}\n"
-            ),
-        )
-        .unwrap();
+        overlay_fixture_with(
+            tmp.path(),
+            FIXTURE_SEALED,
+            FIXTURE_ADDONS,
+            FIXTURE_ARGS_FN,
+            "install_one(&output_dir.join(\"mvm-guest-agent\"), &layout.agent)?;\n\
+             install_one(\n    &output_dir.join(\"mvm-ping\"),\n    &layout.ping,\n)?;\n\
+             install_one(&output_dir.join(\"mvm-egress-client\"), &layout.egress_client)?;\n",
+            FIXTURE_STAGING,
+        );
         assert_eq!(
             check_overlay_parity(tmp.path(), &fixture_universe()).unwrap(),
-            2
+            3
         );
     }
 
     #[test]
     fn overlay_parity_passes_on_agreeing_lists() {
         let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(tmp.path(), FIXTURE_BINS, FIXTURE_STAGING);
+        overlay_fixture(tmp.path());
         assert_eq!(
             check_overlay_parity(tmp.path(), &fixture_universe()).unwrap(),
-            2
+            3
         );
     }
 
     #[test]
     fn orphaned_bin_flag_fails_by_name() {
         let tmp = tempfile::tempdir().unwrap();
-        let orphaned = r#""--bin".to_string(), "--bin".to_string(), "mvm-ping".to_string()"#;
-        overlay_fixture(tmp.path(), orphaned, FIXTURE_STAGING);
-        let error = check_overlay_parity(tmp.path(), &fixture_universe())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("orphaned `--bin` flag"), "{error}");
+        overlay_fixture(tmp.path());
+        let path = tmp.path().join(GUEST_AGENT_BUILD);
+        let mut src = std::fs::read_to_string(&path).unwrap();
+        src.push_str(r#"vec!["--bin".to_string(), "--bin".to_string(), "mvm-ping".to_string()];"#);
+        std::fs::write(&path, src).unwrap();
+        assert!(
+            parity_error(tmp.path()).contains("orphaned `--bin` flag"),
+            "{}",
+            parity_error(tmp.path())
+        );
     }
 
     #[test]
     fn a_built_bin_that_is_never_installed_is_drift() {
         let tmp = tempfile::tempdir().unwrap();
-        let extra = format!(r#"{FIXTURE_BINS}, "--bin".to_string(), "mvm-extra".to_string()"#);
-        overlay_fixture(tmp.path(), &extra, FIXTURE_STAGING);
-        let error = check_overlay_parity(tmp.path(), &fixture_universe())
-            .unwrap_err()
-            .to_string();
+        overlay_fixture_with(
+            tmp.path(),
+            r#""mvm-guest-agent", "mvm-ping", "mvm-extra""#,
+            FIXTURE_ADDONS,
+            FIXTURE_ARGS_FN,
+            FIXTURE_INSTALLS,
+            FIXTURE_STAGING,
+        );
+        let error = parity_error(tmp.path());
         assert!(
             error.contains("runtime-overlay binary lists drift"),
             "{error}"
         );
     }
 
+    /// A sealed bin moved into the addon invocation would link tokio.
+    #[test]
+    fn a_sealed_bin_built_with_addons_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        overlay_fixture_with(
+            tmp.path(),
+            r#""mvm-ping""#,
+            r#""mvm-egress-client", "mvm-guest-agent""#,
+            FIXTURE_ARGS_FN,
+            FIXTURE_INSTALLS,
+            FIXTURE_STAGING,
+        );
+        let error = parity_error(tmp.path());
+        assert!(error.contains("requires `addons`"), "{error}");
+    }
+
+    #[test]
+    fn an_addon_bin_in_the_sealed_list_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        overlay_fixture_with(
+            tmp.path(),
+            r#""mvm-guest-agent", "mvm-ping", "mvm-egress-client""#,
+            r#""mvm-egress-client""#,
+            FIXTURE_ARGS_FN,
+            FIXTURE_INSTALLS,
+            FIXTURE_STAGING,
+        );
+        let error = parity_error(tmp.path());
+        assert!(error.contains("in both"), "{error}");
+    }
+
+    /// One invocation building both lists is the unification this guards.
+    #[test]
+    fn building_both_lists_in_one_invocation_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let merged = "fn runtime_overlay_zigbuild_args(triple: &str) -> [Vec<String>; 1] {\n\
+             let mut all = package_bin_args(\"mvm-agentd\", &RUNTIME_OVERLAY_SEALED_BINS);\n\
+             all.push(MVM_AGENTD_ADDONS_FEATURE.to_string());\n\
+             [release(all)]\n\
+             }\n";
+        overlay_fixture_with(
+            tmp.path(),
+            FIXTURE_SEALED,
+            FIXTURE_ADDONS,
+            merged,
+            FIXTURE_INSTALLS,
+            FIXTURE_STAGING,
+        );
+        let error = parity_error(tmp.path());
+        assert!(
+            error.contains("must build RUNTIME_OVERLAY_ADDON_BINS exactly once"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn enabling_addons_twice_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let twice = FIXTURE_ARGS_FN.replace(
+            "[release(package_bin_args",
+            "let _ = MVM_AGENTD_ADDONS_FEATURE;\n[release(package_bin_args",
+        );
+        overlay_fixture_with(
+            tmp.path(),
+            FIXTURE_SEALED,
+            FIXTURE_ADDONS,
+            &twice,
+            FIXTURE_INSTALLS,
+            FIXTURE_STAGING,
+        );
+        let error = parity_error(tmp.path());
+        assert!(error.contains("2 times"), "{error}");
+    }
+
     #[test]
     fn rust_staging_missing_a_name_is_drift() {
         let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(
+        overlay_fixture_with(
             tmp.path(),
-            FIXTURE_BINS,
-            r#"(&bins.agent, root.join("agent"))"#,
+            FIXTURE_SEALED,
+            FIXTURE_ADDONS,
+            FIXTURE_ARGS_FN,
+            FIXTURE_INSTALLS,
+            r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("ping"))"#,
         );
-        let error = check_overlay_parity(tmp.path(), &fixture_universe())
-            .unwrap_err()
-            .to_string();
+        let error = parity_error(tmp.path());
         assert!(error.contains("staged-name sets drift"), "{error}");
     }
 
     #[test]
     fn a_field_staged_under_another_name_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        overlay_fixture(
+        overlay_fixture_with(
             tmp.path(),
-            FIXTURE_BINS,
-            r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("icmp"))"#,
+            FIXTURE_SEALED,
+            FIXTURE_ADDONS,
+            FIXTURE_ARGS_FN,
+            FIXTURE_INSTALLS,
+            r#"(&bins.agent, root.join("agent")), (&bins.ping, root.join("icmp")), (&bins.egress_client, root.join("egress-client"))"#,
         );
-        let error = check_overlay_parity(tmp.path(), &fixture_universe())
-            .unwrap_err()
-            .to_string();
+        let error = parity_error(tmp.path());
         assert!(
             error.contains("field and staged name must correspond"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn parse_bins_requiring_reads_required_features() {
+        assert_eq!(
+            parse_bins_requiring(FIXTURE_MANIFEST, "addons"),
+            BTreeSet::from(["mvm-egress-client".to_string()])
         );
     }
 
@@ -510,17 +753,17 @@ name = "mvm-oci-entrypoint"
         let universe = guest_bin_universe(&root).unwrap();
         assert_eq!(check_overlay_parity(&root, &universe).unwrap(), 9);
         let gab = read(&root, GUEST_AGENT_BUILD).unwrap();
-        let argv = slice_between(
-            &gab,
-            "fn build_runtime_overlay_guest_binaries_into_cache",
-            "run_zigbuild(&spec, &prod_args)",
-            GUEST_AGENT_BUILD,
-        )
-        .unwrap();
-        let bins = extract_bin_flags(argv);
-        for name in ["mvm-ping", "mvm-display-bridge"] {
-            assert!(bins.contains(name), "{name} must be an overlay binary");
+        let sealed = extract_const_names(&gab, SEALED_BINS_CONST).unwrap();
+        for name in ["mvm-ping", "mvm-display-bridge", "mvm-guest-agent"] {
+            assert!(
+                sealed.contains(name),
+                "{name} must be a sealed overlay binary"
+            );
         }
+        assert_eq!(
+            extract_const_names(&gab, ADDON_BINS_CONST).unwrap(),
+            BTreeSet::from(["mvm-egress-client".to_string(), "mvm-addon-dns".to_string()])
+        );
     }
 
     #[test]

@@ -83,6 +83,7 @@ mod tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),

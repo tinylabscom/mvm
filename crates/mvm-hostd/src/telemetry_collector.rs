@@ -570,6 +570,44 @@ mod tests {
     }
 
     #[test]
+    fn the_capped_sink_persists_each_record_in_the_served_envelope() {
+        use mvm_core::protocol::telemetry::served::ReceivedRecord;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("records.jsonl");
+        let record = record(1);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        // Sized with a receive time of today's width, so the cap admits
+        // exactly two lines as the sink will stamp them.
+        let one_line = ReceivedRecord::encode_line(before, &record).unwrap().len() as u64;
+        let mut sink = CappedJsonlSink::create(&path, one_line * 2 + 1).unwrap();
+        assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
+        assert_eq!(sink.try_ingest(&record), IngestOutcome::Ingested);
+        assert_eq!(
+            sink.try_ingest(&record),
+            IngestOutcome::Shed,
+            "the third line would cross the cap"
+        );
+        let text = std::fs::read(&path).unwrap();
+        let lines: Vec<&[u8]> = text
+            .split(|&b| b == b'\n')
+            .filter(|l| !l.is_empty())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        for line in lines {
+            let served = ReceivedRecord::decode_line(line).expect("the served envelope");
+            assert_eq!(served.record, record);
+            assert!(served.received_at_ms.is_some_and(|at| at >= before));
+        }
+        // Reopening appends: the cap counts what is already there.
+        let mut reopened = CappedJsonlSink::create(&path, one_line * 3).unwrap();
+        assert_eq!(reopened.try_ingest(&record), IngestOutcome::Ingested);
+        assert_eq!(reopened.try_ingest(&record), IngestOutcome::Shed);
+    }
+
+    #[test]
     fn a_full_sink_sheds_with_evidence_and_never_blocks_the_receive_loop() {
         let state = tempfile::tempdir().unwrap();
         let (guest_key, anchor_key) = keys();
@@ -668,11 +706,12 @@ mod tests {
     }
 }
 
-/// A size-capped JSONL sink: each record appends as one JSON line until the
-/// cap, then sheds. This file exists so collection is observable — retention
-/// and durable storage are their own workstream, and nothing here claims
-/// them. Writes are local file appends; a failed write is a shed, never a
-/// stall.
+/// A size-capped JSONL sink: each record appends as one JSON line — the
+/// record inside the served envelope, stamped with the host receive time —
+/// until the cap, then sheds. This file exists so collection is observable
+/// through the read seam — retention and durable storage are their own
+/// workstream, and nothing here claims them. Writes are local file appends;
+/// a failed write is a shed, never a stall.
 pub struct CappedJsonlSink {
     file: std::fs::File,
     written: u64,
@@ -693,10 +732,19 @@ impl CappedJsonlSink {
 impl RecordSink for CappedJsonlSink {
     fn try_ingest(&mut self, record: &TelemetryRecord) -> IngestOutcome {
         use std::io::Write as _;
-        let Ok(mut line) = serde_json::to_vec(record) else {
+        // The persisted line carries the host receive time beside the
+        // record: the guest's monotonic clock orders records within one
+        // producer and epoch, and only this stamp places them on a wall clock.
+        let received_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        let Ok(line) = mvm_core::protocol::telemetry::served::ReceivedRecord::encode_line(
+            received_at_ms,
+            record,
+        ) else {
             return IngestOutcome::Shed;
         };
-        line.push(b'\n');
         if self.written.saturating_add(line.len() as u64) > self.cap {
             return IngestOutcome::Shed;
         }
