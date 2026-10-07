@@ -274,9 +274,27 @@
           guest = (libFor { inherit system; }).mkGuest {
             name = "lean-rootfs-probe";
             entrypoint.command = [ "/bin/true" ];
+            extraFiles = {
+              "/usr/lib/mvm/wrappers/runner" = {
+                content = "#!/bin/sh\nexit 0\n";
+                mode = "0555";
+              };
+              "/etc/mvm/file-mode-test" = {
+                content = "read-only\n";
+                mode = "0444";
+              };
+            };
           };
         in
         {
+          guest-rootfs-file-modes = pkgs.runCommand "guest-rootfs-file-modes" { } ''
+            ${pkgs.e2fsprogs}/bin/debugfs -R 'stat /usr/lib/mvm/wrappers/runner' ${guest} > runner-mode.txt 2>&1
+            ${pkgs.gnugrep}/bin/grep -Eq 'Mode: *0555' runner-mode.txt
+            ${pkgs.e2fsprogs}/bin/debugfs -R 'stat /etc/mvm/file-mode-test' ${guest} > data-mode.txt 2>&1
+            ${pkgs.gnugrep}/bin/grep -Eq 'Mode: *0444' data-mode.txt
+            touch "$out"
+          '';
+
           # The mkGuest rootfs is static-musl only. If the glibc package
           # enters its closure, this build fails — the guest privilege-drop
           # setpriv and every other rootfs binary must stay static. The grep
