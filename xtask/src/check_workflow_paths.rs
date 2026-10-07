@@ -862,23 +862,24 @@ mod tests {
         assert_workspace_suite_compiles_once_and_runs_everything(&workflow);
         for expected in [
             "permissions:",
-            "actions: write",
-            "runs-on: ubuntu-latest",
-            "timeout-minutes: 90",
-            "actions/workflows/workspace-shard.yml/dispatches",
-            "candidates=(github)",
-            "deadline=$((SECONDS + 1800))",
-            "actions/runs/$run_id/cancel",
-            "--arg archive_run_id \"$RUN_ID\"",
+            "actions: read",
+            "shard: ['1', '2']",
+            "uses: ./.github/workflows/workspace-shard.yml",
+            "commit_sha: ${{ github.sha }}",
+            "shard: ${{ matrix.shard }}",
+            "runner_kind: github",
         ] {
             assert!(
                 test_workspace.contains(expected),
-                "workspace runner broker must contain {expected:?}"
+                "workspace matrix must call the shard worker with {expected:?}"
             );
         }
-        assert!(!test_workspace.contains("candidates+=(hetzner)"));
+        assert!(!test_workspace.contains("actions: write"));
+        assert!(!test_workspace.contains("workflow_dispatch"));
         let workspace_worker = self::workflow("workspace-shard.yml");
         for expected in [
+            "workflow_call:",
+            "workflow_dispatch:",
             "fromJSON('[\"self-hosted\",\"Linux\",\"X64\",\"mvm\",\"hetzner\",\"kvm\"]')",
             "if: inputs.runner_kind == 'github' && inputs.archive_run_id == ''",
             "key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}",
@@ -889,6 +890,7 @@ mod tests {
             "cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2",
             "actions: read",
             "workspace-archive-{0}",
+            "workspace-shard-{0}-{1}",
             "if: inputs.archive_run_id == ''",
             "if: inputs.archive_run_id != ''",
             "cp -a \"$GITHUB_WORKSPACE/.\" \"$archive_root/\"",
