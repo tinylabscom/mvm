@@ -716,7 +716,6 @@ pub fn vsock_socket_filename(port: u32) -> String {
 /// keep generated paths at or below 103 bytes and fall back to a short `/tmp`
 /// namespace when a worktree-local `MVM_HOME` would overflow it.
 pub const UNIX_SOCKET_PATH_MAX_BYTES: usize = 103;
-const SHORT_VM_SOCKET_ROOT: &str = "/tmp/mvm-sock";
 
 fn unix_socket_path_len(path: &std::path::Path) -> usize {
     #[cfg(unix)]
@@ -752,12 +751,12 @@ fn short_vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
             sha2::Sha256::digest(path.as_bytes())
         }
     };
-    std::path::PathBuf::from(SHORT_VM_SOCKET_ROOT).join(hex::encode(&digest[..8]))
+    std::path::PathBuf::from(format!("/tmp/mvm-sock-{}", hex::encode(&digest[..8])))
 }
 
 /// Per-VM Unix-socket directory. Uses the normal `vm_state_dir` when its known
 /// socket shapes fit within the Unix-domain path budget; otherwise falls back to
-/// a hashed short namespace under `/tmp/mvm-sock/` so interactive HVF runs from
+/// a per-VM hashed short namespace under `/tmp` so interactive HVF runs from
 /// deep worktrees still bind on macOS.
 pub fn vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
     // Sized on the *longest* socket name that lands in this directory, not on
@@ -2012,19 +2011,19 @@ mod tests {
     #[test]
     fn long_vm_socket_paths_fall_back_to_short_tmp_namespace() {
         let mut env = TestEnv::new();
-        env.set(
-            "MVM_HOME",
-            "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test",
-        );
+        let root = tempfile::tempdir().unwrap();
+        let deep_home = root.path().join("d".repeat(120));
+        env.set("MVM_HOME", &deep_home);
 
         let state_dir = vm_state_dir("sunny-badger-e546");
         let socket_dir = vm_socket_dir("sunny-badger-e546");
         assert_ne!(socket_dir, state_dir, "long worktree paths must shorten");
         assert!(
-            socket_dir.starts_with(SHORT_VM_SOCKET_ROOT),
-            "short socket dir should live under {SHORT_VM_SOCKET_ROOT}: {}",
+            socket_dir.to_string_lossy().starts_with("/tmp/mvm-sock-"),
+            "short socket dir should live under a per-VM short root: {}",
             socket_dir.display()
         );
+        assert_eq!(socket_dir.parent(), Some(std::path::Path::new("/tmp")));
 
         let substitution = vm_network_endpoint_socket("sunny-badger-e546");
         let agent = vm_inhouse_agent_socket_at(&state_dir);

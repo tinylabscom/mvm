@@ -1800,6 +1800,15 @@ mod tests {
     fn extract_and_install_uses_sudo_for_a_host_owned_install_dir() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let sudo = bin.join("sudo");
+        std::fs::write(
+            &sudo,
+            b"#!/bin/sh\nprintf 'called\\n' >> \"$MVM_TEST_SUDO_MARKER\"\n/bin/chmod u+w \"$MVM_TEST_INSTALL_DIR\"\nexec \"$@\"\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
         let work = tmp.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
         let archive = build_release_archive(tmp.path(), "unit-test", true, true);
@@ -1811,10 +1820,17 @@ mod tests {
         std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
         std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
 
+        let marker = tmp.path().join("sudo-called");
+        let mut env = TestEnv::new();
+        env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        env.set("MVM_TEST_SUDO_MARKER", &marker);
+        env.set("MVM_TEST_INSTALL_DIR", &install_dir);
+
         let result = extract_and_install("unit-test", &work, &current_exe);
 
         std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         result.expect("the sudo arm installs into a host-owned directory");
+        assert!(marker.is_file(), "the sudo arm must be invoked");
         assert!(
             std::fs::read_to_string(&current_exe)
                 .unwrap()
