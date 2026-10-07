@@ -1309,6 +1309,10 @@ export interface ToolCheckRequest {
  */
 argv: string
 /**
+ * Actual argv[0] the guest will spawn. A missing or differing path cannot receive command authority from the signed plan.
+ */
+executable?: (string | null)
+/**
  * Name in the admitted plan's tool rules.
  */
 tool: string

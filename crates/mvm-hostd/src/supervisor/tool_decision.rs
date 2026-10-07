@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use mvm_contract::policy::approval_prompt::ApprovalSubject;
 use mvm_contract::policy::tool_rules::{ToolDecision, ToolRules};
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
+use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
@@ -76,9 +77,9 @@ impl ToolDecisionGate {
 
     /// Decide and record one invocation. A recorder failure is an error, so
     /// the caller cannot mistake an unaudited decision for an allow.
-    pub async fn decide(&self, tool: &str, argv: &str) -> Result<ToolVerdict, RecorderError> {
-        let verdict = self.verdict(tool, argv).await;
-        self.record(tool, argv, verdict, None).await?;
+    pub async fn decide(&self, request: &ToolCheckRequest) -> Result<ToolVerdict, RecorderError> {
+        let verdict = self.verdict(request).await;
+        self.record(request, verdict, None).await?;
         Ok(verdict)
     }
 
@@ -87,15 +88,16 @@ impl ToolDecisionGate {
     /// with the decision and live until [`Self::release`].
     pub async fn decide_invocation(
         &self,
-        tool: &str,
-        argv: &str,
+        request: &ToolCheckRequest,
     ) -> Result<InvocationVerdict, RecorderError> {
-        let verdict = self.verdict(tool, argv).await;
+        let verdict = self.verdict(request).await;
         let binding = match verdict {
-            ToolVerdict::Allow if self.scopes_endpoint(tool) => Some(self.mint(tool)),
+            ToolVerdict::Allow if self.scopes_endpoint(&request.tool) => {
+                Some(self.mint(&request.tool))
+            }
             _ => None,
         };
-        if let Err(error) = self.record(tool, argv, verdict, binding.as_ref()).await {
+        if let Err(error) = self.record(request, verdict, binding.as_ref()).await {
             if let Some(binding) = &binding {
                 self.release(binding);
             }
@@ -146,13 +148,19 @@ impl ToolDecisionGate {
         binding
     }
 
-    async fn verdict(&self, tool: &str, argv: &str) -> ToolVerdict {
-        match self.rules.decide(tool, Some(argv)) {
+    async fn verdict(&self, request: &ToolCheckRequest) -> ToolVerdict {
+        let decision = match request.executable.as_deref() {
+            Some(executable) => self
+                .rules
+                .decide_command(&request.tool, executable, &request.argv),
+            None => ToolDecision::Deny("the invocation did not report an executable"),
+        };
+        match decision {
             ToolDecision::Allow => ToolVerdict::Allow,
             ToolDecision::Deny(reason) => ToolVerdict::Deny(reason),
             ToolDecision::Ask => {
                 let subject = ApprovalSubject::ToolCall {
-                    tool: tool.to_string(),
+                    tool: request.tool.clone(),
                 };
                 match self.approver.decide(&subject).await {
                     ApprovalVerdict::Approved => ToolVerdict::Allow,
@@ -164,8 +172,7 @@ impl ToolDecisionGate {
 
     async fn record(
         &self,
-        tool: &str,
-        argv: &str,
+        request: &ToolCheckRequest,
         verdict: ToolVerdict,
         binding: Option<&ToolInvocationBinding>,
     ) -> Result<(), RecorderError> {
@@ -176,15 +183,21 @@ impl ToolDecisionGate {
         let mut labels = vec![
             (
                 "tool_sha256".to_string(),
-                hex::encode(Sha256::digest(tool.as_bytes())),
+                hex::encode(Sha256::digest(request.tool.as_bytes())),
             ),
             (
                 "argv_sha256".to_string(),
-                hex::encode(Sha256::digest(argv.as_bytes())),
+                hex::encode(Sha256::digest(request.argv.as_bytes())),
             ),
             ("outcome".to_string(), outcome.to_string()),
             ("reason".to_string(), reason.to_string()),
         ];
+        if let Some(executable) = &request.executable {
+            labels.push((
+                "executable_sha256".to_string(),
+                hex::encode(Sha256::digest(executable.as_bytes())),
+            ));
+        }
         if let Some(binding) = binding {
             labels.push(("binding_id".to_string(), binding.audit_id()));
         }
@@ -227,6 +240,14 @@ mod tests {
         (ToolDecisionGate::new(rules, approver, recorder), signer)
     }
 
+    fn request(tool: &str, argv: &str) -> ToolCheckRequest {
+        ToolCheckRequest {
+            tool: tool.into(),
+            executable: Some(format!("/bin/{tool}")),
+            argv: argv.into(),
+        }
+    }
+
     #[tokio::test]
     async fn deny_and_unlisted_refusals_never_prompt() {
         let approver = Arc::new(ScriptedApprover {
@@ -242,11 +263,11 @@ mod tests {
             Arc::clone(&approver),
         );
         assert!(matches!(
-            gate.decide("write", "write x").await,
+            gate.decide(&request("write", "write x")).await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert!(matches!(
-            gate.decide("other", "other").await,
+            gate.decide(&request("other", "other")).await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert_eq!(approver.calls.load(Ordering::Relaxed), 0);
@@ -262,12 +283,22 @@ mod tests {
         let (gate, signer) = gate(
             ToolRules {
                 ask: vec!["shell".into()],
+                detail: [(
+                    "shell".into(),
+                    mvm_contract::policy::tool_rules::ToolRuleDetail {
+                        executable: Some("/bin/shell".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
                 ..ToolRules::default()
             },
             Arc::clone(&approver),
         );
         assert_eq!(
-            gate.decide("shell", "echo ok").await.expect("audit"),
+            gate.decide(&request("shell", "echo ok"))
+                .await
+                .expect("audit"),
             ToolVerdict::Allow
         );
         assert_eq!(approver.calls.load(Ordering::Relaxed), 1);
@@ -275,6 +306,35 @@ mod tests {
         assert_eq!(entries.len(), 1);
         let recorded = serde_json::to_string(&entries).expect("serialize audit entries");
         assert!(!recorded.contains("echo ok"));
+    }
+
+    #[tokio::test]
+    async fn spoofed_or_unreported_executable_is_audited_and_never_prompts() {
+        let approver = approving();
+        let mut rules = ToolRules {
+            ask: vec!["gh".into()],
+            ..ToolRules::default()
+        };
+        rules.detail.insert(
+            "gh".into(),
+            mvm_contract::policy::tool_rules::ToolRuleDetail {
+                executable: Some("/usr/bin/gh".into()),
+                ..Default::default()
+            },
+        );
+        let (gate, signer) = gate(rules, Arc::clone(&approver));
+        let mut spoof = request("gh", "gh api");
+        assert!(matches!(
+            gate.decide(&spoof).await,
+            Ok(ToolVerdict::Deny(_))
+        ));
+        spoof.executable = None;
+        assert!(matches!(
+            gate.decide(&spoof).await,
+            Ok(ToolVerdict::Deny(_))
+        ));
+        assert_eq!(approver.calls.load(Ordering::Relaxed), 0);
+        assert_eq!(signer.entries().len(), 2);
     }
 
     fn scoped_rules() -> ToolRules {
@@ -285,7 +345,15 @@ mod tests {
         rules.detail.insert(
             "gh".into(),
             mvm_contract::policy::tool_rules::ToolRuleDetail {
+                executable: Some("/bin/gh".into()),
                 routes: vec!["api.github.com:443".into()],
+                ..Default::default()
+            },
+        );
+        rules.detail.insert(
+            "plain".into(),
+            mvm_contract::policy::tool_rules::ToolRuleDetail {
+                executable: Some("/bin/plain".into()),
                 ..Default::default()
             },
         );
@@ -304,7 +372,10 @@ mod tests {
         let (gate, signer) = gate(scoped_rules(), approving());
         let InvocationVerdict::Allow {
             binding: Some(binding),
-        } = gate.decide_invocation("gh", "gh api").await.expect("audit")
+        } = gate
+            .decide_invocation(&request("gh", "gh api"))
+            .await
+            .expect("audit")
         else {
             panic!("a scoped tool's allowed invocation is bound");
         };
@@ -323,13 +394,13 @@ mod tests {
     async fn unscoped_and_refused_invocations_get_no_binding() {
         let (gate, _signer) = gate(scoped_rules(), approving());
         assert_eq!(
-            gate.decide_invocation("plain", "plain x")
+            gate.decide_invocation(&request("plain", "plain x"))
                 .await
                 .expect("audit"),
             InvocationVerdict::Allow { binding: None }
         );
         assert!(matches!(
-            gate.decide_invocation("other", "other")
+            gate.decide_invocation(&request("other", "other"))
                 .await
                 .expect("audit"),
             InvocationVerdict::Deny(_)
@@ -344,7 +415,11 @@ mod tests {
             TenantId("local".into()),
         ));
         let gate = ToolDecisionGate::new(scoped_rules(), approving(), recorder);
-        assert!(gate.decide_invocation("gh", "gh api").await.is_err());
+        assert!(
+            gate.decide_invocation(&request("gh", "gh api"))
+                .await
+                .is_err()
+        );
         assert!(gate.live().is_empty());
     }
 
@@ -353,7 +428,11 @@ mod tests {
         let (gate, _signer) = gate(scoped_rules(), approving());
         let mut minted = Vec::new();
         for _ in 0..=MAX_LIVE_INVOCATIONS {
-            match gate.decide_invocation("gh", "gh api").await.expect("audit") {
+            match gate
+                .decide_invocation(&request("gh", "gh api"))
+                .await
+                .expect("audit")
+            {
                 InvocationVerdict::Allow {
                     binding: Some(binding),
                 } => minted.push(binding),
@@ -378,11 +457,19 @@ mod tests {
         let gate = ToolDecisionGate::new(
             ToolRules {
                 allow: vec!["shell".into()],
+                detail: [(
+                    "shell".into(),
+                    mvm_contract::policy::tool_rules::ToolRuleDetail {
+                        executable: Some("/bin/shell".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
                 ..ToolRules::default()
             },
             approver,
             recorder,
         );
-        assert!(gate.decide("shell", "echo ok").await.is_err());
+        assert!(gate.decide(&request("shell", "echo ok")).await.is_err());
     }
 }

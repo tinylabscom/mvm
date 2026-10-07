@@ -224,6 +224,7 @@ mod tests {
         rules.detail.insert(
             "gh".into(),
             ToolRuleDetail {
+                executable: Some("/bin/gh".into()),
                 routes: vec!["api.github.com:443".into()],
                 secrets: vec!["github".into()],
                 ..Default::default()
@@ -259,7 +260,17 @@ mod tests {
     }
 
     async fn bound(gate: &ToolDecisionGate) -> ToolInvocationBinding {
-        match gate.decide_invocation("gh", "gh api").await.expect("audit") {
+        match gate
+            .decide_invocation(
+                &mvm_contract::protocol::network_flow::tool::ToolCheckRequest {
+                    tool: "gh".into(),
+                    executable: Some("/bin/gh".into()),
+                    argv: "gh api".into(),
+                },
+            )
+            .await
+            .expect("audit")
+        {
             InvocationVerdict::Allow {
                 binding: Some(binding),
             } => binding,

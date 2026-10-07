@@ -184,7 +184,7 @@ impl EnvSection {
 /// `[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny`
 /// decisions are enforced at the seams the host controls (the MCP tool-call
 /// gate and declared `machine exec --tool` invocations); declared commands
-/// also enforce `argv`. A tool's `routes` and `secrets` are enforced at the
+/// also require the exact signed `executable` path and enforce `argv`. A tool's `routes` and `secrets` are enforced at the
 /// per-VM endpoint against flows attributed to an admitted invocation of
 /// that tool.
 ///
@@ -192,7 +192,8 @@ impl EnvSection {
 /// beats `allow`); per-tool detail is first-defined-then-narrowed: a later
 /// layer may repeat or restrict the `argv`, `routes` and `secrets` an
 /// earlier layer set for a tool, never extend them, and `deny` argv
-/// patterns union.
+/// patterns union. The first executable path cannot be changed or added
+/// after a detail is defined.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -206,7 +207,7 @@ pub struct ToolsSection {
     /// Tool names refused whatever allows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    /// Per-tool argv, route and secret restrictions, keyed by tool name.
+    /// Per-tool executable, argv, route and secret restrictions, keyed by tool name.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub detail: BTreeMap<String, ToolDetail>,
 }
@@ -227,6 +228,7 @@ impl ToolsSection {
                     (
                         name.clone(),
                         ToolRuleDetail {
+                            executable: detail.executable.clone(),
                             argv: detail.argv.clone(),
                             deny: detail.deny.clone(),
                             routes: detail.routes.clone(),
@@ -252,6 +254,11 @@ impl ToolsSection {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ToolDetail {
+    /// Exact absolute executable path in the guest for declared-command
+    /// mediation. A command with no path is refused, while an MCP-only tool
+    /// may omit it. Composition cannot redirect a previously named path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
     /// Argv patterns permitted for this tool, glob-style and matched against
     /// the command line (`git *`). An empty list means any argv the tool is
     /// invoked with. Composition narrows: a later layer may only name
