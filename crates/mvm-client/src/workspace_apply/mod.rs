@@ -29,7 +29,7 @@ use mvm_contract::policy::protected_paths::{
 };
 use mvm_fs::tree_diff::Ext4Tree;
 use mvm_fs::workspace_apply::store::{ApplyStore, StagedApply};
-use mvm_fs::workspace_apply::{PlanParams, plan};
+use mvm_fs::workspace_apply::{PlanParams, RelationKind, plan};
 use mvm_hostd::audit::emitter::{
     AuditEmitter, WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit,
 };
@@ -289,7 +289,7 @@ impl<'a> WorkspaceApplier<'a> {
         if !pending.is_empty() {
             let restored =
                 reconcile_pending_signed_audits(&store, target.source_dir, pending, |staged| {
-                    audit.mutation_recorded(applied_entry(target, staged))
+                    audit.mutation_recorded(mutation_entry(target, staged))
                 })?;
             recovered.extend(restored.into_iter().map(Recovered::Unaudited));
         }
@@ -301,55 +301,16 @@ impl<'a> WorkspaceApplier<'a> {
         Ok((applier, recovered))
     }
 
-    /// Write a reviewed plan to the host tree. The order is what makes it
-    /// safe: stage every pre-image, sign the snapshot root, arm a durable
-    /// marker, commit, sign `workspace.applied`, then clear the marker. When
-    /// the applied entry cannot be shown written, the pre-images are restored
-    /// before this returns its error.
+    /// Write a reviewed plan to the host tree through
+    /// [`Self::commit_audited`]. When the signed `workspace.applied` entry
+    /// cannot be shown written, the pre-images are restored before this
+    /// returns its error.
     pub fn apply(&self, pending: PendingApply) -> Result<Applied> {
         let target = self.target;
         let staged = self
             .store
             .stage(pending.plan, target.source_dir, &pending.live, None)?;
-        let snapshot_root = staged.snapshot_merkle_root();
-        record_snapshot_then_commit(
-            || {
-                self.audit.record_snapshot(WorkspaceSnapshotAudit {
-                    vm_name: target.vm,
-                    volume: target.volume,
-                    apply_id: staged.id(),
-                    snapshot_root: &snapshot_root,
-                    manifest_root: staged.merkle_root(),
-                })
-            },
-            || {
-                self.store.arm_signed_audit(&staged)?;
-                self.store
-                    .commit(&staged, target.source_dir)
-                    .map_err(Into::into)
-            },
-        )?;
-        seal_apply_or_rollback(
-            || {
-                self.audit
-                    .record_mutation("workspace:apply", applied_entry(target, &staged))
-            },
-            || self.audit.mutation_recorded(applied_entry(target, &staged)),
-            |certainty| {
-                match certainty {
-                    AuditCertainty::Absent => {
-                        self.store.rollback_unsealed(&staged, target.source_dir)
-                    }
-                    AuditCertainty::Unverifiable => {
-                        self.store.rollback_unverifiable(&staged, target.source_dir)
-                    }
-                }
-                .map_err(Into::into)
-            },
-        )?;
-        self.store
-            .seal_signed_audit(&staged)
-            .context("clearing the reconciled workspace audit marker")?;
+        let snapshot_root = self.commit_audited(&staged)?;
         mvm_core::audit_emit!(
             WorkspaceApply,
             vm: target.vm,
@@ -366,67 +327,102 @@ impl<'a> WorkspaceApplier<'a> {
         })
     }
 
-    /// Reverse the newest effective apply. `None` when there is none.
+    /// Reverse the newest effective apply, through the same signed sequence
+    /// as an apply. `None` when there is nothing to undo.
     pub fn undo(&self) -> Result<Option<AppliedRelation>> {
         let target = self.target;
-        let Some(applied) = self.store.undo_latest(target.source_dir)? else {
+        let Some(staged) = self.store.stage_undo(target.source_dir)? else {
             return Ok(None);
         };
-        self.audit
-            .record_mutation(
-                "workspace:undo",
-                WorkspaceMutationAudit {
-                    event: workspace_audit::UNDONE_EVENT,
-                    vm_name: target.vm,
-                    volume: target.volume,
-                    apply_id: &applied.apply_id,
-                    target_id: Some(&applied.target_id),
-                    merkle_root: &applied.merkle_root,
-                },
-            )
-            .context("recording the workspace undo in the signed audit chain")?;
+        let relation = self.commit_traversal(&staged)?;
         mvm_core::audit_emit!(
             WorkspaceUndo,
             vm: target.vm,
             "action=workspace.undo volume={} undo={} target={} merkle_root={}",
             target.volume,
-            applied.apply_id,
-            applied.target_id,
-            applied.merkle_root
+            relation.apply_id,
+            relation.target_id,
+            relation.merkle_root
         );
-        Ok(Some(applied))
+        Ok(Some(relation))
     }
 
     /// Re-apply the target of the newest undo while that undo is still the
-    /// newest effective apply. `None` when there is nothing to redo.
+    /// newest effective apply, through the same signed sequence as an apply.
+    /// `None` when there is nothing to redo.
     pub fn redo(&self) -> Result<Option<AppliedRelation>> {
         let target = self.target;
-        let Some(applied) = self.store.redo_latest(target.source_dir)? else {
+        let Some(staged) = self.store.stage_redo(target.source_dir)? else {
             return Ok(None);
         };
-        self.audit
-            .record_mutation(
-                "workspace:redo",
-                WorkspaceMutationAudit {
-                    event: workspace_audit::REDONE_EVENT,
-                    vm_name: target.vm,
-                    volume: target.volume,
-                    apply_id: &applied.apply_id,
-                    target_id: Some(&applied.target_id),
-                    merkle_root: &applied.merkle_root,
-                },
-            )
-            .context("recording the workspace redo in the signed audit chain")?;
+        let relation = self.commit_traversal(&staged)?;
         mvm_core::audit_emit!(
             WorkspaceRedo,
             vm: target.vm,
             "action=workspace.redo volume={} redo={} target={} merkle_root={}",
             target.volume,
-            applied.apply_id,
-            applied.target_id,
-            applied.merkle_root
+            relation.apply_id,
+            relation.target_id,
+            relation.merkle_root
         );
-        Ok(Some(applied))
+        Ok(Some(relation))
+    }
+
+    fn commit_traversal(&self, staged: &StagedApply) -> Result<AppliedRelation> {
+        let relation = staged
+            .relation()
+            .context("a staged undo or redo must name the apply it traverses")?;
+        self.commit_audited(staged)?;
+        Ok(relation)
+    }
+
+    /// Every write to the host tree goes through here, and the order is what
+    /// makes it safe: sign the root over the staged pre-images, arm a durable
+    /// marker, commit, sign the mutation entry (`workspace.applied`,
+    /// `.undone` or `.redone`, from the manifest's relation), then clear the
+    /// marker. When the mutation entry cannot be shown written, the
+    /// pre-images are restored before the error is returned. Returns the
+    /// snapshot root.
+    fn commit_audited(&self, staged: &StagedApply) -> Result<String> {
+        let target = self.target;
+        let snapshot_root = staged.snapshot_merkle_root();
+        let entry = mutation_entry(target, staged);
+        record_snapshot_then_commit(
+            || {
+                self.audit.record_snapshot(WorkspaceSnapshotAudit {
+                    vm_name: target.vm,
+                    volume: target.volume,
+                    apply_id: staged.id(),
+                    snapshot_root: &snapshot_root,
+                    manifest_root: staged.merkle_root(),
+                })
+            },
+            || {
+                self.store.arm_signed_audit(staged)?;
+                self.store
+                    .commit(staged, target.source_dir)
+                    .map_err(Into::into)
+            },
+        )?;
+        seal_apply_or_rollback(
+            || self.audit.record_mutation(intent_for(entry.event), entry),
+            || self.audit.mutation_recorded(entry),
+            |certainty| {
+                match certainty {
+                    AuditCertainty::Absent => {
+                        self.store.rollback_unsealed(staged, target.source_dir)
+                    }
+                    AuditCertainty::Unverifiable => {
+                        self.store.rollback_unverifiable(staged, target.source_dir)
+                    }
+                }
+                .map_err(Into::into)
+            },
+        )?;
+        self.store
+            .seal_signed_audit(staged)
+            .context("clearing the reconciled workspace audit marker")?;
+        Ok(snapshot_root)
     }
 }
 
@@ -500,17 +496,36 @@ impl ExitSettlement<'_> {
     }
 }
 
-fn applied_entry<'s>(
+/// The signed entry a committed apply owes the chain. The event follows the
+/// manifest's relation, so restart recovery reconciles an interrupted undo or
+/// redo against the entry it was meant to write, not against `applied`.
+fn mutation_entry<'s>(
     target: WorkspaceTarget<'s>,
     staged: &'s StagedApply,
 ) -> WorkspaceMutationAudit<'s> {
+    let relation = staged.manifest().relation.as_ref();
+    let event = match relation.map(|relation| relation.kind) {
+        None => workspace_audit::APPLIED_EVENT,
+        Some(RelationKind::Undoes) => workspace_audit::UNDONE_EVENT,
+        Some(RelationKind::Redoes) => workspace_audit::REDONE_EVENT,
+    };
     WorkspaceMutationAudit {
-        event: workspace_audit::APPLIED_EVENT,
+        event,
         vm_name: target.vm,
         volume: target.volume,
         apply_id: staged.id(),
-        target_id: None,
+        target_id: relation.map(|relation| relation.apply.as_str()),
         merkle_root: staged.merkle_root(),
+    }
+}
+
+/// The audit envelope intent each mutation event is recorded under.
+fn intent_for(event: &str) -> &'static str {
+    match event {
+        workspace_audit::UNDONE_EVENT => "workspace:undo",
+        workspace_audit::REDONE_EVENT => "workspace:redo",
+        workspace_audit::AUDIT_ROLLBACK_EVENT => "workspace:audit-rollback",
+        _ => "workspace:apply",
     }
 }
 
@@ -575,13 +590,13 @@ fn reconcile_uncertain_signed_audits(
             .context("restoring host pre-images after an interrupted audit rollback")?;
     }
     for staged in uncertain {
-        if audit.mutation_recorded(applied_entry(target, &staged))? {
+        if audit.mutation_recorded(mutation_entry(target, &staged))? {
             let rollback = WorkspaceMutationAudit {
                 event: workspace_audit::AUDIT_ROLLBACK_EVENT,
-                ..applied_entry(target, &staged)
+                ..mutation_entry(target, &staged)
             };
             if !audit.mutation_recorded(rollback)? {
-                let appended = audit.record_mutation("workspace:audit-rollback", rollback);
+                let appended = audit.record_mutation(intent_for(rollback.event), rollback);
                 if let Err(append_error) = appended
                     && !audit.mutation_recorded(rollback)?
                 {

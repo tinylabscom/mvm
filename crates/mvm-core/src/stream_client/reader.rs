@@ -3,7 +3,6 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
@@ -285,12 +284,31 @@ pub fn connect_stream_at(
 }
 
 fn dial(path: &Path, vm: &str, opts: StreamOpts) -> Result<Box<dyn StreamReader>, StreamError> {
-    let socket = UnixStream::connect(path).map_err(|source| StreamError::Connect {
+    let socket = connect_socket(path).map_err(|source| StreamError::Connect {
         vm: vm.to_string(),
         path: path.to_path_buf(),
         source,
     })?;
     Ok(Box::new(FramedStreamReader::new(socket, opts)))
+}
+
+#[cfg(unix)]
+fn connect_socket(path: &Path) -> io::Result<std::os::unix::net::UnixStream> {
+    std::os::unix::net::UnixStream::connect(path)
+}
+
+/// The broker listens on a Unix domain socket, which std exposes only on Unix
+/// hosts. Elsewhere every dial fails with `Unsupported`, which callers surface
+/// as a connect failure rather than mistaking it for an absent broker.
+#[cfg(not(unix))]
+fn connect_socket(path: &Path) -> io::Result<std::fs::File> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "{}: stream broker sockets are Unix domain sockets, which this host platform does not provide",
+            path.display()
+        ),
+    ))
 }
 
 #[cfg(test)]

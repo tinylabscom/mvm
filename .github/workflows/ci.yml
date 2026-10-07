@@ -7,8 +7,9 @@ on:
   # queue makes one bad entry poison every cumulative commit behind it.
   # The merge queue validates the synthetic commit's scope and aggregate only,
   # reusing the admitted PR proof.
-  # Expensive platform, live-VM, OCI ratification, security, Windows, and
-  # release artifact jobs live in release/manual workflows.
+  # Expensive platform, live-VM, OCI ratification, security, and release
+  # artifact jobs live in release/manual workflows. The Windows lane here
+  # cross-compiles portable crates; it does not run a Windows host.
   pull_request:
   # Required for the merge queue. The full proof already ran on the PR; the
   # synthetic merge commit gets the fail-closed scope/integration check and the
@@ -837,6 +838,47 @@ jobs:
           echo "release feature set: $features"
           cargo check --locked -p mvmctl --bins --features "$features"
 
+  # mvm does not run on Windows hosts, and nothing here claims it does. What
+  # this lane holds is the portable floor a future Windows host would build
+  # on: the foundation crates, and the backend crate with its Unix-only
+  # drivers compiled out, have to keep compiling for a Windows target. A Unix
+  # API used without a platform guard fails here instead of being found by
+  # whoever next attempts the port. It is a compile check only: no Windows
+  # runner, no tests, and the GNU target so no MSVC toolchain is needed. The
+  # crate list is exactly the set that builds without a C cross-compiler;
+  # anything reaching `ring` or `aws-lc-sys` needs mingw and is out of scope.
+  lint-windows:
+    name: Windows compile check (portable crates)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@1.97.1
+
+      # rust-toolchain.toml overrides the action's toolchain, so a target
+      # installed through the action is not the one cargo builds with and
+      # every crate fails with `can't find crate for core`. Add it to the
+      # pinned toolchain instead.
+      - name: Install the Windows target for the pinned toolchain
+        run: rustup target add x86_64-pc-windows-gnu
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - name: cargo check for x86_64-pc-windows-gnu
+        run: |
+          cargo check --locked --target x86_64-pc-windows-gnu \
+            -p mvm-contract -p mvm-core -p mvm-net -p mvm-bundler -p mvm-backends
+          cargo check --locked --target x86_64-pc-windows-gnu \
+            -p mvm-core --features provenance,client,hostd-transport
+
   # The Gherkin scenarios previously ran only from release-tag workflows, so a
   # PR could break a scenario and merge green. Same reusable workflow the
   # release path calls, gated on the narrower `bdd` scope.
@@ -862,7 +904,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     # Every admission check runs in an upstream lane; this aggregate only
     # inspects their results, so it needs no checkout or full hosted image.
     runs-on: ubuntu-slim
@@ -889,6 +931,7 @@ jobs:
           FEATURES_RESULT: ${{ needs.lint-features.result }}
           FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
           FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
+          WINDOWS_RESULT: ${{ needs.lint-windows.result }}
           WORKSPACE_BUILD_RESULT: ${{ needs.test-workspace-build.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
           WORKSPACE_EXTRAS_RESULT: ${{ needs.test-workspace-extras.result }}
@@ -937,7 +980,7 @@ jobs:
             exit 1
           fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
-            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
+            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" "$WINDOWS_RESULT" \
             "$WORKSPACE_BUILD_RESULT" "$WORKSPACE_RESULT" "$WORKSPACE_EXTRAS_RESULT" \
             "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
             "$RELEASE_WITNESS_RESULT" "$MUSL_CONFINEMENT_RESULT" "$EBPF_RESULT"; do

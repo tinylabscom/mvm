@@ -40,10 +40,10 @@
 //! leaving some records under the old master and others under the
 //! new.
 
+use crate::private_fs::{mode_bits, set_mode};
 use rand::Rng;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
@@ -195,7 +195,7 @@ pub fn load_master_key(
     let path = version_path(active_dir, version);
     let meta =
         fs::metadata(&path).with_context(|| format!("stat master key {}", path.display()))?;
-    let mode = meta.permissions().mode() & 0o777;
+    let mode = mode_bits(&path, &meta)?;
     if mode != 0o600 {
         return Err(RotationError::KeyFilePerms { path, mode }.into());
     }
@@ -228,8 +228,7 @@ pub fn rotate_master_key(active_dir: &Path, org_id: &OrgId) -> Result<MasterKeyR
     fs::create_dir_all(active_dir)
         .with_context(|| format!("creating master-key dir {}", active_dir.display()))?;
     // 0700 on the directory mirrors snapshot.key's parent-dir posture.
-    let perms = fs::Permissions::from_mode(0o700);
-    fs::set_permissions(active_dir, perms).ok();
+    set_mode(active_dir, 0o700).ok();
 
     let mut manifest = load_manifest(active_dir)?;
     let new_version = manifest.latest_version() + 1;
@@ -378,9 +377,7 @@ fn write_secret_tempfile(bytes: &[u8]) -> Result<tempfile::NamedTempFile> {
         .prefix("mvm-luks-")
         .tempfile()
         .context("creating secret tempfile")?;
-    let perms = fs::Permissions::from_mode(0o600);
-    fs::set_permissions(tf.path(), perms)
-        .with_context(|| format!("chmod 0600 {}", tf.path().display()))?;
+    set_mode(tf.path(), 0o600).with_context(|| format!("chmod 0600 {}", tf.path().display()))?;
     tf.write_all(bytes)
         .with_context(|| format!("writing {}", tf.path().display()))?;
     tf.flush().ok();
@@ -449,6 +446,7 @@ mod tests {
     use super::*;
     use crate::domain::volume::OrgId;
     use rand::{Rng, RngExt};
+    use std::os::unix::fs::PermissionsExt;
 
     fn random_master_key() -> [u8; MASTER_KEY_BYTES] {
         let mut k = [0u8; MASTER_KEY_BYTES];

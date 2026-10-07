@@ -19,3 +19,14 @@ Feature: Entrypoint egress denial feedback
     # the workload reported, so the seal carries the observed exit.
     When I run mvmctl in the isolated mvm home with "trust audit sessions"
     Then the output contains "sealed (exit 28)"
+
+  @live @firecracker @ci_live
+  Scenario: a JSON entrypoint call carries a review command without prompting
+    Given an isolated mvm home
+    When I run mvmctl without a controlling terminal in an isolated live home with "machine run --flake examples/entrypoint-denial --entrypoint --json --allow-host example.com --timeout 180"
+    Then the command exits with code 28
+    And the error output contains "egress_denial_summary"
+    And the error output contains "egress_review"
+    And the error output contains "mvmctl explain "
+    And the error output contains "--review"
+    And the error output does not contain "Grant / [S] Skip"

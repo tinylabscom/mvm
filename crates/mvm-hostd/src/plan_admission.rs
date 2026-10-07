@@ -2525,7 +2525,7 @@ mod tests {
                 )
                 .expect("valid minimum extension version"),
                 max_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
-                    "0.22.9",
+                    env!("CARGO_PKG_VERSION"),
                 )
                 .expect("valid maximum extension version"),
                 min_protocol: 1,
@@ -5135,7 +5135,7 @@ mod tests {
                 )
                 .expect("minimum version"),
                 max_mvm_version: mvm_contract::protocol::extension_pack::ExtensionVersion::parse(
-                    "0.22.9",
+                    env!("CARGO_PKG_VERSION"),
                 )
                 .expect("maximum version"),
                 min_protocol: 1,
