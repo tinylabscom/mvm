@@ -262,6 +262,9 @@ Two notes from experience:
 - `ci.yml` runs on pull requests, merge-queue (`merge_group` with
   `checks_requested`), and manual dispatch — not on ordinary branch pushes.
   It covers check/fmt/clippy/nextest and related gates used for merge readiness.
+  Feature-only suites share the existing stable-toolchain jobs: the
+  test-support job also runs the Wasm-backend and release-acquisition checks,
+  keeping those checks on PRs without adding another runner job.
   Nix evaluation runs only when the changed paths can affect the Nix surface;
   the required `Test` check still verifies its result for those changes.
 - `security.yml` runs on release tags, nightly schedule, and manual dispatch —
