@@ -1306,6 +1306,90 @@ fn a_stable_tag_is_promoted_only_after_a_fresh_install_boots() {
     );
 }
 
+/// The Linux archive is booted, egress included, before anything is
+/// published.
+///
+/// Every other pre-publish lane builds mvmctl and its host binaries from the
+/// tree against the runner's glibc. The release ships static musl binaries, and
+/// v0.22.0's network endpoint made a syscall under musl that its seccomp filter
+/// did not allow, so every run that granted egress failed on the shipped
+/// release while every lane was green. Only a lane that boots the archive the
+/// build uploaded, and grants egress, reaches that endpoint.
+#[test]
+fn the_release_publishes_only_an_archive_whose_first_run_egress_passed() {
+    let workflow = release_workflow();
+
+    let gate = job_block(&workflow, "release-archive-smoke");
+    assert!(
+        gate.contains("    needs: [build]\n")
+            && gate.contains("    uses: ./.github/workflows/release-archive-smoke.yml\n"),
+        "the archive smoke must run the shared lane on what `build` uploaded"
+    );
+    assert!(
+        gate.contains("tag: ${{ github.event_name == 'push' && github.ref_name || '' }}"),
+        "a tag's archive must report the tag's version; a dry run has none to check"
+    );
+    let release = job_block(&workflow, "release");
+    assert!(
+        release.contains("needs.release-archive-smoke.result == 'success'"),
+        "publication must require the archive smoke to pass"
+    );
+    let build = job_block(&workflow, "build");
+    assert!(
+        build.contains("- target: x86_64-unknown-linux-gnu\n            build_target: x86_64-unknown-linux-musl\n")
+            && build.contains("name: mvmctl-${{ matrix.target }}"),
+        "the smoke downloads the x86_64 Linux archive by the name the build uploads it under"
+    );
+
+    let path = Path::new(".github/workflows/release-archive-smoke.yml");
+    let lane = fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    let lane_on = lane
+        .split("\npermissions:")
+        .next()
+        .expect("release-archive-smoke.yml has an `on:` block");
+    assert!(
+        lane_on.contains("  workflow_call:\n") && lane_on.contains("  workflow_dispatch:\n"),
+        "the lane must be callable by the release and dispatchable against an earlier run"
+    );
+    let smoke = job_block(&lane, "release-archive-smoke");
+    assert!(
+        smoke.contains("runs-on: ubuntu-latest") && smoke.contains("sudo chmod 666 /dev/kvm"),
+        "the archive must boot through KVM on a hosted runner"
+    );
+    assert_eq!(
+        smoke
+            .matches("name: mvmctl-x86_64-unknown-linux-gnu\n")
+            .count(),
+        2,
+        "both download paths must fetch the x86_64 Linux archive"
+    );
+    assert!(
+        smoke.contains("sha256sum --check mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256"),
+        "the archive must be the one the build recorded a checksum for"
+    );
+    assert!(
+        smoke.contains(
+            "MVM_SMOKE_ARCHIVE: ${{ runner.temp }}/release-archive/mvmctl-x86_64-unknown-linux-gnu.tar.gz"
+        ) && smoke.contains(r#"run: sh scripts/smoke-fresh-install.sh ${TAG_NAME:+"$TAG_NAME"}"#),
+        "the lane must run the fresh-install smoke on the downloaded archive"
+    );
+    let upload = smoke
+        .find("uses: actions/upload-artifact@")
+        .expect("the lane must upload its transcript");
+    assert!(
+        smoke[..upload].contains("if: always()"),
+        "the transcript matters most when the smoke fails"
+    );
+
+    let script = fs::read_to_string("scripts/smoke-fresh-install.sh").expect("smoke script");
+    assert!(
+        script
+            .contains(r#"mvmctl machine run --image "$EGRESS_IMAGE" --allow-host "$EGRESS_HOST""#),
+        "the smoke must boot a workload granted egress, or the endpoint never starts"
+    );
+}
+
 /// The merge-queue boot witness must validate the bytes a fresh install
 /// requests. It reads the pin rather than carrying a copy, so what is asserted
 /// here is the read: a literal would be a second place to advance by hand, and
