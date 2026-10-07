@@ -661,7 +661,7 @@ mod tests {
     fn registry_with(names_and_dirs: &[(&str, &str)]) -> VmNameRegistry {
         let mut reg = VmNameRegistry::default();
         for (name, dir) in names_and_dirs {
-            reg.register_with_metadata(RegisterParams::minimal(name, dir, "default"))
+            reg.register(RegisterParams::minimal(name, dir, "default"))
                 .unwrap();
         }
         reg
@@ -1111,8 +1111,8 @@ mod tests {
         let live = RegisterParams::minimal("live", &live_dir, "default");
         let dead = RegisterParams::minimal("dead", &dead_dir, "default");
         let mut reg = VmNameRegistry::default();
-        reg.register_with_metadata(live).unwrap();
-        reg.register_with_metadata(dead).unwrap();
+        reg.register(live).unwrap();
+        reg.register(dead).unwrap();
 
         assert!(view.state_present(reg.lookup("live").unwrap()));
         assert!(view.process_alive(reg.lookup("live").unwrap()));
@@ -1126,7 +1126,7 @@ mod tests {
         let view = FsRuntimeView::new(tmp.path());
         let reg = RegisterParams::minimal("ghost", "/nonexistent/ghost", "default");
         let mut registry = VmNameRegistry::default();
-        registry.register_with_metadata(reg).unwrap();
+        registry.register(reg).unwrap();
         assert!(!view.state_present(registry.lookup("ghost").unwrap()));
     }
 
@@ -1162,7 +1162,7 @@ mod tests {
         let dir_str = dir.to_string_lossy().into_owned();
         let reg = RegisterParams::minimal("hvf-vm", &dir_str, "default");
         let mut registry = VmNameRegistry::default();
-        registry.register_with_metadata(reg).unwrap();
+        registry.register(reg).unwrap();
         assert!(
             view.process_alive(registry.lookup("hvf-vm").unwrap()),
             "a live hvf.pid must count as a live supervisor"
@@ -1185,7 +1185,7 @@ mod tests {
         let dir_str = dir.to_string_lossy().into_owned();
         let reg = RegisterParams::minimal("firecracker-vm", &dir_str, "default");
         let mut registry = VmNameRegistry::default();
-        registry.register_with_metadata(reg).unwrap();
+        registry.register(reg).unwrap();
         assert!(
             view.process_alive(registry.lookup("firecracker-vm").unwrap()),
             "a live fc.pid must count as a live Firecracker owner"
@@ -1215,7 +1215,7 @@ mod tests {
         let actions = FsReconcileActions::new(root);
         let reg = RegisterParams::minimal("vm1", &dir, "default");
         let mut registry = VmNameRegistry::default();
-        registry.register_with_metadata(reg).unwrap();
+        registry.register(reg).unwrap();
         actions
             .tear_down("vm1", registry.lookup("vm1").unwrap())
             .unwrap();
@@ -1328,7 +1328,7 @@ mod tests {
         let registry_path = tmp.path().join("registry.json");
         let mut registry = VmNameRegistry::default();
         registry
-            .register_with_metadata(RegisterParams::minimal(
+            .register(RegisterParams::minimal(
                 "registered-dead",
                 &registered_dir,
                 "default",
@@ -1384,7 +1384,7 @@ mod tests {
         let actions = FsReconcileActions::new(tmp.path());
         let reg = RegisterParams::minimal("gone", "/nonexistent/gone", "default");
         let mut registry = VmNameRegistry::default();
-        registry.register_with_metadata(reg).unwrap();
+        registry.register(reg).unwrap();
         // Idempotent: tearing down already-gone state is a clean no-op.
         actions
             .tear_down("gone", registry.lookup("gone").unwrap())
@@ -1408,7 +1408,7 @@ mod tests {
         let vms_root = root.join("vms");
         let dead_dir = make_state_dir(&vms_root, "dead", Some(i32::MAX));
         let mut reg = VmNameRegistry::default();
-        reg.register_with_metadata(RegisterParams::minimal("dead", &dead_dir, "default"))
+        reg.register(RegisterParams::minimal("dead", &dead_dir, "default"))
             .unwrap();
         reg.save(&crate::vm::name_registry::registry_path())
             .unwrap();
@@ -1455,11 +1455,11 @@ mod tests {
         make_state_dir(&vms_root, "orphan", Some(i32::MAX)); // dead, no record
 
         let mut reg = VmNameRegistry::default();
-        reg.register_with_metadata(RegisterParams::minimal("live", &live_dir, "default"))
+        reg.register(RegisterParams::minimal("live", &live_dir, "default"))
             .unwrap();
-        reg.register_with_metadata(RegisterParams::minimal("dead", &dead_dir, "default"))
+        reg.register(RegisterParams::minimal("dead", &dead_dir, "default"))
             .unwrap();
-        reg.register_with_metadata(RegisterParams::minimal(
+        reg.register(RegisterParams::minimal(
             "gone",
             "/nonexistent/gone",
             "default",
@@ -1496,7 +1496,7 @@ mod tests {
         let registry_path = tmp.path().join("vm-names.json");
         let dead_dir = make_state_dir(&vms_root, "dead", Some(i32::MAX));
         let mut reg = VmNameRegistry::default();
-        reg.register_with_metadata(RegisterParams::minimal("dead", &dead_dir, "default"))
+        reg.register(RegisterParams::minimal("dead", &dead_dir, "default"))
             .unwrap();
         reg.save(&registry_path).unwrap();
 

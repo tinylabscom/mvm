@@ -21,7 +21,7 @@ use mvm_sdk::deploy::{BootArtifactIdentity, read_deploy_record, verify_boot_arti
 
 use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
 use crate::admission::policy_resolver::{
-    PolicyResolutionKind, ValidatedPolicy, validate_policy_refs, validate_policy_refs_with_dir,
+    PolicyResolutionKind, ValidatedPolicy, validate_policy_refs,
 };
 use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
@@ -1091,11 +1091,7 @@ pub fn resolve_policy_for_admission(
     plan: &mvm_core::plan::ExecutionPlan,
     policy_dir: Option<&std::path::Path>,
 ) -> Result<ValidatedPolicy> {
-    let resolved = match policy_dir {
-        Some(dir) => validate_policy_refs_with_dir(plan, dir),
-        None => validate_policy_refs(plan),
-    };
-    match resolved {
+    match validate_policy_refs(plan, policy_dir) {
         Ok(validated) => {
             tracing::info!(
                 plan_id = %plan.plan_id.0,
