@@ -11,6 +11,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
@@ -399,9 +400,7 @@ impl RegistryPackPublisher {
     /// Construct a publisher authority, refusing malformed or ambiguous input.
     ///
     /// The namespace `"*"` is the wildcard: it applies to every namespace
-    /// that has no exact publisher entry. Operators choose it explicitly; the
-    /// built-in official policy uses it so new official namespaces need no
-    /// client release.
+    /// that has no exact publisher entry. Operators choose it explicitly.
     pub fn new(
         namespace: impl Into<String>,
         issuer: impl Into<String>,
@@ -477,6 +476,8 @@ impl<'de> Deserialize<'de> for RegistryPackPublisher {
 pub struct RegistryPackPublisherPolicy {
     schema_version: u32,
     publishers: Vec<RegistryPackPublisher>,
+    #[serde(skip)]
+    legacy_identity_expires_at: Option<DateTime<Utc>>,
 }
 
 impl RegistryPackPublisherPolicy {
@@ -494,6 +495,7 @@ impl RegistryPackPublisherPolicy {
         Ok(Self {
             schema_version: REGISTRY_PACK_PUBLISHER_POLICY_SCHEMA_VERSION,
             publishers,
+            legacy_identity_expires_at: None,
         })
     }
 
@@ -507,7 +509,16 @@ impl RegistryPackPublisherPolicy {
         &self,
         namespace: &str,
     ) -> Result<KeylessTrust, RegistryPackVerificationError> {
-        self.publishers
+        self.trust_for_namespace_at(namespace, Utc::now())
+    }
+
+    fn trust_for_namespace_at(
+        &self,
+        namespace: &str,
+        now: DateTime<Utc>,
+    ) -> Result<KeylessTrust, RegistryPackVerificationError> {
+        let mut trust = self
+            .publishers
             .iter()
             .find(|publisher| publisher.namespace == namespace)
             .or_else(|| {
@@ -518,35 +529,66 @@ impl RegistryPackPublisherPolicy {
             .map(RegistryPackPublisher::keyless_trust)
             .ok_or_else(|| RegistryPackVerificationError::UntrustedNamespace {
                 namespace: namespace.to_string(),
-            })
+            })?;
+        if self
+            .legacy_identity_expires_at
+            .as_ref()
+            .is_some_and(|cutoff| &now >= cutoff)
+        {
+            trust
+                .accepted_identities
+                .retain(|identity| identity != LEGACY_PACK_SIGNING_IDENTITY);
+        }
+        Ok(trust)
     }
 }
 
 /// Keyless signing identity of the official pack registry's publish workflow.
 ///
 /// Packs published from `tinylabscom/mvm-packs` are signed keyless in
-/// `.github/workflows/publish.yml` on the main branch; every trust decision
-/// on an official pack checks this identity under the GitHub OIDC issuer.
+/// `.github/workflows/publish.yml` on the main branch; trust decisions check
+/// this identity under the GitHub OIDC issuer.
 pub const OFFICIAL_PACK_SIGNING_IDENTITY: &str =
     "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main";
+
+/// Previous publish identity accepted temporarily for `agent` and `runtime`
+/// packs that were signed before the repository rename.
+pub const LEGACY_PACK_SIGNING_IDENTITY: &str =
+    "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main";
+
+/// UTC instant when the built-in policy stops accepting the previous identity.
+pub const LEGACY_PACK_SIGNING_CUTOFF: &str = "2026-11-06T00:00:00Z";
 
 /// OIDC issuer that vouches for [`OFFICIAL_PACK_SIGNING_IDENTITY`].
 pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// The publisher trust policy that applies when the operator has made no
-/// trust decision of their own: one wildcard publisher accepting only the
-/// official registry's signing identity. It trusts packs the official
-/// workflow signed, in any namespace, and nothing else; an operator policy
-/// file replaces it wholesale.
+/// trust decision of their own. It accepts only the existing `agent` and
+/// `runtime` namespaces under the current identity, and temporarily under
+/// the previous identity. An operator policy file replaces it wholesale.
 pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
-    let publisher = RegistryPackPublisher::new(
-        "*",
-        OFFICIAL_PACK_SIGNING_ISSUER,
-        vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
-    )
-    .expect("the official publisher policy is built from constants and always validates");
-    RegistryPackPublisherPolicy::new(vec![publisher])
-        .expect("the official publisher policy has one publisher and no duplicates")
+    let publishers = ["agent", "runtime"]
+        .into_iter()
+        .map(|namespace| {
+            RegistryPackPublisher::new(
+                namespace,
+                OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![
+                    OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
+                    LEGACY_PACK_SIGNING_IDENTITY.to_string(),
+                ],
+            )
+            .expect("the built-in publisher policy is built from valid constants")
+        })
+        .collect();
+    let mut policy = RegistryPackPublisherPolicy::new(publishers)
+        .expect("the built-in publisher policy has unique namespaces");
+    policy.legacy_identity_expires_at = Some(
+        DateTime::parse_from_rfc3339(LEGACY_PACK_SIGNING_CUTOFF)
+            .expect("the built-in legacy identity cutoff is valid")
+            .with_timezone(&Utc),
+    );
+    policy
 }
 
 impl<'de> Deserialize<'de> for RegistryPackPublisherPolicy {
@@ -1398,18 +1440,52 @@ mod tests {
     #[test]
     fn the_official_default_policy_matches_its_constants() {
         let policy = official_publisher_policy();
-        let trust = policy.trust_for_namespace("any-future-namespace").unwrap();
-        assert_eq!(trust.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
-        assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
+        let before_cutoff = chrono::DateTime::parse_from_rfc3339("2026-11-05T23:59:59Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let at_cutoff = chrono::DateTime::parse_from_rfc3339("2026-11-06T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        for namespace in ["agent", "runtime"] {
+            let trust = policy
+                .trust_for_namespace_at(namespace, before_cutoff)
+                .unwrap();
+            assert_eq!(trust.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
+            assert_eq!(
+                trust.accepted_identities,
+                [OFFICIAL_PACK_SIGNING_IDENTITY, LEGACY_PACK_SIGNING_IDENTITY]
+            );
+            let trust = policy.trust_for_namespace_at(namespace, at_cutoff).unwrap();
+            assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
+        }
+        assert!(policy.trust_for_namespace("mvm").is_err());
+        assert!(policy.trust_for_namespace("community").is_err());
         assert_eq!(
             OFFICIAL_PACK_SIGNING_IDENTITY,
             "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"
         );
-        assert!(
-            !trust
-                .accepted_identities
-                .iter()
-                .any(|identity| identity.contains("/mvm-templates/"))
+    }
+
+    #[test]
+    fn operator_publisher_policy_is_unaffected_by_legacy_cutoff() {
+        let policy = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "agent",
+                OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![LEGACY_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let after_cutoff = chrono::DateTime::parse_from_rfc3339("2026-11-06T00:00:01Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(
+            policy
+                .trust_for_namespace_at("agent", after_cutoff)
+                .unwrap()
+                .accepted_identities,
+            [LEGACY_PACK_SIGNING_IDENTITY]
         );
     }
 

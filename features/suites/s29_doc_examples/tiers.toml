@@ -607,6 +607,16 @@ path = "pack list"
 tier = "exec"
 
 [[command]]
+path = "pack info"
+tier = "parse"
+reason = "requires an installed signed pack; isolated CLI scenarios exercise refusal and installed-cache tests exercise successful reopen"
+
+[[command]]
+path = "pack verify"
+tier = "parse"
+reason = "requires an installed signed pack; isolated CLI scenarios exercise refusal and installed-cache tests exercise successful verification"
+
+[[command]]
 path = "pack registry"
 tier = "exec"
 

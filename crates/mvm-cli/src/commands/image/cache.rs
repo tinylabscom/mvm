@@ -1632,8 +1632,13 @@ mod tests {
         let mut builder = tar::Builder::new(Vec::new());
         builder.append(&header, std::io::empty()).unwrap();
         let layer = builder.into_inner().unwrap();
-        let report = unpack_layer(layer.as_slice(), unpacked.path(), &UnpackOptions::default())
-            .expect("unpack");
+        let report = unpack_layer(
+            layer.as_slice(),
+            unpacked.path(),
+            &UnpackOptions::default(),
+            None,
+        )
+        .expect("unpack");
         let mut owners = mvm_fs::ownership::OwnerTable::new();
         owners.absorb(&report.ownership);
 
@@ -1696,6 +1701,7 @@ mod tests {
             builder.into_inner().unwrap().as_slice(),
             tree.path(),
             &mvm_fs::oci::unpack::UnpackOptions::default(),
+            None,
         )
         .unwrap();
         owners.absorb(&report.ownership);

@@ -320,6 +320,12 @@ pub enum LocalAuditKind {
     /// inside another session verb) tore down an idle session.
     /// Detail: `session=<id>,idle_timeout_secs=<n>`.
     SessionReap,
+    /// An admitted session ended and could not be sealed, and its reason could
+    /// not be written to the chain-signed log either: no admitted plan to bind
+    /// an entry to, or a chain that refused the write. This is the record that
+    /// the session's end happened and why it is `UNSEALED`.
+    /// Detail: `reason=<tag>` and, when there is one, `error=<message>`.
+    SessionUnsealed,
     // --- deps-volume audit verbs ---
     /// `mvmctl deps audit` re-ran the CVE scan against a cached deps
     /// volume and resealed it. Detail carries the prior + new volume
@@ -1262,6 +1268,7 @@ mod tests {
             LocalAuditKind::SessionConsoleOpen,
             LocalAuditKind::SessionKill,
             LocalAuditKind::SessionReap,
+            LocalAuditKind::SessionUnsealed,
             // Trust-store mutations.
             LocalAuditKind::TrustAdd,
             LocalAuditKind::TrustRemove,
@@ -1320,6 +1327,7 @@ mod tests {
             (LocalAuditKind::SessionConsoleOpen, "session_console_open"),
             (LocalAuditKind::SessionKill, "session_kill"),
             (LocalAuditKind::SessionReap, "session_reap"),
+            (LocalAuditKind::SessionUnsealed, "session_unsealed"),
             // Trust-store mutations.
             (LocalAuditKind::TrustAdd, "trust_add"),
             (LocalAuditKind::TrustRemove, "trust_remove"),

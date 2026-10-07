@@ -282,7 +282,9 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         let tar_bytes = build_tar(|b| {
-            add_file_with_mode(b, "usr/bin/helper", b"#!/bin/sh\n", 0o4755);
+            TarFile::new("usr/bin/helper", b"#!/bin/sh\n")
+                .mode(0o4755)
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -290,6 +292,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -312,7 +315,9 @@ mod tests {
     #[test]
     fn unsigned_production_setid_policy_refuses_setuid_file() {
         let tar_bytes = build_tar(|b| {
-            add_file_with_mode(b, "usr/bin/helper", b"#!/bin/sh\n", 0o4755);
+            TarFile::new("usr/bin/helper", b"#!/bin/sh\n")
+                .mode(0o4755)
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -320,7 +325,7 @@ mod tests {
             setid_policy: SetidPolicy::RefuseUnsigned,
             ..UnpackOptions::default()
         };
-        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts)
+        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts, None)
             .expect("unpack ok");
 
         assert_eq!(report.files_written, 0);
@@ -339,7 +344,9 @@ mod tests {
     #[test]
     fn unsigned_production_setid_policy_refuses_setgid_file() {
         let tar_bytes = build_tar(|b| {
-            add_file_with_mode(b, "usr/bin/group-helper", b"#!/bin/sh\n", 0o2755);
+            TarFile::new("usr/bin/group-helper", b"#!/bin/sh\n")
+                .mode(0o2755)
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -347,7 +354,7 @@ mod tests {
             setid_policy: SetidPolicy::RefuseUnsigned,
             ..UnpackOptions::default()
         };
-        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts)
+        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts, None)
             .expect("unpack ok");
 
         assert_eq!(report.files_written, 0);
@@ -361,7 +368,9 @@ mod tests {
         use std::os::unix::fs::MetadataExt;
 
         let tar_bytes = build_tar(|b| {
-            add_file_with_mode(b, "usr/bin/group-helper", b"#!/bin/sh\n", 0o2755);
+            TarFile::new("usr/bin/group-helper", b"#!/bin/sh\n")
+                .mode(0o2755)
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -369,7 +378,7 @@ mod tests {
             setid_policy: SetidPolicy::PreserveVerified,
             ..UnpackOptions::default()
         };
-        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts)
+        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts, None)
             .expect("unpack ok");
 
         assert_eq!(report.files_written, 1);
@@ -395,7 +404,9 @@ mod tests {
     #[test]
     fn unsigned_production_setid_policy_allows_regular_file_without_setid_bits() {
         let tar_bytes = build_tar(|b| {
-            add_file_with_mode(b, "usr/bin/tool", b"#!/bin/sh\n", 0o755);
+            TarFile::new("usr/bin/tool", b"#!/bin/sh\n")
+                .mode(0o755)
+                .append_to(b);
         });
 
         let tmp = TempDir::new().unwrap();
@@ -403,7 +414,7 @@ mod tests {
             setid_policy: SetidPolicy::RefuseUnsigned,
             ..UnpackOptions::default()
         };
-        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts)
+        let report = super::super::unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts, None)
             .expect("unpack ok");
 
         assert_eq!(report.files_written, 1);
