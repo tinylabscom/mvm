@@ -97,10 +97,6 @@ pub mod intoto;
 pub mod kernel_artifact;
 /// Hash-verify a fetched kernel image against its [`kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
-/// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +
-/// rootfs + verity sidecars + cmdline, with an Ed25519-signed manifest
-/// that hashes every payload.
-pub mod packed_artifact;
 /// Host-side scaffold for the persistent builder VM's dispatch
 /// supervisor. This module owns the dispatch wire over the socket
 /// libkrun creates; spawning the libkrun VM itself lives in
@@ -185,9 +181,11 @@ pub mod fetch_unchanged;
 /// Host-side cross-compile + cache of the guest agent/netinit binaries
 /// baked into an OCI rootfs by [`oci_runtime_inject`].
 pub mod guest_agent_build;
-/// The publishable `mvm-guest-bins` artifact: every guest binary for both
-/// guest architectures, with a manifest pinning their bytes and the producing
-/// tree's source fingerprints. Assembled from [`guest_agent_build`]'s builds.
+/// The `mvm-guest-bins` archive: every guest artifact mvm owns, for both guest
+/// architectures, with a manifest pinning their bytes, the producing commit,
+/// and its source fingerprints. The guest runtime `mvmctl` is to ship with each
+/// release and assemble its overlay, initramfs and SDK sidecar from.
+/// Compiled through [`guest_agent_build`]'s toolchain and caches.
 pub mod guest_bins;
 pub mod nix;
 /// Inject the mvm guest runtime (agent, netinit, `/init`, `/mvm/runtime`

@@ -206,6 +206,8 @@ mod tests {
 
     #[test]
     fn a_local_checkout_reports_both_identities_and_the_local_tier() {
+        // Other tests temporarily clear PATH; keep it stable while git runs.
+        let _env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
         for marker in mvm_build::image_source::IMAGES_CHECKOUT_MARKERS {

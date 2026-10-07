@@ -613,15 +613,20 @@ fn follow_display(
     broker: &SharedBroker,
 ) -> Option<DisplaySourceHandle> {
     let path = display_socket?;
-    DisplaySource::listen(path, Arc::clone(broker))
-        .inspect_err(|error| {
-            tracing::warn!(
-                vm = %vm,
-                error = %error,
-                "display frames will not be streamed for this workload"
-            );
-        })
-        .ok()
+    let paused_vm = vm.to_string();
+    DisplaySource::listen(
+        path,
+        Arc::clone(broker),
+        Arc::new(move || mvm_runtime::vm::human_credential::entry_window_open(&paused_vm)),
+    )
+    .inspect_err(|error| {
+        tracing::warn!(
+            vm = %vm,
+            error = %error,
+            "display frames will not be streamed for this workload"
+        );
+    })
+    .ok()
 }
 
 /// Wind one VM's capture down in the order that neither loses bytes nor

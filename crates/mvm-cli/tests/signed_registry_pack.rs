@@ -3,7 +3,9 @@
 use std::path::{Path, PathBuf};
 
 use mvm_client::policy_profiles::{LayerOrigin, PolicyRef, PolicyStore};
-use mvm_core::registry_pack::{RegistryPackPublisher, RegistryPackPublisherPolicy};
+use mvm_core::registry_pack::{
+    LEGACY_PACK_SIGNING_CUTOFF, RegistryPackPublisher, RegistryPackPublisherPolicy,
+};
 use mvm_core::registry_pack_store::{
     load_pack_lockfile, open_installed_registry_pack, save_publisher_policy,
 };
@@ -14,6 +16,8 @@ const MANIFEST: &[u8] = include_bytes!("fixtures/signed-registry-go/manifest.jso
 const BUNDLE: &[u8] = include_bytes!("fixtures/signed-registry-go/manifest.sigstore.json");
 const GROUP: &[u8] = include_bytes!("fixtures/signed-registry-go/pack/group.toml");
 const MANIFEST_SHA256: &str = "ce1ac86f67e6a9df7a1b1a46d63384fa20a30848fdd7e5967d2293bfb5ceec50";
+const HISTORICAL_PUBLISHER_IDENTITY: &str =
+    "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main";
 const PYTHON_MANIFEST: &[u8] = include_bytes!("fixtures/signed-registry-python/manifest.json");
 const PYTHON_BUNDLE: &[u8] =
     include_bytes!("fixtures/signed-registry-python/manifest.sigstore.json");
@@ -59,7 +63,42 @@ fn isolated_registry(temp: &TempDir, manifest: &[u8], group: &[u8]) -> TestEnv {
         "MVM_PACK_REGISTRY",
         format!("file://{}", registry.display()),
     );
+    let publisher = RegistryPackPublisher::new(
+        "runtime",
+        "https://token.actions.githubusercontent.com",
+        vec![HISTORICAL_PUBLISHER_IDENTITY.to_string()],
+    )
+    .expect("historical publisher identity");
+    let policy = RegistryPackPublisherPolicy::new(vec![publisher]).expect("publisher policy");
+    save_publisher_policy(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+        &policy,
+    )
+    .expect("save explicit historical fixture trust");
     env
+}
+
+#[test]
+fn the_builtin_default_bounds_trust_in_the_historical_fixture_identity() {
+    let temp = TempDir::new().expect("tempdir");
+    let _env = isolated_registry(&temp, MANIFEST, GROUP);
+    std::fs::remove_file(mvm_core::config::registry_pack_publisher_policy_path())
+        .expect("remove explicit fixture trust");
+
+    let cutoff = chrono::DateTime::parse_from_rfc3339(LEGACY_PACK_SIGNING_CUTOFF)
+        .expect("built-in cutoff is RFC 3339")
+        .with_timezone(&chrono::Utc);
+    let result = mvm_cli::pack_registry::pull("runtime/go");
+    let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
+    if chrono::Utc::now() < cutoff {
+        let summary = result.expect("former publisher is trusted before the cutoff");
+        assert_eq!(summary.manifest_sha256, MANIFEST_SHA256);
+        assert_eq!(lock.pins().len(), 1);
+    } else {
+        let error = result.expect_err("former publisher must be refused after the cutoff");
+        assert!(format!("{error:#}").contains("signature"));
+        assert!(lock.pins().is_empty());
+    }
 }
 
 #[test]

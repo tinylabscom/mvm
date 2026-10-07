@@ -34,7 +34,7 @@ const REPLAY_MARKER: &str = "/tmp/bdd-journey-replay-marker";
 /// `MVM_E2E_HOME` points this at an artifact-warm home. A fresh tempdir would
 /// re-acquire the kernel, overlay and initramfs before the first boot, which
 /// reads as a launch timeout rather than as a cold cache.
-fn journey_home() -> &'static Path {
+pub(crate) fn journey_home() -> &'static Path {
     static HOME: OnceLock<PathBuf> = OnceLock::new();
     HOME.get_or_init(|| {
         std::env::var_os("MVM_E2E_HOME")

@@ -309,7 +309,12 @@ mod tests {
 
         // A rebuild replaces the kernel in place with different contents.
         let new = fake_vmlinux_tagged(0x22);
+        let previous_mtime = std::fs::metadata(&kpath).unwrap().modified().unwrap();
         std::fs::write(&kpath, fake_bzimage(&new)).unwrap();
+        std::fs::File::open(&kpath)
+            .unwrap()
+            .set_modified(previous_mtime + std::time::Duration::from_secs(2))
+            .unwrap();
         let second = ensure_fc_loadable_kernel(&kpath).unwrap();
 
         assert_eq!(

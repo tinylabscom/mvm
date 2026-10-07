@@ -123,8 +123,8 @@ pub use error::{BuildError, EmitError};
 // `mvmctl compile --from-recording` and the auto-exec path both
 // reach in through these re-exports.
 pub use runtime::{
-    Divergence, KNOWN_BASE_IMAGES, LowerError, RecordedOp, RuntimeRecording, SandboxCreate,
-    compile_recording, compile_recording_with_findings, recording_sha256_hex, resolve_base_image,
+    CompiledRecording, Divergence, KNOWN_BASE_IMAGES, LowerError, RecordedOp, RuntimeRecording,
+    SandboxCreate, compile_recording, recording_sha256_hex, resolve_base_image,
     verify_recording_digest,
 };
 

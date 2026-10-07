@@ -649,10 +649,15 @@ pub(crate) fn escaping_path_refusal(raw_path: &[u8]) -> Option<RefusalReason> {
 /// Unpack a single layer tarball under `output_root`, applying the
 /// safety policies described at module level.
 ///
-/// This is the backward-compatible entry point for single-layer
-/// callers and tests. Multi-layer callers should use
-/// [`unpack_layer_with_prior_paths`] and accumulate the
-/// [`UnpackReport::paths_written`] set across layers.
+/// Multi-layer callers pass `Some` with the
+/// [`UnpackReport::paths_written`] set accumulated across earlier layers.
+/// When it contains the relative path of an entry being unpacked, the
+/// unpacker removes the existing leaf first (file, symlink, or directory
+/// tree) and then re-creates it with the new entry's type. This lets later
+/// OCI layers replace files from earlier layers without giving up the
+/// `O_EXCL` / `O_NOFOLLOW` first-creation safety for paths that are
+/// genuinely new. Same-layer duplicates remain refused. A single-layer
+/// caller passes `None`.
 ///
 /// Caller's responsibilities:
 ///
@@ -666,33 +671,18 @@ pub(crate) fn escaping_path_refusal(raw_path: &[u8]) -> Option<RefusalReason> {
 /// Returns an [`UnpackReport`] enumerating the writes and the
 /// refused entries. Refusals are **not** errors — callers that want
 /// "all-or-nothing" inspect `report.refused.is_empty()`.
+#[instrument(
+    skip_all,
+    fields(
+        output_root = %output_root.display(),
+        prior_paths = prior_layer_paths.map_or(0, HashSet::len)
+    )
+)]
 pub fn unpack_layer<R: Read>(
     layer_tar: R,
     output_root: &Path,
     options: &UnpackOptions,
-) -> Result<UnpackReport, UnpackError> {
-    unpack_layer_with_prior_paths(layer_tar, output_root, options, &HashSet::new())
-}
-
-/// Unpack a single layer tarball under `output_root`, with knowledge
-/// of paths written by earlier layers.
-///
-/// When `prior_layer_paths` contains the relative path of an entry
-/// being unpacked, the unpacker removes the existing leaf first
-/// (file, symlink, or directory tree) and then re-creates it with
-/// the new entry's type. This lets later OCI layers replace files
-/// from earlier layers without giving up the `O_EXCL` / `O_NOFOLLOW`
-/// first-creation safety for paths that are genuinely new. Same-layer
-/// duplicates remain refused.
-#[instrument(
-    skip_all,
-    fields(output_root = %output_root.display(), prior_paths = prior_layer_paths.len())
-)]
-pub fn unpack_layer_with_prior_paths<R: Read>(
-    layer_tar: R,
-    output_root: &Path,
-    options: &UnpackOptions,
-    prior_layer_paths: &HashSet<PathBuf>,
+    prior_layer_paths: Option<&HashSet<PathBuf>>,
 ) -> Result<UnpackReport, UnpackError> {
     if !output_root.is_absolute() {
         return Err(UnpackError::NonAbsoluteOutputRoot(
@@ -703,6 +693,8 @@ pub fn unpack_layer_with_prior_paths<R: Read>(
         return Err(UnpackError::OutputRootNotADir(output_root.to_path_buf()));
     }
 
+    let no_prior_layers = HashSet::new();
+    let prior_layer_paths = prior_layer_paths.unwrap_or(&no_prior_layers);
     let folding = probe_host_case_folding(output_root);
     unpack_layer_inner(layer_tar, output_root, options, prior_layer_paths, folding)
 }
@@ -964,38 +956,55 @@ mod test_support {
         builder.into_inner().unwrap().into_inner()
     }
 
+    /// A regular-file entry: mode 0644 and no pax xattr records unless set.
+    pub(super) struct TarFile<'a> {
+        path: &'a str,
+        body: &'a [u8],
+        mode: u32,
+        pax_xattrs: &'a [(&'a str, &'a [u8])],
+    }
+
+    impl<'a> TarFile<'a> {
+        pub(super) fn new(path: &'a str, body: &'a [u8]) -> Self {
+            Self {
+                path,
+                body,
+                mode: 0o644,
+                pax_xattrs: &[],
+            }
+        }
+
+        /// Set an explicit tar mode.
+        pub(super) fn mode(mut self, mode: u32) -> Self {
+            self.mode = mode;
+            self
+        }
+
+        /// Precede the entry with these pax xattr records.
+        pub(super) fn pax_xattrs(mut self, xattrs: &'a [(&'a str, &'a [u8])]) -> Self {
+            self.pax_xattrs = xattrs;
+            self
+        }
+
+        pub(super) fn append_to(self, builder: &mut tar::Builder<Cursor<Vec<u8>>>) {
+            if !self.pax_xattrs.is_empty() {
+                builder
+                    .append_pax_extensions(self.pax_xattrs.iter().copied())
+                    .unwrap();
+            }
+            let mut header = tar::Header::new_gnu();
+            header.set_path(self.path).unwrap();
+            header.set_size(self.body.len() as u64);
+            header.set_mode(self.mode);
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_cksum();
+            builder.append(&header, self.body).unwrap();
+        }
+    }
+
     /// Add a regular file with the given content + relative path.
     pub(super) fn add_file(builder: &mut tar::Builder<Cursor<Vec<u8>>>, path: &str, body: &[u8]) {
-        add_file_with_mode(builder, path, body, 0o644);
-    }
-
-    /// Add a regular file with an explicit tar mode.
-    pub(super) fn add_file_with_mode(
-        builder: &mut tar::Builder<Cursor<Vec<u8>>>,
-        path: &str,
-        body: &[u8],
-        mode: u32,
-    ) {
-        let mut header = tar::Header::new_gnu();
-        header.set_path(path).unwrap();
-        header.set_size(body.len() as u64);
-        header.set_mode(mode);
-        header.set_entry_type(tar::EntryType::Regular);
-        header.set_cksum();
-        builder.append(&header, body).unwrap();
-    }
-
-    /// Add a regular file preceded by pax xattr records.
-    pub(super) fn add_file_with_pax_xattrs(
-        builder: &mut tar::Builder<Cursor<Vec<u8>>>,
-        path: &str,
-        body: &[u8],
-        xattrs: &[(&str, &[u8])],
-    ) {
-        builder
-            .append_pax_extensions(xattrs.iter().copied())
-            .unwrap();
-        add_file(builder, path, body);
+        TarFile::new(path, body).append_to(builder);
     }
 
     /// Add a directory entry.
@@ -1323,6 +1332,7 @@ mod tests {
             Cursor::new(debian_pam_manpage_layer()),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -1359,7 +1369,8 @@ mod tests {
             add_dir(b, "usr/lib");
             add_file(b, "usr/lib/libc.so", b"from layer 1");
         });
-        let first = unpack_layer(Cursor::new(layer1), tmp.path(), &opts).expect("layer 1 unpacks");
+        let first =
+            unpack_layer(Cursor::new(layer1), tmp.path(), &opts, None).expect("layer 1 unpacks");
         assert!(first.refused.is_empty(), "{:?}", first.refused);
 
         let layer2 = build_tar(|b| {
@@ -1367,11 +1378,11 @@ mod tests {
             add_dir(b, "usr/lib");
             add_file(b, "usr/lib/libm.so", b"from layer 2");
         });
-        let second = unpack_layer_with_prior_paths(
+        let second = unpack_layer(
             Cursor::new(layer2),
             tmp.path(),
             &opts,
-            &first.paths_written,
+            Some(&first.paths_written),
         )
         .expect("layer 2 unpacks");
         assert!(second.refused.is_empty(), "{:?}", second.refused);
@@ -1396,17 +1407,18 @@ mod tests {
         let opts = UnpackOptions::default();
 
         let layer1 = build_tar(|b| add_file(b, "opt/thing", b"i am a file"));
-        let first = unpack_layer(Cursor::new(layer1), tmp.path(), &opts).expect("layer 1 unpacks");
+        let first =
+            unpack_layer(Cursor::new(layer1), tmp.path(), &opts, None).expect("layer 1 unpacks");
 
         let layer2 = build_tar(|b| {
             add_dir(b, "opt/thing");
             add_file(b, "opt/thing/inner", b"now a directory");
         });
-        let second = unpack_layer_with_prior_paths(
+        let second = unpack_layer(
             Cursor::new(layer2),
             tmp.path(),
             &opts,
-            &first.paths_written,
+            Some(&first.paths_written),
         )
         .expect("layer 2 unpacks");
         assert!(second.refused.is_empty(), "{:?}", second.refused);
@@ -1466,8 +1478,8 @@ mod tests {
     fn deferred_file_carries_its_bytes_and_mode() {
         let tmp = TempDir::new().unwrap();
         let tar_bytes = build_tar(|b| {
-            add_file_with_mode(b, "opt/Run", b"first", 0o644);
-            add_file_with_mode(b, "opt/run", b"second", 0o755);
+            TarFile::new("opt/Run", b"first").mode(0o644).append_to(b);
+            TarFile::new("opt/run", b"second").mode(0o755).append_to(b);
         });
         let report =
             unpack_forcing(tar_bytes, tmp.path(), HostCaseFolding::Insensitive).expect("unpack ok");
@@ -1513,6 +1525,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack happy path");
 
@@ -1551,6 +1564,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack should succeed with refusals, not error");
 
@@ -1575,6 +1589,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -1591,6 +1606,7 @@ mod tests {
             Cursor::new(tar_bytes2),
             tmp2.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
         // `..foo` is a valid filename — accepted as a regular file.
@@ -1609,7 +1625,8 @@ mod tests {
             max_path_len: 32,
             ..UnpackOptions::default()
         };
-        let report = unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts).expect("unpack ok");
+        let report =
+            unpack_layer(Cursor::new(tar_bytes), tmp.path(), &opts, None).expect("unpack ok");
 
         assert_eq!(report.files_written, 0);
         assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
@@ -1634,6 +1651,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -1651,6 +1669,7 @@ mod tests {
             Cursor::new(Vec::new()),
             Path::new("relative/path"),
             &UnpackOptions::default(),
+            None,
         )
         .expect_err("relative output_root must be rejected");
 
@@ -1663,6 +1682,7 @@ mod tests {
             Cursor::new(Vec::new()),
             Path::new("/nonexistent/path/under/root"),
             &UnpackOptions::default(),
+            None,
         )
         .expect_err("missing output_root must be rejected");
 
@@ -1686,12 +1706,14 @@ mod tests {
             Cursor::new(tar_bytes.clone()),
             tmp1.path(),
             &UnpackOptions::default(),
+            None,
         )
         .unwrap();
         unpack_layer(
             Cursor::new(tar_bytes),
             tmp2.path(),
             &UnpackOptions::default(),
+            None,
         )
         .unwrap();
 
@@ -1755,6 +1777,7 @@ mod tests {
                 Cursor::new(tar_bytes),
                 tmp.path(),
                 &UnpackOptions::default(),
+                None,
             )
             .expect("unpack should refuse, not error");
 
@@ -1794,6 +1817,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 

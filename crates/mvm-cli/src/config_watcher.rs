@@ -1,7 +1,5 @@
-#[cfg(feature = "dev-watch")]
 use std::path::Path;
 use std::sync::mpsc;
-#[cfg(feature = "dev-watch")]
 use std::time::Duration;
 
 use anyhow::Result;
@@ -17,7 +15,8 @@ pub enum ConfigReloadEvent {
 
 /// Watches a config file for changes and sends reload events on a channel.
 ///
-/// Changes are debounced by 500 ms (via `notify-debouncer-mini`) to avoid
+/// Changes are debounced (via `notify-debouncer-mini`, by
+/// [`ConfigWatcher::DEFAULT_DEBOUNCE`] for the user config) to avoid
 /// reacting to partial writes or rapid saves.  Drop this struct to stop
 /// watching — the background thread exits when it detects the receiver
 /// has been dropped.
@@ -27,27 +26,27 @@ pub struct ConfigWatcher {
 }
 
 impl ConfigWatcher {
-    /// Start watching the canonical user config path. Returns immediately;
-    /// the debouncer runs on a background thread managed by `notify`.
-    pub fn start() -> Result<Self> {
-        #[cfg(not(feature = "dev-watch"))]
-        {
-            anyhow::bail!(
-                "config watch support is disabled in this build; rebuild with --features dev-watch"
-            );
-        }
+    /// Debounce for watching the user config
+    /// (`mvm_core::user_config::config_path()`): long enough to ride out a
+    /// partial write or an editor's rapid saves.
+    pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(500);
 
-        #[cfg(feature = "dev-watch")]
-        Self::start_with_debounce(
-            &mvm_core::user_config::config_path(),
-            Duration::from_millis(500),
-        )
+    /// Start watching the config file at `path`, coalescing changes that land
+    /// within `debounce` of each other. Returns immediately; the debouncer
+    /// runs on a background thread managed by `notify`.
+    #[cfg(not(feature = "dev-watch"))]
+    pub fn start(path: &Path, debounce: Duration) -> Result<Self> {
+        let _ = (path, debounce);
+        anyhow::bail!(
+            "config watch support is disabled in this build; rebuild with --features dev-watch"
+        );
     }
 
-    /// Like `start` but with a configurable debounce duration.  Useful in
-    /// tests where a shorter debounce keeps suites fast.
+    /// Start watching the config file at `path`, coalescing changes that land
+    /// within `debounce` of each other. Returns immediately; the debouncer
+    /// runs on a background thread managed by `notify`.
     #[cfg(feature = "dev-watch")]
-    pub fn start_with_debounce(path: &Path, debounce: Duration) -> Result<Self> {
+    pub fn start(path: &Path, debounce: Duration) -> Result<Self> {
         // Canonicalize so that event.path comparisons work reliably.
         let watch_file = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         // Watch the parent directory — notify is most reliable when watching dirs.
@@ -152,8 +151,7 @@ mod tests {
         let config_path = dir.path().join("config.toml");
 
         write_config(&config_path, &MvmConfig::default());
-        let watcher =
-            ConfigWatcher::start_with_debounce(&config_path, Duration::from_millis(50)).unwrap();
+        let watcher = ConfigWatcher::start(&config_path, Duration::from_millis(50)).unwrap();
 
         // Give the watcher time to register before writing.
         std::thread::sleep(Duration::from_millis(50));
@@ -195,8 +193,7 @@ mod tests {
         let config_path = dir.path().join("config.toml");
 
         write_config(&config_path, &MvmConfig::default());
-        let watcher =
-            ConfigWatcher::start_with_debounce(&config_path, Duration::from_millis(50)).unwrap();
+        let watcher = ConfigWatcher::start(&config_path, Duration::from_millis(50)).unwrap();
 
         std::thread::sleep(Duration::from_millis(50));
 

@@ -4,7 +4,7 @@
 //! The DTOs ([`RegisterVm`], [`DeregisterVm`], [`ControlRequest`],
 //! [`SignedControl`], [`ControlResponse`]) live in `mvm-contract`, re-exported
 //! here so every existing `crate::protocol::broker_control::X` path keeps
-//! resolving unchanged. `sign`/`sign_with_key_bytes`/`verify` stay in
+//! resolving unchanged. `sign`/`verify` stay in
 //! `mvm-core` as free functions — they need `serde_jcs` + `ed25519-dalek`,
 //! neither available in the no_std `mvm-contract` crate, and the orphan rule
 //! forbids adding inherent `impl`s to a foreign type from here.
@@ -38,20 +38,13 @@ pub enum ControlError {
     SignatureInvalid,
 }
 
-/// Sign `request` with the raw 32-byte host signer key. Lets a caller that
-/// only reads the key file (e.g. the backend that registers VMs) sign
-/// without taking an `ed25519_dalek` dependency of its own.
-pub fn sign_with_key_bytes(
-    request: ControlRequest,
-    key_bytes: &[u8; 32],
-) -> Result<SignedControl, ControlError> {
-    sign(request, &SigningKey::from_bytes(key_bytes))
-}
-
-/// Sign `request` with the host signer key over its JCS canonical bytes.
-pub fn sign(request: ControlRequest, key: &SigningKey) -> Result<SignedControl, ControlError> {
+/// Sign `request` with the raw 32-byte host signer key over its JCS
+/// canonical bytes. Taking the key bytes lets a caller that only reads the
+/// key file (e.g. the backend that registers VMs) sign without an
+/// `ed25519_dalek` dependency of its own.
+pub fn sign(request: ControlRequest, key_bytes: &[u8; 32]) -> Result<SignedControl, ControlError> {
     let bytes = serde_jcs::to_vec(&request)?;
-    let sig = key.sign(&bytes);
+    let sig = SigningKey::from_bytes(key_bytes).sign(&bytes);
     Ok(SignedControl {
         request,
         sig: base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()),
@@ -175,18 +168,9 @@ mod tests {
     }
 
     #[test]
-    fn sign_with_key_bytes_matches_sign() {
-        let kb = [7u8; 32];
-        let from_bytes = sign_with_key_bytes(sample_register(), &kb).unwrap();
-        let vk = SigningKey::from_bytes(&kb).verifying_key();
-        // Verifies under the key derived from the same bytes.
-        assert_eq!(verify(&from_bytes, &vk).unwrap(), &sample_register());
-    }
-
-    #[test]
     fn sign_then_verify_roundtrips() {
         let k = key();
-        let signed = sign(sample_register(), &k).unwrap();
+        let signed = sign(sample_register(), &k.to_bytes()).unwrap();
         let verified = verify(&signed, &k.verifying_key()).unwrap();
         assert_eq!(verified, &sample_register());
     }
@@ -194,7 +178,7 @@ mod tests {
     #[test]
     fn tampered_request_fails_verification() {
         let k = key();
-        let mut signed = sign(sample_register(), &k).unwrap();
+        let mut signed = sign(sample_register(), &k.to_bytes()).unwrap();
         // Flip a field the guest would love to control — the chain path.
         if let ControlRequest::Register(ref mut r) = signed.request {
             r.workload_chain_path = "/audit/local.victim.workload.jsonl".into();
@@ -208,7 +192,7 @@ mod tests {
     #[test]
     fn tampered_signature_fails_verification() {
         let k = key();
-        let mut signed = sign(sample_register(), &k).unwrap();
+        let mut signed = sign(sample_register(), &k.to_bytes()).unwrap();
         // Corrupt one signature byte (still valid base64 / 64 bytes).
         let mut raw = base64::engine::general_purpose::STANDARD
             .decode(signed.sig.as_bytes())
@@ -247,7 +231,7 @@ mod tests {
             endpoint: "/run/mvm/controller.sock".to_string(),
             capabilities: vec![descriptor],
         });
-        let mut signed = sign(request, &key()).unwrap();
+        let mut signed = sign(request, &key().to_bytes()).unwrap();
         let ControlRequest::Register(registration) = &mut signed.request else {
             panic!("signed sample is a registration");
         };
@@ -260,7 +244,7 @@ mod tests {
 
     #[test]
     fn wrong_key_fails_verification() {
-        let signed = sign(sample_register(), &key()).unwrap();
+        let signed = sign(sample_register(), &key().to_bytes()).unwrap();
         let other = SigningKey::from_bytes(&[9u8; 32]);
         assert!(matches!(
             verify(&signed, &other.verifying_key()),
@@ -270,7 +254,7 @@ mod tests {
 
     #[test]
     fn malformed_signature_encoding_fails_closed() {
-        let mut signed = sign(sample_register(), &key()).unwrap();
+        let mut signed = sign(sample_register(), &key().to_bytes()).unwrap();
         signed.sig = "not base64 !!!".into();
         assert!(matches!(
             verify(&signed, &key().verifying_key()),
@@ -280,7 +264,7 @@ mod tests {
 
     #[test]
     fn short_signature_is_rejected() {
-        let mut signed = sign(sample_register(), &key()).unwrap();
+        let mut signed = sign(sample_register(), &key().to_bytes()).unwrap();
         signed.sig = base64::engine::general_purpose::STANDARD.encode([0u8; 10]);
         assert!(matches!(
             verify(&signed, &key().verifying_key()),

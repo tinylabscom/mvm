@@ -183,6 +183,15 @@ pub struct MachineInventoryRecord {
     /// never names-with-values, never the values themselves.
     #[serde(default)]
     pub secret_ref_count: u32,
+    /// Whether the current running plan admits attended display input.
+    #[serde(default)]
+    pub attended: bool,
+    /// The telemetry collector's status for this machine, when the host
+    /// could read it: whether collection was provisioned for the current
+    /// boot and how the collector stands. Absent for a machine with no
+    /// state directory, or whose snapshot could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub telemetry: Option<crate::protocol::telemetry::served::TelemetryStatus>,
 }
 
 impl MachineInventoryRecord {
@@ -211,6 +220,8 @@ impl MachineInventoryRecord {
                 last_started_at: None,
                 volumes: Vec::new(),
                 secret_ref_count: 0,
+                attended: false,
+                telemetry: None,
             },
         }
     }
@@ -333,6 +344,21 @@ impl MachineInventoryRecordBuilder {
         self
     }
 
+    #[must_use]
+    pub fn attended(mut self, attended: bool) -> Self {
+        self.record.attended = attended;
+        self
+    }
+
+    #[must_use]
+    pub fn telemetry(
+        mut self,
+        telemetry: Option<crate::protocol::telemetry::served::TelemetryStatus>,
+    ) -> Self {
+        self.record.telemetry = telemetry;
+        self
+    }
+
     /// Finish building. Infallible — identity was required up front.
     #[must_use]
     pub fn build(self) -> MachineInventoryRecord {
@@ -437,6 +463,7 @@ mod tests {
                 encrypted: true,
             }])
             .secret_ref_count(3)
+            .attended(true)
             .build()
     }
 
@@ -459,6 +486,7 @@ mod tests {
         assert!(record.status_detail.is_none());
         assert!(record.volumes.is_empty());
         assert_eq!(record.secret_ref_count, 0);
+        assert!(!record.attended);
         assert!(record.tags.is_empty());
     }
 

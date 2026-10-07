@@ -39,6 +39,7 @@ use mvm_core::plan::ExecutionPlan;
 use mvm_core::protocol::vm_backend::{VmId, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
 use mvm_hostd::audit::emitter::{AuditEmitter, ExitRecord};
+pub(crate) use mvm_hostd::audit::unsealed::{UnsealedEnd, UnsealedReason, record_unsealed_end};
 use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, StartedMachine, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
 use mvm_runtime::AnyBackend;
@@ -145,16 +146,16 @@ fn build_audit_emitter() -> Option<AuditEmitter> {
 /// removed. The signed envelope comes from the admitted launch configuration;
 /// an invalid signature cannot create an exit claim or a session seal.
 pub fn record_transient_exit(exit: TransientExitAudit<'_>) -> Result<()> {
-    let signed: mvm_core::plan::SignedExecutionPlan =
-        serde_json::from_str(exit.signed_plan_json).map_err(crate::local::backend_err)?;
-    let signer =
-        mvm_hostd::audit::host_keypair::load_or_init().map_err(crate::local::backend_err)?;
-    let signer_id = mvm_hostd::audit::host_keypair::host_signer_id();
-    let plan = mvm_core::plan::verify_plan(&signed, &[(signer_id.as_str(), &signer.verifying)])
-        .map_err(crate::local::backend_err)?;
-    let emitter = AuditEmitter::new(signer.signing)
-        .map(AuditEmitter::with_receipts)
-        .map_err(crate::local::backend_err)?;
+    let (emitter, plan) = match verified_transient_plan(exit.signed_plan_json) {
+        Ok(verified) => verified,
+        Err(e) => {
+            record_unsealed_end(
+                None,
+                UnsealedEnd::new(exit.vm_name, UnsealedReason::NoVerifiedPlan).error(&e),
+            );
+            return Err(e);
+        }
+    };
     seal_transient_end(
         &emitter,
         &plan,
@@ -165,6 +166,35 @@ pub fn record_transient_exit(exit: TransientExitAudit<'_>) -> Result<()> {
             completed: exit.completed,
         },
     )
+}
+
+/// Record that a CLI-owned transient run ended without a seal because its VM
+/// could not be shown to be stopped. A session whose guest may still be
+/// running is not sealed, but its end is still put on the record: chain-signed
+/// under the admitted plan when that plan verifies, in the local audit log
+/// when it does not.
+pub fn record_transient_stop_failure(exit: TransientExitAudit<'_>, error: &str) {
+    let end = UnsealedEnd::new(exit.vm_name, UnsealedReason::StopFailed).error(error);
+    match verified_transient_plan(exit.signed_plan_json) {
+        Ok((emitter, plan)) => record_unsealed_end(Some((&emitter, &plan)), end),
+        Err(_) => record_unsealed_end(None, end),
+    }
+}
+
+/// The admitted plan carried in a transient run's signed envelope, verified
+/// under the host signer, and the emitter to record its end with.
+fn verified_transient_plan(signed_plan_json: &str) -> Result<(AuditEmitter, ExecutionPlan)> {
+    let signed: mvm_core::plan::SignedExecutionPlan =
+        serde_json::from_str(signed_plan_json).map_err(crate::local::backend_err)?;
+    let signer =
+        mvm_hostd::audit::host_keypair::load_or_init().map_err(crate::local::backend_err)?;
+    let signer_id = mvm_hostd::audit::host_keypair::host_signer_id();
+    let plan = mvm_core::plan::verify_plan(&signed, &[(signer_id.as_str(), &signer.verifying)])
+        .map_err(crate::local::backend_err)?;
+    let emitter = AuditEmitter::new(signer.signing)
+        .map(AuditEmitter::with_receipts)
+        .map_err(crate::local::backend_err)?;
+    Ok((emitter, plan))
 }
 
 /// How a transient run whose VM has already been stopped ended.
@@ -193,7 +223,12 @@ pub(crate) fn seal_transient_end(
     let state_dir = vm_state_dir(end.vm_name);
     let mut usage = mvm_core::usage_capture::read_captured(&state_dir);
     usage.host_state_bytes = mvm_core::usage_capture::host_state_bytes(&state_dir);
-    emitter
+    let reason = if end.completed {
+        mvm_hostd::audit::session::SealReason::Exited
+    } else {
+        mvm_hostd::audit::session::SealReason::Failed
+    };
+    let sealed = emitter
         .emit_exited_with_capture(
             plan,
             ExitRecord {
@@ -202,18 +237,26 @@ pub(crate) fn seal_transient_end(
                 usage,
             },
         )
-        .map_err(crate::local::backend_err)?;
-    let reason = if end.completed {
-        mvm_hostd::audit::session::SealReason::Exited
-    } else {
-        mvm_hostd::audit::session::SealReason::Failed
-    };
-    emitter
-        .seal_session(plan, reason)
-        .map_err(crate::local::backend_err)?;
-    emitter
-        .publish_root(&plan.tenant.0)
-        .map_err(crate::local::backend_err)?;
+        .and_then(|()| emitter.seal_session(plan, reason));
+    if let Err(e) = sealed {
+        let e = crate::local::backend_err(format!("{e:#}"));
+        record_unsealed_end(
+            Some((emitter, plan)),
+            UnsealedEnd::new(end.vm_name, UnsealedReason::SealFailed).error(&e),
+        );
+        return Err(e);
+    }
+    // The session is sealed from here: a root that fails to publish weakens a
+    // later consistency check but leaves the seal in place.
+    if let Err(e) = emitter.publish_root(&plan.tenant.0) {
+        tracing::warn!(
+            error = %format!("{e:#}"),
+            machine = end.vm_name,
+            "could not publish an audit root at exit; the session is sealed but a later \
+             consistency check has one fewer point to verify against"
+        );
+        return Err(crate::local::backend_err(format!("{e:#}")));
+    }
     mvm_hostd::audit::witness::flush_configured(emitter.audit_dir(), &plan.tenant.0);
     Ok(())
 }
@@ -224,14 +267,32 @@ pub(crate) fn seal_transient_end(
 /// `trust audit verify` as `UNSEALED` rather than hidden.
 pub(crate) fn seal_stopped_session(plan: &mvm_core::plan::ExecutionPlan, machine: &str) {
     let Some(emitter) = build_audit_emitter() else {
+        record_unsealed_end(
+            None,
+            UnsealedEnd::new(machine, UnsealedReason::SealFailed)
+                .error(format!("no host audit emitter for plan {}", plan.plan_id.0)),
+        );
         return;
     };
     if let Err(e) = mvm_hostd::supervisor::session_expiry::seal_stopped_session(&emitter, plan) {
-        tracing::warn!(
-            error = %format!("{e:#}"),
-            machine,
-            "could not seal the stopped machine's session"
+        record_unsealed_end(
+            Some((&emitter, plan)),
+            UnsealedEnd::new(machine, UnsealedReason::SealFailed).error(format!("{e:#}")),
         );
+    }
+}
+
+/// Record that a session's VM could not be stopped, so it was not sealed:
+/// chain-signed under `plan` when there is one, locally otherwise.
+pub(crate) fn record_session_stop_failure(
+    plan: Option<&mvm_core::plan::ExecutionPlan>,
+    machine: &str,
+    error: &str,
+) {
+    let end = UnsealedEnd::new(machine, UnsealedReason::StopFailed).error(error);
+    match (plan, build_audit_emitter()) {
+        (Some(plan), Some(emitter)) => record_unsealed_end(Some((&emitter, plan)), end),
+        _ => record_unsealed_end(None, end),
     }
 }
 
@@ -1283,10 +1344,9 @@ impl LocalBackend {
             if let Err(e) =
                 emitter.seal_session(&outcome.plan, mvm_hostd::audit::session::SealReason::Exited)
             {
-                tracing::warn!(
-                    error = %format!("{e:#}"),
-                    machine = name,
-                    "could not seal the session at exit; `trust audit verify` will report it unsealed"
+                record_unsealed_end(
+                    Some((&emitter, &outcome.plan)),
+                    UnsealedEnd::new(name, UnsealedReason::SealFailed).error(format!("{e:#}")),
                 );
             }
             // The closing bracket of the run. Admission published the opening

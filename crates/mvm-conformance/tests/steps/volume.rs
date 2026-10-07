@@ -213,6 +213,60 @@ fn replace_host_directory_marker(world: &mut CliWorld, volume_name: String, cont
         .unwrap_or_else(|error| panic!("replace host directory marker {marker:?}: {error}"));
 }
 
+/// The host directory a registered volume was snapshotted from: the tree a
+/// reviewed apply writes.
+fn host_directory_source(world: &CliWorld, volume_name: &str) -> std::path::PathBuf {
+    isolated_home(world).join("dir-volumes").join(volume_name)
+}
+
+#[then(expr = "host directory volume {string} has file {string} containing {string}")]
+fn host_directory_has_file(world: &mut CliWorld, volume_name: String, file: String, text: String) {
+    let path = host_directory_source(world, &volume_name).join(&file);
+    let contents = fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the apply did not write {path:?}: {error}"));
+    assert!(
+        contents.contains(&text),
+        "{path:?} holds {contents:?}, not {text:?}"
+    );
+}
+
+#[then(expr = "host directory volume {string} has no file {string}")]
+fn host_directory_lacks_file(world: &mut CliWorld, volume_name: String, file: String) {
+    let path = host_directory_source(world, &volume_name).join(&file);
+    assert!(
+        !path.exists(),
+        "{path:?} exists, so something wrote the host tree without an apply"
+    );
+}
+
+/// Run the baked entrypoint on an existing machine in the foreground, the way
+/// an agent session ends, with `script` as its stdin. Alpine's entrypoint is
+/// `/bin/sh`, so the script is what the "agent" does inside the guest.
+/// `flags` are appended to the documented command.
+#[when(
+    expr = "the entrypoint of machine {string} runs attached with script {string} and flags {string}"
+)]
+fn run_attached_entrypoint(world: &mut CliWorld, machine: String, script: String, flags: String) {
+    let script_path = isolated_home(world).join(format!("{machine}-entrypoint.sh"));
+    fs::write(&script_path, format!("{script}\n"))
+        .unwrap_or_else(|error| panic!("write entrypoint script {script_path:?}: {error}"));
+    let mut argv: Vec<String> = [
+        "machine",
+        "run",
+        "--entrypoint",
+        "--attach",
+        "--name",
+        machine.as_str(),
+        "--stdin",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+    argv.push(script_path.to_string_lossy().into_owned());
+    argv.extend(flags.split_whitespace().map(String::from));
+    super::cli::run_mvmctl_isolated_live_home_argv(world, argv);
+}
+
 #[when(expr = "I remove the source for host directory volume {string}")]
 fn remove_host_directory_source(world: &mut CliWorld, volume_name: String) {
     let source = isolated_home(world).join("dir-volumes").join(volume_name);

@@ -10,8 +10,9 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
-/// Directories never worth descending into: build output and VCS metadata.
-const SKIP_DIRS: [&str; 3] = ["target", ".git", "node_modules"];
+/// Directories never worth descending into: worktree state, build output,
+/// dependencies, and VCS metadata.
+const SKIP_DIRS: [&str; 4] = ["target", ".mvm-test", ".git", "node_modules"];
 
 /// Whether `dir` is the root of a *different* checkout, and so not ours to scan.
 ///
@@ -114,6 +115,28 @@ mod tests {
             vec!["a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()]
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn walk_skips_isolated_worktree_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join(".mvm-test/cargo/registry/src")).unwrap();
+        std::fs::write(tmp.path().join("src/ours.rs"), "ours").unwrap();
+        std::fs::write(
+            tmp.path()
+                .join(".mvm-test/cargo/registry/src/dependency.rs"),
+            "feature = \"test-support\"",
+        )
+        .unwrap();
+
+        let mut names = Vec::new();
+        walk_files(tmp.path(), &mut |path| {
+            names.push(path.file_name().unwrap().to_string_lossy().into_owned());
+        })
+        .unwrap();
+
+        assert_eq!(names, vec!["ours.rs"]);
     }
 
     /// A gitignored worktree nested inside the repo belongs to another checkout;

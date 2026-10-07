@@ -35,7 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::oci::unpack::{UnpackOptions, UnpackReport, unpack_layer_with_prior_paths};
+use crate::oci::unpack::{UnpackOptions, UnpackReport, unpack_layer};
 use flate2::read::GzDecoder;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tracing::instrument;
@@ -565,11 +565,11 @@ impl OciLayerFetcher {
                 LayerDecoder::Plain(reader)
             };
 
-            let report = unpack_layer_with_prior_paths(
+            let report = unpack_layer(
                 &mut decoder,
                 &unpacked_root,
                 &options,
-                &prior_layer_paths,
+                Some(&prior_layer_paths),
             )
             .map_err(|e| OciError::Unpack(e.to_string()))?;
 
@@ -679,11 +679,11 @@ pub async fn verify_and_unpack_layer_file(
             LayerDecoder::Plain(reader)
         };
 
-        let report = unpack_layer_with_prior_paths(
+        let report = unpack_layer(
             &mut decoder,
             &unpacked_root,
             &options,
-            &prior_layer_paths,
+            Some(&prior_layer_paths),
         )
         .map_err(|e| OciError::Unpack(e.to_string()))?;
 
@@ -799,7 +799,7 @@ impl Read for CacheWriterReader {
 
 /// Either a plain tar stream or a gzip-wrapped tar stream. Keeps the
 /// underlying [`CacheWriterReader`] accessible so we can finalize the
-/// digest after `unpack_layer_with_prior_paths` returns.
+/// digest after `unpack_layer` returns.
 enum LayerDecoder<R: Read> {
     Plain(R),
     Gzip(GzDecoder<R>),

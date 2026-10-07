@@ -227,6 +227,8 @@ const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
+    ("info", AuditPosture::ReadOnly),
+    ("verify", AuditPosture::ReadOnly),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
     ("download", AuditPosture::ReadOnly),
@@ -258,11 +260,14 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("shell", AuditPosture::InteractiveOrControl),
     ("stop", AuditPosture::Emits("VmStop")),
     ("set-timeout", AuditPosture::Emits("VmTtlSet")),
-    // Plan 200 — verify a portable `.mvm` + preview its admission. Read-only:
-    // no extraction, no boot, no audit-chain emission.
+    // Verify a signed `.mvmpkg` and preview its posture. Read-only: no
+    // install, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
     ("logs", AuditPosture::ReadOnly),
-    ("display", AuditPosture::ReadOnly),
+    // View-only by default. With `--input` it is an interactive control
+    // surface whose audit channel is the display input gate's own chain
+    // entries (`display.granted`, `display.refused`, `display.input_event`).
+    ("display", AuditPosture::InteractiveOrControl),
     ("console", AuditPosture::InteractiveOrControl),
     // Hangs up the client attached to a console session. The guest request is
     // recorded as an inbound RPC (`verb=console-detach`), and a detach that
@@ -318,6 +323,12 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("cp", AuditPosture::Emits("VmFileCopy")),
     ("fs", AuditPosture::Emits("VmFsMutate")),
     ("proc", AuditPosture::DelegatesToSub(PROC_SUB)),
+    // Chain-signs the delivery and completion of every prompt, and binds each
+    // step checkpoint with `checkpoint.created`.
+    (
+        "prompt",
+        AuditPosture::Emits("CheckpointCreated+agent.prompt_delivered"),
+    ),
     ("diff", AuditPosture::ReadOnly),
     // Reviewed workspace apply: snapshots the host tree it overwrites,
     // journals the apply, and emits the manifest Merkle root.
@@ -398,6 +409,12 @@ const AGENT_SESSION_SUB: &[(&str, AuditPosture)] = &[
     ("park", AuditPosture::Emits("session.parked")),
     ("resume", AuditPosture::Emits("session.resumed")),
     ("renew", AuditPosture::Emits("session.renewed")),
+    // Fork-boots a session checkpoint and re-delivers its recorded prompts,
+    // each as a chain-signed `agent.prompt_delivered` entry.
+    (
+        "replay",
+        AuditPosture::Emits("CheckpointForked+agent.prompt_delivered"),
+    ),
 ];
 
 const PROC_SUB: &[(&str, AuditPosture)] = &[
@@ -417,22 +434,15 @@ const SNAPSHOT_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("SnapshotDelete")),
 ];
 
-// Plan 76 Phase 6 — `mvmctl artifact pack/verify`. Both are
-// disk-side operations: pack writes a new `.mvm` file but does
-// not touch host audit chain state; verify is a pure read. The
-// host signer's keypair is consulted (read-only) for both.
+// `mvmctl artifact`. `pack` is `bundle export` under its older name: it
+// writes a signed `.mvmpkg` and touches no host audit-chain state, exactly as
+// `bundle export` does.
 const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
     ("pack", AuditPosture::ReadOnly),
-    ("verify", AuditPosture::ReadOnly),
-    // Plan 76 follow-up — read manifest without signature check.
-    ("inspect", AuditPosture::ReadOnly),
-    // Plan 200 — verify a `.mvm` then extract its payload to disk. Produces
-    // local files only (like `pack`); no host audit-chain emission.
-    ("extract", AuditPosture::ReadOnly),
     // Plan 134 — architecture-aware artifact-model commands. All static
     // (read manifest / validate / emit a Firecracker config / build an
     // artifact via the builder); none touch the host audit chain — like
-    // `pack`/`verify` above, they only produce local artifacts.
+    // `pack` above, they only produce local artifacts.
     ("model-inspect", AuditPosture::ReadOnly),
     ("model-validate", AuditPosture::ReadOnly),
     ("model-config", AuditPosture::ReadOnly),
@@ -694,7 +704,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Plan 73 Followup C — sealed deps-volume cache verbs.
     ("deps", AuditPosture::DelegatesToSub(DEPS_SUB)),
     ("capture", AuditPosture::DelegatesToSub(CAPTURE_SUB)),
-    // Plan 76 Phase 6 — portable signed `.mvm` artifacts.
+    // Plan 76 Phase 6 — `artifact pack` and the artifact-model commands.
     ("artifact", AuditPosture::DelegatesToSub(ARTIFACT_SUB)),
     // Host-side developer tool: ptrace a command and report syscalls. No host
     // audit-chain emission of its own; classified as interactive/control.

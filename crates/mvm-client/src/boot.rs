@@ -239,6 +239,7 @@ pub fn backend_stop_by_name(hypervisor: &str, name: &str) -> Result<()> {
     let backend = mvm_runtime::backend::AnyBackend::from_hypervisor(hypervisor);
     backend
         .stop(&VmId(name.to_string()))
+        .map(|_timing| ())
         .map_err(|e| MvmError::Backend {
             reason: format!("{e:#}"),
         })

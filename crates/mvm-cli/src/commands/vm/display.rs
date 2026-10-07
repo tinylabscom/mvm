@@ -1,4 +1,7 @@
-//! `mvmctl machine display` — a local, view-only display-frame viewer.
+//! `mvmctl machine display` — a local display-frame viewer, view-only unless
+//! `--input` opens the attended input path the signed plan grants.
+
+mod attended;
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -26,10 +29,33 @@ pub(in crate::commands) struct Args {
     /// Name of the VM whose view-only frames to show
     #[arg(value_parser = clap_vm_name)]
     pub name: String,
+    /// Also send pointer, keyboard and text input from the viewer page.
+    /// Refused unless the machine's signed plan grants display input, and on a
+    /// sealed image unless that grant is marked attended.
+    #[arg(long)]
+    pub input: bool,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
+    if args.input {
+        let authority = mvm_client::display_input::load_authority(&args.name)?
+            .with_context(|| {
+                format!(
+                    "microVM {:?} was admitted without a display input grant; its display is view-only",
+                    args.name
+                )
+            })?;
+        return attended::serve(&args.name, &authority);
+    }
+    let stream = open_frames(&args.name)?;
+    let viewer = Viewer::bind(stream).context("bind the local display viewer")?;
+    println!("Open {} (the token works once)", viewer.url());
+    viewer.serve_once()
+}
+
+/// Follow `name`'s display frames, starting from the latest one.
+fn open_frames(name: &str) -> Result<VmOutputStream> {
     let request = OutputRequest {
         opts: StreamOpts::builder()
             .follow(true)
@@ -39,11 +65,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         console_tail_bytes: None,
         console_tail_lines: None,
     };
-    let stream = open_vm_output(&args.name, request)
-        .with_context(|| format!("open display frames for microVM {:?}", args.name))?;
-    let viewer = Viewer::bind(stream).context("bind the local display viewer")?;
-    println!("Open {} (the token works once)", viewer.url());
-    viewer.serve_once()
+    open_vm_output(name, request)
+        .with_context(|| format!("open display frames for microVM {name:?}"))
 }
 
 struct Viewer {

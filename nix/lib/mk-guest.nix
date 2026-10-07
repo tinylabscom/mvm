@@ -261,9 +261,10 @@ let
       rawSpec = extraFilesWithProbes.${path};
       spec = if builtins.isString rawSpec then { source = rawSpec; } else rawSpec;
       source = if spec ? source then toString spec.source else "";
+      link = if spec ? link then toString spec.link else "";
       content = if spec ? content then toString spec.content else "";
     in
-    "${path} ${source} ${content}";
+    "${path} ${source} ${link} ${content}";
 
   extraFileSourceRoots = lib.filter (source: source != "") (
     map (
@@ -272,7 +273,12 @@ let
         rawSpec = extraFilesWithProbes.${path};
         spec = if builtins.isString rawSpec then { source = rawSpec; } else rawSpec;
       in
-      if spec ? source then spec.source else ""
+      if spec ? source then
+        spec.source
+      else if spec ? link then
+        spec.link
+      else
+        ""
     ) (lib.attrNames extraFilesWithProbes)
   );
 
@@ -1264,7 +1270,7 @@ let
 
   mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
 
-  # extraFiles — three accepted spec shapes per target path:
+  # extraFiles — accepted spec shapes per target path:
   #
   #   { "absolute/path" = { content = "..."; mode? = "0644"; }; }
   #     → write text content via `pkgs.writeText`. Default mode 0644.
@@ -1276,6 +1282,10 @@ let
   #   { "absolute/path" = "/nix/store/.../bin/foo"; }
   #     → shorthand for `{ source = <that string>; }`.
   #
+  #   { "absolute/path" = { link = someStoreDerivation; }; }
+  #     → symlink to a store path, preserving a directory tree without
+  #       depending on a guest boot script to create the link.
+  #
   # Binary-source variants exist so the builder-vm flake can
   # install `mvm-host-vm-init` at `/sbin/mvm-host-vm-init` without
   # inlining its bytes as a string (`writeText` is text-only).
@@ -1286,6 +1296,7 @@ let
       spec = if builtins.isString rawSpec then { source = rawSpec; } else rawSpec;
       hasContent = spec ? content;
       hasSource = spec ? source;
+      hasLink = spec ? link;
       mode =
         if spec ? mode then
           spec.mode
@@ -1298,18 +1309,20 @@ let
           pkgs.writeText "extra-${builtins.hashString "sha256" path}" spec.content
         else if hasSource then
           spec.source
+        else if hasLink then
+          spec.link
         else
-          throw "mkGuest: extraFiles[${path}] must set either `content` (text) or `source` (file path)";
+          throw "mkGuest: extraFiles[${path}] must set `content`, `source`, or `link`";
     in
-    # Path arrives from Nix-interpolated keys (no shell escaping
-    # needed); inline via `"$out${path}"` rather than via
-    # `lib.escapeShellArg` so the shell expands `$out` instead of
-    # treating it as a literal in single quotes.
     ''
-      mkdir -p "$out$(dirname ${lib.escapeShellArg path})"
-      ${pkgs.coreutils}/bin/install -m ${mode} \
-        ${src} \
-        "$out${path}"
+      target=${lib.escapeShellArg path}
+      mkdir -p "$out$(dirname "$target")"
+      ${
+        if hasLink then
+          ''${pkgs.coreutils}/bin/ln -s ${lib.escapeShellArg (toString src)} "$out$target"''
+        else
+          ''${pkgs.coreutils}/bin/install -m ${mode} ${src} "$out$target"''
+      }
     ''
   ) (lib.attrNames extraFilesWithProbes);
 
@@ -1682,12 +1695,10 @@ let
     volumeLabel = "mvm-${name}";
     populateImageCommands = ''
       cp -a --reflink=auto ${rootfsTree}/. ./files/
-      # `rootfsTree` deliberately makes the registration read-only for the
-      # runtime image. The image builder copies that mode into its staging
-      # tree, then rewrites the same file while assembling the closure. Leave
-      # it out of the generic file copy so the closure manifest can create a
-      # fresh staging file with normal build-user permissions.
-      chmod -R u+w ./files
+      # The store tree is read-only. Make only staging directories writable
+      # so the image builder can replace the closure registration below;
+      # changing file modes would weaken sealed entrypoint checks.
+      ${pkgs.findutils}/bin/find ./files -type d -exec chmod u+w {} +
       rm -f ./files/nix-path-registration
     '';
   };
