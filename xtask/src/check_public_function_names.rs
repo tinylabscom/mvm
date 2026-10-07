@@ -13,8 +13,8 @@ struct SiblingPair {
     extended: String,
 }
 
-// Temporary coordination exceptions for files owned by PR #4164. Exact entries
-// make additions fail, and `validate` rejects entries as soon as they go stale.
+// Temporary coordination exceptions for sibling pairs being renamed concurrently.
+// Exact entries make additions fail, and `validate` rejects them once stale.
 const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
     (
         "crates/mvm-cli/src/commands/ops/cache.rs",
