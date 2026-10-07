@@ -15,6 +15,14 @@ Feature: machine lifecycle request contract
     And the output contains "stop"
     And the output contains "inspect"
 
+  Scenario: attach help exposes the reattach command without booting a guest
+    When I run mvmctl with "machine attach --help" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "machine attach"
+    When I run mvmctl with "machine console --help" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "machine attach"
+
   Scenario: creating a machine records it without booting a guest
     Given an isolated mvm home
     When I run mvmctl in the isolated mvm home with "machine create bdd-lifecycle --image alpine"
