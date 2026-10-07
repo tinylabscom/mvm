@@ -991,7 +991,8 @@ jobs:
           ARCHIVE_RUN_ID: ${{ github.run_id }}
         run: |
           set -euo pipefail
-          archive_root="/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          # Some workspace tests clear /tmp on Linux; keep their own binaries safe.
+          archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           mkdir -p -- "$archive_root"
           cp -a "$GITHUB_WORKSPACE/." "$archive_root/"
           cd "$archive_root"
@@ -1015,14 +1016,14 @@ jobs:
         env:
           ARCHIVE_RUN_ID: ${{ github.run_id }}
         run: |
-          cd "/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+          cd "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
           cargo run -p xtask -- check-nextest-groups
 
       - name: Remove archived workspace
         if: always()
         env:
           ARCHIVE_RUN_ID: ${{ github.run_id }}
-        run: rm -rf -- "/tmp/mvm-workspace-${ARCHIVE_RUN_ID}"
+        run: rm -rf -- "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
 
   test-workspace-extras:
     name: Test workspace (doctests + feature suites)

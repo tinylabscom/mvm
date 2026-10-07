@@ -880,6 +880,13 @@ mod tests {
         assert!(!test_workspace.contains("actions: write"));
         assert!(!test_workspace.contains("workflow_dispatch"));
         let workspace_worker = self::workflow("workspace-shard.yml");
+        let safe_archive_root = "archive_root=\"$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}\"";
+        assert!(
+            workflow.contains(safe_archive_root) && workspace_worker.contains(safe_archive_root),
+            "archive build and shard must stay outside /tmp, which mvmctl cleanup tests clear"
+        );
+        assert!(!workflow.contains("archive_root=\"/tmp/mvm-workspace-"));
+        assert!(!workspace_worker.contains("/tmp/mvm-workspace-"));
         for expected in [
             "workflow_call:",
             "workflow_dispatch:",
