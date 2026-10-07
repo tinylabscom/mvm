@@ -441,6 +441,18 @@ is one decision, consumed by both the endpoint configuration and the guest's
 implies collection, and `MVM_TELEMETRY_COLLECT=1` enables collection without
 export.
 
+Read seam (2026-10-06): the collector's outputs are served through the
+`MvmClient` facade as `telemetry_status` and `telemetry_records`, answered by
+`LocalBackend` from the files beside the VM state and refused by name on the
+gateway; the inventory record carries each machine's status in its
+`telemetry` field, and the host library exposes all three as
+`telemetry.status`, `telemetry.records`, and `machine.inventory`. The
+persisted records line now carries the host receive time
+(`ReceivedRecord`), and the served shapes are frozen as fixtures under
+`tests/vectors/studio-telemetry/`
+(`studio_fixture_statuses_and_page_match_the_committed_vectors`). The
+contract is `specs/telemetry/studio-contract.md`.
+
 - [ ] Supervise per-VM collection independently of CLI/grants, bind identity and
       generation, and reuse stream validation/redaction/retention/fanout helpers.
 - [ ] Bound host resource usage and make saturation non-waiting for ingress and
