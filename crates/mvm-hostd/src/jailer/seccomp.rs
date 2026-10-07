@@ -317,8 +317,14 @@ fn syscall_name_to_nr(name: &str) -> Option<libc::c_long> {
         .map(|(_, nr)| *nr)
 }
 
-/// Install the confined-role filter on the calling thread; threads it spawns
-/// afterwards inherit it.
+/// Install the confined-role filter on every thread of the process.
+///
+/// The filter is installed with `SECCOMP_FILTER_FLAG_TSYNC`, so the kernel
+/// applies it to all existing threads in one step, and threads created later
+/// inherit it. Without the flag the filter binds only the calling thread, and
+/// a sibling that already existed — an async runtime worker — would make any
+/// system call it liked. The install fails, applying nothing, if some thread
+/// cannot be synchronised.
 ///
 /// First installs the refusal reporter, so a call the filter refuses is named
 /// on stderr before the process dies of it rather than silently.
@@ -350,7 +356,12 @@ pub fn apply(spec: &ConfinementSpec) -> Result<(), JailerError> {
     let bpf: seccompiler::BpfProgram = filter
         .try_into()
         .map_err(|e| JailerError::SeccompInstall(format!("{e:?}")))?;
-    seccompiler::apply_filter(&bpf).map_err(|e| JailerError::SeccompInstall(format!("{e:?}")))?;
+    seccompiler::apply_filter_all_threads(&bpf).map_err(|e| match e {
+        seccompiler::Error::ThreadSync(tid) => JailerError::SeccompInstall(format!(
+            "thread {tid} could not take the filter; nothing was installed"
+        )),
+        other => JailerError::SeccompInstall(format!("{other:?}")),
+    })?;
     Ok(())
 }
 

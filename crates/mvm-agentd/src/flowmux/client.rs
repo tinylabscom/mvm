@@ -1,5 +1,6 @@
 use super::pump::SessionPump;
 use super::*;
+use mvm_contract::protocol::network_flow::attribution::{ToolInvocationBinding, encode_open_tcp};
 
 impl FlowMuxClient {
     /// Connect to the host NetworkFlow channel and complete the FlowMux
@@ -132,12 +133,22 @@ impl FlowMuxClient {
     /// This waits for the host to confirm the open with `Opened` before
     /// returning. A refused open surfaces as [`FlowMuxError::Refused`].
     pub async fn open_tcp(&self, target: &str) -> Result<FlowMuxStream, FlowMuxError> {
+        self.open_tcp_attributed(target, None).await
+    }
+
+    /// Open a TCP flow to `target`, naming the tool invocation the guest
+    /// agent attributed it to.
+    pub async fn open_tcp_attributed(
+        &self,
+        target: &str,
+        binding: Option<&ToolInvocationBinding>,
+    ) -> Result<FlowMuxStream, FlowMuxError> {
         self.await_ready().await?;
         let stream_id = self.alloc_stream_id();
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(ClientRequest::OpenTcp {
-                target: target.to_string(),
+                payload: encode_open_tcp(target, binding),
                 stream_id,
                 respond: tx,
             })

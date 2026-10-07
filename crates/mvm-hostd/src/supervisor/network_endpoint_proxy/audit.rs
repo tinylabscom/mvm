@@ -450,12 +450,15 @@ mod server_tests {
         );
 
         let mut response = service
-            .process_stream(WireRequest {
-                method: "POST".into(),
-                url: "https://api.openai.com/v1".into(),
-                headers: vec![("authorization".into(), format!("Bearer {ph}"))],
-                body_b64: String::new(),
-            })
+            .process_stream(
+                WireRequest {
+                    method: "POST".into(),
+                    url: "https://api.openai.com/v1".into(),
+                    headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+                    body_b64: String::new(),
+                },
+                &Default::default(),
+            )
             .await
             .expect("the response head arrived");
         // The relay task records the outcome before it drops its sender, so
@@ -635,6 +638,7 @@ mod server_tests {
                     body_len: body.len() as u64,
                 },
                 receiver,
+                &Default::default(),
             )
             .await;
         assert!(result.is_err(), "the request is refused");

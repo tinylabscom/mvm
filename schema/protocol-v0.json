@@ -4512,6 +4512,23 @@
             "type": "string"
           }
         },
+        "env": {
+          "description": "Host-provisioned variables applied over the workload environment: the egress proxy, the CA bundle, and secret placeholders. Never part of the decided command line.",
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "maxItems": 2,
+            "minItems": 2
+          }
+        },
         "stdin": {
           "type": [
             "string",

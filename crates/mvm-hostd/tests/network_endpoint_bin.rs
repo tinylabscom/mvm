@@ -845,6 +845,126 @@ fn signalling_the_recorded_pid_stops_a_kept_endpoint() {
     vm.wait().unwrap();
 }
 
+/// Every thread of a serving endpoint runs confined — not only the thread that
+/// applied the confinement.
+///
+/// The endpoint is held mid-session, so its threads include the runtime
+/// workers and the blocking-pool thread serving the session, which is where
+/// guest bytes are parsed. The kernel's per-thread view in
+/// `/proc/<pid>/task/*/status` must show every one of them under the seccomp
+/// filter. Landlock has no per-thread status file, so its half is witnessed by
+/// the endpoint's own `runtime-threads` self-test probe, which opens a path
+/// outside the ruleset from a worker and from a blocking-pool thread and fails
+/// the launch unless both are refused; the log line shows it ran and passed.
+#[cfg(target_os = "linux")]
+#[test]
+fn every_endpoint_thread_serves_under_confinement() {
+    use base64::Engine as _;
+    use mvm_core::net::session::Session;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("network.sock");
+    let log = dir.path().join("endpoint.log");
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+    let host_verify = host_key.verifying_key();
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[29u8; 32]);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let cfg = EndpointConfig {
+        telemetry: None,
+        tenant_id: "local".into(),
+        instance_id: "test".into(),
+        secrets: vec![],
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        tools: Default::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        tls_intermediate: None,
+        network_policy: None,
+        network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
+        egress_mode: EgressMode::FlowMux,
+        resolver: ResolverBackend::default(),
+        session_marker: None,
+        session_ready_socket: None,
+        connector_uds_path: None,
+        approval_socket: None,
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "every-thread-confined".into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
+    };
+
+    let mut child = Command::new(BIN)
+        .env("MVM_HOME", dir.path().join("mvm-home"))
+        .env("HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(std::fs::File::create(&log).unwrap()))
+        .spawn()
+        .expect("spawn endpoint bin");
+    let pid = child.id();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let guard = Kill(child);
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+    let stderr = std::fs::read_to_string(&log).unwrap();
+    assert!(!line.trim().is_empty(), "no handshake; stderr:\n{stderr}");
+
+    // Hold a session open so its blocking-pool thread exists while we look.
+    let mut conn = UnixStream::connect(&sock).expect("connect to the endpoint");
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    Session::guest(&mut conn, guest_key, &host_verify).expect("session handshake");
+
+    let mut threads = Vec::new();
+    for entry in std::fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
+        let task = entry.unwrap().path();
+        let status = std::fs::read_to_string(task.join("status")).unwrap_or_default();
+        let comm = std::fs::read_to_string(task.join("comm")).unwrap_or_default();
+        let field = |name: &str| {
+            status
+                .lines()
+                .find_map(|l| l.strip_prefix(name))
+                .map(|v| v.trim().to_string())
+                .unwrap_or_default()
+        };
+        threads.push((
+            comm.trim().to_string(),
+            field("Seccomp:"),
+            field("NoNewPrivs:"),
+        ));
+    }
+    // The confining thread, two runtime workers, and the session's thread.
+    assert!(threads.len() >= 4, "threads: {threads:?}");
+    let unconfined: Vec<_> = threads
+        .iter()
+        .filter(|(_, seccomp, nnp)| seccomp != "2" || nnp != "1")
+        .collect();
+    assert!(
+        unconfined.is_empty(),
+        "threads outside the seccomp filter: {unconfined:?}\nall: {threads:?}"
+    );
+
+    assert!(
+        stderr.contains("confinement self-test passed") && stderr.contains("runtime-threads"),
+        "the runtime-thread probe did not run and pass; stderr:\n{stderr}"
+    );
+    drop(conn);
+    drop(guard);
+}
+
 /// The embedded telemetry collector runs inside the confined endpoint, so its
 /// I/O must fit the endpoint's confinement: on Linux a syscall the seccomp
 /// allowlist lacks kills the whole endpoint with SIGSYS, taking the guest's
@@ -1133,4 +1253,242 @@ fn an_endpoint_whose_collector_cannot_start_keeps_serving() {
         "a collector that cannot start must not end the endpoint"
     );
     drop(conn);
+}
+
+/// A tool's route reaches only flows that name a live binding the endpoint
+/// minted for an admitted invocation of that tool, and a tool's secret is
+/// never substituted into a request no invocation of it made — through the
+/// real bin.
+///
+/// The destination carries a bound secret and the endpoint has no TLS
+/// intermediate, so a flow the tool scope admits is then refused for a
+/// different, deterministic reason: nothing here dials out.
+#[test]
+fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
+    use base64::Engine as _;
+    use mvm_contract::policy::tool_rules::{ToolRuleDetail, ToolRules};
+    use mvm_contract::protocol::network_flow::attribution::{
+        ToolInvocationRelease, encode_open_tcp,
+    };
+    use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+    use mvm_core::net::session::Session;
+    use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
+
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("mvm-home");
+    std::fs::create_dir_all(home.join("keys")).unwrap();
+    std::fs::write(home.join("keys/host-signer.ed25519"), [5u8; 32]).unwrap();
+    let sock = dir.path().join("network.sock");
+    let connector = dir.path().join("connector.sock");
+    let target = format!("{UNBOUND_ADDR}:8443");
+
+    FileBindingStore::with_dir(dir.path().join("bindings"))
+        .put(
+            "local",
+            "github",
+            &SecretBindingMeta {
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec![UNBOUND_ADDR.into()],
+                sigv4: None,
+                inject: Default::default(),
+                provider: None,
+                approve: Default::default(),
+                oauth: None,
+            },
+        )
+        .unwrap();
+    FileSecretStore::with_dir(dir.path().join("secrets"))
+        .put(
+            "local",
+            "github",
+            &SecretBox::new(Box::new("ghp-live".to_string())),
+        )
+        .unwrap();
+
+    let mut tools = ToolRules {
+        allow: vec!["fetch".into(), "gh".into()],
+        ..ToolRules::default()
+    };
+    tools.detail.insert(
+        "gh".into(),
+        ToolRuleDetail {
+            secrets: vec!["github".into()],
+            ..Default::default()
+        },
+    );
+    tools.detail.insert(
+        "fetch".into(),
+        ToolRuleDetail {
+            routes: vec![target.clone()],
+            ..Default::default()
+        },
+    );
+    let host_key = ed25519_dalek::SigningKey::from_bytes(&[27u8; 32]);
+    let host_verify = host_key.verifying_key();
+    let guest_key = ed25519_dalek::SigningKey::from_bytes(&[29u8; 32]);
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let cfg = EndpointConfig {
+        tenant_id: "local".into(),
+        instance_id: "test".into(),
+        secrets: vec![SecretBinding {
+            name: "GITHUB_TOKEN".into(),
+            source: SecretSource::Keystore {
+                address: "github".into(),
+            },
+            destinations: Vec::new(),
+            approval_required: false,
+        }],
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        tools,
+        telemetry: None,
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        forward_timeout_secs: 30,
+        proxy_https: None,
+        proxy_http: None,
+        no_proxy: None,
+        secret_store_dir: Some(dir.path().join("secrets")),
+        binding_store_dir: Some(dir.path().join("bindings")),
+        tls_intermediate: None,
+        network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::allow_list(
+            vec![
+                mvm_core::policy::network_policy::HostPort::new(UNBOUND_ADDR, 443),
+                mvm_core::policy::network_policy::HostPort::new(UNBOUND_ADDR, 8443),
+            ],
+        )),
+        network_limits: mvm_core::plan::NetworkLimits::default(),
+        ingress: Vec::new(),
+        egress_mode: EgressMode::FlowMux,
+        resolver: ResolverBackend::default(),
+        session_marker: None,
+        session_ready_socket: None,
+        connector_uds_path: Some(connector.clone()),
+        approval_socket: None,
+        flowmux_identity: Some(FlowMuxIdentity {
+            session_id: "tool-scope".into(),
+            host_signing_key_base64: b64.encode(host_key.to_bytes()),
+            guest_verifying_key_base64: b64.encode(guest_key.verifying_key().to_bytes()),
+        }),
+    };
+
+    let mut child = Command::new(BIN)
+        .env("MVM_HOME", &home)
+        .env("HOME", dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn endpoint bin");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&serde_json::to_vec(&cfg).unwrap())
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let guard = Kill(child);
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+    let handshake: mvm_runtime::EndpointHandshake =
+        serde_json::from_str(line.trim()).expect("handshake json");
+    let placeholder = handshake.env[0].1.clone();
+
+    // A request no invocation made carries the tool's secret: refused before
+    // anything is substituted or forwarded.
+    let mut http = UnixStream::connect(&connector).expect("connect to connector");
+    write_frame(
+        &mut http,
+        &WireRequest {
+            method: "GET".into(),
+            url: format!("https://{UNBOUND_ADDR}/v1"),
+            headers: vec![("authorization".into(), format!("Bearer {placeholder}"))],
+            body_b64: String::new(),
+        },
+    );
+    match read_frame(&mut http) {
+        WireResponse::Refused { message } => {
+            assert!(message.contains("belongs to a tool"), "{message}")
+        }
+        WireResponse::Ok { status, .. } => panic!("a tool's secret was forwarded: {status}"),
+    }
+
+    // The host admits one declared invocation of the tool and gets its binding.
+    let mut ask = UnixStream::connect(&connector).expect("connect to connector");
+    write_frame(
+        &mut ask,
+        &ToolCheckRequest {
+            tool: "fetch".into(),
+            argv: "fetch it".into(),
+        },
+    );
+    let ToolDecisionReply::AllowBound { binding } = read_frame(&mut ask) else {
+        panic!("an allowed invocation of a tool with routes is bound");
+    };
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let (mut session, _) = Session::guest(&mut stream, guest_key, &host_verify).unwrap();
+    complete_flowmux_hello(&mut stream, &mut session);
+    let mut open = |stream_id: u32, payload: Vec<u8>| {
+        write_flowmux_frame(
+            &mut stream,
+            &mut session,
+            Opcode::OpenTcp,
+            stream_id,
+            &payload,
+        );
+        let (opcode, _, reply) = read_flowmux_frame(&mut stream, &mut session);
+        (opcode, String::from_utf8_lossy(&reply).into_owned())
+    };
+    const SCOPE_REFUSAL: &str = "destination belongs to a tool this flow is not an invocation of";
+
+    let (opcode, reason) = open(1, encode_open_tcp(&target, None));
+    assert_eq!((opcode, reason.as_str()), (Opcode::Refused, SCOPE_REFUSAL));
+
+    // Past the tool scope, the bound flow meets the next decision: a secret
+    // is bound there and this endpoint cannot terminate it.
+    let (opcode, reason) = open(3, encode_open_tcp(&target, Some(&binding)));
+    assert_eq!(
+        (opcode, reason.as_str()),
+        (
+            Opcode::Refused,
+            "destination requires secret substitution over typed HTTP"
+        )
+    );
+
+    let mut release = UnixStream::connect(&connector).expect("connect to connector");
+    write_frame(
+        &mut release,
+        &ToolInvocationRelease {
+            release: binding.clone(),
+        },
+    );
+    drop(release);
+    let refused_after_release = (0..50).any(|attempt| {
+        let (_, reason) = open(5 + attempt * 2, encode_open_tcp(&target, Some(&binding)));
+        reason == SCOPE_REFUSAL || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            false
+        }
+    });
+    assert!(
+        refused_after_release,
+        "a released binding names no invocation"
+    );
+    drop(stream);
+    drop(guard);
+
+    let audit = std::fs::read_to_string(home.join("audit/local.jsonl")).expect("audit chain");
+    assert!(audit.contains("host.tool.decision"), "{audit}");
+    assert!(audit.contains("host.tool.scope_refused"), "{audit}");
+    assert!(audit.contains(&target), "{audit}");
+    assert!(audit.contains("\"scope\":\"route\""), "{audit}");
+    assert!(audit.contains("\"scope\":\"secret\""), "{audit}");
+    assert!(audit.contains(&binding.audit_id()), "{audit}");
+    assert!(
+        !audit.contains(binding.as_str()),
+        "the chain must not carry a usable binding"
+    );
 }

@@ -20,9 +20,11 @@
 //! Self-confinement: because this process simultaneously holds plaintext
 //! secrets and parses untrusted guest bytes, it applies mvm's Landlock +
 //! seccomp-BPF confinement to itself before serving the first guest byte
-//! (Linux only — the same self-moat the firecracker-bridge uses). The
-//! confinement is fail-closed: if it cannot be applied on a supporting kernel,
-//! the endpoint exits rather than serve secrets unconfined.
+//! (Linux only). It confines while it still has a single thread, so every
+//! thread it later starts — runtime workers, blocking-pool threads, relay
+//! threads — inherits both layers. The confinement is fail-closed: if it cannot
+//! be applied on a supporting kernel, or the self-test finds a thread outside
+//! it, the endpoint exits rather than serve secrets unconfined.
 
 use std::io::{Read, Write};
 
@@ -145,6 +147,26 @@ fn main() -> Result<()> {
     let fingerprinted = handshake.input_fingerprints.len();
     let line = serde_json::to_string(&handshake).context("serializing the ready handshake")?;
 
+    // One configured deadline for the forward leg. The UDS/vsock path honors it
+    // via HardenedForwarder.
+    let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
+
+    // Self-confine before reporting ready, and so before serving any guest
+    // byte — and before the async runtime exists. Landlock binds only the
+    // thread that applies it and the threads that thread creates afterwards,
+    // so a runtime built first would leave its workers, and every
+    // blocking-pool thread they start (where FlowMux sessions run), with the
+    // whole filesystem. Confining while this is still the only thread makes
+    // every later thread inherit both layers; `confine_self` refuses if it is
+    // not. The listeners are bound above, so the broad setup is done.
+    // Fail-closed: a confinement error, or a self-test probe that fails or is
+    // refused, ends the process before the handshake line, and the launcher
+    // reports it with this process's stderr before any guest boots.
+    #[cfg(target_os = "linux")]
+    let confined = confine_endpoint(&cfg)?;
+    #[cfg(not(target_os = "linux"))]
+    confine_endpoint_without_lsm(&cfg)?;
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(2)
@@ -152,25 +174,8 @@ fn main() -> Result<()> {
         .build()
         .context("tokio runtime build failed")?;
 
-    // One configured deadline for the forward leg. The UDS/vsock path honors it
-    // via HardenedForwarder.
-    let forward_timeout = std::time::Duration::from_secs(cfg.forward_timeout_secs);
-
-    // Self-confine before reporting ready, and so before serving any guest
-    // byte. The runtime's worker threads are already spawned (multi-thread
-    // `build()` spawns them eagerly), and the listeners are bound above — so
-    // the broad setup is done. `clone`/`clone3` stay in the allowlist anyway
-    // because tokio spawns blocking threads lazily during serve (the vsock
-    // accept loop and every FlowMux session run on `spawn_blocking`). This
-    // thread goes on to drive the accept loop in `block_on`, so the policy
-    // applies to it and to every thread it spawns. Fail-closed: a confinement
-    // error, or a self-test probe the filter refuses, ends the process before
-    // the handshake line, and the launcher reports it with this process's
-    // stderr before any guest boots.
     #[cfg(target_os = "linux")]
-    confine_endpoint(&cfg, runtime.handle())?;
-    #[cfg(not(target_os = "linux"))]
-    confine_endpoint_without_lsm(&cfg)?;
+    confined.self_test(runtime.handle())?;
 
     {
         let mut stdout = std::io::stdout().lock();
@@ -559,12 +564,11 @@ fn resolver_uds_path(cfg: &EndpointConfig) -> Option<&std::path::Path> {
 /// reads. Fail-closed per the jailer's partial-confinement contract: on error
 /// we return it up to `main`, which exits nonzero before serving secrets.
 ///
-/// Confinement is followed by the endpoint's self-test
-/// (`ConfinementSelfTest::network_endpoint`), so it must run outside
-/// `block_on`: one probe blocks this thread on the runtime's blocking pool.
+/// Must be called while the process has one thread; `confine_self` refuses
+/// otherwise. Build the async runtime afterwards, then run
+/// `ConfinedEndpoint::self_test` on it.
 #[cfg(target_os = "linux")]
-fn confine_endpoint(cfg: &EndpointConfig, runtime: &tokio::runtime::Handle) -> Result<()> {
-    use mvm_hostd::jailer::self_test::ConfinementSelfTest;
+fn confine_endpoint(cfg: &EndpointConfig) -> Result<ConfinedEndpoint> {
     use mvm_hostd::jailer::{ConfinementSpec, confine_self};
     use mvm_hostd::supervisor::network_endpoint::resolve_store_dirs;
 
@@ -604,20 +608,40 @@ fn confine_endpoint(cfg: &EndpointConfig, runtime: &tokio::runtime::Handle) -> R
     );
     confine_self(&spec).context("confine substitution endpoint")?;
     info!("substitution endpoint self-confined (landlock + seccomp)");
+    Ok(ConfinedEndpoint { audit_dir })
+}
 
-    // Meet any allowlist gap now, under the filter that will serve, rather
-    // than the first time a session reaches the path. A refused probe does
-    // not return: the process dies of SIGSYS after naming the probe.
-    let report = ConfinementSelfTest::network_endpoint(&audit_dir, runtime).run();
-    for (probe, error) in &report.errored {
-        warn!(
-            probe,
-            %error,
-            "confinement self-test probe failed after the filter allowed its calls"
-        );
+/// A confined endpoint whose self-test has not run yet.
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct ConfinedEndpoint {
+    audit_dir: std::path::PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl ConfinedEndpoint {
+    /// Meet any allowlist gap now, under the filter that will serve, rather
+    /// than the first time a session reaches the path, and prove the runtime's
+    /// threads are confined. A refused probe does not return: the process dies
+    /// of SIGSYS after naming the probe. A failed required probe is returned.
+    ///
+    /// Must run outside `block_on`: probes block this thread on the runtime.
+    fn self_test(&self, runtime: &tokio::runtime::Handle) -> Result<()> {
+        use mvm_hostd::jailer::self_test::ConfinementSelfTest;
+
+        let report = ConfinementSelfTest::network_endpoint(&self.audit_dir, runtime)
+            .run()
+            .context("substitution endpoint confinement")?;
+        for (probe, error) in &report.errored {
+            warn!(
+                probe,
+                %error,
+                "confinement self-test probe failed after the filter allowed its calls"
+            );
+        }
+        info!(probes = ?report.ran, "confinement self-test passed");
+        Ok(())
     }
-    info!(probes = report.ran.len(), "confinement self-test passed");
-    Ok(())
 }
 
 /// macOS/Windows: no kernel LSM. The jailer stub errors rather than run
@@ -1744,10 +1768,7 @@ mod tests {
         let mut cfg = uds_cfg();
         cfg.session_marker = Some(PathBuf::new());
 
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let error = confine_endpoint(&cfg, runtime.handle())
+        let error = confine_endpoint(&cfg)
             .expect_err("a marker without a parent must fail before process confinement");
         assert!(
             error

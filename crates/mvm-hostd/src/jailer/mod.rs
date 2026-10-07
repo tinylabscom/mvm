@@ -29,6 +29,24 @@ pub enum JailerError {
     LandlockUnavailable,
     #[error("kernel does not support seccomp-bpf (need Linux 4.14+)")]
     SeccompUnavailable,
+    /// Confinement was asked for while the process had more than one thread.
+    ///
+    /// Landlock restricts only the thread that calls `landlock_restrict_self`
+    /// and the threads it creates afterwards. A thread that already exists
+    /// keeps the whole filesystem, so confining a multi-threaded process would
+    /// leave every sibling thread outside the ruleset. Nothing is applied when
+    /// this is returned.
+    #[error(
+        "refusing to confine a process with {threads} threads: confinement must be applied before any other thread exists, or the threads already running stay unconfined"
+    )]
+    NotSingleThreaded { threads: usize },
+    /// The thread count could not be read, so single-threadedness could not be
+    /// established. Treated as a refusal rather than an assumption.
+    #[error("cannot count this process's threads in {path}: {source}")]
+    ThreadCountUnavailable {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     /// A path in the `ConfinementSpec` could not be opened to install a
     /// Landlock rule. Carries the failing path so the operator sees
     /// which directory needs to exist (the audit dir is the
@@ -274,7 +292,19 @@ fn existing_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// Apply Landlock filesystem confinement then seccomp-BPF syscall
-/// filtering to the calling thread.
+/// filtering to the whole process.
+///
+/// **Call it while the process has exactly one thread.** Landlock binds only
+/// the calling thread and the threads it creates afterwards, so a thread that
+/// already exists — an async runtime's workers, a logging thread — would keep
+/// unrestricted filesystem access. `confine_self` therefore counts the
+/// process's threads first and refuses with `JailerError::NotSingleThreaded`,
+/// before applying anything, if there is more than one. Create runtimes and
+/// worker threads after it returns; they inherit both layers.
+///
+/// The seccomp filter is additionally installed with `SECCOMP_FILTER_FLAG_TSYNC`,
+/// so it reaches every thread of the process even if one were created between
+/// the count and the install.
 ///
 /// **Partial-confinement contract:** on `Err`, the process may be in
 /// any of three states: nothing applied (the Landlock step failed
@@ -299,6 +329,42 @@ pub fn confine_self(spec: &ConfinementSpec) -> Result<(), JailerError> {
     crate::jailer::landlock::apply(spec)?;
     crate::jailer::seccomp::apply(spec)?;
     Ok(())
+}
+
+/// Where the kernel lists one directory per thread of the calling process.
+#[cfg(any(target_os = "linux", test))]
+const THREAD_LIST_DIR: &str = "/proc/self/task";
+
+/// Refuse unless the calling process has exactly one thread.
+///
+/// Must run before Landlock is applied: the ruleset does not grant `/proc`, so
+/// the count cannot be taken afterwards.
+#[cfg(target_os = "linux")]
+pub fn require_single_threaded() -> Result<(), JailerError> {
+    let unavailable = |source| JailerError::ThreadCountUnavailable {
+        path: PathBuf::from(THREAD_LIST_DIR),
+        source,
+    };
+    let mut threads = 0usize;
+    for entry in std::fs::read_dir(THREAD_LIST_DIR).map_err(unavailable)? {
+        entry.map_err(unavailable)?;
+        threads += 1;
+    }
+    single_threaded(threads)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn single_threaded(threads: usize) -> Result<(), JailerError> {
+    match threads {
+        1 => Ok(()),
+        // Zero entries means the listing is not this process's thread table
+        // (an unmounted or foreign /proc); it proves nothing either way.
+        0 => Err(JailerError::ThreadCountUnavailable {
+            path: PathBuf::from(THREAD_LIST_DIR),
+            source: std::io::Error::other("the thread list is empty"),
+        }),
+        threads => Err(JailerError::NotSingleThreaded { threads }),
+    }
 }
 
 /// Non-Linux stub. Returns `JailerError::SeccompUnavailable` so a
@@ -334,6 +400,50 @@ mod tests {
             classify_landlock_abi_query(Ok(1)),
             LandlockSupport::TooOld { abi: 1 }
         );
+    }
+
+    #[test]
+    fn confinement_requires_exactly_one_thread() {
+        assert!(single_threaded(1).is_ok());
+        assert!(matches!(
+            single_threaded(3),
+            Err(JailerError::NotSingleThreaded { threads: 3 })
+        ));
+        // An empty listing cannot vouch for single-threadedness.
+        assert!(matches!(
+            single_threaded(0),
+            Err(JailerError::ThreadCountUnavailable { .. })
+        ));
+    }
+
+    /// The test harness runs each test on its own thread, so the process is
+    /// never single-threaded here, and the check must say so.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_test_harness_is_refused_as_multi_threaded() {
+        match require_single_threaded() {
+            Err(JailerError::NotSingleThreaded { threads }) => assert!(threads >= 2),
+            other => panic!("expected NotSingleThreaded, got {other:?}"),
+        }
+    }
+
+    /// The runtime-thread self-test proves Landlock covers a thread by being
+    /// refused the root directory, which holds only while no spec grants it.
+    #[test]
+    fn the_endpoint_spec_never_grants_the_root_directory() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let spec = ConfinementSpec::network_endpoint(
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            dir.clone(),
+            None,
+        )
+        .with_session_marker_parent(Some(&dir))
+        .with_approval_socket_parent(Some(&dir));
+        let root = Path::new("/");
+        assert!(!spec.readable_paths.iter().any(|p| p == root));
+        assert!(!spec.read_write_paths.iter().any(|p| p == root));
     }
 
     #[test]

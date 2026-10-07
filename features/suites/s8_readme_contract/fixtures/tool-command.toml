@@ -3,3 +3,6 @@ allow = ["shell"]
 
 [overrides.tools.detail.shell]
 argv = ["sh -c *"]
+# A declared route makes every allowed invocation bound, so the live lane
+# exercises the guest starting the command in its own attributed session.
+routes = ["example.com:443"]

@@ -351,12 +351,10 @@ pub(crate) fn handle_exec(
 
 pub(crate) fn handle_mediated_exec(
     ctx: &mut HandlerCtx,
-    argv: &[String],
-    stdin: Option<&str>,
-    timeout_secs: Option<u64>,
+    command: mvm_agentd::exec_stream::MediatedCommand<'_>,
 ) -> GuestResponse {
     eprintln!("[audit] mediated exec request");
-    let terminal = mvm_agentd::exec_stream::stream_exec_argv(argv, stdin, timeout_secs, |event| {
+    let terminal = mvm_agentd::exec_stream::stream_exec_mediated(command, |event| {
         write_response(ctx.file, &GuestResponse::ExecEvent(event));
     });
     GuestResponse::ExecEvent(terminal)

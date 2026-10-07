@@ -245,7 +245,7 @@ const RAW_SITES: &[RawSite] = &[
     ),
     guest(
         "crates/mvm-agentd/src/exec_stream.rs",
-        "stream_exec_argv",
+        "stream_exec_mediated",
         "Command::new(program)",
         "a guest process streamed over vsock by the guest agent",
     ),

@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease;
 use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
 use mvm_core::substitution_wire::WireRequest;
 use serde::Deserialize;
@@ -15,6 +16,7 @@ use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::supervisor::accept_loop::{
     AcceptAction, classify_accept_error, record_listener_stopped,
 };
+use crate::supervisor::tool_decision::InvocationVerdict;
 
 // The wire envelope (`WireRequest`/`WireResponse`) lives in
 // `mvm_core::substitution_wire` so the in-guest client and this server share
@@ -30,6 +32,7 @@ enum ListenerMode {
 #[serde(untagged)]
 enum ConnectorRequest {
     Tool(ToolCheckRequest),
+    Release(ToolInvocationRelease),
     Http(WireRequest),
 }
 
@@ -164,16 +167,20 @@ impl SubstitutionService {
             }
             ConnectorRequest::Tool(request) => {
                 anyhow::ensure!(request.is_valid(), "invalid tool invocation");
-                let decision = self.decide_tool(&request.tool, &request.argv).await;
-                let response = if matches!(
-                    decision,
-                    Ok(crate::supervisor::tool_decision::ToolVerdict::Allow)
-                ) {
-                    ToolDecisionReply::Allow
-                } else {
-                    ToolDecisionReply::Deny
+                let decision = self
+                    .decide_tool_invocation(&request.tool, &request.argv)
+                    .await;
+                let response = match decision {
+                    Ok(InvocationVerdict::Allow { binding: None }) => ToolDecisionReply::Allow,
+                    Ok(InvocationVerdict::Allow {
+                        binding: Some(binding),
+                    }) => ToolDecisionReply::AllowBound { binding },
+                    Ok(InvocationVerdict::Deny(_)) | Err(_) => ToolDecisionReply::Deny,
                 };
                 write_json_frame(&mut stream, &response).await?;
+            }
+            ConnectorRequest::Release(release) => {
+                self.release_tool_invocation(&release.release);
             }
         }
         Ok(())

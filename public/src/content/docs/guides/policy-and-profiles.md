@@ -104,7 +104,7 @@ allow = ["APP_MODE", "RUST_LOG"]         # once any layer lists names, --env is 
 deny  = ["DEBUG"]
 # readmit = ["LD_PRELOAD"]               # escape hatch: user-authored profiles only
 
-[tools]                                  # partial gates; strict validation still refuses this
+[tools]                                  # see "Tool privileges" below
 allow = ["git", "bash"]
 ask = ["git"]                            # every call asks the approver first
 deny = ["curl"]
@@ -112,8 +112,8 @@ deny = ["curl"]
 [tools.detail.bash]                      # per-tool restrictions
 argv = ["git *", "cargo *"]              # permitted command lines (glob)
 deny = ["rm *"]                          # refused whatever argv allows
-routes = ["github.com:443"]              # destinations this tool may reach
-secrets = ["GITHUB_TOKEN"]               # secrets bound to this tool
+routes = ["github.com:443"]              # destinations only this tool may reach
+secrets = ["GITHUB_TOKEN"]               # stored secrets only this tool may use
 
 [resources]                              # every value is a ceiling; the smallest wins
 cpu_millicores = 1500
@@ -382,7 +382,7 @@ does not automatically trust both identities.
 | --- | --- |
 | `mvmctl policy show [PROFILE...] [--format toml\|json\|plan]` | The merged policy, as TOML with its layers, as JSON with provenance for every item, or as the grants, egress rules, routes and bindings the signed plan would carry. Several profiles compose in order, the last taking precedence. Without `PROFILE`, it reads the project's `[policy]` (`--project DIR`, default `.`). |
 | `mvmctl policy resolve [PROFILE...] [-o FILE]` | Write the resolved manifest that `run --plan` accepts. Several profiles compose in order, the last taking precedence. |
-| `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check the profiles a launch would compose, or a single profile or group file. `--strict` turns every note into an error, refuses the unenforced `[tools]` section, and checks each bound secret against the store. |
+| `mvmctl policy validate [PROFILE\|PATH...] [--strict]` | Check the profiles a launch would compose, or a single profile or group file. `--strict` turns every note into an error and checks each bound secret against the store. |
 | `mvmctl policy diff A B [--json]` | What each side allows or denies that the other does not. |
 | `mvmctl policy groups [--json]` | Built-in and user groups and profiles. |
 | `mvmctl why --host H[:P] [--method METHOD --request-path PATH] \| --path P \| --tool T \| --secret S [--profile PROFILE... \| --plan FILE] [--json]` | Resolve one deterministic allow/deny answer without starting a VM. For routed hosts, include method and path to check the endpoint rule. Several profiles compose in order, the last taking precedence. |
@@ -398,26 +398,64 @@ the Rust types they are parsed into. See the
 everywhere, so a misspelt restriction is an error rather than a silently
 missing one.
 
+## Tool privileges
+
+`[tools]` is enforced at the seams the host controls:
+
+- `mvmctl ops mcp` binds a gate over the project's resolved `[tools]`: `deny`
+  refuses before any backend work, `ask` puts every call to the terminal
+  approver (fail-closed with no terminal), `allow` admits, and anything
+  unlisted fails closed. Every decision is chain-signed to the host audit
+  before backend work; if that audit is unavailable, the gate refuses the
+  call. Per-tool `argv`, `routes` and `secrets` are not applied there, because an MCP call's arguments are tool-specific JSON rather
+  than a command line or a destination.
+- `mvmctl machine exec <name> --tool TOOL -- <cmd>...` reports the exact argv
+  to the guest, which pauses before spawning it. The VM's endpoint decides it
+  against the admitted rules, `argv` and `deny` patterns included, and records
+  the decision in the chain-signed audit log before the guest may start it. A
+  signed tool-bearing plan also makes the guest refuse the command RPCs that
+  skip this step.
+- `routes` and `secrets` belong to their tool. When an allowed invocation's
+  tool declares either, the endpoint mints a binding for that invocation. The
+  guest agent starts the command as the leader of a new session, and the
+  egress client names the binding only on connections the agent traces to a
+  process in that session. At the endpoint, a destination in a tool's `routes`
+  is refused to every flow that is not an invocation of that tool, and an
+  invocation of a tool that declares routes reaches only those; a stored secret
+  in a tool's `secrets` is substituted only for that tool's invocations, and an
+  invocation of a tool that declares secrets uses only those. The network
+  policy must still admit each route. Every refusal is recorded as
+  `host.tool.scope_refused` with the route or secret and the rule; the audit
+  log carries a one-way identifier for the binding, never the binding. The
+  binding is released when the command exits, and the endpoint then ends any
+  connection still open under it. A UDP datagram is never an invocation's, so
+  one addressed to a tool's route is refused. DNS lookups of a tool's route
+  host are answered as usual: a name is not a connection, and the address it
+  returns is still a tool route when dialled.
+- A bound command runs in a group of its own while sharing the workload's
+  uid. The kernel's ptrace check compares groups, so a workload process cannot
+  attach to it, read or write its memory, or take its descriptors.
+- Named machines (`machine create --policy`, `machine run -d --policy`) record
+  `[tools]`, routes and secrets included, in their spec and re-admit it on
+  every start.
+
 ## Not yet
 
-- `[tools]` whole-tool decisions are enforced by the gate `mvmctl ops mcp`
-  binds: `deny` refuses before any backend work, `ask` puts every call to the
-  terminal approver (fail-closed with no terminal), `allow` admits, and
-  anything unlisted fails closed. Every decision is chain-signed to the host
-  audit before backend work; if that audit is unavailable, the gate refuses
-  the call. Per-tool `argv`/`routes`/`secrets`
-  detail is not enforced at the MCP seam (its arguments are tool-specific
-  JSON, not command lines or destinations). A declared, non-interactive
-  `machine exec <name> --tool TOOL -- <cmd>...` checks the exact argv against
-  the admitted per-VM rules and records the endpoint decision before the guest
-  spawns it. A signed tool-bearing plan also makes the guest refuse alternate
-  arbitrary-command RPCs. Declared invocations use the authenticated vsock
-  control session. Tool-scoped routes and secrets are not yet bound, so
-  `policy validate --strict` still refuses a policy that relies on `[tools]`.
-  Persistent `machine create --policy` and `machine run -d --policy` now record
-  whole-tool and argv rules in the machine spec and re-admit them on every
-  start. They refuse a profile with tool-scoped routes or secrets until the
-  endpoint can enforce those bindings.
+- A process the workload starts itself is not mediated: there are no
+  in-guest command shims. A tool's routes and secrets are therefore withheld
+  from everything but a declared `machine exec --tool` invocation; a workload
+  that runs the same binary on its own gets neither.
+- A declared tool still runs under the workload's uid, so it shares the
+  workload's files and the workload can signal it. A tool whose binary,
+  libraries or configuration live anywhere the workload can write — its home,
+  its working directory, a writable path — runs what the workload put there,
+  with the tool's routes and secrets. Declare only tools from the read-only
+  image whose behaviour such files cannot redirect. A separate tool uid would
+  close this and is not built.
+- Attribution needs the agent to be the guest's init (PID 1); a guest booted
+  by another init attributes nothing, so its tool routes and secrets stay
+  refused. The agent answers attribution questions one at a time, so a flood
+  of proxy connections can delay a tool's own; a late answer refuses.
 - Pack profiles require an installed, pinned, publisher-verified signed pack;
   use `mvmctl pull namespace/name` before selecting one.
 - Endpoint routes from a policy are refused on a persistent machine
