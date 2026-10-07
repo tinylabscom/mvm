@@ -858,10 +858,10 @@ mod tests {
             "permissions:",
             "actions: write",
             "runs-on: ubuntu-latest",
-            "timeout-minutes: 90",
+            "timeout-minutes: 120",
             "actions/workflows/workspace-shard.yml/dispatches",
             "candidates=(github)",
-            "deadline=$((SECONDS + 1800))",
+            "deadline=$((SECONDS + 3600))",
             "actions/runs/$run_id/cancel",
         ] {
             assert!(
