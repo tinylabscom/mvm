@@ -123,9 +123,11 @@ impl HermeticRegistry {
             .expect("fixture-built reference parses")
     }
 
-    /// Serve `bytes` at `/v2/<repository>/manifests/<reference>`
-    /// with the right Content-Type and Docker-Content-Digest
-    /// headers. Returns the canonical digest of the bytes.
+    /// Serve `bytes` at `/v2/<repository>/manifests/<reference>` and
+    /// under its digest at `/v2/<repository>/manifests/<digest>` (for
+    /// digest-pin requests), with the right Content-Type and
+    /// Docker-Content-Digest headers. Returns the canonical digest of the
+    /// bytes.
     pub async fn register_manifest(
         &self,
         repository: &str,
@@ -134,46 +136,23 @@ impl HermeticRegistry {
         bytes: &[u8],
     ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-        self.register_manifest_route(
-            repository,
-            reference,
-            media_type,
-            bytes,
-            digest.as_str(),
-            None,
-        );
+        for path_reference in [reference, digest.as_str()] {
+            self.register_manifest_route(
+                repository,
+                path_reference,
+                media_type,
+                bytes,
+                digest.as_str(),
+                None,
+            );
+        }
         digest
     }
 
-    /// Same as [`Self::register_manifest`], also exposes the
-    /// manifest under its digest at
-    /// `/v2/<repository>/manifests/<digest>` (digest-pin
-    /// requests).
-    pub async fn register_manifest_with_digest_path(
-        &self,
-        repository: &str,
-        reference: &str,
-        media_type: &str,
-        bytes: &[u8],
-    ) -> String {
-        let digest = self
-            .register_manifest(repository, reference, media_type, bytes)
-            .await;
-        self.register_manifest_route(
-            repository,
-            digest.as_str(),
-            media_type,
-            bytes,
-            digest.as_str(),
-            None,
-        );
-        digest
-    }
-
-    /// Same as [`Self::register_manifest_with_digest_path`], but
+    /// Same as [`Self::register_manifest`], but
     /// deliberately omits the `Docker-Content-Digest` response
     /// header to simulate registries that do not advertise it.
-    pub async fn register_manifest_without_digest_header_with_digest_path(
+    pub async fn register_manifest_without_digest_header(
         &self,
         repository: &str,
         reference: &str,

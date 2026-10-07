@@ -217,6 +217,8 @@ jobs:
     needs: bdd-live-warm-claim
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       # One witness at a time keeps this track to one hosted runner; see the
