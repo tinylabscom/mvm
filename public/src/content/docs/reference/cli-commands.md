@@ -283,12 +283,15 @@ one. Keyless (`<file>.sigstore.json`) signatures are produced in CI by
 | `mvmctl secret set <name> ... --inject <mode>`            | Restrict substitution to `header` (default), `query_param`, `url_path`, or `basic_auth`                                            |
 | `mvmctl secret set <name> ... --oauth-authorization-url <url> --oauth-token-url <url> --oauth-client-id <id>` | Bind the secret to an OAuth flow (bearer only); the three flags are required together                                             |
 | `mvmctl secret set <name> ... --oauth-client-secret <secret>` | Store the client secret as the initial token set; the host-side refresher exchanges it for a live token set (`-` reads stdin; `--oauth-client-secret-file <path>` reads a file) |
+| `mvmctl secret set <name> ... --oauth-login`               | Define the secret, then consent to its OAuth flow in a browser on this host, as `secret login` does                                 |
+| `mvmctl secret login <name>`                              | Consent to an OAuth-bound secret's flow in a browser on this host and store the token set it yields                               |
+| `mvmctl secret login <name> --no-browser --timeout <secs>` | Print the authorization URL instead of opening a browser; wait up to `<secs>` (default 300) for the consent                        |
 | `mvmctl secret providers`                                 | List the built-in service providers `--provider` accepts                                                                          |
 | `mvmctl secret providers --search <query>`                | Filter providers by name, description, or tag                                                                                     |
 | `mvmctl secret get <name>`                                | Verify that a local secret exists without printing the value                                                                      |
 | `mvmctl secret ls`                                        | List stored secret names, and for bound secrets their auth type, destinations, and authoring provider                             |
 | `mvmctl secret rm <name>`                                 | Remove a local secret                                                                                                             |
-| `mvmctl secret <put\|get\|set\|ls\|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local`                                                                        |
+| `mvmctl secret <put\|get\|set\|login\|ls\|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local`                                                                  |
 
 `secret set` is `put` plus an egress binding: it records where the substituted
 credential may go and how it authenticates. `--provider` takes those from the
@@ -312,23 +315,49 @@ already exists. For a SigV4 provider the credential-scope service comes from the
 entry, while `--region` and `--aws-access-key-id` stay yours to supply — they
 belong to your account, not to the provider.
 
-An OAuth binding turns the stored value into a token set the host maintains:
-the per-VM network endpoint exchanges the client-credentials grant against the
-binding's `--oauth-token-url` and refreshes it before expiry, so the guest only
-ever receives a live access token through substitution. `--oauth-client-secret`
-writes the stored value as the *initial* token set — the client secret plus an
-already-expired timestamp — so the first exchange happens at endpoint boot;
-live token sets are written by the host flow and can never be imported with
+An OAuth binding turns the stored value into a token set the host maintains,
+and the per-VM network endpoint refreshes it against the binding's
+`--oauth-token-url` before it expires, so the guest only ever receives a live
+access token through substitution. The set records which grant renews it.
+
+For a machine client, `--oauth-client-secret` writes the stored value as the
+*initial* token set — the client secret plus an already-expired timestamp — and
+the endpoint exchanges the client-credentials grant at boot and again before
+each expiry.
+
+For an API a person signs in to, the consent happens in a browser on the host.
+`secret login <name>` (or `--oauth-login` on `secret set`) runs the
+authorization-code grant with PKCE (S256): it listens on `127.0.0.1` on a port
+the kernel picks, prints the authorization URL and opens it in the desktop
+browser, and accepts the redirect to `http://127.0.0.1:<port>/callback` only if
+its `state` matches the one this login sent. A callback with a missing or
+different `state` is answered with an error and ignored, and the login keeps
+waiting, so another process on the host cannot cancel it. The code is redeemed at the token endpoint with the
+PKCE verifier, and the resulting token set replaces the stored value. Register
+`http://127.0.0.1/callback` as the client's redirect URI. Without
+`--oauth-client-secret` the client is public and identifies itself with its
+client id; with it the client is confidential, and the secret authenticates
+the code exchange and every refresh. The endpoint renews a consented set with
+the refresh-token grant, and stores a rotated refresh token when the provider
+issues one; it never falls back to the client-credentials grant, which would
+replace the user's identity with the application's. A provider that issues no
+refresh token gives a set that lasts until its access token expires; run
+`secret login` again then. Until a consent completes, `secret set
+--oauth-login` leaves the secret defined with no tokens, and resolution fails
+closed. A login records an `oauth_login` entry in the secret audit log, with
+its outcome and no value.
+
+Live token sets are written by these host flows and can never be imported with
 `--from`. `--oauth-scope` is repeatable, and
 `--oauth-response-access-token-pointer` names a non-standard access-token
 location in the token response (default `/access_token`). The OAuth endpoints
 must be absolute `https` URLs, and the workload's network policy must admit
 the token endpoint's host: the refresher sends the client secret only where
 that policy allows, and records every attempt as a `secret.oauth_refresh`
-audit entry. The token response must carry an expiry (`expires_in` or
-`expires_at`) far enough out to refresh ahead of; a token without one is
-refused rather than stored. The human/browser consent flow lands separately;
-until then the machine client-credentials grant is the supported flow.
+audit entry. Neither the refresh token nor the client secret goes anywhere
+else. The token response must carry an expiry (`expires_in` or `expires_at`)
+far enough out to refresh ahead of; a token without one is refused rather than
+stored.
 `mvmctl secret ls` shows the oauth client id and token URL alongside the
 binding; the client secret is never displayed.
 

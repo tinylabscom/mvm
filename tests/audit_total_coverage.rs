@@ -364,6 +364,9 @@ const VOLUME_SUB: &[(&str, AuditPosture)] = &[
 const SECRET_SUB: &[(&str, AuditPosture)] = &[
     ("put", AuditPosture::Emits("SecretPut")),
     ("set", AuditPosture::Emits("SecretSet")),
+    // Every consent outcome, refusals included, is a secret-audit
+    // `oauth_login` entry, dual-emitted to the chain when it is reachable.
+    ("login", AuditPosture::Emits("secret.oauth_login")),
     ("get", AuditPosture::Emits("SecretGet")),
     ("ls", AuditPosture::ReadOnly),
     // Reads the catalog compiled into this binary. No store access, no
@@ -935,6 +938,10 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // pin; `pack registry rm` records the pin and entry it dropped.
         "RegistryPackPin",
         "RegistryPackRemove",
+        // Secret-service entries: the recorder emits `secret.<action>`
+        // for the action the service names, and a consent run names
+        // `oauth_login` whatever its outcome.
+        "secret.oauth_login",
     ];
 
     let mut failures: Vec<(String, &'static str)> = Vec::new();

@@ -79,15 +79,35 @@ pub struct OAuthTokenSet {
     pub access_token: OAuthSecretString,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<OAuthSecretString>,
-    /// The client secret for the machine client-credentials grant. It lives
-    /// in the same encrypted store entry as the token set, so it is bound to
-    /// the flow by the same (tenant, name) key the egress binding and the
-    /// resolver share. The host-side refresher reads it to mint the initial
-    /// and refreshed token sets; it never leaves the store in any other
-    /// direction.
+    /// The OAuth client secret: the whole credential of the client-credentials
+    /// grant, and the client authentication a confidential client sends with
+    /// the authorization-code and refresh-token grants. It lives in the same
+    /// encrypted store entry as the token set, so it is bound to the flow by
+    /// the same (tenant, name) key the egress binding and the resolver share.
+    /// The host-side token exchanges read it; it never leaves the store in any
+    /// other direction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<OAuthSecretString>,
     pub expires_at: chrono::DateTime<Utc>,
+    /// The grant the host renews this set with. Recorded rather than inferred
+    /// from which credentials happen to be present: a set minted by a human's
+    /// consent must never be renewed by the client-credentials grant, which
+    /// would quietly swap the user's identity for the application's.
+    #[serde(default)]
+    pub grant: OAuthGrant,
+}
+
+/// How the host renews a stored [`OAuthTokenSet`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthGrant {
+    /// The machine flow: the stored client secret is exchanged for a fresh
+    /// set. Sets written before the grant was recorded are all of this kind.
+    #[default]
+    ClientCredentials,
+    /// A human consented in a browser on the host; the stored refresh token
+    /// is exchanged for a fresh set, and a rotated refresh token replaces it.
+    AuthorizationCode,
 }
 
 impl std::fmt::Debug for OAuthTokenSet {
@@ -103,6 +123,7 @@ impl std::fmt::Debug for OAuthTokenSet {
                 &self.client_secret.as_ref().map(|_| "REDACTED"),
             )
             .field("expires_at", &self.expires_at)
+            .field("grant", &self.grant)
             .finish()
     }
 }
@@ -273,6 +294,7 @@ impl SecretResolver for LocalResolver {
             refresh_token: token.refresh_token.or(current.refresh_token),
             client_secret: current.client_secret,
             expires_at: token.expires_at.unwrap_or(current.expires_at),
+            grant: current.grant,
         };
         let serialized = serde_json::to_string(&updated)
             .with_context(|| format!("serializing updated oauth token set for `{name}`"))?;
@@ -397,6 +419,7 @@ mod tests {
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
             expires_at: Utc::now() + Duration::minutes(5),
+            grant: OAuthGrant::default(),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
         let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
@@ -419,6 +442,7 @@ mod tests {
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
             expires_at: Utc::now() + Duration::seconds(30),
+            grant: OAuthGrant::default(),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
         let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
@@ -439,6 +463,7 @@ mod tests {
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
             expires_at: Utc::now() + Duration::minutes(5),
+            grant: OAuthGrant::default(),
         };
         let rendered = format!("{token_set:?}");
         assert!(rendered.contains("REDACTED"));
@@ -456,6 +481,7 @@ mod tests {
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
             expires_at: original_expiry,
+            grant: OAuthGrant::default(),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
         let resolver = LocalResolver::new("local", Arc::new(store));
@@ -498,6 +524,7 @@ mod tests {
             refresh_token: None,
             client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
             expires_at: Utc::now() + Duration::minutes(5),
+            grant: OAuthGrant::default(),
         };
         store_oauth_token_set(&store, "local", "oauth-secret", &token_set);
         let resolver = LocalResolver::new("local", Arc::new(store));
@@ -536,6 +563,7 @@ mod tests {
             refresh_token: None,
             client_secret: Some(OAuthSecretString::from(String::from("oauth-client-secret"))),
             expires_at: Utc::now() + Duration::minutes(5),
+            grant: OAuthGrant::default(),
         };
         let rendered = format!("{token_set:?}");
         assert!(rendered.contains("REDACTED"));
