@@ -857,11 +857,11 @@ mod tests {
         for expected in [
             "permissions:",
             "actions: write",
-            "runs-on: ubuntu-slim",
-            "ALLOW_SELF_HOSTED:",
+            "runs-on: ubuntu-latest",
+            "timeout-minutes: 90",
             "actions/workflows/workspace-shard.yml/dispatches",
             "candidates=(github)",
-            "candidates+=(hetzner)",
+            "deadline=$((SECONDS + 1800))",
             "actions/runs/$run_id/cancel",
         ] {
             assert!(
@@ -869,6 +869,7 @@ mod tests {
                 "workspace runner broker must contain {expected:?}"
             );
         }
+        assert!(!test_workspace.contains("candidates+=(hetzner)"));
         let workspace_worker = self::workflow("workspace-shard.yml");
         for expected in [
             "fromJSON('[\"self-hosted\",\"Linux\",\"X64\",\"mvm\",\"hetzner\",\"kvm\"]')",
@@ -877,12 +878,23 @@ mod tests {
             "key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}",
             "cargo nextest run -p xtask --features man",
             "cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2",
+            "archive_run_id:",
+            "actions: read",
+            "workspace-archive-{0}",
+            "if: inputs.archive_run_id == ''",
+            "if: inputs.archive_run_id != ''",
+            "cp -a \"$GITHUB_WORKSPACE/.\" \"$archive_root/\"",
+            "run-id: ${{ inputs.archive_run_id }}",
+            "github-token: ${{ secrets.GITHUB_TOKEN }}",
+            "--workspace-remap \"$archive_root\"",
+            "--extract-to \"$archive_root\"",
         ] {
             assert!(
                 workspace_worker.contains(expected),
                 "workspace shard worker must contain {expected:?}"
             );
         }
+        assert!(!workspace_worker.contains("actions: write"));
         let test_linux = job_block(&workflow, "test-linux");
         assert!(test_linux.contains("bash scripts/ci-linux-coverage.sh"));
         assert!(!workspace_worker.contains("ci-linux-coverage.sh"));

@@ -1578,7 +1578,9 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // verification, and fetch-when-unchanged behavior have focused CLI tests.
 // `build guest-bins` cross-compiles every guest binary for both guest
 // architectures; its archive and verification logic have unit tests.
-const PARSE_TIER_PIN: usize = 79;
+// `secret login` waits for a human to consent in a browser at a real OAuth
+// provider; its flow is tested in-process against a loopback provider.
+const PARSE_TIER_PIN: usize = 80;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {
