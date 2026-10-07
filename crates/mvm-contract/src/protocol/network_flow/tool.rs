@@ -97,11 +97,17 @@ pub struct ToolCheckDenial {
 }
 
 /// Host-local reply after the per-VM endpoint has audited a tool decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolDecisionReply {
     /// The admitted rules and audit write allowed the invocation.
     Allow,
+    /// Allowed, and the tool owns routes or secrets: flows attributed to this
+    /// binding may use them until the caller releases it.
+    AllowBound {
+        /// The invocation's binding.
+        binding: super::attribution::ToolInvocationBinding,
+    },
     /// The invocation was denied or its decision could not be audited.
     Deny,
 }
@@ -112,7 +118,13 @@ mod tests {
 
     #[test]
     fn host_local_reply_roundtrips_and_rejects_unknown_values() {
-        for reply in [ToolDecisionReply::Allow, ToolDecisionReply::Deny] {
+        for reply in [
+            ToolDecisionReply::Allow,
+            ToolDecisionReply::AllowBound {
+                binding: super::super::attribution::ToolInvocationBinding::from_random([7; 16]),
+            },
+            ToolDecisionReply::Deny,
+        ] {
             let json = serde_json::to_string(&reply).expect("serialize decision");
             assert_eq!(
                 serde_json::from_str::<ToolDecisionReply>(&json).expect("parse decision"),

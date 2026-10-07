@@ -183,6 +183,31 @@ impl SubstitutionService {
         Ok(gate.decide(tool, argv).await?)
     }
 
+    /// Decide one host-started invocation through this VM's admitted gate,
+    /// minting a binding when the tool owns routes or secrets. An absent gate
+    /// or failed audit refuses the call.
+    pub async fn decide_tool_invocation(
+        &self,
+        tool: &str,
+        argv: &str,
+    ) -> anyhow::Result<crate::supervisor::tool_decision::InvocationVerdict> {
+        let gate = self
+            .tool_gate
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("tool mediation is not configured"))?;
+        Ok(gate.decide_invocation(tool, argv).await?)
+    }
+
+    /// Retire a binding once its invocation has finished.
+    pub fn release_tool_invocation(
+        &self,
+        binding: &mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding,
+    ) {
+        if let Some(gate) = &self.tool_gate {
+            gate.release(binding);
+        }
+    }
+
     /// Share `admitted` with the forward leg built over it.
     #[must_use]
     pub(crate) fn with_admitted_addresses(

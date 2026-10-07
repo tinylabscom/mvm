@@ -143,6 +143,10 @@ pub mod telemetry_capture;
 /// Guest side of the dedicated telemetry service (authenticated session per
 /// host connection on the reserved telemetry port).
 pub mod telemetry_service;
+/// Attributes loopback egress connections to a host-admitted tool invocation.
+/// Linux only: it reads `/proc`, and no egress client runs anywhere else.
+#[cfg(any(target_os = "linux", test))]
+pub mod tool_attribution;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;

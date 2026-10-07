@@ -823,6 +823,35 @@ where
     D: FnOnce(&ToolCheckRequest) -> Result<bool>,
     F: FnMut(&ExecEvent),
 {
+    send_attributed_mediated_exec_streaming(
+        stream,
+        call,
+        |question| {
+            decide(question).map(|allowed| {
+                if allowed {
+                    ToolCheckReply::Allow
+                } else {
+                    ToolCheckReply::Deny
+                }
+            })
+        },
+        on_event,
+    )
+}
+
+/// [`send_mediated_exec_streaming`] for a decision that may carry an
+/// invocation binding: on [`ToolCheckReply::AllowBound`] the guest attributes
+/// the command's flows to that binding while it runs.
+pub fn send_attributed_mediated_exec_streaming<D, F>(
+    stream: &mut UnixStream,
+    call: MediatedExecCall,
+    decide: D,
+    on_event: F,
+) -> Result<ExecEvent>
+where
+    D: FnOnce(&ToolCheckRequest) -> Result<ToolCheckReply>,
+    F: FnMut(&ExecEvent),
+{
     let invocation = call
         .tool_check()
         .ok_or_else(|| anyhow::anyhow!("invalid declared tool invocation"))?;
@@ -840,13 +869,15 @@ where
     }
     let decision = decide(&reported);
     let reply = match &decision {
-        Ok(true) => ToolCheckReply::Allow,
-        Ok(false) | Err(_) => ToolCheckReply::Deny,
+        Ok(reply) => reply.clone(),
+        Err(_) => ToolCheckReply::Deny,
     };
     session.write(stream, &reply)?;
     match decision {
-        Ok(true) => read_exec_stream_with_session(stream, &mut session, on_event),
-        Ok(false) => bail!("declared tool invocation denied"),
+        Ok(ToolCheckReply::Deny) => bail!("declared tool invocation denied"),
+        Ok(ToolCheckReply::Allow | ToolCheckReply::AllowBound { .. }) => {
+            read_exec_stream_with_session(stream, &mut session, on_event)
+        }
         Err(error) => Err(error),
     }
 }
@@ -1771,6 +1802,7 @@ mod tests {
             argv: vec!["echo".to_string(), "ok".to_string()],
             stdin: None,
             timeout_secs: Some(5),
+            env: Vec::new(),
         }
     }
 

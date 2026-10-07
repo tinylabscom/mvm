@@ -184,9 +184,9 @@ impl EnvSection {
 /// `[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny`
 /// decisions are enforced at the seams the host controls (the MCP tool-call
 /// gate and declared `machine exec --tool` invocations); declared commands
-/// also enforce `argv`. Scoped routes and secrets still need a trusted
-/// invocation binding at the endpoint, so strict validation refuses any
-/// nonempty `[tools]` section.
+/// also enforce `argv`. A tool's `routes` and `secrets` are enforced at the
+/// per-VM endpoint against flows attributed to an admitted invocation of
+/// that tool.
 ///
 /// Composition only narrows. Whole-tool lists union (`deny` beats `ask`
 /// beats `allow`); per-tool detail is first-defined-then-narrowed: a later
@@ -262,13 +262,16 @@ pub struct ToolDetail {
     /// and beats `argv` on conflict.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    /// Destinations (`HOST[:PORT]`) this tool may reach through the one host
-    /// egress gate. Composition narrows like secret destinations: a later
+    /// Destinations (`HOST[:PORT]`) that belong to this tool. The network
+    /// policy must still admit each one; only flows from a declared
+    /// invocation of the tool may reach them, and its invocations may reach
+    /// only these. Composition narrows like secret destinations: a later
     /// layer may list a subset, never a destination outside them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<String>,
-    /// Secret names bound to this tool; the binding is enforced where the
-    /// secret is substituted. Composition narrows like `routes`.
+    /// Stored secret names that belong to this tool: only flows from a
+    /// declared invocation of it have them substituted, and its invocations
+    /// may use only these. Composition narrows like `routes`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
 }

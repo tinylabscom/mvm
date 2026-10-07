@@ -342,7 +342,10 @@ mod ai_metering_tests {
             AiPolicy::metered(),
         );
         let stream = service
-            .process_stream(wire_to("https://api.openai.com/v1/chat/completions"))
+            .process_stream(
+                wire_to("https://api.openai.com/v1/chat/completions"),
+                &Default::default(),
+            )
             .await
             .expect("stream request succeeded");
         assert_eq!(stream.status, 200);

@@ -1346,6 +1346,7 @@ IntegrationStatus = Union[
 class MediatedExecCall:
     argv: List[str]
     tool: str
+    env: Optional[List[List[str]]] = None
     stdin: Optional[str] = None
     timeout_secs: Optional[int] = None
 

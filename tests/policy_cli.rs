@@ -138,15 +138,34 @@ fn validate_names_the_file_layer_and_key_and_strict_refuses_warnings() {
         "{stderr}"
     );
 
-    let tools = host.home.path().join("tools.toml");
-    std::fs::write(&tools, "[overrides.tools]\nallow = [\"git\"]\n").unwrap();
-    let lenient = host.mvmctl(&["policy", "validate", tools.to_str().unwrap()]);
+    let dropped = host.home.path().join("dropped.toml");
+    std::fs::write(
+        &dropped,
+        "extends = \"offline\"\n[overrides.network]\nallow = [\"a.test\"]\n",
+    )
+    .unwrap();
+    let lenient = host.mvmctl(&["policy", "validate", dropped.to_str().unwrap()]);
     assert!(lenient.status.success(), "{}", text(&lenient.stderr));
-    let strict = host.mvmctl(&["policy", "validate", tools.to_str().unwrap(), "--strict"]);
+    let strict = host.mvmctl(&["policy", "validate", dropped.to_str().unwrap(), "--strict"]);
     assert!(
         !strict.status.success(),
-        "--strict refuses the unenforced tools section"
+        "--strict refuses a policy whose hosts the offline base drops"
     );
+}
+
+#[test]
+fn strict_validation_accepts_an_enforced_tools_section() {
+    let host = Host::new();
+    let tools = host.home.path().join("tools.toml");
+    std::fs::write(
+        &tools,
+        "[overrides.tools]\nallow = [\"gh\"]\n[overrides.tools.detail.gh]\n\
+         argv = [\"gh *\"]\nroutes = [\"api.github.com:443\"]\n",
+    )
+    .unwrap();
+    let strict = host.mvmctl(&["policy", "validate", tools.to_str().unwrap(), "--strict"]);
+    assert!(strict.status.success(), "{}", text(&strict.stderr));
+    assert!(!text(&strict.stderr).contains("not enforced"));
 }
 
 #[test]

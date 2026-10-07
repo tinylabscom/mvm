@@ -334,7 +334,11 @@ impl SubstitutionService {
     pub(super) async fn prepare_flow(
         &self,
         wire: WireRequest,
+        attribution: &super::tool_scope::FlowAttribution,
     ) -> Result<PreparedFlow, WireResponse> {
+        // Re-resolved per request: a keep-alive flow outlives the invocation
+        // it was opened for, and a released binding attributes nothing.
+        let attribution = &self.attribute(attribution.binding().cloned());
         let body = match B64.decode(wire.body_b64.as_bytes()) {
             Ok(b) => b,
             Err(e) => {
@@ -384,6 +388,12 @@ impl SubstitutionService {
                 // The forward leg connects to exactly these; see `pinned_dns`.
                 if let Some((host, port)) = url_host_and_port(&req.url) {
                     self.admitted.record(&host, port, ips);
+                    // A tool's route only for that tool's invocation.
+                    if let Err(reason) = self.enforce_tool_route(&host, port, attribution).await {
+                        return Err(WireResponse::Refused {
+                            message: format!("egress refused {host}:{port} ({reason})"),
+                        });
+                    }
                     // Then what the request may do there. The path is the
                     // URL's own, the one the forward leg will send.
                     let path = Url::parse(&req.url)
@@ -425,6 +435,25 @@ impl SubstitutionService {
             });
         }
         let placeholders = locate_placeholders(&req.url, &req.headers);
+        // A tool's secret only for that tool's invocation, decided before any
+        // approval is asked for it.
+        let carried_secrets: Vec<String> = placeholders
+            .iter()
+            .filter_map(|located| self.registry.resolve(&located.placeholder))
+            .map(|secret| secret.name.clone())
+            .collect();
+        if let Err(reason) = self
+            .enforce_tool_secrets(
+                &carried_secrets,
+                destination.as_deref().unwrap_or(UNPARSEABLE_DESTINATION),
+                attribution,
+            )
+            .await
+        {
+            return Err(WireResponse::Refused {
+                message: format!("use of a secret that belongs to a tool was refused ({reason})"),
+            });
+        }
         let substituted = collect_substituted_meta(&endpoint, &placeholders);
         // Resolve the per-destination redaction action; clone so it outlives
         // `req` (which `redact_outbound` then `prepare_request` consume).

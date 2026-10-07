@@ -27,6 +27,7 @@ use crate::egress_client::{
 use crate::flowmux::{FlowMuxError, FlowMuxReconnectClient};
 use crate::guest_vsock_session::splice_streams;
 use crate::socks5_udp::{self, Address, Datagram};
+use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
 use mvm_core::guest_netd::ConnectAck;
 
 /// Default loopback address for the in-guest DNS stub.
@@ -105,20 +106,52 @@ async fn serve(mut client: TcpStream, flowmux: FlowMuxReconnectClient) -> io::Re
             return Err(error);
         }
     };
+    let opener = TcpOpener {
+        binding: attribution_for(&client).await,
+        flowmux: flowmux.clone(),
+    };
     match route {
-        ProxyRoute::Socks { target } => serve_socks(client, &target, flowmux).await,
+        ProxyRoute::Socks { target } => serve_socks(client, &target, opener).await,
         ProxyRoute::SocksUdpAssociate => serve_socks_udp(client, flowmux).await,
-        ProxyRoute::HttpConnect { target } => serve_http_connect(client, &target, flowmux).await,
-        ProxyRoute::HttpForward { head } => serve_http_forward(client, &head, flowmux).await,
+        ProxyRoute::HttpConnect { target } => serve_http_connect(client, &target, opener).await,
+        ProxyRoute::HttpForward { head } => serve_http_forward(client, &head, opener).await,
     }
 }
 
-async fn serve_socks(
-    client: TcpStream,
-    target: &str,
+/// Opens TCP flows for one accepted connection, naming the tool invocation
+/// the guest agent attributed that connection to.
+struct TcpOpener {
+    binding: Option<ToolInvocationBinding>,
     flowmux: FlowMuxReconnectClient,
-) -> io::Result<()> {
-    match flowmux.open_tcp(target).await {
+}
+
+impl TcpOpener {
+    async fn open(&self, target: &str) -> Result<crate::flowmux::FlowMuxStream, FlowMuxError> {
+        self.flowmux
+            .open_tcp_attributed(target, self.binding.as_ref())
+            .await
+    }
+}
+
+/// Ask the guest agent which admitted tool invocation, if any, holds the
+/// other end of `client`. Every failure means none.
+#[cfg(target_os = "linux")]
+async fn attribution_for(client: &TcpStream) -> Option<ToolInvocationBinding> {
+    let (peer, local) = (client.peer_addr().ok()?, client.local_addr().ok()?);
+    tokio::task::spawn_blocking(move || crate::tool_attribution::query(peer, local))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// No guest agent answers off Linux, so no connection is attributed.
+#[cfg(not(target_os = "linux"))]
+async fn attribution_for(_client: &TcpStream) -> Option<ToolInvocationBinding> {
+    None
+}
+
+async fn serve_socks(client: TcpStream, target: &str, opener: TcpOpener) -> io::Result<()> {
+    match opener.open(target).await {
         Ok(upstream) => {
             let mut client = client;
             write_connect_reply(&mut client, ProxyReplyStyle::Socks, ConnectAck::Ok).await?;
@@ -134,12 +167,8 @@ async fn serve_socks(
     }
 }
 
-async fn serve_http_connect(
-    client: TcpStream,
-    target: &str,
-    flowmux: FlowMuxReconnectClient,
-) -> io::Result<()> {
-    match flowmux.open_tcp(target).await {
+async fn serve_http_connect(client: TcpStream, target: &str, opener: TcpOpener) -> io::Result<()> {
+    match opener.open(target).await {
         Ok(upstream) => {
             let mut client = client;
             write_connect_reply(&mut client, ProxyReplyStyle::HttpConnect, ConnectAck::Ok).await?;
@@ -188,17 +217,13 @@ async fn refuse_tls_absolute_uri(mut client: TcpStream, target: &str) -> io::Res
     ))
 }
 
-async fn serve_http_forward(
-    client: TcpStream,
-    head: &[u8],
-    flowmux: FlowMuxReconnectClient,
-) -> io::Result<()> {
+async fn serve_http_forward(client: TcpStream, head: &[u8], opener: TcpOpener) -> io::Result<()> {
     let forward = http_forward_target(head)?;
     if forward.tls {
         return refuse_tls_absolute_uri(client, &forward.target).await;
     }
     let target = forward.target;
-    match flowmux.open_tcp(&target).await {
+    match opener.open(&target).await {
         Ok(mut upstream) => {
             upstream.write_all(head).await?;
             upstream.flush().await?;
@@ -1098,9 +1123,16 @@ mod http_forward_tests {
         let (served, _) = listener.accept().await.unwrap();
 
         let head = b"GET https://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
-        let err = serve_http_forward(served, head, flowmux)
-            .await
-            .expect_err("an https absolute-URI must be refused");
+        let err = serve_http_forward(
+            served,
+            head,
+            TcpOpener {
+                binding: None,
+                flowmux,
+            },
+        )
+        .await
+        .expect_err("an https absolute-URI must be refused");
         assert_eq!(err.kind(), io::ErrorKind::Unsupported);
 
         let mut reply = String::new();
@@ -1121,10 +1153,9 @@ mod http_forward_tests {
         );
     }
 
-    /// The path that still works, and must keep working: a `http://` absolute
-    /// URI is forwarded, so the guest opens a flow for it.
-    #[tokio::test]
-    async fn a_plain_http_absolute_uri_still_opens_a_flow() {
+    /// Forward one `http://` absolute-URI request through an opener carrying
+    /// `binding`, and return the opcode and payload of the frame it sends.
+    async fn forwarded_open(binding: Option<ToolInvocationBinding>) -> (Opcode, Vec<u8>) {
         let (guest_stream, host_stream) = tokio::io::duplex(4096);
         let (guest_key, _guest_anchor) = keypair();
         let (host_key, host_anchor) = keypair();
@@ -1157,7 +1188,7 @@ mod http_forward_tests {
             let (opcode, _sid, _len, payload) = read_frame(&mut host_stream, &mut host_session)
                 .await
                 .unwrap();
-            (opcode, String::from_utf8_lossy(&payload).to_string())
+            (opcode, payload)
         });
 
         let client = crate::flowmux::FlowMuxClient::connect(guest_stream, guest_key, host_anchor)
@@ -1174,15 +1205,33 @@ mod http_forward_tests {
 
         let head = b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n";
         let forward = tokio::spawn(async move {
-            let _ = serve_http_forward(served, head, flowmux).await;
+            let _ = serve_http_forward(served, head, TcpOpener { binding, flowmux }).await;
         });
 
-        let (opcode, target) = host.await.unwrap();
-        assert_eq!(opcode, Opcode::OpenTcp);
-        assert!(
-            target.contains("example.com:80"),
-            "unexpected open target: {target}"
-        );
+        let opened = host.await.unwrap();
         forward.abort();
+        opened
+    }
+
+    /// The path that still works, and must keep working: a `http://` absolute
+    /// URI is forwarded, so the guest opens a flow for it.
+    #[tokio::test]
+    async fn a_plain_http_absolute_uri_still_opens_a_flow() {
+        let (opcode, payload) = forwarded_open(None).await;
+        assert_eq!(opcode, Opcode::OpenTcp);
+        assert_eq!(payload, b"example.com:80");
+    }
+
+    /// A connection the agent attributed to an invocation names its binding
+    /// in the open, after the target.
+    #[tokio::test]
+    async fn an_attributed_connection_names_its_binding_in_the_open() {
+        let binding = ToolInvocationBinding::from_random([9; 16]);
+        let (opcode, payload) = forwarded_open(Some(binding.clone())).await;
+        assert_eq!(opcode, Opcode::OpenTcp);
+        assert_eq!(
+            mvm_contract::protocol::network_flow::attribution::decode_open_tcp(&payload),
+            Ok(("example.com:80", Some(binding)))
+        );
     }
 }

@@ -232,6 +232,7 @@ fn run_command_call(
         argv: vec!["/bin/sh".to_string(), "-c".to_string(), wrapper],
         stdin,
         timeout_secs,
+        env: Vec::new(),
     };
     anyhow::ensure!(
         call.tool_check().is_some(),
