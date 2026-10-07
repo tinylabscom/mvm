@@ -52,6 +52,60 @@ fn machine_workspace_apply_verbs_are_discoverable() {
 }
 
 #[test]
+fn artifact_pack_takes_the_arguments_of_bundle_export() {
+    let help = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(args)
+            .output()
+            .expect("run help");
+        assert!(out.status.success(), "{args:?} --help failed");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let pack = help(&["artifact", "pack", "--help"]);
+    let export = help(&["bundle", "export", "--help"]);
+    for flag in [
+        "<TEMPLATE>",
+        "--out",
+        "--cmdline",
+        "--posture",
+        "--allow-egress",
+        "--allow-volumes",
+        "--allow-unauthenticated",
+    ] {
+        assert!(
+            pack.contains(flag),
+            "artifact pack help missing {flag}: {pack}"
+        );
+        assert!(
+            export.contains(flag),
+            "bundle export help missing {flag}: {export}"
+        );
+    }
+    assert!(pack.contains("Alias of `mvmctl bundle export`"), "{pack}");
+}
+
+#[test]
+fn bundle_export_refuses_an_allow_flag_without_a_posture() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args([
+            "bundle",
+            "export",
+            "tmpl",
+            "--out",
+            "/tmp/never.mvmpkg",
+            "--allow-egress",
+        ])
+        .output()
+        .expect("run bundle export");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--posture"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn machine_check_artifact_help_names_bundle_verification_controls() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "check-artifact", "--help"])
@@ -67,26 +121,42 @@ fn machine_check_artifact_help_names_bundle_verification_controls() {
     }
 }
 
-/// `build guest-bins` is the producer of the artifact mvm-images pins; its
-/// help names the output directory and the per-architecture selector.
-#[test]
-fn build_guest_bins_help_names_output_and_arch_controls() {
+/// `mvmctl <argv>`'s stdout with runs of whitespace collapsed to one space.
+fn help_text(argv: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
-        .args(["build", "guest-bins", "--help"])
+        .args(argv)
         .output()
-        .expect("run build guest-bins help");
+        .expect("run mvmctl help");
     assert!(
         out.status.success(),
         "help must succeed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    for expected in ["--out", "--arch", "mvm-guest-bins-v"] {
-        assert!(
-            stdout.contains(expected),
-            "help missing {expected}: {stdout}"
-        );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `build guest-bins` produces mvmctl's guest-runtime archive; its help names
+/// the output directory, the per-architecture selector, and whose archive it
+/// is, and its long help says mvm-images is not a consumer.
+#[test]
+fn build_guest_bins_help_names_output_and_arch_controls() {
+    let short = help_text(&["build", "guest-bins", "--help"]);
+    for expected in [
+        "--out",
+        "--arch",
+        "mvm-guest-bins-v",
+        "mvmctl's guest-runtime archive",
+    ] {
+        assert!(short.contains(expected), "help missing {expected}: {short}");
     }
+    let long = help_text(&["help", "build", "guest-bins"]);
+    assert!(
+        long.contains("Its consumer is mvmctl; mvm-images does not consume it"),
+        "{long}"
+    );
 }
 
 /// An unknown architecture is a parse error, not a silent fallback to the
@@ -1443,6 +1513,67 @@ fn allow_env_is_documented_on_run_and_proc_start() {
 }
 
 #[test]
+fn machine_prompt_is_listed_and_documents_its_session_and_step_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let machine = isolated_mvmctl(tmp.path())
+        .args(["machine", "--help"])
+        .output()
+        .unwrap();
+    assert!(machine.status.success());
+    assert!(
+        String::from_utf8_lossy(&machine.stdout).contains("prompt"),
+        "machine --help does not list prompt"
+    );
+
+    let out = isolated_mvmctl(tmp.path())
+        .args(["machine", "prompt", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--session <ID>",
+        "--idempotency-key <KEY>",
+        "--timeout <SECS>",
+        "--no-step-checkpoint",
+        "[PROMPT]",
+    ] {
+        assert!(stdout.contains(flag), "{flag} missing: {stdout}");
+    }
+}
+
+#[test]
+fn agent_session_replay_documents_its_checkpoint_fork_and_dry_run_flags() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args(["agent-session", "replay", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for flag in [
+        "--from <CHECKPOINT>",
+        "--as <NAME>",
+        "--dry-run",
+        "--timeout <SECS>",
+    ] {
+        assert!(stdout.contains(flag), "{flag} missing: {stdout}");
+    }
+}
+
+#[test]
+fn agent_session_replay_of_an_unknown_session_fails_without_forking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = isolated_mvmctl(tmp.path())
+        .args(["agent-session", "replay", "no-such-session", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("no-such-session"), "stderr: {stderr}");
+}
+
+#[test]
 fn machine_run_help_documents_both_cold_build_flags() {
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")
@@ -2044,7 +2175,7 @@ fn pull_refuses_a_pack_whose_signature_does_not_verify_and_installs_nothing() {
 [[publishers]]
 namespace = "runtime"
 issuer = "https://token.actions.githubusercontent.com"
-accepted_identities = ["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main"]
+accepted_identities = ["https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"]
 "#,
     )
     .unwrap();

@@ -38,5 +38,5 @@ mod signer;
 
 pub use debug::{DebugFormat, DebugOutput};
 pub use export::{ExportedBundle, export_bundle_with_signer, guest_sidecar_path};
-pub use inputs::BundleExportInputs;
+pub use inputs::{BundleExportInputs, PostureInputs};
 pub use signer::BundleSigner;

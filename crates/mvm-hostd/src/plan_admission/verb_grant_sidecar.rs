@@ -2,7 +2,7 @@
 
 use super::write_secret_file;
 use anyhow::{Context, Result};
-use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, ToolMediationGrant};
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, ToolMediationGrant, VerbId};
 use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
 use std::path::Path;
 
@@ -39,11 +39,10 @@ pub(super) fn mint_verb_grant_sidecar(
     // only say `VerbNotAuthorized`; refusing here says what actually expired.
     refuse_expired_plan(&plan, chrono::Utc::now())?;
     let tool_mediation = tool_mediation_for(&plan);
-    let verbs = plan.agent_verbs.unwrap_or_default();
     let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
-    if verbs.is_empty() && drive.is_none() && tool_mediation.is_none() {
+    let Some(verbs) = granted_verbs(&plan, drive.is_some() || tool_mediation.is_some()) else {
         return Ok(None);
-    }
+    };
 
     let keys_dir = mvm_core::config::mvm_keys_dir();
     let signer = crate::audit::host_keypair::load_or_init_at(&keys_dir)
@@ -75,6 +74,25 @@ pub(super) fn mint_verb_grant_sidecar(
     let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;
     write_secret_file(&sidecar_path, &envelope_json)?;
     Ok(Some(envelope))
+}
+
+/// The verbs a minted grant carries, or `None` when the plan needs no grant.
+///
+/// The display verbs ride along on a grant that is being minted anyway, and
+/// never cause one: a minted grant is a closed verb list for the guest agent,
+/// so minting one for display alone would take every unlisted verb away from a
+/// plan that never asked for that.
+fn granted_verbs(plan: &ExecutionPlan, other_authority: bool) -> Option<Vec<VerbId>> {
+    let mut verbs = plan.agent_verbs.clone().unwrap_or_default();
+    if verbs.is_empty() && !other_authority {
+        return None;
+    }
+    for verb in mvm_contract::stream::display_verbs(plan) {
+        if !verbs.contains(&verb) {
+            verbs.push(verb);
+        }
+    }
+    Some(verbs)
 }
 
 fn tool_mediation_for(plan: &ExecutionPlan) -> Option<ToolMediationGrant> {
@@ -125,6 +143,41 @@ mod tests {
     #[test]
     fn a_plan_still_in_its_window_mints() {
         assert!(refuse_expired_plan(&plan_valid(5, 600), chrono::Utc::now()).is_ok());
+    }
+
+    #[test]
+    fn display_verbs_join_a_grant_but_never_cause_one() {
+        let mut plan = plan_valid(5, 600);
+        plan.services = vec![
+            mvm_contract::protocol::broker::ServiceId::parse(
+                mvm_contract::stream::DISPLAY_VIEW_GRANT_SERVICE,
+            )
+            .unwrap(),
+        ];
+        plan.grants = Some(mvm_contract::grants::Grants {
+            display_input: Some(mvm_contract::grants::DisplayInputGrant::default()),
+            ..Default::default()
+        });
+        assert_eq!(
+            granted_verbs(&plan, false),
+            None,
+            "a display-only plan must not narrow the agent to a verb list"
+        );
+
+        plan.agent_verbs = Some(vec![VerbId::new("run-entrypoint").unwrap()]);
+        let verbs: Vec<String> = granted_verbs(&plan, false)
+            .unwrap()
+            .iter()
+            .map(|verb| verb.as_str().to_string())
+            .collect();
+        assert_eq!(
+            verbs,
+            vec![
+                "run-entrypoint",
+                mvm_contract::stream::DISPLAY_VIEW_VERB,
+                mvm_contract::stream::DISPLAY_INPUT_VERB,
+            ]
+        );
     }
 
     #[test]

@@ -195,6 +195,7 @@ fn provision_boot_grant(spec: &BenchSpec, config: &VmStartConfig) -> Result<()> 
         &mvm_hostd::plan_admission::InMemoryNonceLedger::new(),
         None,
         None,
+        None,
         mvm_hostd::plan_admission::RunPosture::without_backend(mvm_core::plan::Variant::Dev),
     )
     .context("admitting the bench verb-grant plan")?;

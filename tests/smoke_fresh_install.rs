@@ -6,11 +6,17 @@
 //! on the throwaway PATH. What is under test is the verdict: a smoke that
 //! cannot go red is a gate that reports green over a broken release.
 //!
-//! The smoke boots three times: the README's first command, the same command
-//! again from the same HOME, and a boot binding an SDK host service. The fake
-//! answers all three, and caches a runtime overlay the way a release binary's
-//! first boot does, so the second boot has something to reuse.
+//! The smoke boots four times: the README's first command, the same command
+//! again from the same HOME, a boot binding an SDK host service, and a boot
+//! granted egress to one host. The fake answers all four, and caches a runtime
+//! overlay the way a release binary's first boot does, so the second boot has
+//! something to reuse.
+//!
+//! The same boots run against an unpublished release archive when
+//! `MVM_SMOKE_ARCHIVE` names one; the release workflow does that before it
+//! publishes anything.
 
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -90,11 +96,25 @@ impl Smoke {
     }
 
     fn run(&self, installer: &Path, version: Option<&str>, envs: &[(&str, &str)]) -> Output {
+        let mut command = self.command(version, envs);
+        command.env("MVM_SMOKE_INSTALLER", installer);
+        command.output().unwrap()
+    }
+
+    fn run_archive(&self, archive: &Path, version: Option<&str>) -> Output {
+        let mut command = self.command(version, &[]);
+        command
+            .env("MVM_SMOKE_ARCHIVE", archive)
+            .env_remove("MVM_SMOKE_INSTALLER");
+        command.output().unwrap()
+    }
+
+    fn command(&self, version: Option<&str>, envs: &[(&str, &str)]) -> Command {
         let mut command = Command::new("sh");
         command
             .arg(script())
-            .env("MVM_SMOKE_INSTALLER", installer)
             .env("MVM_SMOKE_OUT", self.out())
+            .env_remove("MVM_SMOKE_ARCHIVE")
             .env_remove("GITHUB_ACTIONS")
             .env_remove("GITHUB_STEP_SUMMARY");
         if let Some(version) = version {
@@ -103,7 +123,7 @@ impl Smoke {
         for (key, value) in envs {
             command.env(key, value);
         }
-        command.output().unwrap()
+        command
     }
 
     fn transcript(&self) -> String {
@@ -151,21 +171,250 @@ fn a_first_command_that_prints_the_token_passes() {
         transcript.contains("runtime-overlay/1.2.3/aarch64/overlay.ext4"),
         "the transcript must carry the cache the second boot was held to: {transcript}"
     );
-    for step in ["first command", "second boot", "SDK boot"] {
+    assert!(
+        transcript.contains(
+            "mvmctl machine run --image curlimages/curl:8.21.0 --allow-host example.com -- sh -c \"curl -fsS -o /dev/null https://example.com/ && echo mvm-fresh-install-"
+        ),
+        "the transcript must name the egress boot's command: {transcript}"
+    );
+    for step in ["first command", "second boot", "SDK boot", "egress boot"] {
         assert!(
             transcript.contains(&format!("--- {step} exited 0 after ")),
             "the transcript must time the {step}: {transcript}"
         );
     }
     assert!(
-        transcript.contains("second boot:    ") && transcript.contains("SDK boot:       "),
+        transcript.contains("second boot:    ")
+            && transcript.contains("SDK boot:       ")
+            && transcript.contains("egress boot:    "),
         "the transcript must summarise every boot's time: {transcript}"
     );
     assert!(
         transcript.contains("a second boot from the same HOME in")
-            && transcript.contains("a boot binding host.time.v1 saw the SDK sidecar in"),
+            && transcript.contains("a boot binding host.time.v1 saw the SDK sidecar in")
+            && transcript.contains("a boot allowed example.com fetched it in"),
         "{transcript}"
     );
+}
+
+/// A release whose network endpoint dies after the guest authenticates boots
+/// every workload that has no grant, so only a boot that grants egress fails.
+/// That is how v0.22.0 shipped: its static endpoint made a syscall its seccomp
+/// filter did not list, and no lane ran an egress grant on the shipped binary.
+#[test]
+fn an_egress_boot_that_fails_fails_the_smoke() {
+    let smoke = Smoke::new();
+    let body = format!(
+        "    case \" $* \" in *' --allow-host example.com '*) \
+         echo \"Error: VM snug-pika: waiting for the network endpoint's authenticated session: failed to fill whole buffer\" >&2; exit 1 ;; esac\n{ECHO_TOKEN}"
+    );
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", &body), 0);
+
+    let output = smoke.run(&installer, Some("v1.2.3"), &[]);
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(
+        transcript.contains("--- SDK boot exited 0 after "),
+        "every boot without a grant passed: {transcript}"
+    );
+    assert!(
+        transcript.contains("FAIL: the egress boot exited 1"),
+        "{transcript}"
+    );
+    assert!(
+        transcript.contains("waiting for the network endpoint's authenticated session"),
+        "the transcript must carry the egress boot's stderr: {transcript}"
+    );
+}
+
+#[test]
+fn an_egress_boot_over_budget_fails_and_is_stopped() {
+    let smoke = Smoke::new();
+    let body =
+        format!("    case \" $* \" in *' --allow-host '*) exec sleep 600 ;; esac\n{ECHO_TOKEN}");
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", &body), 0);
+
+    let started = std::time::Instant::now();
+    let output = smoke.run(
+        &installer,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_EGRESS_RUN_BUDGET_SECS", "2")],
+    );
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("FAIL: the egress boot did not finish within 2s"),
+        "{}",
+        smoke.transcript()
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(120),
+        "the budget must stop the egress boot, not wait for it"
+    );
+}
+
+/// Pack `files` (name, body) as `mvmctl-x86_64-unknown-linux-gnu/<name>` into
+/// a gzipped tarball shaped like the one the release workflow uploads.
+fn release_archive(dir: &Path, files: &[(&str, &str)]) -> PathBuf {
+    let stage = dir.join("stage");
+    let top = stage.join("mvmctl-x86_64-unknown-linux-gnu");
+    std::fs::create_dir_all(&top).unwrap();
+    for (name, body) in files {
+        let path = top.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let archive = dir.join("mvmctl-x86_64-unknown-linux-gnu.tar.gz");
+    let status = Command::new("tar")
+        .arg("-czf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&stage)
+        .arg("mvmctl-x86_64-unknown-linux-gnu")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    archive
+}
+
+/// The release workflow runs the smoke on the archive it is about to publish.
+/// mvmctl must run from the unpacked directory, where the host binaries it
+/// spawns sit beside it, and the installer's bootstrap must run first.
+#[test]
+fn an_unpublished_archive_runs_beside_the_binaries_it_ships() {
+    let smoke = Smoke::new();
+    let record = smoke.dir.path().join("seen");
+    let mvmctl = format!(
+        "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'mvmctl 1.2.3' ;;\n  \
+         bootstrap) echo bootstrapped >> '{record}' ;;\n  \
+         machine) shift 2\n    \
+         [ -f '{record}.beside' ] || ls \"$(dirname \"$(readlink -f \"$0\")\")\" > '{record}.beside'\n\
+         {CACHE_OVERLAY_ONCE}\n{ECHO_TOKEN}\n    ;;\nesac",
+        record = record.display()
+    );
+    let archive = release_archive(
+        smoke.dir.path(),
+        &[
+            ("mvmctl", &mvmctl),
+            ("mvm-network-endpoint", "#!/bin/sh\nexit 0\n"),
+        ],
+    );
+
+    let output = smoke.run_archive(&archive, Some("v1.2.3"));
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(
+        transcript.contains("PASS: mvmctl 1.2.3 installed in"),
+        "{transcript}"
+    );
+    let unpacked = transcript
+        .lines()
+        .find_map(|line| line.strip_prefix("unpacked:"))
+        .unwrap_or_else(|| {
+            panic!("the transcript must list what the archive shipped: {transcript}")
+        });
+    assert!(
+        unpacked
+            .split_whitespace()
+            .any(|name| name == "mvm-network-endpoint")
+            && unpacked.split_whitespace().any(|name| name == "mvmctl"),
+        "the transcript must list what the archive shipped: {transcript}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).unwrap(),
+        "bootstrapped\n",
+        "the installer's bootstrap must run once, before the first boot"
+    );
+    let beside = std::fs::read_to_string(record.with_extension("beside")).unwrap();
+    assert!(
+        beside.lines().any(|name| name == "mvm-network-endpoint"),
+        "mvmctl must resolve to the unpacked directory, beside its host binaries: {beside}"
+    );
+}
+
+/// A failed bootstrap is the installer's warning, not its failure: the first
+/// command retries it, and the smoke holds that command to its budget.
+#[test]
+fn an_archive_whose_bootstrap_fails_still_runs_the_first_command() {
+    let smoke = Smoke::new();
+    let mvmctl = fake_mvmctl("1.2.3", ECHO_TOKEN).replace(
+        "  machine)",
+        "  bootstrap) echo 'no builder image' >&2; exit 4 ;;\n  machine)",
+    );
+    let archive = release_archive(smoke.dir.path(), &[("mvmctl", &mvmctl)]);
+
+    let output = smoke.run_archive(&archive, None);
+
+    assert!(output.status.success(), "{}", combined(&output));
+    let transcript = smoke.transcript();
+    assert!(
+        transcript.contains("bootstrap failed (mvmctl bootstrap exited 4)")
+            && transcript.contains("note: the installer's bootstrap failed"),
+        "{transcript}"
+    );
+}
+
+#[test]
+fn an_archive_that_carries_no_mvmctl_fails() {
+    let smoke = Smoke::new();
+    let archive = release_archive(
+        smoke.dir.path(),
+        &[("mvm-network-endpoint", "#!/bin/sh\nexit 0\n")],
+    );
+
+    let output = smoke.run_archive(&archive, Some("v1.2.3"));
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("holds no mvmctl-<target>/mvmctl"),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+#[test]
+fn an_archive_reporting_another_version_fails() {
+    let smoke = Smoke::new();
+    let archive = release_archive(
+        smoke.dir.path(),
+        &[("mvmctl", &fake_mvmctl("0.22.0", ECHO_TOKEN))],
+    );
+
+    let output = smoke.run_archive(&archive, Some("v0.23.0"));
+
+    assert_eq!(output.status.code(), Some(1), "{}", combined(&output));
+    assert!(
+        smoke
+            .transcript()
+            .contains("the install pinned to v0.23.0 left 'mvmctl 0.22.0' on PATH"),
+        "{}",
+        smoke.transcript()
+    );
+}
+
+/// An archive and an installer are two answers to what to install.
+#[test]
+fn an_archive_and_an_installer_together_is_exit_two() {
+    let smoke = Smoke::new();
+    let installer = stand_in_installer(smoke.dir.path(), &fake_mvmctl("1.2.3", ECHO_TOKEN), 0);
+    let archive = release_archive(
+        smoke.dir.path(),
+        &[("mvmctl", &fake_mvmctl("1.2.3", ECHO_TOKEN))],
+    );
+
+    let output = smoke.run(
+        &installer,
+        Some("v1.2.3"),
+        &[("MVM_SMOKE_ARCHIVE", archive.to_str().unwrap())],
+    );
+
+    assert_eq!(output.status.code(), Some(2), "{}", combined(&output));
 }
 
 /// A download-mode artifact whose VERSION is not the binary's own boots once,
@@ -555,6 +804,7 @@ fn a_budget_that_is_not_a_positive_whole_number_is_exit_two() {
         "MVM_SMOKE_RUN_BUDGET_SECS",
         "MVM_SMOKE_SECOND_RUN_BUDGET_SECS",
         "MVM_SMOKE_SDK_RUN_BUDGET_SECS",
+        "MVM_SMOKE_EGRESS_RUN_BUDGET_SECS",
     ] {
         for value in ["0", "1.5", "soon"] {
             let output = smoke.run(&installer, Some("v1.2.3"), &[(budget, value)]);
@@ -570,7 +820,8 @@ fn a_budget_that_is_not_a_positive_whole_number_is_exit_two() {
 
 /// Each step's budget is what reports a slow step, with a transcript saying
 /// which one. A job timeout below their sum would cancel the smoke first, and
-/// say only that the job ran long.
+/// say only that the job ran long. Both workflows that run the smoke are held
+/// to it: the published-tag lanes and the unpublished-archive gate.
 #[test]
 fn the_job_timeout_covers_every_default_budget() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -580,6 +831,7 @@ fn the_job_timeout_covers_every_default_budget() {
         "MVM_SMOKE_RUN_BUDGET_SECS",
         "MVM_SMOKE_SECOND_RUN_BUDGET_SECS",
         "MVM_SMOKE_SDK_RUN_BUDGET_SECS",
+        "MVM_SMOKE_EGRESS_RUN_BUDGET_SECS",
     ]
     .iter()
     .map(|var| {
@@ -596,18 +848,20 @@ fn the_job_timeout_covers_every_default_budget() {
     })
     .sum();
 
-    let workflow =
-        std::fs::read_to_string(root.join(".github/workflows/first-run-smoke.yml")).unwrap();
-    let minutes: u64 = workflow
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("timeout-minutes:"))
-        .expect("the first-run job must set a timeout")
-        .trim()
-        .parse()
-        .unwrap();
+    for name in ["first-run-smoke.yml", "release-archive-smoke.yml"] {
+        let workflow = std::fs::read_to_string(root.join(".github/workflows").join(name)).unwrap();
+        let minutes: u64 = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("timeout-minutes:"))
+            .unwrap_or_else(|| panic!("the job in {name} must set a timeout"))
+            .trim()
+            .parse()
+            .unwrap();
 
-    assert!(
-        minutes * 60 > budgets,
-        "the job timeout ({minutes} min) must exceed the smoke's summed default budgets ({budgets} s)"
-    );
+        assert!(
+            minutes * 60 > budgets,
+            "{name}: the job timeout ({minutes} min) must exceed the smoke's summed default \
+             budgets ({budgets} s)"
+        );
+    }
 }

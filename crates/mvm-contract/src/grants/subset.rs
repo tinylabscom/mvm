@@ -14,7 +14,8 @@
 //! absent egress grant is deny-all, so a child that drops one has narrowed.
 
 use crate::grants::{
-    CpuGrant, DriveGrant, DriveProgramId, EgressGrant, Grants, WallClockGrant, WorkspaceRoot,
+    CpuGrant, DisplayInputGrant, DriveGrant, DriveProgramId, EgressGrant, Grants, WallClockGrant,
+    WorkspaceRoot,
 };
 use crate::policy::network_policy::HostPort;
 
@@ -57,18 +58,27 @@ pub enum GrantWidening {
     DriveOutputExceeded { child: u64, parent: u64 },
     #[error("child drive lifetime {child} seconds exceeds the parent's {parent}")]
     DriveTtlExceeded { child: u32, parent: u32 },
+    #[error("child carries a display input grant, but the parent carried none")]
+    DisplayInputNotAdmitted,
+    #[error("child marks display input attended, but the parent's grant did not")]
+    DisplayAttendedNotAdmitted,
+    #[error("child clipboard paste bound exceeds what the parent's display grant admitted")]
+    DisplayClipboardNotAdmitted,
+    #[error("child changes the parent's human-credential destinations")]
+    HumanCredentialChanged,
 }
 
 /// Whether `child` asks for no more than `parent` holds, in every dimension.
 ///
-/// Dimensions are checked in a fixed order — CPU, wall clock, egress, drive —
-/// so a child that widens in more than one reports a stable reason rather than
-/// one that depends on evaluation order.
+/// Dimensions are checked in a fixed order — CPU, wall clock, egress, drive,
+/// display input — so a child that widens in more than one reports a stable
+/// reason rather than one that depends on evaluation order.
 pub fn grants_are_subset(child: &Grants, parent: &Grants) -> Result<(), GrantWidening> {
     cpu_is_subset(child.cpu, parent.cpu)?;
     wall_clock_is_subset(child.wall_clock, parent.wall_clock)?;
     egress_is_subset(child.egress.as_ref(), parent.egress.as_ref())?;
-    drive_is_subset(child.drive.as_ref(), parent.drive.as_ref())
+    drive_is_subset(child.drive.as_ref(), parent.drive.as_ref())?;
+    display_input_is_subset(child.display_input.as_ref(), parent.display_input.as_ref())
 }
 
 fn cpu_is_subset(child: Option<CpuGrant>, parent: Option<CpuGrant>) -> Result<(), GrantWidening> {
@@ -189,6 +199,35 @@ fn drive_is_subset(
     Ok(())
 }
 
+/// An absent display input grant is no input path at all, so dropping one
+/// narrows. A human-credential marker is the exception in the other direction:
+/// it is what confines the run's egress, so a child may not drop or change it.
+fn display_input_is_subset(
+    child: Option<&DisplayInputGrant>,
+    parent: Option<&DisplayInputGrant>,
+) -> Result<(), GrantWidening> {
+    if parent.and_then(|parent| parent.human_credential.as_ref())
+        != child.and_then(|child| child.human_credential.as_ref())
+    {
+        return Err(GrantWidening::HumanCredentialChanged);
+    }
+    let Some(child) = child else {
+        return Ok(());
+    };
+    let Some(parent) = parent else {
+        return Err(GrantWidening::DisplayInputNotAdmitted);
+    };
+    if child.attended && !parent.attended {
+        return Err(GrantWidening::DisplayAttendedNotAdmitted);
+    }
+    match (child.clipboard, parent.clipboard) {
+        (None, _) => {}
+        (Some(child), Some(parent)) if child.max_paste_bytes <= parent.max_paste_bytes => {}
+        (Some(_), _) => return Err(GrantWidening::DisplayClipboardNotAdmitted),
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,12 +273,14 @@ mod tests {
             wall_clock: secs(600),
             egress: egress(&[("api.example.com", 443), ("pypi.org", 443)]),
             drive: drive("/workspace", "agent", 1_000, 2_000, 300),
+            display_input: None,
         };
         let child = Grants {
             cpu: share(1000),
             wall_clock: secs(60),
             egress: egress(&[("api.example.com", 443)]),
             drive: drive("/workspace/src", "agent", 500, 1_000, 60),
+            display_input: None,
         };
         assert_eq!(grants_are_subset(&child, &parent), Ok(()));
     }
@@ -251,6 +292,7 @@ mod tests {
             wall_clock: secs(60),
             egress: egress(&[("api.example.com", 443)]),
             drive: drive("/workspace", "agent", 1_000, 2_000, 300),
+            display_input: None,
         };
         assert_eq!(grants_are_subset(&g, &g), Ok(()));
     }
@@ -491,12 +533,14 @@ mod tests {
             wall_clock: secs(60),
             egress: None,
             drive: None,
+            display_input: None,
         };
         let child = Grants {
             cpu: share(2000),
             wall_clock: Some(WallClockGrant::Unbounded),
             egress: egress(&[("evil.example.com", 443)]),
             drive: drive("/workspace", "agent", 1, 1, 1),
+            display_input: None,
         };
         assert_eq!(
             grants_are_subset(&child, &parent),
@@ -611,5 +655,54 @@ mod tests {
                 Err(expected)
             );
         }
+    }
+
+    fn display(attended: bool, paste: Option<u32>) -> Grants {
+        Grants {
+            display_input: Some(DisplayInputGrant {
+                attended,
+                clipboard: paste.map(|bytes| crate::grants::DisplayClipboardGrant {
+                    max_paste_bytes: NonZeroU32::new(bytes).unwrap(),
+                }),
+                human_credential: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_child_cannot_gain_display_input_attendance_or_a_larger_paste() {
+        assert_eq!(
+            grants_are_subset(&display(false, None), &Grants::default()),
+            Err(GrantWidening::DisplayInputNotAdmitted)
+        );
+        assert_eq!(
+            grants_are_subset(&display(true, None), &display(false, None)),
+            Err(GrantWidening::DisplayAttendedNotAdmitted)
+        );
+        assert_eq!(
+            grants_are_subset(&display(true, Some(10)), &display(true, Some(9))),
+            Err(GrantWidening::DisplayClipboardNotAdmitted)
+        );
+        assert_eq!(
+            grants_are_subset(&display(true, Some(9)), &display(true, None)),
+            Err(GrantWidening::DisplayClipboardNotAdmitted)
+        );
+        assert!(grants_are_subset(&display(false, Some(9)), &display(true, Some(10))).is_ok());
+        assert!(grants_are_subset(&Grants::default(), &display(true, Some(10))).is_ok());
+    }
+
+    #[test]
+    fn a_child_cannot_drop_or_change_the_human_credential_marker() {
+        let mut parent = display(true, None);
+        parent.display_input.as_mut().unwrap().human_credential =
+            Some(crate::grants::HumanCredentialGrant {
+                destinations: vec![HostPort::new("login.example", 443)],
+            });
+        assert_eq!(
+            grants_are_subset(&display(true, None), &parent),
+            Err(GrantWidening::HumanCredentialChanged)
+        );
+        assert!(grants_are_subset(&parent, &parent).is_ok());
     }
 }
