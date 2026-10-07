@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::packs::{KeylessTrust, Sha256Hex};
+use crate::registry_pack::VerifiedRegistryPack;
 
 /// Supported signed registry-pack revocation document schema.
 pub const REGISTRY_PACK_REVOCATION_SCHEMA_VERSION: u32 = 1;
@@ -61,10 +62,22 @@ impl VerifiedRegistryPackRevocations {
 
     /// Refuse a revoked signing identity or exact manifest digest.
     ///
-    /// `authenticated_signer` must be the identity that actually verified the
-    /// pack signature, not an untrusted manifest field or a namespace's list
-    /// of identities. A caller may not use this result after `not_after`.
-    pub fn check_pack_at(
+    /// The signer and digest come from the authenticated pack, never from
+    /// untrusted manifest metadata or a caller-supplied identity. A caller
+    /// may not use this result after `not_after`.
+    pub fn check_verified_pack_at(
+        &self,
+        verified_pack: &VerifiedRegistryPack,
+        now: DateTime<Utc>,
+    ) -> Result<(), RegistryPackRevocationError> {
+        self.check_pack_at(
+            &verified_pack.signer().identity,
+            verified_pack.manifest_sha256(),
+            now,
+        )
+    }
+
+    fn check_pack_at(
         &self,
         authenticated_signer: &str,
         manifest_sha256: &Sha256Hex,
@@ -272,6 +285,11 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
+    use crate::crypto::image_verify::VerifiedSigner;
+    use crate::registry_pack::{
+        PackAdoption, PackReference, RegistryPackFile, RegistryPackManifest, RegistryPackPublisher,
+        RegistryPackPublisherPolicy, RegistryPackVerificationError, adopt_registry_pack_with,
+    };
 
     fn at(day: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, day, 0, 0, 0)
@@ -320,29 +338,81 @@ mod tests {
         )
     }
 
+    fn test_pack_signature(
+        _manifest: &[u8],
+        bundle: &[u8],
+        trust: &KeylessTrust,
+    ) -> Result<VerifiedSigner, RegistryPackVerificationError> {
+        let identity = std::str::from_utf8(bundle)
+            .map_err(|error| RegistryPackVerificationError::SignatureInvalid(error.to_string()))?;
+        if !trust
+            .accepted_identities
+            .iter()
+            .any(|allowed| allowed == identity)
+        {
+            return Err(RegistryPackVerificationError::SignatureInvalid(
+                "test identity is not trusted".to_string(),
+            ));
+        }
+        Ok(VerifiedSigner {
+            identity: identity.to_string(),
+            issuer: trust.issuer.clone(),
+        })
+    }
+
+    fn verified_pack(identity: &str) -> VerifiedRegistryPack {
+        let reference: PackReference = "mvm/example@1.0.0".parse().expect("valid reference");
+        let manifest_bytes = serde_json::to_vec(&RegistryPackManifest {
+            schema_version: 1,
+            reference: reference.clone(),
+            description: "Example workload".to_string(),
+            image: None,
+            files: vec![RegistryPackFile {
+                path: "pack/profile.toml".to_string(),
+                sha256: Sha256Hex::from_bytes(b"profile"),
+                size: 7,
+            }],
+        })
+        .expect("serialize manifest");
+        let policy = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "mvm",
+                "test issuer",
+                vec!["new identity".to_string(), "old identity".to_string()],
+            )
+            .expect("valid publisher"),
+        ])
+        .expect("valid policy");
+        let adoption = PackAdoption {
+            requested: &reference,
+            manifest_bytes: &manifest_bytes,
+            signature_bundle: identity.as_bytes(),
+            publisher_policy: &policy,
+        };
+        adopt_registry_pack_with(&adoption, test_pack_signature).expect("verified test pack")
+    }
+
     #[test]
     fn signed_document_checks_identity_and_manifest_revocations() {
         let verified = signed(&document(1), None).expect("valid signed document");
         let checkpoint = verified.checkpoint();
         assert_eq!(checkpoint.sequence, 1);
-        assert_eq!(
-            verified.check_pack_at("new identity", &Sha256Hex::from_bytes(b"good"), at(7)),
-            Ok(())
-        );
+        let good = verified_pack("new identity");
+        let old = verified_pack("old identity");
+        assert_eq!(verified.check_verified_pack_at(&good, at(7)), Ok(()));
         assert!(matches!(
-            verified.check_pack_at("old identity", &Sha256Hex::from_bytes(b"good"), at(7)),
+            verified.check_verified_pack_at(&old, at(7)),
             Err(RegistryPackRevocationError::RevokedIdentity { .. })
         ));
+        let mut digest_revocation = document(1);
+        digest_revocation.revoked_manifests = vec![good.manifest_sha256().clone()];
+        let verified_digest = signed(&digest_revocation, None).expect("valid digest revocation");
         assert!(matches!(
-            verified.check_pack_at(
-                "new identity",
-                &Sha256Hex::from_bytes(b"bad manifest"),
-                at(7)
-            ),
+            verified_digest.check_verified_pack_at(&good, at(7)),
             Err(RegistryPackRevocationError::RevokedManifest { .. })
         ));
         assert_eq!(
-            verified.check_pack_at("new identity", &Sha256Hex::from_bytes(b"good"), at(31)),
+            verified.check_verified_pack_at(&good, at(31)),
             Err(RegistryPackRevocationError::Expired)
         );
     }
