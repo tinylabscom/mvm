@@ -460,12 +460,14 @@ mod tests {
     }
 
     fn publisher_policy() -> RegistryPackPublisherPolicy {
-        RegistryPackPublisherPolicy::new(vec![RegistryPackPublisher::new(
-            "runtime",
-            "https://token.actions.githubusercontent.com",
-            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main".to_string()],
-        )
-        .unwrap()])
+        RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "runtime",
+                "https://token.actions.githubusercontent.com",
+                vec![crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
         .unwrap()
     }
 

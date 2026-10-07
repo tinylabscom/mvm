@@ -765,8 +765,8 @@ mod tests {
              lint-features-test-support, lint-features-embed, \
              test-workspace-build, test-workspace, test-workspace-extras, \
              test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, \
-             boot-latency, nix-flake-check]"
+             test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
+             bdd-conformance, boot-latency, nix-flake-check]"
         ));
         assert!(
             job_body(&workflow, "pr-regressions").is_none(),
@@ -800,6 +800,7 @@ mod tests {
             "test-workspace-extras",
             "test-workspace-aarch64",
             "test-release-witness",
+            "test-musl-confinement",
             "test-linux",
             "test-ebpf-telemetry",
         ] {
@@ -831,6 +832,7 @@ mod tests {
             "\"$FEATURES_EMBED_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
+            "\"$MUSL_CONFINEMENT_RESULT\"",
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$BOOT_RESULT\"",
@@ -857,6 +859,26 @@ mod tests {
             assert!(
                 release_witness.contains(expected),
                 "release-witness lane must cover {expected:?}"
+            );
+        }
+
+        // The Linux release ships static musl binaries, and the libc decides
+        // which syscalls reach a confined role's seccomp filter. Only this
+        // lane builds the endpoint the way the release does, so it must cover
+        // both shipped musl targets and stay in the aggregate.
+        let musl = job_block(&workflow, "test-musl-confinement");
+        for expected in [
+            "target: x86_64-unknown-linux-musl",
+            "target: aarch64-unknown-linux-musl",
+            "uses: ./.github/actions/install-zigbuild",
+            "cargo-zigbuild test --profile release-witness --target \"${TARGET}\"",
+            "--test confinement_self_test",
+            "--test network_endpoint_bin",
+            "--test seccomp_property",
+        ] {
+            assert!(
+                musl.contains(expected),
+                "musl confinement lane must contain {expected:?}"
             );
         }
 
@@ -1079,6 +1101,7 @@ mod tests {
             "test-workspace-build",
             "test-workspace-extras",
             "test-release-witness",
+            "test-musl-confinement",
             "test-linux",
             "test-ebpf-telemetry",
         ] {
