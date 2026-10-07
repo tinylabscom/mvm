@@ -433,7 +433,7 @@ fn audit_detached_readiness_failure(
                 .error(format!("{error:#}")),
         );
     } else {
-        emit_failed(&admission, "guest-readiness", &anyhow::anyhow!("{error:#}"));
+        emit_failed(admission, "guest-readiness", &anyhow::anyhow!("{error:#}"));
     }
 }
 
