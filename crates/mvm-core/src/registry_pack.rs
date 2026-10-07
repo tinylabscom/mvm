@@ -1281,7 +1281,7 @@ pub(crate) fn check_registry_pack_signature(
         .iter()
         .map(String::as_str)
         .collect();
-    crate::crypto::image_verify::verify_signed_payload_under_any_identity_with_signer(
+    crate::crypto::image_verify::verify_signed_payload_and_signer_under_any_identity(
         manifest_bytes,
         signature_bundle,
         &identities,

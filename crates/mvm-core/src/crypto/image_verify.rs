@@ -199,7 +199,7 @@ pub fn verify_signed_payload_under_any_identity(
     identities: &[&str],
     expected_issuer: &str,
 ) -> VerifyResult<()> {
-    verify_signed_payload_under_any_identity_with_signer(
+    verify_signed_payload_and_signer_under_any_identity(
         payload_bytes,
         cosign_bundle,
         identities,
@@ -211,7 +211,7 @@ pub fn verify_signed_payload_under_any_identity(
 /// Verify against a closed identity set and return the identity that signed
 /// the payload. The returned signer is the certificate subject that satisfied
 /// the exact-identity policy, not a name copied from the payload.
-pub fn verify_signed_payload_under_any_identity_with_signer(
+pub fn verify_signed_payload_and_signer_under_any_identity(
     payload_bytes: &[u8],
     cosign_bundle: &[u8],
     identities: &[&str],
