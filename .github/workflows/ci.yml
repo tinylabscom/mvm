@@ -982,7 +982,7 @@ jobs:
         shard: [1, 2]
     # The shard broker can wait longer than the 15-minute ubuntu-slim job cap.
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Run shard on the first available runner
         env:
@@ -1022,7 +1022,7 @@ jobs:
           done
 
           winner=
-          deadline=$((SECONDS + 1800))
+          deadline=$((SECONDS + 3600))
           while [ -z "$winner" ] && [ "$SECONDS" -lt "$deadline" ]; do
             runs="$(curl -fsS "${auth[@]}" \
               "$api/actions/workflows/workspace-shard.yml/runs?event=workflow_dispatch&per_page=50")"
@@ -1042,7 +1042,7 @@ jobs:
             [ -n "$winner" ] || sleep 3
           done
           if [ -z "$winner" ]; then
-            echo "::error::no workspace shard candidate started within 30 minutes" >&2
+            echo "::error::no workspace shard candidate started within 60 minutes" >&2
             exit 1
           fi
 
