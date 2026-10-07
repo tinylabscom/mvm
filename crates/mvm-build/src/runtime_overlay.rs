@@ -7,11 +7,10 @@
 //! [`mvm_fs::overlay`] (its main names are re-exported here); this module
 //! owns how an artifact *lands* in the cache in the first place:
 //!
-//! 1. **Build from a source checkout.** A contributor build cross-compiles
-//!    the guest binaries from the checkout it was compiled from and
-//!    [`build_runtime_overlay_from_guest_binaries`] assembles the ext4 and
-//!    its verity sidecar in-process. No image flake is involved; the
-//!    published overlay is built by `mvm-images`.
+//! 1. **Build from a source checkout.** A contributor acquires one verified
+//!    guest-runtime tree shared with initramfs and SDK sidecar assembly, then
+//!    [`build_runtime_overlay_from_guest_runtime`] assembles the ext4 and
+//!    its verity sidecar in-process. No image flake is involved.
 //! 2. **Download from the image set.** [`download_runtime_overlay`] fetches
 //!    the per-arch tarball as a member of the signed image set this build
 //!    pins, holds it to the digest the verified root declares, and installs
@@ -178,7 +177,20 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // fingerprint doesn't cover (that hash only walks crate sources, not this
 // file) — forces a locally cached overlay to rebuild instead of reusing
 // stale staged content.
-const LOCAL_BUILD_EPOCH: &str = "4";
+const LOCAL_BUILD_EPOCH: &str = "5";
+
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
+    ("mvm-guest-agent", "agent"),
+    ("mvm-guest-netinit", "netinit"),
+    ("mvm-ping", "ping"),
+    ("mvm-seccomp-apply", "seccomp-apply"),
+    ("mvm-display-bridge", "display-bridge"),
+    ("mvm-runner", "runner"),
+    ("mvm-egress-client", "egress-client"),
+    ("mvm-addon-dns", "addon-dns"),
+    ("mvm-exit-report", "exit-report"),
+];
+const GPU_SHIM_SONAMES: [&str; 3] = ["libcuda.so.1", "libcudart.so", "libnvidia-ml.so.1"];
 
 /// Resolve `arch`'s overlay from `resolver`'s cache; on a miss with a
 /// non-default cache root (e.g. a worktree-isolated `MVM_HOME`), seed
@@ -285,9 +297,144 @@ pub fn build_runtime_overlay_from_guest_binaries(
     })
     .into_iter()
     .collect::<Result<(), _>>()?;
+    assemble_runtime_overlay(cache_root, version, arch, &root, &staging)
+}
+
+/// Assemble the runtime overlay from one verified guest-runtime tree. The
+/// archive member names are the only source of files admitted to the image;
+/// the staging tree does not inherit unrelated files from a source checkout.
+pub fn build_runtime_overlay_from_guest_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    runtime: &crate::guest_runtime::GuestRuntime,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    if runtime.manifest.version != version {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: format!(
+                "guest runtime version {} does not match overlay version {version}",
+                runtime.manifest.version
+            ),
+        });
+    }
+    let resolver = RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
+    if local_source_cache_is_fresh(&resolver.layout(&arch.to_string()), &runtime.digest)?
+        && let Ok(cached) = resolver.resolve(&arch.to_string())
+        && verify_guest_runtime_overlay_verity(&cached).is_ok()
+    {
+        return Ok(cached);
+    }
+    let staging = tempfile::tempdir()?;
+    let root = staging.path().join("overlay-root");
+    std::fs::create_dir_all(&root)?;
+    stage_guest_runtime_overlay_tree(runtime, arch, &root)?;
+    let artifact = assemble_runtime_overlay(cache_root, version, arch, &root, &staging)?;
+    verify_guest_runtime_overlay_verity(&artifact)?;
+    write_local_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
+    write_local_build_epoch(cache_root, version, arch)?;
+    Ok(artifact)
+}
+
+fn stage_guest_runtime_overlay_tree(
+    runtime: &crate::guest_runtime::GuestRuntime,
+    arch: GuestArch,
+    root: &Path,
+) -> Result<(), RuntimeOverlayError> {
+    for (archive_name, overlay_name) in GUEST_RUNTIME_OVERLAY_BINARIES {
+        let member = format!("{arch}/bin/{archive_name}");
+        stage_guest_runtime_member(runtime, &member, &root.join(overlay_name), 0o555)?;
+    }
+    for libc in [
+        crate::guest_libc::GuestLibc::Glibc,
+        crate::guest_libc::GuestLibc::Musl,
+    ] {
+        for soname in GPU_SHIM_SONAMES {
+            let member = format!("{arch}/lib/{libc}/{soname}");
+            stage_guest_runtime_member(
+                runtime,
+                &member,
+                &root.join("gpu").join(libc.as_str()).join(soname),
+                0o555,
+            )?;
+        }
+    }
+    let sdk_prefix = "sdk-py/mvm/";
+    let sdk_members: Vec<&String> = runtime
+        .manifest
+        .files
+        .keys()
+        .filter(|member| member.starts_with(sdk_prefix))
+        .collect();
+    if !sdk_members
+        .iter()
+        .any(|member| member.as_str() == "sdk-py/mvm/__init__.py")
+    {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: "guest runtime contains no Python SDK package initializer".into(),
+        });
+    }
+    for member in sdk_members {
+        let parsed = crate::guest_bins::GuestBinsMember::parse(member).map_err(|e| {
+            RuntimeOverlayError::DirectBuildFailed {
+                reason: format!("invalid Python SDK archive member {member:?}: {e}"),
+            }
+        })?;
+        if !matches!(parsed, crate::guest_bins::GuestBinsMember::PythonSdk { .. }) {
+            return Err(RuntimeOverlayError::DirectBuildFailed {
+                reason: format!("archive member {member:?} is not a Python SDK file"),
+            });
+        }
+        stage_guest_runtime_member(runtime, member, &root.join(member), 0o644)?;
+    }
+    Ok(())
+}
+
+fn stage_guest_runtime_member(
+    runtime: &crate::guest_runtime::GuestRuntime,
+    member: &str,
+    destination: &Path,
+    mode: u32,
+) -> Result<(), RuntimeOverlayError> {
+    let Some(expected_digest) = runtime.manifest.files.get(member) else {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: format!("guest runtime manifest does not contain {member}"),
+        });
+    };
+    let source = runtime.root.join(member);
+    if !std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: format!("guest runtime member is not a regular file: {member}"),
+        });
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(&source, destination)?;
+    if compute_file_sha256(destination)? != *expected_digest {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: format!("guest runtime member changed while staging: {member}"),
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(destination, std::fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    Ok(())
+}
+
+fn assemble_runtime_overlay(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    root: &Path,
+    staging: &tempfile::TempDir,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
 
-    let image = mvm_fs::ext4::build_image(collect_overlay_nodes(&root)?, &Default::default())
+    let image = mvm_fs::ext4::build_image(collect_overlay_nodes(root)?, &Default::default())
         .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
             reason: format!("build ext4 image: {e}"),
         })?;
@@ -321,6 +468,27 @@ pub fn build_runtime_overlay_from_guest_binaries(
         &RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string()),
         arch,
     )
+}
+
+fn verify_guest_runtime_overlay_verity(
+    artifact: &RuntimeOverlayArtifact,
+) -> Result<(), RuntimeOverlayError> {
+    let image = std::fs::read(&artifact.overlay_ext4)?;
+    let tree = std::fs::read(&artifact.sidecar)?;
+    let expected = mvm_fs::ext4::verity::format(
+        &image,
+        &DIRECT_OVERLAY_VERITY_SALT,
+        DIRECT_OVERLAY_DATA_BLOCK_SIZE as usize,
+        DIRECT_OVERLAY_HASH_BLOCK_SIZE as usize,
+    );
+    if expected.hash_tree != tree
+        || mvm_fs::ext4::verity::to_hex(&expected.root_hash) != artifact.roothash
+    {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: "runtime overlay ext4, verity tree, and roothash disagree".into(),
+        });
+    }
+    Ok(())
 }
 
 fn stage_runtime_overlay_binary(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
@@ -412,17 +580,21 @@ pub fn resolve_or_build_local_runtime_overlay(
     let Some(workspace_root) = runtime_overlay_source_checkout_root() else {
         return resolve_cached_runtime_overlay(&resolver, arch);
     };
-    let expected_fingerprint =
-        crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace_root)
-            .map_err(|e| RuntimeOverlayError::NixBuildFailed {
-                reason: format!("compute runtime-overlay source fingerprint: {e}"),
-            })?;
+    let runtime = crate::guest_runtime::resolve_or_build_source_guest_runtime(
+        cache_root,
+        version,
+        arch,
+        &workspace_root,
+    )
+    .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
+        reason: format!("acquire guest runtime for overlay: {e}"),
+    })?;
     match resolve_or_seed_from_default_cache(&resolver, arch) {
         Ok(artifact)
             if local_source_cache_is_fresh(
                 &resolver.layout(&arch.to_string()),
-                &expected_fingerprint,
-            )? =>
+                &runtime.digest,
+            )? && verify_guest_runtime_overlay_verity(&artifact).is_ok() =>
         {
             Ok(artifact)
         }
@@ -433,7 +605,7 @@ pub fn resolve_or_build_local_runtime_overlay(
                 arch = %arch,
                 "runtime overlay source-built cache is stale; rebuilding from source checkout"
             );
-            build_runtime_overlay_from_source_checkout(cache_root, version, arch, &workspace_root)
+            build_runtime_overlay_from_guest_runtime(cache_root, version, arch, &runtime)
         }
         Err(initial_error) => {
             tracing::info!(
@@ -443,7 +615,7 @@ pub fn resolve_or_build_local_runtime_overlay(
                 error = %initial_error,
                 "runtime overlay cache miss or invalid payload; rebuilding from source checkout"
             );
-            build_runtime_overlay_from_source_checkout(cache_root, version, arch, &workspace_root)
+            build_runtime_overlay_from_guest_runtime(cache_root, version, arch, &runtime)
         }
     }
 }
@@ -490,37 +662,6 @@ fn local_source_cache_is_fresh(
 
 fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
     crate::image_source::guest_runtime_source_checkout()
-}
-
-fn build_runtime_overlay_from_source_checkout(
-    cache_root: &Path,
-    version: &str,
-    arch: GuestArch,
-    workspace_root: &Path,
-) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    let source_fingerprint =
-        crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(workspace_root)
-            .map_err(|e| RuntimeOverlayError::NixBuildFailed {
-                reason: format!("compute runtime-overlay source fingerprint: {e}"),
-            })?;
-    let phase = mvm_vmm::host::ui::activity::start(format!(
-        "Compiling the {arch} runtime overlay from local sources (cached for this checkout \
-         afterward)"
-    ));
-    let bins = crate::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
-        cache_root,
-        version,
-        arch,
-        workspace_root,
-    )
-    .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
-        reason: format!("build guest binaries for runtime overlay: {e}"),
-    })?;
-    let artifact = build_runtime_overlay_from_guest_binaries(cache_root, version, arch, &bins)?;
-    write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
-    write_local_build_epoch(cache_root, version, arch)?;
-    phase.finish();
-    Ok(artifact)
 }
 
 // =================================================================
@@ -1141,6 +1282,211 @@ mod tests {
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    fn guest_runtime_fixture() -> (TempDir, crate::guest_runtime::GuestRuntime) {
+        use mvm_core::image_set::{GitCommit, WorktreeState};
+        use sha2::{Digest, Sha256};
+        let dir = TempDir::new().unwrap();
+        let arch = GuestArch::X86_64;
+        let mut files = std::collections::BTreeMap::new();
+        for (name, _) in GUEST_RUNTIME_OVERLAY_BINARIES {
+            let member = format!("{arch}/bin/{name}");
+            let bytes = format!("binary:{name}");
+            let path = dir.path().join(&member);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, bytes.as_bytes()).unwrap();
+            files.insert(member, hex::encode(Sha256::digest(bytes.as_bytes())));
+        }
+        for libc in [
+            crate::guest_libc::GuestLibc::Glibc,
+            crate::guest_libc::GuestLibc::Musl,
+        ] {
+            for soname in GPU_SHIM_SONAMES {
+                let member = format!("{arch}/lib/{libc}/{soname}");
+                let bytes = format!("{libc}:{soname}");
+                let path = dir.path().join(&member);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, bytes.as_bytes()).unwrap();
+                files.insert(member, hex::encode(Sha256::digest(bytes.as_bytes())));
+            }
+        }
+        for (member, bytes) in [
+            ("sdk-py/mvm/__init__.py", b"".as_slice()),
+            ("sdk-py/mvm/host.py", b"def time(): pass\n".as_slice()),
+        ] {
+            let path = dir.path().join(member);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            files.insert(member.to_string(), hex::encode(Sha256::digest(bytes)));
+        }
+        let runtime = crate::guest_runtime::GuestRuntime {
+            root: dir.path().to_path_buf(),
+            digest: "d".repeat(64),
+            manifest: crate::guest_bins::GuestBinsManifest {
+                schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
+                version: "1.2.3".into(),
+                guest_source_fingerprint: "g".repeat(64),
+                sdk_cdylib_source_fingerprint: "s".repeat(64),
+                source: crate::image_source::RepoIdentity {
+                    commit: GitCommit::new("a".repeat(40)).unwrap(),
+                    worktree: WorktreeState::Clean,
+                },
+                files,
+            },
+        };
+        (dir, runtime)
+    }
+
+    #[test]
+    fn guest_runtime_overlay_stages_exact_guest_tree_and_is_deterministic() {
+        let (_source, runtime) = guest_runtime_fixture();
+        let cache_a = TempDir::new().unwrap();
+        let cache_b = TempDir::new().unwrap();
+        let a = build_runtime_overlay_from_guest_runtime(
+            cache_a.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap();
+        let fs = ext4_view::Ext4::load_from_path(&a.overlay_ext4).unwrap();
+        let names_in = |path: &str| {
+            let mut names: Vec<Vec<u8>> = fs
+                .read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().as_ref().to_vec())
+                .filter(|name| name != b"." && name != b"..")
+                .collect();
+            names.sort();
+            names
+        };
+        let mut expected_root: Vec<Vec<u8>> = GUEST_RUNTIME_OVERLAY_BINARIES
+            .iter()
+            .map(|(_, overlay_name)| overlay_name.as_bytes().to_vec())
+            .chain([b"gpu".to_vec(), b"sdk-py".to_vec(), b"VERSION".to_vec()])
+            .collect();
+        expected_root.sort();
+        assert_eq!(names_in("/"), expected_root);
+        assert_eq!(names_in("/gpu"), vec![b"glibc".to_vec(), b"musl".to_vec()]);
+        assert_eq!(names_in("/sdk-py"), vec![b"mvm".to_vec()]);
+        assert_eq!(
+            names_in("/sdk-py/mvm"),
+            vec![b"__init__.py".to_vec(), b"host.py".to_vec()]
+        );
+        for (archive_name, overlay_name) in GUEST_RUNTIME_OVERLAY_BINARIES {
+            let guest_path = format!("/{overlay_name}");
+            assert_eq!(
+                fs.read(guest_path.as_str()).unwrap(),
+                std::fs::read(runtime.root.join(format!("x86_64/bin/{archive_name}"))).unwrap()
+            );
+            assert_eq!(
+                fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
+                0o555
+            );
+        }
+        for libc in ["glibc", "musl"] {
+            let mut expected_gpu: Vec<Vec<u8>> = GPU_SHIM_SONAMES
+                .iter()
+                .map(|name| name.as_bytes().to_vec())
+                .collect();
+            expected_gpu.sort();
+            assert_eq!(names_in(&format!("/gpu/{libc}")), expected_gpu);
+            for soname in GPU_SHIM_SONAMES {
+                let guest_path = format!("/gpu/{libc}/{soname}");
+                assert_eq!(
+                    fs.read(guest_path.as_str()).unwrap(),
+                    std::fs::read(runtime.root.join(format!("x86_64/lib/{libc}/{soname}")))
+                        .unwrap()
+                );
+                assert_eq!(
+                    fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
+                    0o555
+                );
+            }
+        }
+        for member in ["sdk-py/mvm/__init__.py", "sdk-py/mvm/host.py"] {
+            let guest_path = format!("/{member}");
+            assert_eq!(
+                fs.read(guest_path.as_str()).unwrap(),
+                std::fs::read(runtime.root.join(member)).unwrap()
+            );
+            assert_eq!(
+                fs.metadata(guest_path.as_str()).unwrap().mode() & 0o777,
+                0o644
+            );
+        }
+        let b = build_runtime_overlay_from_guest_runtime(
+            cache_b.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&a.overlay_ext4).unwrap(),
+            std::fs::read(&b.overlay_ext4).unwrap()
+        );
+        assert_eq!(
+            std::fs::read(&a.sidecar).unwrap(),
+            std::fs::read(&b.sidecar).unwrap()
+        );
+        assert_eq!(a.roothash, b.roothash);
+        assert_eq!(
+            std::fs::read_to_string(
+                RuntimeOverlayLayout::under(cache_a.path(), "1.2.3", "x86_64")
+                    .local_source_fingerprint_file
+            )
+            .unwrap()
+            .trim(),
+            runtime.digest,
+        );
+    }
+
+    #[test]
+    fn guest_runtime_overlay_refuses_missing_or_changed_member_and_tampered_verity() {
+        let (_source, mut runtime) = guest_runtime_fixture();
+        let cache = TempDir::new().unwrap();
+        let member = "x86_64/lib/musl/libcuda.so.1";
+        let digest = runtime.manifest.files.remove(member).unwrap();
+        let error = build_runtime_overlay_from_guest_runtime(
+            cache.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(member), "{error}");
+        runtime.manifest.files.insert(member.into(), digest);
+        std::fs::write(runtime.root.join(member), b"changed").unwrap();
+        let error = build_runtime_overlay_from_guest_runtime(
+            cache.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("changed while staging"),
+            "{error}"
+        );
+
+        let (_source, runtime) = guest_runtime_fixture();
+        let artifact = build_runtime_overlay_from_guest_runtime(
+            cache.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &runtime,
+        )
+        .unwrap();
+        std::fs::write(&artifact.sidecar, b"wrong tree").unwrap();
+        assert!(verify_guest_runtime_overlay_verity(&artifact).is_err());
+        std::fs::write(&artifact.roothash_file, format!("{}\n", "f".repeat(64))).unwrap();
+        let wrong_root = RuntimeOverlayArtifact {
+            roothash: "f".repeat(64),
+            ..artifact
+        };
+        assert!(verify_guest_runtime_overlay_verity(&wrong_root).is_err());
+    }
 
     #[cfg(feature = "release-channel")]
     #[test]

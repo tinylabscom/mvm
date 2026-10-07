@@ -184,6 +184,8 @@ pub mod guest_agent_build;
 /// release and assemble its overlay, initramfs and SDK sidecar from.
 /// Compiled through [`guest_agent_build`]'s toolchain and caches.
 pub mod guest_bins;
+/// One digest-keyed guest-runtime tree shared by the host-side assemblers.
+pub mod guest_runtime;
 pub mod nix;
 /// Inject the mvm guest runtime (agent, netinit, `/init`, `/mvm/runtime`
 /// mount point) into an OCI-unpacked rootfs so `run --image` has a vsock

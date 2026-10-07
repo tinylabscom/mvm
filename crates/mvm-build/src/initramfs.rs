@@ -1,15 +1,11 @@
 //! Build and resolve the universal initramfs artifact.
 //!
-//! The initramfs is a tiny deterministic **cargo artifact** — one static
-//! `mvm-guest-agent` binary packed as `/init` in an epoch-zero newc cpio —
-//! built locally by [`build_initramfs_with_cargo`] on Linux and cached at
-//! `<cache_root>/<version>/<arch>/`. Its attestability comes from the
-//! reproducible cargo build of the pinned agent source plus the content
-//! hash, not from Nix. Nix remains the build for kernels, images, and
-//! overlays, where toolchain variance matters; mvm-images' initramfs flake
-//! is the publish-path build of the same artifact. This
-//! module mirrors the runtime-overlay orchestration but is intentionally
-//! smaller because the artifact has no verity sidecar and no per-rootfs
+//! The initramfs is one static agent packed as `/init` in an epoch-zero newc
+//! cpio, cached at `<cache_root>/<version>/<arch>/`. A source checkout takes
+//! the distinct size-tuned agent from the verified guest-runtime tree and
+//! packs it with [`build_initramfs_from_guest_runtime`]. The image-set
+//! download remains a compatibility path. This module is smaller than the
+//! overlay assembler because the artifact has no verity sidecar or per-rootfs
 //! variation.
 
 use std::path::{Path, PathBuf};
@@ -357,7 +353,53 @@ fn build_initramfs_with_cargo(
     Ok(installed)
 }
 
-/// Write the four artifact files (image + sidecars) for `agent_bytes` into
+/// Pack the size-tuned initramfs agent from the verified guest runtime as
+/// `/init`. This archive member is deliberately distinct from the overlay's
+/// addons-enabled agent under `<arch>/bin/`.
+pub fn build_initramfs_from_guest_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    runtime: &crate::guest_runtime::GuestRuntime,
+) -> Result<InitramfsArtifact, InitramfsBuildError> {
+    if runtime.manifest.version != version {
+        return Err(InitramfsBuildError::CargoBuildFailed {
+            reason: format!(
+                "guest runtime version {} does not match initramfs version {version}",
+                runtime.manifest.version
+            ),
+        });
+    }
+    let member = format!("{arch}/initramfs/mvm-guest-agent");
+    let Some(expected_digest) = runtime.manifest.files.get(&member) else {
+        return Err(InitramfsBuildError::CargoBuildFailed {
+            reason: format!("guest runtime manifest does not contain {member}"),
+        });
+    };
+    let agent = runtime.root.join(&member);
+    if !std::fs::symlink_metadata(&agent).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Err(InitramfsBuildError::CargoBuildFailed {
+            reason: format!("guest runtime member is not a regular file: {member}"),
+        });
+    }
+    let agent_bytes = std::fs::read(&agent)?;
+    if sha256_hex(&agent_bytes) != *expected_digest {
+        return Err(InitramfsBuildError::CargoBuildFailed {
+            reason: format!("guest runtime member changed while packing: {member}"),
+        });
+    }
+    if cached_artifact_matches_source(cache_root, version, arch, &runtime.digest)
+        && let Ok(cached) = InitramfsResolver::new(cache_root, version).resolve(&arch.to_string())
+    {
+        return Ok(cached);
+    }
+    let staging = tempfile::tempdir()?;
+    assemble_initramfs_artifact(&agent_bytes, version, staging.path())?;
+    let installed = install_initramfs_into_cache(staging.path(), cache_root, version, arch)?;
+    record_source_fingerprint(cache_root, version, arch, &runtime.digest)?;
+    Ok(installed)
+}
+
 /// Write the four artifact files (image + sidecars) for `agent_bytes` into
 /// `out_dir`: the deterministic image, `initramfs.hash` = SHA-256 of the
 /// UNCOMPRESSED cpio, `initramfs.size` = the compressed byte length, and
@@ -850,6 +892,94 @@ mod tests {
     use std::cell::Cell;
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn guest_runtime_initramfs_uses_sealed_agent_and_exact_cpio() {
+        use flate2::read::GzDecoder;
+        use mvm_core::image_set::{GitCommit, WorktreeState};
+        use std::io::Read as _;
+
+        let source = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+        let sealed_member = format!("{arch}/initramfs/mvm-guest-agent");
+        let overlay_member = format!("{arch}/bin/mvm-guest-agent");
+        for (member, bytes) in [
+            (sealed_member.as_str(), b"sealed-agent".as_slice()),
+            (overlay_member.as_str(), b"addons-agent".as_slice()),
+        ] {
+            let path = source.path().join(member);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let files = std::collections::BTreeMap::from([
+            (sealed_member.clone(), sha256_hex(b"sealed-agent")),
+            (overlay_member, sha256_hex(b"addons-agent")),
+        ]);
+        let mut runtime = crate::guest_runtime::GuestRuntime {
+            root: source.path().to_path_buf(),
+            digest: "d".repeat(64),
+            manifest: crate::guest_bins::GuestBinsManifest {
+                schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
+                version: "1.2.3".into(),
+                guest_source_fingerprint: "g".repeat(64),
+                sdk_cdylib_source_fingerprint: "s".repeat(64),
+                source: crate::image_source::RepoIdentity {
+                    commit: GitCommit::new("a".repeat(40)).unwrap(),
+                    worktree: WorktreeState::Clean,
+                },
+                files,
+            },
+        };
+        let artifact =
+            build_initramfs_from_guest_runtime(cache.path(), "1.2.3", arch, &runtime).unwrap();
+        let mut cpio = Vec::new();
+        GzDecoder::new(std::fs::File::open(&artifact.image_path).unwrap())
+            .read_to_end(&mut cpio)
+            .unwrap();
+        assert_eq!(cpio, initramfs_cpio(b"sealed-agent"));
+        assert!(
+            !cpio
+                .windows(b"addons-agent".len())
+                .any(|bytes| bytes == b"addons-agent")
+        );
+        assert_eq!(
+            std::fs::read_to_string(cache.path().join("1.2.3/x86_64/SOURCE_FINGERPRINT")).unwrap(),
+            runtime.digest
+        );
+
+        let stale = tempfile::tempdir().unwrap();
+        assemble_initramfs_artifact(b"older-agent", "1.2.3", stale.path()).unwrap();
+        install_initramfs_into_cache(stale.path(), cache.path(), "1.2.3", arch).unwrap();
+        record_source_fingerprint(cache.path(), "1.2.3", arch, "older-runtime").unwrap();
+        let refreshed =
+            build_initramfs_from_guest_runtime(cache.path(), "1.2.3", arch, &runtime).unwrap();
+        let mut refreshed_cpio = Vec::new();
+        GzDecoder::new(std::fs::File::open(&refreshed.image_path).unwrap())
+            .read_to_end(&mut refreshed_cpio)
+            .unwrap();
+        assert_eq!(refreshed_cpio, initramfs_cpio(b"sealed-agent"));
+        assert_eq!(
+            std::fs::read_to_string(cache.path().join("1.2.3/x86_64/SOURCE_FINGERPRINT")).unwrap(),
+            runtime.digest
+        );
+
+        runtime.manifest.files.remove(&sealed_member);
+        let error =
+            build_initramfs_from_guest_runtime(cache.path(), "1.2.3", arch, &runtime).unwrap_err();
+        assert!(error.to_string().contains(&sealed_member), "{error}");
+        runtime
+            .manifest
+            .files
+            .insert(sealed_member.clone(), sha256_hex(b"sealed-agent"));
+        std::fs::write(source.path().join(&sealed_member), b"changed").unwrap();
+        let error =
+            build_initramfs_from_guest_runtime(cache.path(), "1.2.3", arch, &runtime).unwrap_err();
+        assert!(
+            error.to_string().contains("changed while packing"),
+            "{error}"
+        );
+    }
 
     fn absent(arch: GuestArch) -> InitramfsBuildError {
         not_in_image_set_error(arch)
