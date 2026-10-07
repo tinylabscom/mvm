@@ -6,16 +6,16 @@ fn workspace_shards_keep_mutable_state_per_worker_run() {
         .expect("read workspace shard workflow");
 
     assert!(
-        worker.contains(
-            "base=\"$RUNNER_TEMP/mvm-workspace-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""
-        ),
+        worker.contains("base=\"/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}\""),
         "the persistent runner must not reuse another job's mutable state"
     );
-    assert!(worker.contains("chmod 700 \"$base\" \"$base/tmp\""));
+    assert!(worker.contains("mkdir -m 700 -- \"$base\""));
+    assert!(worker.contains("mkdir -m 700 -- \"$base/home\" \"$base/mvm\" \"$base/tmp\""));
     assert!(worker.contains("CARGO_HOME=%s\\nRUSTUP_HOME=%s\\n"));
-    assert!(worker.contains("HOME=%s\\nMVM_HOME=%s\\nTMPDIR=%s\\n"));
+    assert!(worker.contains("\"$base/home\" \"$base/mvm\" \"$base/tmp\""));
     assert!(worker.contains(">> \"$GITHUB_ENV\""));
     assert!(worker.contains("if: always()"));
     assert!(worker.contains("[ ! -L \"$base\" ]"));
+    assert!(worker.contains("chmod -R u+rwX -- \"$base\""));
     assert!(worker.contains("rm -rf -- \"$base\""));
 }

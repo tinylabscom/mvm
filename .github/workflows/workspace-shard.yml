@@ -108,13 +108,15 @@ jobs:
         env:
           SHARD: ${{ inputs.shard }}
         run: |
-          base="$RUNNER_TEMP/mvm-workspace-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
-          mkdir -p "$base/tmp"
-          chmod 700 "$base" "$base/tmp"
+          set -euo pipefail
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[12]$ ]]
+          base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+          mkdir -m 700 -- "$base"
+          mkdir -m 700 -- "$base/home" "$base/mvm" "$base/tmp"
           {
             printf 'RUNNER_ORIGINAL_HOME=%s\n' "$HOME"
             printf 'CARGO_HOME=%s\nRUSTUP_HOME=%s\n' "${CARGO_HOME:-$HOME/.cargo}" "${RUSTUP_HOME:-$HOME/.rustup}"
-            printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base" "$base" "$base/tmp"
+            printf 'HOME=%s\nMVM_HOME=%s\nTMPDIR=%s\n' "$base/home" "$base/mvm" "$base/tmp"
           } >> "$GITHUB_ENV"
 
       - name: Build
@@ -178,12 +180,14 @@ jobs:
         env:
           SHARD: ${{ inputs.shard }}
         run: |
+          set -euo pipefail
           if [ -n "${RUNNER_ORIGINAL_HOME:-}" ]; then
             printf 'HOME=%s\n' "$RUNNER_ORIGINAL_HOME" >> "$GITHUB_ENV"
           fi
-          if [[ "$RUNNER_TEMP" = /* && "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[12]$ ]]; then
-            base="$RUNNER_TEMP/mvm-workspace-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
+          if [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ && "$SHARD" =~ ^[12]$ ]]; then
+            base="/tmp/mvm-w-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${SHARD}"
             if [ -d "$base" ] && [ ! -L "$base" ]; then
+              chmod -R u+rwX -- "$base"
               rm -rf -- "$base"
             fi
           fi
