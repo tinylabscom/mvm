@@ -748,7 +748,7 @@ pub fn bring_loopback_up() {
     if loopback_is_up() {
         return;
     }
-    if bring_loopback_up_with_busybox() {
+    if busybox_loopback_up() {
         if loopback_is_up() {
             return;
         }
@@ -774,7 +774,10 @@ pub fn loopback_flags_indicate_up(flags: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn bring_loopback_up_with_busybox() -> bool {
+/// Fallback for a kernel that refused the netlink loopback request: run
+/// busybox `ip link set lo up`, then `ifconfig lo up`. False when busybox is
+/// absent or both commands fail.
+fn busybox_loopback_up() -> bool {
     let busybox = Path::new("/bin/busybox");
     if !is_executable(busybox) {
         return false;

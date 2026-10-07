@@ -9,21 +9,21 @@
 //! Reuses the source-parsing + transport rules from
 //! [`super::fetch::BundleSource`] (local path, `https://` URL, or `oci://`
 //! registry reference; plain HTTP refused unless `--allow-http`; a tag
-//! reference refused under `--prod`). After verification
-//! the archive is atomically installed under
-//! `~/.mvm/bundles/<bundle_sha256>/` via
-//! [`mvm_core::plan::BundleRegistry::install`]; the archive bytes are
-//! also written to `<bundle_sha256>.mvmpkg` so the
-//! `FsBundleResolver` admit-time path finds them too.
+//! reference refused under `--prod`). The archive is streamed into
+//! `~/.mvm/bundles/<bundle_sha256>/` by
+//! [`mvm_core::plan::BundleRegistry::install_file`], each artifact hashed on
+//! its way in and the directory promoted only once all of them verified; the
+//! archive is also copied to `<bundle_sha256>.mvmpkg` so the
+//! `FsBundleResolver` admit-time path finds it too. Nothing reads the archive
+//! into memory whole.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
 use mvm_core::plan::bundle::{
-    BundleInstallError, BundleRegistry, FsTrustStore, InstalledBundle, bundle_sha256,
-    read_and_verify_bundle,
+    BundleInstallError, BundleRegistry, FsTrustStore, InstalledBundle, verify_bundle_file,
 };
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::oci::ImageReference;
@@ -82,7 +82,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let installed = install_archive(
         ArchiveInstall {
             source: &args.source,
-            bytes: &loaded.bytes,
+            archive: loaded.path(),
             resolved: loaded.resolved.as_ref(),
             on_existing: if args.force {
                 OnExisting::Replace
@@ -143,7 +143,7 @@ enum OnExisting {
 struct ArchiveInstall<'a> {
     /// Where the bytes came from, as the user named it.
     source: &'a str,
-    bytes: &'a [u8],
+    archive: &'a Path,
     /// The digest-pinned reference a registry pull resolved to.
     resolved: Option<&'a ImageReference>,
     on_existing: OnExisting,
@@ -167,7 +167,7 @@ fn install_archive(
     registry: &BundleRegistry,
 ) -> Result<Installed> {
     let force = request.on_existing == OnExisting::Replace;
-    let bundle = match registry.install(request.bytes, trust, force) {
+    let bundle = match registry.install_file(request.archive, trust, force) {
         Ok(bundle) => bundle,
         Err(BundleInstallError::AlreadyInstalled { bundle_sha256 })
             if request.on_existing == OnExisting::Reuse =>
@@ -225,16 +225,16 @@ pub(in crate::commands) fn settle_manifest_archive(
     let loaded = load_bundle(arg, LoadOptions::default())?;
     let trust = trust_store(None)?;
     let sha256 = if dry_run {
-        read_and_verify_bundle(&loaded.bytes, &trust)
-            .with_context(|| format!("verifying bundle archive {arg}"))?;
-        let sha256 = bundle_sha256(&loaded.bytes);
+        let sha256 = verify_bundle_file(loaded.path(), &trust)
+            .with_context(|| format!("verifying bundle archive {arg}"))?
+            .bundle_sha256;
         eprintln!("[mvm] verified {arg} as bundle {sha256} (dry run: not installed)");
         sha256
     } else {
         let installed = install_archive(
             ArchiveInstall {
                 source: arg,
-                bytes: &loaded.bytes,
+                archive: loaded.path(),
                 resolved: None,
                 on_existing: OnExisting::Reuse,
             },
@@ -281,6 +281,7 @@ fn audit_source(source: &str, resolved: Option<&mvm_fs::oci::ImageReference>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::plan::bundle::bundle_sha256;
 
     #[test]
     fn audit_source_records_the_resolved_digest_for_a_registry_pull() {
@@ -542,13 +543,13 @@ mod tests {
     #[test]
     fn bundle_install_still_refuses_a_second_install_without_force() {
         let host = Host::new(true);
-        let (_dir, _path, bytes) = host.archive();
+        let (_dir, path, _bytes) = host.archive();
         let trust = trust_store(None).expect("trust store");
         let install = |on_existing| {
             install_archive(
                 ArchiveInstall {
                     source: "./app.mvmpkg",
-                    bytes: &bytes,
+                    archive: &path,
                     resolved: None,
                     on_existing,
                 },

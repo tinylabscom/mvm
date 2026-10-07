@@ -67,9 +67,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::test_support::build_tar;
-    use super::super::{
-        RefusalReason, UnpackOptions, UnpackReport, unpack_layer, unpack_layer_with_prior_paths,
-    };
+    use super::super::{RefusalReason, UnpackOptions, UnpackReport, unpack_layer};
     use crate::ext4::Owner;
     use crate::ownership::OwnerTable;
 
@@ -114,8 +112,13 @@ mod tests {
     }
 
     fn unpack(tar: Vec<u8>, root: &TempDir) -> UnpackReport {
-        let report =
-            unpack_layer(Cursor::new(tar), root.path(), &UnpackOptions::default()).expect("unpack");
+        let report = unpack_layer(
+            Cursor::new(tar),
+            root.path(),
+            &UnpackOptions::default(),
+            None,
+        )
+        .expect("unpack");
         assert!(report.refused.is_empty(), "{:?}", report.refused);
         report
     }
@@ -125,11 +128,11 @@ mod tests {
         let mut prior: HashSet<PathBuf> = HashSet::new();
         let mut table = OwnerTable::new();
         for layer in layers {
-            let report = unpack_layer_with_prior_paths(
+            let report = unpack_layer(
                 Cursor::new(layer),
                 root.path(),
                 &UnpackOptions::default(),
-                &prior,
+                Some(&prior),
             )
             .expect("unpack");
             assert!(report.refused.is_empty(), "{:?}", report.refused);
@@ -206,6 +209,7 @@ mod tests {
             })),
             root.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack");
         assert_eq!(report.refused.len(), 1);
@@ -239,6 +243,7 @@ mod tests {
             })),
             root.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack");
         assert_eq!(report.refused.len(), 1);
@@ -257,6 +262,7 @@ mod tests {
             })),
             root.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack");
         assert_eq!(report.refused.len(), 1);

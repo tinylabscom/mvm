@@ -475,6 +475,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -508,6 +509,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -536,6 +538,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -564,6 +567,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -596,6 +600,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -637,6 +642,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -657,6 +663,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -683,6 +690,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -707,6 +715,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -731,6 +740,7 @@ mod tests {
             Cursor::new(tar_bytes),
             tmp.path(),
             &UnpackOptions::default(),
+            None,
         )
         .expect("unpack ok");
 
@@ -798,6 +808,7 @@ mod tests {
                 Cursor::new(tar.clone()),
                 &root_path,
                 &UnpackOptions::default(),
+                None,
             );
             if !victim.exists() {
                 escaped = true;

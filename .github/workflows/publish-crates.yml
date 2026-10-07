@@ -47,6 +47,8 @@ concurrency:
 jobs:
   bdd:
     if: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run }}
+    permissions:
+      contents: read
     uses: ./.github/workflows/bdd.yml
 
   # Token-free: every crate in the plan is packaged exactly as it would be

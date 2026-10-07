@@ -92,10 +92,15 @@ use crate::packs::Sha256Hex;
 mod declarations;
 mod lookup;
 mod signer;
+mod stream;
 mod verify_error;
 pub use declarations::BundleSizeBudget;
 pub use lookup::{BundleResolveError, BundleResolver, FsBundleResolver, FsTrustStore, TrustStore};
 pub use signer::ManifestSigner;
+pub use stream::{
+    BundlePayload, MAX_IMAGE_SET_MANIFEST_BYTES, VerifiedBundleFile, verify_bundle_file,
+    write_bundle_to,
+};
 pub use verify_error::{BundleVerifyError, ensure_safe_path};
 
 /// Derive the key_id from a verifying-key's bytes.
@@ -253,21 +258,6 @@ impl BundleRegistry {
             .join("image-sets")
     }
 
-    /// Publish only the embedded image-set members into their content-addressed
-    /// cache. Used by `bundle fetch`, which verifies a remote bundle without
-    /// installing the workload bundle itself.
-    pub fn cache_embedded_image_sets(
-        &self,
-        verified: &VerifiedBundle,
-        bundle_sha256: &str,
-    ) -> Result<(), BundleInstallError> {
-        install_embedded_image_set_cache(
-            verified,
-            &self.embedded_image_set_cache_root(),
-            bundle_sha256,
-        )
-    }
-
     /// Install a verified archive into the registry. Verifies the
     /// archive against `trust`, extracts every declared artifact
     /// atomically (stage to `<sha>.partial/`, rename to `<sha>/`),
@@ -277,137 +267,27 @@ impl BundleRegistry {
     /// Idempotent when `force == false`: if `<sha>/` already exists
     /// the call returns `AlreadyInstalled`. `force == true` removes
     /// the existing install and replaces it.
+    ///
+    /// The bytes are spooled to a temporary file and installed through
+    /// [`install_file`](Self::install_file), so an archive in memory and one
+    /// on disk go through the same streaming verification.
     pub fn install(
         &self,
         archive_bytes: &[u8],
         trust: &dyn TrustStore,
         force: bool,
     ) -> Result<InstalledBundle, BundleInstallError> {
-        let verified =
-            read_and_verify_bundle(archive_bytes, trust).map_err(BundleInstallError::Verify)?;
         let sha = bundle_sha256(archive_bytes);
-
-        let install_dir = self.install_dir(&sha);
-
-        // Ensure the registry root exists with tight perms — same
-        // shape as the trust store directory.
-        std::fs::create_dir_all(&self.root).map_err(|e| BundleInstallError::Io {
+        let io_error = |reason: String| BundleInstallError::Io {
             bundle_sha256: sha.clone(),
-            reason: format!("creating registry root {}: {e}", self.root.display()),
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(meta) = std::fs::metadata(&self.root) {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o700);
-                let _ = std::fs::set_permissions(&self.root, perms);
-            }
-        }
-
-        // Embedded image sets have their own CAS so multiple workload bundles
-        // carrying identical boot bytes converge on one verified cache entry.
-        // The bundle verification above covered every nested hash; an existing
-        // cache hit is re-hashed again before it is trusted.
-        self.cache_embedded_image_sets(&verified, &sha)?;
-
-        if install_dir.exists() {
-            if !force {
-                return Err(BundleInstallError::AlreadyInstalled {
-                    bundle_sha256: sha.clone(),
-                });
-            }
-            std::fs::remove_dir_all(&install_dir).map_err(|e| BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason: format!(
-                    "removing existing install at {}: {e}",
-                    install_dir.display()
-                ),
-            })?;
-        }
-
-        // Stage extracts into <sha>.partial/. A previous crash
-        // could have left this dir behind; remove it first.
-        let staging = self.root.join(format!("{sha}.partial"));
-        if staging.exists() {
-            std::fs::remove_dir_all(&staging).map_err(|e| BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason: format!("removing stale staging at {}: {e}", staging.display()),
-            })?;
-        }
-        std::fs::create_dir_all(&staging).map_err(|e| BundleInstallError::Io {
-            bundle_sha256: sha.clone(),
-            reason: format!("creating staging dir {}: {e}", staging.display()),
-        })?;
-
-        // Write manifest.json + manifest.sig + each artifact into
-        // the staging dir. `verified.artifacts` is keyed by the
-        // archive-relative path the verifier already validated as
-        // safe — direct join is OK.
-        let manifest_bytes =
-            canonical_manifest_bytes(&verified.manifest).map_err(|e| BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason: format!("re-serialising manifest: {e:#}"),
-            })?;
-        write_into(&staging, MANIFEST_FILENAME, &manifest_bytes, &sha)?;
-
-        // Recover the signature blob from the original archive —
-        // verified.artifacts doesn't carry it as an entry, but the
-        // tar does.
-        let sig_bytes = read_signature_from_archive(archive_bytes).map_err(|reason| {
-            BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason,
-            }
-        })?;
-        write_into(&staging, SIGNATURE_FILENAME, &sig_bytes, &sha)?;
-
-        for (rel_path, bytes) in &verified.artifacts {
-            write_into(&staging, rel_path, bytes, &sha)?;
-        }
-
-        // Promote the staging dir to its final name. `rename` is
-        // atomic on POSIX within the same filesystem; the registry
-        // root lives inside `~/.mvm/` so this is always within
-        // `$HOME`'s filesystem in practice.
-        std::fs::rename(&staging, &install_dir).map_err(|e| BundleInstallError::Io {
-            bundle_sha256: sha.clone(),
-            reason: format!(
-                "promoting staging {} → install {}: {e}",
-                staging.display(),
-                install_dir.display()
-            ),
-        })?;
-
-        // Also persist the archive bytes so FsBundleResolver finds
-        // them. Atomic via NamedTempFile + persist.
-        let archive_path = self.archive_path(&sha);
-        let mut tmp =
-            tempfile::NamedTempFile::new_in(&self.root).map_err(|e| BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason: format!("creating archive tempfile: {e}"),
-            })?;
-        std::io::Write::write_all(tmp.as_file_mut(), archive_bytes).map_err(|e| {
-            BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason: format!("writing archive bytes: {e}"),
-            }
-        })?;
-        tmp.persist(&archive_path)
-            .map_err(|e| BundleInstallError::Io {
-                bundle_sha256: sha.clone(),
-                reason: format!(
-                    "persisting archive {} → {}: {e}",
-                    e.file.path().display(),
-                    archive_path.display()
-                ),
-            })?;
-
-        Ok(InstalledBundle {
-            sha256: sha,
-            root: install_dir,
-            manifest: verified.manifest,
-        })
+            reason,
+        };
+        let mut spooled = tempfile::NamedTempFile::new()
+            .map_err(|e| io_error(format!("creating archive spool file: {e}")))?;
+        spooled
+            .write_all(archive_bytes)
+            .map_err(|e| io_error(format!("spooling archive bytes: {e}")))?;
+        self.install_file(spooled.path(), trust, force)
     }
 
     /// Remove an installed bundle. Best-effort symmetric to
@@ -492,6 +372,37 @@ impl BundleRegistry {
     /// when the entry isn't present (the caller often wants to
     /// fall through to a different lookup); errors only on I/O
     /// or corrupt-manifest cases.
+    /// The signature-verified manifest of an installed bundle, or `None`
+    /// when no archive is installed under `bundle_sha256`.
+    ///
+    /// Reads `manifest.json` and `manifest.sig` from the head of the
+    /// installed archive and runs every manifest check
+    /// [`read_and_verify_bundle`] does — trust-store lookup, signature,
+    /// schema, declarations — without hashing an artifact. The artifacts were
+    /// hashed when the bundle was installed; this is the cheap read a launch
+    /// makes to learn what the bundle declares, and it refuses a manifest
+    /// whose posture was edited on disk after install.
+    pub fn verified_manifest(
+        &self,
+        bundle_sha256: &str,
+        trust: &dyn TrustStore,
+    ) -> Result<Option<BundleManifest>, BundleVerifyError> {
+        let path = self.archive_path(bundle_sha256);
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(BundleVerifyError::ManifestParse(format!(
+                    "opening installed bundle archive {}: {e}",
+                    path.display()
+                )));
+            }
+        };
+        let (manifest_bytes, sig_bytes) = read_manifest_entries(file)?;
+        verify_signed_manifest(&manifest_bytes, &sig_bytes, trust)
+            .map(|(manifest, _)| Some(manifest))
+    }
+
     pub fn find(&self, bundle_sha256: &str) -> anyhow::Result<Option<InstalledBundle>> {
         let dir = self.install_dir(bundle_sha256);
         if !dir.exists() {
@@ -518,109 +429,106 @@ impl BundleRegistry {
     }
 }
 
-/// Write a single file under `dir` atomically. Used by
-/// [`BundleRegistry::install`] for every staged artifact + the
-/// manifest + the signature.
-fn write_into(
-    dir: &Path,
-    rel_path: &str,
-    bytes: &[u8],
-    bundle_sha256: &str,
-) -> Result<(), BundleInstallError> {
-    let target = dir.join(rel_path);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| BundleInstallError::Io {
-            bundle_sha256: bundle_sha256.to_string(),
-            reason: format!("creating {}: {e}", parent.display()),
-        })?;
-    }
-    std::fs::write(&target, bytes).map_err(|e| BundleInstallError::Io {
-        bundle_sha256: bundle_sha256.to_string(),
-        reason: format!("writing {}: {e}", target.display()),
-    })
-}
-
-/// Read just the signature blob from a `.mvmpkg` archive without
-/// going through the full verification pass. Used by
-/// [`BundleRegistry::install`] to copy the signature into the
-/// extracted directory.
-fn read_signature_from_archive(archive: &[u8]) -> Result<Vec<u8>, String> {
-    let mut tar = tar::Archive::new(std::io::Cursor::new(archive));
-    for entry in tar.entries().map_err(|e| e.to_string())? {
-        let mut entry = entry.map_err(|e| e.to_string())?;
+/// Read `manifest.json` and `manifest.sig` out of an archive, stopping as soon
+/// as both are found. A bundle writes them first, so a multi-GiB archive is
+/// read only as far as its first two entries.
+fn read_manifest_entries(archive: impl Read) -> Result<(Vec<u8>, Vec<u8>), BundleVerifyError> {
+    let tar_error = |e: std::io::Error| BundleVerifyError::ManifestParse(format!("tar read: {e}"));
+    let mut manifest = None;
+    let mut signature = None;
+    let mut budget = declarations::BundleSizeBudget::default();
+    for entry in tar::Archive::new(archive).entries().map_err(tar_error)? {
+        let mut entry = entry.map_err(tar_error)?;
         let path = entry
             .path()
-            .map_err(|e| e.to_string())?
+            .map_err(tar_error)?
             .to_string_lossy()
             .into_owned();
-        if path == SIGNATURE_FILENAME {
-            let mut bytes = Vec::with_capacity(64);
-            std::io::Read::read_to_end(&mut entry, &mut bytes).map_err(|e| e.to_string())?;
-            return Ok(bytes);
+        let slot = match path.as_str() {
+            MANIFEST_FILENAME => &mut manifest,
+            SIGNATURE_FILENAME => &mut signature,
+            _ => continue,
+        };
+        budget.admit(&path, entry.size())?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(tar_error)?;
+        *slot = Some(bytes);
+        if manifest.is_some() && signature.is_some() {
+            break;
         }
     }
-    Err(format!("{SIGNATURE_FILENAME} not present in archive"))
+    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
+    Ok((
+        manifest.ok_or_else(|| missing(MANIFEST_FILENAME))?,
+        signature.ok_or_else(|| missing(SIGNATURE_FILENAME))?,
+    ))
+}
+
+/// The verified bundle an embedded image-set cache is filled from: its
+/// manifest, the image sets it embeds, and where their bytes can be read.
+struct ImageSetSource<'a> {
+    manifest: &'a BundleManifest,
+    embedded: &'a [VerifiedEmbeddedImageSet],
+    artifacts: &'a dyn stream::ArtifactSource,
+}
+
+impl ImageSetSource<'_> {
+    fn manifest_declaration(
+        &self,
+        embedded: &VerifiedEmbeddedImageSet,
+    ) -> Result<&BundleArtifact, String> {
+        self.manifest
+            .find_by_name(&embedded.manifest_artifact)
+            .ok_or_else(|| "verified embedded image-set declaration disappeared".to_string())
+    }
 }
 
 fn install_embedded_image_set_cache(
-    verified: &VerifiedBundle,
+    source: &ImageSetSource<'_>,
     cache_root: &Path,
     bundle_sha256: &str,
 ) -> Result<(), BundleInstallError> {
-    if verified.embedded_image_sets.is_empty() {
+    if source.embedded.is_empty() {
         return Ok(());
     }
-    std::fs::create_dir_all(cache_root).map_err(|error| BundleInstallError::Io {
+    let io_error = |reason: String| BundleInstallError::Io {
         bundle_sha256: bundle_sha256.to_string(),
-        reason: format!(
+        reason,
+    };
+    std::fs::create_dir_all(cache_root).map_err(|error| {
+        io_error(format!(
             "creating embedded image-set cache {}: {error}",
             cache_root.display()
-        ),
+        ))
     })?;
 
-    for embedded in &verified.embedded_image_sets {
+    for embedded in source.embedded {
         let destination = cache_root.join(embedded.manifest_sha256.as_str());
         if destination.exists() {
-            verify_cached_embedded_image_set(verified, embedded, &destination).map_err(
-                |reason| BundleInstallError::Io {
-                    bundle_sha256: bundle_sha256.to_string(),
-                    reason,
-                },
-            )?;
+            verify_cached_embedded_image_set(source, embedded, &destination).map_err(io_error)?;
             continue;
         }
 
         let staging = tempfile::Builder::new()
             .prefix(".image-set-")
             .tempdir_in(cache_root)
-            .map_err(|error| BundleInstallError::Io {
-                bundle_sha256: bundle_sha256.to_string(),
-                reason: format!("creating embedded image-set staging directory: {error}"),
+            .map_err(|error| {
+                io_error(format!(
+                    "creating embedded image-set staging directory: {error}"
+                ))
             })?;
-        write_embedded_image_set_cache(verified, embedded, staging.path()).map_err(|reason| {
-            BundleInstallError::Io {
-                bundle_sha256: bundle_sha256.to_string(),
-                reason,
-            }
-        })?;
+        write_embedded_image_set_cache(source, embedded, staging.path()).map_err(io_error)?;
         match std::fs::rename(staging.path(), &destination) {
             Ok(()) => {}
             Err(_) if destination.exists() => {
-                verify_cached_embedded_image_set(verified, embedded, &destination).map_err(
-                    |reason| BundleInstallError::Io {
-                        bundle_sha256: bundle_sha256.to_string(),
-                        reason,
-                    },
-                )?;
+                verify_cached_embedded_image_set(source, embedded, &destination)
+                    .map_err(io_error)?;
             }
             Err(error) => {
-                return Err(BundleInstallError::Io {
-                    bundle_sha256: bundle_sha256.to_string(),
-                    reason: format!(
-                        "publishing embedded image-set cache {}: {error}",
-                        destination.display()
-                    ),
-                });
+                return Err(io_error(format!(
+                    "publishing embedded image-set cache {}: {error}",
+                    destination.display()
+                )));
             }
         }
     }
@@ -628,66 +536,56 @@ fn install_embedded_image_set_cache(
 }
 
 fn write_embedded_image_set_cache(
-    verified: &VerifiedBundle,
+    source: &ImageSetSource<'_>,
     embedded: &VerifiedEmbeddedImageSet,
     destination: &Path,
 ) -> Result<(), String> {
-    let manifest_declaration = verified
-        .manifest
+    let manifest_declaration = source.manifest_declaration(embedded)?;
+    source
         .artifacts
-        .iter()
-        .find(|artifact| artifact.name == embedded.manifest_artifact)
-        .ok_or_else(|| "verified embedded image-set declaration disappeared".to_string())?;
-    let manifest_bytes = verified
-        .artifacts
-        .get(&manifest_declaration.path)
-        .ok_or_else(|| "verified embedded image-set manifest bytes disappeared".to_string())?;
-    std::fs::write(destination.join("image-set.json"), manifest_bytes)
+        .copy_to(
+            &manifest_declaration.path,
+            &destination.join("image-set.json"),
+        )
         .map_err(|error| format!("writing embedded image-set manifest: {error}"))?;
     let artifact_dir = destination.join("artifacts");
     std::fs::create_dir_all(&artifact_dir)
         .map_err(|error| format!("creating embedded image-set artifact directory: {error}"))?;
     for (name, bundle_path) in &embedded.artifact_paths {
-        let bytes = verified.artifacts.get(bundle_path).ok_or_else(|| {
-            format!("verified embedded image-set artifact {name} bytes disappeared")
-        })?;
-        std::fs::write(artifact_dir.join(name), bytes)
+        source
+            .artifacts
+            .copy_to(bundle_path, &artifact_dir.join(name))
             .map_err(|error| format!("writing embedded image-set artifact {name}: {error}"))?;
     }
     Ok(())
 }
 
+/// Re-hash an existing cache entry against the digests the verified bundle
+/// declares. Streams each file; nothing is held whole.
 fn verify_cached_embedded_image_set(
-    verified: &VerifiedBundle,
+    source: &ImageSetSource<'_>,
     embedded: &VerifiedEmbeddedImageSet,
     destination: &Path,
 ) -> Result<(), String> {
-    let manifest_declaration = verified
-        .manifest
-        .artifacts
-        .iter()
-        .find(|artifact| artifact.name == embedded.manifest_artifact)
-        .ok_or_else(|| "verified embedded image-set declaration disappeared".to_string())?;
-    let expected_manifest = verified
-        .artifacts
-        .get(&manifest_declaration.path)
-        .ok_or_else(|| "verified embedded image-set manifest bytes disappeared".to_string())?;
-    let cached_manifest = std::fs::read(destination.join("image-set.json"))
-        .map_err(|error| format!("reading cached embedded image-set manifest: {error}"))?;
-    if &cached_manifest != expected_manifest {
+    let manifest_declaration = source.manifest_declaration(embedded)?;
+    let cached_digest = |path: &Path, what: &str| {
+        crate::crypto::image_verify::sha256_file(path)
+            .map_err(|error| format!("reading cached embedded image-set {what}: {error}"))
+    };
+    if cached_digest(&destination.join("image-set.json"), "manifest")?
+        != manifest_declaration.sha256
+    {
         return Err(format!(
             "cached embedded image set {} failed manifest re-verification",
             embedded.manifest_sha256.as_str()
         ));
     }
-    for (name, bundle_path) in &embedded.artifact_paths {
-        let expected = verified.artifacts.get(bundle_path).ok_or_else(|| {
-            format!("verified embedded image-set artifact {name} bytes disappeared")
+    for name in embedded.artifact_paths.keys() {
+        let declared = source.manifest.find_by_name(name).ok_or_else(|| {
+            format!("verified embedded image-set artifact {name} declaration disappeared")
         })?;
-        let cached = std::fs::read(destination.join("artifacts").join(name)).map_err(|error| {
-            format!("reading cached embedded image-set artifact {name}: {error}")
-        })?;
-        if &cached != expected {
+        let cached = cached_digest(&destination.join("artifacts").join(name), name)?;
+        if cached != declared.sha256 {
             return Err(format!(
                 "cached embedded image-set artifact {name} failed re-verification"
             ));
@@ -840,93 +738,20 @@ fn extract_manifest_signature(archive: &[u8]) -> Result<[u8; 64], String> {
 ///
 /// Returns the full archive bytes as a `Vec<u8>` — the caller is
 /// responsible for writing them out. In-memory representation
-/// matches the on-disk archive byte-for-byte.
+/// matches the on-disk archive byte-for-byte. [`write_bundle_to`] is the same
+/// writer streaming into any `Write`, from files as well as bytes.
 pub fn write_bundle(
     manifest: &BundleManifest,
     signer: &dyn ManifestSigner,
-    mut artifacts: Vec<(String, Vec<u8>)>,
+    artifacts: Vec<(String, Vec<u8>)>,
 ) -> Result<Vec<u8>> {
-    // Defensive: the manifest must declare the same key_id the
-    // signing key would derive. Mismatch is a publisher bug, not a
-    // verifier concern, but catching it at write-time stops bad
-    // bundles from ever leaving the build host.
-    let verifying_key = signer.verifying_key();
-    let derived = key_id_from_pubkey(&verifying_key);
-    declarations::validate_declarations(manifest).context("refusing to seal the bundle")?;
-    anyhow::ensure!(
-        manifest.key_id == derived,
-        "manifest key_id ({}) does not match signing key derivation ({})",
-        manifest.key_id.0,
-        derived.0
-    );
-
-    // Same defensive check for declared sha256 vs actual bytes.
-    for (path, bytes) in &artifacts {
-        let art = manifest
-            .artifacts
-            .iter()
-            .find(|a| a.path == *path)
-            .with_context(|| {
-                format!("archive contains {path:?} not declared in manifest.artifacts")
-            })?;
-        let actual = sha256_hex(bytes);
-        anyhow::ensure!(
-            art.sha256 == actual,
-            "artifact {} sha256 mismatch at write time: manifest {}, actual {}",
-            art.name,
-            art.sha256,
-            actual,
-        );
-        anyhow::ensure!(
-            art.size_bytes == bytes.len() as u64,
-            "artifact {} size mismatch at write time: manifest {}, actual {}",
-            art.name,
-            art.size_bytes,
-            bytes.len(),
-        );
-        ensure_safe_path(path).context("artifact path validation")?;
-    }
-
-    let manifest_bytes = canonical_manifest_bytes(manifest)?;
-    let sig_bytes = signer
-        .sign_manifest(&manifest_bytes)
-        .context("signing the bundle manifest")?;
-    verifying_key
-        .verify(&manifest_bytes, &Signature::from_bytes(&sig_bytes))
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "the signer returned a signature that does not verify under its own key {}: {e}",
-                derived.0
-            )
-        })?;
-
-    let mut tar_buf = Cursor::new(Vec::<u8>::new());
-    {
-        let mut tar = tar::Builder::new(&mut tar_buf);
-
-        // manifest.json first so a partial-read consumer can find it
-        // without scanning the whole archive.
-        append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes)?;
-        append_bytes(&mut tar, SIGNATURE_FILENAME, &sig_bytes)?;
-
-        // Artifacts in manifest order — deterministic output.
-        artifacts.sort_by(|(a, _), (b, _)| a.cmp(b));
-        for (path, bytes) in &artifacts {
-            append_bytes(&mut tar, path, bytes)?;
-        }
-        tar.finish().context("finalise tar archive")?;
-    }
-
-    Ok(tar_buf.into_inner())
-}
-
-fn append_bytes<W: Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) -> Result<()> {
-    let mut header = tar::Header::new_gnu();
-    header.set_size(bytes.len() as u64);
-    header.set_mode(0o644);
-    header.set_cksum();
-    tar.append_data(&mut header, path, Cursor::new(bytes))
-        .with_context(|| format!("write tar entry {path:?}"))
+    let payload = artifacts
+        .into_iter()
+        .map(|(path, bytes)| (path, BundlePayload::Bytes(bytes)))
+        .collect();
+    let mut archive = Vec::new();
+    write_bundle_to(manifest, signer, payload, &mut archive)?;
+    Ok(archive)
 }
 
 /// Verified bundle handle: the parsed manifest, the bytes for each
@@ -987,17 +812,16 @@ pub fn check_embedded_image_set_for_backend(
 /// All four failure modes ([`BundleVerifyError::UnknownKey`],
 /// `SignatureInvalid`, `ArtifactSha256Mismatch`, `UnsafePath`)
 /// reject *before* the artifact bytes are exposed to anything
-/// outside this function's local scope. The bytes ARE held in
-/// memory during the size+hash pass; production callers that need
-/// streaming verification of multi-GiB rootfs files will want a
-/// chunked extractor (Phase 2).
+/// outside this function's local scope. Every entry is held in memory
+/// for the size and hash pass, which suits bytes that are already in
+/// memory. An archive on disk goes through [`verify_bundle_file`] or
+/// [`BundleRegistry::install_file`], which stream it instead.
 pub fn read_and_verify_bundle(
     archive_bytes: &[u8],
     trust_store: &dyn TrustStore,
 ) -> Result<VerifiedBundle, BundleVerifyError> {
-    // Pass 1: pull every entry into memory. Bundles for v1 are
-    // modest in size (≤ a few hundred MiB); a chunked impl can come
-    // when that stops being true.
+    // Pass 1: pull every entry into memory, each counted against the size
+    // caps before it is read.
     let mut entries: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut budget = declarations::BundleSizeBudget::default();
     let mut archive = tar::Archive::new(Cursor::new(archive_bytes));
@@ -1030,6 +854,42 @@ pub fn read_and_verify_bundle(
         .ok_or_else(|| BundleVerifyError::ManifestParse(format!("{SIGNATURE_FILENAME} missing")))?
         .clone();
 
+    let (manifest, declared_key_id) =
+        verify_signed_manifest(&manifest_bytes, &sig_bytes, trust_store)?;
+
+    // ----- Step 6: per-artifact hash + size check -----
+    let mut artifacts_out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    for art in &manifest.artifacts {
+        ensure_safe_path(&art.path)?;
+        let bytes = entries
+            .get(&art.path)
+            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
+                name: art.name.clone(),
+            })?;
+        stream::check_artifact_digest(art, bytes.len() as u64, sha256_hex(bytes))?;
+        artifacts_out.insert(art.path.clone(), bytes.clone());
+    }
+
+    let embedded_image_sets =
+        verify_embedded_image_sets(&manifest, &stream::InMemoryArtifacts(&artifacts_out))?;
+
+    Ok(VerifiedBundle {
+        manifest,
+        artifacts: artifacts_out,
+        key_id: declared_key_id,
+        embedded_image_sets,
+    })
+}
+
+/// Verify a manifest's detached signature against the trust store and parse
+/// it: the schema sniff, the key lookup, the signature, the full parse, and
+/// the declaration checks. Everything [`read_and_verify_bundle`] establishes
+/// about the manifest, without looking at a single artifact byte.
+fn verify_signed_manifest(
+    manifest_bytes: &[u8],
+    sig_bytes: &[u8],
+    trust_store: &dyn TrustStore,
+) -> Result<(BundleManifest, KeyId), BundleVerifyError> {
     // ----- Step 1: schema version sniff (pre-signature) -----
     //
     // We deliberately read schema_version *before* checking the
@@ -1041,7 +901,7 @@ pub fn read_and_verify_bundle(
     struct SchemaProbe {
         schema_version: u32,
     }
-    let probe: SchemaProbe = serde_json::from_slice(&manifest_bytes).map_err(|e| {
+    let probe: SchemaProbe = serde_json::from_slice(manifest_bytes).map_err(|e| {
         BundleVerifyError::ManifestParse(format!("schema_version probe failed: {e}"))
     })?;
     if probe.schema_version > BUNDLE_SCHEMA_VERSION {
@@ -1056,7 +916,7 @@ pub fn read_and_verify_bundle(
     struct KeyIdProbe {
         key_id: KeyId,
     }
-    let key_probe: KeyIdProbe = serde_json::from_slice(&manifest_bytes)
+    let key_probe: KeyIdProbe = serde_json::from_slice(manifest_bytes)
         .map_err(|e| BundleVerifyError::ManifestParse(format!("key_id probe failed: {e}")))?;
     let declared_key_id = key_probe.key_id;
 
@@ -1086,18 +946,18 @@ pub fn read_and_verify_bundle(
             got: sig_bytes.len(),
         });
     }
-    let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().expect("checked above");
+    let sig_arr: [u8; 64] = sig_bytes.try_into().expect("checked above");
     let signature = Signature::from_bytes(&sig_arr);
-    pubkey.verify(&manifest_bytes, &signature).map_err(|e| {
-        BundleVerifyError::SignatureInvalid {
+    pubkey
+        .verify(manifest_bytes, &signature)
+        .map_err(|e| BundleVerifyError::SignatureInvalid {
             key_id: declared_key_id.0.clone(),
             reason: e.to_string(),
-        }
-    })?;
+        })?;
 
     // ----- Step 5: full manifest parse, now that the bytes are
     // proven authentic -----
-    let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)
+    let manifest: BundleManifest = serde_json::from_slice(manifest_bytes)
         .map_err(|e| BundleVerifyError::ManifestParse(e.to_string()))?;
     if manifest.schema_version < 3 && !manifest.members.is_empty() {
         return Err(BundleVerifyError::MembersRequireSchemaV3 {
@@ -1106,42 +966,7 @@ pub fn read_and_verify_bundle(
     }
     declarations::validate_declarations(&manifest)?;
 
-    // ----- Step 6: per-artifact hash + size check -----
-    let mut artifacts_out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for art in &manifest.artifacts {
-        ensure_safe_path(&art.path)?;
-        let bytes = entries
-            .get(&art.path)
-            .ok_or_else(|| BundleVerifyError::ArtifactMissing {
-                name: art.name.clone(),
-            })?;
-        let actual_size = bytes.len() as u64;
-        if actual_size != art.size_bytes {
-            return Err(BundleVerifyError::ArtifactSizeMismatch {
-                name: art.name.clone(),
-                declared: art.size_bytes,
-                actual: actual_size,
-            });
-        }
-        let actual_sha = sha256_hex(bytes);
-        if actual_sha != art.sha256 {
-            return Err(BundleVerifyError::ArtifactSha256Mismatch {
-                name: art.name.clone(),
-                declared: art.sha256.clone(),
-                actual: actual_sha,
-            });
-        }
-        artifacts_out.insert(art.path.clone(), bytes.clone());
-    }
-
-    let embedded_image_sets = verify_embedded_image_sets(&manifest, &artifacts_out)?;
-
-    Ok(VerifiedBundle {
-        manifest,
-        artifacts: artifacts_out,
-        key_id: declared_key_id,
-        embedded_image_sets,
-    })
+    Ok((manifest, declared_key_id))
 }
 
 /// Bind each embedded image-set declaration to the already verified bundle
@@ -1149,7 +974,7 @@ pub fn read_and_verify_bundle(
 /// compatibility; this adapter owns only the cross-manifest name/hash binding.
 fn verify_embedded_image_sets(
     bundle: &BundleManifest,
-    artifacts: &BTreeMap<String, Vec<u8>>,
+    artifacts: &dyn stream::ArtifactSource,
 ) -> Result<Vec<VerifiedEmbeddedImageSet>, BundleVerifyError> {
     let mut names = BTreeSet::new();
     for artifact in &bundle.artifacts {
@@ -1175,7 +1000,7 @@ fn verify_embedded_image_sets(
 
 fn verify_embedded_image_set(
     bundle: &BundleManifest,
-    artifacts: &BTreeMap<String, Vec<u8>>,
+    artifacts: &dyn stream::ArtifactSource,
     manifest_artifact: &str,
 ) -> Result<VerifiedEmbeddedImageSet, BundleVerifyError> {
     let declaration = bundle
@@ -1185,12 +1010,13 @@ fn verify_embedded_image_set(
         .ok_or_else(|| BundleVerifyError::ImageSetManifestArtifactMissing {
             name: manifest_artifact.to_string(),
         })?;
-    let manifest_bytes = artifacts.get(&declaration.path).ok_or_else(|| {
-        BundleVerifyError::ImageSetManifestArtifactMissing {
+    let manifest_bytes = artifacts
+        .read_image_set_manifest(&declaration.path)
+        .map_err(|reason| BundleVerifyError::ImageSetManifestParse {
             name: manifest_artifact.to_string(),
-        }
-    })?;
-    let manifest: ImageSetManifest = serde_json::from_slice(manifest_bytes).map_err(|error| {
+            reason,
+        })?;
+    let manifest: ImageSetManifest = serde_json::from_slice(&manifest_bytes).map_err(|error| {
         BundleVerifyError::ImageSetManifestParse {
             name: manifest_artifact.to_string(),
             reason: error.to_string(),
@@ -1240,7 +1066,7 @@ fn verify_embedded_image_set(
 
     Ok(VerifiedEmbeddedImageSet {
         manifest_artifact: manifest_artifact.to_string(),
-        manifest_sha256: Sha256Hex::from_bytes(manifest_bytes),
+        manifest_sha256: Sha256Hex::from_bytes(&manifest_bytes),
         manifest,
         artifact_paths,
     })
@@ -1271,6 +1097,15 @@ mod tests {
     };
     use crate::kernel_format::KernelFormat;
     use crate::packs::{FlakeLockIdentity, SbomReference, SourceRevisionIdentity};
+
+    fn append_bytes<W: Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) -> Result<()> {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        tar.append_data(&mut header, path, Cursor::new(bytes))
+            .with_context(|| format!("write tar entry {path:?}"))
+    }
 
     /// In-memory trust store for tests. Production uses
     /// [`FsTrustStore`]; the trait split keeps the verifier free of
@@ -1874,52 +1709,6 @@ mod tests {
             }
             other => panic!("expected ArtifactMissing, got {other:?}"),
         }
-    }
-
-    /// The signature blob read back is the exact one written.
-    ///
-    /// Nothing asserted the *contents* of what this returns, so
-    /// `read_signature_from_archive -> Ok(vec![])` survived mutation:
-    /// the install path would have copied an empty signature into the
-    /// extracted directory and no test noticed. Matching the filename is
-    /// also load-bearing — inverting that comparison picks up the
-    /// manifest instead.
-    #[test]
-    fn read_signature_from_archive_returns_the_signature_verbatim() {
-        let sk = fresh_key();
-        let key_id = key_id_from_pubkey(&sk.verifying_key());
-        let manifest = make_manifest(key_id, vec![]);
-        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
-        let sig = sk.sign(&manifest_bytes).to_bytes().to_vec();
-
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        {
-            let mut tar = tar::Builder::new(&mut buf);
-            append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
-            append_bytes(&mut tar, SIGNATURE_FILENAME, &sig).unwrap();
-            tar.finish().unwrap();
-        }
-
-        let got = read_signature_from_archive(&buf.into_inner()).expect("signature present");
-        assert_eq!(got, sig, "must return the signature bytes verbatim");
-        assert_eq!(got.len(), 64, "an ed25519 signature is 64 bytes");
-        assert_ne!(got, manifest_bytes, "must not return the manifest");
-    }
-
-    /// A signature-less archive is an error, not an empty signature.
-    #[test]
-    fn read_signature_from_archive_errors_when_absent() {
-        let sk = fresh_key();
-        let key_id = key_id_from_pubkey(&sk.verifying_key());
-        let manifest_bytes = canonical_manifest_bytes(&make_manifest(key_id, vec![])).unwrap();
-
-        let mut buf = Cursor::new(Vec::<u8>::new());
-        {
-            let mut tar = tar::Builder::new(&mut buf);
-            append_bytes(&mut tar, MANIFEST_FILENAME, &manifest_bytes).unwrap();
-            tar.finish().unwrap();
-        }
-        assert!(read_signature_from_archive(&buf.into_inner()).is_err());
     }
 
     /// Each unsafe shape rejected on its own.
@@ -3047,6 +2836,66 @@ mod tests {
         assert!(matches!(
             read_and_verify_bundle(&archive, &trust(&sk)),
             Err(BundleVerifyError::EntryTooLarge { size, .. }) if size == 3 * 1024 * 1024 * 1024
+        ));
+    }
+
+    #[test]
+    fn verified_manifest_reads_the_posture_of_an_installed_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sk = fresh_key();
+        let archive =
+            hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(sealed_posture())]);
+        let installed = registry.install(&archive, &trust(&sk), false).unwrap();
+
+        let manifest = registry
+            .verified_manifest(&installed.sha256, &trust(&sk))
+            .expect("verifies")
+            .expect("installed");
+        assert_eq!(manifest.security_posture(), Some(&sealed_posture()));
+        assert!(
+            registry
+                .verified_manifest(&"0".repeat(64), &trust(&sk))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn verified_manifest_refuses_a_posture_widened_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sk = fresh_key();
+        let archive =
+            hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(sealed_posture())]);
+        let installed = registry.install(&archive, &trust(&sk), false).unwrap();
+        let path = registry.archive_path(&installed.sha256);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let needle = br#""allows_egress":false"#;
+        let at = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        bytes[at..at + needle.len()].copy_from_slice(br#""allows_egress":true "#);
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            registry.verified_manifest(&installed.sha256, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn verified_manifest_refuses_an_unknown_publisher() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle(&sk, Vec::new());
+        let installed = registry.install(&archive, &trust(&sk), false).unwrap();
+
+        assert!(matches!(
+            registry.verified_manifest(&installed.sha256, &trust(&fresh_key())),
+            Err(BundleVerifyError::UnknownKey { .. })
         ));
     }
 }

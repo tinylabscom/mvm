@@ -332,6 +332,8 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
     let (rootfs_blob, recorded_sha) =
         fork_admission_rootfs(p.store, p.parent_meta, scratch.path())?;
     let parent_agent_verbs = parent_agent_verb_override(p.checkpoint, p.store);
+    let parent_bundle =
+        mvm_client::admission::InheritedBundle::of_parent_vm(&p.parent_meta.vm_name)?;
     let tenant = crate::commands::vm::tenant_resolution::resolve_tenant(None);
     super::validate_fork_secret_policy(
         p.checkpoint,
@@ -374,7 +376,10 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             keys_dir: None,
             audit_dir: None,
             policy_dir: None,
-            bundle_pin: None,
+            bundle_pin: parent_bundle
+                .as_ref()
+                .map(mvm_client::admission::InheritedBundle::pin),
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -1195,5 +1200,63 @@ mod tests {
             msg.contains("fs_quick") || msg.contains("fs-quick"),
             "error must name the fs_quick alternative: {msg}"
         );
+    }
+
+    fn fork_child_of(
+        store: &CheckpointStore,
+        id: &str,
+        parent_meta: &CheckpointMeta,
+        child: &str,
+    ) -> Result<AdmittedForkChild> {
+        admit_forked_child(&AdmitForkedChildParams {
+            store,
+            checkpoint: &CheckpointId::new(id),
+            parent_meta,
+            child_vm_name: child,
+            backend_kind: BackendKind::Hvf,
+            declared_secrets: &[],
+            allow_secret_drop: false,
+            intent: ForkIntent::Ordinary,
+        })
+    }
+
+    /// A child of a parent that booted a bundle is admitted under that bundle,
+    /// so the bundle is re-verified at the child's admission. Here it has been
+    /// uninstalled since the parent booted, and the child is refused rather
+    /// than booting unpinned; a parent whose plan names no bundle forks as
+    /// before.
+    #[test]
+    fn a_fork_of_a_bundle_booted_parent_re_verifies_the_parents_bundle() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CheckpointStore::at(tmp.path().join("store"));
+        let id = "ck-bundle-parent";
+        let parent_meta = parent_with_grants(&store, id, None);
+
+        // The parent's plan, as its boot persisted it.
+        let unpinned = fork_child_of(&store, id, &parent_meta, "plain-child")
+            .expect("a parent with no plan forks unpinned");
+        let mut parent_plan = unpinned.admission.admitted.plan().clone();
+        assert!(parent_plan.bundle.is_none());
+        crate::commands::vm::plan_persist::write_plan(&parent_meta.vm_name, &parent_plan).unwrap();
+        fork_child_of(&store, id, &parent_meta, "plain-child-2")
+            .expect("a parent whose plan names no bundle forks as before");
+
+        let bundle_sha256 = "ab".repeat(32);
+        parent_plan.bundle = Some(mvm_core::plan::bundle::PlanArtifact::new(
+            bundle_sha256.clone(),
+            &[0; 64],
+            mvm_core::plan::bundle::KeyId("publisher".into()),
+        ));
+        crate::commands::vm::plan_persist::write_plan(&parent_meta.vm_name, &parent_plan).unwrap();
+
+        let err = match fork_child_of(&store, id, &parent_meta, "bundle-child") {
+            Ok(_) => panic!("a child of an uninstalled bundle must not be admitted"),
+            Err(e) => format!("{e:#}"),
+        };
+        assert!(err.contains("reading bundle archive"), "{err}");
+        assert!(err.contains(&bundle_sha256), "{err}");
     }
 }

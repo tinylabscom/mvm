@@ -131,21 +131,13 @@ impl ConsoleTail {
     /// Read `path` from its start. `follow` keeps polling for appended bytes
     /// once the end is reached, instead of finishing.
     pub fn open(path: &Path, follow: bool) -> Self {
-        Self::open_with_redactor(path, follow, default_redactor())
-    }
-
-    /// As [`open`](Self::open), with an explicit detector.
-    ///
-    /// Exists so a test can pin behaviour to a known rule set rather than to
-    /// whatever the defaults happen to be that week.
-    pub fn open_with_redactor(path: &Path, follow: bool, redactor: Arc<PiiRedactor>) -> Self {
         Self {
             path: path.to_path_buf(),
             file: None,
             offset: 0,
             seq: 0,
             follow,
-            redactor,
+            redactor: default_redactor(),
         }
     }
 

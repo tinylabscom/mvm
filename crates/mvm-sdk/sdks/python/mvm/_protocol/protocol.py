@@ -125,6 +125,125 @@ class ConsoleSessionInfo:
     exit_code: Optional[int] = None
 
 
+class DisplayDeliveryRefusal1(Enum):
+    no_bridge = 'no_bridge'
+
+
+class DisplayDeliveryRefusal2(Enum):
+    out_of_order = 'out_of_order'
+
+
+class DisplayDeliveryRefusal3(Enum):
+    malformed = 'malformed'
+
+
+class DisplayDeliveryRefusal4(Enum):
+    busy = 'busy'
+
+
+DisplayDeliveryRefusal = Union[
+    DisplayDeliveryRefusal1,
+    DisplayDeliveryRefusal2,
+    DisplayDeliveryRefusal3,
+    DisplayDeliveryRefusal4,
+]
+
+
+class Kind(Enum):
+    pointer_move = 'pointer-move'
+
+
+@dataclass
+class DisplayInputEvent1:
+    kind: Kind
+    x: int
+    y: int
+
+
+class Kind1(Enum):
+    pointer_button = 'pointer-button'
+
+
+class Kind2(Enum):
+    wheel = 'wheel'
+
+
+@dataclass
+class DisplayInputEvent3:
+    delta_x: int
+    delta_y: int
+    kind: Kind2
+    x: int
+    y: int
+
+
+class Kind3(Enum):
+    key = 'key'
+
+
+@dataclass
+class DisplayInputEvent4:
+    key: str
+    kind: Kind3
+    pressed: bool
+
+
+class Kind4(Enum):
+    text = 'text'
+
+
+@dataclass
+class DisplayInputEvent5:
+    kind: Kind4
+    text: str
+
+
+class Kind5(Enum):
+    paste = 'paste'
+
+
+@dataclass
+class DisplayInputEvent6:
+    kind: Kind5
+    text: str
+
+
+class Kind6(Enum):
+    credential_entry_begin = 'credential-entry-begin'
+
+
+@dataclass
+class DisplayInputEvent7:
+    kind: Kind6
+
+
+class Kind7(Enum):
+    credential_entry_end = 'credential-entry-end'
+
+
+@dataclass
+class DisplayInputEvent8:
+    kind: Kind7
+
+
+class DisplayInputResult1(Enum):
+    Accepted = 'Accepted'
+
+
+@dataclass
+class Refused:
+    kind: DisplayDeliveryRefusal
+    message: str
+
+
+@dataclass
+class DisplayInputResult2:
+    Refused: Refused
+
+
+DisplayInputResult = Union[DisplayInputResult1, DisplayInputResult2]
+
+
 @dataclass
 class Read:
     length: int
@@ -1176,6 +1295,11 @@ class GuestResponse44:
 
 
 @dataclass
+class GuestResponse46:
+    DisplayInputResult: DisplayInputResult
+
+
+@dataclass
 class InputFrame:
     payload: List[int]
     seq: int
@@ -1227,6 +1351,12 @@ class MediatedExecCall:
 
 
 Nonce = str
+
+
+class PointerButton(Enum):
+    left = 'left'
+    middle = 'middle'
+    right = 'right'
 
 
 @dataclass
@@ -1554,14 +1684,14 @@ class StreamInputResult2(Enum):
 
 
 @dataclass
-class Refused:
+class Refused1:
     kind: StreamInputRefusal
     message: str
 
 
 @dataclass
 class StreamInputResult3:
-    Refused: Refused
+    Refused: Refused1
 
 
 StreamInputResult = Union[StreamInputResult1, StreamInputResult2, StreamInputResult3]
@@ -1663,6 +1793,33 @@ VolumeMountResult = Union[VolumeMountResult1, VolumeMountResult2, VolumeMountRes
 class CapabilityId:
     service: ServiceId
     verb: str
+
+
+@dataclass
+class DisplayInputEvent2:
+    button: PointerButton
+    kind: Kind1
+    pressed: bool
+    x: int
+    y: int
+
+
+DisplayInputEvent = Union[
+    DisplayInputEvent1,
+    DisplayInputEvent2,
+    DisplayInputEvent3,
+    DisplayInputEvent4,
+    DisplayInputEvent5,
+    DisplayInputEvent6,
+    DisplayInputEvent7,
+    DisplayInputEvent8,
+]
+
+
+@dataclass
+class DisplayInputFrame:
+    events: List[DisplayInputEvent]
+    seq: int
 
 
 @dataclass
@@ -1798,6 +1955,11 @@ class GuestRequest20:
 @dataclass
 class GuestRequest51:
     StreamInput: InputFrame
+
+
+@dataclass
+class GuestRequest53:
+    DisplayInput: DisplayInputFrame
 
 
 @dataclass
@@ -2044,6 +2206,7 @@ GuestResponse = Union[
     GuestResponse43,
     GuestResponse44,
     GuestResponse45,
+    GuestResponse46,
 ]
 
 
@@ -2122,6 +2285,7 @@ GuestRequest = Union[
     GuestRequest50,
     GuestRequest51,
     GuestRequest52,
+    GuestRequest53,
 ]
 
 
