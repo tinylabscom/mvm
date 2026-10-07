@@ -1471,3 +1471,146 @@ fn the_no_kvm_smoke_prints_its_boot_log_on_any_failure() {
         "the boot log dump must be armed before the installed-bundle run"
     );
 }
+
+/// Top-level job names of a workflow, in declaration order.
+fn workflow_jobs(workflow: &str) -> Vec<&str> {
+    let jobs = workflow
+        .split_once("\njobs:\n")
+        .map(|(_, jobs)| jobs)
+        .expect("workflow must declare jobs");
+    jobs.lines()
+        .filter_map(|line| {
+            let name = line.strip_prefix("  ")?.strip_suffix(':')?;
+            (!name.starts_with([' ', '#']) && !name.contains(' ')).then_some(name)
+        })
+        .collect()
+}
+
+/// The jobs one job waits for, in either the inline or the list form.
+fn job_needs(block: &str) -> Vec<&str> {
+    let mut lines = block.lines().skip(1);
+    while let Some(line) = lines.next() {
+        let Some(value) = line.strip_prefix("    needs:") else {
+            continue;
+        };
+        let value = value.trim();
+        if let Some(list) = value.strip_prefix('[') {
+            return list
+                .trim_end_matches(']')
+                .split(',')
+                .map(str::trim)
+                .collect();
+        }
+        if !value.is_empty() {
+            return vec![value];
+        }
+        return lines
+            .map_while(|line| line.strip_prefix("      - "))
+            .map(str::trim)
+            .collect();
+    }
+    Vec::new()
+}
+
+/// Extended CI shares the organization's hosted-runner pool with the merge
+/// queue. Keyed per dispatch, operator runs on feature branches stacked on top
+/// of the nightly and of each other, and merge-group jobs waited behind them
+/// for an hour. One group for every ref and trigger, never cancelling a run
+/// that has started, holds it to one run at a time.
+#[test]
+fn extended_ci_runs_one_at_a_time_across_every_ref() {
+    let workflow = ci_full();
+    assert!(
+        workflow.contains("\nconcurrency:\n  group: extended-ci\n  cancel-in-progress: false\n"),
+        "Extended CI must share one literal concurrency group across refs and triggers"
+    );
+    assert_eq!(
+        workflow.matches("concurrency:").count(),
+        1,
+        "a job-level concurrency group would let jobs escape the workflow's"
+    );
+    for per_run_key in ["github.run_id", "github.ref", "github.event_name }}-"] {
+        assert!(
+            !workflow
+                .split_once("\nconcurrency:\n")
+                .and_then(|(_, rest)| rest.split_once("\n\n"))
+                .is_some_and(|(group, _)| group.contains(per_run_key)),
+            "the concurrency group must not be keyed on {per_run_key}"
+        );
+    }
+}
+
+/// Every matrix in Extended CI is bounded, so adding a leg cannot widen the
+/// runner footprint unnoticed.
+#[test]
+fn every_extended_ci_matrix_runs_one_leg_at_a_time() {
+    let workflow = ci_full();
+    let mut matrices = 0;
+    for job in workflow_jobs(&workflow) {
+        let block = job_block(&workflow, job);
+        if block.contains("matrix:") {
+            matrices += 1;
+            assert!(
+                block.contains("max-parallel: 1"),
+                "{job} must run its matrix one leg at a time"
+            );
+        }
+    }
+    assert!(matrices > 0, "the live BDD matrix must still be found");
+}
+
+/// Extended CI runs as a few serial tracks so it holds about five hosted
+/// runners rather than twenty-odd. Each chained job runs under `!cancelled()`,
+/// so a red lane does not skip the lanes queued behind it; only the no-KVM
+/// pipeline, whose stages consume each other's artifacts, keeps the implicit
+/// all-succeeded rule.
+#[test]
+fn extended_ci_holds_one_hosted_runner_per_track() {
+    let workflow = ci_full();
+    let jobs = workflow_jobs(&workflow);
+    let heads: Vec<&str> = jobs
+        .iter()
+        .copied()
+        .filter(|job| job_needs(job_block(&workflow, job)).is_empty())
+        .collect();
+    assert_eq!(
+        heads,
+        [
+            "bdd-live-warm-claim",
+            "e2e-docs",
+            "source-bootstrap-linux",
+            "apple",
+            "no-kvm-prepare",
+        ],
+        "only the five track heads may start with the run"
+    );
+
+    let artifact_chain = ["no-kvm-bootstrap", "no-kvm-build", "no-kvm-smoke"];
+    for job in &jobs {
+        let block = job_block(&workflow, job);
+        if heads.contains(job) || artifact_chain.contains(job) {
+            continue;
+        }
+        assert!(
+            block.contains("    if: ${{ !cancelled() }}\n"),
+            "{job} must run whatever its predecessor concluded, unless the run is cancelled"
+        );
+    }
+
+    // The SDK dry-run's matrices are declared in the workflows it calls, out
+    // of reach of `max-parallel` here, so it must start only once every
+    // track has finished.
+    let sdk = job_block(&workflow, "sdk-release-dry-run");
+    let sdk_needs = job_needs(sdk);
+    for tail in jobs.iter().filter(|job| {
+        **job != "sdk-release-dry-run"
+            && !jobs
+                .iter()
+                .any(|other| job_needs(job_block(&workflow, other)).contains(job))
+    }) {
+        assert!(
+            sdk_needs.contains(tail),
+            "sdk-release-dry-run must wait for the {tail} track"
+        );
+    }
+}
