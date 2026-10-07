@@ -262,7 +262,10 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // install, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
     ("logs", AuditPosture::ReadOnly),
-    ("display", AuditPosture::ReadOnly),
+    // View-only by default. With `--input` it is an interactive control
+    // surface whose audit channel is the display input gate's own chain
+    // entries (`display.granted`, `display.refused`, `display.input_event`).
+    ("display", AuditPosture::InteractiveOrControl),
     ("console", AuditPosture::InteractiveOrControl),
     // Hangs up the client attached to a console session. The guest request is
     // recorded as an inbound RPC (`verb=console-detach`), and a detach that
