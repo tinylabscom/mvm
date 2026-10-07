@@ -199,15 +199,15 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
     }
     let cache_root = mvm_build::app_deps::resolve_cache_root(args.cache_root.as_deref());
     let runner = HostAuditRunner;
-    let outcomes = run_with_runner(&cache_root, &args, &runner)?;
+    let outcomes = audit_volumes(&cache_root, &args, &runner)?;
     render_summary(&outcomes, args.json)?;
     Ok(())
 }
 
-/// Test-visible driver. Splits the AuditRunner out so tests can
-/// inject a [`MockAuditRunner`]; production [`run`] wires
-/// [`HostAuditRunner`].
-pub(super) fn run_with_runner(
+/// Re-audit the volumes `args` selects under `cache_root` through `runner`,
+/// emitting one audit event per volume. Production [`run`] wires
+/// [`HostAuditRunner`]; tests inject a [`MockAuditRunner`].
+pub(super) fn audit_volumes(
     cache_root: &Path,
     args: &Args,
     runner: &dyn AuditRunner,
@@ -757,7 +757,7 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             json: false,
         };
-        let outcomes = run_with_runner(cache, &args, &runner).unwrap();
+        let outcomes = audit_volumes(cache, &args, &runner).unwrap();
         assert_eq!(outcomes.len(), 1);
         let outcome = &outcomes[0];
         assert_eq!(outcome.prior_hash, old_hash);
@@ -807,7 +807,7 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             json: false,
         };
-        let outcomes = run_with_runner(cache, &args, &runner).unwrap();
+        let outcomes = audit_volumes(cache, &args, &runner).unwrap();
         // Hash changes because last_audit_at advanced.
         assert_ne!(outcomes[0].new_hash, old_hash);
         assert_eq!(outcomes[0].new_high_critical, 0);
@@ -839,7 +839,7 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             json: false,
         };
-        let outcomes = run_with_runner(cache, &args, &runner).unwrap();
+        let outcomes = audit_volumes(cache, &args, &runner).unwrap();
         let new_hash = &outcomes[0].new_hash;
         let pointer = std::fs::read_to_string(cache.join("index").join("lockaaaa")).unwrap();
         assert_eq!(pointer, *new_hash);
@@ -876,7 +876,7 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             json: false,
         };
-        let outcomes = run_with_runner(cache, &args, &runner).unwrap();
+        let outcomes = audit_volumes(cache, &args, &runner).unwrap();
         assert_eq!(outcomes.len(), 2);
         let prior_hashes: std::collections::BTreeSet<_> =
             outcomes.iter().map(|o| o.prior_hash.clone()).collect();
@@ -905,7 +905,7 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             json: false,
         };
-        let err = run_with_runner(cache, &args, &runner).unwrap_err();
+        let err = audit_volumes(cache, &args, &runner).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("tampered") || msg.contains("hash mismatch"),
@@ -932,7 +932,7 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             json: false,
         };
-        let err = run_with_runner(cache, &args, &runner).unwrap_err();
+        let err = audit_volumes(cache, &args, &runner).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("language") && msg.contains("annotation"),
@@ -960,7 +960,7 @@ mod tests {
             cache_root: Some(cache.to_path_buf()),
             json: false,
         };
-        let err = run_with_runner(cache, &args, &runner).unwrap_err();
+        let err = audit_volumes(cache, &args, &runner).unwrap_err();
         let msg = format!("{err:#}");
         assert!(
             msg.contains("unknown language") && msg.contains("ruby"),

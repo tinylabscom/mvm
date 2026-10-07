@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 5,
+  "abi_minor": 6,
   "methods": [
     {
       "classification": "prod_safe",
@@ -79,6 +79,12 @@
       "key": "machine_pause",
       "name": "machine.pause",
       "summary": "Pauses a running machine, sealing a snapshot where the backend uses one."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "machine_prompt",
+      "name": "machine.prompt",
+      "summary": "Sends one prompt to a running machine's resident agent, granted by its plan, journaled, recorded encrypted and chain-audited."
     },
     {
       "classification": "prod_safe",
@@ -241,6 +247,18 @@
       "key": "guest_proc_wait",
       "name": "guest.proc.wait",
       "summary": "Waits for a guest process to end, returning its output."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "telemetry_records",
+      "name": "telemetry.records",
+      "summary": "Reads one cursor-paged page of a machine's collected telemetry records."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "telemetry_status",
+      "name": "telemetry.status",
+      "summary": "Reports whether telemetry collection was provisioned for a machine and how its collector stands."
     }
   ],
   "version": 0

@@ -561,6 +561,9 @@ pub struct AgentSessionJournal {
     next_live_sequence: u64,
     seen_requests: Vec<SeenRequest>,
     active_request: Option<AgentRequestId>,
+    /// `Failed` or `Canceled` was reached by a prompt's own result, ending
+    /// that turn, rather than by a session-level failure or cancellation.
+    ended_turn: bool,
 }
 
 impl AgentSessionJournal {
@@ -582,6 +585,7 @@ impl AgentSessionJournal {
             next_live_sequence: 1,
             seen_requests: Vec::new(),
             active_request: None,
+            ended_turn: false,
         };
         let event = journal.append_durable(
             DurableAgentSessionEvent::Opened { workload_digest },
@@ -613,6 +617,7 @@ impl AgentSessionJournal {
             next_live_sequence: 1,
             seen_requests: Vec::new(),
             active_request: None,
+            ended_turn: false,
         };
         for envelope in history {
             envelope.validate()?;
@@ -685,10 +690,7 @@ impl AgentSessionJournal {
                 idempotency_key,
                 prompt,
             } => {
-                if !matches!(
-                    self.state,
-                    AgentSessionState::Ready | AgentSessionState::Completed
-                ) {
+                if !self.accepts_prompt() {
                     return Err(self.invalid_state());
                 }
                 let prompt_digest = Sha256::digest(prompt).into();
@@ -815,12 +817,7 @@ impl AgentSessionJournal {
             DurableAgentSessionEvent::PromptCompleted { request_id, result },
             now_unix_ms,
         )?;
-        self.state = match result {
-            PromptResult::Succeeded => AgentSessionState::Completed,
-            PromptResult::Failed => AgentSessionState::Failed,
-            PromptResult::Canceled => AgentSessionState::Canceled,
-        };
-        self.active_request = None;
+        self.end_turn(result);
         Ok(event)
     }
 
@@ -837,6 +834,7 @@ impl AgentSessionJournal {
         }
         let event = self.append_durable(DurableAgentSessionEvent::Canceled, now_unix_ms)?;
         self.state = AgentSessionState::Canceled;
+        self.ended_turn = false;
         self.active_request = None;
         Ok(event)
     }
@@ -980,10 +978,42 @@ impl AgentSessionJournal {
         self.state
     }
 
+    /// The prompt accepted and not yet completed, if any. A journal recovered
+    /// in `Running` names the request a crashed adapter left in flight.
+    #[must_use]
+    pub fn active_request(&self) -> Option<&AgentRequestId> {
+        self.active_request.as_ref()
+    }
+
     /// Public session identity.
     #[must_use]
     pub fn session_id(&self) -> &AgentSessionId {
         &self.session_id
+    }
+
+    /// Whether the next prompt may start a turn. A prompt that completed as
+    /// failed or canceled ends its turn and leaves the session open; a session
+    /// that failed or was canceled as a whole, is mid-turn, unloaded or
+    /// deleted takes no prompt.
+    fn accepts_prompt(&self) -> bool {
+        match self.state {
+            AgentSessionState::Ready | AgentSessionState::Completed => true,
+            AgentSessionState::Failed | AgentSessionState::Canceled => self.ended_turn,
+            AgentSessionState::Running
+            | AgentSessionState::Canceling
+            | AgentSessionState::Unloaded
+            | AgentSessionState::Deleted => false,
+        }
+    }
+
+    fn end_turn(&mut self, result: PromptResult) {
+        self.state = match result {
+            PromptResult::Succeeded => AgentSessionState::Completed,
+            PromptResult::Failed => AgentSessionState::Failed,
+            PromptResult::Canceled => AgentSessionState::Canceled,
+        };
+        self.ended_turn = result != PromptResult::Succeeded;
+        self.active_request = None;
     }
 
     fn invalid_state(&self) -> AgentSessionError {
@@ -1085,11 +1115,7 @@ impl AgentSessionJournal {
                 idempotency_key,
                 prompt_digest,
             } => {
-                if !matches!(
-                    self.state,
-                    AgentSessionState::Ready | AgentSessionState::Completed
-                ) || self.active_request.is_some()
-                {
+                if !self.accepts_prompt() || self.active_request.is_some() {
                     return Err(AgentSessionError::new(
                         AgentSessionErrorCode::MalformedEvent,
                         "prompt was accepted in an invalid session state",
@@ -1116,12 +1142,7 @@ impl AgentSessionJournal {
                         "prompt completion does not match the active request",
                     ));
                 }
-                self.state = match result {
-                    PromptResult::Succeeded => AgentSessionState::Completed,
-                    PromptResult::Failed => AgentSessionState::Failed,
-                    PromptResult::Canceled => AgentSessionState::Canceled,
-                };
-                self.active_request = None;
+                self.end_turn(*result);
                 Ok(())
             }
             DurableAgentSessionEvent::CancelRequested {
@@ -1154,6 +1175,7 @@ impl AgentSessionJournal {
                     ));
                 }
                 self.state = AgentSessionState::Canceled;
+                self.ended_turn = false;
                 self.active_request = None;
                 Ok(())
             }
@@ -1207,6 +1229,7 @@ impl AgentSessionJournal {
             }
             DurableAgentSessionEvent::Failed { .. } => {
                 self.state = AgentSessionState::Failed;
+                self.ended_turn = false;
                 Ok(())
             }
             DurableAgentSessionEvent::OutputAvailable { .. }
@@ -1303,6 +1326,63 @@ mod tests {
             back.validate().expect("valid event");
         }
         assert!(applied.applied);
+    }
+
+    fn second_prompt() -> AgentSessionCommand {
+        AgentSessionCommand::Prompt {
+            request_id: request("request-2"),
+            idempotency_key: key("retry-2"),
+            prompt: b"next turn".to_vec(),
+        }
+    }
+
+    #[test]
+    fn a_failed_or_canceled_turn_leaves_the_session_open_for_the_next_prompt() {
+        for ended in [PromptResult::Failed, PromptResult::Canceled] {
+            let (mut journal, _) =
+                AgentSessionJournal::open(session(), [0; 32], 1, RetentionPolicy::default())
+                    .expect("open");
+            journal.apply(prompt(), 2).expect("prompt");
+            journal
+                .complete_prompt(request("request-1"), ended, 3)
+                .expect("end turn");
+            let next = journal.apply(second_prompt(), 4).expect("next turn");
+            assert!(next.applied, "{ended:?} ended the session, not the turn");
+
+            // A journal rebuilt from the same history agrees.
+            let history = journal.history(None, 10).expect("history").events;
+            let rebuilt =
+                AgentSessionJournal::from_history(session(), history, RetentionPolicy::default())
+                    .expect("rebuild");
+            assert_eq!(rebuilt.state(), AgentSessionState::Running);
+            assert_eq!(rebuilt.active_request(), Some(&request("request-2")));
+        }
+    }
+
+    #[test]
+    fn a_session_that_failed_on_its_own_takes_no_prompt() {
+        let failed = AgentSessionEventEnvelope {
+            protocol_version: AGENT_SESSION_PROTOCOL_VERSION,
+            session_id: session(),
+            durable_sequence: Some(2),
+            live_sequence: None,
+            occurred_unix_ms: 2,
+            event: AgentSessionEvent::Durable {
+                event: DurableAgentSessionEvent::Failed {
+                    code: AgentFailureCode::AdapterFailure,
+                },
+            },
+        };
+        let (_, opened) =
+            AgentSessionJournal::open(session(), [0; 32], 1, RetentionPolicy::default())
+                .expect("open");
+        let mut journal = AgentSessionJournal::from_history(
+            session(),
+            vec![opened, failed],
+            RetentionPolicy::default(),
+        )
+        .expect("rebuild");
+        assert!(journal.apply(prompt(), 3).is_err());
     }
 
     #[test]

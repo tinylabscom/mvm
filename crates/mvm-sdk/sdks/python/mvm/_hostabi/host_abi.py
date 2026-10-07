@@ -434,6 +434,16 @@ class MachinePauseRequest:
 
 
 @dataclass
+class MachinePromptRequest:
+    id: str
+    prompt_b64: str
+    idempotency_key: Optional[str] = None
+    request_id: Optional[str] = None
+    session_id: Optional[str] = None
+    timeout_secs: Optional[int] = None
+
+
+@dataclass
 class MachineReconfigureRequest:
     id: str
     allow_host: Optional[List[str]] = None
@@ -667,6 +677,33 @@ class StreamName3(Enum):
 StreamName = Union[StreamName1, StreamName2, StreamName3]
 
 
+@dataclass
+class TelemetryCursor:
+    offset: int
+
+
+@dataclass
+class TelemetryRecordsReply:
+    pass
+
+
+@dataclass
+class TelemetryRecordsRequest:
+    id: str
+    cursor: Optional[TelemetryCursor] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class TelemetryStatusReply:
+    pass
+
+
+@dataclass
+class TelemetryStatusRequest:
+    id: str
+
+
 class Kind(Enum):
     exited = 'exited'
 
@@ -856,6 +893,18 @@ class SessionStop:
 
 
 @dataclass
+class TelemetryRecords:
+    reply: TelemetryRecordsReply
+    request: TelemetryRecordsRequest
+
+
+@dataclass
+class TelemetryStatus:
+    reply: TelemetryStatusReply
+    request: TelemetryStatusRequest
+
+
+@dataclass
 class AgentErrorReply:
     kind: RunEntrypointError
     message: str
@@ -981,6 +1030,18 @@ class MachineLogsStreamOpenRequest:
     follow: Optional[bool] = True
     streams: Optional[List[StreamName]] = field(default_factory=lambda: [])
     tail_lines: Optional[int] = None
+
+
+@dataclass
+class MachinePromptReply:
+    delivered: bool
+    journal_cursor: int
+    agent_error: Optional[AgentErrorReply] = None
+    error: Optional[RemoteErrorReply] = None
+    exit_code: Optional[int] = None
+    output_truncated: Optional[bool] = None
+    stderr_b64: Optional[str] = None
+    stdout_b64: Optional[str] = None
 
 
 @dataclass
@@ -1131,6 +1192,12 @@ class MachineLogsStreamOpen:
 
 
 @dataclass
+class MachinePrompt:
+    reply: MachinePromptReply
+    request: MachinePromptRequest
+
+
+@dataclass
 class MachineReconfigure:
     reply: MachineReconfigureReply
     request: MachineReconfigureRequest
@@ -1219,6 +1286,7 @@ class HostAbi:
     machine_logs_stream_next: MachineLogsStreamNext
     machine_logs_stream_open: MachineLogsStreamOpen
     machine_pause: MachinePause
+    machine_prompt: MachinePrompt
     machine_reconfigure: MachineReconfigure
     machine_resume: MachineResume
     machine_rm: MachineRm
@@ -1230,3 +1298,5 @@ class HostAbi:
     session_info: SessionInfo
     session_start: SessionStart
     session_stop: SessionStop
+    telemetry_records: TelemetryRecords
+    telemetry_status: TelemetryStatus

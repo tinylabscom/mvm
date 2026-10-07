@@ -7,23 +7,6 @@
 
 use anyhow::{Context, Result};
 
-/// Resolve the transient-run egress flags (`--net` / `--allow-host`) into a
-/// single `NetworkPolicy`, identical for every backend.
-///
-/// Precedence (one tested place so it can't drift):
-/// - any `--allow-host` ⇒ allow-list (narrowest intent **wins** over `--net`);
-/// - else `--net` ⇒ the `dev` preset (broad outbound + DNS, never
-///   `unrestricted`, so it never trips the claim-10 unrestricted ack);
-/// - else ⇒ `deny_all` (the safe default).
-///
-/// `HOST` with no `:PORT` defaults to `443`.
-pub fn resolve_run_network_policy(
-    net: bool,
-    allow_host: &[String],
-) -> Result<mvm_core::network_policy::NetworkPolicy> {
-    resolve_run_network_policy_with_preset_and_peers(net, None, allow_host, &[])
-}
-
 pub fn parse_run_network_preset(
     value: &str,
 ) -> std::result::Result<mvm_core::network_policy::NetworkPreset, String> {
@@ -64,24 +47,26 @@ pub fn persisted_run_network(
     }
 }
 
-/// As [`resolve_run_network_policy`], plus the `--peer` routes.
+/// Resolve the transient-run egress flags (`--net` / `--network-preset` /
+/// `--allow-host` / `--peer`) into a single `NetworkPolicy`, identical for
+/// every backend.
+///
+/// Precedence (one tested place so it can't drift):
+/// - any `--allow-host` ⇒ allow-list (narrowest intent **wins** over the
+///   preset and `--net`);
+/// - else a named preset ⇒ that preset;
+/// - else `--net` ⇒ the `dev` preset (broad outbound + DNS, never
+///   `unrestricted`);
+/// - else ⇒ `deny_all` (the safe default).
+///
+/// `HOST` with no `:PORT` defaults to `443`.
 ///
 /// Peers are orthogonal to the egress arms above: a workload may dial a peer
 /// while admitting no outbound egress at all, which is the common shape for a
 /// service that only talks to its own database. So the peer set is attached to
 /// whichever policy the egress precedence selected rather than being an arm of
 /// it.
-#[cfg(test)]
-fn resolve_run_network_policy_with_peers(
-    net: bool,
-    allow_host: &[String],
-    peer: &[String],
-) -> Result<mvm_core::network_policy::NetworkPolicy> {
-    resolve_run_network_policy_with_preset_and_peers(net, None, allow_host, peer)
-}
-
-/// Resolve egress flags including the named preset surface.
-pub fn resolve_run_network_policy_with_preset_and_peers(
+pub fn resolve_run_network_policy(
     net: bool,
     preset: Option<mvm_core::network_policy::NetworkPreset>,
     allow_host: &[String],
@@ -177,21 +162,22 @@ mod tests {
     #[test]
     fn run_net_default_is_deny_all() {
         assert_eq!(
-            resolve_run_network_policy(false, &[]).unwrap(),
+            resolve_run_network_policy(false, None, &[], &[]).unwrap(),
             NetworkPolicy::deny_all()
         );
     }
 
     #[test]
     fn run_net_flag_maps_to_dev_preset_not_unrestricted() {
-        let p = resolve_run_network_policy(true, &[]).unwrap();
+        let p = resolve_run_network_policy(true, None, &[], &[]).unwrap();
         assert_eq!(p, NetworkPolicy::preset(NetworkPreset::Dev));
         assert!(!p.is_unrestricted(), "--net must never be unrestricted");
     }
 
     #[test]
     fn allow_host_defaults_to_port_443() {
-        let p = resolve_run_network_policy(false, &["api.example.com".to_string()]).unwrap();
+        let p =
+            resolve_run_network_policy(false, None, &["api.example.com".to_string()], &[]).unwrap();
         assert_eq!(
             p,
             NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)])
@@ -200,8 +186,13 @@ mod tests {
 
     #[test]
     fn allow_host_honors_explicit_port_and_multiple_hosts() {
-        let p = resolve_run_network_policy(false, &["a.com".to_string(), "b.com:8443".to_string()])
-            .unwrap();
+        let p = resolve_run_network_policy(
+            false,
+            None,
+            &["a.com".to_string(), "b.com:8443".to_string()],
+            &[],
+        )
+        .unwrap();
         assert_eq!(
             p,
             NetworkPolicy::allow_list(vec![
@@ -213,7 +204,7 @@ mod tests {
 
     #[test]
     fn allow_host_wins_over_net() {
-        let p = resolve_run_network_policy(true, &["a.com".to_string()]).unwrap();
+        let p = resolve_run_network_policy(true, None, &["a.com".to_string()], &[]).unwrap();
         assert_eq!(
             p,
             NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)]),
@@ -223,7 +214,7 @@ mod tests {
 
     #[test]
     fn explicit_agent_preset_resolves_to_agent_policy() {
-        let policy = resolve_run_network_policy_with_preset_and_peers(
+        let policy = resolve_run_network_policy(
             false,
             Some(mvm_core::network_policy::NetworkPreset::Agent),
             &[],
@@ -250,14 +241,16 @@ mod tests {
 
     #[test]
     fn allow_host_rejects_malformed_entries_fail_closed() {
-        assert!(resolve_run_network_policy(false, &["host:0notaport".to_string()]).is_err());
-        assert!(resolve_run_network_policy(false, &[":443".to_string()]).is_err());
-        assert!(resolve_run_network_policy(false, &["".to_string()]).is_err());
+        assert!(
+            resolve_run_network_policy(false, None, &["host:0notaport".to_string()], &[]).is_err()
+        );
+        assert!(resolve_run_network_policy(false, None, &[":443".to_string()], &[]).is_err());
+        assert!(resolve_run_network_policy(false, None, &["".to_string()], &[]).is_err());
     }
 
     #[test]
     fn allow_host_rejects_ssh_port() {
-        let err = resolve_run_network_policy(false, &["github.com:22".to_string()])
+        let err = resolve_run_network_policy(false, None, &["github.com:22".to_string()], &[])
             .expect_err("TCP/22 must be refused");
         assert!(
             err.to_string().contains("SSH sessions are banned"),
@@ -306,21 +299,21 @@ mod peer_flag_tests {
     fn peers_attach_to_whichever_egress_arm_was_selected() {
         let peer = vec!["db.mvm.peer:5432=127.0.0.1:34567".to_string()];
 
-        let denied = resolve_run_network_policy_with_peers(false, &[], &peer).expect("resolves");
+        let denied = resolve_run_network_policy(false, None, &[], &peer).expect("resolves");
         assert_eq!(denied.peers().len(), 1, "deny-all still carries its peers");
 
-        let dev = resolve_run_network_policy_with_peers(true, &[], &peer).expect("resolves");
+        let dev = resolve_run_network_policy(true, None, &[], &peer).expect("resolves");
         assert_eq!(dev.peers().len(), 1);
 
-        let allow = resolve_run_network_policy_with_peers(false, &["a.com".to_string()], &peer)
+        let allow = resolve_run_network_policy(false, None, &["a.com".to_string()], &peer)
             .expect("resolves");
         assert_eq!(allow.peers().len(), 1);
     }
 
     #[test]
     fn no_peer_flag_leaves_the_policy_unchanged() {
-        let p = resolve_run_network_policy_with_peers(false, &[], &[]).expect("resolves");
+        let p = resolve_run_network_policy(false, None, &[], &[]).expect("resolves");
         assert!(p.peers().is_empty());
-        assert_eq!(p, resolve_run_network_policy(false, &[]).expect("resolves"));
+        assert_eq!(p, mvm_core::network_policy::NetworkPolicy::deny_all());
     }
 }

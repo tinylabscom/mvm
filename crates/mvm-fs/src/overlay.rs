@@ -886,10 +886,15 @@ mod tests {
         resolver
             .resolve("aarch64")
             .expect("first resolve validates");
+        let previous_mtime = std::fs::metadata(&overlay).unwrap().modified().unwrap();
         let mut bytes = std::fs::read(&overlay).expect("read overlay fixture");
         let last = bytes.last_mut().expect("overlay fixture is non-empty");
         *last ^= 0xff;
         std::fs::write(&overlay, bytes).expect("rewrite overlay at the same length");
+        std::fs::File::open(&overlay)
+            .unwrap()
+            .set_modified(previous_mtime + std::time::Duration::from_secs(2))
+            .unwrap();
 
         assert!(!validation_stamp_matches(&artifact_dir));
         let err = resolver

@@ -284,6 +284,14 @@ pub(super) mod bundle_pin_tests {
     pub(in crate::admission) fn make_bundle_for_pin(
         sk: &ed25519_dalek::SigningKey,
     ) -> (Vec<u8>, mvm_core::plan::KeyId) {
+        make_bundle_for_pin_with(sk, Vec::new())
+    }
+
+    /// As [`make_bundle_for_pin`], carrying `members`.
+    pub(in crate::admission) fn make_bundle_for_pin_with(
+        sk: &ed25519_dalek::SigningKey,
+        members: Vec<mvm_core::plan::BundleMember>,
+    ) -> (Vec<u8>, mvm_core::plan::KeyId) {
         use mvm_core::plan::bundle::{
             ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             key_id_from_pubkey, sha256_hex, write_bundle,
@@ -317,7 +325,7 @@ pub(super) mod bundle_pin_tests {
                     size_bytes: rootfs.len() as u64,
                 },
             ],
-            members: Vec::new(),
+            members,
             verity: None,
             resources: None,
         };

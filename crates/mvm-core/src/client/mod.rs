@@ -30,6 +30,11 @@ use dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 
+pub use crate::protocol::telemetry::served::{
+    CollectorState, ReceivedRecord, TelemetryCursor, TelemetryReadRequest,
+    TelemetryReadRequestBuilder, TelemetryReadResponse, TelemetryStatus,
+};
+
 /// The single machine-driving contract. `async_trait` boxes the futures so
 /// `dyn MvmClient` stays object-safe — callers hold one backend behind a trait
 /// object and never see which transport is underneath.
@@ -106,6 +111,23 @@ pub trait MvmClient: Send + Sync {
     /// and answers any number of requirement sets locally. A gateway therefore
     /// needs a capability endpoint, not a negotiation one.
     async fn backend_capabilities(&self) -> Result<BackendCapabilityReport>;
+
+    /// Whether the host provisioned telemetry collection for a machine's
+    /// current boot, and how its collector stands. A health question, not a
+    /// record read: absence of records is never evidence either way, this is.
+    /// Serves a status snapshot, so it is cheap to poll.
+    async fn telemetry_status(&self, id: &MachineId) -> Result<TelemetryStatus>;
+
+    /// One cursor-paged read of a machine's collected records, oldest first.
+    /// The reply always carries the next cursor; an empty page with the same
+    /// cursor means nothing new has arrived, and the caller polls it again.
+    /// A cursor the stream no longer honors is refused rather than guessed
+    /// at, and the caller starts over from [`TelemetryCursor::START`].
+    async fn telemetry_records(
+        &self,
+        id: &MachineId,
+        request: TelemetryReadRequest,
+    ) -> Result<TelemetryReadResponse>;
 }
 
 #[cfg(test)]
