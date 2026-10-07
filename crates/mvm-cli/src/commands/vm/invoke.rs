@@ -90,6 +90,8 @@ pub(in crate::commands) struct EntrypointCall {
     pub attach: bool,
     /// Whether this terminal invocation may print host denial notices.
     pub show_denials: bool,
+    /// Keep denial feedback structured and never open a review prompt.
+    pub json_denials: bool,
     /// Where the boot's policy came from, for reviewing its refusals once the
     /// call ends. An `attach` dispatches into a machine another invocation
     /// admitted, and ignores it.
@@ -190,7 +192,11 @@ pub(in crate::commands) fn dispatch_attached(call: EntrypointCall) -> Result<i32
         "entrypoint: dispatching into running workload '{}'",
         call.source
     ));
-    let mut denials = CallDenials::new(call.show_denials, ReviewSource::admitted_elsewhere());
+    let mut denials = CallDenials::new(
+        call.show_denials,
+        call.json_denials,
+        ReviewSource::admitted_elsewhere(),
+    );
     denials.arm(&call.source);
     let outcome = dispatch(EntrypointDispatch {
         vm_name: &call.source,
@@ -249,7 +255,7 @@ fn run_booted_entrypoint(call: EntrypointCall) -> Result<()> {
         .map_or(SessionVmName::Prefixed("invoke"), SessionVmName::Exact);
 
     let mut out = CallOutput::inherited();
-    out.denials = CallDenials::new(call.show_denials, call.review_source);
+    out.denials = CallDenials::new(call.show_denials, call.json_denials, call.review_source);
     let outcome = crate::commands::env::builder_vm::with_pair_artifact_source(|pair| {
         mvm_client::entrypoint::run_entrypoint_call(
             mvm_client::entrypoint::EntrypointCall {
@@ -603,12 +609,14 @@ struct CallDenials {
     source: Option<ReviewSource>,
     watch: Option<super::egress_denials::DenialWatch>,
     review: Option<ReviewOffer>,
+    json: bool,
 }
 
 impl CallDenials {
-    fn new(show: bool, source: ReviewSource) -> Self {
+    fn new(show: bool, json: bool, source: ReviewSource) -> Self {
         Self {
-            source: show.then_some(source),
+            source: (show || json).then_some(source),
+            json,
             ..Self::default()
         }
     }
@@ -617,8 +625,14 @@ impl CallDenials {
     fn arm(&mut self, vm_name: &str) {
         self.review = self.review_for(vm_name);
         if self.review.is_some() {
-            self.watch =
-                super::egress_denials::watch_machine(vm_name, super::egress_denials::Live::Notices);
+            self.watch = super::egress_denials::watch_machine(
+                vm_name,
+                if self.json {
+                    super::egress_denials::Live::Quiet
+                } else {
+                    super::egress_denials::Live::Notices
+                },
+            );
         }
     }
 
@@ -632,7 +646,19 @@ impl CallDenials {
     /// Stop watching, print the summary, and offer the review.
     fn finish(&mut self) {
         if let Some(review) = self.review.take() {
-            super::egress_denials::finish_and_summarize(self.watch.take(), &review);
+            if self.json {
+                let tally = self
+                    .watch
+                    .take()
+                    .map(|watch| watch.finish())
+                    .unwrap_or_default();
+                if let Err(error) = super::denial_review::emit_json_denial_summary(&tally, &review)
+                {
+                    eprintln!("could not report denied egress: {error:#}");
+                }
+            } else {
+                super::egress_denials::finish_and_summarize(self.watch.take(), &review);
+            }
         }
     }
 }
@@ -752,7 +778,7 @@ mod denial_observation_tests {
         let home = tempfile::tempdir().expect("isolated home");
         env.isolate_mvm_home(home.path());
         let mut human = CallOutput::inherited();
-        human.denials = CallDenials::new(true, ReviewSource::admitted_elsewhere());
+        human.denials = CallDenials::new(true, false, ReviewSource::admitted_elsewhere());
         human.vm_named("entrypoint-human");
         assert!(human.denials.watch.is_some());
         human.finish_denials();
@@ -768,7 +794,7 @@ mod denial_observation_tests {
         let home = tempfile::tempdir().expect("isolated home");
         env.isolate_mvm_home(home.path());
         let mut out = CallOutput::inherited();
-        out.denials = CallDenials::new(true, manifest.clone());
+        out.denials = CallDenials::new(true, false, manifest.clone());
         out.vm_named("invoke-7");
         assert_eq!(
             out.denials.review,
@@ -778,9 +804,16 @@ mod denial_observation_tests {
 
     /// `--json` shows no refusals, so it neither watches nor offers a review.
     #[test]
-    fn a_machine_readable_call_offers_no_review() {
-        let denials = CallDenials::new(false, ReviewSource::Manifest("/p/mvm.toml".into()));
-        assert_eq!(denials.review_for("invoke-8"), None);
+    fn a_machine_readable_call_watches_quietly_and_points_at_later_review() {
+        let source = ReviewSource::Manifest("/p/mvm.toml".into());
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
+        let mut denials = CallDenials::new(false, true, source.clone());
+        denials.arm("invoke-8");
+        assert_eq!(denials.review, Some(ReviewOffer::new("invoke-8", source)));
+        assert!(denials.watch.is_some());
+        assert!(denials.json);
     }
 
     /// An attach dispatches into a machine another invocation admitted, so
@@ -788,7 +821,7 @@ mod denial_observation_tests {
     /// this process cannot know.
     #[test]
     fn an_attached_call_offers_its_refusals_as_admitted_elsewhere() {
-        let denials = CallDenials::new(true, ReviewSource::admitted_elsewhere());
+        let denials = CallDenials::new(true, false, ReviewSource::admitted_elsewhere());
         assert_eq!(
             denials.review_for("already-running"),
             Some(ReviewOffer::new(
@@ -1929,6 +1962,7 @@ mod streamed_stdin_tests {
             r#fn: None,
             attach: true,
             show_denials: true,
+            json_denials: false,
             review_source: ReviewSource::admitted_elsewhere(),
             network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
             hypervisor: None,
