@@ -3,6 +3,9 @@
 //! The socket is read-only at the protocol boundary: the guest dials it and
 //! the host only reads bounded, length-prefixed [`DisplayFrame`] values. No
 //! byte is ever written back, so this source cannot become an input path.
+//!
+//! Frames are read and dropped, not recorded, while the run's credential entry
+//! window is open: those are the frames that show a human typing a credential.
 
 use std::fs::Permissions;
 use std::io::{self, ErrorKind, Read};
@@ -20,11 +23,19 @@ use crate::stream::console_source::{SharedBroker, lock_broker};
 
 const READ_DEADLINE: Duration = Duration::from_millis(200);
 
+/// Answers whether frame recording is paused right now. Asked once per frame,
+/// so a pause takes effect at the next frame boundary.
+pub type RecordingPause = Arc<dyn Fn() -> bool + Send + Sync>;
+
 /// A listener that accepts display frames from the guest-only relay.
 pub struct DisplaySource;
 
 impl DisplaySource {
-    pub fn listen(path: &Path, broker: SharedBroker) -> io::Result<DisplaySourceHandle> {
+    pub fn listen(
+        path: &Path,
+        broker: SharedBroker,
+        paused: RecordingPause,
+    ) -> io::Result<DisplaySourceHandle> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -37,7 +48,7 @@ impl DisplaySource {
         let thread_path = path.to_path_buf();
         let thread = std::thread::Builder::new()
             .name(format!("mvm-display-source-{}", path.display()))
-            .spawn(move || run(listener, &broker, &thread_stop))?;
+            .spawn(move || run(listener, &broker, paused.as_ref(), &thread_stop))?;
         Ok(DisplaySourceHandle {
             stop,
             path: thread_path,
@@ -77,7 +88,12 @@ impl Drop for DisplaySourceHandle {
     }
 }
 
-fn run(listener: UnixListener, broker: &SharedBroker, stop: &AtomicBool) {
+fn run(
+    listener: UnixListener,
+    broker: &SharedBroker,
+    paused: &(dyn Fn() -> bool + Send + Sync),
+    stop: &AtomicBool,
+) {
     while !stop.load(Ordering::Acquire) {
         let Ok((mut stream, _)) = listener.accept() else {
             if !stop.load(Ordering::Acquire) {
@@ -92,7 +108,7 @@ fn run(listener: UnixListener, broker: &SharedBroker, stop: &AtomicBool) {
             tracing::warn!(error = %error, "display-frame connection could not set a read deadline");
             continue;
         }
-        if let Err(error) = ingest_connection(&mut stream, broker, stop) {
+        if let Err(error) = ingest_connection(&mut stream, broker, paused, stop) {
             tracing::warn!(error = %error, "display-frame connection was refused");
         }
     }
@@ -101,6 +117,7 @@ fn run(listener: UnixListener, broker: &SharedBroker, stop: &AtomicBool) {
 fn ingest_connection(
     stream: &mut UnixStream,
     broker: &SharedBroker,
+    paused: &(dyn Fn() -> bool + Send + Sync),
     stop: &AtomicBool,
 ) -> io::Result<()> {
     loop {
@@ -117,6 +134,9 @@ fn ingest_connection(
         read_exact_until_stopped(stream, &mut encoded, stop)?;
         let frame = DisplayFrame::decode(&encoded)
             .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
+        if paused() {
+            continue;
+        }
         lock_broker(broker)
             .ingest_frame(&frame)
             .map_err(|error| io::Error::new(ErrorKind::InvalidData, error))?;
@@ -221,6 +241,29 @@ mod tests {
         }
     }
 
+    fn not_paused() -> RecordingPause {
+        Arc::new(|| false)
+    }
+
+    #[test]
+    fn frames_inside_a_credential_entry_window_are_never_recorded() {
+        let broker = Arc::new(std::sync::Mutex::new(StreamBroker::live_only(
+            "display-vm",
+            StreamRedaction::curated(&RedactionPolicy::default()),
+        )));
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+        let encoded = frame().encode().unwrap();
+        for _ in 0..2 {
+            guest
+                .write_all(&(encoded.len() as u32).to_be_bytes())
+                .unwrap();
+            guest.write_all(&encoded).unwrap();
+        }
+        drop(guest);
+        ingest_connection(&mut host, &broker, &|| true, &AtomicBool::new(false)).unwrap();
+        assert_eq!(broker.lock().unwrap().ingested_count(), 0);
+    }
+
     #[test]
     fn a_guest_frame_reaches_the_broker_with_display_identity() {
         let dir = tempfile::tempdir().unwrap();
@@ -230,7 +273,7 @@ mod tests {
             StreamRedaction::curated(&RedactionPolicy::default()),
         )));
         let mut reader = broker.lock().unwrap().subscribe();
-        let source = DisplaySource::listen(&path, Arc::clone(&broker)).unwrap();
+        let source = DisplaySource::listen(&path, Arc::clone(&broker), not_paused()).unwrap();
         let mut guest = UnixStream::connect(&path).unwrap();
         let encoded = frame().encode().unwrap();
         guest
@@ -266,7 +309,8 @@ mod tests {
                     .to_be_bytes(),
             )
             .unwrap();
-        let error = ingest_connection(&mut host, &broker, &AtomicBool::new(false)).unwrap_err();
+        let error =
+            ingest_connection(&mut host, &broker, &|| false, &AtomicBool::new(false)).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::InvalidData);
         assert_eq!(broker.lock().unwrap().ingested_count(), 0);
     }

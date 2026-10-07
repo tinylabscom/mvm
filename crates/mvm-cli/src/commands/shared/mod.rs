@@ -25,7 +25,6 @@ pub(in crate::commands) use mvm_client::admission::run_grants::{
 };
 pub(super) use mvm_client::admission::run_network::{
     parse_run_network_preset, persisted_run_network, resolve_ai_policy, resolve_run_network_policy,
-    resolve_run_network_policy_with_preset_and_peers,
 };
 pub(super) use mvm_client::launch::machine_start::resolve_effective_hypervisor;
 pub(crate) use parse::AssetSpec;

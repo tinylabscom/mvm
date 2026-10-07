@@ -113,6 +113,25 @@ pub fn prepare_replay(
     if last_cursor != session.journal_cursor {
         bail!("replay checkpoint tip does not match the session journal cursor");
     }
+    // Every input recorded between the checkpoint and the tip must be on the
+    // timeline. One recorded without a committed step changed the guest in a
+    // way no checkpoint holds; replaying around it would skip it silently.
+    if let Some(unstepped) = inputs
+        .after(
+            &session.session_id,
+            session.generation,
+            binding.journal_cursor,
+        )?
+        .into_iter()
+        .filter(|input| input.binding.journal_cursor <= session.journal_cursor)
+        .find(|input| !recorded.contains(input))
+    {
+        bail!(
+            "the input recorded at journal cursor {} has no step checkpoint; the \
+             timeline cannot be replayed past it",
+            unstepped.binding.journal_cursor
+        );
+    }
     Ok(ReplayPlan {
         checkpoint: checkpoint.clone(),
         session_id: binding.session_id,
@@ -120,6 +139,35 @@ pub fn prepare_replay(
         checkpoint_cursor: binding.journal_cursor,
         inputs: recorded,
     })
+}
+
+/// The checkpoint a session's recorded timeline starts from: its base, found
+/// by following the hash links back from the session's current resume point.
+/// Replaying from it re-delivers every prompt the session has committed.
+///
+/// # Errors
+/// A session with no resume point, a link that does not resolve, or a cycle.
+pub fn timeline_base(
+    checkpoints: &CheckpointStore,
+    session: &AgentSessionRecord,
+) -> Result<CheckpointId> {
+    let mut cursor = session
+        .parent_checkpoint
+        .clone()
+        .context("agent session has no committed replay checkpoint")?;
+    let mut visited = std::collections::HashSet::new();
+    loop {
+        if !visited.insert(cursor.clone()) {
+            bail!("replay checkpoint timeline contains a cycle");
+        }
+        let meta = checkpoints
+            .by_digest(&cursor)?
+            .with_context(|| format!("committed replay checkpoint {cursor} is missing"))?;
+        match meta.parent {
+            Some(parent) => cursor = parent,
+            None => return Ok(meta.id),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

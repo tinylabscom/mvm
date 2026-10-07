@@ -112,14 +112,10 @@ pub struct FirecrackerConfig {
 }
 
 impl FirecrackerConfig {
-    /// Convert a backend-agnostic config into the legacy artifact shape.
-    pub fn from_start_config(config: &VmStartConfig) -> Result<Self> {
-        let slot = microvm::allocate_slot(&config.name)?;
-        Self::from_start_config_with_slot(config, slot)
-    }
-
-    /// Convert a config using a slot that has already been reserved.
-    pub fn from_start_config_with_slot(config: &VmStartConfig, slot: VmSlot) -> Result<Self> {
+    /// Convert a backend-agnostic config into the legacy artifact shape,
+    /// using a slot the caller has already reserved
+    /// (`microvm::allocate_slot`).
+    pub fn from_start_config(config: &VmStartConfig, slot: VmSlot) -> Result<Self> {
         let run_config = FlakeRunConfig {
             name: config.name.clone(),
             slot,
@@ -790,41 +786,40 @@ impl AnyBackend {
         self.inner().host_process_id(id)
     }
 
-    pub fn stop(&self, id: &VmId) -> Result<()> {
-        self.inner().stop(id)
-    }
-
-    /// Stop a VM and return runner teardown timings when this backend exposes
-    /// the shared workload-runner lifecycle.
-    pub fn stop_with_timing(&self, id: &VmId) -> Result<Option<StopTiming>> {
-        match self {
-            Self::Firecracker(backend) => backend.stop_with_timing(id).map(Some),
-            Self::Libkrun(backend) => backend.stop_with_timing(id).map(Some),
-            Self::Qemu(backend) => backend.stop_with_timing(id).map(Some),
-            #[cfg(feature = "test-support")]
-            Self::Mock(backend) => backend.stop(id).map(|_| None),
-            Self::Hvf(backend) => backend.stop_with_timing(id).map(Some),
-            Self::Wasm(backend) => backend.stop(id).map(|_| None),
-            Self::AppleContainer(backend) => backend.stop_with_timing(id).map(Some),
-            Self::WebLinux(backend) => backend.stop(id).map(|_| None),
+    /// Stop a VM. Backends on the shared workload-runner lifecycle report
+    /// their teardown phase timings; the others return `None`.
+    pub fn stop(&self, id: &VmId) -> Result<Option<StopTiming>> {
+        match self.stop_runner(id) {
+            Some(timing) => timing.map(Some),
+            None => self.inner().stop(id).map(|()| None),
         }
     }
 
     /// Fast teardown for an ephemeral transient run. See
-    /// [`VmBackend::stop_transient`]. No backend currently overrides it —
-    /// every backend falls through to the default (== `stop`).
-    pub fn stop_transient(&self, id: &VmId) -> Result<()> {
-        self.inner().stop_transient(id)
+    /// [`VmBackend::stop_transient`]. Runner-backed backends tear down
+    /// through the same sequence as [`Self::stop`] and report its timings;
+    /// the others go through their own `stop_transient` hook and return
+    /// `None`.
+    pub fn stop_transient(&self, id: &VmId) -> Result<Option<StopTiming>> {
+        match self.stop_runner(id) {
+            Some(timing) => timing.map(Some),
+            None => self.inner().stop_transient(id).map(|()| None),
+        }
     }
 
-    /// Stop a transient VM and return runner teardown timings when the
-    /// selected backend exposes the shared workload-runner lifecycle.
-    ///
-    /// The transient backend hook currently has no backend-specific
-    /// overrides, so this follows the same stop operation while preserving
-    /// the timing detail for launch diagnostics.
-    pub fn stop_transient_with_timing(&self, id: &VmId) -> Result<Option<StopTiming>> {
-        self.stop_with_timing(id)
+    /// Run the shared workload-runner stop sequence when this backend is
+    /// built on it, or `None` when it has its own lifecycle.
+    fn stop_runner(&self, id: &VmId) -> Option<Result<StopTiming>> {
+        match self {
+            Self::Firecracker(backend) => Some(backend.stop_with_timing(id)),
+            Self::Libkrun(backend) => Some(backend.stop_with_timing(id)),
+            Self::Qemu(backend) => Some(backend.stop_with_timing(id)),
+            Self::Hvf(backend) => Some(backend.stop_with_timing(id)),
+            Self::AppleContainer(backend) => Some(backend.stop_with_timing(id)),
+            #[cfg(feature = "test-support")]
+            Self::Mock(_) => None,
+            Self::Wasm(_) | Self::WebLinux(_) => None,
+        }
     }
 
     /// Block until a VM exits and return its captured exit status.
@@ -1059,7 +1054,7 @@ mod tests {
             ..Default::default()
         };
 
-        let fc = FirecrackerConfig::from_start_config_with_slot(&config, slot.clone())
+        let fc = FirecrackerConfig::from_start_config(&config, slot.clone())
             .expect("slot-backed config");
 
         assert_eq!(fc.run_config.name, "standby-a");
@@ -1089,7 +1084,7 @@ mod tests {
         };
 
         let firecracker =
-            FirecrackerConfig::from_start_config_with_slot(&config, VmSlot::new("standby-a", 7))
+            FirecrackerConfig::from_start_config(&config, VmSlot::new("standby-a", 7))
                 .expect("materialized directory uses the block transport");
         assert_eq!(
             firecracker.run_config.volumes[0]
