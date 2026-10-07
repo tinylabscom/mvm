@@ -3048,6 +3048,77 @@
         }
       ]
     },
+    "TelemetryCursor": {
+      "additionalProperties": false,
+      "description": "Position in a VM's record stream: the byte offset of the next line. A cursor is valid only against the file it came from; one that no longer lands on a line boundary is refused rather than guessed at, and the consumer starts over from the beginning.",
+      "properties": {
+        "offset": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "offset"
+      ],
+      "type": "object"
+    },
+    "TelemetryRecordsReply": {
+      "description": "A TelemetryReadResponse; the shape is owned by the telemetry contract. `records`, `next_cursor` (`offset`), `undecodable`, and `exhausted` are always present.",
+      "type": "object"
+    },
+    "TelemetryRecordsRequest": {
+      "additionalProperties": false,
+      "description": "A `telemetry.records` request: the machine, where to resume, and how many records at most. An absent cursor reads from the start of the stream; the limit is clamped by the seam.",
+      "properties": {
+        "cursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TelemetryCursor"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "id": {
+          "type": "string"
+        },
+        "limit": {
+          "default": null,
+          "format": "uint",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "TelemetryRecordsRequest",
+      "type": "object"
+    },
+    "TelemetryStatusReply": {
+      "description": "A TelemetryStatus; the shape is owned by the telemetry contract. `collection` is always present: `not_provisioned`, or `provisioned` with `vm_name`, `state` (`kind`: connecting | collecting | degraded | stopped), `shed`, `records_bytes`, and `snapshot_age_ms` when known.",
+      "type": "object"
+    },
+    "TelemetryStatusRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "MachineRef",
+      "type": "object"
+    },
     "WaitOutcome": {
       "description": "How a waited-on process ended.",
       "oneOf": [
@@ -3786,6 +3857,40 @@
       ],
       "title": "SessionStop",
       "type": "object"
+    },
+    "telemetry_records": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/TelemetryRecordsReply"
+        },
+        "request": {
+          "$ref": "#/definitions/TelemetryRecordsRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "TelemetryRecords",
+      "type": "object"
+    },
+    "telemetry_status": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/TelemetryStatusReply"
+        },
+        "request": {
+          "$ref": "#/definitions/TelemetryStatusRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "TelemetryStatus",
+      "type": "object"
     }
   },
   "required": [
@@ -3828,7 +3933,9 @@
     "guest_proc_stream_close",
     "guest_proc_stream_next",
     "guest_proc_stream_open",
-    "guest_proc_wait"
+    "guest_proc_wait",
+    "telemetry_records",
+    "telemetry_status"
   ],
   "title": "HostAbi",
   "type": "object"
