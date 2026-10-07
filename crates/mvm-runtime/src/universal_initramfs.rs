@@ -6,9 +6,34 @@
 
 use anyhow::Result;
 
+const UNCACHED_SOURCE_RUNTIME_FINGERPRINT: &str = "source-runtime-cache-missing";
+
+#[cfg(any(test, feature = "test-support"))]
+static SEEDED_TEST_INITRAMFS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+#[cfg(any(test, feature = "test-support"))]
+fn seeded_test_initramfs(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Option<mvm_fs::initramfs::InitramfsArtifact> {
+    if !SEEDED_TEST_INITRAMFS
+        .lock()
+        .expect("test initramfs registry mutex is not poisoned")
+        .contains(cache_root)
+    {
+        return None;
+    }
+    mvm_fs::initramfs::InitramfsResolver::new(cache_root, version)
+        .resolve(&arch.to_string())
+        .ok()
+}
+
 /// Discard a cached universal initramfs whose recorded source fingerprint no
 /// longer matches the checkout it would be attached from. Returns true when a
-/// stale artifact was evicted.
+/// stale artifact was evicted; rejects a corrupt source-runtime cache.
 ///
 /// A source checkout rebuilds its guest binaries when they change, but the
 /// initramfs cache is keyed only on `(version, arch)` — so without this it
@@ -19,19 +44,28 @@ fn evict_stale_universal_initramfs(
     cache_root: &std::path::Path,
     version: &str,
     arch: mvm_core::arch::GuestArch,
-) -> bool {
+) -> Result<bool> {
     let Some(workspace_root) = mvm_build::image_source::guest_runtime_source_checkout() else {
-        return false;
+        return Ok(false);
     };
-    let Ok(fingerprint) =
-        mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace_root)
-    else {
-        return false;
+    let Some(shared_cache_root) = cache_root.parent() else {
+        return Ok(false);
     };
-    matches!(
-        mvm_build::initramfs::evict_if_source_changed(cache_root, version, arch, &fingerprint),
-        Ok(true)
-    )
+    let fingerprint = match mvm_build::guest_runtime::cached_source_guest_runtime(
+        shared_cache_root,
+        version,
+        arch,
+        &workspace_root,
+    )? {
+        Some(runtime) => runtime.digest,
+        None => UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string(),
+    };
+    Ok(mvm_build::initramfs::evict_if_source_changed(
+        cache_root,
+        version,
+        arch,
+        &fingerprint,
+    )?)
 }
 
 /// Pure-read probe: would the universal initramfs attach from the cache
@@ -43,8 +77,12 @@ fn universal_initramfs_available() -> bool {
     let version = env!("CARGO_PKG_VERSION");
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
-    evict_stale_universal_initramfs(&cache_root, version, arch);
-    mvm_build::initramfs::resolve_or_seed_from_default_cache(&cache_root, version, arch).is_ok()
+    if evict_stale_universal_initramfs(&cache_root, version, arch).is_err() {
+        return false;
+    }
+    mvm_fs::initramfs::InitramfsResolver::new(&cache_root, version)
+        .resolve(&arch.to_string())
+        .is_ok()
 }
 
 /// Backends that boot a kernel, and so have something to mount an initramfs
@@ -105,6 +143,34 @@ pub fn attach_universal_initramfs_if_cached(
         return Ok(());
     }
     attach_universal_initramfs_with_resolver(start_config, |env, cache_root, version, arch| {
+        if let Some(workspace_root) = mvm_build::image_source::guest_runtime_source_checkout() {
+            #[cfg(any(test, feature = "test-support"))]
+            if let Some(fixture) = seeded_test_initramfs(cache_root, version, arch) {
+                return Ok(fixture);
+            }
+            let shared_cache_root = cache_root.parent().ok_or_else(|| {
+                mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
+                    reason: format!(
+                        "initramfs cache root {} has no parent for the shared guest runtime",
+                        cache_root.display()
+                    ),
+                }
+            })?;
+            let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+                shared_cache_root,
+                version,
+                arch,
+                &workspace_root,
+            )
+            .map_err(|error| {
+                mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
+                    reason: error.to_string(),
+                }
+            })?;
+            return mvm_build::initramfs::build_initramfs_from_guest_runtime(
+                cache_root, version, arch, &runtime,
+            );
+        }
         mvm_build::initramfs::resolve_or_build_local_initramfs(env, cache_root, version, arch)
     })
 }
@@ -129,7 +195,7 @@ fn attach_universal_initramfs_with_resolver(
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     let arch = mvm_core::arch::GuestArch::host();
     let env = crate::host_shell::HostShellEnvironment;
-    if evict_stale_universal_initramfs(&cache_root, version, arch) {
+    if evict_stale_universal_initramfs(&cache_root, version, arch)? {
         tracing::info!(
             initramfs_version = version,
             "guest sources changed since the cached universal initramfs was built; discarded it"
@@ -137,19 +203,6 @@ fn attach_universal_initramfs_with_resolver(
     }
     match resolve(&env, &cache_root, version, arch) {
         Ok(artifact) => {
-            if let Some(workspace_root) = mvm_build::image_source::guest_runtime_source_checkout()
-                && let Ok(fingerprint) =
-                    mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
-                        &workspace_root,
-                    )
-            {
-                let _ = mvm_build::initramfs::record_source_fingerprint(
-                    &cache_root,
-                    version,
-                    arch,
-                    &fingerprint,
-                );
-            }
             start_config.initrd_path = Some(artifact.image_path.display().to_string());
             tracing::info!(
                 initramfs_version = version,
@@ -230,15 +283,23 @@ pub fn seed_warm_universal_initramfs(mvm_home: &std::path::Path) {
     // fingerprint the artifact is of unknown provenance and is discarded —
     // which is the whole point of the eviction, and would make this fixture
     // describe a cache the attach path is right to refuse.
-    if let Some(workspace_root) = mvm_build::image_source::guest_runtime_source_checkout()
-        && let Ok(fingerprint) =
-            mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
-                &workspace_root,
-            )
-    {
+    if let Some(workspace_root) = mvm_build::image_source::guest_runtime_source_checkout() {
+        let fingerprint = match mvm_build::guest_runtime::cached_source_guest_runtime(
+            &mvm_home.join("cache"),
+            version,
+            arch,
+            &workspace_root,
+        ) {
+            Ok(Some(runtime)) => runtime.digest,
+            _ => UNCACHED_SOURCE_RUNTIME_FINGERPRINT.to_string(),
+        };
         mvm_build::initramfs::record_source_fingerprint(&cache_root, version, arch, &fingerprint)
             .unwrap();
     }
+    SEEDED_TEST_INITRAMFS
+        .lock()
+        .expect("test initramfs registry mutex is not poisoned")
+        .insert(cache_root);
 }
 
 #[cfg(test)]
@@ -364,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn attach_universal_initramfs_if_cached_attaches_from_cache() {
+    fn injected_cache_resolver_attaches_an_initramfs() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(dir.path());
@@ -374,7 +435,10 @@ mod tests {
             kernel_path: Some("/dummy/vmlinux".to_string()),
             ..Default::default()
         };
-        attach_universal_initramfs_if_cached(&mut sc, "firecracker").unwrap();
+        attach_universal_initramfs_with_resolver(&mut sc, |_, cache_root, version, arch| {
+            mvm_build::initramfs::resolve_or_seed_from_default_cache(cache_root, version, arch)
+        })
+        .unwrap();
 
         assert!(
             sc.initrd_path.is_some(),
@@ -386,6 +450,37 @@ mod tests {
                 .unwrap()
                 .contains("initramfs.cpio.gz"),
             "attached path should point at the cpio.gz image"
+        );
+    }
+
+    #[test]
+    fn a_disk_cache_entry_alone_is_not_a_test_fixture() {
+        let mut env = TestEnv::new();
+        let seeded = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(seeded.path());
+        seed_warm_universal_initramfs(seeded.path());
+
+        let other = tempfile::tempdir().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let arch = GuestArch::host();
+        let source = seeded
+            .path()
+            .join("cache/initramfs")
+            .join(version)
+            .join(arch.to_string());
+        let target = other
+            .path()
+            .join("cache/initramfs")
+            .join(version)
+            .join(arch.to_string());
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        for entry in std::fs::read_dir(source).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), target.join(entry.file_name())).unwrap();
+        }
+        assert!(
+            seeded_test_initramfs(&other.path().join("cache/initramfs"), version, arch).is_none()
         );
     }
 

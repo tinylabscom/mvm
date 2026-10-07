@@ -1,11 +1,10 @@
 //! Fetch, verify, and install the published SDK-sidecar artifact.
 //!
 //! Picking a cached sidecar and proving it sound is the resolve half and lives
-//! in [`mvm_fs::sdk_sidecar`]. This module owns how one *lands* in the cache on
-//! a host that cannot build it: the per-arch, per-libc member of the signed
-//! image set this build pins, delivered through the same member fetch as the
-//! runtime overlay's, extracted through the same allow-listed entry validator,
-//! and installed through the same stage-then-rename discipline.
+//! in [`mvm_fs::sdk_sidecar`]. This module owns how one *lands* in the cache:
+//! host-side ext4 packing from the verified guest runtime for a source
+//! checkout, or the per-arch, per-libc member of the signed image set this
+//! build pins. Both use the same stage-then-rename cache discipline.
 //!
 //! Every step fails closed. A set that does not declare the member, a size or
 //! digest mismatch, an unsafe archive entry, an inner-manifest disagreement, or
@@ -353,6 +352,98 @@ pub fn install_source_built_sidecar(
     )
 }
 
+/// Build the libc-specific SDK sidecar from a verified guest-runtime member.
+/// The image contains only the host-services cdylib: the guest workload's own
+/// dynamic loader and libc satisfy its dependencies.
+pub fn build_sdk_sidecar_from_guest_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    libc: GuestLibc,
+    runtime: &crate::guest_runtime::GuestRuntime,
+) -> Result<SdkSidecarArtifact, SdkSidecarBuildError> {
+    if libc == GuestLibc::Unknown {
+        return Err(SdkSidecarBuildError::UnknownLibc { arch });
+    }
+    if runtime.manifest.version != version {
+        return Err(SdkSidecarBuildError::InstallInvalid {
+            reason: format!(
+                "guest runtime version {} does not match sidecar version {version}",
+                runtime.manifest.version
+            ),
+        });
+    }
+    let member = format!("{arch}/lib/{libc}/libmvm_host_services.so");
+    let Some(expected_digest) = runtime.manifest.files.get(&member) else {
+        return Err(SdkSidecarBuildError::InstallInvalid {
+            reason: format!("guest runtime manifest does not contain {member}"),
+        });
+    };
+    let source = runtime.root.join(&member);
+    if !std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.file_type().is_file()) {
+        return Err(SdkSidecarBuildError::InstallInvalid {
+            reason: format!("guest runtime member is not a regular file: {member}"),
+        });
+    }
+    let cdylib = std::fs::read(&source).map_err(io_at("reading", &source))?;
+    use sha2::Digest as _;
+    if hex::encode(sha2::Sha256::digest(&cdylib)) != *expected_digest {
+        return Err(SdkSidecarBuildError::InstallInvalid {
+            reason: format!("guest runtime member changed while packing: {member}"),
+        });
+    }
+    let resolver = SdkSidecarResolver::new(cache_root.to_path_buf(), version.to_string());
+    let layout = resolver.layout(&arch.to_string(), libc);
+    if std::fs::read_to_string(layout.artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE))
+        .is_ok_and(|fingerprint| fingerprint.trim() == runtime.digest)
+        && let Ok(cached) = resolver.resolve(&arch.to_string(), libc)
+    {
+        return Ok(cached);
+    }
+    let image = mvm_fs::ext4::build_image(
+        vec![
+            mvm_fs::ext4::Node::Dir {
+                path: "/lib".into(),
+                mode: 0o555,
+                xattrs: Vec::new(),
+                owner: mvm_fs::ext4::Owner::ROOT,
+            },
+            mvm_fs::ext4::Node::File {
+                path: "/lib/libmvm_host_services.so".into(),
+                mode: 0o555,
+                data: cdylib,
+                xattrs: Vec::new(),
+                owner: mvm_fs::ext4::Owner::ROOT,
+            },
+        ],
+        &Default::default(),
+    )
+    .map_err(|e| SdkSidecarBuildError::InstallInvalid {
+        reason: format!("build SDK sidecar ext4: {e}"),
+    })?;
+    let staging = temp_dir()?;
+    let image_path = staging.path().join(SDK_SIDECAR_IMAGE_FILE);
+    let version_path = staging.path().join(SDK_SIDECAR_VERSION_FILE);
+    std::fs::write(&image_path, &image).map_err(io_at("writing", &image_path))?;
+    std::fs::write(&version_path, format!("{version}\n"))
+        .map_err(io_at("writing", &version_path))?;
+    let manifest_path = staging.path().join(CHECKSUM_MANIFEST_FILE);
+    let body = format!(
+        "{}  {SDK_SIDECAR_IMAGE_FILE}\n{}  {SDK_SIDECAR_VERSION_FILE}\n",
+        hex::encode(sha2::Sha256::digest(&image)),
+        hex::encode(sha2::Sha256::digest(format!("{version}\n").as_bytes())),
+    );
+    std::fs::write(&manifest_path, body).map_err(io_at("writing", &manifest_path))?;
+    install_source_built_sidecar(
+        staging.path(),
+        cache_root,
+        version,
+        arch,
+        libc,
+        &runtime.digest,
+    )
+}
+
 /// Refuse a source directory that does not hold the canonical file set,
 /// naming the first missing path. The integrity check below reads these files
 /// by their canonical names and would otherwise surface a bare `ENOENT` with
@@ -583,6 +674,95 @@ pub(crate) mod tests {
     use sha2::{Digest, Sha256};
 
     const FIXTURE_VERSION: &str = "9.9.9";
+
+    #[test]
+    fn guest_runtime_sidecar_packs_one_cdylib_for_each_libc_and_rejects_bad_members() {
+        use mvm_core::image_set::{GitCommit, WorktreeState};
+        let source = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::X86_64;
+        let mut files = std::collections::BTreeMap::new();
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            let member = format!("{arch}/lib/{libc}/libmvm_host_services.so");
+            let bytes = mvm_fs::elf::test_fixture::shared_object(&[
+                "libgcc_s.so.1",
+                libc.libc_soname().unwrap(),
+            ]);
+            let path = source.path().join(&member);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, &bytes).unwrap();
+            files.insert(member, sha256_hex(&bytes));
+        }
+        let mut runtime = crate::guest_runtime::GuestRuntime {
+            root: source.path().to_path_buf(),
+            digest: "d".repeat(64),
+            manifest: crate::guest_bins::GuestBinsManifest {
+                schema_version: crate::guest_bins::GUEST_BINS_MANIFEST_SCHEMA,
+                version: FIXTURE_VERSION.into(),
+                guest_source_fingerprint: "g".repeat(64),
+                sdk_cdylib_source_fingerprint: "s".repeat(64),
+                source: crate::image_source::RepoIdentity {
+                    commit: GitCommit::new("a".repeat(40)).unwrap(),
+                    worktree: WorktreeState::Clean,
+                },
+                files,
+            },
+        };
+        for libc in [GuestLibc::Glibc, GuestLibc::Musl] {
+            let artifact = build_sdk_sidecar_from_guest_runtime(
+                cache.path(),
+                FIXTURE_VERSION,
+                arch,
+                libc,
+                &runtime,
+            )
+            .unwrap();
+            let fs = ext4_view::Ext4::load_from_path(&artifact.image).unwrap();
+            let names: Vec<Vec<u8>> = fs
+                .read_dir("/lib")
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().as_ref().to_vec())
+                .filter(|name| name != b"." && name != b"..")
+                .collect();
+            assert_eq!(names, vec![b"libmvm_host_services.so".to_vec()]);
+            assert_eq!(artifact.libc, libc);
+        }
+        let member = format!("{arch}/lib/musl/libmvm_host_services.so");
+        let digest = runtime.manifest.files.remove(&member).unwrap();
+        let error = build_sdk_sidecar_from_guest_runtime(
+            cache.path(),
+            FIXTURE_VERSION,
+            arch,
+            GuestLibc::Musl,
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(&member), "{error}");
+        runtime.manifest.files.insert(member.clone(), digest);
+        std::fs::write(source.path().join(&member), b"changed").unwrap();
+        let error = build_sdk_sidecar_from_guest_runtime(
+            cache.path(),
+            FIXTURE_VERSION,
+            arch,
+            GuestLibc::Musl,
+            &runtime,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("changed while packing"),
+            "{error}"
+        );
+        assert!(matches!(
+            build_sdk_sidecar_from_guest_runtime(
+                cache.path(),
+                FIXTURE_VERSION,
+                arch,
+                GuestLibc::Unknown,
+                &runtime
+            ),
+            Err(SdkSidecarBuildError::UnknownLibc { .. })
+        ));
+    }
 
     fn sha256_hex(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))

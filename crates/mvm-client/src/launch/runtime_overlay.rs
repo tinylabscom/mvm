@@ -19,7 +19,7 @@ pub enum RuntimeOverlayAcquireMode {
 pub const RUNTIME_OVERLAY_ACQUIRE_MODE_ENV: &str = "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE";
 
 const COLD_SOURCE_RUNTIME_NOTICE: &str = "Preparing the MVM guest runtime from local sources (not the OCI base image): \
-     cold-building guest agent, network, sandbox, and egress helpers for this checkout; \
+     building one guest archive for the overlay, initramfs, SDK sidecar, and OCI path; \
      cached afterward. Use -v for Cargo output…";
 
 pub fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
@@ -83,7 +83,16 @@ pub fn acquire_runtime_overlay(
     params: &RuntimeOverlayAcquireParams<'_>,
 ) -> Result<RuntimeOverlayArtifact> {
     let acquisition = OverlayAcquisition::for_params(params);
-    if let Some(artifact) = acquisition.cold_build_artifact() {
+    if let OverlayAcquisition::BuildFromSource { workspace_root } = acquisition
+        && mvm_build::guest_runtime::cached_source_guest_runtime(
+            params.cache_root,
+            params.expected_version,
+            params.arch,
+            workspace_root,
+        )?
+        .is_none()
+        && let Some(artifact) = acquisition.cold_build_artifact()
+    {
         mvm_runtime::ui::admit_cold_build(artifact).map_err(anyhow::Error::msg)?;
     }
     match acquisition {
@@ -125,30 +134,49 @@ pub fn acquire_runtime_overlay(
 pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
     let version = env!("CARGO_PKG_VERSION");
     let arch = GuestArch::host();
+    let cache_root = shared_guest_runtime_cache_root(oci_cache_root)?;
     match mvm_build::guest_agent_build::guest_binary_source()? {
         mvm_build::guest_agent_build::GuestBinarySource::SourceCheckout {
             workspace_root,
             cache_key,
         } => {
-            if mvm_build::guest_agent_build::cached_guest_binaries(oci_cache_root, &cache_key, arch)
+            let cached_runtime = mvm_build::guest_runtime::cached_source_guest_runtime(
+                cache_root,
+                version,
+                arch,
+                &workspace_root,
+            )?;
+            if cached_runtime.is_none()
+                && mvm_build::guest_agent_build::cached_guest_binaries(
+                    oci_cache_root,
+                    &cache_key,
+                    arch,
+                )
                 .is_some()
             {
                 return Ok(());
             }
-            mvm_runtime::ui::admit_cold_build("the OCI guest runtime")
-                .map_err(anyhow::Error::msg)?;
-            // Status goes to stderr: stdout belongs to the workload's own output.
-            mvm_runtime::ui::activity::println_above(&format!(
-                "[mvm] {COLD_SOURCE_RUNTIME_NOTICE}"
-            ));
-            let phase =
-                mvm_runtime::ui::activity::start("Compiling the guest runtime from local sources");
-            mvm_build::guest_agent_build::resolve_or_build_guest_binaries(
-                oci_cache_root,
-                &cache_key,
+            let cold = cached_runtime.is_none();
+            if cold {
+                mvm_runtime::ui::admit_cold_build("the OCI guest runtime")
+                    .map_err(anyhow::Error::msg)?;
+                // Status goes to stderr: stdout belongs to the workload's own output.
+                mvm_runtime::ui::activity::println_above(&format!(
+                    "[mvm] {COLD_SOURCE_RUNTIME_NOTICE}"
+                ));
+            }
+            let phase = mvm_runtime::ui::activity::start(if cold {
+                "Compiling the guest runtime from local sources"
+            } else {
+                "Using the cached guest runtime for OCI"
+            });
+            mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+                cache_root,
+                version,
                 arch,
                 &workspace_root,
-            )?;
+            )
+            .context("prepare the shared source-built guest runtime for OCI")?;
             phase.finish();
             return Ok(());
         }
@@ -160,13 +188,6 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
             }
         }
     }
-
-    let cache_root = oci_cache_root.parent().ok_or_else(|| {
-        anyhow::anyhow!(
-            "OCI cache root {} has no parent for shared release artifacts",
-            oci_cache_root.display()
-        )
-    })?;
 
     let phase = mvm_runtime::ui::activity::start(
         "Preparing the published guest runtime (first use; downloaded and cached afterward)",
@@ -187,31 +208,56 @@ pub fn prepare_oci_guest_runtime(oci_cache_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn shared_guest_runtime_cache_root(oci_cache_root: &Path) -> Result<&Path> {
+    match oci_cache_root.file_name() {
+        Some(name) if name == "oci" => oci_cache_root.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OCI cache root {} has no parent for shared guest runtime artifacts",
+                oci_cache_root.display()
+            )
+        }),
+        Some(_) => Ok(oci_cache_root),
+        None => anyhow::bail!(
+            "OCI cache root {} does not identify an isolated cache directory",
+            oci_cache_root.display()
+        ),
+    }
+}
+
 fn build_runtime_overlay_from_source_checkout(
     workspace_root: &Path,
     cache_root: &Path,
     expected_version: &str,
     arch: GuestArch,
 ) -> Result<RuntimeOverlayArtifact> {
-    let bins = mvm_build::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
+    let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
         cache_root,
         expected_version,
         arch,
         workspace_root,
     )
-    .context("build guest binaries for the direct runtime-overlay path")?;
-    mvm_build::runtime_overlay::build_runtime_overlay_from_guest_binaries(
+    .context("resolve shared guest runtime for the direct runtime-overlay path")?;
+    mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
         cache_root,
         expected_version,
         arch,
-        &bins,
+        &runtime,
     )
-    .context("assemble direct runtime-overlay artifact from source-built guest binaries")
+    .context("assemble direct runtime-overlay artifact from shared guest runtime")
 }
 
 #[cfg(test)]
 mod acquisition_policy_tests {
     use super::*;
+
+    #[test]
+    fn oci_uses_the_same_guest_runtime_cache_root_as_overlay() {
+        let base = Path::new("/isolated/mvm/cache");
+        let oci = base.join("oci");
+        assert_eq!(shared_guest_runtime_cache_root(&oci).unwrap(), base);
+        assert_eq!(shared_guest_runtime_cache_root(base).unwrap(), base);
+        assert!(shared_guest_runtime_cache_root(Path::new("/")).is_err());
+    }
 
     #[test]
     fn release_channel_defaults_to_download_even_inside_a_checkout() {
@@ -260,7 +306,8 @@ mod acquisition_policy_tests {
     #[test]
     fn cold_source_runtime_notice_names_the_artifacts_and_caching() {
         assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("not the OCI base image"));
-        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("guest agent, network, sandbox, and egress"));
+        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("one guest archive"));
+        assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("overlay, initramfs, SDK sidecar, and OCI"));
         assert!(COLD_SOURCE_RUNTIME_NOTICE.contains("cached afterward"));
         // The prewarm pointer belongs to the one first-run notice the cold
         // build gate prints before this line; repeating it here is noise.

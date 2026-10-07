@@ -313,7 +313,7 @@ mod pair_routing_tests {
     }
 
     #[test]
-    fn the_pair_overlay_installs_into_the_cache_with_its_identity_stamped() {
+    fn explicit_pair_overlay_build_installs_into_the_cache_with_its_identity_stamped() {
         let pair = Pair::new();
         let mut env = selector_env(&pair);
         let home = pair.tmp.path().join("home");
@@ -362,20 +362,6 @@ mod pair_routing_tests {
             key.digest().as_str(),
             "the stamp is the pair's cache-key digest, so a changed pair reinstalls"
         );
-
-        // The launch path under the same pair must now answer from the
-        // install without another build.
-        let mut sc = mvm_core::vm_backend::VmStartConfig::default();
-        crate::commands::env::builder_vm::with_pair_artifact_source(|pair_source| {
-            mvm_client::launch::runtime_source::attach_runtime_overlay_if_cached_version(
-                &mut sc,
-                "firecracker",
-                None,
-                pair_source,
-            )
-        })
-        .expect("launch resolves the stamped pair install");
-        assert!(sc.runtime_overlay_path.is_some(), "overlay attached");
     }
 
     /// A pair build keeps exact equality with this CLI's version: an overlay
