@@ -284,7 +284,7 @@ pub(in crate::commands) fn run_declared_command(
         timeout_secs: None,
         // The proxy, CA bundle and secret placeholders the VM was provisioned
         // with: what a tool needs to reach the routes its rules give it.
-        env: mvm_hostd::workload_env::workload_egress_env(name),
+        env: mvm_client::entrypoint::dispatch::workload_egress_env(name),
     };
     anyhow::ensure!(
         call.tool_check().is_some(),
