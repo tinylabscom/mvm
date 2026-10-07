@@ -1958,7 +1958,7 @@ class GuestRequest51:
 
 
 @dataclass
-class GuestRequest52:
+class GuestRequest53:
     DisplayInput: DisplayInputFrame
 
 
@@ -2285,6 +2285,7 @@ GuestRequest = Union[
     GuestRequest50,
     GuestRequest51,
     GuestRequest52,
+    GuestRequest53,
 ]
 
 

@@ -1135,6 +1135,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         audit_dir: None,
         policy_dir: None,
         bundle_pin: None,
+        bundle_posture: None,
         deps_volume: None,
         shares: Vec::new(),
         assets: Vec::new(),

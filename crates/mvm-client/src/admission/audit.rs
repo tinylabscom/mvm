@@ -80,6 +80,23 @@ pub fn emit_policy_resolve_failure(
     }
 }
 
+/// Record a launch refused for asking more than its bundle's signed posture
+/// allows, bound to the plan it would have run under.
+pub fn emit_bundle_posture_refused(
+    plan: &mvm_core::plan::ExecutionPlan,
+    emitter: &AuditEmitter,
+    err: &anyhow::Error,
+) {
+    if let Err(audit_err) =
+        emitter.emit_failed(plan, "bundle-posture-exceeded", &format!("{err:#}"))
+    {
+        tracing::warn!(
+            error = %audit_err,
+            "audit emit_failed for bundle-posture-exceeded failed (non-fatal)"
+        );
+    }
+}
+
 pub fn emit_policy_audit_invalid(
     plan: &mvm_core::plan::ExecutionPlan,
     emitter: &AuditEmitter,

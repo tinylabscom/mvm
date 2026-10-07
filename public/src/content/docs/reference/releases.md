@@ -29,7 +29,10 @@ third binds an SDK host service (`--host-service host.time.v1`), which downloads
 the published SDK sidecar, and the guest must find the SDK library under
 `/mvm/sdk`. A release binary refuses or fetches again any of these artifacts
 whose `VERSION` is not its own, and only the later boots reach that check. The
-smoke runs on the self-hosted Apple Silicon runner (HVF) and on a
+fourth grants egress to one host
+(`--image curlimages/curl:8.21.0 --allow-host example.com`) and the guest must
+fetch it over HTTPS, which starts the network endpoint shipped beside `mvmctl`.
+The smoke runs on the self-hosted Apple Silicon runner (HVF) and on a
 hosted Linux runner with KVM (Firecracker). When every lane prints its tokens,
 `promote-release` makes the tag a full release and GitHub's latest, and
 dispatches the site deployment that bakes it into `https://runmvm.com/install.sh`
@@ -52,6 +55,30 @@ artifacts come from the tag. That exercises the runners, the installer, and
 that tag's first run. It does not exercise code that has not been released yet:
 for that, tag a release candidate, which runs the same lanes and stays a
 prerelease.
+
+## Before publication: the Linux archive boots
+
+The Linux release archives carry static musl binaries; every other lane before
+publication builds `mvmctl` and its host binaries from the tree against the
+runner's glibc. The two libcs reach the kernel through different syscalls for
+the same call, and the network endpoint's seccomp filter kills it for any call
+it does not list, so a defect of that kind passes every source-built lane. That
+is how v0.22.0 shipped an endpoint that died on every egress grant.
+
+So `release.yml` does not publish until `release-archive-smoke` has run the
+same smoke against the `x86_64-unknown-linux-gnu` archive its `build` job just
+uploaded: the archive is checked against the checksum the build recorded,
+unpacked, `mvmctl` is linked into a throwaway `HOME` as the installer links it,
+`mvmctl bootstrap` runs, and all four boots, egress included, must print their
+tokens on a hosted runner with KVM (Firecracker). The installer is not used
+because it refuses an archive without the signature the publish step adds.
+There is no aarch64 leg: no hosted arm64 runner exposes KVM. CI's
+`test-musl-confinement` lane covers both architectures without a guest, running
+the endpoint's seccomp tests against the musl build on every pull request.
+
+The lane lives in `.github/workflows/release-archive-smoke.yml`. Dispatch it
+with the id of an earlier release run to smoke the archive that run built:
+`gh workflow run release-archive-smoke.yml --ref main -f run_id=<id> -f tag=<tag>`.
 
 ## How each install path consumes a release
 
