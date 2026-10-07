@@ -192,6 +192,8 @@ covered = [
     "mvmctl machine wait api-dev --for all",
     "mvmctl machine wait my-app",
     "mvmctl machine wait service-dev --for all",
+    "mvmctl pack info runtime/node",
+    "mvmctl pack verify runtime/node",
     "mvmctl run",
     "mvmctl run -- uname -a",
     "mvmctl run --image alpine -- uname -a",

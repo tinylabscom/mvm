@@ -424,9 +424,9 @@ fn pull_one(
     let loaded = load_publisher_policy_or_official_default(&policy_path)?;
     if loaded.is_official_default() {
         crate::ui::info(&format!(
-            "no publisher policy at {}; using the built-in official registry policy \
-             (signed by {} in mvm-packs). Write that file to make your own trust \
-             decision.",
+            "no publisher policy at {}; using built-in trust for agent/ and runtime/ \
+             signed by {} (or the former identity until 2026-11-06 UTC). \
+             Write that file to make your own trust decision.",
             policy_path.display(),
             mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
         ));
