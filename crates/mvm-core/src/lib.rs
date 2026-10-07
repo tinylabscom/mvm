@@ -76,6 +76,7 @@ pub mod migration;
 pub mod naming;
 pub mod net;
 pub mod observability;
+pub mod otlp_env;
 pub mod pack_cache;
 pub mod pack_revocation;
 pub mod pack_trust;
@@ -91,6 +92,7 @@ pub mod release_version;
 pub use release_version::{ReleaseVersion, VersionSyntax};
 /// Named product-pack references and their fail-closed manifest lockfile.
 pub mod registry_pack;
+pub mod registry_pack_revocation;
 pub mod registry_pack_store;
 /// UOR-ADDR-compatible canonical content identity for the Workload IR,
 /// distinct from every exact-byte, trust, and replay identity type.

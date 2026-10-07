@@ -182,6 +182,12 @@ pub enum ImageSetError {
         role: ImageSetRole,
         capability: GuestDeviceRequirement,
     },
+    #[error("at least one artifact must be selected")]
+    EmptyArtifactSelection,
+    #[error("artifact {name} is not declared by the signed image set")]
+    UnknownSelectedArtifact { name: ArtifactName },
+    #[error("artifact {name} was selected more than once or declared ambiguously")]
+    DuplicateSelectedArtifact { name: ArtifactName },
     #[error("image lock schema version {found} is not supported (expected {supported})")]
     UnsupportedLockSchemaVersion { found: u32, supported: u32 },
     #[error("manifest digest {} is not the locked {}", .actual.as_str(), .pinned.as_str())]
@@ -308,7 +314,7 @@ pub enum ImageSetStage {
     Artifacts,
     /// The set or one of its members is revoked.
     Revocation,
-    /// A backend cannot run any member the set offers for a role.
+    /// A requested member or artifact cannot be selected from the set.
     Selection,
 }
 
@@ -386,6 +392,9 @@ impl ImageSetError {
             | Self::ArtifactDigestMismatch { .. } => ImageSetStage::Artifacts,
             Self::MemberRevoked { .. } | Self::SetRevoked { .. } => ImageSetStage::Revocation,
             Self::ArchitectureUnsupportedByBackend { .. }
+            | Self::EmptyArtifactSelection
+            | Self::UnknownSelectedArtifact { .. }
+            | Self::DuplicateSelectedArtifact { .. }
             | Self::WrongArchitecture { .. }
             | Self::MemberNotFound { .. }
             | Self::UnsupportedBootProtocol { .. }

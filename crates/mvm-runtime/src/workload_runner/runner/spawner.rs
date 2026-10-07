@@ -66,6 +66,14 @@ pub trait NetworkEndpointSpawner: Send + Sync {
 /// over the in-process-VMM UDS transport.
 pub struct RealNetworkEndpointSpawner;
 
+fn telemetry_for_boot(collection_enabled: bool, identity: FlowMuxIdentitySource<'_>) -> bool {
+    // A restored guest keeps the standby parent's kernel command line. That
+    // parent deliberately booted without an endpoint or telemetry assertion,
+    // so adding a collector only on claim would create another listener/dialer
+    // mismatch. Fresh boots can assert telemetry after their endpoint spawns.
+    collection_enabled && matches!(identity, FlowMuxIdentitySource::Mint)
+}
+
 /// Provision a parent's guest key without tenant workload authority or egress.
 pub(super) fn prepare_standby_identity(
     spawner: &dyn NetworkEndpointSpawner,
@@ -93,6 +101,8 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
     fn prepare_identity(&self, req: &NetworkEndpointSpawnRequest<'_>) -> Result<Option<PathBuf>> {
         let anchor_path = mvm_core::config::mvm_keys_dir()
             .join(mvm_vmm::host::broker_services_spawn::HOST_SIGNER_PUB);
+        mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, false)
+            .context("clearing telemetry provisioning for a boot without an endpoint")?;
         prepare_observation_identity(req, &anchor_path)
     }
 
@@ -152,13 +162,17 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
         )
         .context("registering this boot's telemetry identity")?;
 
+        let telemetry = telemetry_for_boot(
+            mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
+            req.identity,
+        );
         spawn_network_endpoint(SubstitutionSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
             // A detached machine outlives the `mvmctl` that started it; its
             // endpoint must too, and must stop when the machine does.
             lifetime: mvm_vmm::host::network_endpoint_spawn::EndpointLifetime::Vm,
-            telemetry: mvm_vmm::host::telemetry_provisioning::telemetry_collection_enabled(),
+            telemetry,
             tenant: req.tenant,
             secrets: req.secrets,
             redaction: req.redaction,
@@ -176,6 +190,8 @@ impl NetworkEndpointSpawner for RealNetworkEndpointSpawner {
             binding_store_dir: None,
             flowmux_identity: Some(identity),
         })?;
+        mvm_vmm::host::telemetry_provisioning::record_boot_provisioning(req.state_dir, telemetry)
+            .context("recording this boot's telemetry provisioning")?;
         Ok(SpawnedEndpoint {
             egress_uds: uds,
             identity_drive,
@@ -372,6 +388,17 @@ fn host_signer_key_base64() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_is_provisioned_only_for_fresh_boots_that_can_assert_it() {
+        let parent = Path::new("/parent");
+        assert!(telemetry_for_boot(true, FlowMuxIdentitySource::Mint));
+        assert!(!telemetry_for_boot(
+            true,
+            FlowMuxIdentitySource::InheritFrom(parent)
+        ));
+        assert!(!telemetry_for_boot(false, FlowMuxIdentitySource::Mint));
+    }
     use base64::Engine as _;
     use mvm_vmm::host::flowmux_identity::{
         IDENTITY_DRIVE_FILE, InheritableIdentity, PUBLIC_IDENTITY_FILE, load_inheritable_identity,

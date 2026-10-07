@@ -372,7 +372,7 @@ pub fn assemble(
     cfg: &EndpointConfig,
 ) -> anyhow::Result<(Arc<SubstitutionService>, HandedPlaceholders)> {
     let projection = EndpointNetworkProjection::from_config(cfg);
-    let (service, handed, _) = assemble_with_projection(cfg, &projection)?;
+    let (service, handed, _) = assemble_projected(cfg, &projection)?;
     Ok((service, handed))
 }
 
@@ -385,7 +385,7 @@ pub fn assemble(
 /// per-binding refresh loops live exactly as long as the VM. `None` under
 /// `ResolverBackend::Remote` — the fleet resolver refuses store writes, so
 /// there is nothing host-local to drive.
-pub fn assemble_with_projection(
+pub fn assemble_projected(
     cfg: &EndpointConfig,
     projection: &EndpointNetworkProjection,
 ) -> anyhow::Result<(
@@ -775,7 +775,7 @@ mod tests {
             recorder: Some(Arc::clone(&recorder)),
         };
 
-        let (service, _, oauth_refresh) = assemble_with_projection(&cfg, &projection).unwrap();
+        let (service, _, oauth_refresh) = assemble_projected(&cfg, &projection).unwrap();
         assert!(oauth_refresh.is_none());
         assert_eq!(
             service.shared_projection_ids(),
@@ -793,6 +793,13 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("bindings")).unwrap();
         let mut cfg = vsock_cfg(vec![], dir.path());
         cfg.tools.allow.push("shell".into());
+        cfg.tools.detail.insert(
+            "shell".into(),
+            mvm_contract::policy::tool_rules::ToolRuleDetail {
+                executable: Some("/bin/echo".into()),
+                ..Default::default()
+            },
+        );
 
         let signer = Arc::new(crate::supervisor::audit::CapturingAuditSigner::new());
         let recorder = Arc::new(crate::supervisor::audit_recorder::Recorder::new(
@@ -804,18 +811,30 @@ mod tests {
             recorder: Some(recorder),
         };
         let (service, _, oauth_refresh) =
-            assemble_with_projection(&cfg, &projection).expect("assemble endpoint");
+            assemble_projected(&cfg, &projection).expect("assemble endpoint");
         assert!(oauth_refresh.is_none());
         assert_eq!(
             service
-                .decide_tool("shell", "echo ok")
+                .decide_tool(
+                    &mvm_contract::protocol::network_flow::tool::ToolCheckRequest {
+                        tool: "shell".into(),
+                        executable: Some("/bin/echo".into()),
+                        argv: "echo ok".into(),
+                    }
+                )
                 .await
                 .expect("audit allow"),
             crate::supervisor::tool_decision::ToolVerdict::Allow
         );
         assert!(matches!(
             service
-                .decide_tool("other", "other")
+                .decide_tool(
+                    &mvm_contract::protocol::network_flow::tool::ToolCheckRequest {
+                        tool: "other".into(),
+                        executable: Some("/bin/other".into()),
+                        argv: "other".into(),
+                    }
+                )
                 .await
                 .expect("audit deny"),
             crate::supervisor::tool_decision::ToolVerdict::Deny(_)
@@ -837,7 +856,7 @@ mod tests {
             gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
             recorder: None,
         };
-        assert!(assemble_with_projection(&cfg, &projection).is_err());
+        assert!(assemble_projected(&cfg, &projection).is_err());
     }
 
     /// A loopback listener that counts the connections it accepts, so a test
@@ -921,7 +940,7 @@ mod tests {
                 mvm_core::plan::TenantId("local".into()),
             ))),
         };
-        let (_, _, oauth_refresh) = assemble_with_projection(&cfg, &projection).unwrap();
+        let (_, _, oauth_refresh) = assemble_projected(&cfg, &projection).unwrap();
         oauth_refresh
             .expect("an oauth-bound secret yields a refresher")
             .with_retry_policy(Duration::from_millis(10), 3)
@@ -1010,7 +1029,7 @@ mod tests {
             gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
             recorder: None,
         };
-        let err = match assemble_with_projection(&cfg, &projection) {
+        let err = match assemble_projected(&cfg, &projection) {
             Ok(_) => panic!("a cleartext token endpoint must refuse assembly"),
             Err(err) => format!("{err:#}"),
         };
@@ -1047,7 +1066,7 @@ mod tests {
             gate: Arc::new(mvm_runtime::vmm::egress_gate::EgressGate::default_deny()),
             recorder: None,
         };
-        let error = assemble_with_projection(&cfg, &projection)
+        let error = assemble_projected(&cfg, &projection)
             .err()
             .expect("route policy without audit is refused");
         assert!(error.to_string().contains("route rules require"));

@@ -74,11 +74,11 @@ impl FlowMuxReconnectClient {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = Result<S, FlowMuxError>> + Send,
     {
-        Self::connect_with_ingress(connector, guest_signing_key, host_anchor, Vec::new()).await
+        Self::connect_ingress_targets(connector, guest_signing_key, host_anchor, Vec::new()).await
     }
 
     /// Connect and retain the signed ingress target set across reconnects.
-    pub async fn connect_with_ingress<S, F, Fut>(
+    pub async fn connect_ingress_targets<S, F, Fut>(
         connector: F,
         guest_signing_key: SigningKey,
         host_anchor: VerifyingKey,
@@ -92,7 +92,7 @@ impl FlowMuxReconnectClient {
         let ingress_targets = Arc::new(ingress_targets);
         let initial = connector().await?;
         let client = Arc::new(
-            FlowMuxClient::connect_with_ingress(
+            FlowMuxClient::connect_ingress_targets(
                 initial,
                 guest_signing_key.clone(),
                 host_anchor,
@@ -281,7 +281,7 @@ async fn reconnect_loop<S, F, Fut>(
 
         let attempt = async {
             let stream = connector().await?;
-            FlowMuxClient::connect_with_ingress(
+            FlowMuxClient::connect_ingress_targets(
                 stream,
                 guest_signing_key.clone(),
                 host_anchor,

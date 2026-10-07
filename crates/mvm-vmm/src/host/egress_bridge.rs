@@ -30,8 +30,7 @@ pub fn require_grant_cmdline_token(vm_name: &str) -> Option<String> {
 /// provisioning decision the spawner uses to embed the collector in the
 /// endpoint, so the assertion and the collection can never disagree.
 pub fn telemetry_cmdline_token(vm_name: &str) -> Option<String> {
-    let _ = vm_name;
-    super::telemetry_provisioning::telemetry_collection_enabled()
+    super::telemetry_provisioning::boot_is_provisioned(&mvm_core::config::vm_state_dir(vm_name))
         .then(|| "mvm.telemetry=1".to_string())
 }
 
@@ -75,6 +74,28 @@ mod tests {
         let vm_name = "missing-grant";
         assert!(verb_grant_cmdline_token(vm_name).is_none());
         assert!(require_grant_cmdline_token(vm_name).is_none());
+    }
+
+    #[test]
+    fn telemetry_token_requires_this_boots_endpoint_provisioning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", dir.path());
+        env.set(
+            mvm_core::otlp_env::ENV_ENDPOINT,
+            "https://collector.example",
+        );
+        let vm_name = "standby-with-host-global-telemetry";
+
+        assert!(telemetry_cmdline_token(vm_name).is_none());
+
+        let state = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state).unwrap();
+        super::super::telemetry_provisioning::record_boot_provisioning(&state, true).unwrap();
+        assert_eq!(
+            telemetry_cmdline_token(vm_name).as_deref(),
+            Some("mvm.telemetry=1")
+        );
     }
 
     /// The host-identity anchor ships even when no grant is minted. Gating it on

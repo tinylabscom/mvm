@@ -138,7 +138,7 @@ pub mod wall_clock;
 pub use aggregate::{
     AuditPolicyValidationError, EgressPolicyValidationError, KNOWN_AUDIT_STREAM_SCHEMES,
     KNOWN_INSPECTOR_NAMES, Supervisor, SupervisorError, build_inspector_chain,
-    build_inspector_chain_with_pii, validate_audit_policy_stream_destinations,
+    build_pii_inspector_chain, validate_audit_policy_stream_destinations,
     validate_egress_policy_inspector_names,
 };
 pub use artifact::{

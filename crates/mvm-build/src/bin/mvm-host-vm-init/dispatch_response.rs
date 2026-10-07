@@ -157,6 +157,43 @@ pub(crate) fn workload_failed_json(workload_id: &str, error: &str) -> String {
     out
 }
 
+/// The single-shot job outcome the guest writes to `/job/result`, as
+/// `mvm_build::builder_job_contract::JobOutcome` parses it: the contract
+/// version this init speaks, the exit code, the stderr tail cut to the
+/// contract's bound, the failure category, and the job's run time.
+pub(crate) fn job_outcome_json(
+    exit_code: i32,
+    failure: Option<mvm_build::builder_job_contract::FailureCategory>,
+    stderr_tail: &str,
+    build_ms: Option<u64>,
+) -> String {
+    use mvm_build::builder_job_contract::{BUILDER_JOB_CONTRACT_VERSION, bounded_tail};
+    let tail = bounded_tail(stderr_tail);
+    let mut out = String::with_capacity(128 + tail.len());
+    out.push_str(r#"{"contract_version":"#);
+    out.push_str(&BUILDER_JOB_CONTRACT_VERSION.to_string());
+    out.push_str(r#","exit_code":"#);
+    out.push_str(&exit_code.to_string());
+    out.push_str(r#","stderr_tail":""#);
+    push_json_string(&mut out, tail);
+    out.push_str(r#"","failure":"#);
+    match failure {
+        Some(category) => {
+            out.push('"');
+            out.push_str(category.as_str());
+            out.push('"');
+        }
+        None => out.push_str("null"),
+    }
+    out.push_str(r#","build_ms":"#);
+    match build_ms {
+        Some(ms) => out.push_str(&ms.to_string()),
+        None => out.push_str("null"),
+    }
+    out.push_str("}\n");
+    out
+}
+
 /// JSON string-escape per RFC 8259 §7. Inlined rather than calling
 /// the existing `json_escape` in `main.rs` because that one is
 /// `#[cfg(target_os = "linux")]`-gated under the linux module —
@@ -360,6 +397,55 @@ mod tests {
             }
             other => panic!("expected Result variant, got {other:?}"),
         }
+    }
+
+    /// The job outcome the guest writes parses as the host's typed
+    /// `JobOutcome`, unknown fields denied, for every failure category.
+    #[test]
+    fn job_outcome_json_parses_as_the_typed_contract_outcome() {
+        use mvm_build::builder_job_contract::{
+            BUILDER_JOB_CONTRACT_VERSION, FailureCategory, JobOutcome, parse_outcome,
+        };
+        let success = parse_outcome(&job_outcome_json(0, None, "ok\n\"quoted\"", Some(9))).unwrap();
+        assert_eq!(
+            success,
+            JobOutcome {
+                contract_version: BUILDER_JOB_CONTRACT_VERSION,
+                exit_code: 0,
+                stderr_tail: "ok\n\"quoted\"".to_string(),
+                failure: None,
+                build_ms: Some(9),
+            }
+        );
+        for category in [
+            FailureCategory::Version,
+            FailureCategory::InvalidRequest,
+            FailureCategory::NixEval,
+            FailureCategory::NixBuild,
+            FailureCategory::Fetch,
+            FailureCategory::Timeout,
+            FailureCategory::Internal,
+            FailureCategory::Unsupported,
+            FailureCategory::OutputContract,
+            FailureCategory::Unknown,
+        ] {
+            let parsed = parse_outcome(&job_outcome_json(2, Some(category), "\u{1}", None))
+                .expect("every category renders as its serde tag");
+            assert_eq!(parsed.failure, Some(category));
+            assert_eq!(parsed.build_ms, None);
+        }
+    }
+
+    #[test]
+    fn job_outcome_json_bounds_the_stderr_tail() {
+        let long = "x".repeat(mvm_build::builder_job_contract::STDERR_TAIL_MAX_BYTES * 3);
+        let parsed =
+            mvm_build::builder_job_contract::parse_outcome(&job_outcome_json(1, None, &long, None))
+                .unwrap();
+        assert_eq!(
+            parsed.stderr_tail.len(),
+            mvm_build::builder_job_contract::STDERR_TAIL_MAX_BYTES
+        );
     }
 
     /// Every workload-lifecycle emitter must deserialize as the typed

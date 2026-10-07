@@ -28,6 +28,9 @@ mod builder_host_binaries;
 /// The mvm sources a builder image's evaluation reads, shared by the Stage 0
 /// fingerprint and the local image cache key.
 pub mod builder_image_inputs;
+/// What a staged builder job directory means to the guest, and the versioned
+/// outcome the guest writes back.
+pub mod builder_job_contract;
 /// One flake build through a builder VM, as a request and a result, for a
 /// caller that wants the artifacts where it asked for them.
 pub mod builder_orchestrator;
@@ -184,6 +187,8 @@ pub mod guest_agent_build;
 /// release and assemble its overlay, initramfs and SDK sidecar from.
 /// Compiled through [`guest_agent_build`]'s toolchain and caches.
 pub mod guest_bins;
+/// One digest-keyed guest-runtime tree shared by the host-side assemblers.
+pub mod guest_runtime;
 pub mod nix;
 /// Inject the mvm guest runtime (agent, netinit, `/init`, `/mvm/runtime`
 /// mount point) into an OCI-unpacked rootfs so `run --image` has a vsock

@@ -5,14 +5,7 @@ use std::time::Duration;
 
 use mvm_http::{HeaderMap, HeaderName, HeaderValue, Url};
 
-/// Signal-specific endpoint, used exactly as given.
-pub const ENV_TRACES_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT";
-/// Base endpoint; the traces path is appended.
-pub const ENV_ENDPOINT: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
-/// `name=value` pairs separated by commas, values percent-encoded.
-pub const ENV_HEADERS: &str = "OTEL_EXPORTER_OTLP_HEADERS";
-/// Per-request timeout in milliseconds.
-pub const ENV_TIMEOUT: &str = "OTEL_EXPORTER_OTLP_TIMEOUT";
+pub use mvm_core::otlp_env::{ENV_ENDPOINT, ENV_HEADERS, ENV_TIMEOUT, ENV_TRACES_ENDPOINT};
 /// `service.name` resource attribute.
 pub const ENV_SERVICE_NAME: &str = "OTEL_SERVICE_NAME";
 /// Target filter for the exporter's own layer, independent of the log filter.

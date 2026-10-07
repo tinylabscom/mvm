@@ -25,3 +25,18 @@ Feature: The documented flake build runs for real
   Scenario: the documented entrypoint launch runs the compiled workload
     When I run mvmctl in an isolated live home with "machine run --entrypoint --flake examples/exit_code"
     Then the command exits with code 7
+
+  # The image a builder VM produced, sealed on the host that ran it and
+  # installed somewhere else. The builder is untrusted and never holds the
+  # signing key: `bundle export` signs on the host, after the build is done,
+  # and a second home that trusts only the signer's public half verifies and
+  # installs the result without booting it. Reuses the build above.
+  @live
+  Scenario: the documented flake build seals into a host-signed bundle another home installs
+    When I run mvmctl in an isolated live home with "machine build --flake examples/exit_code"
+    Then the command exits with code 0
+    When I seal the live build of "examples/exit_code" into a bundle
+    Then the command exits with code 0
+    When I install the sealed bundle into a fresh home that trusts its builder
+    Then the command exits with code 0
+    And the install reports a bundle content address

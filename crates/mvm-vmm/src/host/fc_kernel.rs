@@ -392,7 +392,7 @@ mod tests {
     /// launch and nothing else here would notice.
     #[test]
     fn preparing_a_kernel_leaves_the_shared_digest_cache_warm() {
-        use mvm_core::crypto::image_verify::{DigestSource, sha256_file_cached_with_source};
+        use mvm_core::crypto::image_verify::{DigestSource, sha256_file_cached_report_source};
 
         let dir = tempfile::tempdir().unwrap();
         let kpath = dir.path().join("vmlinux");
@@ -400,7 +400,7 @@ mod tests {
 
         ensure_fc_loadable_kernel(&kpath).unwrap();
 
-        let (_, source) = sha256_file_cached_with_source(&kpath).unwrap();
+        let (_, source) = sha256_file_cached_report_source(&kpath).unwrap();
         assert_eq!(
             source,
             DigestSource::Sidecar,

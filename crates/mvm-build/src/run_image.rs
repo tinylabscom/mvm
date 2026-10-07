@@ -733,13 +733,40 @@ pub fn resolve_guest_binaries(cache_root: &Path) -> Result<MvmRuntimeBinaries> {
             workspace_root,
             cache_key,
         } => {
-            return crate::guest_agent_build::resolve_or_build_guest_binaries(
-                cache_root,
-                &cache_key,
+            let shared_cache = cache_root
+                .file_name()
+                .filter(|name| *name == "oci")
+                .and_then(|_| cache_root.parent())
+                .unwrap_or(cache_root);
+            // An existing source-keyed OCI cache is a migration input, not a
+            // reason to cross-compile again. Fresh caches use the shared
+            // archive, and once it exists it wins over this legacy layout.
+            if crate::guest_runtime::cached_source_guest_runtime(
+                shared_cache,
+                env!("CARGO_PKG_VERSION"),
+                arch,
+                &workspace_root,
+            )?
+            .is_none()
+                && let Some(cached) =
+                    crate::guest_agent_build::cached_guest_binaries(cache_root, &cache_key, arch)
+            {
+                return Ok(cached);
+            }
+            let runtime = crate::guest_runtime::resolve_or_build_source_guest_runtime(
+                shared_cache,
+                env!("CARGO_PKG_VERSION"),
                 arch,
                 &workspace_root,
             )
-            .context("build guest agent binaries from the source checkout");
+            .context("resolve the shared source-built guest runtime for OCI")?;
+            let bin = |name: &str| runtime.root.join(arch.to_string()).join("bin").join(name);
+            return Ok(MvmRuntimeBinaries {
+                agent: bin("mvm-guest-agent"),
+                netinit: bin("mvm-guest-netinit"),
+                egress_client: bin("mvm-egress-client"),
+                entrypoint_runner: bin("mvm-oci-entrypoint"),
+            });
         }
         crate::guest_agent_build::GuestBinarySource::EmbeddedVersion { cache_key } => {
             if let Some(cached) =
@@ -910,6 +937,38 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
     let arch = mvm_core::arch::GuestArch::host();
     let source = crate::guest_agent_build::guest_binary_source()
         .context("resolve the guest-binary cache key for this host")?;
+    if let crate::guest_agent_build::GuestBinarySource::SourceCheckout { workspace_root, .. } =
+        &source
+    {
+        let shared_cache = cache_root
+            .file_name()
+            .filter(|name| *name == "oci")
+            .and_then(|_| cache_root.parent())
+            .unwrap_or(cache_root);
+        if let Some(runtime) = crate::guest_runtime::cached_source_guest_runtime(
+            shared_cache,
+            env!("CARGO_PKG_VERSION"),
+            arch,
+            workspace_root,
+        )? {
+            return Ok(runtime.digest);
+        }
+        let legacy_layout =
+            crate::guest_agent_build::GuestAgentLayout::under(cache_root, source.cache_key(), arch);
+        if legacy_layout.is_complete() {
+            return crate::runtime_identity::identity_with_sidecar(
+                &legacy_layout.binaries(),
+                &legacy_layout.dir,
+            )
+            .with_context(|| {
+                format!(
+                    "identify the legacy guest runtime in {}",
+                    legacy_layout.dir.display()
+                )
+            });
+        }
+        return Ok(format!("pending-{}", source.cache_key()));
+    }
     let layout =
         crate::guest_agent_build::GuestAgentLayout::under(cache_root, source.cache_key(), arch);
 

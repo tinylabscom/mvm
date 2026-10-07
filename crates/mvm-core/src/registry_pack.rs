@@ -15,6 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
+use crate::crypto::image_verify::VerifiedSigner;
 use crate::packs::{KeylessTrust, Sha256Hex, hash_file, pack_path_is_safe};
 use crate::release_version::{ReleaseVersion, VersionSyntax};
 
@@ -651,6 +652,7 @@ pub struct VerifiedRegistryPack {
     manifest_sha256: Sha256Hex,
     manifest_bytes: Vec<u8>,
     signature_bundle: Vec<u8>,
+    signer: VerifiedSigner,
 }
 
 impl VerifiedRegistryPack {
@@ -668,6 +670,11 @@ impl VerifiedRegistryPack {
 
     pub fn signature_bundle(&self) -> &[u8] {
         &self.signature_bundle
+    }
+
+    /// The certificate identity that authenticated the signed manifest.
+    pub fn signer(&self) -> &VerifiedSigner {
+        &self.signer
     }
 }
 
@@ -808,7 +815,7 @@ pub struct PackAdoption<'a> {
 }
 
 pub(crate) type RegistryPackSignatureChecker =
-    fn(&[u8], &[u8], &KeylessTrust) -> Result<(), RegistryPackVerificationError>;
+    fn(&[u8], &[u8], &KeylessTrust) -> Result<VerifiedSigner, RegistryPackVerificationError>;
 
 /// The production signature checker (real cosign verification when the
 /// `manifest-verify` feature is built in, an unconditional refusal
@@ -825,11 +832,12 @@ pub(crate) fn adopt_registry_pack_with(
     let trust = request
         .publisher_policy
         .trust_for_namespace(request.requested.namespace())?;
-    check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
+    let signer = check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
     finish_registry_pack_verification(
         request.requested,
         request.manifest_bytes,
         request.signature_bundle,
+        signer,
         None,
     )
 }
@@ -844,11 +852,12 @@ pub(crate) fn verify_registry_pack_with(
     let trust = request
         .publisher_policy
         .trust_for_namespace(pin.reference().namespace())?;
-    check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
+    let signer = check_signature(request.manifest_bytes, request.signature_bundle, &trust)?;
     finish_registry_pack_verification(
         request.requested,
         request.manifest_bytes,
         request.signature_bundle,
+        signer,
         Some(pin),
     )
 }
@@ -857,6 +866,7 @@ fn finish_registry_pack_verification(
     requested: &PackReference,
     manifest_bytes: &[u8],
     signature_bundle: &[u8],
+    signer: VerifiedSigner,
     pin: Option<&PackPin>,
 ) -> Result<VerifiedRegistryPack, RegistryPackVerificationError> {
     let manifest: RegistryPackManifest = serde_json::from_slice(manifest_bytes)
@@ -898,6 +908,7 @@ fn finish_registry_pack_verification(
         manifest_sha256,
         manifest_bytes: manifest_bytes.to_vec(),
         signature_bundle: signature_bundle.to_vec(),
+        signer,
     })
 }
 
@@ -1264,13 +1275,13 @@ pub(crate) fn check_registry_pack_signature(
     manifest_bytes: &[u8],
     signature_bundle: &[u8],
     trust: &KeylessTrust,
-) -> Result<(), RegistryPackVerificationError> {
+) -> Result<VerifiedSigner, RegistryPackVerificationError> {
     let identities: Vec<&str> = trust
         .accepted_identities
         .iter()
         .map(String::as_str)
         .collect();
-    crate::crypto::image_verify::verify_signed_payload_under_any_identity(
+    crate::crypto::image_verify::verify_signed_payload_and_signer_under_any_identity(
         manifest_bytes,
         signature_bundle,
         &identities,
@@ -1284,7 +1295,7 @@ pub(crate) fn check_registry_pack_signature(
     _manifest_bytes: &[u8],
     _signature_bundle: &[u8],
     _trust: &KeylessTrust,
-) -> Result<(), RegistryPackVerificationError> {
+) -> Result<VerifiedSigner, RegistryPackVerificationError> {
     Err(RegistryPackVerificationError::SignatureInvalid(
         "manifest-verify feature disabled in this build".to_string(),
     ))
@@ -1389,6 +1400,10 @@ mod tests {
             manifest_sha256: Sha256Hex::from_bytes(&manifest_bytes),
             manifest_bytes,
             signature_bundle: b"test bundle".to_vec(),
+            signer: VerifiedSigner {
+                identity: OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
+                issuer: OFFICIAL_PACK_SIGNING_ISSUER.to_string(),
+            },
         }
     }
 
@@ -1396,15 +1411,18 @@ mod tests {
         _payload: &[u8],
         _bundle: &[u8],
         _trust: &KeylessTrust,
-    ) -> Result<(), RegistryPackVerificationError> {
-        Ok(())
+    ) -> Result<VerifiedSigner, RegistryPackVerificationError> {
+        Ok(VerifiedSigner {
+            identity: OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
+            issuer: OFFICIAL_PACK_SIGNING_ISSUER.to_string(),
+        })
     }
 
     fn reject_signature(
         _payload: &[u8],
         _bundle: &[u8],
         _trust: &KeylessTrust,
-    ) -> Result<(), RegistryPackVerificationError> {
+    ) -> Result<VerifiedSigner, RegistryPackVerificationError> {
         Err(RegistryPackVerificationError::SignatureInvalid(
             "test refusal".to_string(),
         ))
@@ -1679,6 +1697,8 @@ mod tests {
         assert_eq!(verified.manifest_sha256(), &Sha256Hex::from_bytes(&bytes));
         assert_eq!(verified.manifest_bytes(), bytes);
         assert_eq!(verified.signature_bundle(), b"bundle");
+        assert_eq!(verified.signer().identity, OFFICIAL_PACK_SIGNING_IDENTITY);
+        assert_eq!(verified.signer().issuer, OFFICIAL_PACK_SIGNING_ISSUER);
 
         for files in [
             vec![RegistryPackFile {
@@ -1828,6 +1848,73 @@ mod tests {
         ));
     }
 
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn signed_pack_records_the_accepted_certificate_identity() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvm-cli/tests/fixtures/signed-registry-go");
+        let manifest = std::fs::read(fixture.join("manifest.json")).unwrap();
+        let bundle = std::fs::read(fixture.join("manifest.sigstore.json")).unwrap();
+        let requested = reference("runtime/go@1.0.0");
+        let policy = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "runtime",
+                OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![
+                    OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
+                    LEGACY_PACK_SIGNING_IDENTITY.to_string(),
+                ],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let adoption = PackAdoption {
+            requested: &requested,
+            manifest_bytes: &manifest,
+            signature_bundle: &bundle,
+            publisher_policy: &policy,
+        };
+        let verified = adopt_registry_pack(&adoption).unwrap();
+        assert_eq!(verified.signer().identity, LEGACY_PACK_SIGNING_IDENTITY);
+        assert_eq!(verified.signer().issuer, OFFICIAL_PACK_SIGNING_ISSUER);
+
+        let wrong_policy = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "runtime",
+                OFFICIAL_PACK_SIGNING_ISSUER,
+                vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let wrong_adoption = PackAdoption {
+            publisher_policy: &wrong_policy,
+            ..adoption
+        };
+        assert!(matches!(
+            adopt_registry_pack(&wrong_adoption),
+            Err(RegistryPackVerificationError::SignatureInvalid(_))
+        ));
+    }
+
+    #[cfg(not(feature = "manifest-verify"))]
+    #[test]
+    fn signer_cannot_be_recorded_without_the_keyless_verifier() {
+        let manifest = signed_manifest_bytes("runtime/python@1.2.3");
+        let requested = reference("runtime/python@1.2.3");
+        let policy = publisher_policy();
+        let adoption = PackAdoption {
+            requested: &requested,
+            manifest_bytes: &manifest,
+            signature_bundle: b"bundle",
+            publisher_policy: &policy,
+        };
+        assert!(matches!(
+            adopt_registry_pack(&adoption),
+            Err(RegistryPackVerificationError::SignatureInvalid(_))
+        ));
+    }
+
     #[test]
     fn verified_payload_accepts_exactly_the_declared_files() {
         let root = tempfile::tempdir().unwrap();
@@ -1910,6 +1997,10 @@ mod tests {
             manifest_sha256: Sha256Hex::from_bytes(&manifest_bytes),
             manifest_bytes,
             signature_bundle: b"test bundle".to_vec(),
+            signer: VerifiedSigner {
+                identity: OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
+                issuer: OFFICIAL_PACK_SIGNING_ISSUER.to_string(),
+            },
         };
         (root, verified)
     }

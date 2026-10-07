@@ -1209,6 +1209,10 @@ jobs:
             sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" --exact "guest_mount::privilege_tests::$witness" 2>&1 | tee witness.log
             grep -q "1 passed" witness.log
           done
+          sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" \
+            --exact tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials \
+            2>&1 | tee attribution.log
+          grep -q "1 passed" attribution.log
 
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)

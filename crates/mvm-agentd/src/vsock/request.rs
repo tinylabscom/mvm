@@ -770,6 +770,7 @@ mod tests {
         };
         let question = call.tool_check().expect("valid call");
         assert_eq!(question.tool, "git");
+        assert_eq!(question.executable.as_deref(), Some("git"));
         assert_eq!(question.argv, "git 'status; rm -rf /'");
         assert!(!format!("{call:?}").contains("rm -rf"));
         let mut invalid = call;

@@ -983,7 +983,7 @@ impl AuditEmitter {
     /// Emit `plan.exited` — fires after a waited-for workload powers off,
     /// carrying its captured exit code.
     pub fn emit_exited(&self, plan: &ExecutionPlan, exit_code: i32, backend: &str) -> Result<()> {
-        self.emit_exited_with_capture(
+        self.emit_exit_record(
             plan,
             ExitRecord {
                 exit_code: Some(exit_code),
@@ -999,11 +999,7 @@ impl AuditEmitter {
     /// record follows the same rule — a dimension nobody observed is written
     /// as unavailable rather than left out, so a reader can tell an
     /// unmeasured run from an unmeasurable one.
-    pub fn emit_exited_with_capture(
-        &self,
-        plan: &ExecutionPlan,
-        record: ExitRecord<'_>,
-    ) -> Result<()> {
+    pub fn emit_exit_record(&self, plan: &ExecutionPlan, record: ExitRecord<'_>) -> Result<()> {
         let (code, captured) = match record.exit_code {
             Some(code) => (code.to_string(), "true"),
             None => ("none".to_string(), "false"),
@@ -2266,7 +2262,7 @@ mod tests {
 
         // A captured exit records the code and captured=true.
         emitter
-            .emit_exited_with_capture(
+            .emit_exit_record(
                 &plan,
                 ExitRecord {
                     exit_code: Some(0),
@@ -2277,7 +2273,7 @@ mod tests {
             .unwrap();
         // A missing capture must never be attested as exit 0.
         emitter
-            .emit_exited_with_capture(
+            .emit_exit_record(
                 &plan,
                 ExitRecord {
                     exit_code: None,
@@ -2318,7 +2314,7 @@ mod tests {
         };
 
         emitter
-            .emit_exited_with_capture(
+            .emit_exit_record(
                 &plan,
                 ExitRecord {
                     exit_code: Some(0),
@@ -2369,7 +2365,7 @@ mod tests {
         let plan = fixture_plan("local", "plan-USAGE-NONE");
 
         emitter
-            .emit_exited_with_capture(
+            .emit_exit_record(
                 &plan,
                 ExitRecord {
                     exit_code: None,

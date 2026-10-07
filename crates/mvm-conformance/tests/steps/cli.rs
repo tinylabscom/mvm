@@ -1191,6 +1191,108 @@ fn trust_the_fixture_publisher(world: &mut CliWorld) {
     );
 }
 
+/// The template slot a `machine build --flake <flake_dir>` registered in
+/// `home`, found by the flake it was built from rather than by recency: a live
+/// home may be the shared warm one, holding other builds.
+fn flake_slot_in(home: &Path, flake_dir: &str) -> Option<String> {
+    let suffix = format!("/{}", flake_dir.trim_end_matches('/'));
+    fs::read_dir(home.join("templates"))
+        .ok()?
+        .filter_map(Result::ok)
+        .find_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            if name.len() != 64 || !name.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(entry.path().join("manifest.json")).ok()?).ok()?;
+            let flake_ref = manifest.get("flake_ref")?.as_str()?;
+            flake_ref
+                .trim_end_matches('/')
+                .ends_with(&suffix)
+                .then_some(name)
+        })
+}
+
+/// Seal what the last live `machine build` produced into a `.mvmpkg`, on the
+/// host that ran the build and under that host's signer. The builder VM that
+/// produced the image never held the key; this is the step that uses it.
+#[when(expr = "I seal the live build of {string} into a bundle")]
+fn seal_live_build(world: &mut CliWorld, flake_dir: String) {
+    let home = world
+        .last_live_home
+        .clone()
+        .expect("a live build step runs before the seal");
+    let slot = flake_slot_in(&home, &flake_dir).unwrap_or_else(|| {
+        panic!(
+            "no template slot built from {flake_dir} under {}",
+            home.join("templates").display()
+        )
+    });
+    let dir = tempfile::tempdir().expect("create the sealed-bundle directory");
+    let bundle = dir.path().join("build.mvmpkg");
+    let output = mvmctl_command()
+        .current_dir(workspace_root())
+        .args(["bundle", "export", &slot, "--out"])
+        .arg(&bundle)
+        .isolated_home(&home)
+        .output()
+        .expect("failed to spawn mvmctl bundle export");
+    if output.status.success() {
+        fs::copy(
+            home.join("keys/host-signer.pub"),
+            dir.path().join("publisher.pub"),
+        )
+        .expect("the export signed with the home's host signer, so its public half exists");
+    }
+    world.sealed_bundle = Some(dir);
+    world.last_run = Some(output);
+}
+
+/// Verify and install the sealed bundle in a home that shares nothing with the
+/// one that built it except trust in its signer's public half. Neither command
+/// boots anything.
+#[when(expr = "I install the sealed bundle into a fresh home that trusts its builder")]
+fn install_sealed_bundle(world: &mut CliWorld) {
+    let sealed = world
+        .sealed_bundle
+        .as_ref()
+        .expect("a seal step runs before the install");
+    let bundle = sealed.path().join("build.mvmpkg");
+    let publisher = sealed.path().join("publisher.pub");
+    let home = tempfile::tempdir().expect("create isolated MVM_HOME");
+    let run = |args: &[&str], path: &Path| {
+        mvmctl_command()
+            .current_dir(workspace_root())
+            .args(args)
+            .arg(path)
+            .isolated_home(home.path())
+            .output()
+            .expect("failed to spawn mvmctl")
+    };
+    for (args, path) in [
+        (&["trust", "add"][..], &publisher),
+        (&["bundle", "fetch"][..], &bundle),
+    ] {
+        let output = run(args, path);
+        assert!(
+            output.status.success(),
+            "`mvmctl {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let output = run(&["bundle", "install"], &bundle);
+    // `Installed bundle <sha> (N artifacts, publisher key_id=...)`
+    world.bundle_sha = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("Installed bundle "))
+        .and_then(|rest| rest.split_whitespace().next())
+        .map(str::to_string);
+    world.isolated_home = Some(home);
+    world.last_run = Some(output);
+}
+
 /// Install the fixture into a home that has *not* enrolled its publisher.
 #[when(expr = "I install the bundle fixture without trusting its publisher")]
 fn install_bundle_fixture_untrusted(world: &mut CliWorld) {

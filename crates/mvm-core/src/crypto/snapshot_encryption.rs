@@ -86,12 +86,12 @@ pub const HEADER_SIZE: usize = 24;
 /// the original is left intact and any partial ciphertext is
 /// cleaned up.
 pub fn encrypt_file_in_place(path: &Path, key: &[u8]) -> Result<()> {
-    encrypt_file_in_place_with_chunk_size(path, key, DEFAULT_CHUNK_SIZE)
+    encrypt_file_in_place_using_chunk_size(path, key, DEFAULT_CHUNK_SIZE)
 }
 
 /// Variant that lets tests pin a small chunk size to exercise the
 /// multi-chunk path without committing megabytes of fixture data.
-pub fn encrypt_file_in_place_with_chunk_size(
+pub fn encrypt_file_in_place_using_chunk_size(
     path: &Path,
     key: &[u8],
     chunk_size: usize,
@@ -384,7 +384,7 @@ mod tests {
         let plaintext = vec![0x42u8; 64 * 3 + 32];
         write_file(&path, &plaintext);
 
-        encrypt_file_in_place_with_chunk_size(&path, &test_key(), 64).unwrap();
+        encrypt_file_in_place_using_chunk_size(&path, &test_key(), 64).unwrap();
         let ct = read_file(&path);
         // Header (24) + 3 full chunks (64+12+16 = 92 each = 276) + 1
         // partial chunk (32+12+16 = 60) = 360 total.
@@ -429,7 +429,7 @@ mod tests {
         let path = tmp.path().join("aligned.bin");
         let plaintext = vec![0x11u8; 64 * 2];
         write_file(&path, &plaintext);
-        encrypt_file_in_place_with_chunk_size(&path, &test_key(), 64).unwrap();
+        encrypt_file_in_place_using_chunk_size(&path, &test_key(), 64).unwrap();
         let ct = read_file(&path);
         // Header + 2 full chunks = 24 + 2*(64+28) = 208.
         assert_eq!(ct.len(), HEADER_SIZE + 2 * (64 + 28));

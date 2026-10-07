@@ -21,7 +21,7 @@ use super::runtime_source::{
 };
 use crate::admission::policy::shares_from_volume_cfg;
 use crate::admission::{
-    AdmitPlanForBootParams, admit_plan_for_boot_with_ingress, attach_guest_boot_config,
+    AdmitPlanForBootParams, admit_plan_for_boot_configured_ingress, attach_guest_boot_config,
     emit_failed, emit_launched, enforce_kernel, enforce_shares, guest_profile_for_boot,
 };
 
@@ -279,7 +279,7 @@ pub fn start_persistent_oci_machine(
                     .as_deref()
                     .map(std::path::PathBuf::from)
             }));
-            admit_plan_for_boot_with_ingress(
+            admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
                     instructions: crate::admission::InstructionSources::for_workload(workload_dir)
                         .with_mount_roots(&[])

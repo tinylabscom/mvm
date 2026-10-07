@@ -34,8 +34,11 @@ fn a_stale_boot_expectation_is_refused_even_though_the_session_still_authenticat
             TelemetrySender::connect(&mut guest, guest_key, &anchor).map(|_| ())
         });
         let signer = anchor_key.clone();
-        let outcome =
-            TelemetryReceiver::connect_with_signer(&mut host, &anchor, &expected, |hello, ack| {
+        let outcome = TelemetryReceiver::connect_authenticated(
+            &mut host,
+            &anchor,
+            &expected,
+            |hello, ack| {
                 use ed25519_dalek::Signer as _;
                 let bytes = mvm_core::net::telemetry::handshake_signing_bytes(hello, ack, &anchor)
                     .map_err(|_| {
@@ -44,8 +47,9 @@ fn a_stale_boot_expectation_is_refused_even_though_the_session_still_authenticat
                         )
                     })?;
                 Ok(signer.sign(&bytes))
-            })
-            .map(|_| ());
+            },
+        )
+        .map(|_| ());
         let _ = producer.join();
         outcome
     };

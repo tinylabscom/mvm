@@ -199,16 +199,66 @@ pub fn verify_signed_payload_under_any_identity(
     identities: &[&str],
     expected_issuer: &str,
 ) -> VerifyResult<()> {
+    verify_signed_payload_and_signer_under_any_identity(
+        payload_bytes,
+        cosign_bundle,
+        identities,
+        expected_issuer,
+    )
+    .map(|_| ())
+}
+
+/// Verify against a closed identity set and return the identity that signed
+/// the payload. The returned signer is the certificate subject that satisfied
+/// the exact-identity policy, not a name copied from the payload.
+pub fn verify_signed_payload_and_signer_under_any_identity(
+    payload_bytes: &[u8],
+    cosign_bundle: &[u8],
+    identities: &[&str],
+    expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
     let mut failure: Option<VerifyError> = None;
     for identity in identities {
-        match verify_signed_payload(payload_bytes, cosign_bundle, identity, expected_issuer) {
-            Ok(()) => return Ok(()),
+        match verify_signed_payload_with_signer(
+            payload_bytes,
+            cosign_bundle,
+            identity,
+            expected_issuer,
+        ) {
+            Ok(signer) => return Ok(signer),
             Err(error) => failure = Some(error),
         }
     }
     Err(failure.unwrap_or_else(|| VerifyError::SignatureInvalid {
         reason: "no accepted identities configured for keyless verification".to_string(),
     }))
+}
+
+#[cfg(feature = "manifest-verify")]
+fn verify_signed_payload_with_signer(
+    payload_bytes: &[u8],
+    cosign_bundle: &[u8],
+    expected_identity: &str,
+    expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
+    verify_cosign_bundle(
+        payload_bytes,
+        cosign_bundle,
+        Some(expected_identity),
+        expected_issuer,
+    )
+}
+
+#[cfg(not(feature = "manifest-verify"))]
+fn verify_signed_payload_with_signer(
+    _payload_bytes: &[u8],
+    _cosign_bundle: &[u8],
+    _expected_identity: &str,
+    _expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
+    Err(VerifyError::SignatureInvalid {
+        reason: VERIFIER_DISABLED_REASON.to_string(),
+    })
 }
 
 /// Stream a file through SHA-256 and return the lowercase hex digest.
@@ -254,7 +304,7 @@ pub fn sha256_reader(mut reader: impl io::Read) -> io::Result<String> {
 /// content) moves its mtime and forces a re-hash, so a stale digest can never
 /// be admitted. A read-only cache dir simply means the next boot re-hashes.
 pub fn sha256_file_cached(path: &Path) -> io::Result<String> {
-    sha256_file_cached_with_source(path).map(|(hex, _)| hex)
+    sha256_file_cached_report_source(path).map(|(hex, _)| hex)
 }
 
 /// Where a [`sha256_file_cached`] digest came from.
@@ -273,7 +323,7 @@ pub enum DigestSource {
 
 /// [`sha256_file_cached`], reporting whether the sidecar served the digest.
 #[tracing::instrument(name = "sha256_file.cached", skip_all, fields(path = %path.display()))]
-pub fn sha256_file_cached_with_source(path: &Path) -> io::Result<(String, DigestSource)> {
+pub fn sha256_file_cached_report_source(path: &Path) -> io::Result<(String, DigestSource)> {
     let meta = fs::metadata(path)?;
     let size = meta.len();
     let mtime_nanos = meta
@@ -398,14 +448,14 @@ mod tests {
         let sidecar = sha256_cache_path(&p);
         let _ = fs::remove_file(&sidecar);
 
-        let (miss, miss_source) = sha256_file_cached_with_source(&p).expect("cached miss");
+        let (miss, miss_source) = sha256_file_cached_report_source(&p).expect("cached miss");
         assert_eq!(
             miss_source,
             DigestSource::Hashed(body.len() as u64),
             "a sidecar miss reads the whole artifact"
         );
 
-        let (hit, hit_source) = sha256_file_cached_with_source(&p).expect("cached hit");
+        let (hit, hit_source) = sha256_file_cached_report_source(&p).expect("cached hit");
         assert_eq!(hit, miss, "a hit serves the digest the miss computed");
         assert_eq!(
             hit_source,
@@ -417,7 +467,7 @@ mod tests {
         // than serve the digest of content that is gone.
         f.write_all(b" jumps").expect("append");
         f.flush().expect("flush");
-        let (fresh, fresh_source) = sha256_file_cached_with_source(&p).expect("after rewrite");
+        let (fresh, fresh_source) = sha256_file_cached_report_source(&p).expect("after rewrite");
         assert_ne!(fresh, miss, "content changed, so the digest must change");
         assert!(
             matches!(fresh_source, DigestSource::Hashed(_)),

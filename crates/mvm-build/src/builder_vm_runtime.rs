@@ -225,6 +225,21 @@ impl<'a> BuilderVmRuntime<'a> {
     }
 }
 
+/// Create a job directory stamped with the builder job contract it is staged
+/// under. Every job directory the guest runs goes through here, so the guest
+/// can refuse one staged under a contract it does not speak.
+pub fn create_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
+    std::fs::create_dir_all(job_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("creating job dir {}: {e}", job_dir.display()))
+    })?;
+    crate::builder_job_contract::write_marker(job_dir).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "stamping job dir {} with its contract version: {e}",
+            job_dir.display()
+        ))
+    })
+}
+
 /// Stage the per-job dir inside `~/.mvm/cache/builder-vm/jobs/<id>/`
 /// so the in-guest `mvm-host-vm-init` finds the right artifact
 /// for dispatch:
@@ -247,9 +262,7 @@ pub fn stage_job_dir(
     mvm_local_override: Option<&Path>,
     workspace_src: Option<&Path>,
 ) -> Result<(), BuilderVmError> {
-    std::fs::create_dir_all(job_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("creating job dir {}: {e}", job_dir.display()))
-    })?;
+    create_job_dir(job_dir)?;
 
     let (flake_ref, attr_path) = match job {
         BuilderJob::Flake {
@@ -756,33 +769,24 @@ pub fn shell_single_quote_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Parsed `<job_dir>/result` written by `mvm-host-vm-init`. Shape
-/// matches the JSON `mvm-host-vm-init::linux::write_result` emits.
-/// The guest PID 1 writes this on every code path that reaches
-/// `power_off`; the host-side helper reads it to learn the guest's
-/// exit code and the cmd.sh stderr-tail ringbuffer for diagnostics.
-///
-/// Hypervisor-agnostic: the file lives in the `/job` virtio-fs share,
-/// which both libkrun and HVF attach identically. Migrated from
-/// `libkrun_builder.rs`.
-#[derive(Debug, Deserialize)]
-pub struct JobResult {
-    pub exit_code: i32,
-    #[serde(default)]
-    pub stderr_tail: String,
-}
-
-/// Read and parse `<job_dir>/result`. The guest's PID 1 writes this
-/// on every code path that reaches `power_off`; absence here means
+/// Read and parse `<job_dir>/result`, the guest's
+/// [`JobOutcome`](crate::builder_job_contract::JobOutcome). The guest's PID 1
+/// writes it on every code path that reaches `power_off`; absence here means
 /// the VM crashed before `mvm-host-vm-init` could finalize.
 ///
-/// Error mapping mirrors the original libkrun-side implementation:
-/// missing file → [`BuilderVmError::NixBuildFailed`] (it's almost
-/// always a guest crash mid-build); malformed JSON →
-/// [`BuilderVmError::ExtractionFailed`] (host couldn't extract the
-/// result, regardless of whether the build succeeded).
-fn parse_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
-    let path = job_dir.join("result");
+/// Missing file → [`BuilderVmError::NixBuildFailed`] (it's almost always a
+/// guest crash mid-build). An outcome from a guest speaking another job
+/// contract → [`BuilderVmError::JobFailed`] with
+/// [`FailureCategory::Version`](crate::builder_job_contract::FailureCategory::Version).
+/// Anything else unparseable → [`BuilderVmError::ExtractionFailed`] (the host
+/// couldn't read the result, whether or not the build succeeded).
+pub(crate) fn parse_job_result(
+    job_dir: &Path,
+) -> Result<crate::builder_job_contract::JobOutcome, BuilderVmError> {
+    use crate::builder_job_contract::{
+        FailureCategory, JobContractError, RESULT_FILE, parse_outcome,
+    };
+    let path = job_dir.join(RESULT_FILE);
     let body = std::fs::read_to_string(&path).map_err(|e| {
         BuilderVmError::NixBuildFailed(format!(
             "guest did not write {}: {e} \
@@ -790,11 +794,15 @@ fn parse_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
             path.display()
         ))
     })?;
-    serde_json::from_str::<JobResult>(&body).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!(
-            "parsing {} as JSON: {e}\nbody:\n{body}",
+    parse_outcome(&body).map_err(|e| match e {
+        JobContractError::OutcomeMalformed { detail } => BuilderVmError::ExtractionFailed(format!(
+            "parsing {}: {detail}\nbody:\n{body}",
             path.display()
-        ))
+        )),
+        version => BuilderVmError::JobFailed {
+            category: FailureCategory::Version,
+            detail: format!("{version} (read from {})", path.display()),
+        },
     })
 }
 
@@ -806,7 +814,10 @@ fn parse_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
 /// Surfacing the VM state dir plus whatever `console.log` /
 /// `supervisor.{stdout,stderr}.log` captured keeps the next operator run from
 /// starting at a bare ENOENT.
-pub fn read_job_result(job_dir: &Path, vm_state_dir: &Path) -> Result<JobResult, BuilderVmError> {
+pub fn read_job_result(
+    job_dir: &Path,
+    vm_state_dir: &Path,
+) -> Result<crate::builder_job_contract::JobOutcome, BuilderVmError> {
     match parse_job_result(job_dir) {
         Ok(result) => Ok(result),
         Err(BuilderVmError::NixBuildFailed(message)) => {
@@ -826,9 +837,7 @@ pub fn read_job_result(job_dir: &Path, vm_state_dir: &Path) -> Result<JobResult,
 /// backend-neutral runtime module avoids each VMM driver drifting on the
 /// job-dir shape.
 pub fn stage_shell_job_dir(job_dir: &Path, script: &str) -> Result<(), BuilderVmError> {
-    std::fs::create_dir_all(job_dir).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("creating job dir {}: {e}", job_dir.display()))
-    })?;
+    create_job_dir(job_dir)?;
     let cmd_path = job_dir.join("cmd.sh");
     std::fs::write(&cmd_path, script).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("writing {}: {e}", cmd_path.display()))
@@ -1181,24 +1190,32 @@ pub fn finalize_flake_job(
             });
         }
 
-        return Err(BuilderVmError::NixBuildFailed(format!(
-            "guest cmd.sh exited {} — full log: {}\n\
-             outer stderr tail (cmd.sh ringbuffer):\n{}\n\
-             derivation stderr tail (last 4 KiB of {}):\n{}",
-            result.exit_code,
-            stderr_log.display(),
-            result.stderr_tail,
-            stderr_log.display(),
-            derivation_tail,
-        )));
+        return Err(BuilderVmError::JobFailed {
+            category: result
+                .failure_category()
+                .unwrap_or(crate::builder_job_contract::FailureCategory::Unknown),
+            detail: format!(
+                "guest cmd.sh exited {} — full log: {}\n\
+                 outer stderr tail (cmd.sh ringbuffer):\n{}\n\
+                 derivation stderr tail (last 4 KiB of {}):\n{}",
+                result.exit_code,
+                stderr_log.display(),
+                result.stderr_tail,
+                stderr_log.display(),
+                derivation_tail,
+            ),
+        });
     }
 
     let rootfs_path = artifact_out.join("rootfs.ext4");
     if !rootfs_path.is_file() {
-        return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM exited cleanly but {} was not written",
-            rootfs_path.display()
-        )));
+        return Err(BuilderVmError::JobFailed {
+            category: crate::builder_job_contract::FailureCategory::OutputContract,
+            detail: format!(
+                "builder VM exited cleanly but {} was not written",
+                rootfs_path.display()
+            ),
+        });
     }
     let kernel_path_out = artifact_out.join("vmlinux");
     let kernel_path = if kernel_path_out.is_file() {
@@ -1216,7 +1233,10 @@ pub fn finalize_flake_job(
     })
 }
 
-fn read_flake_job_result(job_dir: &Path, artifact_out: &Path) -> Result<JobResult, BuilderVmError> {
+fn read_flake_job_result(
+    job_dir: &Path,
+    artifact_out: &Path,
+) -> Result<crate::builder_job_contract::JobOutcome, BuilderVmError> {
     // Guest init writes the same result to both writable shares. Some VMM/FUSE
     // combinations can lose one share's final write during power-off, so accept
     // the mirror only when the primary file is absent. A malformed primary
@@ -1277,6 +1297,23 @@ pub struct InstallResultReport {
 pub fn finalize_install_job(artifact_out: &Path) -> Result<BuilderArtifacts, BuilderVmError> {
     let result_path = artifact_out.join(INSTALL_RESULT_FILENAME);
     if !result_path.is_file() {
+        // A guest that refused the job before running the installer wrote its
+        // job outcome instead of an install report; that refusal is the cause.
+        match parse_job_result(artifact_out) {
+            Ok(outcome) => {
+                if let Some(category) = outcome.failure_category() {
+                    return Err(BuilderVmError::JobFailed {
+                        category,
+                        detail: format!(
+                            "install job did not run (exit {}): {}",
+                            outcome.exit_code, outcome.stderr_tail
+                        ),
+                    });
+                }
+            }
+            Err(refused @ BuilderVmError::JobFailed { .. }) => return Err(refused),
+            Err(_) => {}
+        }
         return Err(BuilderVmError::ExtractionFailed(format!(
             "install job VM exited cleanly but {} was not written",
             result_path.display()
@@ -1392,6 +1429,21 @@ pub fn builder_vm_timeout() -> Result<Duration, BuilderVmError> {
 
 #[cfg(test)]
 mod tests {
+    /// A guest job outcome under this build's contract.
+    fn outcome_json(exit_code: i32, stderr_tail: &str) -> String {
+        use crate::builder_job_contract::{
+            BUILDER_JOB_CONTRACT_VERSION, FailureCategory, JobOutcome,
+        };
+        serde_json::to_string(&JobOutcome {
+            contract_version: BUILDER_JOB_CONTRACT_VERSION,
+            exit_code,
+            stderr_tail: stderr_tail.to_string(),
+            failure: (exit_code != 0).then_some(FailureCategory::NixBuild),
+            build_ms: Some(1),
+        })
+        .unwrap()
+    }
+
     use super::*;
     use crate::builder_vm::{BuilderVmDisk, BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig};
     use mvm_core::util::test_env::TestEnv;
@@ -1552,27 +1604,82 @@ mod tests {
     fn parse_job_result_parses_well_formed_json() {
         let scratch = tempfile::TempDir::new().unwrap();
         let job_dir = scratch.path().to_path_buf();
-        std::fs::write(
-            job_dir.join("result"),
-            r#"{"exit_code":0,"stderr_tail":"hello"}"#,
-        )
-        .unwrap();
+        std::fs::write(job_dir.join("result"), outcome_json(0, "hello")).unwrap();
         let r = parse_job_result(&job_dir).unwrap();
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.stderr_tail, "hello");
     }
 
     #[test]
-    fn parse_job_result_defaults_stderr_tail_when_absent() {
-        // `#[serde(default)]` on stderr_tail. A guest that
-        // exited before writing stderr_tail (rare, but possible
-        // under panic) still parses cleanly.
+    fn parse_job_result_refuses_a_guest_that_predates_the_contract() {
+        // The result shape an init from before the job contract wrote. It
+        // carries no version, so it is refused by name rather than read as a
+        // build outcome whose meaning nobody can vouch for.
         let scratch = tempfile::TempDir::new().unwrap();
         let job_dir = scratch.path().to_path_buf();
-        std::fs::write(job_dir.join("result"), r#"{"exit_code":2}"#).unwrap();
-        let r = parse_job_result(&job_dir).unwrap();
-        assert_eq!(r.exit_code, 2);
-        assert_eq!(r.stderr_tail, "");
+        std::fs::write(
+            job_dir.join("result"),
+            r#"{"exit_code":0,"stderr_tail":""}"#,
+        )
+        .unwrap();
+        let err = parse_job_result(&job_dir).unwrap_err();
+        assert_eq!(
+            err.failure_category(),
+            crate::builder_job_contract::FailureCategory::Version
+        );
+        assert!(err.to_string().contains("predates"), "{err}");
+    }
+
+    #[test]
+    fn parse_job_result_refuses_another_contract_version() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let body = outcome_json(0, "").replace(
+            &format!(
+                "\"contract_version\":{}",
+                crate::builder_job_contract::BUILDER_JOB_CONTRACT_VERSION
+            ),
+            "\"contract_version\":99",
+        );
+        std::fs::write(scratch.path().join("result"), body).unwrap();
+        let err = parse_job_result(scratch.path()).unwrap_err();
+        assert_eq!(
+            err.failure_category(),
+            crate::builder_job_contract::FailureCategory::Version
+        );
+        assert!(err.to_string().contains("contract 99"), "{err}");
+    }
+
+    #[test]
+    fn staged_job_dirs_carry_the_contract_marker() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let shell = scratch.path().join("shell");
+        stage_shell_job_dir(&shell, "true\n").unwrap();
+        crate::builder_job_contract::check_job_dir(&shell).unwrap();
+
+        let flake = scratch.path().join("flake");
+        stage_job_dir(
+            &flake,
+            &BuilderJob::Flake {
+                flake_ref: "/work".to_string(),
+                attr_path: "packages.x86_64-linux.default".to_string(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+        crate::builder_job_contract::check_job_dir(&flake).unwrap();
+
+        let spec = scratch.path().join("spec.json");
+        std::fs::write(&spec, b"{}").unwrap();
+        let install = scratch.path().join("install");
+        stage_job_dir(
+            &install,
+            &BuilderJob::Install { spec_path: spec },
+            None,
+            None,
+        )
+        .unwrap();
+        crate::builder_job_contract::check_job_dir(&install).unwrap();
     }
 
     #[test]
@@ -1680,11 +1787,7 @@ mod tests {
         let artifact_out = scratch.path().join("out");
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::create_dir_all(&artifact_out).unwrap();
-        std::fs::write(
-            job_dir.join("result"),
-            r#"{"exit_code":0,"stderr_tail":""}"#,
-        )
-        .unwrap();
+        std::fs::write(job_dir.join("result"), outcome_json(0, "")).unwrap();
         std::fs::write(
             job_dir.join("store-path"),
             "/nix/store/deadbeefcafebabe-builder-vm\n",
@@ -1708,11 +1811,7 @@ mod tests {
         let artifact_out = scratch.path().join("out");
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::create_dir_all(&artifact_out).unwrap();
-        std::fs::write(
-            job_dir.join("result"),
-            r#"{"exit_code":0,"stderr_tail":""}"#,
-        )
-        .unwrap();
+        std::fs::write(job_dir.join("result"), outcome_json(0, "")).unwrap();
         std::fs::write(artifact_out.join("rootfs.ext4"), b"rootfs").unwrap();
 
         let artifacts = finalize_flake_job(&job_dir, &artifact_out, "fallback-job-id").unwrap();
@@ -1731,11 +1830,7 @@ mod tests {
         let artifact_out = scratch.path().join("out");
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::create_dir_all(&artifact_out).unwrap();
-        std::fs::write(
-            artifact_out.join("result"),
-            r#"{"exit_code":0,"stderr_tail":""}"#,
-        )
-        .unwrap();
+        std::fs::write(artifact_out.join("result"), outcome_json(0, "")).unwrap();
         std::fs::write(artifact_out.join("rootfs.ext4"), b"rootfs").unwrap();
 
         let artifacts = finalize_flake_job(&job_dir, &artifact_out, "fallback-job-id").unwrap();
@@ -1796,11 +1891,7 @@ mod tests {
         let artifact_out = scratch.path().join("out");
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::create_dir_all(&artifact_out).unwrap();
-        std::fs::write(
-            job_dir.join("result"),
-            r#"{"exit_code":1,"stderr_tail":"outer-tail"}"#,
-        )
-        .unwrap();
+        std::fs::write(job_dir.join("result"), outcome_json(1, "outer-tail")).unwrap();
         // Sentinel string the helper must surface — proves we're
         // reading from THIS file and not from the outer ringbuffer.
         std::fs::write(
@@ -1811,8 +1902,11 @@ mod tests {
 
         let err = finalize_flake_job(&job_dir, &artifact_out, "job-id").unwrap_err();
         let msg = match err {
-            BuilderVmError::NixBuildFailed(s) => s,
-            other => panic!("expected NixBuildFailed, got {other:?}"),
+            BuilderVmError::JobFailed {
+                category: crate::builder_job_contract::FailureCategory::NixBuild,
+                detail,
+            } => detail,
+            other => panic!("expected a nix_build JobFailed, got {other:?}"),
         };
         assert!(msg.contains("exited 1"), "names exit code: {msg}");
         let log_path = job_dir.join("nix-stderr.log");
@@ -1841,16 +1935,12 @@ mod tests {
         let artifact_out = scratch.path().join("out");
         std::fs::create_dir_all(&job_dir).unwrap();
         std::fs::create_dir_all(&artifact_out).unwrap();
-        std::fs::write(
-            job_dir.join("result"),
-            r#"{"exit_code":2,"stderr_tail":"no cmd.sh"}"#,
-        )
-        .unwrap();
+        std::fs::write(job_dir.join("result"), outcome_json(2, "no cmd.sh")).unwrap();
 
         let err = finalize_flake_job(&job_dir, &artifact_out, "job-id").unwrap_err();
         let msg = match err {
-            BuilderVmError::NixBuildFailed(s) => s,
-            other => panic!("expected NixBuildFailed, got {other:?}"),
+            BuilderVmError::JobFailed { detail, .. } => detail,
+            other => panic!("expected JobFailed, got {other:?}"),
         };
         assert!(
             msg.contains("<nix-stderr.log not present on host>"),
@@ -1860,6 +1950,64 @@ mod tests {
             msg.contains("no cmd.sh"),
             "outer tail still surfaces: {msg}"
         );
+    }
+
+    #[test]
+    fn finalize_flake_job_carries_the_guest_failure_category() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let (job_dir, artifact_out) = (scratch.path().join("job"), scratch.path().join("out"));
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&artifact_out).unwrap();
+        let body = serde_json::to_string(&crate::builder_job_contract::JobOutcome {
+            contract_version: crate::builder_job_contract::BUILDER_JOB_CONTRACT_VERSION,
+            exit_code: 1,
+            stderr_tail: "attribute missing".to_string(),
+            failure: Some(crate::builder_job_contract::FailureCategory::NixEval),
+            build_ms: Some(40),
+        })
+        .unwrap();
+        std::fs::write(job_dir.join("result"), body).unwrap();
+        let err = finalize_flake_job(&job_dir, &artifact_out, "job-id").unwrap_err();
+        assert_eq!(
+            err.failure_category(),
+            crate::builder_job_contract::FailureCategory::NixEval
+        );
+    }
+
+    #[test]
+    fn finalize_flake_job_classifies_a_missing_rootfs_as_an_output_contract_failure() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let (job_dir, artifact_out) = (scratch.path().join("job"), scratch.path().join("out"));
+        std::fs::create_dir_all(&job_dir).unwrap();
+        std::fs::create_dir_all(&artifact_out).unwrap();
+        std::fs::write(job_dir.join("result"), outcome_json(0, "")).unwrap();
+        let err = finalize_flake_job(&job_dir, &artifact_out, "job-id").unwrap_err();
+        assert_eq!(
+            err.failure_category(),
+            crate::builder_job_contract::FailureCategory::OutputContract
+        );
+    }
+
+    #[test]
+    fn finalize_install_job_surfaces_a_guest_refusal() {
+        // A guest that refused the job directory writes a job outcome and no
+        // install report; the refusal, not the missing report, is the cause.
+        let scratch = tempfile::TempDir::new().unwrap();
+        let body = serde_json::to_string(&crate::builder_job_contract::JobOutcome {
+            contract_version: crate::builder_job_contract::BUILDER_JOB_CONTRACT_VERSION,
+            exit_code: 2,
+            stderr_tail: "staged under builder job contract 7".to_string(),
+            failure: Some(crate::builder_job_contract::FailureCategory::Version),
+            build_ms: None,
+        })
+        .unwrap();
+        std::fs::write(scratch.path().join("result"), body).unwrap();
+        let err = finalize_install_job(scratch.path()).unwrap_err();
+        assert_eq!(
+            err.failure_category(),
+            crate::builder_job_contract::FailureCategory::Version
+        );
+        assert!(err.to_string().contains("contract 7"), "{err}");
     }
 
     #[test]

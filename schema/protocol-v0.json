@@ -5407,6 +5407,13 @@
           "description": "Exact command line to compare with the admitted argv patterns.",
           "type": "string"
         },
+        "executable": {
+          "description": "Actual argv[0] the guest will spawn. A missing or differing path cannot receive command authority from the signed plan.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tool": {
           "description": "Name in the admitted plan's tool rules.",
           "type": "string"

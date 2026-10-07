@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::image_set::{
-    ImageLock, ImageSetError, ImageSetRequirement, ImageSetVerification, VerifiedImageSet,
-    verify_image_set,
+    ArtifactName, ImageLock, ImageSetError, ImageSetRequirement, ImageSetVerification,
+    VerifiedImageSet, VerifiedSelectedArtifacts, verify_image_set, verify_image_set_artifacts,
 };
 use serde_json::json;
 
@@ -22,6 +22,7 @@ pub(in crate::commands) struct VerifyRequest {
     /// `None` selects the lock compiled into this binary.
     pub lock: Option<PathBuf>,
     pub artifacts: PathBuf,
+    pub artifact: Vec<String>,
     pub require_complete: bool,
     pub json: bool,
 }
@@ -81,7 +82,13 @@ fn require_directory(path: &Path) -> Result<()> {
 
 /// Run every verification stage. The outer `Result` is an input that could not
 /// be read; the inner one is the verifier's verdict.
-fn verify(request: &VerifyRequest) -> Result<Result<VerifiedImageSet, ImageSetError>> {
+#[derive(Debug)]
+enum VerifyOutcome {
+    Full(VerifiedImageSet),
+    Selected(VerifiedSelectedArtifacts),
+}
+
+fn verify(request: &VerifyRequest) -> Result<Result<VerifyOutcome, ImageSetError>> {
     let inputs = VerifyInputs::read(request)?;
     let requirement = ImageSetRequirement::current_train();
     let mut verification = ImageSetVerification::new(
@@ -93,7 +100,16 @@ fn verify(request: &VerifyRequest) -> Result<Result<VerifiedImageSet, ImageSetEr
     if request.require_complete {
         verification = verification.require(&requirement);
     }
-    Ok(verify_image_set(&verification))
+    if request.artifact.is_empty() {
+        Ok(verify_image_set(&verification).map(VerifyOutcome::Full))
+    } else {
+        let selected = request
+            .artifact
+            .iter()
+            .map(|name| ArtifactName::new(name).map_err(|error| anyhow!(error)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(verify_image_set_artifacts(&verification, &selected).map(VerifyOutcome::Selected))
+    }
 }
 
 /// One line naming the stage first, so a reader learns how far the set got
@@ -149,18 +165,62 @@ fn verified_text(verified: &VerifiedImageSet) -> String {
     text
 }
 
+fn selected_json(verified: &VerifiedSelectedArtifacts) -> serde_json::Value {
+    json!({
+        "verified": true,
+        "scope": "selected-artifacts",
+        "set_version": verified.manifest.set_version.as_str(),
+        "release_tag": verified.release.release_tag.as_str(),
+        "manifest_sha256": verified.manifest_sha256.as_str(),
+        "signer_key_id": verified.signer_key_id.0,
+        "artifacts": verified.artifacts.iter().map(|artifact| json!({
+            "role": artifact.role.to_string(),
+            "target": artifact.target.to_string(),
+            "name": artifact.name.as_str(),
+            "sha256": artifact.sha256.as_str(),
+            "size": artifact.size,
+        })).collect::<Vec<_>>(),
+        "unselected_artifacts_verified": false,
+    })
+}
+
+fn selected_text(verified: &VerifiedSelectedArtifacts) -> String {
+    let mut text = format!(
+        "Selected artifacts verified under signed image set {} ({}). Unselected artifacts were not verified.\n  manifest sha256: {}\n  signer key id:   {}\n",
+        verified.manifest.set_version,
+        verified.release.release_tag,
+        verified.manifest_sha256.as_str(),
+        verified.signer_key_id.0,
+    );
+    for artifact in &verified.artifacts {
+        text.push_str(&format!(
+            "    {}/{} {} {} ({} bytes)\n",
+            artifact.role,
+            artifact.target,
+            artifact.name,
+            artifact.sha256.as_str(),
+            artifact.size,
+        ));
+    }
+    text
+}
+
 pub(super) fn run(request: &VerifyRequest) -> Result<()> {
     let verdict = verify(request)?;
     if request.json {
         let value = match &verdict {
-            Ok(verified) => verified_json(verified),
+            Ok(VerifyOutcome::Full(verified)) => verified_json(verified),
+            Ok(VerifyOutcome::Selected(verified)) => selected_json(verified),
             Err(error) => refused_json(error),
         };
         println!("{}", serde_json::to_string_pretty(&value)?);
     } else if let Ok(verified) = &verdict {
         // The report is the command's output, not commentary, so it bypasses
         // the opt-in chatter channel.
-        print!("{}", verified_text(verified));
+        match verified {
+            VerifyOutcome::Full(verified) => print!("{}", verified_text(verified)),
+            VerifyOutcome::Selected(verified) => print!("{}", selected_text(verified)),
+        }
     }
     verdict
         .map(drop)
@@ -247,6 +307,7 @@ mod tests {
             bundle: path("manifest.json.bundle"),
             lock: Some(path("images.lock")),
             artifacts,
+            artifact: Vec::new(),
             require_complete: false,
             json: false,
         };
@@ -432,6 +493,19 @@ mod tests {
         assert_eq!(value["artifacts"][0]["name"], "vmlinux");
         assert!(text.contains("Image set 0.0.0-smoke (v0.0.0-smoke) verified."));
         assert!(text.contains("default_tenant_workload_kernel/x86_64 vmlinux"));
+
+        let selected = VerifiedSelectedArtifacts {
+            manifest: verified.manifest.clone(),
+            release: verified.release.clone(),
+            manifest_sha256: verified.manifest_sha256.clone(),
+            signer_key_id: verified.signer_key_id.clone(),
+            artifacts: verified.artifacts.clone(),
+        };
+        let selected_value = selected_json(&selected);
+        let selected_report = selected_text(&selected);
+        assert_eq!(selected_value["scope"], "selected-artifacts");
+        assert_eq!(selected_value["unselected_artifacts_verified"], false);
+        assert!(selected_report.contains("Unselected artifacts were not verified"));
     }
 
     /// The real release bundle `mvm-build` and `mvm-core` already verify: a

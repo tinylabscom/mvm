@@ -163,7 +163,7 @@ impl TelemetryReceiver {
         host_key: SigningKey,
         expected_guest: &VerifyingKey,
     ) -> Result<Self, TelemetryError> {
-        Self::connect_with_signer(
+        Self::connect_authenticated(
             stream,
             &host_key.verifying_key(),
             expected_guest,
@@ -182,7 +182,7 @@ impl TelemetryReceiver {
     /// The signer must sign the canonical JSON tuple `(hello, ack)` through a
     /// dedicated handshake operation, never an unrelated signing verb. It runs
     /// on the transport worker and must enforce its own bounded I/O deadline.
-    pub fn connect_with_signer<S, F>(
+    pub fn connect_authenticated<S, F>(
         stream: &mut S,
         host_key: &VerifyingKey,
         expected_guest: &VerifyingKey,

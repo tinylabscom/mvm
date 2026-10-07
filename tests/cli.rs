@@ -1656,6 +1656,7 @@ fn image_boot_verify_help_lists_every_input() {
         "--bundle",
         "--lock",
         "--artifacts",
+        "--artifact",
         "--require-complete",
         "--json",
     ] {

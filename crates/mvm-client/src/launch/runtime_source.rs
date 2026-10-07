@@ -80,10 +80,9 @@ pub fn attach_runtime_overlay(
 /// running mvmctl version, then attach for `hypervisor`. Called at each
 /// workload-boot `VmStartConfig` construction in [`run`].
 ///
-/// A selected local image checkout plus the one way this process builds a
-/// pair target. The build closure is injected by the CLI, which owns the VM
-/// backends; this crate orchestrates caches and refuses stale installs, and
-/// never boots anything itself.
+/// A selected local image checkout plus the build closure used for Linux-layer
+/// image targets. Guest runtime artifacts are assembled from this repository
+/// on the host and never invoke the pair closure.
 pub struct PairArtifactSource<'a> {
     pub checkout: &'a mvm_build::image_source::LocalImageCheckout,
     /// Build (or cache-hit) one image-set target of the pair. Returns the
@@ -92,39 +91,6 @@ pub struct PairArtifactSource<'a> {
         &mvm_build::image_source::LocalImageCheckout,
         mvm_build::image_source::ImageBuildTarget,
     ) -> anyhow::Result<mvm_build::image_source::CachedImageSet>,
-}
-
-impl PairArtifactSource<'_> {
-    fn target(
-        role: mvm_build::image_source::ImageBuildRole,
-        attr: &str,
-    ) -> mvm_build::image_source::ImageBuildTarget {
-        mvm_build::image_source::ImageBuildTarget {
-            role,
-            attr: mvm_build::image_source::FlakeAttr::new(attr)
-                .expect("a literal attribute is valid"),
-        }
-    }
-
-    /// The pair's identity for `target` as it is now: the digest of the pair
-    /// cache key. Recorded beside an install; a later boot compares before
-    /// trusting the install, so a change in either checkout, the toolchain
-    /// pins or a flake lock reinstalls rather than boots stale bytes.
-    fn fingerprint(&self, target: &mvm_build::image_source::ImageBuildTarget) -> Result<String> {
-        use mvm_build::image_source::KeyInputs;
-        let mvm_root = mvm_build::image_source::mvm_source_checkout(
-            mvm_build::artifact_acquisition::compiled_channel(),
-        )
-        .context("a pair build needs the mvm checkout this binary was compiled from")?;
-        let key = mvm_build::image_source::LocalImageCacheKey::derive(&KeyInputs {
-            images: self.checkout,
-            mvm_checkout: &mvm_root,
-            target,
-            arch: mvm_core::arch::GuestArch::host(),
-        })
-        .context("reading the pair's cache key inputs")?;
-        Ok(key.digest().as_str().to_string())
-    }
 }
 
 /// Where the pair fingerprint for one overlay install is recorded: a sibling
@@ -139,56 +105,6 @@ fn overlay_pair_stamp(
         .join("runtime-overlay")
         .join(version)
         .join(format!("{arch}.pair"))
-}
-
-fn installed_overlay_pair_fingerprint(
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: &str,
-) -> Option<String> {
-    std::fs::read_to_string(overlay_pair_stamp(cache_root, version, arch))
-        .ok()
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-}
-
-/// Install the pair's runtime overlay when the install the launch path checks
-/// does not carry the pair's current fingerprint. The one pair overlay
-/// install the launch arm and the bootstrap prewarm share, so both leave the
-/// same stamp in the same place.
-fn ensure_pair_overlay_installed(
-    pair: &mut PairArtifactSource<'_>,
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: mvm_core::arch::GuestArch,
-) -> Result<()> {
-    let target = PairArtifactSource::target(
-        mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
-        "default",
-    );
-    let fingerprint = pair.fingerprint(&target)?;
-    if installed_overlay_pair_fingerprint(cache_root, version, &arch.to_string()).as_deref()
-        == Some(fingerprint.as_str())
-    {
-        return Ok(());
-    }
-    ui::info("Runtime overlay: building from the selected image checkout...");
-    let entry = (pair.build)(pair.checkout, target)?;
-    let (_staged, artifact) = crate::launch::pair_stage::staged_overlay_artifact(&entry, arch)?;
-    if artifact.version != version {
-        anyhow::bail!(
-            "the selected checkout's runtime overlay is version {}, but this mvmctl requires \
-             {version}; check out matching versions or unset MVM_IMAGES_DIR",
-            artifact.version,
-        );
-    }
-    mvm_build::runtime_overlay::install_overlay_into_cache(
-        &artifact,
-        cache_root,
-        &mvm_build::runtime_overlay::InstallOptions { overwrite: true },
-    )?;
-    record_overlay_pair_fingerprint(cache_root, version, &arch.to_string(), &fingerprint)?;
-    Ok(())
 }
 
 /// Record the pair fingerprint for the overlay installed at
@@ -218,58 +134,6 @@ fn record_overlay_pair_fingerprint(
     Ok(())
 }
 
-/// The recorded pair fingerprint of an installed sidecar, if it was installed
-/// from a pair. Anything else — published, in-tree source build — is not a
-/// pair answer.
-fn installed_sidecar_pair_fingerprint(
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: mvm_core::arch::GuestArch,
-    libc: mvm_contract::guest_libc::GuestLibc,
-) -> Option<String> {
-    let layout =
-        mvm_fs::sdk_sidecar::SdkSidecarLayout::under(cache_root, version, &arch.to_string(), libc);
-    std::fs::read_to_string(
-        layout
-            .artifact_dir
-            .join(mvm_build::sdk_sidecar::LOCAL_SOURCE_FINGERPRINT_FILE),
-    )
-    .ok()
-    .map(|text| text.trim().to_string())
-    .filter(|text| !text.is_empty())
-}
-
-/// Install the pair's `libc` SDK sidecar when the install the launch path
-/// checks does not carry the pair's current fingerprint. The one pair sidecar
-/// install the launch arm and the bootstrap prewarm share, so both leave the
-/// same stamp in the same place.
-fn ensure_pair_sidecar_installed(
-    pair: &mut PairArtifactSource<'_>,
-    target: &mvm_build::image_source::ImageBuildTarget,
-    fingerprint: &str,
-    cache_root: &std::path::Path,
-    version: &str,
-    arch: mvm_core::arch::GuestArch,
-    libc: mvm_contract::guest_libc::GuestLibc,
-) -> Result<()> {
-    if installed_sidecar_pair_fingerprint(cache_root, version, arch, libc).as_deref()
-        == Some(fingerprint)
-    {
-        return Ok(());
-    }
-    ui::info("SDK sidecar: building from the selected image checkout...");
-    let entry = (pair.build)(pair.checkout, target.clone())?;
-    crate::launch::pair_stage::install_pair_sidecar(
-        &entry,
-        fingerprint,
-        cache_root,
-        version,
-        arch,
-        libc,
-    )?;
-    Ok(())
-}
-
 /// Ordinary starts always re-resolve the overlay for the current host build.
 /// Callers that need same-version continuity across lifecycle state must use
 /// [`attach_runtime_overlay_if_cached_version`] with an explicit pin.
@@ -280,7 +144,7 @@ pub fn attach_runtime_overlay_if_cached(
     attach_runtime_overlay_if_cached_version(start_config, hypervisor, None, None)
 }
 
-/// The pair-aware form takes a selected checkout through
+/// The selected-checkout form takes a local image checkout through
 /// [`attach_runtime_overlay_if_cached_version`]; this convenience is for
 /// callers with no selection to offer (tests, non-CLI consumers).
 pub fn attach_runtime_overlay_if_cached_version_unpaired(
@@ -305,37 +169,42 @@ pub fn attach_runtime_overlay_if_cached_version(
     let version = expected_version.unwrap_or(env!("CARGO_PKG_VERSION"));
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = mvm_core::arch::GuestArch::host();
-    // A selected checkout is the overlay's source: an unchanged pair answers
-    // from the install recorded at the last pair build; a changed pair builds
-    // once and reinstalls under the same stamp. Neither the in-tree build nor
-    // the published download runs while a checkout is selected.
-    if let Some(pair) = pair {
-        ensure_pair_overlay_installed(pair, &cache_root, version, arch)?;
-        // The pair's install is the only source under a selected checkout:
-        // resolve it from the cache and return. Falling through would run
-        // the in-tree build arm (for a contributor build it rebuilds from
-        // the mvm checkout on every boot, overwriting the pair's bytes) or
-        // the published-download ladder, and neither may run here.
-        let resolver =
-            mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
-        return attach_runtime_overlay(start_config, hypervisor, &resolver, arch).with_context(
-            || {
-                format!(
-                    "the pair's runtime overlay {version} for {arch} installed but did not resolve from the cache"
-                )
-            },
-        );
+    // Selecting a local image checkout changes only Linux-layer image
+    // targets. The guest runtime still comes from this mvm source checkout.
+    if pair.is_some() {
+        if expected_version.is_some_and(|pinned| pinned != env!("CARGO_PKG_VERSION")) {
+            anyhow::bail!(
+                "runtime overlay version {version} is pinned for this boot, but the selected source-built mvmctl provides only {}; do not replace the pinned guest runtime",
+                env!("CARGO_PKG_VERSION")
+            );
+        }
+        let workspace_root = runtime_overlay_source_checkout_root().ok_or_else(|| {
+            anyhow::anyhow!(
+                "a selected image checkout cannot provide the guest runtime; run a source-built mvmctl or use the published runtime"
+            )
+        })?;
+        let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+            cache_root: &cache_root,
+            expected_version: version,
+            arch,
+            source_checkout_root: Some(&workspace_root),
+        })?;
+        apply_runtime_overlay_artifact(start_config, artifact);
+        return Ok(());
     }
     if expected_version.is_none()
         && matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun")
         && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
         && runtime_overlay_source_checkout_root().is_some()
     {
-        let artifact = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-            &cache_root,
-            version,
+        let workspace_root = runtime_overlay_source_checkout_root()
+            .expect("source build mode already verified a source checkout");
+        let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+            cache_root: &cache_root,
+            expected_version: version,
             arch,
-        )?;
+            source_checkout_root: Some(&workspace_root),
+        })?;
         apply_runtime_overlay_artifact(start_config, artifact);
         return Ok(());
     }
@@ -411,57 +280,64 @@ pub fn attach_runtime_overlay_if_cached_version(
 /// cold-cache acquisition ladder the same way
 /// [`attach_runtime_overlay_if_cached_version`] does for the overlay:
 ///
-/// 1. Resolve from cache. A warm cache never touches the network.
-/// 2. On a miss, seed from the default cache — a worktree-isolated `MVM_HOME`
-///    inherits the host's artifact rather than re-acquiring it. Still offline.
-/// 3. Still missing: consult the *same* build-vs-download decision the overlay
-///    makes on this host, so a contributor whose overlay is source-built never
-///    silently downloads a sidecar.
+/// 1. Return immediately when no bound SDK service needs a sidecar; reject an
+///    unknown guest libc before selecting a host artifact.
+/// 2. For a source checkout, assemble from the shared guest-runtime archive.
+/// 3. For a published runtime, resolve from cache or the pinned image set,
+///    downloading on a miss.
 pub fn resolve_sdk_sidecar_attachment_for_host(
     services: &[mvm_contract::protocol::broker::ServiceId],
     libc: mvm_contract::guest_libc::GuestLibc,
     pair: Option<&mut PairArtifactSource<'_>>,
 ) -> Result<Option<SdkSidecarAttachment>> {
+    // This decision precedes even the pair target and fingerprint. Most
+    // workloads bind no SDK host service and must do no sidecar work at all.
+    if !mvm_core::plan::sdk_sidecar_required_for(services, true) {
+        return Ok(None);
+    }
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
     let resolver =
         mvm_fs::sdk_sidecar::SdkSidecarResolver::new(cache_root.clone(), version.to_string());
 
-    // A selected checkout owns the sidecar's freshness: a cached sidecar
-    // installed from a pair answers only while its recorded pair identity is
-    // the pair on disk now, so a change in either checkout reinstalls rather
-    // than boots a stale cdylib.
-    let mut pair_plan: Option<(mvm_build::image_source::ImageBuildTarget, String)> = None;
-    if let Some(pair) = pair.as_deref() {
-        // `Unknown` selects no sidecar at all: the resolver answers `None`
-        // for it below, and there is nothing for the pair to build. Probing
-        // a sidecar for an undetected libc would only guess.
-        let attr = match libc {
-            mvm_contract::guest_libc::GuestLibc::Glibc => Some("sdk-sidecar-image"),
-            mvm_contract::guest_libc::GuestLibc::Musl => Some("sdk-sidecar-image-musl"),
-            mvm_contract::guest_libc::GuestLibc::Unknown => None,
-        };
-        if let Some(attr) = attr {
-            let target = PairArtifactSource::target(
-                mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
-                attr,
-            );
-            let fingerprint = pair.fingerprint(&target)?;
-            pair_plan = Some((target, fingerprint));
-        }
+    // A bound SDK service with an undetected libc is a hard error. Resolve
+    // before touching the source cache so no host artifact is built on a
+    // guessed ABI.
+    if libc == mvm_contract::guest_libc::GuestLibc::Unknown {
+        return mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+            services, &resolver, arch, libc,
+        );
     }
-    let pair_selected = pair_plan.is_some();
-    if let (Some(pair), Some((target, fingerprint))) = (pair, pair_plan) {
-        ensure_pair_sidecar_installed(
-            pair,
-            &target,
-            &fingerprint,
-            &cache_root,
-            version,
-            arch,
-            libc,
-        )?;
+
+    if pair.is_some()
+        || runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+    {
+        if let Some(workspace_root) = runtime_overlay_source_checkout_root() {
+            let runtime = mvm_build::guest_runtime::resolve_or_build_source_guest_runtime(
+                &cache_root,
+                version,
+                arch,
+                &workspace_root,
+            )
+            .context("resolve the shared guest runtime for the SDK sidecar")?;
+            mvm_build::sdk_sidecar::build_sdk_sidecar_from_guest_runtime(
+                &cache_root,
+                version,
+                arch,
+                libc,
+                &runtime,
+            )
+            .context("assemble the SDK sidecar from the shared guest runtime")?;
+            return mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
+                services, &resolver, arch, libc,
+            );
+        }
+        if pair.is_some() {
+            anyhow::bail!(
+                "a selected image checkout cannot provide the SDK guest runtime; run a source-built mvmctl or use the published runtime"
+            );
+        }
     }
 
     let cache_miss = match mvm_runtime::sdk_sidecar::resolve_sdk_sidecar_attachment(
@@ -486,33 +362,22 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
     }
 
     match runtime_overlay_acquire_mode() {
-        // Building the sidecar needs the builder VM, which must not be spawned
-        // implicitly inside a launch. A sidecar `build sdk-sidecar build`
-        // adopted from the pinned image set (`MVM_FETCH_UNCHANGED_IMAGES`) is
-        // filed under that set's root, not this CLI's version, so look there —
-        // a pure cache read, never the network. Otherwise keep the fail-closed
-        // refusal, which names the binding and the explicit source-build
-        // command.
+        // A contributor mode without an available source checkout can only
+        // use an already-adopted member of the pinned set. It never silently
+        // downloads a runtime artifact.
         RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-            if !pair_selected
-                && let Some(attached) = resolve_image_set_sidecar_attachment(
-                    services,
-                    &cache_root,
-                    &mvm_build::published_image_set::SetMemberCache::locked(),
-                    arch,
-                    libc,
-                )
-            {
+            if let Some(attached) = resolve_image_set_sidecar_attachment(
+                services,
+                &cache_root,
+                &mvm_build::published_image_set::SetMemberCache::locked(),
+                arch,
+                libc,
+            ) {
                 return Ok(Some(attached));
             }
             Err(cache_miss)
         }
         RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-            if pair_selected {
-                anyhow::bail!(
-                    "the SDK sidecar for {libc} is not in the selected checkout's set and no pair install is usable; build it with `mvmctl build sdk-sidecar build` from the paired checkout"
-                );
-            }
             // The published sidecar is a member of the image set this build
             // pins, filed under that set's root rather than this CLI's
             // version, so a warm one resolves without the network.
@@ -543,41 +408,22 @@ pub fn resolve_sdk_sidecar_attachment_for_host(
     }
 }
 
-/// Prewarm the pair-stamped artifacts a launch checks — the runtime overlay
-/// and both libc variants of the SDK sidecar — installing each through the
-/// same helpers the launch path uses, so a boot under this pair finds every
-/// stamp warm and never cold-builds. Idempotent: an install whose stamp
-/// already matches the pair on disk is skipped.
-pub fn prepare_pair_launch_artifacts(pair: &mut PairArtifactSource<'_>) -> Result<()> {
+/// Prewarm the host-assembled runtime overlay for a launch that selected a
+/// local Linux image checkout. SDK sidecars are assembled only when the
+/// workload actually binds an SDK host service.
+pub fn prepare_pair_launch_artifacts(_pair: &mut PairArtifactSource<'_>) -> Result<()> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    ensure_pair_overlay_installed(pair, &cache_root, version, arch)?;
-    for (libc, attr) in [
-        (
-            mvm_contract::guest_libc::GuestLibc::Glibc,
-            "sdk-sidecar-image",
-        ),
-        (
-            mvm_contract::guest_libc::GuestLibc::Musl,
-            "sdk-sidecar-image-musl",
-        ),
-    ] {
-        let target = PairArtifactSource::target(
-            mvm_build::image_source::ImageBuildRole::RuntimeOverlay,
-            attr,
-        );
-        let fingerprint = pair.fingerprint(&target)?;
-        ensure_pair_sidecar_installed(
-            pair,
-            &target,
-            &fingerprint,
-            &cache_root,
-            version,
-            arch,
-            libc,
-        )?;
-    }
+    let workspace_root = runtime_overlay_source_checkout_root().ok_or_else(|| {
+        anyhow::anyhow!("a selected image checkout needs a source-built mvmctl guest runtime")
+    })?;
+    acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
+        cache_root: &cache_root,
+        expected_version: version,
+        arch,
+        source_checkout_root: Some(&workspace_root),
+    })?;
     Ok(())
 }
 
@@ -864,7 +710,7 @@ mod sdk_sidecar_host_resolution_tests {
     }
 
     #[test]
-    fn the_host_wrapper_fails_closed_on_a_cold_cache() {
+    fn source_mode_without_sdk_bindings_does_no_sidecar_work() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
@@ -872,15 +718,17 @@ mod sdk_sidecar_host_resolution_tests {
             crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "build",
         );
-        assert!(
+        assert_eq!(
             resolve_sdk_sidecar_attachment_for_host(
-                &[svc("host.audit.v1")],
+                &[svc("broker.v1")],
                 mvm_contract::guest_libc::GuestLibc::Musl,
                 None,
             )
-            .is_err(),
-            "a bound SDK service with no cached sidecar must refuse the launch"
+            .unwrap(),
+            None,
         );
+        assert!(!dir.path().join("cache/guest-runtime").exists());
+        assert!(!dir.path().join("cache/sdk-sidecar").exists());
     }
 
     /// A base URL no transport can reach. Any test asserting "the network was
@@ -933,11 +781,10 @@ mod sdk_sidecar_host_resolution_tests {
         assert!(!layout.artifact_dir.exists(), "nothing may be cached");
     }
 
-    /// Building the sidecar needs the builder VM, which a launch must never
-    /// spawn implicitly — so a source checkout keeps the fail-closed refusal
-    /// and never falls through to the network.
+    /// An unknown guest libc cannot select one of the two host-packed
+    /// sidecars. This fails before trying to build the shared source archive.
     #[test]
-    fn a_source_checkout_host_refuses_instead_of_downloading() {
+    fn an_unknown_libc_with_a_required_service_fails_before_source_build() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path());
@@ -949,29 +796,21 @@ mod sdk_sidecar_host_resolution_tests {
 
         let err = resolve_sdk_sidecar_attachment_for_host(
             &[svc("host.kv.v1")],
-            mvm_contract::guest_libc::GuestLibc::Musl,
+            mvm_contract::guest_libc::GuestLibc::Unknown,
             None,
         )
-        .expect_err("a source-checkout host must refuse rather than download");
+        .expect_err("an unknown libc must fail closed without building a guessed sidecar");
         let msg = format!("{err:#}");
 
         assert!(msg.contains("host.kv.v1"), "{msg}");
-        assert!(
-            msg.contains(mvm_core::plan::SDK_SIDECAR_GUEST_PATH),
-            "{msg}"
-        );
-        assert!(
-            msg.contains("mvmctl build sdk-sidecar build"),
-            "the refusal must still name the build that satisfies it: {msg}"
-        );
+        assert!(msg.contains("libc is unknown"), "{msg}");
+        assert!(!dir.path().join("cache/guest-runtime").exists());
     }
 
-    /// A source checkout whose `build sdk-sidecar build` adopted the pinned
-    /// set's sidecars (`MVM_FETCH_UNCHANGED_IMAGES`) attaches them from the
-    /// set's member cache, for either libc, without the network. Without that
-    /// install the refusal above stands.
+    /// A published sidecar member already installed at another version is
+    /// still reused offline by either libc, preserving pinned-set continuity.
     #[test]
-    fn a_source_checkout_host_attaches_a_sidecar_adopted_from_the_pinned_set() {
+    fn a_download_mode_host_attaches_a_sidecar_adopted_from_the_pinned_set() {
         let member_version = "0.0.1-member";
         for libc in [
             mvm_contract::guest_libc::GuestLibc::Glibc,
@@ -994,7 +833,7 @@ mod sdk_sidecar_host_resolution_tests {
             env.isolate_mvm_home(dir.path());
             env.set(
                 crate::launch::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
-                "build",
+                "download",
             );
             env.set("MVM_UPDATE_DOWNLOAD_URL", UNREACHABLE_BASE_URL);
 

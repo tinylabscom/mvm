@@ -429,6 +429,10 @@ impl InstallDriver for MockDriver {
 fn clone_builder_err(e: &BuilderVmError) -> BuilderVmError {
     match e {
         BuilderVmError::NixBuildFailed(s) => BuilderVmError::NixBuildFailed(s.clone()),
+        BuilderVmError::JobFailed { category, detail } => BuilderVmError::JobFailed {
+            category: *category,
+            detail: detail.clone(),
+        },
         BuilderVmError::ExtractionFailed(s) => BuilderVmError::ExtractionFailed(s.clone()),
         BuilderVmError::LibkrunUnavailable(s) => BuilderVmError::LibkrunUnavailable(s.clone()),
         BuilderVmError::ImagePullFailed(s) => BuilderVmError::ImagePullFailed(s.clone()),

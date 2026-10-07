@@ -362,6 +362,14 @@ pub fn workspace_blob_name(volume: &str) -> String {
     format!("workspace-{volume}.ext4")
 }
 
+/// Validate a registered workspace volume name before deriving its blob path.
+pub fn checked_workspace_blob_name(volume: &str) -> anyhow::Result<String> {
+    if !workspace_name_is_safe(volume) {
+        anyhow::bail!("workspace volume name {volume:?} is not a registered volume name");
+    }
+    Ok(workspace_blob_name(volume))
+}
+
 /// Whether `name` is safe to become part of a blob file name: the registered
 /// volume-name shape, which admits no separator or dot.
 fn workspace_name_is_safe(name: &str) -> bool {
@@ -377,13 +385,7 @@ impl WorkspaceVolume {
     /// The blob name, or an error for a name that could escape the content
     /// directory.
     pub(crate) fn blob_name(&self) -> anyhow::Result<String> {
-        if !workspace_name_is_safe(&self.name) {
-            anyhow::bail!(
-                "workspace volume name {:?} is not a registered volume name",
-                self.name
-            );
-        }
-        Ok(workspace_blob_name(&self.name))
+        checked_workspace_blob_name(&self.name)
     }
 }
 
