@@ -1,10 +1,18 @@
 //! `mvmctl build guest-bins` — assemble the publishable `mvm-guest-bins`
 //! artifact from this source checkout.
 //!
-//! The binaries come from the same host-side guest builds the runtime overlay
-//! and the OCI runtime already use, so a warm cache makes this a packaging step
-//! and a cold one compiles each requested architecture once. The archive is
-//! what `mvm-images` pins instead of building this source tree.
+//! The archive carries every guest artifact mvm owns: the static guest
+//! executables, the initramfs agent, the host-services and GPU shared objects
+//! for both libcs, and the Python SDK. The executables come from the same
+//! host-side guest builds the runtime overlay and the OCI runtime already use,
+//! so a warm cache makes this a packaging step and a cold one compiles each
+//! requested architecture once.
+//!
+//! Its consumer is `mvmctl`: the archive is the guest runtime a CLI release is
+//! to ship as a signed asset, from which `mvmctl` assembles the runtime
+//! overlay, the initramfs and the SDK sidecar. Neither the release asset nor
+//! that assembly exists yet, so today the command is how the archive is
+//! produced and inspected. `mvm-images` does not consume it.
 
 use std::path::PathBuf;
 
@@ -37,10 +45,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         mvm_build::guest_agent_build::detect_source_workspace().ok_or_else(no_source_checkout)?;
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     let request = build_request(&args, workspace, cache_root);
-    // A cold cache compiles every guest binary per architecture, which takes
-    // minutes; the live line keeps that from looking like a hang.
+    // A cold cache compiles every guest artifact per architecture, which takes
+    // many minutes; the live line keeps that from looking like a hang.
     let phase = mvm_runtime::ui::activity::start(format!(
-        "Building the guest binaries for {} from {}",
+        "Building the guest artifacts for {} from {}",
         arch_list(&request.arches),
         request.workspace_root.display()
     ));
@@ -90,7 +98,8 @@ fn render_summary(written: &WrittenGuestBins) -> String {
             written.archive.display()
         ),
         format!("  sha256:                        {}", written.sha256),
-        format!("  binaries:                      {}", manifest.files.len()),
+        format!("  members:                       {}", manifest.files.len()),
+        format!("  source:                        {}", manifest.source),
         format!(
             "  guest_source_fingerprint:      {}",
             manifest.guest_source_fingerprint
@@ -106,6 +115,7 @@ fn render_summary(written: &WrittenGuestBins) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::image_set::{GitCommit, RepoIdentity, WorktreeState};
     use std::collections::BTreeMap;
 
     fn args(arches: Vec<GuestArch>) -> Args {
@@ -135,7 +145,7 @@ mod tests {
     }
 
     #[test]
-    fn the_summary_names_the_pin_and_both_fingerprints() {
+    fn the_summary_names_the_pin_the_source_and_both_fingerprints() {
         let written = WrittenGuestBins {
             archive: PathBuf::from("/out/mvm-guest-bins-v1.2.3.tar.gz"),
             checksum: PathBuf::from("/out/mvm-guest-bins-v1.2.3.tar.gz.sha256"),
@@ -145,7 +155,11 @@ mod tests {
                 version: "1.2.3".into(),
                 guest_source_fingerprint: "g".repeat(64),
                 sdk_cdylib_source_fingerprint: "c".repeat(64),
-                files: BTreeMap::from([("x86_64/mvm-guest-agent".into(), "d".repeat(64))]),
+                source: RepoIdentity {
+                    commit: GitCommit::new("e".repeat(40)).unwrap(),
+                    worktree: WorktreeState::Clean,
+                },
+                files: BTreeMap::from([("x86_64/bin/mvm-guest-agent".into(), "d".repeat(64))]),
             },
         };
         let summary = render_summary(&written);
@@ -154,6 +168,7 @@ mod tests {
             "ab".repeat(32),
             "g".repeat(64),
             "c".repeat(64),
+            format!("{} (clean)", "e".repeat(40)),
         ] {
             assert!(summary.contains(&expected), "{summary}");
         }

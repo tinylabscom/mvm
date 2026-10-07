@@ -6,12 +6,14 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use mvm_core::guest_sidecar::SIDECAR_FILENAME;
 use mvm_core::plan::bundle::{
-    ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, KeyId,
-    VerityInfo, sha256_hex, write_bundle,
+    ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
+    BundleMember, BundleSecurityPosture, BundleSizeBudget, KeyId, VerityInfo, sha256_hex,
+    write_bundle,
 };
+use mvm_core::plan::types::BuildProvenance;
 
 use crate::debug;
-use crate::inputs::BundleExportInputs;
+use crate::inputs::{BundleExportInputs, PostureInputs};
 use crate::signer::{AsManifestSigner, BundleSigner};
 
 const KERNEL_NAME: &str = "vmlinux";
@@ -38,7 +40,8 @@ pub struct ExportedBundle {
 /// that cannot be written fails the call with the archive already on disk.
 ///
 /// Artifacts are held in memory while the archive is assembled, as they are
-/// when a bundle is verified.
+/// when a bundle is verified. Each file's size is checked against the bundle
+/// caps before it is read, so an oversized rootfs is refused without loading it.
 pub fn export_bundle_with_signer(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
@@ -46,22 +49,13 @@ pub fn export_bundle_with_signer(
     refuse_summary_over_archive(inputs)?;
 
     let mut contents = BundleContents::default();
-    contents.push(
-        KERNEL_NAME,
-        ArtifactRole::Kernel,
-        read_artifact("kernel", inputs.vmlinux)?,
-    );
-    contents.push(
-        ROOTFS_NAME,
-        ArtifactRole::Rootfs,
-        read_artifact("rootfs", inputs.rootfs)?,
-    );
+    let kernel = contents.read_artifact("kernel", inputs.vmlinux)?;
+    contents.push(KERNEL_NAME, ArtifactRole::Kernel, kernel);
+    let rootfs = contents.read_artifact("rootfs", inputs.rootfs)?;
+    contents.push(ROOTFS_NAME, ArtifactRole::Rootfs, rootfs);
     if let Some(initrd) = inputs.initrd {
-        contents.push(
-            INITRD_NAME,
-            ArtifactRole::Initrd,
-            read_artifact("initrd", initrd)?,
-        );
+        let initrd = contents.read_artifact("initrd", initrd)?;
+        contents.push(INITRD_NAME, ArtifactRole::Initrd, initrd);
     }
     let verity = contents.push_verity(inputs.verity_bytes, inputs.roothash)?;
     contents.push(
@@ -71,7 +65,8 @@ pub fn export_bundle_with_signer(
     );
 
     let key_id = signer.key_id();
-    let manifest = manifest_for(inputs, signer, &key_id, contents.artifacts, verity);
+    let members = declarations_for(inputs, &contents.artifacts, verity.is_some());
+    let manifest = manifest_for(inputs, signer, &key_id, contents.artifacts, members, verity);
     let archive = write_bundle(&manifest, &AsManifestSigner(signer), contents.payload)
         .context("sealing bundle (manifest + signature + artifacts)")?;
 
@@ -115,9 +110,22 @@ pub fn guest_sidecar_path(rootfs: &str) -> Result<PathBuf> {
 struct BundleContents {
     artifacts: Vec<BundleArtifact>,
     payload: Vec<(String, Vec<u8>)>,
+    budget: BundleSizeBudget,
 }
 
 impl BundleContents {
+    /// Read one input file, refusing it before the read when it would put
+    /// the bundle past a size cap.
+    fn read_artifact(&mut self, what: &str, path: &str) -> Result<Vec<u8>> {
+        let size = std::fs::metadata(path)
+            .with_context(|| format!("reading {what} at {path}"))?
+            .len();
+        self.budget
+            .admit(path, size)
+            .with_context(|| format!("{what} at {path} cannot be bundled"))?;
+        std::fs::read(path).with_context(|| format!("reading {what} at {path}"))
+    }
+
     fn push(&mut self, name: &str, role: ArtifactRole, bytes: Vec<u8>) {
         let path = format!("{ARTIFACTS_DIR}/{name}");
         self.artifacts.push(BundleArtifact {
@@ -160,10 +168,6 @@ impl BundleContents {
     }
 }
 
-fn read_artifact(what: &str, path: &str) -> Result<Vec<u8>> {
-    std::fs::read(path).with_context(|| format!("reading {what} at {path}"))
-}
-
 /// The runtime refuses to boot a rootfs whose sidecar is missing, so a bundle
 /// exported without it is unbootable on arrival: it installs, and the failure
 /// only surfaces at admission on the target host. Fail here instead.
@@ -177,11 +181,67 @@ fn read_guest_sidecar(rootfs: &str) -> Result<Vec<u8>> {
     })
 }
 
+/// The declaration members an export carries, in a fixed order so the same
+/// inputs always produce the same manifest.
+fn declarations_for(
+    inputs: &BundleExportInputs<'_>,
+    artifacts: &[BundleArtifact],
+    verity_protected: bool,
+) -> Vec<BundleMember> {
+    let mut members = Vec::new();
+    if let Some(cmdline) = inputs.cmdline {
+        members.push(BundleMember::KernelCmdline {
+            cmdline: cmdline.trim_end().to_string(),
+        });
+    }
+    if let Some(posture) = inputs.posture {
+        members.push(BundleMember::SecurityPosture(posture_for(
+            posture,
+            verity_protected,
+        )));
+    }
+    if let Some(provenance) = &inputs.provenance {
+        members.push(BundleMember::BuildProvenance(bind_provenance(
+            provenance.clone(),
+            artifacts,
+        )));
+    }
+    members
+}
+
+fn posture_for(posture: PostureInputs, verity_protected: bool) -> BundleSecurityPosture {
+    BundleSecurityPosture {
+        profile: posture.profile,
+        verity_protected,
+        requires_auth: posture.requires_auth,
+        allows_volumes: posture.allows_volumes,
+        allows_egress: posture.allows_egress,
+    }
+}
+
+/// Record the digests of the kernel, rootfs, and initramfs actually sealed.
+fn bind_provenance(
+    mut provenance: BuildProvenance,
+    artifacts: &[BundleArtifact],
+) -> BuildProvenance {
+    let digest = |role: ArtifactRole| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact.role == role)
+            .map(|artifact| artifact.sha256.clone())
+    };
+    provenance.artifacts.kernel = digest(ArtifactRole::Kernel);
+    provenance.artifacts.rootfs = digest(ArtifactRole::Rootfs);
+    provenance.artifacts.initramfs = digest(ArtifactRole::Initrd);
+    provenance
+}
+
 fn manifest_for(
     inputs: &BundleExportInputs<'_>,
     signer: &dyn BundleSigner,
     key_id: &KeyId,
     artifacts: Vec<BundleArtifact>,
+    members: Vec<BundleMember>,
     verity: Option<VerityInfo>,
 ) -> BundleManifest {
     BundleManifest {
@@ -195,7 +255,7 @@ fn manifest_for(
         created_at: Utc::now().to_rfc3339(),
         labels: Default::default(),
         artifacts,
-        members: Vec::new(),
+        members,
         verity,
         resources: inputs.resources.clone(),
     }

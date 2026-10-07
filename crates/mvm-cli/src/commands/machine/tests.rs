@@ -3255,6 +3255,13 @@ fn machine_advanced_verbs_parse() {
         "proc: {r:?}"
     );
 
+    // prompt
+    let r = parse(&["prompt", "myvm", "summarize the diff"]);
+    assert!(
+        matches!(r, Ok(MachineAction::Vm(VmCmd::Prompt(_)))),
+        "prompt: {r:?}"
+    );
+
     // session
     let r = parse(&["session", "ls"]);
     assert!(
@@ -3895,6 +3902,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
                 ],
             }),
             drive: None,
+            display_input: None,
         })
     );
 }
