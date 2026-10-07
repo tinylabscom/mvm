@@ -423,6 +423,11 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         trace.mark("endpoint_spawn");
 
         let mut boot_cmdline = inputs.cmdline.clone();
+        if let Some(token) =
+            mvm_vmm::host::egress_bridge::telemetry_cmdline_token(&inputs.config.name)
+        {
+            append_cmdline_token(&mut boot_cmdline, &token);
+        }
         if let Some(token) = cmdline::secret_env_cmdline_token(&inputs.config.name)? {
             append_cmdline_token(&mut boot_cmdline, &token);
         }
