@@ -27,7 +27,8 @@ verified under an MVM-controlled release identity and a current signed
 revocation document. Until that revocation check exists, the built-in policy
 does not trust `mvm/` and no pack is labelled official. No wildcard may
 convey official status. Community namespaces require their own explicit
-publisher trust. A signature proves publisher and integrity, not safety.
+publisher trust. A valid signature authenticates publisher identity and
+artifact integrity; it says nothing about safety.
 
 The owner renamed `tinylabscom/mvm-templates` to `tinylabscom/mvm-packs` on
 2026-10-06. The repository already publishes signed packs, while its
@@ -38,8 +39,8 @@ only built-in authority until an explicit trust migration is approved and
 shipped. A transition may accept the new identity for legacy `agent/` and
 `runtime/` references while retaining the old one only for a documented
 cutoff period, or may re-sign existing artifacts first. Neither path grants
-`mvm/` trust before revocation enforcement. A URL redirect never establishes
-signing authority.
+`mvm/` trust before revocation enforcement. A URL redirect is not signing
+authority.
 
 The workload pack CLI becomes `mvmctl pack info|verify|pull|run|ls|rm|update`.
 The attested builder/runtime/image-project cache moves under `pack system`,
