@@ -762,12 +762,15 @@ mod tests {
         );
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
-             lint-features-test-support, lint-features-embed, pr-regressions, \
+             lint-features-test-support, lint-features-embed, \
              test-workspace, test-workspace-aarch64, test-linux, \
              test-release-witness, test-ebpf-telemetry, bdd-conformance, \
              boot-latency, nix-flake-check]"
         ));
-        let preflight = job_block(&workflow, "pr-regressions");
+        assert!(
+            job_body(&workflow, "pr-regressions").is_none(),
+            "focused regressions must not allocate a separate PR runner"
+        );
         for expected in [
             "github.event_name == 'pull_request'",
             "shellcheck \"${scripts[@]}\"",
@@ -777,8 +780,8 @@ mod tests {
             "could not classify added shell scripts",
         ] {
             assert!(
-                preflight.contains(expected),
-                "PR focused regressions must contain {expected:?}"
+                lint_policy.contains(expected),
+                "the policy lane must keep the focused regression {expected:?}"
             );
         }
 
@@ -1030,8 +1033,13 @@ mod tests {
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
         assert!(nix.contains(
-            "if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'"
+            "if: needs.scope.outputs.nix == 'true' && github.event_name != 'merge_group'"
         ));
+        assert!(aggregate.contains("SCOPE_NIX: ${{ needs.scope.outputs.nix }}"));
+        assert!(
+            aggregate.contains("pull_request:true|workflow_dispatch:true) nix_required=success")
+        );
+        assert!(aggregate.contains("pull_request:false|workflow_dispatch:false|merge_group:true|merge_group:false) nix_required=skipped"));
         assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
         assert!(
             nix.contains("run: sh scripts/check-devshell-tiers.sh"),
@@ -1267,18 +1275,16 @@ mod tests {
         assert!(ci.contains(expected_group));
         assert!(ci.contains(expected_cancel));
         assert!(ci.contains("permissions:\n  contents: read"));
-        for required_name in [
-            "name: Test",
-            "name: Invariant",
-            "name: Nix flake check (Linux eval)",
-        ] {
-            assert!(ci.contains(required_name), "required check name drifted");
-        }
+        assert!(ci.contains("name: Test"), "required check name drifted");
+        assert!(ci.contains("name: Invariant"));
+        assert!(ci.contains("name: Nix flake check (Linux eval)"));
 
-        let architecture = workflow("architecture.yml");
-        assert!(!architecture.contains("pull_request:"));
-        assert!(!architecture.contains("merge_group:"));
-        assert!(architecture.contains("workflow_dispatch:"));
+        assert!(
+            !Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../.github/workflows/architecture.yml")
+                .exists(),
+            "the duplicate architecture diagnostic workflow must stay retired"
+        );
     }
 
     /// A branch ref re-resolves on every run, so what executes is whatever
@@ -1582,10 +1588,10 @@ mod tests {
         assert!(warm.contains("--out-link \"$RUNNER_TEMP/nix-cache-warm\""));
         assert!(warm.contains("Build Nix outputs to populate the binary cache"));
         assert!(warm.contains("save: \"true\""));
-        let hetzner = job_block(&warm, "warm-hetzner");
-        assert!(hetzner.contains("runs-on: [self-hosted, Linux, X64, mvm, hetzner, kvm]"));
-        assert!(hetzner.contains("key: hetzner-workspace"));
-        assert!(hetzner.contains("cargo build --all-targets"));
+        assert!(
+            job_body(&warm, "warm-hetzner").is_none(),
+            "the hosted-only PR shard path must not warm an unused runner pool"
+        );
         assert!(warm.contains("key: test-support"));
         assert!(warm.contains("Warm test-support feature tests"));
 
