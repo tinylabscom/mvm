@@ -52,6 +52,60 @@ fn machine_workspace_apply_verbs_are_discoverable() {
 }
 
 #[test]
+fn artifact_pack_takes_the_arguments_of_bundle_export() {
+    let help = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+            .args(args)
+            .output()
+            .expect("run help");
+        assert!(out.status.success(), "{args:?} --help failed");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let pack = help(&["artifact", "pack", "--help"]);
+    let export = help(&["bundle", "export", "--help"]);
+    for flag in [
+        "<TEMPLATE>",
+        "--out",
+        "--cmdline",
+        "--posture",
+        "--allow-egress",
+        "--allow-volumes",
+        "--allow-unauthenticated",
+    ] {
+        assert!(
+            pack.contains(flag),
+            "artifact pack help missing {flag}: {pack}"
+        );
+        assert!(
+            export.contains(flag),
+            "bundle export help missing {flag}: {export}"
+        );
+    }
+    assert!(pack.contains("Alias of `mvmctl bundle export`"), "{pack}");
+}
+
+#[test]
+fn bundle_export_refuses_an_allow_flag_without_a_posture() {
+    let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
+        .args([
+            "bundle",
+            "export",
+            "tmpl",
+            "--out",
+            "/tmp/never.mvmpkg",
+            "--allow-egress",
+        ])
+        .output()
+        .expect("run bundle export");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--posture"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn machine_check_artifact_help_names_bundle_verification_controls() {
     let out = Command::new(env!("CARGO_BIN_EXE_mvmctl"))
         .args(["machine", "check-artifact", "--help"])
