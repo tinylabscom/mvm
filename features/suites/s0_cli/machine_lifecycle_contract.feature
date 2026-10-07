@@ -5,12 +5,22 @@ Feature: machine lifecycle request contract
   Every scenario here uses one isolated mvm home so the record written by an
   earlier step is the record a later step reads.
 
+  Scenario: one machine group presents the named-machine lifecycle
+    When I run mvmctl with "machine --help" and an isolated mvm home
+    Then the command exits with code 0
+    And the output contains "ps"
+    And the output contains "attach"
+    And the output contains "detach"
+    And the output contains "logs"
+    And the output contains "stop"
+    And the output contains "inspect"
+
   Scenario: creating a machine records it without booting a guest
     Given an isolated mvm home
     When I run mvmctl in the isolated mvm home with "machine create bdd-lifecycle --image alpine"
     Then the command exits with code 0
     And the output contains "created machine bdd-lifecycle"
-    When I run mvmctl in the isolated mvm home with "machine ls"
+    When I run mvmctl in the isolated mvm home with "machine ps"
     Then the command exits with code 0
     And the output contains "bdd-lifecycle"
     And the output contains "stopped"
