@@ -15,9 +15,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use mvm_client::display_input::{DisplayAuthority, DisplayInputRoute, DisplayInputRouteError};
 use mvm_contract::stream::{DisplayInputEvent, DisplayInputFrame};
-use mvm_hostd::display::DisplayAuthority;
-use mvm_hostd::stream::{DisplayInputRoute, DisplayInputRouteError};
 use rand::Rng as _;
 use serde::Deserialize;
 
@@ -44,10 +43,9 @@ pub(super) fn serve(name: &str, authority: &DisplayAuthority) -> Result<()> {
     // An interrupt skips destructors. Closing the route here is what ends an
     // open credential entry, so recording resumes and the chain records it.
     let interrupt_route = Arc::clone(&route);
-    let _cleanup =
-        mvm_runtime::interrupt_cleanup::on_interrupt("display input session", move || {
-            close_route(&interrupt_route);
-        });
+    let _cleanup = mvm_client::display_input::on_interrupt(move || {
+        close_route(&interrupt_route);
+    });
     let stop = Arc::new(AtomicBool::new(false));
     spawn_refresher(Arc::clone(&route), Arc::clone(&stop));
 
