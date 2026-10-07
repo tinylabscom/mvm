@@ -60,8 +60,27 @@ mod tests {
     use super::*;
     use crate::commands::vm::denial_review::NoManifest;
     use crate::commands::vm::egress_denials::Live;
-    use crate::commands::vm::egress_denials::denial::EgressDenial;
-    use crate::commands::vm::egress_denials::denial::tests::entry;
+    use mvm_client::egress_denials::denial::EgressDenial;
+    use mvm_hostd::supervisor::PlanAuditEntry;
+
+    fn entry(event: &str, labels: &[(&str, &str)]) -> PlanAuditEntry {
+        PlanAuditEntry {
+            timestamp: "2026-09-26T10:00:00Z".parse().unwrap(),
+            tenant: mvm_core::plan::TenantId("local".into()),
+            plan_id: mvm_core::plan::PlanId("00000000-0000-0000-0000-000000000000".into()),
+            plan_version: 0,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: "<unbound>".into(),
+            image_sha256: "0".repeat(64),
+            event: event.into(),
+            caller_commitment: None,
+            labels: labels
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
 
     fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
