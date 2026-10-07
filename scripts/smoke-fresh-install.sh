@@ -12,7 +12,7 @@
 # with stdin redirected from /dev/null, and must print the token on stdout
 # within its time budget.
 #
-# Two more boots follow from the same HOME, each with its own token and
+# Three more boots follow from the same HOME, each with its own token and
 # budget, because a release binary's downloads are not checked by its first
 # boot. That boot runs the runtime overlay and initramfs it has just fetched.
 # The second is the first to resolve them from the cache, which fetches again,
@@ -24,6 +24,19 @@
 # /mvm/sdk. A source checkout builds all three locally, so CI's e2e lanes
 # cannot see this class of bug.
 #
+# The fourth grants egress to one host (`--allow-host example.com`) and the
+# guest must fetch it over HTTPS. That starts the per-VM network endpoint
+# shipped beside mvmctl, which confines itself with a seccomp filter before it
+# answers the guest. A syscall the release's libc makes and a source build's
+# does not kills the endpoint there, so only the shipped binary can show it.
+#
+# MVM_SMOKE_ARCHIVE runs the same boots against a release archive that has not
+# been published yet: the archive is unpacked, mvmctl is linked into the
+# throwaway HOME's ~/.local/bin the way the installer links it, and `mvmctl
+# bootstrap` runs as the installer would run it. The installer itself cannot
+# take that archive, because it refuses anything without the signature the
+# publish step adds.
+#
 # The environment is rebuilt from nothing (`env -i`): no MVM_* knob, cache
 # directory or tool the developer's shell happens to carry can make a broken
 # release look working. Nothing outside the throwaway root is written.
@@ -31,6 +44,8 @@
 # Environment:
 #   MVM_SMOKE_INSTALLER            install.sh to run, as a path or an http(s)
 #                                  URL; default: this checkout's install.sh
+#   MVM_SMOKE_ARCHIVE              release archive (mvmctl-<target>.tar.gz) to
+#                                  unpack instead of running an installer
 #   MVM_SMOKE_OUT                  directory for the transcript and VM logs;
 #                                  default: a new directory under /tmp
 #   MVM_SMOKE_INSTALL_BUDGET_SECS  install + bootstrap budget; default 1200
@@ -38,10 +53,12 @@
 #   MVM_SMOKE_SECOND_RUN_BUDGET_SECS
 #                                  second-boot budget; default 300
 #   MVM_SMOKE_SDK_RUN_BUDGET_SECS  SDK-boot budget; default 300
+#   MVM_SMOKE_EGRESS_RUN_BUDGET_SECS
+#                                  egress-boot budget; default 300
 #   MVM_SMOKE_KEEP                 set to 1 to keep the throwaway HOME
 #   MVM_SMOKE_NO_HOMEBREW          set to 1 to leave Homebrew off the PATH
 #
-# Exit status: 0 when all three boots printed their tokens in budget and the
+# Exit status: 0 when all four boots printed their tokens in budget and the
 # second fetched nothing again, 1 when any of that failed, 2 on a usage error.
 set -eu
 
@@ -60,14 +77,24 @@ esac
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 BOUNDED="$REPO_ROOT/scripts/run-bounded-command.py"
+ARCHIVE="${MVM_SMOKE_ARCHIVE:-}"
+if [ -n "$ARCHIVE" ] && [ -n "${MVM_SMOKE_INSTALLER:-}" ]; then
+  echo "MVM_SMOKE_ARCHIVE and MVM_SMOKE_INSTALLER each name what to install; set one" >&2
+  exit 2
+fi
 INSTALLER="${MVM_SMOKE_INSTALLER:-$REPO_ROOT/install.sh}"
 INSTALL_BUDGET="${MVM_SMOKE_INSTALL_BUDGET_SECS:-1200}"
 RUN_BUDGET="${MVM_SMOKE_RUN_BUDGET_SECS:-600}"
 SECOND_RUN_BUDGET="${MVM_SMOKE_SECOND_RUN_BUDGET_SECS:-300}"
 SDK_RUN_BUDGET="${MVM_SMOKE_SDK_RUN_BUDGET_SECS:-300}"
+EGRESS_RUN_BUDGET="${MVM_SMOKE_EGRESS_RUN_BUDGET_SECS:-300}"
 IMAGE="alpine"
+# The image and host the documented egress examples use; alpine's busybox
+# wget cannot be relied on to speak HTTPS through the guest's proxy.
+EGRESS_IMAGE="curlimages/curl:8.21.0"
+EGRESS_HOST="example.com"
 
-for budget in "$INSTALL_BUDGET" "$RUN_BUDGET" "$SECOND_RUN_BUDGET" "$SDK_RUN_BUDGET"; do
+for budget in "$INSTALL_BUDGET" "$RUN_BUDGET" "$SECOND_RUN_BUDGET" "$SDK_RUN_BUDGET" "$EGRESS_RUN_BUDGET"; do
   case "$budget" in
     ''|*[!0-9]*|0) echo "time budgets must be positive whole seconds, got: $budget" >&2; exit 2 ;;
   esac
@@ -196,31 +223,81 @@ bounded() {
 section "fresh-install smoke"
 log "date:       $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 log "host:       $(uname -s) $(uname -r) $(uname -m)"
-log "installer:  $INSTALLER"
-log "release:    ${VERSION:-(unpinned: what the one-liner installs today)}"
+if [ -n "$ARCHIVE" ]; then
+  log "archive:    $ARCHIVE"
+  log "release:    ${VERSION:-(the version its mvmctl reports)}"
+else
+  log "installer:  $INSTALLER"
+  log "release:    ${VERSION:-(unpinned: what the one-liner installs today)}"
+fi
 log "HOME:       $SMOKE_HOME"
-log "budgets:    install ${INSTALL_BUDGET}s, first command ${RUN_BUDGET}s, second boot ${SECOND_RUN_BUDGET}s, SDK boot ${SDK_RUN_BUDGET}s"
+log "budgets:    install ${INSTALL_BUDGET}s, first command ${RUN_BUDGET}s, second boot ${SECOND_RUN_BUDGET}s, SDK boot ${SDK_RUN_BUDGET}s, egress boot ${EGRESS_RUN_BUDGET}s"
 log "PATH:       $PATH_FOR_USER"
 
-case "$INSTALLER" in
-  http://*|https://*)
-    curl -fsSL "$INSTALLER" -o "$ROOT/install.sh" || fail "could not download the installer from $INSTALLER"
-    ;;
-  *)
-    [ -f "$INSTALLER" ] || fail "no installer at $INSTALLER"
-    cp "$INSTALLER" "$ROOT/install.sh"
-    ;;
-esac
+# Run the installer the way the README does.
+install_with_installer() {
+  case "$INSTALLER" in
+    http://*|https://*)
+      curl -fsSL "$INSTALLER" -o "$ROOT/install.sh" || fail "could not download the installer from $INSTALLER"
+      ;;
+    *)
+      [ -f "$INSTALLER" ] || fail "no installer at $INSTALLER"
+      cp "$INSTALLER" "$ROOT/install.sh"
+      ;;
+  esac
 
-# `curl ... | sh`: the script arrives on the shell's stdin, so anything the
-# installer runs inherits that pipe as its own stdin — as it does for a user.
-section "install ($([ -n "$VERSION" ] && printf 'MVM_VERSION=%s ' "$VERSION")sh install.sh)"
-# shellcheck disable=SC2016 # the inner shell expands its own "$1"
-if bounded "$INSTALL_BUDGET" "$ROOT/install.out" "$ROOT/install.err" \
-  env ${VERSION:+"MVM_VERSION=$VERSION"} sh -c 'cat "$1" | sh' sh "$ROOT/install.sh"; then
-  install_status=0
+  # `curl ... | sh`: the script arrives on the shell's stdin, so anything the
+  # installer runs inherits that pipe as its own stdin — as it does for a user.
+  section "install ($([ -n "$VERSION" ] && printf 'MVM_VERSION=%s ' "$VERSION")sh install.sh)"
+  # shellcheck disable=SC2016 # the inner shell expands its own "$1"
+  if bounded "$INSTALL_BUDGET" "$ROOT/install.out" "$ROOT/install.err" \
+    env ${VERSION:+"MVM_VERSION=$VERSION"} sh -c 'cat "$1" | sh' sh "$ROOT/install.sh"; then
+    install_status=0
+  else
+    install_status=$?
+  fi
+}
+
+# Do by hand what the installer does once it has verified an archive: unpack
+# it, link mvmctl onto PATH from beside the binaries it ships with, and run
+# `mvmctl bootstrap`. mvmctl finds the per-VM host binaries next to its own
+# resolved path, so the link has to point into the unpacked directory.
+install_from_archive() {
+  section "install (unpack $ARCHIVE, link mvmctl, mvmctl bootstrap)"
+  [ -f "$ARCHIVE" ] || fail "no release archive at $ARCHIVE"
+  mkdir -p "$ROOT/release" "$SMOKE_HOME/.local/bin"
+  tar -xzf "$ARCHIVE" -C "$ROOT/release" || fail "could not unpack $ARCHIVE"
+  unpacked=""
+  for candidate in "$ROOT"/release/mvmctl-*/mvmctl; do
+    [ -f "$candidate" ] || continue
+    [ -z "$unpacked" ] || fail "$ARCHIVE holds more than one mvmctl-<target>/mvmctl"
+    unpacked="$candidate"
+  done
+  [ -n "$unpacked" ] || fail "$ARCHIVE holds no mvmctl-<target>/mvmctl"
+  ln -s "$unpacked" "$SMOKE_HOME/.local/bin/mvmctl"
+  shipped=""
+  for entry in "$(dirname "$unpacked")"/*; do
+    shipped="$shipped $(basename "$entry")"
+  done
+  log "unpacked:  $shipped"
+
+  # Like the installer, a failed bootstrap is left for the first command to
+  # recover from; one that outlives its budget is not.
+  if bounded "$INSTALL_BUDGET" "$ROOT/install.out" "$ROOT/install.err" mvmctl bootstrap; then
+    install_status=0
+  else
+    install_status=$?
+    if [ "$install_status" -ne 124 ]; then
+      printf 'bootstrap failed (mvmctl bootstrap exited %s)\n' "$install_status" >> "$ROOT/install.err"
+      install_status=0
+    fi
+  fi
+}
+
+if [ -n "$ARCHIVE" ]; then
+  install_from_archive
 else
-  install_status=$?
+  install_with_installer
 fi
 append "$ROOT/install.out"
 log "--- stderr ---"
@@ -348,11 +425,22 @@ boot_and_expect "SDK boot" "$SDK_RUN_BUDGET" "$TOKEN3" run-sdk \
   mvmctl machine run --image "$IMAGE" --host-service "$SDK_SERVICE" -- sh -c "$SDK_SCRIPT"
 SDK_RUN_ELAPSED="$STEP_ELAPSED"
 
+# What every --allow-host, --net, --secret and --policy run depends on: the
+# guest's traffic leaves only through the network endpoint the release ships,
+# so the token is printed only after a fetch through it succeeded.
+TOKEN4="$TOKEN-egress"
+EGRESS_SCRIPT="curl -fsS -o /dev/null https://$EGRESS_HOST/ && echo $TOKEN4"
+section "egress boot (mvmctl machine run --image $EGRESS_IMAGE --allow-host $EGRESS_HOST -- sh -c \"$EGRESS_SCRIPT\" </dev/null)"
+boot_and_expect "egress boot" "$EGRESS_RUN_BUDGET" "$TOKEN4" run-egress \
+  mvmctl machine run --image "$EGRESS_IMAGE" --allow-host "$EGRESS_HOST" -- sh -c "$EGRESS_SCRIPT"
+EGRESS_RUN_ELAPSED="$STEP_ELAPSED"
+
 section "timings"
 log "install:        ${INSTALL_ELAPSED}s of ${INSTALL_BUDGET}s"
 log "first command:  ${RUN_ELAPSED}s of ${RUN_BUDGET}s"
 log "second boot:    ${SECOND_RUN_ELAPSED}s of ${SECOND_RUN_BUDGET}s"
 log "SDK boot:       ${SDK_RUN_ELAPSED}s of ${SDK_RUN_BUDGET}s"
+log "egress boot:    ${EGRESS_RUN_ELAPSED}s of ${EGRESS_RUN_BUDGET}s"
 
-verdict "PASS: $INSTALLED installed in ${INSTALL_ELAPSED}s; its first microVM printed the token in ${RUN_ELAPSED}s, a second boot from the same HOME in ${SECOND_RUN_ELAPSED}s without fetching anything again, and a boot binding $SDK_SERVICE saw the SDK sidecar in ${SDK_RUN_ELAPSED}s"
+verdict "PASS: $INSTALLED installed in ${INSTALL_ELAPSED}s; its first microVM printed the token in ${RUN_ELAPSED}s, a second boot from the same HOME in ${SECOND_RUN_ELAPSED}s without fetching anything again, a boot binding $SDK_SERVICE saw the SDK sidecar in ${SDK_RUN_ELAPSED}s, and a boot allowed $EGRESS_HOST fetched it in ${EGRESS_RUN_ELAPSED}s"
 printf '[smoke] transcript: %s\n' "$TRANSCRIPT" >&2

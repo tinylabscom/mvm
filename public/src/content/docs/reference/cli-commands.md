@@ -1049,6 +1049,22 @@ rather than re-extracted. An unsigned, tampered, or unknown-publisher archive
 is refused with the verifier's error before anything boots, and nothing is
 written to the registry.
 
+A bundle sealed with `bundle export --posture` bounds every launch of it. Before
+boot, the run reads the installed bundle's manifest and checks its signature
+against the trust store again, without re-hashing the artifacts. It then refuses
+a launch that asks for more than the posture allows:
+
+- a network policy that reaches off the host (`--net`, `--allow-host`, `--peer`)
+  when the bundle allows no egress;
+- a `--volume` when the bundle allows no volumes;
+- an interactive, ad-hoc command, or `--profile dev` run of a `sealed-prod`
+  bundle.
+
+The refusal is recorded as `plan.failed` with class `bundle-posture-exceeded`.
+The posture never grants anything: a bundle that allows egress still boots
+deny-all unless the launch asks for egress. A manifest edited on disk after
+install fails the signature check and refuses the boot.
+
 The archive is taken through `--manifest` rather than as a positional argument.
 `machine run` already reads its trailing positionals as the guest command, so
 `mvmctl machine run ./app.mvmpkg` would mean "run the program `./app.mvmpkg`",
@@ -1507,7 +1523,7 @@ running microVM.
 | `mvmctl pack registry rm ns/name`                         | Remove a signed registry pack's cache entry and lock pin                                                                                                          |
 | `mvmctl pack registry update ns/name[@version]`           | Re-pull a signed registry pack and its signed profile dependencies, adopting newer published versions when there are any                                                                              |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. With no `$MVM_HOME/registry/publishers.toml`, the built-in official-registry policy (mvm-templates `publish.yml` identity) applies; a written policy replaces it wholesale                                                                         |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. With no `$MVM_HOME/registry/publishers.toml`, the built-in official-registry policy (mvm-packs `publish.yml` identity) applies; a written policy replaces it wholesale                                                                         |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -1668,7 +1684,7 @@ All commands accept these global options:
 | `MVM_TEMPLATE_REGISTRY_ACCESS_KEY_ID`     | S3 access key ID                                                                                                                                                                                                                                                                                                                                                                            | None                             |
 | `MVM_TEMPLATE_REGISTRY_SECRET_ACCESS_KEY` | S3 secret access key                                                                                                                                                                                                                                                                                                                                                                        | None                             |
 | `MVM_TEMPLATE_REGISTRY_PREFIX`            | Key prefix inside the bucket                                                                                                                                                                                                                                                                                                                                                                | `mvm`                            |
-| `MVM_PACK_REGISTRY`                       | Base URL of the signed pack registry `mvmctl search`, `pull` and `pack registry update` read (`https://` or `file://`). Defaults to the `mvm-templates` repository. Packs from another registry still have to verify under the publisher trust policy                                                                                                                                                                          |
+| `MVM_PACK_REGISTRY`                       | Base URL of the signed pack registry `mvmctl search`, `pull` and `pack registry update` read (`https://` or `file://`). Defaults to the `mvm-packs` repository. Packs from another registry still have to verify under the publisher trust policy                                                                                                                                                                          |
 | `MVM_TEMPLATE_REGISTRY_REGION`            | S3 region                                                                                                                                                                                                                                                                                                                                                                                   | `us-east-1`                      |
 | `OPENAI_API_KEY`                          | Enables LLM-backed template planning for `template init --prompt`                                                                                                                                                                                                                                                                                                                           | None                             |
 | `MVM_TEMPLATE_PROVIDER`                   | Prompt planning provider: `auto`, `openai`, `local`, or `heuristic`                                                                                                                                                                                                                                                                                                                         | `auto`                           |

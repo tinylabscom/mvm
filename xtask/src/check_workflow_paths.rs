@@ -764,8 +764,8 @@ mod tests {
             "needs: [scope, lint-core, lint-policy, lint-features, \
              lint-features-test-support, lint-features-embed, \
              test-workspace, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, \
-             boot-latency, nix-flake-check]"
+             test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
+             bdd-conformance, boot-latency, nix-flake-check]"
         ));
         assert!(
             job_body(&workflow, "pr-regressions").is_none(),
@@ -797,6 +797,7 @@ mod tests {
             "test-workspace",
             "test-workspace-aarch64",
             "test-release-witness",
+            "test-musl-confinement",
             "test-linux",
             "test-ebpf-telemetry",
         ] {
@@ -826,6 +827,7 @@ mod tests {
             "\"$FEATURES_EMBED_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
+            "\"$MUSL_CONFINEMENT_RESULT\"",
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$BOOT_RESULT\"",
@@ -852,6 +854,26 @@ mod tests {
             assert!(
                 release_witness.contains(expected),
                 "release-witness lane must cover {expected:?}"
+            );
+        }
+
+        // The Linux release ships static musl binaries, and the libc decides
+        // which syscalls reach a confined role's seccomp filter. Only this
+        // lane builds the endpoint the way the release does, so it must cover
+        // both shipped musl targets and stay in the aggregate.
+        let musl = job_block(&workflow, "test-musl-confinement");
+        for expected in [
+            "target: x86_64-unknown-linux-musl",
+            "target: aarch64-unknown-linux-musl",
+            "uses: ./.github/actions/install-zigbuild",
+            "cargo-zigbuild test --profile release-witness --target \"${TARGET}\"",
+            "--test confinement_self_test",
+            "--test network_endpoint_bin",
+            "--test seccomp_property",
+        ] {
+            assert!(
+                musl.contains(expected),
+                "musl confinement lane must contain {expected:?}"
             );
         }
 
@@ -958,6 +980,41 @@ mod tests {
     }
 
     #[test]
+    fn feature_coverage_tail_uses_existing_test_support_runner() {
+        let workflow = ci_workflow();
+        let core = job_block(&workflow, "lint-features");
+        let support = job_block(&workflow, "lint-features-test-support");
+
+        for expected in [
+            "name: wasm-backend feature tests (wasmtime tier)",
+            "cargo nextest run -p mvm-runtime --features wasm-backend",
+            "cargo nextest run -p mvm-hostd --features wasm-backend --test wasm_egress_witness",
+            "name: release artifact acquisition contract",
+            "cargo check -p mvm-cli --features release-artifact-bootstrap --lib",
+            "cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib",
+            "cargo test -p mvm-build --features release-channel --lib",
+            "name: Assert auto-detect still picks libkrun off Linux/HVF",
+            "name: In-process pure ext4 materialize tests",
+        ] {
+            assert!(
+                support.contains(expected),
+                "test-support must retain {expected:?}"
+            );
+            assert!(
+                !core.contains(expected),
+                "core feature lane must not repeat {expected:?}"
+            );
+            if expected.starts_with("name:") {
+                assert_eq!(
+                    workflow.matches(expected).count(),
+                    1,
+                    "feature coverage must run {expected:?} exactly once"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn merge_group_ci_reuses_pr_proof_and_runs_only_the_integration_scope() {
         let ci = ci_workflow();
         let scope = job_block(&ci, "scope");
@@ -995,6 +1052,7 @@ mod tests {
             "lint-features-embed",
             "test-workspace",
             "test-release-witness",
+            "test-musl-confinement",
             "test-linux",
             "test-ebpf-telemetry",
         ] {
