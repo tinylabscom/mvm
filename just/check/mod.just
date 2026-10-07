@@ -26,8 +26,8 @@ linux TARGET="x86_64-unknown-linux-gnu":
 #
 #   1. `cfg(target_os = "linux")` *test* files. `linux` above is --lib
 #      only, so a Linux-gated test target is checked by nothing local. This
-#      surfaces in CI as `check-nextest-groups` failing with "cargo nextest list
-#      failed" — a message that never names the file or the field.
+#      surfaces only in CI, as a compile error in the "Build workspace tests"
+#      job.
 #   2. Targets behind `required-features` (mvm-conformance's cucumber runner).
 #      `--all-targets` skips them silently: without `--features bdd` the same
 #      broken tree reports zero errors.
