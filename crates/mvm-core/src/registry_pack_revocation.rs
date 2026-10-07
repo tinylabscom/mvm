@@ -118,6 +118,8 @@ pub enum RegistryPackRevocationError {
     InvalidSequence,
     #[error("registry-pack revocation document has an invalid validity window")]
     InvalidValidityWindow,
+    #[error("registry-pack revocation document validity exceeds 48 hours")]
+    ValidityTooLong,
     #[error("registry-pack revocation document was issued in the future")]
     IssuedInFuture,
     #[error("registry-pack revocation document is expired")]
@@ -248,6 +250,9 @@ fn validate_document(
     if document.issued_at >= document.not_after {
         return Err(RegistryPackRevocationError::InvalidValidityWindow);
     }
+    if document.not_after - document.issued_at > chrono::Duration::hours(48) {
+        return Err(RegistryPackRevocationError::ValidityTooLong);
+    }
     validate_time(document, now)?;
     let mut identities = BTreeSet::new();
     for identity in &document.revoked_identities {
@@ -308,8 +313,8 @@ mod tests {
         RegistryPackRevocationDocument {
             schema_version: REGISTRY_PACK_REVOCATION_SCHEMA_VERSION,
             sequence,
-            issued_at: at(1),
-            not_after: at(31),
+            issued_at: at(6),
+            not_after: at(8),
             revoked_identities: vec!["old identity".to_string()],
             revoked_manifests: vec![Sha256Hex::from_bytes(b"bad manifest")],
         }
@@ -507,6 +512,12 @@ mod tests {
         assert_eq!(
             signed(&invalid, None).expect_err("invalid window"),
             RegistryPackRevocationError::InvalidValidityWindow
+        );
+        let mut too_long = document(1);
+        too_long.not_after += chrono::Duration::seconds(1);
+        assert_eq!(
+            signed(&too_long, None).expect_err("overlong window"),
+            RegistryPackRevocationError::ValidityTooLong
         );
     }
 
