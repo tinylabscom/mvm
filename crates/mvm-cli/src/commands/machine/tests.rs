@@ -3255,6 +3255,13 @@ fn machine_advanced_verbs_parse() {
         "proc: {r:?}"
     );
 
+    // prompt
+    let r = parse(&["prompt", "myvm", "summarize the diff"]);
+    assert!(
+        matches!(r, Ok(MachineAction::Vm(VmCmd::Prompt(_)))),
+        "prompt: {r:?}"
+    );
+
     // session
     let r = parse(&["session", "ls"]);
     assert!(
