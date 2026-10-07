@@ -6,3 +6,7 @@ self-hosted-runner:
     # The Apple Silicon laptop that boots guests under HVF for the macOS
     # documented-surface lane (issue #3011).
     - m1
+    # Dedicated Linux/KVM CI host.
+    - mvm
+    - hetzner
+    - kvm
