@@ -985,6 +985,7 @@ jobs:
       commit_sha: ${{ github.sha }}
       shard: ${{ matrix.shard }}
       runner_kind: github
+      archive_run_id: ${{ github.run_id }}
 
   test-workspace-build:
     name: Build workspace tests

@@ -995,13 +995,13 @@ mod tests {
             "a shard must run the archive it was handed, not compile its own"
         );
         for expected in [
-            "actions/workflows/workspace-shard.yml/dispatches",
-            "--arg archive_run_id \"$RUN_ID\"",
-            "shard: [1, 2]",
+            "uses: ./.github/workflows/workspace-shard.yml",
+            "archive_run_id: ${{ github.run_id }}",
+            "shard: ['1', '2']",
         ] {
             assert!(
                 shards.contains(expected),
-                "the broker must dispatch two archive-backed shards: missing {expected:?}"
+                "the caller must start two archive-backed shards: missing {expected:?}"
             );
         }
 
