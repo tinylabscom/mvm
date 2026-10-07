@@ -19,6 +19,8 @@ use crate::registry_pack::VerifiedRegistryPack;
 pub const REGISTRY_PACK_REVOCATION_SCHEMA_VERSION: u32 = 1;
 #[cfg(any(feature = "manifest-verify", test))]
 const MAX_REVOCATION_DOCUMENT_BYTES: usize = 1024 * 1024;
+#[cfg(any(feature = "manifest-verify", test))]
+const MAX_REVOCATION_BUNDLE_BYTES: usize = 1024 * 1024;
 
 /// An authenticated, monotonically increasing position in the revocation feed.
 ///
@@ -106,7 +108,7 @@ impl VerifiedRegistryPackRevocations {
 /// Reasons registry-pack revocation trust cannot be established.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum RegistryPackRevocationError {
-    #[error("registry-pack revocation document exceeds the 1 MiB limit")]
+    #[error("registry-pack revocation document or signature bundle exceeds the 1 MiB limit")]
     TooLarge,
     #[error("registry-pack revocation signature is invalid: {0}")]
     SignatureInvalid(String),
@@ -202,7 +204,9 @@ fn verify_registry_pack_revocations_with<F>(
 where
     F: FnOnce(&[u8], &[u8], &KeylessTrust) -> Result<(), String>,
 {
-    if document_bytes.len() > MAX_REVOCATION_DOCUMENT_BYTES {
+    if document_bytes.len() > MAX_REVOCATION_DOCUMENT_BYTES
+        || signature_bundle.len() > MAX_REVOCATION_BUNDLE_BYTES
+    {
         return Err(RegistryPackRevocationError::TooLarge);
     }
     verify_signature(document_bytes, signature_bundle, release_trust)
@@ -483,6 +487,22 @@ mod tests {
             |_, _, _| panic!("oversized data must not reach signature verification"),
         )
         .expect_err("oversized document");
+        assert_eq!(error, RegistryPackRevocationError::TooLarge);
+    }
+
+    #[test]
+    fn oversized_bundle_is_refused_before_signature_check() {
+        let bytes = serde_json::to_vec(&document(1)).expect("serialize");
+        let bundle = vec![b' '; MAX_REVOCATION_BUNDLE_BYTES + 1];
+        let error = verify_registry_pack_revocations_with(
+            &bytes,
+            &bundle,
+            &trust(),
+            at(7),
+            None,
+            |_, _, _| panic!("oversized bundle must not reach signature verification"),
+        )
+        .expect_err("oversized bundle");
         assert_eq!(error, RegistryPackRevocationError::TooLarge);
     }
 
