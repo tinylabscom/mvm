@@ -2,7 +2,7 @@ use super::*;
 use crate::commands::shared;
 use crate::commands::vm::denial_review::{ReviewOffer, ReviewSource};
 use crate::commands::vm::egress_denials::{DenialWatch, finish_and_summarize};
-use crate::commands::vm::{invoke, logs};
+use crate::commands::vm::{invoke, logs, workspace_apply};
 
 pub(super) fn resolve_persistent_spec(
     args: &MachineRunArgs,
@@ -469,7 +469,8 @@ fn run_entrypoint_action(
     .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget))
     .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
-    invoke::run_entrypoint(invoke::EntrypointCall {
+    let exit_apply = exit_apply_request(&args);
+    let call = invoke::EntrypointCall {
         source,
         stdin,
         timeout: args.run.timeout.unwrap_or(30),
@@ -491,7 +492,29 @@ fn run_entrypoint_action(
         review_source,
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
-    })
+    };
+    if !call.attach {
+        return invoke::run_entrypoint(call);
+    }
+    // A run on a named machine ends here, and that machine may carry a
+    // workspace the entrypoint wrote. Its changes are offered back before the
+    // entrypoint's own exit status is handed on.
+    let machine = call.source.clone();
+    let exit_code = invoke::dispatch_attached(call)?;
+    workspace_apply::offer_at_exit(&machine, exit_apply)?;
+    if exit_code != 0 {
+        mvm_observability::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// What the end of an attached run does with the machine's workspace changes.
+fn exit_apply_request(args: &MachineRunArgs) -> mvm_client::workspace_apply::ExitApplyRequest {
+    mvm_client::workspace_apply::ExitApplyRequest {
+        apply: args.apply,
+        json: args.run.json,
+        operator_at_terminal: crate::approval::operator_at_terminal(),
+    }
 }
 
 fn show_entrypoint_denials(args: &MachineRunArgs) -> bool {
