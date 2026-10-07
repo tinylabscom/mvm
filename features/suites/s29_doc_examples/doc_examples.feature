@@ -1,3 +1,4 @@
+@docs
 Feature: Documented examples work
 
   Every `mvmctl` command printed in the README or the website docs is a promise

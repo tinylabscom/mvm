@@ -1,3 +1,4 @@
+@docs
 Feature: README CLI contract
 
   The README's user-facing surface — the verbs, subcommands, and flags it shows,
