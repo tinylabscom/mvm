@@ -5,8 +5,8 @@ Validation: fn:studio_fixture_streams_match_the_committed_vectors
 
 The kickoff artifact for mvm studio — the Tauri (desktop + web) app that
 shows a user what is happening inside their VM. It names the data shapes
-studio renders, the semantics the UI must respect, and the fixture streams
-the frontend can build against today, before the live read seam exists.
+studio renders, the semantics the UI must respect, the read seam that
+serves them, and the fixture streams the frontend builds against offline.
 The shapes are the real ones: every fixture line is produced by the
 contract types' own builders and serde, and the sync test above goes red if
 a fixture drifts from the code.
@@ -22,13 +22,27 @@ Two modes, one integration surface:
   the same `MvmClient` facade. The server is studio's, not mvm's; mvm's
   HTTP client is deliberately minimal and serves nothing.
 
-The read seam itself is **planned, not yet built** (the W4 slice after the
-embedded-collector change lands): a status-snapshot call, a cursor-paged
-record read (`records(vm, cursor) → (batch, next_cursor)`), and a machine
-list joined with per-VM coverage status for the dashboard view. Until it
-lands, the collector's on-disk outputs (a status JSON and a capped records
-JSONL in the VM state dir) are interim observability — readable for
-development, not a contract studio should couple to.
+The read seam is two methods on the `MvmClient` facade, answered by
+`LocalBackend` from the collector's files beside the VM state and refused
+by name on the gateway until a remote collector endpoint exists:
+
+- `telemetry_status(id)` → a `TelemetryStatus`: whether collection was
+  provisioned for the machine's current boot, and the collector's standing
+  when it was. A health question, cheap to poll.
+- `telemetry_records(id, request)` → a `TelemetryReadResponse`: one
+  cursor-paged read of the machine's records, oldest first. The reply
+  always carries `next_cursor`; an empty page with the same cursor means
+  nothing new has arrived, and the consumer polls it again.
+
+The dashboard view's join is on the inventory record itself: every
+`MachineInventoryRecord` carries an optional `telemetry` status, absent for a
+machine with no state directory. The host library carries the same three
+answers over its C ABI as `telemetry.status`, `telemetry.records`, and the
+`telemetry` field of `machine.inventory`; the backend's capability report
+names the seam as the `telemetry` operation, so a consumer asks before it
+calls. The shapes live in `mvm_core::protocol::telemetry::served` and are
+frozen as fixtures below. The collector's on-disk files remain its own:
+studio reads them through the seam, never directly.
 
 ## The fixture streams
 
@@ -40,6 +54,16 @@ same encoding the collector persists and the seam will serve.
 | `healthy-boot.jsonl` | The ordinary case: coverage announced first, then diagnostics events with every typed attribute kind (unsigned, signed, bool, float, text). One epoch, gapless sequences. |
 | `lossy-flood.jsonl` | Capture under pressure: a visible sequence gap (5 → 43) plus `loss` summary records. The gap and the summaries are evidence to surface, not smooth over. |
 | `restored-generation.jsonl` | A restore boundary: the old epoch closes with `stopped`, the new generation mints a fresh epoch and announces `started` again. Ordering across epochs is not meaningful. |
+
+The served shapes are frozen beside them
+(`studio_fixture_statuses_and_page_match_the_committed_vectors`):
+
+| Fixture | What it teaches the UI |
+| --- | --- |
+| `status-not-provisioned.json` | The answer for a machine booted without a collector: nothing dials the guest, no records are expected, and the health badge says so rather than "no data". |
+| `status-collecting.json` | A live collector under boot generation 1, with the snapshot's age and the records file's size. |
+| `status-degraded.json` | Collection impaired with a short `code` and a non-zero host-side `shed` count. |
+| `page-healthy-boot.json` | The healthy-boot stream as one served page: each record in its envelope with its `received_at_ms`, the cursor past the last persisted line, `undecodable` zero, `exhausted` true. |
 
 ## The record shape
 
@@ -63,7 +87,11 @@ Each line decodes as one record (`TelemetryRecord` in
   sequences is loss evidence the host can detect and the UI should show.
 - `monotonic_ns` — the guest's monotonic clock, an ordering hint within one
   producer and epoch. It is **not** a wall clock; wall-clock placement comes
-  from host receive time, which the read seam adds alongside each record.
+  from host receive time. The collector persists each record inside an
+  envelope `{"received_at_ms": …, "record": {…}}`, and the seam serves that
+  envelope as a `ReceivedRecord`. A line persisted before receive time was
+  stamped serves with no `received_at_ms`; a consumer orders those by
+  `monotonic_ns` alone.
 - `source` — the declared source class (`guest_agent`, `stdio`, `sdk`, …).
 - `body.kind` — the closed record family:
   - `event`: severity `level`, bounded `name`, up to 16 typed `attributes`,
@@ -97,14 +125,33 @@ unbounded line.
    unavailable` → show the code; `stopped` → clean end. Absence of records
    is not evidence of health — the status snapshot is.
 
-## The status snapshot (shape pending one in-flight change)
+## The status
 
-The collector keeps a per-VM status the seam will serve directly — as of
-the in-flight embedded-collector change: `vm_name`, `status`
-(`connecting` / `collecting` / `degraded:<code>` / `stopped`), `generation`
-when collecting, and the host-side `shed` count. Treat this section as the
-shape's description, not its freeze; the seam change freezes it with a
-generated fixture like the record streams above.
+`TelemetryStatus` is a tagged object on `collection`:
+
+- `not_provisioned` — no collector was provisioned for the current boot.
+- `provisioned` — with `vm_name`, `state`, `shed` (records the host shed
+  after receipt), `records_bytes` (the records file's current size), and
+  `snapshot_age_ms` when the host can tell. The collector rewrites its
+  snapshot about once a second while it lives, so a large age means the
+  process that owned the VM is gone; the UI should read a stale `collecting`
+  as "was collecting", not "is".
+
+`state` is a tagged object on `kind`: `connecting`, `collecting` with its
+boot `generation`, `degraded` with a short `code`, or `stopped`. The
+`status-*.json` fixtures above freeze all of it.
+
+## The page
+
+`TelemetryReadRequest` names a `cursor` (`{"offset": …}`, the start of the
+stream when absent) and a `limit` (256 by default, 1024 at most).
+`TelemetryReadResponse` carries `records` oldest first, `next_cursor`,
+`undecodable` (lines in the page's span that were not records — evidence,
+not something to hide) and `exhausted` (whether the page reached the end of
+what the file held). A cursor the stream no longer honors — past the end,
+or inside a line, after a machine was removed and recreated — is refused as
+an invalid request rather than resynchronized by guesswork; the consumer
+starts over from offset 0.
 
 ## Scope of this phase, per the recorded decisions
 
