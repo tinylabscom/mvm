@@ -299,6 +299,29 @@ fn aggregate_does_not_depend_on_the_no_kvm_smoke() {
     );
 }
 
+#[test]
+fn workspace_shards_run_on_their_own_hosted_jobs() {
+    let workflow = std::fs::read_to_string(".github/workflows/ci.yml")
+        .expect("failed to read .github/workflows/ci.yml");
+    let job = workflow
+        .split_once("\n  test-workspace:\n")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| {
+            rest.split_once("\n  test-workspace-aarch64:\n")
+                .map(|(job, _)| job)
+        })
+        .expect("workspace job must remain delimited by the aarch64 job");
+    assert!(job.contains("shard: [1, 2]"));
+    assert!(job.contains("runs-on: ubuntu-latest"));
+    assert!(job.contains(
+        "cargo nextest run --workspace --all-targets --partition hash:${{ matrix.shard }}/2"
+    ));
+    assert!(job.contains("cargo nextest run -p mvm-agentd --features addons"));
+    assert!(job.contains("cargo test --workspace --doc"));
+    assert!(!job.contains("workspace-shard.yml/dispatches"));
+    assert!(!job.contains("no workspace shard candidate started"));
+}
+
 /// A malformed scope output must fail closed rather than be read as one of the
 /// two valid values.
 #[test]
