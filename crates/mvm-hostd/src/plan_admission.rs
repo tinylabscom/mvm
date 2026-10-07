@@ -88,6 +88,7 @@ use mvm_core::vm_backend::{VmId, VmStartConfig};
 use mvm_runtime::AnyBackend;
 use sha2::{Digest, Sha256};
 
+mod display_grants;
 mod host_trust;
 mod registry_pack;
 mod verb_grant_sidecar;
@@ -870,6 +871,7 @@ fn admit_grants(plan: &ExecutionPlan, ceiling: &GrantCeiling, posture: RunPostur
             )
         })?;
 
+    display_grants::admit_display_input(grants, posture.variant)?;
     enforceability_gate(grants, plan, posture)
 }
 
@@ -1215,6 +1217,9 @@ pub fn stash_plan_and_mint_verb_grant(
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("create per-VM state dir {}", state_dir.display()))?;
     write_secret_file(&state_dir.join("plan.json"), plan_json.as_bytes())?;
+    // A new plan under this name is a new run, and a human credential entered
+    // during the previous one is not in this guest.
+    mvm_runtime::vm::human_credential::clear_for_new_run(&state_dir)?;
     if let Some(bundle_json) = cfg.bundle_json.as_deref() {
         write_secret_file(&state_dir.join("bundle.json"), bundle_json.as_bytes())?;
     }

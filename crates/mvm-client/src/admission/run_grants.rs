@@ -252,6 +252,7 @@ fn cli_layer(inputs: &GrantInputs<'_>) -> Result<Grants> {
         wall_clock,
         egress,
         drive: None,
+        display_input: None,
     })
 }
 
