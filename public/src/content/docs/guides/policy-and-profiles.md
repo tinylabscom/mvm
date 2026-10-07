@@ -303,10 +303,11 @@ JSON.
 What a profile *reached from a project* declares is project content, not
 yours. It can tighten, but it cannot use an escape hatch.
 
-### Pack policy: signed, official profiles and groups
+### Pack policy: signed profiles and groups
 
-The official registry is the `mvm-templates` repository; every pack in it is
-signed keyless (Sigstore) by its `publish.yml` workflow. `mvmctl search`
+The pack registry source is the `mvm-packs` repository. Published legacy
+`agent/` and `runtime/` packs carry keyless (Sigstore) signatures from the
+legacy `mvm-templates` workflow identity. `mvmctl search`
 lists what the registry offers and `mvmctl pull ns/name[@version]` fetches a
 pack: the signature is verified against the publisher trust policy, the
 payload is checked file-by-file against the signed manifest, the pack is
@@ -358,14 +359,22 @@ under the same rules as every non-user layer — denies stick, resource
 bounds are ceilings, and `env.readmit` and `shares.mount` entries the pack
 carries are stripped with notes, never honoured.
 
-Trust in the official registry is the default: with no publisher policy
-file, packs signed by the `mvm-templates` publish workflow verify in any
-namespace. To make your own trust decision — pin other publishers, or
-refuse packs outright — write `$MVM_HOME/registry/publishers.toml`; it
+Legacy pack trust is the default: with no publisher policy file, packs
+signed by the old `mvm-templates` or renamed `mvm-packs` publish workflow
+verify only in `agent/` and `runtime/`. The former identity expires from
+built-in trust at 2026-11-06 00:00 UTC; `mvm/` has no built-in trust until
+revocation enforcement exists. To make your own trust decision — pin other
+publishers, or refuse packs outright — write
+`$MVM_HOME/registry/publishers.toml`; it
 replaces the default wholesale, and a malformed file fails closed rather
 than silently widening trust. One publisher may use the `*` namespace to
 accept a signing identity for every namespace, and an exact
 `namespace = ...` entry always wins over the wildcard.
+
+The repository rename changed its workflow identity. Packs signed under the
+former repository identity fail closed under the built-in default; re-pull a
+version published under the current workflow identity. The built-in policy
+does not automatically trust both identities.
 
 ## Commands
 

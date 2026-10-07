@@ -65,7 +65,7 @@ Three repositories, three owners:
 |---|---|---|
 | `mvm-images` | Kernels; base `default-tenant` and `rootless-tenant` root filesystems that contain no mvm binaries and no mvm-authored `/init`; the builder VM image; the Stage 0 seeds. Nix-built, reproduced, cosign-signed, published as one image set, with SLSA build provenance. | A kernel, package or toolchain moves. Never as a consequence of an mvm merge. |
 | `mvm` | `mvmctl` plus one signed guest-runtime release asset, version-locked to the CLI: the guest-bins archive (guest agent and helpers, the initramfs agent, `mvm-setpriv`, `libmvm_host_services.so` for glibc and musl, the GPU shims, the Python SDK tree). `mvmctl` assembles the runtime overlay, the initramfs and the SDK sidecar from it, or from a source build in a checkout, at boot. | Every CLI release. A guest change is a single-repository change. |
-| `mvm-templates` | Packs. Each pack's CI builds its image on the pinned base set, rebuilds it to check reproducibility, signs it and attests it; `mvmctl pull` verifies. | Per pack. |
+| `mvm-packs` | Packs. Each pack's CI builds its image on the pinned base set, rebuilds it to check reproducibility, signs it and attests it; `mvmctl pull` verifies. | Per pack. |
 
 The rules that follow from the table:
 
@@ -90,7 +90,7 @@ The rules that follow from the table:
    `mkGuest`'s `/init`. `mvm-setpriv` reaches a workload through the runtime
    overlay and the builder through its boot payload, at builder boot ABI 2.
 4. **Packs are the image registry.** A workload image that is not one of the
-   base images is a pack in `mvm-templates`, built in CI on the base set
+   base images is a pack in `mvm-packs`, built in CI on the base set
    `crates/mvm-core/images.lock` pins, reproduced, signed and attested.
 5. **`mkGuest` stays in mvm** as the workload-author library. It is the API a
    workload flake calls, and it co-changes with mvm's crates far more often
@@ -162,7 +162,7 @@ and cite #4100 for the direction, never the reverse.
 - `mvm-images` drops the `mvm` input and every read of mvm's source
   (tinylabscom/mvm-images#49) and attests build provenance for image sets
   (tinylabscom/mvm-images#50). Pack CI moves to the pinned base set
-  (tinylabscom/mvm-templates#12).
+  (tinylabscom/mvm-packs#12).
 
 ### Ordering
 
@@ -262,5 +262,5 @@ In order; items on the same line can run in parallel.
    docs.
 
 In parallel from the start:
-[tinylabscom/mvm-templates#12](https://github.com/tinylabscom/mvm-templates/issues/12):
+[tinylabscom/mvm-packs#12](https://github.com/tinylabscom/mvm-packs/issues/12):
 pack CI builds on the pinned base set, reproduces, signs and attests.

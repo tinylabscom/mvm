@@ -29,7 +29,7 @@ env = { PYTHONPATH = "crates/mvm-sdk/sdks/python" }
 [[command]]
 path = "build guest-bins"
 tier = "parse"
-reason = "cross-compiles every guest binary for both guest architectures with the pinned zig toolchain, which takes minutes and needs that toolchain installed; its packaging and verification have focused unit tests"
+reason = "cross-compiles every guest artifact for both guest architectures with the pinned zig toolchain, which takes minutes and needs that toolchain installed; its packaging and verification have focused unit tests"
 
 [[command]]
 path = "build kernel build"
@@ -174,7 +174,7 @@ tier = "live"
 [[command]]
 path = "machine check-artifact"
 tier = "parse"
-reason = "names a signed .mvm artifact that only a real build produces"
+reason = "names a signed .mvmpkg bundle that only a real build produces"
 
 [[command]]
 path = "machine checkpoint create"
@@ -535,6 +535,11 @@ tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
+path = "secret login"
+tier = "parse"
+reason = "opens the host browser and waits for a human to consent at a real OAuth provider; the consent flow, the PKCE exchange and the forged-callback refusals are exercised in-process against a loopback provider by mvm-client's oauth_login tests"
+
+[[command]]
 path = "secret rm"
 tier = "live"
 
@@ -600,6 +605,16 @@ reason = "a long-lived stdio server: it never exits, so an exec-tier run would h
 [[command]]
 path = "pack list"
 tier = "exec"
+
+[[command]]
+path = "pack info"
+tier = "parse"
+reason = "requires an installed signed pack; isolated CLI scenarios exercise refusal and installed-cache tests exercise successful reopen"
+
+[[command]]
+path = "pack verify"
+tier = "parse"
+reason = "requires an installed signed pack; isolated CLI scenarios exercise refusal and installed-cache tests exercise successful verification"
 
 [[command]]
 path = "pack registry"
@@ -787,6 +802,14 @@ reason = "\"a mvmctl built with pack support\" — a noun phrase"
 [[prose]]
 text = "mvmctl release"
 reason = "\"the mvmctl release channel\" — a noun phrase"
+
+[[prose]]
+text = "mvmctl deb package"
+reason = "\"the mvmctl .deb package, so dpkg owns it\" — a noun phrase naming the distribution package"
+
+[[prose]]
+text = "mvmctl rpm package"
+reason = "\"the mvmctl .rpm package, so rpm owns it\" — a noun phrase naming the distribution package"
 
 [[prose]]
 text = "mvmctl does not"

@@ -78,6 +78,21 @@ impl MvmClient for FailingBackend {
         Err(self.error.clone())
     }
 
+    async fn telemetry_status(
+        &self,
+        _id: &MachineId,
+    ) -> mvm_client::Result<mvm_client::TelemetryStatus> {
+        Err(self.error.clone())
+    }
+
+    async fn telemetry_records(
+        &self,
+        _id: &MachineId,
+        _request: mvm_client::TelemetryReadRequest,
+    ) -> mvm_client::Result<mvm_client::TelemetryReadResponse> {
+        Err(self.error.clone())
+    }
+
     async fn inspect_machine(&self, _id: &MachineId) -> mvm_client::Result<MachineState> {
         Err(self.error.clone())
     }
@@ -291,6 +306,21 @@ impl MvmClient for FailingCapabilities {
     }
 
     async fn list_machines(&self, _filter: MachineFilter) -> mvm_client::Result<Vec<MachineState>> {
+        unreachable!("capability discovery already failed")
+    }
+
+    async fn telemetry_status(
+        &self,
+        _id: &MachineId,
+    ) -> mvm_client::Result<mvm_client::TelemetryStatus> {
+        unreachable!("capability discovery already failed")
+    }
+
+    async fn telemetry_records(
+        &self,
+        _id: &MachineId,
+        _request: mvm_client::TelemetryReadRequest,
+    ) -> mvm_client::Result<mvm_client::TelemetryReadResponse> {
         unreachable!("capability discovery already failed")
     }
 

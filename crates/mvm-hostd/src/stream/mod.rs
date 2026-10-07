@@ -50,6 +50,8 @@
 
 pub mod broker;
 pub mod console_source;
+pub mod display_input_gate;
+pub mod display_input_route;
 pub mod display_source;
 pub mod durable;
 pub mod edge_connector;
@@ -67,6 +69,12 @@ use std::sync::{Arc, OnceLock};
 
 pub use broker::{DEFAULT_CAPTURE_BOUNDS, StreamAudit, StreamBroker, StreamCounters};
 pub use console_source::{ConsoleSource, ConsoleSourceHandle, SharedBroker};
+pub use display_input_gate::{
+    DisplayAudit, DisplayAuditSink, DisplayInputGate, DisplayInputRefusal, DisplayInputSession,
+};
+pub use display_input_route::{
+    DisplayInputRoute, DisplayInputRouteError, DisplayInputTransport, VsockDisplayInput,
+};
 pub use display_source::{DisplaySource, DisplaySourceHandle};
 pub use edge_connector::{EdgeConnector, EdgeError, EdgeStep, servable};
 pub use entrypoint_source::{EntrypointSink, RecordedCopy, ShownChunk};

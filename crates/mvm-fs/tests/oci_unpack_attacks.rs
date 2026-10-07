@@ -108,7 +108,7 @@ fn permits_legitimate_relative_symlink_within_rootfs() {
     let mut b = Builder::new(Vec::new());
     add_directory(&mut b, "usr/bin", 0o755);
     add_directory(&mut b, "usr/lib", 0o755);
-    add_file(&mut b, "usr/lib/python3.9", b"python interpreter");
+    add_file(&mut b, "usr/lib/python3.9", b"python interpreter", 0o644);
     add_symlink(&mut b, "usr/bin/python", "../lib/python3.9");
     let tar = finish(b);
 
@@ -125,7 +125,7 @@ fn permits_legitimate_relative_symlink_within_rootfs() {
 fn permits_legitimate_absolute_symlink_within_rootfs() {
     let mut b = Builder::new(Vec::new());
     add_directory(&mut b, "usr/lib", 0o755);
-    add_file(&mut b, "usr/lib/python3.9", b"python interpreter");
+    add_file(&mut b, "usr/lib/python3.9", b"python interpreter", 0o644);
     add_directory(&mut b, "usr/bin", 0o755);
     add_symlink(&mut b, "usr/bin/python", "/usr/lib/python3.9");
     let tar = finish(b);
@@ -173,7 +173,7 @@ fn rejects_hardlink_to_nonexistent_target_in_staging() {
 fn permits_hardlink_to_existing_staging_file() {
     let mut b = Builder::new(Vec::new());
     add_directory(&mut b, "usr/bin", 0o755);
-    add_file_with_mode(&mut b, "usr/bin/orig", b"original bytes", 0o755);
+    add_file(&mut b, "usr/bin/orig", b"original bytes", 0o755);
     add_hardlink(&mut b, "usr/bin/link", "usr/bin/orig");
     let tar = finish(b);
 
@@ -191,7 +191,7 @@ fn permits_hardlink_to_existing_staging_file() {
 fn rejects_entry_exceeding_per_entry_cap() {
     let big_contents = vec![0u8; 10_000];
     let mut b = Builder::new(Vec::new());
-    add_file(&mut b, "huge.bin", &big_contents);
+    add_file(&mut b, "huge.bin", &big_contents, 0o644);
     let tar = finish(b);
 
     let (_tmp, mut staging) = fresh_staging_with(StagingOptions {
@@ -216,7 +216,7 @@ fn rejects_layer_total_exceeding_per_layer_cap() {
     // Five 1 KiB files — the third pushes the running total over
     // the 2.5 KiB layer cap.
     for i in 0..5 {
-        add_file(&mut b, &format!("blobs/{i}.bin"), &bytes_each);
+        add_file(&mut b, &format!("blobs/{i}.bin"), &bytes_each, 0o644);
     }
     let tar = finish(b);
 
@@ -321,7 +321,7 @@ fn preserves_setuid_bits_on_disk_in_staging() {
 
     let mut b = Builder::new(Vec::new());
     add_directory(&mut b, "usr/bin", 0o755);
-    add_file_with_mode(&mut b, "usr/bin/sudo", b"sudo binary", 0o4755);
+    add_file(&mut b, "usr/bin/sudo", b"sudo binary", 0o4755);
     let tar = finish(b);
 
     let (tmp, mut staging) = fresh_staging();
@@ -346,7 +346,7 @@ fn whiteout_marker_removes_file_from_previous_layer() {
     // Layer 1 adds the file.
     let mut b1 = Builder::new(Vec::new());
     add_directory(&mut b1, "etc", 0o755);
-    add_file(&mut b1, "etc/secret", b"secret bytes");
+    add_file(&mut b1, "etc/secret", b"secret bytes", 0o644);
     staging
         .apply_layer(Cursor::new(finish(b1)))
         .expect("layer 1");
@@ -355,7 +355,7 @@ fn whiteout_marker_removes_file_from_previous_layer() {
     // Layer 2 whiteouts the file.
     let mut b2 = Builder::new(Vec::new());
     add_directory(&mut b2, "etc", 0o755);
-    add_file(&mut b2, "etc/.wh.secret", b"");
+    add_file(&mut b2, "etc/.wh.secret", b"", 0o644);
     let stats = staging
         .apply_layer(Cursor::new(finish(b2)))
         .expect("layer 2");
@@ -376,9 +376,9 @@ fn opaque_whiteout_clears_directory_contents() {
 
     let mut b1 = Builder::new(Vec::new());
     add_directory(&mut b1, "var/lib", 0o755);
-    add_file(&mut b1, "var/lib/a.txt", b"a");
-    add_file(&mut b1, "var/lib/b.txt", b"b");
-    add_file(&mut b1, "var/lib/c.txt", b"c");
+    add_file(&mut b1, "var/lib/a.txt", b"a", 0o644);
+    add_file(&mut b1, "var/lib/b.txt", b"b", 0o644);
+    add_file(&mut b1, "var/lib/c.txt", b"c", 0o644);
     staging
         .apply_layer(Cursor::new(finish(b1)))
         .expect("layer 1");
@@ -386,8 +386,8 @@ fn opaque_whiteout_clears_directory_contents() {
 
     let mut b2 = Builder::new(Vec::new());
     add_directory(&mut b2, "var/lib", 0o755);
-    add_file(&mut b2, "var/lib/.wh..wh..opq", b"");
-    add_file(&mut b2, "var/lib/d.txt", b"d");
+    add_file(&mut b2, "var/lib/.wh..wh..opq", b"", 0o644);
+    add_file(&mut b2, "var/lib/d.txt", b"d", 0o644);
     let stats = staging
         .apply_layer(Cursor::new(finish(b2)))
         .expect("layer 2");
@@ -407,14 +407,14 @@ fn later_layer_overrides_earlier_layer_for_same_path() {
 
     let mut b1 = Builder::new(Vec::new());
     add_directory(&mut b1, "etc", 0o755);
-    add_file(&mut b1, "etc/version", b"v1");
+    add_file(&mut b1, "etc/version", b"v1", 0o644);
     staging
         .apply_layer(Cursor::new(finish(b1)))
         .expect("layer 1");
 
     let mut b2 = Builder::new(Vec::new());
     add_directory(&mut b2, "etc", 0o755);
-    add_file(&mut b2, "etc/version", b"v2");
+    add_file(&mut b2, "etc/version", b"v2", 0o644);
     staging
         .apply_layer(Cursor::new(finish(b2)))
         .expect("layer 2");
@@ -436,9 +436,9 @@ fn three_layer_positive_path_with_whiteout_opaque_and_override() {
     add_directory(&mut b1, "bin", 0o755);
     add_directory(&mut b1, "etc", 0o755);
     add_directory(&mut b1, "etc/conf.d", 0o755);
-    add_file_with_mode(&mut b1, "bin/sh", b"sh-v1", 0o755);
-    add_file(&mut b1, "etc/conf.d/a.conf", b"a-v1");
-    add_file(&mut b1, "etc/conf.d/b.conf", b"b-v1");
+    add_file(&mut b1, "bin/sh", b"sh-v1", 0o755);
+    add_file(&mut b1, "etc/conf.d/a.conf", b"a-v1", 0o644);
+    add_file(&mut b1, "etc/conf.d/b.conf", b"b-v1", 0o644);
     staging
         .apply_layer(Cursor::new(finish(b1)))
         .expect("layer 1");
@@ -446,10 +446,10 @@ fn three_layer_positive_path_with_whiteout_opaque_and_override() {
     // Layer 2: override sh; whiteout a.conf; opaque etc/conf.d.
     let mut b2 = Builder::new(Vec::new());
     add_directory(&mut b2, "bin", 0o755);
-    add_file_with_mode(&mut b2, "bin/sh", b"sh-v2", 0o755);
+    add_file(&mut b2, "bin/sh", b"sh-v2", 0o755);
     add_directory(&mut b2, "etc/conf.d", 0o755);
-    add_file(&mut b2, "etc/conf.d/.wh..wh..opq", b"");
-    add_file(&mut b2, "etc/conf.d/c.conf", b"c-v2");
+    add_file(&mut b2, "etc/conf.d/.wh..wh..opq", b"", 0o644);
+    add_file(&mut b2, "etc/conf.d/c.conf", b"c-v2", 0o644);
     staging
         .apply_layer(Cursor::new(finish(b2)))
         .expect("layer 2");
@@ -457,9 +457,9 @@ fn three_layer_positive_path_with_whiteout_opaque_and_override() {
     // Layer 3: add a symlink + whiteout c.conf.
     let mut b3 = Builder::new(Vec::new());
     add_directory(&mut b3, "etc/conf.d", 0o755);
-    add_file(&mut b3, "etc/conf.d/.wh.c.conf", b"");
+    add_file(&mut b3, "etc/conf.d/.wh.c.conf", b"", 0o644);
     add_directory(&mut b3, "usr/local/bin", 0o755);
-    add_file(&mut b3, "usr/local/bin/tool", b"tool-binary");
+    add_file(&mut b3, "usr/local/bin/tool", b"tool-binary", 0o644);
     // Relative symlink so the staging dir resolution works
     // without the rootfs being mounted as `/`. An absolute
     // target like `/usr/local/bin/tool` is legitimate in a
@@ -524,7 +524,7 @@ fn null_byte_in_entry_path_rejected() {
     // Instead: write a valid tar with a known path, then
     // manually inject a null into the bytes.
     let mut b = Builder::new(Vec::new());
-    add_file(&mut b, "good", b"good");
+    add_file(&mut b, "good", b"good", 0o644);
     let mut bytes = finish(b);
     // Overwrite the first byte of the name field (offset 0 of
     // header) with a null; tar will surface it back as a

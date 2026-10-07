@@ -275,13 +275,13 @@ const RAW_SITES: &[RawSite] = &[
     ),
     guest(
         "crates/mvm-agentd/src/guest_bootstrap.rs",
-        "bring_loopback_up_with_busybox",
+        "busybox_loopback_up",
         "Command::new(busybox)",
         "guest init services and loopback setup, inside the guest",
     ),
     guest(
         "crates/mvm-agentd/src/guest_bootstrap.rs",
-        "bring_loopback_up_with_busybox",
+        "busybox_loopback_up",
         "Command::new(busybox)",
         "guest init services and loopback setup, inside the guest",
     ),

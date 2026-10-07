@@ -103,6 +103,7 @@ pub const GATES: &[Gate] = &[
         "check-cli-runtime-surface",
         crate::check_cli_runtime_surface::run,
     ),
+    ("check-thin-cli", crate::check_thin_cli::run),
     (
         "check-cli-help-matches-docs",
         crate::check_cli_help_matches_docs::run,
@@ -331,7 +332,7 @@ mod tests {
         ),
         (
             "check-nextest-groups",
-            "needs cargo-nextest; runs in the test job",
+            "needs cargo-nextest and the compiled suite; runs in CI's workspace test build",
         ),
         (
             "check-release-evidence",

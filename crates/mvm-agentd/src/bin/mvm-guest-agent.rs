@@ -119,13 +119,13 @@ use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
     handle_cancel_extension, handle_checkpoint_integrations, handle_close_stream_input,
-    handle_drive_file, handle_drive_open, handle_entrypoint_status, handle_fs_diff, handle_fs_list,
-    handle_fs_mkdir, handle_fs_move, handle_fs_read, handle_fs_remove, handle_fs_stat,
-    handle_fs_write, handle_integration_status, handle_mount_volume, handle_ping,
-    handle_post_restore, handle_primed_status, handle_probe_status, handle_proc_kill,
-    handle_proc_list, handle_proc_send_input, handle_proc_signal, handle_proc_start,
-    handle_proc_wait, handle_readiness_status, handle_resource_usage,
-    handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
+    handle_display_input, handle_drive_file, handle_drive_open, handle_entrypoint_status,
+    handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move, handle_fs_read,
+    handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
+    handle_mount_volume, handle_ping, handle_post_restore, handle_primed_status,
+    handle_probe_status, handle_proc_kill, handle_proc_list, handle_proc_send_input,
+    handle_proc_signal, handle_proc_start, handle_proc_wait, handle_readiness_status,
+    handle_resource_usage, handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
     handle_start_unix_socket_forward, handle_stream_input, handle_sync_filesystems,
     handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
@@ -516,6 +516,15 @@ fn handle_client(
                 stream_input,
             } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input),
 
+            // The resident agent is the boot-validated entrypoint, so a prompt
+            // is served by the same handler, with the prompt as the agent's
+            // complete stdin. Never streamed: a prompt is one bounded input.
+            GuestRequest::AgentPrompt {
+                prompt,
+                timeout_secs,
+                env,
+            } => handle_run_entrypoint_request(&mut ctx, prompt, timeout_secs, env, false),
+
             GuestRequest::DriveOpen {
                 program_id: _,
                 cwd,
@@ -539,6 +548,9 @@ fn handle_client(
             // here is bytes it already cleared, in the order it cleared them.
             GuestRequest::StreamInput(frame) => handle_stream_input(frame),
             GuestRequest::CloseStreamInput(close) => handle_close_stream_input(close),
+            // Display input reaches here only after the host's display input
+            // gate admitted and recorded it, and the verb-grant check above.
+            GuestRequest::DisplayInput(frame) => handle_display_input(&frame),
 
             GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 

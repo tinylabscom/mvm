@@ -460,7 +460,7 @@ fn run_entrypoint_action(
     // transient argv path does, so a baked entrypoint enforces the same posture.
     let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
     crate::approval::configure(crate::commands::vm::run_routes::launch_approval(&args.run)?);
-    let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
+    let network_policy = shared::resolve_run_network_policy(
         args.run.net,
         args.run.network_preset,
         &routes.with_allow_host(&args.run.allow_host),
@@ -596,16 +596,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
     // The manifest that policy came from, for reviewing the run's refusals.
-    // Read now, while the arguments still name the flake directory.
+    // Read now, while the arguments still name the flake directory; the
+    // transient lanes carry it on the run arguments.
     let review_source = ReviewSource::for_launch(&args.run)?;
+    args.run.review_source = Some(review_source.clone());
     check_pack_entrypoint(&args)?;
-    let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
-        let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
-        args.run.manifest = Some(slot_hash.clone());
-        Some(slot_hash)
-    } else {
-        None
-    };
+    let resolved_flake_slot = crate::commands::vm::exec::build_flake_slot(&mut args.run)?;
     let local_deployment = args
         .run
         .deployment
@@ -660,7 +656,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -694,7 +690,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
     }
 }

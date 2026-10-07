@@ -65,18 +65,6 @@ fn candidate(denial: &DeniedDestination) -> Option<GrantCandidate> {
     })
 }
 
-/// Open the controlling terminal and run the two-stage review, after verifying
-/// the local audit chain. `Ok(false)` means no terminal, no candidates, or the
-/// operator declined the write.
-pub(in crate::commands) fn review(tally: &DenialTally, manifest: &Path) -> Result<bool> {
-    review_with(
-        &tally.destinations(),
-        manifest,
-        &mut LocalHost::verifying_chain(),
-    )
-    .map(ReviewOutcome::wrote)
-}
-
 /// Review denials recovered after the run from the verified audit chain.
 pub(in crate::commands) fn review_destinations(
     denials: &[DeniedDestination],
@@ -189,6 +177,12 @@ impl ReviewOffer {
 /// says why.
 pub(in crate::commands) fn summarize_and_offer(tally: &DenialTally, offer: &ReviewOffer) {
     summarize_and_offer_with(tally, offer, &mut LocalHost::verifying_chain());
+}
+
+/// Offer a finished run's grantable refusals for review, for a lane that has
+/// already printed its exit summary.
+pub(in crate::commands) fn offer(tally: &DenialTally, offer: &ReviewOffer) {
+    offer_with(tally, offer, &mut LocalHost::verifying_chain());
 }
 
 fn summarize_and_offer_with(tally: &DenialTally, offer: &ReviewOffer, host: &mut dyn ReviewHost) {
@@ -489,9 +483,29 @@ impl ManifestEdit {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::vm::egress_denials::denial::EgressDenial;
-    use crate::commands::vm::egress_denials::denial::tests::entry;
+    use mvm_client::egress_denials::denial::EgressDenial;
+    use mvm_hostd::supervisor::PlanAuditEntry;
     use std::collections::VecDeque;
+
+    /// An endpoint audit entry carrying `labels`, as the chain records one.
+    fn entry(event: &str, labels: &[(&str, &str)]) -> PlanAuditEntry {
+        PlanAuditEntry {
+            timestamp: "2026-09-26T10:00:00Z".parse().unwrap(),
+            tenant: mvm_core::plan::TenantId("local".into()),
+            plan_id: mvm_core::plan::PlanId("00000000-0000-0000-0000-000000000000".into()),
+            plan_version: 0,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: "<unbound>".into(),
+            image_sha256: "0".repeat(64),
+            event: event.into(),
+            caller_commitment: None,
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
 
     #[derive(Default)]
     struct FakeTerminal {

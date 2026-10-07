@@ -109,7 +109,7 @@ const INCLUDED_TOP_LEVEL: &[&str] = &[
 /// the binding obviously safe — the cost is a redundant rebuild, never a
 /// stale image. `target`/`.build`/`node_modules`/`.git` are the heavy
 /// dirs whose exclusion actually matters for walk speed.
-const EXCLUDED_BASENAMES: &[&str] = &[
+pub(crate) const EXCLUDED_BASENAMES: &[&str] = &[
     "target",
     "result",
     "node_modules",

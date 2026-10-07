@@ -1,0 +1,107 @@
+name: First run of an unpublished release archive
+
+# Runs the fresh-install smoke against the Linux x86_64 archive a release run
+# built and has not published yet: the static musl mvmctl and the per-VM host
+# binaries beside it, booted through Firecracker on a hosted runner with KVM.
+#
+# Every lane before publication builds both sides from the tree with the host's
+# glibc, so a defect that exists only in the shipped static binaries passes all
+# of them. v0.22.0 was one: on x86_64, musl's open() issues the legacy `open`
+# syscall where glibc issues `openat`, the network endpoint's seccomp filter
+# allowed only the latter, and every run that granted egress failed once the
+# guest authenticated. The smoke's egress boot is what reaches that endpoint.
+#
+# x86_64 only. GitHub's arm64 runners expose no KVM, so there is no hosted
+# runner the aarch64 archive could boot on; CI's musl confinement lane runs the
+# endpoint's seccomp tests against both musl targets instead.
+#
+# `release.yml` calls this after its build and before it publishes. Dispatch it
+# by hand with the id of a release run to smoke the archive that run built.
+on:
+  workflow_call:
+    inputs:
+      run_id:
+        description: Id of another release run whose archive to smoke; empty for the calling run
+        required: false
+        type: string
+        default: ""
+      tag:
+        description: Version the archive's mvmctl must report; empty for a dry run
+        required: false
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Id of the release workflow run whose build uploaded the archive
+        required: true
+        type: string
+      tag:
+        description: Version the archive's mvmctl must report, e.g. v0.22.0; empty to skip the check
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  # Downloading an artifact another run uploaded goes through the Actions API.
+  actions: read
+
+jobs:
+  release-archive-smoke:
+    name: First run of the unpublished archive (Linux, Firecracker)
+    runs-on: ubuntu-latest
+    # Above the smoke's summed budgets (bootstrap 20 min, four boots 25 min),
+    # so a slow step fails on its own budget with a transcript, not on this.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Grant /dev/kvm access for the job
+        run: |
+          set -euo pipefail
+          if [ ! -e /dev/kvm ]; then
+            echo "::error::/dev/kvm missing on this runner — the archive cannot boot here." >&2
+            exit 1
+          fi
+          sudo chmod 666 /dev/kvm
+
+      # A called workflow sees its caller's event, so a dispatched release dry
+      # run reads as `workflow_dispatch` here too. Which run built the archive
+      # is decided by the input alone.
+      - name: Download the archive the calling release run built
+        if: inputs.run_id == ''
+        uses: actions/download-artifact@v8
+        with:
+          name: mvmctl-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/release-archive
+
+      - name: Download the archive the named release run built
+        if: inputs.run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: mvmctl-x86_64-unknown-linux-gnu
+          path: ${{ runner.temp }}/release-archive
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Check the archive against the checksum the build recorded
+        run: |
+          cd "${RUNNER_TEMP}/release-archive"
+          sha256sum --check mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Unpack the archive and run the first-run smoke, egress included
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+          MVM_SMOKE_ARCHIVE: ${{ runner.temp }}/release-archive/mvmctl-x86_64-unknown-linux-gnu.tar.gz
+          MVM_SMOKE_OUT: ${{ runner.temp }}/release-archive-smoke
+        run: sh scripts/smoke-fresh-install.sh ${TAG_NAME:+"$TAG_NAME"}
+
+      - name: Upload the transcript
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-archive-smoke-linux-firecracker
+          path: ${{ runner.temp }}/release-archive-smoke
+          if-no-files-found: warn
+          retention-days: 30

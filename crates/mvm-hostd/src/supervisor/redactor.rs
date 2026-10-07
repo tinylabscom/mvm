@@ -173,7 +173,11 @@ impl RedactingSubstitution {
         // per-destination PII masking policy.
         let names_active = !matches!(action.names, NameMode::Off);
         let pii_spans = if names_active {
-            self.pii.match_spans(&buf)
+            self.pii
+                .match_spans(&buf)
+                .into_iter()
+                .map(|span| (span.start, span.end))
+                .collect()
         } else {
             Vec::new()
         };

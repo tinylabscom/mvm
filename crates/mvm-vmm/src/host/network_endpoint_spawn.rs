@@ -22,6 +22,9 @@ use zeroize::Zeroizing;
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
 use mvm_core::atomic_io::write_private;
 
+mod stderr_log;
+use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
+
 /// How the guest reaches the substitution endpoint. Backend-shaped: QEMU's
 /// `vhost-vsock` gives a real guest→host AF_VSOCK path, so the host binds an
 /// AF_VSOCK listener; Firecracker/libkrun route guest→host through a per-port
@@ -397,7 +400,7 @@ fn wait_for_endpoint_session_with_timeout(
         return Ok(());
     };
     if let EndpointState::Exited(exit) = endpoint_state(pid) {
-        bail!("{}", endpoint_exited_message(vm_name, exit));
+        bail!("{}", endpoint_exited_message(vm_name, state_dir, exit));
     }
 
     let socket = session_ready_socket_path(state_dir);
@@ -407,7 +410,9 @@ fn wait_for_endpoint_session_with_timeout(
                 "VM {vm_name}: connect to network endpoint session readiness socket {}: {e}",
                 socket.display()
             ),
-            EndpointState::Exited(exit) => anyhow!("{}", endpoint_exited_message(vm_name, exit)),
+            EndpointState::Exited(exit) => {
+                anyhow!("{}", endpoint_exited_message(vm_name, state_dir, exit))
+            }
         }
     })?;
     stream
@@ -437,10 +442,13 @@ fn wait_for_endpoint_session_with_timeout(
             // status trails the close by a moment, and it is the one thing
             // that says why.
             if let Some(exit) = await_child_exit(pid, EXIT_STATUS_GRACE) {
-                bail!("{}", endpoint_exited_message(vm_name, Some(exit)));
+                bail!(
+                    "{}",
+                    endpoint_exited_message(vm_name, state_dir, Some(exit))
+                );
             }
             if let EndpointState::Exited(exit) = endpoint_state(pid) {
-                bail!("{}", endpoint_exited_message(vm_name, exit));
+                bail!("{}", endpoint_exited_message(vm_name, state_dir, exit));
             }
             return Err(anyhow!(
                 "VM {vm_name}: waiting for the network endpoint's authenticated session: {e}"
@@ -492,7 +500,9 @@ pub fn refuse_launch_without_endpoint_session(
              authenticated against it — the workload has no network. Check that the \
              guest found its FlowMux identity drive."
         ),
-        EndpointState::Exited(exit) => bail!("{}", endpoint_exited_message(vm_name, exit)),
+        EndpointState::Exited(exit) => {
+            bail!("{}", endpoint_exited_message(vm_name, state_dir, exit))
+        }
     }
 }
 
@@ -528,12 +538,12 @@ fn endpoint_state(pid: libc::pid_t) -> EndpointState {
 
 /// The refusal for a launch whose endpoint is gone: how it ended when that is
 /// known, and what it last wrote to its stderr log.
-fn endpoint_exited_message(vm_name: &str, exit: Option<HelperExit>) -> String {
+fn endpoint_exited_message(vm_name: &str, state_dir: &Path, exit: Option<HelperExit>) -> String {
     let how = exit.map(|exit| format!(". It {exit}")).unwrap_or_default();
     format!(
         "VM {vm_name}: the network endpoint exited before any guest authenticated \
          against it — the workload has no network{how}{}",
-        stderr_note(&endpoint_stderr_log_path(vm_name))
+        stderr_note(&endpoint_stderr_log_path(state_dir))
     )
 }
 /// Default bound on the endpoint's ready handshake.
@@ -600,12 +610,6 @@ fn stderr_note(log: &Path) -> String {
         Some(tail) => format!("; its stderr said: {tail}"),
         None => format!("; it wrote nothing to {}", log.display()),
     }
-}
-
-/// Where a VM's endpoint stderr is captured. Per VM and truncated on each
-/// spawn, so the tail always belongs to the endpoint the launch is reporting.
-fn endpoint_stderr_log_path(vm_name: &str) -> PathBuf {
-    PathBuf::from("/tmp").join(format!("mvm-network-endpoint-{vm_name}.log"))
 }
 
 /// Last `max_bytes` of `path`, collapsed onto one line so it survives an error
@@ -701,6 +705,10 @@ pub struct SubstitutionSpawnParams<'a> {
     /// `(cert_pem, key_pem)` of the per-VM intermediate for the `https`
     /// terminator; the key never reaches the guest. `None` ⇒ `http`-only.
     pub tls_intermediate: Option<(String, String)>,
+    /// Embed the per-VM telemetry collector in the endpoint process. Set by
+    /// the workload spawner from the host's provisioning decision; the
+    /// builder-VM and wasm endpoints never collect.
+    pub telemetry: bool,
     /// The VM's resolved claim-10 network policy. `Some` ⇒ the endpoint gates
     /// egress itself (the relay path — the run loop no longer gates); `None` ⇒
     /// ungated here (the legacy in-loop gate is the enforcer).
@@ -744,6 +752,7 @@ pub struct SubstitutionSpawnParamsBuilder<'a> {
     tools: Option<&'a mvm_contract::policy::tool_rules::ToolRules>,
     transport: Option<EndpointTransport>,
     tls_intermediate: Option<(String, String)>,
+    telemetry: bool,
     network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     network_limits: Option<mvm_core::plan::NetworkLimits>,
     ingress: Option<&'a [IngressMapping]>,
@@ -758,6 +767,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
     #[must_use]
     pub fn new() -> Self {
         Self {
+            telemetry: false,
             vm_name: None,
             state_dir: None,
             lifetime: None,
@@ -840,6 +850,15 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
         tls_intermediate: impl Into<Option<(String, String)>>,
     ) -> Self {
         self.tls_intermediate = tls_intermediate.into();
+        self
+    }
+
+    /// Embed the per-VM telemetry collector in the endpoint process.
+    /// Defaults to off; only the workload spawner turns it on, from the
+    /// host's provisioning decision.
+    #[must_use]
+    pub fn telemetry(mut self, telemetry: bool) -> Self {
+        self.telemetry = telemetry;
         self
     }
 
@@ -931,6 +950,7 @@ impl<'a> SubstitutionSpawnParamsBuilder<'a> {
                 "transport",
             ))?,
             tls_intermediate: self.tls_intermediate,
+            telemetry: self.telemetry,
             network_policy: self.network_policy,
             network_limits: self.network_limits.ok_or(BuilderError::missing(
                 "SubstitutionSpawnParams",
@@ -1014,6 +1034,7 @@ pub fn endpoint_config_for_identity(
         },
         egress_proxy: None,
         session_marker: None,
+        telemetry: false,
         tls_intermediate: None,
         network_policy: None,
         network_limits: mvm_core::plan::NetworkLimits::default(),
@@ -1056,6 +1077,23 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
     });
     if let Some(tools) = params.tools.filter(|rules| !rules.is_empty()) {
         cfg["tools"] = serde_json::to_value(tools).expect("ToolRules serializes to JSON");
+    }
+    if params.telemetry {
+        // The embedded collector's inputs, derived here so the spawner's one
+        // provisioning decision fans out to every path the endpoint needs.
+        cfg["telemetry"] = serde_json::json!({
+            "state_dir": params.state_dir,
+            "telemetry_sock": mvm_core::config::vm_hvf_vsock_port_socket_at(
+                params.state_dir,
+                mvm_core::protocol::telemetry::TELEMETRY_PORT,
+            ),
+            "signer_sock": params.state_dir.join(
+                super::broker_services_spawn::AUDIT_SIGNER_SOCK,
+            ),
+            "host_anchor_path": mvm_core::config::mvm_keys_dir()
+                .join(super::broker_services_spawn::HOST_SIGNER_PUB),
+            "records_byte_cap": super::telemetry_provisioning::DEFAULT_RECORDS_BYTE_CAP,
+        });
     }
     if let Some(marker) = params.session_marker.as_ref() {
         cfg["session_marker"] = serde_json::json!(marker);
@@ -1163,6 +1201,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     params.session_marker = Some(session_marker);
     let cfg = build_endpoint_config_json(&params);
     let SubstitutionSpawnParams {
+        telemetry: _,
         vm_name,
         state_dir,
         lifetime,
@@ -1171,20 +1210,10 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
 
     let bin = resolve_network_endpoint_path()?;
 
-    // Capture endpoint diagnostics to /tmp so hangs/refusals are observable.
-    // The file is per-VM and truncated each run; stderr was previously /dev/null.
-    let stderr_log = endpoint_stderr_log_path(vm_name);
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&stderr_log)
-        .map_err(|e| {
-            anyhow!(
-                "open substitution endpoint stderr log {}: {e}",
-                stderr_log.display()
-            )
-        })?;
+    // Keep endpoint diagnostics inside the VM state directory. The file is
+    // truncated each run; stderr was previously /dev/null.
+    let stderr_log = endpoint_stderr_log_path(state_dir);
+    let log_file = open_endpoint_stderr_log(state_dir)?;
 
     let mut cmd = mvm_core::env_hygiene::helper_command(&bin);
     select_lifetime(&mut cmd, lifetime, state_dir);
@@ -1890,7 +1919,7 @@ mod tests {
     fn a_launch_names_an_endpoint_that_seccomp_killed_and_quotes_its_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let vm_name = format!("seccomp-kill-test-{}", std::process::id());
-        let log = endpoint_stderr_log_path(&vm_name);
+        let log = endpoint_stderr_log_path(dir.path());
         std::fs::write(
             &log,
             "mvm-network-endpoint: seccomp refused x86_64 syscall 2 during self-test probe \"file-append\"\n",
@@ -2347,6 +2376,7 @@ mod tests {
         let sock = dir.join("vsock-5253.sock");
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let res = spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: "uds-xport-vm",
             state_dir: &dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2412,6 +2442,7 @@ mod tests {
         }
         let redaction = mvm_core::policy::RedactionPolicy::default();
         spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: vm,
             state_dir: &dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2488,6 +2519,7 @@ mod tests {
         let vm = "handshake-garbage-vm";
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let err = spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: vm,
             state_dir: &dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2559,6 +2591,7 @@ mod tests {
 
         let redaction = mvm_core::policy::RedactionPolicy::default();
         let result = spawn_network_endpoint(SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: "rollback-vm",
             state_dir: &state_dir,
             lifetime: EndpointLifetime::Launcher,
@@ -2622,6 +2655,7 @@ mod tests {
         network_policy: Option<&'a mvm_core::policy::network_policy::NetworkPolicy>,
     ) -> SubstitutionSpawnParams<'a> {
         SubstitutionSpawnParams {
+            telemetry: false,
             vm_name: "cfg-vm",
             state_dir: Path::new("/tmp"),
             lifetime: EndpointLifetime::Launcher,

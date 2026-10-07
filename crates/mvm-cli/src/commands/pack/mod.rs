@@ -14,6 +14,7 @@ use mvm_core::user_config::MvmConfig;
 use super::Cli;
 
 mod download;
+mod inspect;
 mod list;
 mod prune;
 mod registry;
@@ -68,6 +69,24 @@ pub(in crate::commands) enum PackAction {
         /// Which pack class to update
         kind: PackKindArg,
     },
+    /// Show the signed manifest and policy of an installed workload pack
+    Info {
+        /// Installed pack selected by its lock pin
+        #[arg(value_name = "ns/name[@version]")]
+        reference: String,
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
+    /// Verify an installed workload pack's signature and every payload file
+    Verify {
+        /// Installed pack selected by its lock pin
+        #[arg(value_name = "ns/name[@version]")]
+        reference: String,
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage signed registry packs (list/remove/update)
     Registry(registry::Args),
 }
@@ -115,6 +134,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         } => prune::run(keep_recent, dry_run, json),
         PackAction::Download { kind } => download::run(kind),
         PackAction::Update { kind } => update::run(kind),
+        PackAction::Info { reference, json } => inspect::run(&reference, json, false),
+        PackAction::Verify { reference, json } => inspect::run(&reference, json, true),
         PackAction::Registry(action) => registry::run(_cli, action, _cfg),
     }
 }

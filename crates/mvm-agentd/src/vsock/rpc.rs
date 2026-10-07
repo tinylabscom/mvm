@@ -483,6 +483,26 @@ pub fn send_close_stream_input(
     stream_input_result(stream, GuestRequest::CloseStreamInput(close))
 }
 
+/// Deliver one host-admitted display input frame to the display bridge.
+///
+/// One RPC per frame, for the reason [`send_stream_input`] gives: waiting for
+/// each answer is what makes arrival order at the guest the order the host's
+/// display input gate accepted.
+pub fn send_display_input(
+    stream: &mut UnixStream,
+    frame: mvm_contract::stream::DisplayInputFrame,
+) -> Result<DisplayInputResult, RpcError> {
+    let req = GuestRequest::DisplayInput(frame);
+    match call_unary(stream, &req)? {
+        GuestResponse::DisplayInputResult(result) => Ok(result),
+        other => Err(RpcError::OffContract {
+            verb: req.verb().name(),
+            got: other.variant(),
+            expected: req.response_contract().responses,
+        }),
+    }
+}
+
 fn stream_input_result(
     stream: &mut UnixStream,
     req: GuestRequest,
@@ -551,14 +571,13 @@ const STREAM_LIVENESS_POLL: std::time::Duration = std::time::Duration::from_secs
 pub fn send_run_entrypoint_while<F, L>(
     stream: &mut UnixStream,
     call: RunEntrypointCall,
-    mut on_event: F,
-    mut still_alive: L,
+    on_event: F,
+    still_alive: L,
 ) -> Result<EntrypointEvent>
 where
     F: FnMut(&EntrypointEvent),
     L: FnMut() -> bool,
 {
-    require_capabilities(stream, &[GuestCapability::RunEntrypoint])?;
     let RunEntrypointCall {
         stdin,
         timeout_secs,
@@ -571,6 +590,87 @@ where
         env,
         stream_input,
     };
+    stream_entrypoint_events(
+        stream,
+        EntrypointStreamRequest {
+            request: req,
+            capability: GuestCapability::RunEntrypoint,
+        },
+        on_event,
+        still_alive,
+    )
+}
+
+/// One prompt for the guest's resident agent. See [`GuestRequest::AgentPrompt`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPromptCall {
+    /// The prompt, written to the agent's stdin.
+    pub prompt: Vec<u8>,
+    /// Wall-clock budget for the agent's answer.
+    pub timeout_secs: u64,
+    /// The workload's egress environment.
+    pub env: Vec<(String, String)>,
+}
+
+/// Send an `AgentPrompt` request and consume its `EntrypointEvent` stream,
+/// with the same liveness rule as [`send_run_entrypoint_while`].
+///
+/// A guest agent built before the verb existed does not advertise
+/// [`GuestCapability::AgentPrompt`] and is refused here, before the prompt
+/// leaves the host.
+pub fn send_agent_prompt_while<F, L>(
+    stream: &mut UnixStream,
+    call: AgentPromptCall,
+    on_event: F,
+    still_alive: L,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+    L: FnMut() -> bool,
+{
+    let AgentPromptCall {
+        prompt,
+        timeout_secs,
+        env,
+    } = call;
+    stream_entrypoint_events(
+        stream,
+        EntrypointStreamRequest {
+            request: GuestRequest::AgentPrompt {
+                prompt,
+                timeout_secs,
+                env,
+            },
+            capability: GuestCapability::AgentPrompt,
+        },
+        on_event,
+        still_alive,
+    )
+}
+
+/// A request answered by an `EntrypointEvent` stream, and the capability the
+/// agent must advertise before it is sent.
+struct EntrypointStreamRequest {
+    request: GuestRequest,
+    capability: GuestCapability,
+}
+
+fn stream_entrypoint_events<F, L>(
+    stream: &mut UnixStream,
+    call: EntrypointStreamRequest,
+    mut on_event: F,
+    mut still_alive: L,
+) -> Result<EntrypointEvent>
+where
+    F: FnMut(&EntrypointEvent),
+    L: FnMut() -> bool,
+{
+    let EntrypointStreamRequest {
+        request: req,
+        capability,
+    } = call;
+    require_capabilities(stream, &[capability])?;
+    let verb = req.verb_name();
     let mut session = RpcSession::open(stream)?;
     session.write(stream, &req)?;
 
@@ -603,9 +703,17 @@ where
             GuestResponse::WorkloadPrivilegeRefused { verb, uid } => {
                 break Err(RpcError::WorkloadPrivilegeRefused { verb, uid }.into());
             }
+            // A grant or profile refusal stays typed, so the host can audit
+            // it as the refusal it is rather than as a transport fault.
+            GuestResponse::VerbNotAuthorized { verb } => {
+                break Err(RpcError::VerbNotAuthorized { verb }.into());
+            }
+            GuestResponse::UnsupportedInProfile { profile, verb } => {
+                break Err(RpcError::UnsupportedInProfile { profile, verb }.into());
+            }
             other => {
                 break Err(anyhow::anyhow!(
-                    "expected EntrypointEvent during RunEntrypoint stream, got {other:?}"
+                    "expected EntrypointEvent during {verb} stream, got {other:?}"
                 ));
             }
         };
@@ -1331,6 +1439,137 @@ mod tests {
             EntrypointEvent::Stderr { ref chunk } if chunk == b"err"
         ));
         assert!(matches!(terminal, EntrypointEvent::Exit { code: 0 }));
+    }
+
+    fn answer_agent_prompt_hello(stream: &mut UnixStream, advertised: Vec<GuestCapability>) {
+        let req: GuestRequest = read_frame(stream).unwrap();
+        match req {
+            GuestRequest::ProtocolHello {
+                requested_capabilities,
+                ..
+            } => assert_eq!(requested_capabilities, vec![GuestCapability::AgentPrompt]),
+            other => panic!("expected ProtocolHello, got {other:?}"),
+        }
+        write_frame(
+            stream,
+            &GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: PROTOCOL_VERSION,
+                min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                agent_version: "test-agent".to_string(),
+                capabilities: advertised,
+            },
+        )
+        .unwrap();
+    }
+
+    fn prompt_call(prompt: &[u8]) -> AgentPromptCall {
+        AgentPromptCall {
+            prompt: prompt.to_vec(),
+            timeout_secs: 45,
+            env: vec![("HTTPS_PROXY".into(), "http://127.0.0.1:3128".into())],
+        }
+    }
+
+    fn paired() -> (UnixStream, UnixStream) {
+        let (host, guest) = UnixStream::pair().unwrap();
+        host.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        guest
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        (host, guest)
+    }
+
+    #[test]
+    fn agent_prompt_carries_the_prompt_and_streams_the_answer_back() {
+        let (mut host, mut guest) = paired();
+        let guest_handle = std::thread::spawn(move || {
+            answer_agent_prompt_hello(&mut guest, vec![GuestCapability::AgentPrompt]);
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            let GuestRequest::AgentPrompt {
+                prompt,
+                timeout_secs,
+                env,
+            } = req
+            else {
+                panic!("expected AgentPrompt, got {req:?}");
+            };
+            assert_eq!(prompt, b"what changed?");
+            assert_eq!(timeout_secs, 45);
+            assert_eq!(env[0].0, "HTTPS_PROXY");
+            write_event_frame(
+                &mut guest,
+                &EntrypointEvent::Stdout {
+                    chunk: b"two files".to_vec(),
+                },
+            );
+            write_event_frame(&mut guest, &EntrypointEvent::Exit { code: 0 });
+        });
+
+        let mut answer = Vec::new();
+        let terminal = send_agent_prompt_while(
+            &mut host,
+            prompt_call(b"what changed?"),
+            |event| {
+                if let EntrypointEvent::Stdout { chunk } = event {
+                    answer.extend_from_slice(chunk);
+                }
+            },
+            || true,
+        )
+        .expect("prompt round trip");
+        guest_handle.join().unwrap();
+
+        assert_eq!(answer, b"two files");
+        assert!(matches!(terminal, EntrypointEvent::Exit { code: 0 }));
+    }
+
+    #[test]
+    fn a_grant_refused_prompt_surfaces_as_a_typed_verb_refusal() {
+        // The host audits a refusal by downcasting to this variant; an
+        // untyped "unexpected response" error would let it go unrecorded.
+        let (mut host, mut guest) = paired();
+        let guest_handle = std::thread::spawn(move || {
+            answer_agent_prompt_hello(&mut guest, vec![GuestCapability::AgentPrompt]);
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::VerbNotAuthorized {
+                    verb: "agent-prompt".into(),
+                },
+            )
+            .unwrap();
+        });
+
+        let err = send_agent_prompt_while(&mut host, prompt_call(b"hi"), |_| {}, || true)
+            .expect_err("refused prompt");
+        guest_handle.join().unwrap();
+
+        match err.downcast_ref::<RpcError>() {
+            Some(RpcError::VerbNotAuthorized { verb }) => assert_eq!(verb, "agent-prompt"),
+            other => panic!("expected RpcError::VerbNotAuthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_guest_agent_without_the_prompt_capability_never_sees_the_prompt() {
+        let (mut host, mut guest) = paired();
+        let guest_handle = std::thread::spawn(move || {
+            answer_agent_prompt_hello(&mut guest, vec![GuestCapability::RunEntrypoint]);
+            // Nothing further may arrive: the host refuses after the hello.
+            guest
+                .set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
+            read_frame::<GuestRequest>(&mut guest).is_err()
+        });
+
+        let err = send_agent_prompt_while(&mut host, prompt_call(b"secret plan"), |_| {}, || true)
+            .expect_err("missing capability");
+        drop(host);
+        assert!(
+            guest_handle.join().unwrap(),
+            "the prompt reached a guest agent that cannot serve it"
+        );
+        assert!(err.to_string().contains("AgentPrompt"), "{err}");
     }
 
     #[test]

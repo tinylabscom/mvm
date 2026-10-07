@@ -193,6 +193,11 @@ pub struct EndpointConfig {
     /// Resolved per-tool rules projected from the admitted signed plan.
     #[serde(default)]
     pub tools: mvm_contract::policy::tool_rules::ToolRules,
+    /// Embed the per-VM telemetry collector in this endpoint process: the
+    /// collector's inputs when this boot is provisioned for collection,
+    /// absent otherwise. See `mvm_hostd::telemetry_collector`.
+    #[serde(default)]
+    pub telemetry: Option<crate::telemetry_collector::TelemetryEmbedConfig>,
     /// Per-destination reversible replacement policy, carried from the signed
     /// `ExecutionPlan.reversible_replacement`. Default (disabled) preserves the
     /// current one-way-only behavior.
@@ -886,6 +891,7 @@ mod tests {
             client_secret: Some(OAuthSecretString::from("the-client-secret".to_string())),
             // Inside the proactive window, so the loop exchanges at once.
             expires_at: chrono::Utc::now() + chrono::Duration::seconds(30),
+            grant: Default::default(),
         };
         FileSecretStore::with_dir(dir.join("secrets"))
             .put(
@@ -1073,6 +1079,7 @@ mod tests {
 
     fn vsock_cfg(secrets: Vec<SecretBinding>, dir: &std::path::Path) -> EndpointConfig {
         EndpointConfig {
+            telemetry: None,
             tenant_id: "local".into(),
             instance_id: "test".into(),
             secrets,
