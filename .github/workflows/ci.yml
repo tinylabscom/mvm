@@ -1,14 +1,15 @@
 name: CI
 
 on:
-  # Pull requests run the full deterministic lint/test matrix, including Nix
-  # evaluation and the published-image boot witness. A PR must expose its own
-  # failures before admission; deferring them to the queue makes one bad entry
-  # poison every cumulative commit behind it. The merge queue validates the
-  # synthetic commit's scope and aggregate only, reusing the admitted PR proof.
+  # Pull requests run the relevant deterministic lint/test matrix, including
+  # Nix evaluation for Nix-affecting changes and the boot-latency witness.
+  # A PR must expose its own failures before admission; deferring them to the
+  # queue makes one bad entry poison every cumulative commit behind it.
+  # The merge queue validates the synthetic commit's scope and aggregate only,
+  # reusing the admitted PR proof.
   # Expensive platform, live-VM, OCI ratification, security, and release
-  # artifact jobs live in release/manual workflows. The Windows lane here is a
-  # cross-compile check of the portable crates, not a Windows host run.
+  # artifact jobs live in release/manual workflows. The Windows lane here
+  # cross-compiles portable crates; it does not run a Windows host.
   pull_request:
   # Required for the merge queue. The full proof already ran on the PR; the
   # synthetic merge commit gets the fail-closed scope/integration check and the
@@ -293,10 +294,9 @@ jobs:
         run: ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
   lint-policy:
-    # This real policy lane publishes the existing required `Invariant`
-    # context. The architecture scan used to occupy a separate workflow plus
-    # an aggregate runner; keeping it here preserves the gate without that
-    # merge-group fan-out.
+    # This policy lane publishes the `Invariant` context. The architecture
+    # scan used to occupy a separate workflow; keeping it here preserves the
+    # gate without another runner or workflow.
     name: Invariant
     needs: [scope]
     if: github.event_name != 'merge_group'
@@ -304,6 +304,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -367,6 +369,41 @@ jobs:
 
       - name: Dev-run guard tests
         run: bash scripts/dev-run-guard.test.sh
+
+      - name: ShellCheck added scripts
+        if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed=$(mktemp)
+          trap 'rm -f "$changed"' EXIT
+          if ! MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA"); then
+            echo "::error::could not resolve the pull-request merge base" >&2
+            exit 1
+          fi
+          if ! git diff --name-only --diff-filter=A -z \
+            "$MERGE_BASE" "$HEAD_SHA" -- '*.sh' '.githooks/*' >"$changed"; then
+            echo "::error::could not classify added shell scripts" >&2
+            exit 1
+          fi
+          mapfile -d '' scripts <"$changed"
+          if [ "${#scripts[@]}" -gt 0 ]; then
+            printf 'shellcheck %s\n' "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+          else
+            echo "No added shell scripts."
+          fi
+
+      - name: Embedded helper recipe contract
+        if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 --edition=2024 -D warnings --test \
+            crates/mvm-cli/tests/embed_recipe.rs \
+            -o "$RUNNER_TEMP/embed-recipe-test"
+          "$RUNNER_TEMP/embed-recipe-test"
 
       # The nightly security lanes do not run on a PR, so this is the only
       # place their failure reporting is exercised before it has to work.
@@ -825,60 +862,6 @@ jobs:
           cargo check --locked --target x86_64-pc-windows-gnu \
             -p mvm-core --features provenance,client,hostd-transport
 
-  # Deterministic failures should never reach the queue and poison every
-  # cumulative commit behind them. Keep this bounded: policy/workflow checks
-  # run in `lint-policy`; this companion catches changed shell scripts and the
-  # embed-recipe regression that previously failed both workspace arches.
-  pr-regressions:
-    name: PR focused regressions
-    needs: [scope]
-    if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@1.97.1
-
-      - uses: ./.github/actions/apt-deps
-        with:
-          packages: shellcheck
-
-      - name: ShellCheck added scripts
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          changed=$(mktemp)
-          trap 'rm -f "$changed"' EXIT
-          if ! MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA"); then
-            echo "::error::could not resolve the pull-request merge base" >&2
-            exit 1
-          fi
-          if ! git diff --name-only --diff-filter=A -z \
-            "$MERGE_BASE" "$HEAD_SHA" -- '*.sh' '.githooks/*' >"$changed"; then
-            echo "::error::could not classify added shell scripts" >&2
-            exit 1
-          fi
-          mapfile -d '' scripts <"$changed"
-          if [ "${#scripts[@]}" -gt 0 ]; then
-            printf 'shellcheck %s\n' "${scripts[@]}"
-            shellcheck "${scripts[@]}"
-          else
-            echo "No added shell scripts."
-          fi
-
-      - name: Embedded helper recipe contract
-        run: |
-          rustc +1.97.1 --edition=2024 -D warnings --test \
-            crates/mvm-cli/tests/embed_recipe.rs \
-            -o "$RUNNER_TEMP/embed-recipe-test"
-          "$RUNNER_TEMP/embed-recipe-test"
-
   # The Gherkin scenarios previously ran only from release-tag workflows, so a
   # PR could break a scenario and merge green. Same reusable workflow the
   # release path calls, gated on the narrower `bdd` scope.
@@ -897,7 +880,7 @@ jobs:
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
     # The queue aggregate only inspects `needs` results, so use the small,
     # fast-starting image. Pull requests still need the full image for the
     # admission smoke below.
@@ -932,7 +915,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
-          PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
+          SCOPE_NIX: ${{ needs.scope.outputs.nix }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
@@ -972,15 +955,6 @@ jobs:
             echo "Policy lint did not match event $EVENT_NAME: $POLICY_RESULT"
             exit 1
           fi
-          case "$EVENT_NAME:$SCOPE_CODE" in
-            pull_request:true) preflight_required=success ;;
-            pull_request:false|merge_group:*|workflow_dispatch:*) preflight_required=skipped ;;
-            *) echo "Invalid preflight scope: event=$EVENT_NAME code=$SCOPE_CODE"; exit 1 ;;
-          esac
-          if [ "$PREFLIGHT_RESULT" != "$preflight_required" ]; then
-            echo "PR focused regressions did not match event/scope $EVENT_NAME/$SCOPE_CODE: $PREFLIGHT_RESULT"
-            exit 1
-          fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
             "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" "$WINDOWS_RESULT" \
             "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
@@ -990,13 +964,13 @@ jobs:
               exit 1
             fi
           done
-          case "$EVENT_NAME" in
-            pull_request|workflow_dispatch) nix_required=success ;;
-            merge_group) nix_required=skipped ;;
-            *) echo "Invalid event name: $EVENT_NAME"; exit 1 ;;
+          case "$EVENT_NAME:$SCOPE_NIX" in
+            pull_request:true|workflow_dispatch:true) nix_required=success ;;
+            pull_request:false|workflow_dispatch:false|merge_group:true|merge_group:false) nix_required=skipped ;;
+            *) echo "Invalid Nix scope: event=$EVENT_NAME nix=$SCOPE_NIX"; exit 1 ;;
           esac
           if [ "$NIX_RESULT" != "$nix_required" ]; then
-            echo "Nix validation did not match event $EVENT_NAME: $NIX_RESULT"
+            echo "Nix validation did not match event/scope $EVENT_NAME/$SCOPE_NIX: $NIX_RESULT"
             exit 1
           fi
           case "$EVENT_NAME:$SCOPE_CODE" in
@@ -1014,108 +988,17 @@ jobs:
     needs: [scope]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     permissions:
-      actions: write
+      actions: read
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        # Each broker races one shard across eligible runner pools. The worker
-        # that actually starts first owns the shard; its queued sibling is
-        # cancelled. A matrix in this workflow cannot provide that semantic,
-        # because Actions waits for every matrix child, including the loser.
-        shard: [1, 2]
-    runs-on: ubuntu-slim
-    timeout-minutes: 60
-    steps:
-      - name: Run shard on the first available runner
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          COMMIT_SHA: ${{ github.sha }}
-          SHARD: ${{ matrix.shard }}
-          ALLOW_SELF_HOSTED: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
-          REPOSITORY: ${{ github.repository }}
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: |
-          set -euo pipefail
-
-          api="https://api.github.com/repos/$REPOSITORY"
-          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "Content-Type: application/json")
-          correlation="${RUN_ID}-${RUN_ATTEMPT}-${SHARD}"
-          candidates=(github)
-          if [ "$ALLOW_SELF_HOSTED" = true ]; then
-            candidates+=(hetzner)
-          fi
-
-          run_ids=()
-          cleanup() {
-            for run_id in "${run_ids[@]}"; do
-              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
-            done
-          }
-          trap cleanup EXIT
-          trap 'exit 130' INT
-          trap 'exit 143' TERM
-
-          for candidate in "${candidates[@]}"; do
-            curl -fsS -X POST "${auth[@]}" \
-              "$api/actions/workflows/workspace-shard.yml/dispatches" \
-              -d "$(jq -nc \
-                --arg ref "$COMMIT_SHA" \
-                --arg shard "$SHARD" \
-                --arg runner "$candidate" \
-                --arg correlation "$correlation" \
-                '{ref:"main",inputs:{commit_sha:$ref,shard:$shard,runner_kind:$runner,correlation:$correlation}}')"
-          done
-
-          winner=
-          deadline=$((SECONDS + 600))
-          while [ -z "$winner" ] && [ "$SECONDS" -lt "$deadline" ]; do
-            runs="$(curl -fsS "${auth[@]}" \
-              "$api/actions/workflows/workspace-shard.yml/runs?event=workflow_dispatch&per_page=50")"
-            mapfile -t run_ids < <(
-              jq -r --arg marker "$correlation" \
-                '.workflow_runs[] | select(.display_title | contains($marker)) | .id' \
-                <<<"$runs"
-            )
-            winner="$(jq -r --arg marker "$correlation" '
-              [.workflow_runs[]
-               | select(.display_title | contains($marker))
-               | select(.status == "in_progress" or .status == "completed")]
-              | sort_by(.run_started_at)
-              | first
-              | .id // empty
-            ' <<<"$runs")"
-            [ -n "$winner" ] || sleep 3
-          done
-          if [ -z "$winner" ]; then
-            echo "::error::no workspace shard candidate started within 10 minutes" >&2
-            exit 1
-          fi
-
-          for run_id in "${run_ids[@]}"; do
-            if [ "$run_id" != "$winner" ]; then
-              curl -fsS -X POST "${auth[@]}" "$api/actions/runs/$run_id/cancel" >/dev/null || true
-            fi
-          done
-          run_ids=("$winner")
-
-          while :; do
-            run="$(curl -fsS "${auth[@]}" "$api/actions/runs/$winner")"
-            status="$(jq -r .status <<<"$run")"
-            if [ "$status" = completed ]; then
-              conclusion="$(jq -r .conclusion <<<"$run")"
-              url="$(jq -r .html_url <<<"$run")"
-              echo "workspace shard $SHARD completed on $(jq -r .display_title <<<"$run"): $url"
-              run_ids=()
-              if [ "$conclusion" != success ]; then
-                echo "::error::workspace shard $SHARD concluded $conclusion" >&2
-                exit 1
-              fi
-              exit 0
-            fi
-            sleep 5
-          done
+        shard: ['1', '2']
+    uses: ./.github/workflows/workspace-shard.yml
+    with:
+      commit_sha: ${{ github.sha }}
+      shard: ${{ matrix.shard }}
+      runner_kind: github
 
   test-workspace-aarch64:
     name: Test workspace (aarch64)
@@ -1702,24 +1585,21 @@ jobs:
     # flake, so prove its evaluation and lean-rootfs contracts before queue
     # admission. Canonical image builds and reproducibility belong to mvm-images.
     needs: [scope]
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: needs.scope.outputs.nix == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        if: needs.scope.outputs.nix == 'true'
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Restore Nix binary cache
-        if: needs.scope.outputs.nix == 'true'
         uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
           primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'third_party/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
           restore-prefixes-first-match: nix-
 
       - name: Eval-check every flake
-        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           find nix -name flake.nix -type f -print0 | sort -z | while IFS= read -r -d '' flake; do
@@ -1731,14 +1611,12 @@ jobs:
       # The root flake's default dev shell stays lean: Zig, cargo-zigbuild and
       # libclang belong to `.#full`. Evaluation only; nothing is built.
       - name: Dev shell tiers stay split
-        if: needs.scope.outputs.nix == 'true'
         run: sh scripts/check-devshell-tiers.sh
 
       # This runner is x86_64, so only the x86_64-linux check variant builds
       # here; the aarch64-linux variant stays defined for parity and for a
       # future arm64 runner.
       - name: Baked guest rootfs closure stays lean and glibc-free
-        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs \

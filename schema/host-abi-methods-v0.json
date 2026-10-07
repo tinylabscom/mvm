@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 5,
+  "abi_minor": 6,
   "methods": [
     {
       "classification": "prod_safe",
@@ -241,6 +241,18 @@
       "key": "guest_proc_wait",
       "name": "guest.proc.wait",
       "summary": "Waits for a guest process to end, returning its output."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "telemetry_records",
+      "name": "telemetry.records",
+      "summary": "Reads one cursor-paged page of a machine's collected telemetry records."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "telemetry_status",
+      "name": "telemetry.status",
+      "summary": "Reports whether telemetry collection was provisioned for a machine and how its collector stands."
     }
   ],
   "version": 0

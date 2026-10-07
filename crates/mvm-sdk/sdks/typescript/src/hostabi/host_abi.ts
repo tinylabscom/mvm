@@ -138,6 +138,8 @@ session_call: SessionCall
 session_info: SessionInfo
 session_start: SessionStart
 session_stop: SessionStop
+telemetry_records: TelemetryRecords
+telemetry_status: TelemetryStatus
 }
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
@@ -1383,4 +1385,44 @@ export interface Empty12 {
  */
 export interface SessionRef1 {
 session_id: string
+}
+export interface TelemetryRecords {
+reply: TelemetryRecordsReply
+request: TelemetryRecordsRequest
+}
+/**
+ * A TelemetryReadResponse; the shape is owned by the telemetry contract. `records`, `next_cursor` (`offset`), `undecodable`, and `exhausted` are always present.
+ */
+export interface TelemetryRecordsReply {
+
+}
+/**
+ * A `telemetry.records` request: the machine, where to resume, and how many records at most. An absent cursor reads from the start of the stream; the limit is clamped by the seam.
+ */
+export interface TelemetryRecordsRequest {
+cursor?: (TelemetryCursor | null)
+id: string
+limit?: (number | null)
+}
+/**
+ * Position in a VM's record stream: the byte offset of the next line. A cursor is valid only against the file it came from; one that no longer lands on a line boundary is refused rather than guessed at, and the consumer starts over from the beginning.
+ */
+export interface TelemetryCursor {
+offset: number
+}
+export interface TelemetryStatus {
+reply: TelemetryStatusReply
+request: MachineRef2
+}
+/**
+ * A TelemetryStatus; the shape is owned by the telemetry contract. `collection` is always present: `not_provisioned`, or `provisioned` with `vm_name`, `state` (`kind`: connecting | collecting | degraded | stopped), `shed`, `records_bytes`, and `snapshot_age_ms` when known.
+ */
+export interface TelemetryStatusReply {
+
+}
+/**
+ * A request naming one machine.
+ */
+export interface MachineRef2 {
+id: string
 }

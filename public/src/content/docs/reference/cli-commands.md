@@ -282,12 +282,15 @@ one. Keyless (`<file>.sigstore.json`) signatures are produced in CI by
 | `mvmctl secret set <name> ... --inject <mode>`            | Restrict substitution to `header` (default), `query_param`, `url_path`, or `basic_auth`                                            |
 | `mvmctl secret set <name> ... --oauth-authorization-url <url> --oauth-token-url <url> --oauth-client-id <id>` | Bind the secret to an OAuth flow (bearer only); the three flags are required together                                             |
 | `mvmctl secret set <name> ... --oauth-client-secret <secret>` | Store the client secret as the initial token set; the host-side refresher exchanges it for a live token set (`-` reads stdin; `--oauth-client-secret-file <path>` reads a file) |
+| `mvmctl secret set <name> ... --oauth-login`               | Define the secret, then consent to its OAuth flow in a browser on this host, as `secret login` does                                 |
+| `mvmctl secret login <name>`                              | Consent to an OAuth-bound secret's flow in a browser on this host and store the token set it yields                               |
+| `mvmctl secret login <name> --no-browser --timeout <secs>` | Print the authorization URL instead of opening a browser; wait up to `<secs>` (default 300) for the consent                        |
 | `mvmctl secret providers`                                 | List the built-in service providers `--provider` accepts                                                                          |
 | `mvmctl secret providers --search <query>`                | Filter providers by name, description, or tag                                                                                     |
 | `mvmctl secret get <name>`                                | Verify that a local secret exists without printing the value                                                                      |
 | `mvmctl secret ls`                                        | List stored secret names, and for bound secrets their auth type, destinations, and authoring provider                             |
 | `mvmctl secret rm <name>`                                 | Remove a local secret                                                                                                             |
-| `mvmctl secret <put\|get\|set\|ls\|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local`                                                                        |
+| `mvmctl secret <put\|get\|set\|login\|ls\|rm> --tenant <tenant>` | Use a non-default local tenant namespace. Default: `local`                                                                  |
 
 `secret set` is `put` plus an egress binding: it records where the substituted
 credential may go and how it authenticates. `--provider` takes those from the
@@ -311,23 +314,49 @@ already exists. For a SigV4 provider the credential-scope service comes from the
 entry, while `--region` and `--aws-access-key-id` stay yours to supply — they
 belong to your account, not to the provider.
 
-An OAuth binding turns the stored value into a token set the host maintains:
-the per-VM network endpoint exchanges the client-credentials grant against the
-binding's `--oauth-token-url` and refreshes it before expiry, so the guest only
-ever receives a live access token through substitution. `--oauth-client-secret`
-writes the stored value as the *initial* token set — the client secret plus an
-already-expired timestamp — so the first exchange happens at endpoint boot;
-live token sets are written by the host flow and can never be imported with
+An OAuth binding turns the stored value into a token set the host maintains,
+and the per-VM network endpoint refreshes it against the binding's
+`--oauth-token-url` before it expires, so the guest only ever receives a live
+access token through substitution. The set records which grant renews it.
+
+For a machine client, `--oauth-client-secret` writes the stored value as the
+*initial* token set — the client secret plus an already-expired timestamp — and
+the endpoint exchanges the client-credentials grant at boot and again before
+each expiry.
+
+For an API a person signs in to, the consent happens in a browser on the host.
+`secret login <name>` (or `--oauth-login` on `secret set`) runs the
+authorization-code grant with PKCE (S256): it listens on `127.0.0.1` on a port
+the kernel picks, prints the authorization URL and opens it in the desktop
+browser, and accepts the redirect to `http://127.0.0.1:<port>/callback` only if
+its `state` matches the one this login sent. A callback with a missing or
+different `state` is answered with an error and ignored, and the login keeps
+waiting, so another process on the host cannot cancel it. The code is redeemed at the token endpoint with the
+PKCE verifier, and the resulting token set replaces the stored value. Register
+`http://127.0.0.1/callback` as the client's redirect URI. Without
+`--oauth-client-secret` the client is public and identifies itself with its
+client id; with it the client is confidential, and the secret authenticates
+the code exchange and every refresh. The endpoint renews a consented set with
+the refresh-token grant, and stores a rotated refresh token when the provider
+issues one; it never falls back to the client-credentials grant, which would
+replace the user's identity with the application's. A provider that issues no
+refresh token gives a set that lasts until its access token expires; run
+`secret login` again then. Until a consent completes, `secret set
+--oauth-login` leaves the secret defined with no tokens, and resolution fails
+closed. A login records an `oauth_login` entry in the secret audit log, with
+its outcome and no value.
+
+Live token sets are written by these host flows and can never be imported with
 `--from`. `--oauth-scope` is repeatable, and
 `--oauth-response-access-token-pointer` names a non-standard access-token
 location in the token response (default `/access_token`). The OAuth endpoints
 must be absolute `https` URLs, and the workload's network policy must admit
 the token endpoint's host: the refresher sends the client secret only where
 that policy allows, and records every attempt as a `secret.oauth_refresh`
-audit entry. The token response must carry an expiry (`expires_in` or
-`expires_at`) far enough out to refresh ahead of; a token without one is
-refused rather than stored. The human/browser consent flow lands separately;
-until then the machine client-credentials grant is the supported flow.
+audit entry. Neither the refresh token nor the client secret goes anywhere
+else. The token response must carry an expiry (`expires_in` or `expires_at`)
+far enough out to refresh ahead of; a token without one is refused rather than
+stored.
 `mvmctl secret ls` shows the oauth client id and token URL alongside the
 binding; the client secret is never displayed.
 
@@ -774,10 +803,8 @@ guest, on any tier.
 | `mvmctl machine reconfigure <name> --cpus <n>`                                                 | Change the vCPU count                                                                                                                                                                                                                                                                                                                |
 | `mvmctl machine reconfigure <name> --memory <size>`                                            | Change the memory limit (accepts `512m`, `1g`, etc.)                                                                                                                                                                                                                                                                                 |
 | `mvmctl machine reconfigure <name> --mem-initial <size>`                                       | Change the initial balloon memory target (CLI-only; not exposed on the remote facade)                                                                                                                                                                                                                                                |
-| `mvmctl machine check-artifact <artifact.mvm>`                                                 | Verify a portable artifact and preview its admission posture without extracting or booting                                                                                                                                                                                                                                           |
-| `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>`                                  | Verify with an explicit raw Ed25519 public key                                                                                                                                                                                                                                                                                       |
-| `mvmctl machine check-artifact <artifact.mvm> --json`                                          | Print the verified artifact/admission preview as JSON                                                                                                                                                                                                                                                                                |
-| `mvmctl machine check-artifact <bundle.mvmpkg> [--trust-store <dir>]`                           | Verify the signed bundle, its complete embedded image-set manifest, and every image size/hash without booting                                                                                                                                                                                                                        |
+| `mvmctl machine check-artifact <bundle.mvmpkg> [--trust-store <dir>]`                           | Verify the signed bundle, its declarations, its complete embedded image-set manifest, and every image size/hash, confirm its architecture matches this host, and preview its posture, without installing or booting                                                                                                                                                                                                                        |
+| `mvmctl machine check-artifact <bundle.mvmpkg> --json`                                        | Print the verdict as JSON, including the declared posture (`null` when none), kernel command line, and build input                                                                                                                                                                                                                   |
 | `mvmctl machine check-artifact <bundle.mvmpkg> --backend <name>`                                | Also refuse before boot when the selected Linux-direct backend lacks the artifact's architecture, boot protocol, image format, or required guest device                                                                                                                                                                               |
 
 ### Workload output capture
@@ -994,12 +1021,14 @@ machine-start receipt carries the same policy summary plus the resolved digest
 and start timestamp after a real boot. `exec` / `shell` / `stop` reuse the
 existing console/down paths for the running VM. `machine reconfigure <name>`
 patches a subset of the stored config (`net`, `allow_host`, `cpus`, `memory`, and the CLI-only `mem_initial`) and relaunches the machine — auto stop + start when running,
-persist-only when stopped; identity, image, and volumes are preserved. `machine pack` for portable
-signed `.mvm` artifacts is still follow-up work, and a `.mvm` has no boot path.
-`machine check-artifact` is the read-only portable-artifact gate: it
-verifies the signed manifest, file hashes, format version, sealed-prod verity
-requirements, host architecture, and fail-closed admission posture before
-printing a preview. Use `mvmctl machine run` for the manifest/flake path that already
+persist-only when stopped; identity, image, and volumes are preserved.
+`machine check-artifact` is the read-only gate for a signed `.mvmpkg`: it
+verifies the signed manifest, every artifact's size and hash, the size caps
+(2 GiB per entry, 4 GiB in total), the declared posture's coherence (a
+`sealed-prod` posture must cover a dm-verity rootfs and require
+authentication), and the host architecture before printing a preview. The
+older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
+to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
 #### Booting a signed bundle
@@ -1478,11 +1507,14 @@ running microVM.
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
 | `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. With no `$MVM_HOME/registry/publishers.toml`, the built-in official-registry policy (mvm-templates `publish.yml` identity) applies; a written policy replaces it wholesale                                                                         |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
+| `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
+| `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
+| `mvmctl bundle export <t> --posture <p> --allow-egress` / `--allow-volumes` / `--allow-unauthenticated` | Open one ceiling of the declared posture. `--allow-unauthenticated` is refused for `sealed-prod`                                                                   |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
 | `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
 | `mvmctl bundle gc`                                        | Prune installed bundles — a specific `<SHA>` or `--all`                                                                                                           |
-| `mvmctl artifact pack` / `verify` / `inspect` / `extract` | Pack or verify signed `.mvm` artifacts                                                                                                                            |
+| `mvmctl artifact pack`                                    | Alias of `mvmctl bundle export`; takes the same arguments                                                                                                         |
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
 | `mvmctl deps audit`                                       | Re-verify a sealed dep volume against its recorded chain                                                                                                          |
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |

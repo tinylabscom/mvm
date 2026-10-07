@@ -174,7 +174,7 @@ tier = "live"
 [[command]]
 path = "machine check-artifact"
 tier = "parse"
-reason = "names a signed .mvm artifact that only a real build produces"
+reason = "names a signed .mvmpkg bundle that only a real build produces"
 
 [[command]]
 path = "machine checkpoint create"
@@ -533,6 +533,11 @@ reason = "retired at runtime while still present in the clap tree; the docs no l
 path = "secret set"
 tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
+
+[[command]]
+path = "secret login"
+tier = "parse"
+reason = "opens the host browser and waits for a human to consent at a real OAuth provider; the consent flow, the PKCE exchange and the forged-callback refusals are exercised in-process against a loopback provider by mvm-client's oauth_login tests"
 
 [[command]]
 path = "secret rm"

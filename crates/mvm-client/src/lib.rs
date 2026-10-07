@@ -50,7 +50,9 @@ pub mod builder_bundle;
 pub mod bundle;
 pub mod connect;
 pub mod drive;
+pub mod egress_denials;
 pub mod entrypoint;
+pub mod explain;
 pub mod grants;
 pub mod grants_resolve;
 pub mod guest;
@@ -58,6 +60,7 @@ pub mod instruction_trust;
 pub mod inventory;
 pub mod launch;
 pub mod local;
+pub mod notices;
 pub mod policy_profiles;
 pub mod profile;
 pub mod readiness;
@@ -67,6 +70,7 @@ pub mod snapshot;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
+pub mod telemetry;
 pub mod tool_mediation;
 pub mod volume;
 
@@ -88,7 +92,8 @@ pub use mvm_core::client::gateway;
 pub use mvm_core::client::mock::{self, MockBackend};
 pub use mvm_core::client::{
     BackendCapabilityReport, ClientOperationCapabilities, ClientOperationCapabilitiesBuilder,
-    MvmClient, MvmError, Result,
+    CollectorState, MvmClient, MvmError, ReceivedRecord, Result, TelemetryCursor,
+    TelemetryReadRequest, TelemetryReadRequestBuilder, TelemetryReadResponse, TelemetryStatus,
 };
 pub use mvm_core::error_codes;
 pub use mvm_core::naming::validate_vm_name;
@@ -118,3 +123,4 @@ pub use registration::{
     MachineRegistration, StaleRegistration, gc_stale_registrations, name_registry_path,
     register_machine,
 };
+pub use telemetry::{LocalTelemetryReader, TelemetryReadError};
