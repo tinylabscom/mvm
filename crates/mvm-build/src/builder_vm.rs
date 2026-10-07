@@ -601,6 +601,18 @@ pub enum BuilderVmError {
     #[error("nix build failed inside builder sandbox: {0}")]
     NixBuildFailed(String),
 
+    /// A builder job failed, and the failure carries a stable category: the
+    /// guest classified it, the host refused what the job left behind, or the
+    /// job outran its deadline. A build error, never a VMM one, so it never
+    /// triggers a builder-backend fallback.
+    #[error("builder job failed ({category}): {detail}")]
+    JobFailed {
+        /// Why the job failed.
+        category: crate::builder_job_contract::FailureCategory,
+        /// The guest's account of the failure, with the log to read.
+        detail: String,
+    },
+
     /// The builder-VM supervisor exited non-zero — the VM/VMM itself could not
     /// run the build (e.g. libkrun failing `KVM_SET_USER_MEMORY_REGION` on a
     /// host that can't map the guest's high-memory region). Distinct from
@@ -703,6 +715,32 @@ pub enum BuilderVmError {
         /// preserved.
         console_log_path: String,
     },
+}
+
+impl BuilderVmError {
+    /// The stable category this failure belongs to, for callers that choose a
+    /// message or a retry posture without parsing the text.
+    pub fn failure_category(&self) -> crate::builder_job_contract::FailureCategory {
+        use crate::builder_job_contract::FailureCategory as C;
+        match self {
+            Self::JobFailed { category, .. } => *category,
+            Self::NixBuildFailed(_) => C::NixBuild,
+            Self::ImagePullFailed(_) => C::Fetch,
+            Self::BootStaging(crate::builder_boot::StageBootError::Abi { .. }) => C::Version,
+            Self::NotYetImplemented
+            | Self::LibkrunUnavailable(_)
+            | Self::VmmUnavailable { .. }
+            | Self::CliSpawnRefused(_) => C::Unsupported,
+            Self::SupervisorExited { .. }
+            | Self::VmmFailed { .. }
+            | Self::DegradedBuilderStore { .. }
+            | Self::ExtractionFailed(_)
+            | Self::BootStaging(_)
+            | Self::SeedKernelPanic { .. }
+            | Self::RuntimeOverlayUnavailable(_)
+            | Self::GuestHalted { .. } => C::Internal,
+        }
+    }
 }
 
 /// `~/.mvm/cache/builder-vm/` (honors `MVM_HOME`) — the directory to clear

@@ -28,6 +28,9 @@ mod builder_host_binaries;
 /// The mvm sources a builder image's evaluation reads, shared by the Stage 0
 /// fingerprint and the local image cache key.
 pub mod builder_image_inputs;
+/// What a staged builder job directory means to the guest, and the versioned
+/// outcome the guest writes back.
+pub mod builder_job_contract;
 /// One flake build through a builder VM, as a request and a result, for a
 /// caller that wants the artifacts where it asked for them.
 pub mod builder_orchestrator;

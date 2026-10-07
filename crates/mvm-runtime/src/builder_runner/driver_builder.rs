@@ -127,8 +127,8 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
                 map_runner_failure(format!("{} builder shell job: {e}", self.driver.name()))
             })?;
         if !outcome.stopped {
-            return Err(map_runner_failure(format!(
-                "{} builder VM shell job did not power off within the deadline",
+            return Err(deadline_exceeded(&format!(
+                "{} builder VM shell job",
                 self.driver.name()
             )));
         }
@@ -169,6 +169,16 @@ impl<D: VmmDriver + Clone + 'static> DriverBuilderVm<D> {
 /// Boot / disk-transport / power-off failures are VMM-level (the builder VM
 /// could not run the build), so the auto-detect fallback retries the next
 /// backend rather than surfacing a false build error.
+/// A builder run the host stopped waiting for. The job outran its budget,
+/// which says nothing about whether the VMM works, so it is a job failure and
+/// not a VMM one.
+fn deadline_exceeded(what: &str) -> BuilderVmError {
+    BuilderVmError::JobFailed {
+        category: mvm_build::builder_job_contract::FailureCategory::Timeout,
+        detail: format!("{what} did not power off within the deadline"),
+    }
+}
+
 fn map_runner_failure(detail: String) -> BuilderVmError {
     BuilderVmError::VmmFailed { detail }
 }
@@ -326,8 +336,8 @@ impl<D: VmmDriver + Clone + 'static> BuilderVm for DriverBuilderVm<D> {
             })
             .map_err(|e| map_runner_failure(format!("{} builder run: {e}", self.driver.name())))?;
         if !outcome.stopped {
-            return Err(map_runner_failure(format!(
-                "{} builder VM did not power off within the deadline",
+            return Err(deadline_exceeded(&format!(
+                "{} builder VM",
                 self.driver.name()
             )));
         }
@@ -488,6 +498,17 @@ mod tests {
         let with_closure = DriverBuilderVm::new(HvfDriver::new(), "/k".into(), "/r".into())
             .with_closure_nar(Some("/nar".into()));
         assert_eq!(with_closure.closure_nar, Some(PathBuf::from("/nar")));
+    }
+
+    #[test]
+    fn a_missed_deadline_is_a_timeout_and_not_a_vmm_failure() {
+        let err = deadline_exceeded("hvf builder VM");
+        assert_eq!(
+            err.failure_category(),
+            mvm_build::builder_job_contract::FailureCategory::Timeout
+        );
+        assert!(!mvm_build::builder_backend_select::is_builder_vm_level_failure(&err));
+        assert!(err.to_string().contains("hvf builder VM did not power off"));
     }
 
     #[test]

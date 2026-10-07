@@ -330,8 +330,37 @@ pub enum FailureCategory {
     /// protocol version matched, only this one operation is missing.
     /// Non-retryable against the same daemon.
     Unsupported,
+    /// The build ran and exited cleanly, but what it left behind is not what
+    /// the output contract requires: no root filesystem, or a root filesystem
+    /// without the runtime sidecar admission reads. Non-retryable; the flake
+    /// has to change.
+    OutputContract,
     /// Catch-all when no narrower category applies. Non-retryable.
     Unknown,
+}
+
+impl FailureCategory {
+    /// The wire tag, for writers that render JSON by hand.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Version => "version",
+            Self::InvalidRequest => "invalid_request",
+            Self::NixEval => "nix_eval",
+            Self::NixBuild => "nix_build",
+            Self::Fetch => "fetch",
+            Self::Timeout => "timeout",
+            Self::Internal => "internal",
+            Self::Unsupported => "unsupported",
+            Self::OutputContract => "output_contract",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for FailureCategory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// Negotiate the protocol version a [`BuilderRequest::Handshake`]
@@ -526,6 +555,7 @@ mod tests {
             FailureCategory::Timeout,
             FailureCategory::Internal,
             FailureCategory::Unsupported,
+            FailureCategory::OutputContract,
             FailureCategory::Unknown,
         ] {
             roundtrip(&BuilderResponse::Failed {
@@ -699,10 +729,13 @@ mod tests {
             (FailureCategory::Timeout, "timeout"),
             (FailureCategory::Internal, "internal"),
             (FailureCategory::Unsupported, "unsupported"),
+            (FailureCategory::OutputContract, "output_contract"),
             (FailureCategory::Unknown, "unknown"),
         ];
         for (category, expected) in cases {
             assert_eq!(serde_json::to_value(category).unwrap(), expected);
+            // The hand-rolled tag the builder guest writes is the serde tag.
+            assert_eq!(category.as_str(), expected);
         }
     }
 

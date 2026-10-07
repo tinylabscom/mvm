@@ -40,7 +40,11 @@
 //!      `/job/result` if missing.
 //!   6. Spawn `/bin/sh -eu /job/cmd.sh`. Capture exit + stderr
 //!      tail (last 20 lines, to keep the result file small).
-//!   7. Write `/job/result` as `{"exit_code":<i32>,"stderr_tail":<json-string>}`.
+//!   7. Write `/job/result` as the job outcome
+//!      `mvm_build::builder_job_contract` defines: contract version, exit
+//!      code, bounded stderr tail, failure category, run time. A job
+//!      directory staged under another contract version is refused here
+//!      instead of run.
 //!   8. `sync` + `reboot(RB_POWER_OFF)`. The libkrun host
 //!      detects power-off via the shutdown-eventfd
 //!      (`krun_get_shutdown_eventfd`).
@@ -114,6 +118,11 @@ mod boot_stage;
 #[cfg(target_os = "linux")]
 #[path = "mvm-host-vm-init/builder_hooks.rs"]
 mod builder_hooks;
+
+/// The single-shot job's contract outcome and the job-directory refusal.
+#[cfg(target_os = "linux")]
+#[path = "mvm-host-vm-init/job_outcome.rs"]
+mod job_outcome;
 
 /// Parse the exact device path emitted by `losetup --find --show`.
 ///
@@ -1271,6 +1280,11 @@ mod linux {
     use std::time::Instant;
 
     use crate::boot_timings::BootTimings;
+    use crate::job_outcome::{
+        classify_failed_job, mirror_build_logs, mirror_host_visible_out_artifact,
+        refuse_unless_contract, write_result, write_setup_failure,
+    };
+    use mvm_build::builder_job_contract::FailureCategory;
 
     /// Persistent Nix-store device — virtio-blk attached as
     /// `/dev/vdb` by `LibkrunBuilderVm` via its `extra_disks` entry.
@@ -1342,7 +1356,7 @@ mod linux {
     /// Per-job command staging dir (`/job/cmd.sh`, `/job/env`,
     /// `/job/result`). Mounted via virtio-fs from the host
     /// (`LibkrunBuilderVm` declares the `job` tag).
-    const JOB_DIR: &str = "/job";
+    pub(crate) const JOB_DIR: &str = "/job";
 
     /// Workspace bind from the host — the in-repo flake the user
     /// is building. Read-only from the guest's perspective: libkrun
@@ -1353,7 +1367,7 @@ mod linux {
     /// Artifact-extraction dir. The user's `cmd.sh` writes
     /// `vmlinux` + `rootfs.ext4` here; the host reads them back
     /// out after the VM powers off.
-    const OUT_DIR: &str = "/out";
+    pub(crate) const OUT_DIR: &str = "/out";
 
     /// Pre-cross-compiled host-vm binaries. `cmd.sh` exports
     /// `MVM_HOST_BIN_DIR=/mvm-bins` so the builder-vm flake installs
@@ -1384,7 +1398,7 @@ mod linux {
     /// (`krun_set_console_output`).
     const STDERR_TAIL_LINES: usize = 20;
 
-    fn append_init_breadcrumb(stage: &str, detail: &str) {
+    pub(crate) fn append_init_breadcrumb(stage: &str, detail: &str) {
         let mut persistent_targets = Vec::new();
         for candidate in [NIX_STORE_MOUNT, JOB_DIR, OUT_DIR] {
             let path = Path::new(candidate);
@@ -1658,7 +1672,7 @@ mod linux {
         // readable.
         if let Err(e) = mount_pseudofs(pseudo_fs) {
             eprintln!("mvm-host-vm-init: mount_pseudofs failed: {e}");
-            write_result(2, &format!("mount_pseudofs failed: {e}"));
+            write_setup_failure(&format!("mount_pseudofs failed: {e}"));
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
             });
@@ -1732,7 +1746,7 @@ mod linux {
             // orphaned across the reboot syscall.
             let _ = track_b.join();
             let _ = track_c.join();
-            write_result(2, &format!("setup_nix_store failed: {e}"));
+            write_setup_failure(&format!("setup_nix_store failed: {e}"));
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
             });
@@ -1754,7 +1768,7 @@ mod linux {
             && let Err(e) = stage_disk_transport_input(t)
         {
             eprintln!("mvm-host-vm-init: disk-transport input staging failed: {e}");
-            write_result(2, &format!("disk-transport input staging failed: {e}"));
+            write_setup_failure(&format!("disk-transport input staging failed: {e}"));
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
             });
@@ -1777,10 +1791,7 @@ mod linux {
                 eprintln!(
                     "mvm-host-vm-init: runtime overlay required but no runtime disk was declared; refusing boot"
                 );
-                write_result(
-                    2,
-                    "runtime overlay required but no runtime disk was declared",
-                );
+                write_setup_failure("runtime overlay required but no runtime disk was declared");
                 stamp(&timings, |t| {
                     t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
                 });
@@ -1790,7 +1801,7 @@ mod linux {
             Err(e) => {
                 append_init_breadcrumb("runtime_overlay_mount_error", &e);
                 eprintln!("mvm-host-vm-init: {e}; refusing boot");
-                write_result(2, &e);
+                write_setup_failure(&e);
                 stamp(&timings, |t| {
                     t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
                 });
@@ -1854,6 +1865,23 @@ mod linux {
             return power_off();
         }
 
+        // Every single-shot job directory carries the job contract version it
+        // was staged under. Refuse one this init does not speak before running
+        // anything in it; the refusal is the job's outcome.
+        if let Some(refusal) = refuse_unless_contract(JOB_DIR) {
+            write_result(2, Some(FailureCategory::Version), &refusal, None);
+            if let Some(t) = &disk_transport
+                && let Err(e) = collect_disk_transport_output(t)
+            {
+                eprintln!("mvm-host-vm-init: disk-transport output collection failed: {e}");
+            }
+            stamp(&timings, |t| {
+                t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+            });
+            write_boot_timings(&timings);
+            return power_off();
+        }
+
         // Install dispatch: install jobs hand the init
         // binary a structured spec rather than a shell script. We
         // probe for the spec first; if absent, fall through to the
@@ -1888,7 +1916,12 @@ mod linux {
         let cmd_path = format!("{JOB_DIR}/cmd.sh");
         if !Path::new(&cmd_path).exists() {
             append_init_breadcrumb("cmd_missing", &cmd_path);
-            write_result(2, &format!("missing {cmd_path}"));
+            write_result(
+                2,
+                Some(FailureCategory::InvalidRequest),
+                &format!("missing {cmd_path}"),
+                None,
+            );
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
             });
@@ -1906,7 +1939,9 @@ mod linux {
         stamp(&timings, |t| {
             t.job_end_ms = Some(BootTimings::ms_since(anchor))
         });
-        write_result(code, &tail);
+        let failure = (code != 0).then(|| classify_failed_job(&tail));
+        write_result(code, failure, &tail, Some(build_ms));
+        mirror_build_logs();
         // Disk-transport mode: tar /out (artifacts + result) onto the output disk
         // for the host to read back. Best-effort — the console + exit code still
         // convey failure if this can't complete.
@@ -2585,6 +2620,16 @@ mod linux {
         cold_boot_timings: Option<BootTimings>,
         disk_transport_active: bool,
     ) -> String {
+        if let Some(refusal) = refuse_unless_contract(&format!("{JOB_DIR}/{job_dir_relpath}")) {
+            return crate::dispatch_response::DispatchResponse {
+                job_id,
+                exit_code: 2,
+                stderr_tail: refusal,
+                boot_timings: cold_boot_timings,
+                build_ms: 0,
+            }
+            .to_json();
+        }
         let (exit_code, stderr_tail, build_ms) = match job {
             crate::builder_request::BuilderJob::Flake { .. } => {
                 let cmd_path = format!("{JOB_DIR}/{job_dir_relpath}/cmd.sh");
@@ -3774,41 +3819,6 @@ mod linux {
         };
         let tail_joined = tail.into_iter().collect::<Vec<_>>().join("\n");
         (exit_code, tail_joined)
-    }
-
-    /// Write `/job/result` as JSON. Hand-rolled rather than
-    /// pulling `serde_json` in just for this — the init binary's
-    /// size budget is ≤ 1.5 MiB and the JSON shape is one
-    /// `i32` + one string.
-    fn write_result(exit_code: i32, stderr_tail: &str) {
-        let body = format!(
-            r#"{{"exit_code":{exit_code},"stderr_tail":"{escaped}"}}{nl}"#,
-            escaped = json_escape(stderr_tail),
-            nl = "\n",
-        );
-        let path = format!("{JOB_DIR}/result");
-        if let Err(e) = std::fs::write(&path, &body) {
-            eprintln!("mvm-host-vm-init: failed to write {path}: {e}");
-        }
-        mirror_host_visible_out_artifact("result", &body);
-    }
-
-    pub(crate) fn mirror_artifact_into_dir(dir: &Path, file_name: &str, body: &str) {
-        if !dir.is_dir() {
-            return;
-        }
-        let path = dir.join(file_name);
-        if let Err(e) = std::fs::write(&path, body) {
-            eprintln!(
-                "mvm-host-vm-init: failed to mirror {} into {}: {e}",
-                file_name,
-                path.display()
-            );
-        }
-    }
-
-    fn mirror_host_visible_out_artifact(file_name: &str, body: &str) {
-        mirror_artifact_into_dir(Path::new(OUT_DIR), file_name, body);
     }
 
     /// Minimal JSON string escaper. Only handles the characters

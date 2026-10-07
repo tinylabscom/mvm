@@ -303,6 +303,10 @@ pub struct CliWorld {
     /// Content address of the bundle a `bundle install` step registered, so the
     /// boot step can name it as `machine run --manifest <sha>`.
     pub bundle_sha: Option<String>,
+    /// Directory holding a bundle a live step sealed from its own build, as
+    /// `build.mvmpkg`, beside the public half of the key that signed it, as
+    /// `publisher.pub`.
+    pub sealed_bundle: Option<tempfile::TempDir>,
     /// Local kernel pins accumulated by the freshness-watcher scenarios.
     pub kernel_pins: Vec<KernelPin>,
     /// Latest upstream point release per `MAJOR.MINOR` series, as those same
