@@ -492,6 +492,37 @@ impl BundleRegistry {
     /// when the entry isn't present (the caller often wants to
     /// fall through to a different lookup); errors only on I/O
     /// or corrupt-manifest cases.
+    /// The signature-verified manifest of an installed bundle, or `None`
+    /// when no archive is installed under `bundle_sha256`.
+    ///
+    /// Reads `manifest.json` and `manifest.sig` from the head of the
+    /// installed archive and runs every manifest check
+    /// [`read_and_verify_bundle`] does — trust-store lookup, signature,
+    /// schema, declarations — without hashing an artifact. The artifacts were
+    /// hashed when the bundle was installed; this is the cheap read a launch
+    /// makes to learn what the bundle declares, and it refuses a manifest
+    /// whose posture was edited on disk after install.
+    pub fn verified_manifest(
+        &self,
+        bundle_sha256: &str,
+        trust: &dyn TrustStore,
+    ) -> Result<Option<BundleManifest>, BundleVerifyError> {
+        let path = self.archive_path(bundle_sha256);
+        let file = match std::fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(BundleVerifyError::ManifestParse(format!(
+                    "opening installed bundle archive {}: {e}",
+                    path.display()
+                )));
+            }
+        };
+        let (manifest_bytes, sig_bytes) = read_manifest_entries(file)?;
+        verify_signed_manifest(&manifest_bytes, &sig_bytes, trust)
+            .map(|(manifest, _)| Some(manifest))
+    }
+
     pub fn find(&self, bundle_sha256: &str) -> anyhow::Result<Option<InstalledBundle>> {
         let dir = self.install_dir(bundle_sha256);
         if !dir.exists() {
@@ -516,6 +547,41 @@ impl BundleRegistry {
             manifest,
         }))
     }
+}
+
+/// Read `manifest.json` and `manifest.sig` out of an archive, stopping as soon
+/// as both are found. A bundle writes them first, so a multi-GiB archive is
+/// read only as far as its first two entries.
+fn read_manifest_entries(archive: impl Read) -> Result<(Vec<u8>, Vec<u8>), BundleVerifyError> {
+    let tar_error = |e: std::io::Error| BundleVerifyError::ManifestParse(format!("tar read: {e}"));
+    let mut manifest = None;
+    let mut signature = None;
+    let mut budget = declarations::BundleSizeBudget::default();
+    for entry in tar::Archive::new(archive).entries().map_err(tar_error)? {
+        let mut entry = entry.map_err(tar_error)?;
+        let path = entry
+            .path()
+            .map_err(tar_error)?
+            .to_string_lossy()
+            .into_owned();
+        let slot = match path.as_str() {
+            MANIFEST_FILENAME => &mut manifest,
+            SIGNATURE_FILENAME => &mut signature,
+            _ => continue,
+        };
+        budget.admit(&path, entry.size())?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(tar_error)?;
+        *slot = Some(bytes);
+        if manifest.is_some() && signature.is_some() {
+            break;
+        }
+    }
+    let missing = |name: &str| BundleVerifyError::ManifestParse(format!("{name} missing"));
+    Ok((
+        manifest.ok_or_else(|| missing(MANIFEST_FILENAME))?,
+        signature.ok_or_else(|| missing(SIGNATURE_FILENAME))?,
+    ))
 }
 
 /// Write a single file under `dir` atomically. Used by
@@ -1030,81 +1096,8 @@ pub fn read_and_verify_bundle(
         .ok_or_else(|| BundleVerifyError::ManifestParse(format!("{SIGNATURE_FILENAME} missing")))?
         .clone();
 
-    // ----- Step 1: schema version sniff (pre-signature) -----
-    //
-    // We deliberately read schema_version *before* checking the
-    // signature. If a v2 bundle ever shows up, an older verifier
-    // should refuse with UnsupportedSchema, not parse-fail with a
-    // misleading deny_unknown_fields error. The signature check
-    // still happens before we expose any parsed plan-level fields.
-    #[derive(Deserialize)]
-    struct SchemaProbe {
-        schema_version: u32,
-    }
-    let probe: SchemaProbe = serde_json::from_slice(&manifest_bytes).map_err(|e| {
-        BundleVerifyError::ManifestParse(format!("schema_version probe failed: {e}"))
-    })?;
-    if probe.schema_version > BUNDLE_SCHEMA_VERSION {
-        return Err(BundleVerifyError::UnsupportedSchema {
-            found: probe.schema_version,
-            supported: BUNDLE_SCHEMA_VERSION,
-        });
-    }
-
-    // ----- Step 2: pull key_id (still pre-signature) -----
-    #[derive(Deserialize)]
-    struct KeyIdProbe {
-        key_id: KeyId,
-    }
-    let key_probe: KeyIdProbe = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| BundleVerifyError::ManifestParse(format!("key_id probe failed: {e}")))?;
-    let declared_key_id = key_probe.key_id;
-
-    // ----- Step 3: trust-store lookup -----
-    let pubkey =
-        trust_store
-            .lookup(&declared_key_id)
-            .ok_or_else(|| BundleVerifyError::UnknownKey {
-                key_id: declared_key_id.0.clone(),
-            })?;
-
-    // Defensive: confirm the pubkey we got back actually derives to
-    // the declared key_id. Defends against a misnamed file in the
-    // trust store; the trust-store file naming convention is the
-    // verifier's only link from declared id to actual key.
-    let actual_id = key_id_from_pubkey(&pubkey);
-    if actual_id != declared_key_id {
-        return Err(BundleVerifyError::KeyIdMismatch {
-            declared: declared_key_id.0,
-            actual: actual_id.0,
-        });
-    }
-
-    // ----- Step 4: signature check -----
-    if sig_bytes.len() != 64 {
-        return Err(BundleVerifyError::MalformedSignature {
-            got: sig_bytes.len(),
-        });
-    }
-    let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().expect("checked above");
-    let signature = Signature::from_bytes(&sig_arr);
-    pubkey.verify(&manifest_bytes, &signature).map_err(|e| {
-        BundleVerifyError::SignatureInvalid {
-            key_id: declared_key_id.0.clone(),
-            reason: e.to_string(),
-        }
-    })?;
-
-    // ----- Step 5: full manifest parse, now that the bytes are
-    // proven authentic -----
-    let manifest: BundleManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|e| BundleVerifyError::ManifestParse(e.to_string()))?;
-    if manifest.schema_version < 3 && !manifest.members.is_empty() {
-        return Err(BundleVerifyError::MembersRequireSchemaV3 {
-            found: manifest.schema_version,
-        });
-    }
-    declarations::validate_declarations(&manifest)?;
+    let (manifest, declared_key_id) =
+        verify_signed_manifest(&manifest_bytes, &sig_bytes, trust_store)?;
 
     // ----- Step 6: per-artifact hash + size check -----
     let mut artifacts_out: BTreeMap<String, Vec<u8>> = BTreeMap::new();
@@ -1142,6 +1135,94 @@ pub fn read_and_verify_bundle(
         key_id: declared_key_id,
         embedded_image_sets,
     })
+}
+
+/// Verify a manifest's detached signature against the trust store and parse
+/// it: the schema sniff, the key lookup, the signature, the full parse, and
+/// the declaration checks. Everything [`read_and_verify_bundle`] establishes
+/// about the manifest, without looking at a single artifact byte.
+fn verify_signed_manifest(
+    manifest_bytes: &[u8],
+    sig_bytes: &[u8],
+    trust_store: &dyn TrustStore,
+) -> Result<(BundleManifest, KeyId), BundleVerifyError> {
+    // ----- Step 1: schema version sniff (pre-signature) -----
+    //
+    // We deliberately read schema_version *before* checking the
+    // signature. If a v2 bundle ever shows up, an older verifier
+    // should refuse with UnsupportedSchema, not parse-fail with a
+    // misleading deny_unknown_fields error. The signature check
+    // still happens before we expose any parsed plan-level fields.
+    #[derive(Deserialize)]
+    struct SchemaProbe {
+        schema_version: u32,
+    }
+    let probe: SchemaProbe = serde_json::from_slice(manifest_bytes).map_err(|e| {
+        BundleVerifyError::ManifestParse(format!("schema_version probe failed: {e}"))
+    })?;
+    if probe.schema_version > BUNDLE_SCHEMA_VERSION {
+        return Err(BundleVerifyError::UnsupportedSchema {
+            found: probe.schema_version,
+            supported: BUNDLE_SCHEMA_VERSION,
+        });
+    }
+
+    // ----- Step 2: pull key_id (still pre-signature) -----
+    #[derive(Deserialize)]
+    struct KeyIdProbe {
+        key_id: KeyId,
+    }
+    let key_probe: KeyIdProbe = serde_json::from_slice(manifest_bytes)
+        .map_err(|e| BundleVerifyError::ManifestParse(format!("key_id probe failed: {e}")))?;
+    let declared_key_id = key_probe.key_id;
+
+    // ----- Step 3: trust-store lookup -----
+    let pubkey =
+        trust_store
+            .lookup(&declared_key_id)
+            .ok_or_else(|| BundleVerifyError::UnknownKey {
+                key_id: declared_key_id.0.clone(),
+            })?;
+
+    // Defensive: confirm the pubkey we got back actually derives to
+    // the declared key_id. Defends against a misnamed file in the
+    // trust store; the trust-store file naming convention is the
+    // verifier's only link from declared id to actual key.
+    let actual_id = key_id_from_pubkey(&pubkey);
+    if actual_id != declared_key_id {
+        return Err(BundleVerifyError::KeyIdMismatch {
+            declared: declared_key_id.0,
+            actual: actual_id.0,
+        });
+    }
+
+    // ----- Step 4: signature check -----
+    if sig_bytes.len() != 64 {
+        return Err(BundleVerifyError::MalformedSignature {
+            got: sig_bytes.len(),
+        });
+    }
+    let sig_arr: [u8; 64] = sig_bytes.try_into().expect("checked above");
+    let signature = Signature::from_bytes(&sig_arr);
+    pubkey
+        .verify(manifest_bytes, &signature)
+        .map_err(|e| BundleVerifyError::SignatureInvalid {
+            key_id: declared_key_id.0.clone(),
+            reason: e.to_string(),
+        })?;
+
+    // ----- Step 5: full manifest parse, now that the bytes are
+    // proven authentic -----
+    let manifest: BundleManifest = serde_json::from_slice(manifest_bytes)
+        .map_err(|e| BundleVerifyError::ManifestParse(e.to_string()))?;
+    if manifest.schema_version < 3 && !manifest.members.is_empty() {
+        return Err(BundleVerifyError::MembersRequireSchemaV3 {
+            found: manifest.schema_version,
+        });
+    }
+    declarations::validate_declarations(&manifest)?;
+
+    Ok((manifest, declared_key_id))
 }
 
 /// Bind each embedded image-set declaration to the already verified bundle
@@ -3047,6 +3128,66 @@ mod tests {
         assert!(matches!(
             read_and_verify_bundle(&archive, &trust(&sk)),
             Err(BundleVerifyError::EntryTooLarge { size, .. }) if size == 3 * 1024 * 1024 * 1024
+        ));
+    }
+
+    #[test]
+    fn verified_manifest_reads_the_posture_of_an_installed_bundle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sk = fresh_key();
+        let archive =
+            hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(sealed_posture())]);
+        let installed = registry.install(&archive, &trust(&sk), false).unwrap();
+
+        let manifest = registry
+            .verified_manifest(&installed.sha256, &trust(&sk))
+            .expect("verifies")
+            .expect("installed");
+        assert_eq!(manifest.security_posture(), Some(&sealed_posture()));
+        assert!(
+            registry
+                .verified_manifest(&"0".repeat(64), &trust(&sk))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn verified_manifest_refuses_a_posture_widened_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sk = fresh_key();
+        let archive =
+            hand_sealed_bundle(&sk, vec![BundleMember::SecurityPosture(sealed_posture())]);
+        let installed = registry.install(&archive, &trust(&sk), false).unwrap();
+        let path = registry.archive_path(&installed.sha256);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let needle = br#""allows_egress":false"#;
+        let at = bytes
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .unwrap();
+        bytes[at..at + needle.len()].copy_from_slice(br#""allows_egress":true "#);
+        std::fs::write(&path, bytes).unwrap();
+
+        assert!(matches!(
+            registry.verified_manifest(&installed.sha256, &trust(&sk)),
+            Err(BundleVerifyError::SignatureInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn verified_manifest_refuses_an_unknown_publisher() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(tmp.path());
+        let sk = fresh_key();
+        let archive = hand_sealed_bundle(&sk, Vec::new());
+        let installed = registry.install(&archive, &trust(&sk), false).unwrap();
+
+        assert!(matches!(
+            registry.verified_manifest(&installed.sha256, &trust(&fresh_key())),
+            Err(BundleVerifyError::UnknownKey { .. })
         ));
     }
 }

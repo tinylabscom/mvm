@@ -1137,6 +1137,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         audit_dir: None,
         policy_dir: None,
         bundle_pin: parent_bundle.as_ref().map(InheritedBundle::pin),
+        bundle_posture: None,
         deps_volume: None,
         shares: Vec::new(),
         assets: Vec::new(),

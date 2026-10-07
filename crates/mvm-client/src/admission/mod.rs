@@ -27,8 +27,8 @@ use mvm_hostd::audit::emitter::AuditEmitter;
 use mvm_hostd::audit::host_keypair::{PUBLIC_FILENAME, load_or_init_at};
 
 use self::audit::{
-    build_default_audit_emitter, build_policy_audit_emitter, emit_policy_audit_invalid,
-    emit_policy_resolve_failure, emit_policy_resolved,
+    build_default_audit_emitter, build_policy_audit_emitter, emit_bundle_posture_refused,
+    emit_policy_audit_invalid, emit_policy_resolve_failure, emit_policy_resolved,
 };
 use self::policy::{
     InMemoryBundleResolver, bundle_pin_from_archive, generated_policy_bundle_for_network_policy,
@@ -37,6 +37,7 @@ use self::policy::{
 pub mod agent_verbs;
 mod audit;
 mod bundle_binding;
+pub mod bundle_posture;
 pub mod entrypoint_resolve;
 pub mod instructions;
 pub mod policy;
@@ -139,6 +140,12 @@ pub struct AdmitPlanForBootParams<'a> {
     /// inherits that pin ([`InheritedBundle`]): the archive is re-verified
     /// and must still be the bundle the parent was admitted under.
     pub bundle_pin: Option<BundlePin<'a>>,
+    /// The signed security posture of the installed bundle this run boots,
+    /// when it boots one. The launch may only narrow it: admission refuses a
+    /// run whose network policy, host shares, or agent verbs ask for more,
+    /// and records the refusal as `plan.failed`. A pinned bundle's own
+    /// posture is checked the same way.
+    pub bundle_posture: Option<mvm_core::plan::BundleSecurityPosture>,
     /// Optional deps-volume binding from the app-deps install pipeline.
     /// No boot path supplies one today. When `Some`, the
     /// synthesised `ExecutionPlan` carries `deps_volume = Some(...)`,
@@ -457,6 +464,8 @@ pub fn admit_plan_for_boot_with_ingress(
         .backend_kind
         .and_then(mvm_core::image_set::BackendImageSupport::for_backend);
     let bundle_host_protocols = mvm_build::stage0_kernel::current_image_set_protocol_support();
+    let mut postures: Vec<mvm_core::plan::BundleSecurityPosture> =
+        p.bundle_posture.into_iter().collect();
     let (bundle_pin, bundle_resolver, bundle_trust, bundle_has_embedded_images, pinned_bundle) =
         match p.bundle_pin {
             Some(bundle) => {
@@ -497,6 +506,7 @@ pub fn admit_plan_for_boot_with_ingress(
                     }
                 }
                 let has_embedded_images = !verified.embedded_image_sets.is_empty();
+                postures.extend(verified.manifest.security_posture().copied());
                 let pin = bundle_pin_from_archive(&bytes, verified.key_id.clone()).with_context(
                     || format!("extracting signature from bundle at {}", path.display()),
                 )?;
@@ -762,6 +772,26 @@ pub fn admit_plan_for_boot_with_ingress(
         None => mvm_hostd::audit::host_keypair::load_or_init(),
     }
     .context("loading host signer for audit emitter")?;
+
+    // A bundle's signed posture is a ceiling on this launch. The plan is
+    // already admitted so the refusal binds to its id in the audit chain;
+    // nothing has been recorded as admitted yet, and nothing boots.
+    let posture_request = bundle_posture::PostureRequest {
+        network_policy: &p.network_policy,
+        shares: &shares,
+        restrict_agent_verbs: p.restrict_agent_verbs,
+    };
+    let exceeded: Vec<_> = postures
+        .iter()
+        .flat_map(|posture| bundle_posture::posture_exceedances(posture, &posture_request))
+        .collect();
+    if !exceeded.is_empty() {
+        let err = anyhow::anyhow!(bundle_posture::refusal_message(&exceeded));
+        let emitter = build_default_audit_emitter(signer.signing.clone(), p.audit_dir)
+            .context("opening audit chain emitter for the posture refusal")?;
+        emit_bundle_posture_refused(admitted.plan(), &emitter, &err);
+        return Err(err);
+    }
     let t_signer = std::time::Instant::now();
     tracing::debug!(
         ms = (t_signer - t_signed).as_secs_f64() * 1000.0,
@@ -1496,6 +1526,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: None,
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -1664,6 +1695,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -1732,6 +1764,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -1817,6 +1850,7 @@ pub(crate) mod admit_plan_tests {
                 audit_dir: Some(audit_dir.path()),
                 policy_dir: None,
                 bundle_pin: None,
+                bundle_posture: None,
                 deps_volume: None,
                 shares: Vec::new(),
                 assets: Vec::new(),
@@ -1874,6 +1908,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             services: Vec::new(),
@@ -1911,6 +1946,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -1962,6 +1998,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -2091,6 +2128,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: Some(policy_dir.path()),
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -2154,6 +2192,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -2227,6 +2266,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -2403,6 +2443,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: vec![mvm_core::plan::HostShareGrant {
                 tag: "uvol0".into(),
@@ -2470,6 +2511,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -2526,6 +2568,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -2591,6 +2634,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -2652,6 +2696,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
@@ -2705,6 +2750,7 @@ pub(crate) mod admit_plan_tests {
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             ledger: &ledger,
@@ -3112,6 +3158,7 @@ allow_hosts = ["localhost:8443"]
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: vec![
                 share(
@@ -3221,6 +3268,7 @@ allow_hosts = ["localhost:8443"]
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -3396,6 +3444,7 @@ allow_hosts = ["localhost:8443"]
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -3465,6 +3514,7 @@ allow_hosts = ["localhost:8443"]
             audit_dir: Some(audit_dir.path()),
             policy_dir: None,
             bundle_pin: None,
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),

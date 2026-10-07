@@ -379,6 +379,7 @@ fn admit_forked_child(p: &AdmitForkedChildParams<'_>) -> Result<AdmittedForkChil
             bundle_pin: parent_bundle
                 .as_ref()
                 .map(mvm_client::admission::InheritedBundle::pin),
+            bundle_posture: None,
             deps_volume: None,
             shares: Vec::new(),
             assets: Vec::new(),
