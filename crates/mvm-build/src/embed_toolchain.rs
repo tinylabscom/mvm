@@ -272,7 +272,7 @@ fn configured_embed_tools_from(
     Ok(Some((cargo, rustc)))
 }
 
-fn rustc_has_target(rustc: &str, target: &str) -> bool {
+pub fn rustc_has_target(rustc: &str, target: &str) -> bool {
     let out = super::helper_command(rustc)
         .args(["--target", target, "--print", "target-libdir"])
         .output();
