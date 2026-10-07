@@ -3,7 +3,6 @@
 pub(super) use mvm_client::admission::agent_verbs;
 pub(super) mod artifact;
 pub(super) mod audit_chain;
-pub(in crate::commands) mod audit_follow;
 pub(in crate::commands) mod checkpoint;
 pub(crate) mod console;
 pub(super) mod cp;

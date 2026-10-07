@@ -298,7 +298,7 @@ uncovered = [
     "mvmctl machine build --update-hash",
     "mvmctl machine build ./ci-worker --json",
     "mvmctl machine build ./my-app --json",
-    "mvmctl machine check-artifact ./my-app.mvm",
+    "mvmctl machine check-artifact ./my-app.mvmpkg",
     "mvmctl machine checkpoint restore CHECKPOINT_ID",
     "mvmctl machine console agent-dev",
     'mvmctl machine console agent-dev --command "uname -a"',

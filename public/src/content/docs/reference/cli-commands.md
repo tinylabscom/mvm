@@ -805,10 +805,8 @@ guest, on any tier.
 | `mvmctl machine reconfigure <name> --cpus <n>`                                                 | Change the vCPU count                                                                                                                                                                                                                                                                                                                |
 | `mvmctl machine reconfigure <name> --memory <size>`                                            | Change the memory limit (accepts `512m`, `1g`, etc.)                                                                                                                                                                                                                                                                                 |
 | `mvmctl machine reconfigure <name> --mem-initial <size>`                                       | Change the initial balloon memory target (CLI-only; not exposed on the remote facade)                                                                                                                                                                                                                                                |
-| `mvmctl machine check-artifact <artifact.mvm>`                                                 | Verify a portable artifact and preview its admission posture without extracting or booting                                                                                                                                                                                                                                           |
-| `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>`                                  | Verify with an explicit raw Ed25519 public key                                                                                                                                                                                                                                                                                       |
-| `mvmctl machine check-artifact <artifact.mvm> --json`                                          | Print the verified artifact/admission preview as JSON                                                                                                                                                                                                                                                                                |
-| `mvmctl machine check-artifact <bundle.mvmpkg> [--trust-store <dir>]`                           | Verify the signed bundle, its complete embedded image-set manifest, and every image size/hash without booting                                                                                                                                                                                                                        |
+| `mvmctl machine check-artifact <bundle.mvmpkg> [--trust-store <dir>]`                           | Verify the signed bundle, its declarations, its complete embedded image-set manifest, and every image size/hash, confirm its architecture matches this host, and preview its posture, without installing or booting                                                                                                                                                                                                                        |
+| `mvmctl machine check-artifact <bundle.mvmpkg> --json`                                        | Print the verdict as JSON, including the declared posture (`null` when none), kernel command line, and build input                                                                                                                                                                                                                   |
 | `mvmctl machine check-artifact <bundle.mvmpkg> --backend <name>`                                | Also refuse before boot when the selected Linux-direct backend lacks the artifact's architecture, boot protocol, image format, or required guest device                                                                                                                                                                               |
 
 ### Workload output capture
@@ -1025,12 +1023,14 @@ machine-start receipt carries the same policy summary plus the resolved digest
 and start timestamp after a real boot. `exec` / `shell` / `stop` reuse the
 existing console/down paths for the running VM. `machine reconfigure <name>`
 patches a subset of the stored config (`net`, `allow_host`, `cpus`, `memory`, and the CLI-only `mem_initial`) and relaunches the machine — auto stop + start when running,
-persist-only when stopped; identity, image, and volumes are preserved. `machine pack` for portable
-signed `.mvm` artifacts is still follow-up work, and a `.mvm` has no boot path.
-`machine check-artifact` is the read-only portable-artifact gate: it
-verifies the signed manifest, file hashes, format version, sealed-prod verity
-requirements, host architecture, and fail-closed admission posture before
-printing a preview. Use `mvmctl machine run` for the manifest/flake path that already
+persist-only when stopped; identity, image, and volumes are preserved.
+`machine check-artifact` is the read-only gate for a signed `.mvmpkg`: it
+verifies the signed manifest, every artifact's size and hash, the size caps
+(2 GiB per entry, 4 GiB in total), the declared posture's coherence (a
+`sealed-prod` posture must cover a dm-verity rootfs and require
+authentication), and the host architecture before printing a preview. The
+older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
+to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
 #### Booting a signed bundle
@@ -1509,11 +1509,14 @@ running microVM.
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
 | `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. With no `$MVM_HOME/registry/publishers.toml`, the built-in official-registry policy (mvm-templates `publish.yml` identity) applies; a written policy replaces it wholesale                                                                         |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
+| `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
+| `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
+| `mvmctl bundle export <t> --posture <p> --allow-egress` / `--allow-volumes` / `--allow-unauthenticated` | Open one ceiling of the declared posture. `--allow-unauthenticated` is refused for `sealed-prod`                                                                   |
 | `mvmctl bundle fetch`                                     | Verify a `.mvmpkg` from a path, an `https://` URL, or an `oci://` registry reference against the local trust store                                                |
 | `mvmctl bundle install`                                   | Verify and atomically install a `.mvmpkg` (from any `fetch` source) into `~/.mvm/bundles/<sha>/`                                                                  |
 | `mvmctl bundle push <file> <ref>`                         | Verify a `.mvmpkg` against the local trust store, publish it to an image registry, and print its `oci://…@sha256:` reference                                      |
 | `mvmctl bundle gc`                                        | Prune installed bundles — a specific `<SHA>` or `--all`                                                                                                           |
-| `mvmctl artifact pack` / `verify` / `inspect` / `extract` | Pack or verify signed `.mvm` artifacts                                                                                                                            |
+| `mvmctl artifact pack`                                    | Alias of `mvmctl bundle export`; takes the same arguments                                                                                                         |
 | `mvmctl deps inspect`                                     | Show a sealed application-dep volume's SBOM, CVE, and hash-chained metadata without spawning a VM                                                                 |
 | `mvmctl deps audit`                                       | Re-verify a sealed dep volume against its recorded chain                                                                                                          |
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
