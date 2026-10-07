@@ -6,6 +6,11 @@
 //! markers are the only evidence a directory is the installer's, so nothing
 //! here — and nothing in `uninstall.sh` — treats an unmarked directory as a
 //! release, whatever its name.
+//!
+//! The Linux `.deb` and `.rpm` install a third marker, [`PACKAGE_MARKER`],
+//! under the prefix whose `bin/` holds `mvmctl`. Its presence means the system
+//! package manager owns the binaries beside `mvmctl`, and its content names the
+//! package format.
 
 use std::path::{Path, PathBuf};
 
@@ -13,6 +18,58 @@ use std::path::{Path, PathBuf};
 pub(crate) const LIB_MARKER: &str = ".mvm-lib";
 /// Marker file inside each release directory the installer created.
 pub(crate) const RELEASE_MARKER: &str = ".mvm-release";
+
+/// Marker file the distribution packages install, relative to the prefix whose
+/// `bin/` directory holds `mvmctl` (`/usr/share/mvmctl/package-managed` for
+/// `/usr/bin/mvmctl`).
+pub(crate) const PACKAGE_MARKER: &str = "share/mvmctl/package-managed";
+
+/// The package format a [`PACKAGE_MARKER`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PackageFormat {
+    Deb,
+    Rpm,
+}
+
+impl PackageFormat {
+    /// The marker content each package writes; nothing else parses.
+    fn from_marker(content: &str) -> Option<Self> {
+        match content.trim() {
+            "deb" => Some(Self::Deb),
+            "rpm" => Some(Self::Rpm),
+            _ => None,
+        }
+    }
+}
+
+/// A system-package install of `mvmctl`, recognised by its marker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PackageInstall {
+    /// The marker that identified the install.
+    pub(crate) marker: PathBuf,
+    /// The format the marker names, or `None` when its content is not one a
+    /// package of ours writes. The marker still means a package owns the
+    /// files, so an unreadable format is not evidence of the opposite.
+    pub(crate) format: Option<PackageFormat>,
+}
+
+/// The package install `exe` belongs to, when `exe` resolves to a file in a
+/// `bin/` directory whose prefix carries [`PACKAGE_MARKER`].
+pub(crate) fn package_install_of(exe: &Path) -> Option<PackageInstall> {
+    let exe = std::fs::canonicalize(exe).ok()?;
+    let bin = exe.parent()?;
+    if bin.file_name()? != "bin" {
+        return None;
+    }
+    let marker = bin.parent()?.join(PACKAGE_MARKER);
+    if !marker.is_file() {
+        return None;
+    }
+    let format = std::fs::read_to_string(&marker)
+        .ok()
+        .and_then(|content| PackageFormat::from_marker(&content));
+    Some(PackageInstall { marker, format })
+}
 
 /// The library directory of the install `exe` runs from, when `exe` resolves to
 /// a file in a marked release directory of a marked library directory.
@@ -108,6 +165,90 @@ mod tests {
             "a marked release in an unmarked library is not an install"
         );
         assert_eq!(versioned_lib_dir_of(&root.path().join("missing")), None);
+    }
+
+    /// `<root>/usr/bin/mvmctl`, with the package marker under `<root>/usr`
+    /// holding `content` when it is `Some`.
+    fn package_prefix(content: Option<&str>) -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let usr = root.path().join("usr");
+        std::fs::create_dir_all(usr.join("bin")).unwrap();
+        std::fs::write(usr.join("bin/mvmctl"), "").unwrap();
+        if let Some(content) = content {
+            let marker = usr.join(PACKAGE_MARKER);
+            std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+            std::fs::write(marker, content).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn the_packaging_installs_the_marker_this_binary_looks_for() {
+        let manifest = include_str!("../../../Cargo.toml");
+        let destination = format!("/usr/{PACKAGE_MARKER}");
+        assert!(
+            manifest.contains(&format!("\"{}\"", &destination[1..])),
+            "the .deb assets must install {destination}"
+        );
+        assert!(
+            manifest.contains(&format!("dest = \"{destination}\"")),
+            "the .rpm assets must install {destination}"
+        );
+        let script = include_str!("../../../scripts/build-distro-packages.sh");
+        for format in ["deb", "rpm"] {
+            assert!(
+                script.contains(&format!("printf '%s\\n' {format}")),
+                "the build script must write the {format} marker"
+            );
+            assert!(PackageFormat::from_marker(&format!("{format}\n")).is_some());
+        }
+    }
+
+    #[test]
+    fn a_binary_under_a_marked_prefix_is_a_package_install() {
+        for (content, format) in [
+            ("deb\n", Some(PackageFormat::Deb)),
+            ("rpm\n", Some(PackageFormat::Rpm)),
+            ("pacman\n", None),
+        ] {
+            let root = package_prefix(Some(content));
+            let install = package_install_of(&root.path().join("usr/bin/mvmctl"))
+                .expect("a marked prefix is a package install");
+            assert_eq!(install.format, format, "marker content {content:?}");
+            assert_eq!(
+                install.marker,
+                std::fs::canonicalize(root.path().join("usr"))
+                    .unwrap()
+                    .join(PACKAGE_MARKER)
+            );
+        }
+    }
+
+    #[test]
+    fn a_link_to_a_packaged_binary_is_still_the_package_install() {
+        let root = package_prefix(Some("deb\n"));
+        let link = root.path().join("mvmctl");
+        std::os::unix::fs::symlink(root.path().join("usr/bin/mvmctl"), &link).unwrap();
+        assert!(package_install_of(&link).is_some());
+    }
+
+    #[test]
+    fn an_unmarked_prefix_or_a_binary_outside_bin_is_not_a_package_install() {
+        let root = package_prefix(None);
+        assert_eq!(
+            package_install_of(&root.path().join("usr/bin/mvmctl")),
+            None
+        );
+
+        let root = package_prefix(Some("deb\n"));
+        let loose = root.path().join("usr/share/mvmctl/mvmctl");
+        std::fs::write(&loose, "").unwrap();
+        assert_eq!(
+            package_install_of(&loose),
+            None,
+            "only a binary in the prefix's bin/ is the package's"
+        );
+        assert_eq!(package_install_of(&root.path().join("missing")), None);
     }
 
     #[test]

@@ -1,11 +1,18 @@
-//! `mvmctl machine check-artifact` round-trip: pack a dev `.mvm` for this
-//! host's arch, then verify + preview its admission. Read-only — no boot.
+//! `mvmctl machine check-artifact` round-trip: seal a signed `.mvmpkg` for
+//! this host's arch, then verify it and preview its posture. Read-only — no
+//! install, no boot.
 
 use assert_cmd::cargo::CommandCargoExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use mvmctl::core::plan::bundle::BundleMember;
+
 fn signed_bundle_fixture(root: &Path) -> (PathBuf, PathBuf) {
+    signed_bundle_fixture_with(root, Vec::new())
+}
+
+fn signed_bundle_fixture_with(root: &Path, members: Vec<BundleMember>) -> (PathBuf, PathBuf) {
     use mvmctl::core::plan::bundle::{
         ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, key_id_from_pubkey,
         sha256_hex, write_bundle,
@@ -31,7 +38,7 @@ fn signed_bundle_fixture(root: &Path) -> (PathBuf, PathBuf) {
             sha256: sha256_hex(&kernel),
             size_bytes: kernel.len() as u64,
         }],
-        members: Vec::new(),
+        members,
         verity: None,
         resources: None,
     };
@@ -51,95 +58,6 @@ fn signed_bundle_fixture(root: &Path) -> (PathBuf, PathBuf) {
     )
     .expect("enrol publisher key");
     (archive_path, trust_dir)
-}
-
-#[test]
-fn check_artifact_reports_verified_runnable_and_admission_preview() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let work = tmp.path();
-    let data = work.join("data");
-    let kernel = work.join("vmlinux");
-    let rootfs = work.join("rootfs.ext4");
-    let cmdline = work.join("cmdline.txt");
-    std::fs::write(&kernel, b"kernel bytes").unwrap();
-    std::fs::write(&rootfs, b"rootfs bytes").unwrap();
-    std::fs::write(&cmdline, b"console=hvc0").unwrap();
-    let artifact = work.join("out.mvm");
-
-    // Pack for THIS host's arch so the arch-gate reports runnable everywhere
-    // (CI is x86_64, dev boxes aarch64). `std::env::consts::ARCH` matches
-    // mvm's GuestArch strings ("aarch64" / "x86_64").
-    let host_arch = std::env::consts::ARCH;
-
-    #[allow(deprecated)]
-    let pack = Command::cargo_bin("mvmctl")
-        .unwrap()
-        .env("HOME", &data)
-        .env("MVM_HOME", &data)
-        .args([
-            "artifact",
-            "pack",
-            "--kernel",
-            kernel.to_str().unwrap(),
-            "--rootfs",
-            rootfs.to_str().unwrap(),
-            "--cmdline",
-            cmdline.to_str().unwrap(),
-            "--target-arch",
-            host_arch,
-            "--profile",
-            "dev",
-            "--allows-egress",
-            "--allows-volumes",
-            "--out",
-            artifact.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        pack.status.success(),
-        "pack failed: {}",
-        String::from_utf8_lossy(&pack.stderr)
-    );
-
-    #[allow(deprecated)]
-    let check = Command::cargo_bin("mvmctl")
-        .unwrap()
-        .env("HOME", &data)
-        .env("MVM_HOME", &data)
-        .args([
-            "machine",
-            "check-artifact",
-            artifact.to_str().unwrap(),
-            "--json",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        check.status.success(),
-        "check-artifact failed: {}",
-        String::from_utf8_lossy(&check.stderr)
-    );
-
-    let stdout = String::from_utf8_lossy(&check.stdout);
-    assert!(
-        stdout.contains("\"runnable_here\": true"),
-        "expected runnable_here=true, got: {stdout}"
-    );
-    // The artifact declares egress + volumes; the preview reflects the
-    // declared posture (proving it flows through admission_for).
-    assert!(
-        stdout.contains("\"egress\": \"allowed\""),
-        "expected egress=allowed for an egress-declaring artifact, got: {stdout}"
-    );
-    assert!(
-        stdout.contains("\"volumes\": true"),
-        "expected volumes=true for a volume-declaring artifact, got: {stdout}"
-    );
-    assert!(
-        stdout.contains(&format!("\"target_arch\": \"{host_arch}\"")),
-        "expected target_arch={host_arch}, got: {stdout}"
-    );
 }
 
 #[test]
@@ -169,4 +87,70 @@ fn check_artifact_verifies_a_signed_mvmpkg_without_booting() {
     assert_eq!(verdict["verified"], true);
     assert_eq!(verdict["artifact_count"], 1);
     assert_eq!(verdict["embedded_image_sets"], serde_json::json!([]));
+}
+
+fn check_artifact_json(home: &Path, artifact: &Path, trust_dir: &Path) -> std::process::Output {
+    #[allow(deprecated)]
+    Command::cargo_bin("mvmctl")
+        .expect("mvmctl binary")
+        .env("HOME", home)
+        .env("MVM_HOME", home)
+        .args(["machine", "check-artifact"])
+        .arg(artifact)
+        .arg("--trust-store")
+        .arg(trust_dir)
+        .arg("--json")
+        .output()
+        .expect("run check-artifact")
+}
+
+#[test]
+fn check_artifact_previews_a_declared_posture() {
+    use mvmctl::core::plan::bundle::BundleSecurityPosture;
+    use mvmctl::core::security::AgentProfile;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (artifact, trust_dir) = signed_bundle_fixture_with(
+        tmp.path(),
+        vec![
+            BundleMember::KernelCmdline {
+                cmdline: "console=ttyS0".to_string(),
+            },
+            BundleMember::SecurityPosture(BundleSecurityPosture {
+                profile: AgentProfile::Dev,
+                verity_protected: false,
+                requires_auth: true,
+                allows_volumes: false,
+                allows_egress: false,
+            }),
+        ],
+    );
+
+    let check = check_artifact_json(&tmp.path().join("data"), &artifact, &trust_dir);
+    assert!(
+        check.status.success(),
+        "check-artifact failed: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let verdict: serde_json::Value = serde_json::from_slice(&check.stdout).expect("JSON verdict");
+    assert_eq!(verdict["runnable_here"], true);
+    assert_eq!(verdict["posture"]["profile"], "dev");
+    assert_eq!(verdict["posture"]["egress"], "deny-all");
+    assert_eq!(verdict["posture"]["volumes"], false);
+    assert_eq!(verdict["kernel_cmdline"], "console=ttyS0");
+}
+
+#[test]
+fn check_artifact_refuses_a_path_that_is_not_a_bundle() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let not_a_bundle = tmp.path().join("app.mvm");
+    std::fs::write(&not_a_bundle, b"retired format").expect("write fixture");
+
+    let check = check_artifact_json(&tmp.path().join("data"), &not_a_bundle, tmp.path());
+    assert!(!check.status.success());
+    assert!(
+        String::from_utf8_lossy(&check.stderr).contains("not a .mvmpkg bundle"),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
 }

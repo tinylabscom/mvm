@@ -75,6 +75,7 @@ mod session_events;
 mod workspace;
 pub use workspace::{WorkspaceMutationAudit, WorkspaceSnapshotAudit, workspace_audit};
 
+pub mod agent_prompt_audit;
 pub mod checkpoint_audit;
 pub mod display_audit;
 pub mod drive_audit;
@@ -1752,6 +1753,108 @@ mod tests {
 
         verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
             .expect("the entry is chain-signed like any other");
+    }
+
+    /// A prompt reaches the chain as its digest, its size and the content
+    /// address of its encrypted replay artifact. The key set is pinned whole,
+    /// so a label added later fails here rather than quietly carrying text,
+    /// and the prompt and the answer appear nowhere in the entry.
+    #[test]
+    fn agent_prompt_entries_carry_the_binding_and_no_prompt_or_answer_bytes() {
+        use agent_prompt_audit as k;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = [0u8; 32];
+        rand::rng().fill_bytes(&mut seed);
+        let key = SigningKey::from_bytes(&seed);
+        let vk = key.verifying_key();
+        let emitter = AuditEmitter::with_dir(key, dir.path()).expect("emitter");
+        let plan = fixture_plan("local", "plan-prompt");
+        let prompt = b"rotate the staging credentials and tell nobody";
+        let binding = k::PromptAuditBinding {
+            vm_name: "agent-vm".into(),
+            session_id: "agent-vm".into(),
+            generation: 1,
+            journal_cursor: 4,
+            delivery: k::PromptDelivery::Live,
+        };
+        let fingerprint = k::PromptFingerprint::of(prompt, "sha256:artifact");
+
+        emitter
+            .emit_agent_prompt_delivered(&plan, &binding, &fingerprint)
+            .expect("delivered");
+        emitter
+            .emit_agent_prompt_completed(&plan, &binding, "exited:0")
+            .expect("completed");
+
+        let raw = std::fs::read_to_string(dir.path().join("local.jsonl")).unwrap();
+        assert!(
+            !raw.contains("rotate the staging"),
+            "prompt text in the chain"
+        );
+        let entries: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["entry"].clone())
+            .collect();
+        assert_eq!(entries.len(), 2);
+
+        let delivered = &entries[0];
+        assert_eq!(delivered["event"], k::DELIVERED_EVENT);
+        assert_eq!(delivered["plan_id"], "plan-prompt");
+        assert_eq!(
+            delivered["labels"][k::LABEL_PROMPT_SHA256],
+            fingerprint.sha256.as_str()
+        );
+        assert_eq!(
+            delivered["labels"][k::LABEL_PROMPT_BYTES],
+            prompt.len().to_string()
+        );
+        let mut keys: Vec<&str> = delivered["labels"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            k::LABEL_DELIVERY,
+            k::LABEL_GENERATION,
+            k::LABEL_JOURNAL_CURSOR,
+            k::LABEL_PROMPT_BYTES,
+            k::LABEL_PROMPT_SHA256,
+            k::LABEL_REPLAY_INPUT,
+            k::LABEL_SESSION_ID,
+            k::LABEL_VM_NAME,
+        ];
+        expected.sort_unstable();
+        assert_eq!(
+            keys, expected,
+            "a delivery carries the binding and nothing else"
+        );
+
+        let completed = &entries[1];
+        assert_eq!(completed["event"], k::COMPLETED_EVENT);
+        assert_eq!(completed["labels"][k::LABEL_OUTCOME], "exited:0");
+        let mut keys: Vec<&str> = completed["labels"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = vec![
+            k::LABEL_DELIVERY,
+            k::LABEL_GENERATION,
+            k::LABEL_JOURNAL_CURSOR,
+            k::LABEL_OUTCOME,
+            k::LABEL_SESSION_ID,
+            k::LABEL_VM_NAME,
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "a completion carries no answer bytes");
+
+        verify_audit_chain(&dir.path().join("local.jsonl"), &vk)
+            .expect("prompt entries are chain-signed");
     }
 
     /// Every refusal variant reaches the chain under its own reason word, and
