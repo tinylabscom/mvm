@@ -5,7 +5,7 @@
 use anyhow::Result;
 
 use super::RunArgs;
-use crate::commands::vm::denial_review::ReviewSource;
+use crate::commands::vm::denial_review::{self, JsonReviewPointer, ReviewSource};
 use crate::commands::vm::egress_denials::{DenialTally, PendingWatch};
 
 /// Build a `--flake` into a manifest slot and point the run at it, returning
@@ -44,15 +44,77 @@ pub(super) fn offer_review(
     }
 }
 
+/// Carry an armed run's review command into its single JSON summary.
+pub(super) fn json_review_pointer(
+    refused: &DenialTally,
+    denials: &PendingWatch,
+    source: &ReviewSource,
+) -> Option<JsonReviewPointer> {
+    denials
+        .review_offer(source)
+        .and_then(|offer| denial_review::json_review_pointer(refused, &offer))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::vm::denial_review::NoManifest;
+    use crate::commands::vm::egress_denials::Live;
+    use mvm_client::egress_denials::denial::EgressDenial;
+    use mvm_hostd::supervisor::PlanAuditEntry;
+
+    fn entry(event: &str, labels: &[(&str, &str)]) -> PlanAuditEntry {
+        PlanAuditEntry {
+            timestamp: "2026-09-26T10:00:00Z".parse().unwrap(),
+            tenant: mvm_core::plan::TenantId("local".into()),
+            plan_id: mvm_core::plan::PlanId("00000000-0000-0000-0000-000000000000".into()),
+            plan_version: 0,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: "<unbound>".into(),
+            image_sha256: "0".repeat(64),
+            event: event.into(),
+            caller_commitment: None,
+            labels: labels
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
 
     fn project() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("mvm.toml"), "flake = \".\"\n").unwrap();
         dir
+    }
+
+    #[test]
+    fn json_review_uses_the_armed_machine_and_the_admitted_manifest() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().expect("isolated home");
+        env.isolate_mvm_home(home.path());
+        let watch = PendingWatch::new(Live::Quiet);
+        let source = ReviewSource::Manifest("/project/mvm.toml".into());
+        let audit = entry(
+            "host.flow.denied",
+            &[
+                ("vm_name", "vm-json"),
+                ("class", "tcp"),
+                ("target", "api.example.com:443"),
+                ("reason", "policy_denied"),
+            ],
+        );
+        let mut refused = DenialTally::default();
+        refused.observe(EgressDenial::from_entry(&audit, "vm-json").expect("denial"));
+
+        assert!(json_review_pointer(&refused, &watch, &source).is_none());
+        watch.arm("vm-json");
+        let pointer = json_review_pointer(&refused, &watch, &source).expect("review pointer");
+        assert_eq!(pointer.run, "vm-json");
+        assert_eq!(
+            pointer.command,
+            "mvmctl explain vm-json --review --project /project/mvm.toml"
+        );
     }
 
     /// The slot replaces the flake, so the review source has to be read

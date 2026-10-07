@@ -45,8 +45,8 @@
 //! - **Multi-host replication.** Single-host only; mvmd's secret
 //!   service handles fleets.
 
+use crate::private_fs::{mode_bits, set_mode};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -157,8 +157,7 @@ impl FileSecretStore {
         if !dir.exists() {
             fs::create_dir_all(&dir)
                 .with_context(|| format!("creating tenant secret dir {}", dir.display()))?;
-            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("chmod 0700 {}", dir.display()))?;
+            set_mode(&dir, 0o700).with_context(|| format!("chmod 0700 {}", dir.display()))?;
         }
         Ok(dir)
     }
@@ -204,7 +203,7 @@ impl SecretStore for FileSecretStore {
                 path.display()
             )
         })?;
-        let mode = meta.permissions().mode() & 0o777;
+        let mode = mode_bits(&path, &meta)?;
         if mode != 0o600 {
             anyhow::bail!("secret {} has mode 0{mode:o}; require 0600", path.display());
         }
@@ -321,7 +320,7 @@ fn load_or_init_file_key(path: &Path) -> Result<SecretBox<Vec<u8>>> {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)
                     .with_context(|| format!("creating {}", parent.display()))?;
-                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+                set_mode(parent, 0o700)
                     .with_context(|| format!("chmod 0700 {}", parent.display()))?;
             }
         }
@@ -344,7 +343,7 @@ fn load_or_init_file_key(path: &Path) -> Result<SecretBox<Vec<u8>>> {
 fn load_file_key(path: &Path) -> Result<SecretBox<Vec<u8>>> {
     let meta =
         fs::metadata(path).with_context(|| format!("stat secret-store key {}", path.display()))?;
-    let mode = meta.permissions().mode() & 0o777;
+    let mode = mode_bits(path, &meta)?;
     if mode != 0o600 {
         anyhow::bail!(
             "secret-store key {} has mode 0{mode:o}; require 0600",
@@ -468,8 +467,7 @@ impl KeyringSecretStore {
             && !parent.exists()
         {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
-                .with_context(|| format!("chmod 0700 {}", parent.display()))?;
+            set_mode(parent, 0o700).with_context(|| format!("chmod 0700 {}", parent.display()))?;
         }
         let json = serde_json::to_vec_pretty(names).context("serialize index")?;
         crate::atomic_io::write_private(&path, &json)
@@ -662,6 +660,7 @@ pub fn default_secret_store() -> Box<dyn SecretStore> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn mk_value(s: &str) -> SecretBox<String> {
         SecretBox::new(Box::new(s.to_string()))

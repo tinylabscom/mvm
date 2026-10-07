@@ -49,9 +49,9 @@
 //!   pipeline) chooses based on whether a tenant DEK is
 //!   available.
 
+use crate::private_fs::OpenOptionsModeExt as _;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 
 use crate::crypto::aead;
@@ -116,8 +116,7 @@ pub fn encrypt_file_in_place_with_chunk_size(
         let tmp_file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
-            .open(&tmp_path)
+            .open_with_mode(0o600, &tmp_path)
             .with_context(|| format!("creating tmp {}", tmp_path.display()))?;
         let mut writer = BufWriter::new(tmp_file);
 
@@ -223,8 +222,7 @@ pub fn decrypt_file_in_place(path: &Path, key: &[u8]) -> Result<()> {
         let tmp_file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o600)
-            .open(&tmp_path)
+            .open_with_mode(0o600, &tmp_path)
             .with_context(|| format!("creating tmp {}", tmp_path.display()))?;
         let mut writer = BufWriter::new(tmp_file);
 

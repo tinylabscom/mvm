@@ -586,14 +586,9 @@ pub(in crate::commands) fn run_secure(
         }
         return Ok(());
     }
-    // `--json` offers no review: its document carries the refusals instead.
-    let review_source = if args.json {
-        None
-    } else {
-        match args.review_source.take() {
-            Some(source) => Some(source),
-            None => Some(super::denial_review::ReviewSource::for_launch(&args)?),
-        }
+    let review_source = match args.review_source.take() {
+        Some(source) => Some(source),
+        None => Some(super::denial_review::ReviewSource::for_launch(&args)?),
     };
     // Prepare outputs before admission binds them to the grant.
     let outputs = super::outputs::PreparedOutputs::prepare(&args.outputs, &args.mounts)?;
@@ -837,6 +832,13 @@ pub(in crate::commands) fn run_secure(
         }
         let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path)
             .with_egress_denials(refused.destinations())
+            .with_egress_review(if json_requested {
+                review_source.as_ref().and_then(|source| {
+                    review_source::json_review_pointer(&refused, &denials, source)
+                })
+            } else {
+                None
+            })
             .with_network(network_access.label());
         if let Some(path) = summary.receipt_path.as_deref() {
             write_run_receipt(path, receipt_input, &output)?;
@@ -850,7 +852,9 @@ pub(in crate::commands) fn run_secure(
         if !json_requested {
             network_access.announce_exit(output.exit_code, &super::host_notices::Stderr);
         }
-        offer_review(&refused, &denials, review_source.as_ref());
+        if !json_requested {
+            offer_review(&refused, &denials, review_source.as_ref());
+        }
         if output.exit_code != 0 {
             mvm_observability::exit(output.exit_code);
         }
@@ -923,8 +927,8 @@ struct RunAudit<'a> {
     denials: &'a super::egress_denials::PendingWatch,
     /// Whether the run could reach the network at all.
     network: NetworkAccess,
-    /// Where the run's policy came from; `None` for `--json`, which offers no
-    /// review.
+    /// Where the run's policy came from, for an in-place review or a JSON
+    /// pointer to an after-the-fact review.
     review_source: Option<&'a super::denial_review::ReviewSource>,
 }
 
@@ -2351,6 +2355,19 @@ mod tests {
         // shape whether or not the run hit the gate.
         let value: serde_json::Value = serde_json::from_str(&json).expect("json");
         assert_eq!(value["egress_denials"], serde_json::json!([]));
+        assert!(value.get("egress_review").is_none());
+        let with_review = serde_json::to_value(summary.clone().with_egress_review(Some(
+            crate::commands::vm::denial_review::JsonReviewPointer {
+                run: "plan-1".into(),
+                command: "mvmctl explain plan-1 --review".into(),
+                reason: "no project manifest".into(),
+            },
+        )))
+        .expect("JSON review summary");
+        assert_eq!(
+            with_review["egress_review"]["command"],
+            "mvmctl explain plan-1 --review"
+        );
         let offline = serde_json::to_value(summary.with_network("none")).expect("json");
         assert_eq!(offline["network"], "none");
     }

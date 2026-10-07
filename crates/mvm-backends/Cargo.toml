@@ -15,23 +15,31 @@ authors.workspace = true
 substrate_server_category = "per-VM provider plumbing (backend-local vsock listeners)"
 
 [dependencies]
-mvm-vmm = { workspace = true }
 mvm-core = { workspace = true }
 # `CpuGrant` — the admitted CPU bound a driver hands to `mvm_core::spawn_scope`
 # when it spawns its per-VM process.
 mvm-contract = { workspace = true }
-mvm-net = { workspace = true }
-mvm-agentd = { workspace = true }
 anyhow = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
-libkrun-sys = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-libc = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 which = { workspace = true }
+
+# Every driver here — Firecracker, HVF, libkrun, QEMU, and the mock that
+# stands in for them — drives a VMM through Unix sockets, file descriptors
+# and vsock, so the driver modules and the crates only they need build on
+# Unix hosts alone. The VMM seam in mvm-vmm is part of that: it carries the
+# fd-backed guest-memory and vsock device model with it. On any other host
+# the crate builds as `run_sidecars` and nothing else.
+[target.'cfg(unix)'.dependencies]
+mvm-vmm = { workspace = true }
+mvm-net = { workspace = true }
+mvm-agentd = { workspace = true }
+libkrun-sys = { workspace = true }
+libc = { workspace = true }
 
 [features]
 default = []
@@ -40,8 +48,10 @@ test-support = []
 [lints]
 workspace = true
 
-[dev-dependencies]
+[target.'cfg(unix)'.dev-dependencies]
 mvm-vmm = { workspace = true, features = ["test-support"] }
+
+[dev-dependencies]
 # `TestEnv` + `spawn_scope::pretend_mechanism_present` — the driver tests assert
 # the argv a scoped spawn produces, which needs the mechanism probe to answer
 # the same way on every host.
