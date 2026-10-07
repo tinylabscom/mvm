@@ -24,6 +24,47 @@ use crate::secret::MachineSecretRef;
 /// up. Matches what `machine run -d -- <argv>` has always waited.
 const AGENT_READY_SECS: u64 = 30;
 
+/// A detached persistent launch is accepted only after the authenticated guest
+/// control plane completes a Ping/Pong. On failure the backend that performed
+/// the start owns rollback, including its VMM and host helpers.
+pub fn require_serving_guest(
+    name: &str,
+    started: &crate::StartedVm,
+    timeout: std::time::Duration,
+) -> Result<()> {
+    // The in-memory backend has no guest transport. It is a lifecycle test
+    // double, not a production detached lane.
+    let ready = started.backend().name() == "mock"
+        || crate::readiness::wait_for_guest_agent_for(name, timeout);
+    require_serving_guest_result(name, timeout, ready, || {
+        started.backend().stop(started.vm_id()).map(|_| ())
+    })
+}
+
+fn require_serving_guest_result(
+    name: &str,
+    timeout: std::time::Duration,
+    ready: bool,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if ready {
+        return Ok(());
+    }
+    rollback().with_context(|| {
+        format!(
+            "guest control for machine {name:?} did not become ready within {}s; \
+             rolling back the partial start also failed",
+            timeout.as_secs()
+        )
+    })?;
+    crate::local::deregister_from_name_registry(name);
+    bail!(
+        "guest control for machine {name:?} did not become ready within {}s; \
+         the partial start was rolled back",
+        timeout.as_secs()
+    )
+}
+
 /// Whether `name` is running on the backend this host selects.
 pub fn machine_is_running(name: &str) -> bool {
     crate::backend_is_running(
@@ -409,5 +450,40 @@ mod tests {
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("LD_PRELOAD"), "{err:#}");
+    }
+
+    #[test]
+    fn failed_readiness_rolls_back_without_an_accepted_launch() {
+        let (_env, _home) = isolated();
+        let name = "not-serving";
+        crate::register_machine(&crate::MachineRegistration {
+            vm_dir: mvm_core::config::vm_state_dir(name)
+                .to_string_lossy()
+                .into_owned(),
+            ..crate::MachineRegistration::minimal(name, "default")
+        });
+        crate::record_readiness(
+            name,
+            mvm_core::domain::instance::InstanceReadiness::LaunchAccepted,
+        );
+        let rolled_back = std::sync::atomic::AtomicBool::new(false);
+
+        let err =
+            require_serving_guest_result(name, std::time::Duration::from_millis(1), false, || {
+                rolled_back.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            })
+            .expect_err("a non-serving guest must fail closed");
+
+        assert!(err.to_string().contains("partial start was rolled back"));
+        assert!(
+            rolled_back.load(std::sync::atomic::Ordering::SeqCst),
+            "the partially started VM is stopped"
+        );
+        assert_eq!(
+            crate::readiness::readiness_of(name),
+            None,
+            "no LaunchAccepted state survives rollback"
+        );
     }
 }

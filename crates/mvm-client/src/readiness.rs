@@ -83,7 +83,32 @@ pub fn fetch_live_readiness(vm_name: &str) -> anyhow::Result<ReadinessReport> {
 /// kernel starts, so a `connect()` that succeeds says nothing about whether an
 /// agent exists behind it.
 pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    wait_for_guest_agent_for(vm_id, std::time::Duration::from_secs(timeout_secs))
+}
+
+/// Duration-based form used by launch policy and tests.
+pub fn wait_for_guest_agent_for(vm_id: &str, timeout: std::time::Duration) -> bool {
+    wait_with_probe(timeout, |remaining| {
+        let Ok(transport) = mvm_runtime::vsock_transport::for_vm(vm_id) else {
+            return false;
+        };
+        let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) else {
+            return false;
+        };
+        // Never let a bound-but-silent socket park this probe past the launch
+        // deadline. Authentication and Ping/Pong must both complete.
+        let io_timeout = remaining.min(std::time::Duration::from_secs(3));
+        let _ = stream.set_read_timeout(Some(io_timeout));
+        let _ = stream.set_write_timeout(Some(io_timeout));
+        mvm_agentd::vsock::probe_agent_ready(&mut stream).is_ok()
+    })
+}
+
+fn wait_with_probe(
+    timeout: std::time::Duration,
+    mut probe: impl FnMut(std::time::Duration) -> bool,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
 
     // Adaptive backoff instead of a fixed 500 ms poll. A guest that
     // binds in ~80 ms used to wait up to a
@@ -97,19 +122,44 @@ pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
     // guest simply fails this attempt and we retry on the next tick.
     let mut attempt: u32 = 0;
     while std::time::Instant::now() < deadline {
-        if let Ok(transport) = mvm_runtime::vsock_transport::for_vm(vm_id)
-            && let Ok(mut s) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
-            && {
-                // Bound the probe so a bound-but-silent socket can't park the
-                // loop past its deadline.
-                let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(3)));
-                mvm_agentd::vsock::probe_agent_ready(&mut s).is_ok()
-            }
-        {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if probe(remaining) {
             return true;
         }
-        std::thread::sleep(mvm_agentd::vsock::adaptive_backoff(attempt));
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(mvm_agentd::vsock::adaptive_backoff(attempt).min(remaining));
         attempt = attempt.saturating_add(1);
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_accepts_only_a_successful_authenticated_probe() {
+        let mut attempts = 0;
+        assert!(wait_with_probe(
+            std::time::Duration::from_millis(100),
+            |_| {
+                attempts += 1;
+                attempts == 2
+            }
+        ));
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn readiness_times_out_when_a_bound_peer_never_serves() {
+        let started = std::time::Instant::now();
+        assert!(!wait_with_probe(
+            std::time::Duration::from_millis(35),
+            |_| false
+        ));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 }
