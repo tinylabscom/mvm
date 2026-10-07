@@ -20,11 +20,9 @@
 //! directory: it is a fork. A mid-replay failure leaves the restored VM
 //! running at the last good step; the operator stops or re-replays it.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::Args;
-use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::checkpoint::vm_is_running;
 
 use super::checkpoint::{self, validated_checkpoint_id};
 use super::workspace;
@@ -53,12 +51,9 @@ pub(in crate::commands) fn run_replay(
     cfg: &MvmConfig,
 ) -> Result<()> {
     let id = validated_checkpoint_id(&args.from)?;
-    let store = mvm_runtime::checkpoint::CheckpointStore::open();
-    let meta = store
-        .read_meta(&id)
-        .with_context(|| format!("no checkpoint {:?} found", id.as_str()))?;
-
-    let plan = plan_replay(&store, &meta, &args)?;
+    let source = mvm_client::replay::ReplayService::open().prepare(&id, args.as_name.as_deref())?;
+    let meta = source.checkpoint;
+    let plan = plan_replay(&meta, source.restored_name, &args)?;
 
     if args.dry_run {
         print_plan(&plan);
@@ -139,11 +134,10 @@ struct ReplayPlan {
 }
 
 fn plan_replay(
-    store: &mvm_runtime::checkpoint::CheckpointStore,
     meta: &mvm_core::checkpoint::CheckpointMeta,
+    restored_name: String,
     args: &ReplayArgs,
 ) -> Result<ReplayPlan> {
-    let _ = store;
     let entries = input_journal::read(&mvm_core::config::machine_state_dir(&meta.vm_name))
         .with_context(|| format!("reading the input journal of {:?}", meta.vm_name))?;
     let cursor = meta.machine_input_cursor.with_context(|| {
@@ -153,37 +147,11 @@ fn plan_replay(
         )
     })?;
     let selected = input_journal::select_after_cursor(&entries, cursor);
-    let restored_name = fork_name(&meta.id, args.as_name.as_deref())?;
     Ok(ReplayPlan {
         restored_name,
         entries: selected,
         step_checkpoints: args.step_checkpoints,
     })
-}
-
-/// The name a replay's fork boots under: `as_name` when it is a valid name
-/// no machine holds, otherwise one derived from the checkpoint and the time.
-pub(in crate::commands) fn fork_name(
-    from: &mvm_core::checkpoint::CheckpointId,
-    as_name: Option<&str>,
-) -> Result<String> {
-    match as_name {
-        Some(name) => {
-            validate_vm_name(name).with_context(|| format!("Invalid VM name: {name:?}"))?;
-            if vm_is_running(name) {
-                bail!("a VM named {name:?} is already running; stop it or pick another --as name");
-            }
-            if mvm_runtime::machine::persist::load_machine_spec(name).is_ok() {
-                bail!("a machine named {name:?} already exists; pick another --as name");
-            }
-            Ok(name.to_string())
-        }
-        None => Ok(format!(
-            "replay-{}-{}",
-            from.as_str(),
-            checkpoint::now_unix()
-        )),
-    }
 }
 
 fn print_plan(plan: &ReplayPlan) {
@@ -260,8 +228,11 @@ mod tests {
             dry_run: true,
             step_checkpoints: true,
         };
-        let store = mvm_runtime::checkpoint::CheckpointStore::open();
-        let err = plan_replay(&store, &meta("web", 0), &args).expect_err("invalid name");
+        let err = mvm_client::replay::replay_target_name(
+            &CheckpointId::new("ckpt-x"),
+            args.as_name.as_deref(),
+        )
+        .expect_err("invalid name");
         assert!(err.to_string().contains("Invalid VM name"), "{err}");
     }
 
@@ -273,8 +244,9 @@ mod tests {
             dry_run: true,
             step_checkpoints: true,
         };
-        let store = mvm_runtime::checkpoint::CheckpointStore::open();
-        let plan = plan_replay(&store, &meta("web", 0), &args).expect("plan");
+        let target = mvm_client::replay::replay_target_name(&CheckpointId::new("ckpt-x"), None)
+            .expect("target");
+        let plan = plan_replay(&meta("web", 0), target, &args).expect("plan");
         assert!(plan.restored_name.starts_with("replay-ckpt-x-"), "{plan:?}");
         assert!(plan.restored_name.len() > "replay-ckpt-x-".len());
     }
@@ -294,14 +266,14 @@ mod tests {
             input_journal::finish_exec(&state, second, true).expect("finish");
         }
 
-        let store = mvm_runtime::checkpoint::CheckpointStore::open();
         let args = ReplayArgs {
             from: "ckpt-x".into(),
             as_name: Some("replay-test-child".into()),
             dry_run: true,
             step_checkpoints: true,
         };
-        let plan = plan_replay(&store, &meta("web", 100), &args).expect("plan");
+        let plan =
+            plan_replay(&meta("web", 100), "replay-test-child".to_string(), &args).expect("plan");
         assert_eq!(plan.entries.len(), 1, "{plan:?}");
         assert_eq!(plan.entries[0].argv, ["during"]);
     }

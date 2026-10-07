@@ -25,7 +25,7 @@ pub use diff::{BlobDelta, BlobStatus, CheckpointDiff, LineageRelation, diff_chec
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
     CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness, WorkspaceVolume,
-    workspace_blob_name,
+    checked_workspace_blob_name, workspace_blob_name,
 };
 use restore_content::{
     content_with_load_memory_digest, reseed_forked_identity_drive, validate_fork_verity_binding,
