@@ -476,7 +476,7 @@ CI lanes: no lane referenced the two deleted flags, so `lint-features`,
 check, and the xtask gates (`check-two-surfaces`, `check-core-runtime-free`,
 `check-guest-agent-runtime-free`, `check-sdk-transport-free`,
 `check-closure-budget`, `check-feature-closure-budget`) are unchanged; the
-all-features closure shrinks, which the 488-crate budget ratchet absorbs.
+all-features closure shrinks, which the 485-crate budget ratchet absorbs.
 The owner decided the three parked groups on 2026-10-02; their rows above
 record the outcome. Re-examining `mvm-build/builder-libkrun` staying in
 `default` is best done as its own small PR.
