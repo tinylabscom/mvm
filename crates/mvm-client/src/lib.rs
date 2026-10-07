@@ -50,6 +50,7 @@ pub mod boot;
 pub mod builder_bundle;
 pub mod bundle;
 pub mod connect;
+pub mod display;
 pub mod drive;
 pub mod egress_denials;
 pub mod entrypoint;

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
+use mvm_client::display::DisplayAuthority;
 use mvm_contract::stream::{DisplayFrame, DisplayMime, StreamKind};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::stream_client::{
@@ -39,7 +40,7 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
     if args.input {
-        let authority = mvm_hostd::display::DisplayAuthority::load(&args.name)
+        let authority = DisplayAuthority::load(&args.name)
             .with_context(|| format!("load the display input authority for {:?}", args.name))?
             .with_context(|| {
                 format!(
