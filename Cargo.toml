@@ -441,6 +441,11 @@ authors.workspace = true
 # SDKs find the library, beside the running mvmctl. The executables are
 # static musl builds, so there are no runtime dependencies to declare; the
 # library is only ever loaded into an interpreter that already has its libc.
+#
+# /usr/share/mvmctl/package-managed tells the installed mvmctl that a package
+# manager owns it, and which one, so `mvmctl env update` refuses to replace
+# files dpkg or rpm records rather than desync their database
+# (crates/mvm-cli/src/install_layout.rs reads it).
 [package.metadata.deb]
 name = "mvmctl"
 maintainer = "mvm contributors <https://github.com/tinylabscom/mvm>"
@@ -457,6 +462,7 @@ assets = [
     ["target/distro-pkg/bin/*", "usr/bin/", "755"],
     ["target/distro-pkg/doc/README.md", "usr/share/doc/mvmctl/", "644"],
     ["target/distro-pkg/man/*", "usr/share/man/man1/", "644"],
+    ["target/distro-pkg/package-managed/deb", "usr/share/mvmctl/package-managed", "644"],
 ]
 
 [package.metadata.generate-rpm]
@@ -467,6 +473,7 @@ assets = [
     { source = "target/distro-pkg/bin/*", dest = "/usr/bin/", mode = "755" },
     { source = "target/distro-pkg/doc/README.md", dest = "/usr/share/doc/mvmctl/README.md", mode = "644", doc = true },
     { source = "target/distro-pkg/man/*", dest = "/usr/share/man/man1/", mode = "644", doc = true },
+    { source = "target/distro-pkg/package-managed/rpm", dest = "/usr/share/mvmctl/package-managed", mode = "644" },
 ]
 
 [lib]

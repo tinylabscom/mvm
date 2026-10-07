@@ -455,10 +455,9 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = TestEnv::new();
-        env.set(
-            "MVM_HOME",
-            "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test",
-        );
+        let root = tempfile::tempdir().unwrap();
+        let deep_home = root.path().join("d".repeat(120));
+        env.set("MVM_HOME", &deep_home);
         let name = "hvf-picker-long-path";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         let Some(_listener) = bind_unix_listener(&sock) else {

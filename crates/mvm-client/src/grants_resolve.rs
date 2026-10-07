@@ -70,6 +70,7 @@ pub struct GrantProvenance {
     pub wall_clock: Option<GrantSurface>,
     pub egress: Option<GrantSurface>,
     pub drive: Option<GrantSurface>,
+    pub display_input: Option<GrantSurface>,
 }
 
 impl GrantProvenance {
@@ -87,6 +88,7 @@ impl GrantProvenance {
             "wall_clock" => self.wall_clock,
             "egress" => self.egress,
             "drive" => self.drive,
+            "display_input" => self.display_input,
             _ => None,
         }
     }
@@ -164,6 +166,12 @@ pub fn resolve_grants(layers: &[GrantLayer]) -> ResolvedGrants {
         {
             resolved.grants.drive = Some(drive.clone());
             resolved.provenance.drive = Some(layer.surface);
+        }
+        if resolved.grants.display_input.is_none()
+            && let Some(display_input) = layer.grants.display_input.as_ref()
+        {
+            resolved.grants.display_input = Some(display_input.clone());
+            resolved.provenance.display_input = Some(layer.surface);
         }
     }
     resolved
@@ -309,6 +317,7 @@ mod tests {
             wall_clock: Some(GrantSurface::Cli),
             egress: None,
             drive: Some(GrantSurface::GrantsFile),
+            display_input: Some(GrantSurface::GrantsFile),
         };
         assert_eq!(
             provenance.surface_for_dimension("cpu.share_millicores"),
@@ -337,6 +346,33 @@ mod tests {
         assert_eq!(grant.program_id.as_str(), "reviewer");
         assert_eq!(grant.workspace_roots[0].as_str(), "/review");
         assert_eq!(resolved.provenance().drive, Some(GrantSurface::GrantsFile));
+    }
+
+    #[test]
+    fn a_grants_file_authors_display_input_as_its_own_dimension() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("grants.json");
+        std::fs::write(
+            &path,
+            r#"{"display_input":{"attended":true},"cpu":{"unit":"share","millicores":500}}"#,
+        )
+        .expect("write");
+        let file = load_grants_file(&path).expect("display input grant parses");
+        let resolved = resolve_grants(&[
+            GrantLayer::new(GrantSurface::Cli, cpu(1000)),
+            GrantLayer::new(GrantSurface::GrantsFile, file),
+        ]);
+        let display = resolved
+            .grants()
+            .display_input
+            .as_ref()
+            .expect("display input survives a higher CPU layer");
+        assert!(display.attended);
+        assert_eq!(
+            resolved.provenance().display_input,
+            Some(GrantSurface::GrantsFile)
+        );
+        assert_eq!(resolved.provenance().cpu, Some(GrantSurface::Cli));
     }
 
     #[test]

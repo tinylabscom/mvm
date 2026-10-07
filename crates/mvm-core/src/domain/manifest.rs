@@ -738,6 +738,7 @@ impl ManifestGrants {
             wall_clock,
             egress,
             drive: self.drive.clone(),
+            display_input: None,
         })
     }
 }

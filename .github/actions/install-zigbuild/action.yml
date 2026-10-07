@@ -97,13 +97,15 @@ runs:
           "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-zigbuild"
         cargo-zigbuild --version
 
-    - name: Install embedded Rust toolchain and musl targets
+    - name: Install embedded Rust toolchain and guest targets
       id: install_rust
       shell: bash
       # Plan 164 — mvm-cli/build.rs picks the embed target by
       # CARGO_CFG_TARGET_ARCH. On an x86_64 runner it builds the bins
       # natively for x86_64-musl (no zig); a cross path zigbuilds. Add both
-      # musl targets so either path resolves regardless of runner arch.
+      # musl targets so either path resolves regardless of runner arch, and
+      # both glibc targets for the guest shared objects that
+      # `mvmctl build guest-bins` cross-compiles.
       #
       # Read without Python: `tomllib` needs 3.11, and the system python3 on
       # macOS is 3.9, so a self-hosted Mac without a newer Python would stop
@@ -120,4 +122,5 @@ runs:
         echo "rust_version=${RUST_VERSION}" >> "$GITHUB_OUTPUT"
         rustup toolchain install "${RUST_VERSION}" --profile minimal
         rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl \
+          aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu \
           --toolchain "${RUST_VERSION}"

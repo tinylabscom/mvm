@@ -306,6 +306,7 @@ pub fn start_persistent_oci_machine(
                     audit_dir: None,
                     policy_dir: None,
                     bundle_pin: None,
+                    bundle_posture: None,
                     deps_volume: None,
                     shares: shares_from_volume_cfg(volumes),
                     assets: registry_pack_image
