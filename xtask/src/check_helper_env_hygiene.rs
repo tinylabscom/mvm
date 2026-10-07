@@ -245,7 +245,7 @@ const RAW_SITES: &[RawSite] = &[
     ),
     guest(
         "crates/mvm-agentd/src/exec_stream.rs",
-        "stream_exec_argv",
+        "stream_exec_mediated",
         "Command::new(program)",
         "a guest process streamed over vsock by the guest agent",
     ),
@@ -269,13 +269,13 @@ const RAW_SITES: &[RawSite] = &[
     ),
     guest(
         "crates/mvm-agentd/src/guest_bootstrap.rs",
-        "bring_loopback_up_with_busybox",
+        "busybox_loopback_up",
         "Command::new(busybox)",
         "guest init services and loopback setup, inside the guest",
     ),
     guest(
         "crates/mvm-agentd/src/guest_bootstrap.rs",
-        "bring_loopback_up_with_busybox",
+        "busybox_loopback_up",
         "Command::new(busybox)",
         "guest init services and loopback setup, inside the guest",
     ),

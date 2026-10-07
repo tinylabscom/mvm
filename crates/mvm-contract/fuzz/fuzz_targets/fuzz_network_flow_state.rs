@@ -19,8 +19,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use mvm_contract::protocol::network_flow::{
-    Direction, FrameFacts, MAX_INGRESS_LISTENERS, MAX_STREAM_CREDIT, MAX_TCP_FLOWS,
-    MAX_UDP_ASSOCIATIONS, Opcode, SessionValidator, SessionState,
+    Direction, FrameFacts, IngressFlowKind, MAX_INGRESS_LISTENERS, MAX_STREAM_CREDIT,
+    MAX_TCP_FLOWS, MAX_UDP_ASSOCIATIONS, Opcode, SessionState, SessionValidator,
 };
 
 /// Every stream the machine may hold at once, summed across the classes.
@@ -52,7 +52,8 @@ fn facts_from(chunk: &[u8]) -> FrameFacts {
 fuzz_target!(|data: &[u8]| {
     // Declare a couple of ingress mappings so the ingress path is reachable
     // at all; everything outside the set must still be refused.
-    let mut validator = SessionValidator::new([0u16, 1, 2]);
+    let mut validator =
+        SessionValidator::new([0u16, 1, 2].map(|mapping| (mapping, IngressFlowKind::Tcp)));
 
     for chunk in data.chunks_exact(6) {
         let facts = facts_from(chunk);

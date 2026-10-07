@@ -4,6 +4,7 @@
 
 use super::*;
 use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
+use mvm_contract::stream::DisplayInputFrame;
 use mvm_contract::stream::input::{CloseInput, InputFrame};
 use serde::{Deserialize, Serialize};
 
@@ -121,6 +122,31 @@ pub enum GuestRequest {
         /// forgot to close would run to its timeout instead of exiting.
         #[serde(default)]
         stream_input: bool,
+    },
+    /// Deliver one prompt to the agent resident in the guest and stream its
+    /// response back.
+    ///
+    /// The resident agent is the program the image names in
+    /// `/etc/mvm/entrypoint`, validated at boot exactly as for
+    /// `RunEntrypoint`: there is no argv, no shell and no program selection
+    /// on the wire. The prompt is the agent's complete stdin, which is closed
+    /// after it is written. The response is the same `EntrypointEvent`
+    /// stream `RunEntrypoint` produces.
+    ///
+    /// A verb of its own rather than a `RunEntrypoint` call so the signed
+    /// plan grants prompts separately: a plan whose `agent_verbs` omits
+    /// `agent-prompt` refuses every prompt while still serving its
+    /// function calls.
+    AgentPrompt {
+        /// The prompt bytes, written to the agent's stdin.
+        prompt: Vec<u8>,
+        /// Wall-clock timeout for the call, in seconds.
+        timeout_secs: u64,
+        /// Env vars injected into the agent after `env_clear()`: the
+        /// host-synthesized egress settings and secret placeholders, never a
+        /// raw secret value.
+        #[serde(default)]
+        env: Vec<(String, String)>,
     },
     /// Start the one plan-selected program under its drive grant. The host
     /// echoes the opaque program identity from the admitted plan; the guest
@@ -523,6 +549,17 @@ pub enum GuestRequest {
     /// trailing bytes go first, because they are the writer's last ones and
     /// the close is what proved they were only ever a prefix of a secret.
     CloseStreamInput(CloseInput),
+
+    /// Deliver one host-admitted batch of display input to the display
+    /// bridge.
+    ///
+    /// Production-safe for the same reason as `StreamInput`: the host's
+    /// display input gate refuses it unless the signed plan grants display
+    /// input — attended, on a sealed image — and records every batch by kind
+    /// and count before sending it. A pinned verb grant must also name
+    /// `display-input`. The guest checks only what it can see: that the frame
+    /// is well formed and its `seq` does not go backwards.
+    DisplayInput(DisplayInputFrame),
 }
 
 /// One declared command. The checked command line is derived from `argv` on
@@ -536,6 +573,11 @@ pub struct MediatedExecCall {
     pub argv: Vec<String>,
     pub stdin: Option<String>,
     pub timeout_secs: Option<u64>,
+    /// Host-provisioned variables applied over the workload environment: the
+    /// egress proxy, the CA bundle, and secret placeholders. Never part of
+    /// the decided command line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for MediatedExecCall {
@@ -546,6 +588,7 @@ impl std::fmt::Debug for MediatedExecCall {
             .field("argv", &"[redacted]")
             .field("stdin", &"[redacted]")
             .field("timeout_secs", &self.timeout_secs)
+            .field("env", &"[redacted]")
             .finish()
     }
 }
@@ -586,6 +629,7 @@ impl GuestRequest {
             Self::MediatedExec(_) => "mediated-exec",
             Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
+            Self::AgentPrompt { .. } => "agent-prompt",
             Self::DriveOpen { .. } => "drive-open",
             Self::DriveFile { .. } => "drive-file",
             Self::RunExtension { .. } => "run-extension",
@@ -622,6 +666,7 @@ impl GuestRequest {
             Self::RunCode { .. } => "run-code",
             Self::StreamInput(_) => "stream-input",
             Self::CloseStreamInput(_) => "close-stream-input",
+            Self::DisplayInput(_) => mvm_contract::stream::DISPLAY_INPUT_VERB,
         }
     }
 }
@@ -721,6 +766,7 @@ mod tests {
             argv: vec!["git".to_string(), "status; rm -rf /".to_string()],
             stdin: None,
             timeout_secs: Some(5),
+            env: Vec::new(),
         };
         let question = call.tool_check().expect("valid call");
         assert_eq!(question.tool, "git");
@@ -762,6 +808,7 @@ mod tests {
                 argv: vec!["echo".to_string(), "ok".to_string()],
                 stdin: None,
                 timeout_secs: Some(10),
+                env: Vec::new(),
             }),
             GuestRequest::DriveOpen {
                 program_id: mvm_contract::grants::DriveProgramId::parse("agent").unwrap(),
@@ -892,6 +939,11 @@ mod tests {
             GuestRequest::RunCode {
                 code: "print('hello')".into(),
                 timeout_secs: Some(30),
+            },
+            GuestRequest::AgentPrompt {
+                prompt: b"summarize the diff".to_vec(),
+                timeout_secs: 30,
+                env: vec![("HTTPS_PROXY".into(), "http://127.0.0.1:3128".into())],
             },
             GuestRequest::ReadinessStatus,
         ];
@@ -1387,6 +1439,7 @@ mod tests {
                     argv: vec!["echo".to_string(), "ok".to_string()],
                     stdin: None,
                     timeout_secs: None,
+                    env: Vec::new(),
                 }),
                 "mediated-exec",
             ),
@@ -1400,6 +1453,14 @@ mod tests {
                 "run-entrypoint",
             ),
             (
+                GuestRequest::AgentPrompt {
+                    prompt: Vec::new(),
+                    timeout_secs: 0,
+                    env: Vec::new(),
+                },
+                "agent-prompt",
+            ),
+            (
                 GuestRequest::StreamInput(InputFrame {
                     seq: 0,
                     payload: Vec::new(),
@@ -1409,6 +1470,13 @@ mod tests {
             (
                 GuestRequest::CloseStreamInput(CloseInput::default()),
                 "close-stream-input",
+            ),
+            (
+                GuestRequest::DisplayInput(DisplayInputFrame {
+                    seq: 0,
+                    events: Vec::new(),
+                }),
+                "display-input",
             ),
             (
                 GuestRequest::PostRestore {

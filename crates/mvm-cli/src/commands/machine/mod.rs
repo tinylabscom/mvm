@@ -53,7 +53,7 @@ use mvm_runtime::machine::persist::{
 
 use super::Cli;
 use super::build::build;
-use super::vm::exec::{RunArgs, RunProfile, run_secure_with_source};
+use super::vm::exec::{RunArgs, RunProfile, run_secure};
 use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
@@ -148,7 +148,7 @@ pub(in crate::commands) enum MachineAction {
     /// Disconnect the client attached to a VM's console; the session keeps running
     #[command(display_order = 13)]
     Detach(super::vm::console::DetachArgs),
-    /// Verify a portable `.mvm` artifact without booting
+    /// Verify a signed `.mvmpkg` bundle without booting
     #[command(name = "check-artifact", display_order = 13)]
     CheckArtifact(portable::CheckArtifactArgs),
     /// Show and verify checkpoint or image lineage
@@ -309,6 +309,9 @@ pub(in crate::commands) struct MachineRunArgs {
         conflicts_with_all = ["image", "manifest", "flake", "deployment", "fresh", "reset", "detach"]
     )]
     pub attach: bool,
+    /// Apply the machine's workspace changes at exit without asking.
+    #[arg(long, requires = "attach", conflicts_with = "json")]
+    pub apply: bool,
 }
 
 /// The same values clap fills in when a flag is absent, for the same reason
@@ -339,6 +342,7 @@ impl Default for MachineRunArgs {
             reset: false,
             stdin: None,
             attach: false,
+            apply: false,
         }
     }
 }
@@ -604,9 +608,6 @@ fn machine_run_spec(
     resolved_manifest_slot: Option<&str>,
 ) -> Result<MachineSpec> {
     validate_machine_name(&name)?;
-    if let Some(policy) = args.run.applied_policy.as_ref() {
-        create_policy::refuse_unmediated_tool_scope(policy)?;
-    }
     let (image, manifest, deployment) = if let Some(path) = &args.run.deployment {
         let deployment = resolve_local_deployment(path)?;
         (None, None, Some(deployment.directory.display().to_string()))
@@ -1559,7 +1560,7 @@ fn complete_revert(
         super::vm::checkpoint::RevertOutcome::Done => Ok(()),
         super::vm::checkpoint::RevertOutcome::RunImage(run) => {
             let (args, source) = run_args_for_image_revert(run);
-            run_secure_with_source(cli, args.into_run_args(), cfg, source)
+            run_secure(cli, args.into_run_args(), cfg, source)
         }
     }
 }

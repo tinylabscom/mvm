@@ -159,6 +159,28 @@ pub const DESTRUCTIVE_LAB_ONLY_TAG: &str = "destructive_lab_only";
 /// *is* selected.
 pub const NO_LOCAL_IMAGES_CHECKOUT_TAG: &str = "no_local_images_checkout";
 
+/// Features that read the documentation corpus itself: the README contract
+/// and the documented-example suite. `just bdd::docs` selects exactly these
+/// with `MVM_BDD_ONLY_TAG=docs`, and that is what CI runs for a change
+/// confined to documentation. The tag goes on the `Feature:` line rather than
+/// on each scenario, so a scenario added to one of those files cannot fall out
+/// of the selection.
+pub const DOCS_TAG: &str = "docs";
+
+/// The tags a scenario carries once Gherkin inheritance is applied: its own,
+/// plus those on its enclosing `Rule:` and `Feature:`.
+///
+/// cucumber hands the filter each level's tags separately. Reading only the
+/// scenario's would make a feature-level `@live` or `@docs` mean nothing.
+pub fn inherited_tags(feature: &[String], rule: &[String], scenario: &[String]) -> Vec<String> {
+    feature
+        .iter()
+        .chain(rule)
+        .chain(scenario)
+        .cloned()
+        .collect()
+}
+
 /// Host capabilities a scenario may require, probed once by the harness.
 ///
 /// Plain data so [`scenario_should_run`] is a pure decision the harness can
@@ -1595,6 +1617,52 @@ mod tests {
         assert_eq!(
             scenario_gate_for_selection(&tags(&[LIVE_TAG]), ALL, Some(WARM_CLAIM_TAG)),
             ScenarioGate::OutsideSelectedTag
+        );
+    }
+
+    /// The docs lane tags whole features, so selection has to see a tag that
+    /// sits on the `Feature:` line rather than on the scenario.
+    #[test]
+    fn a_feature_level_tag_selects_every_scenario_under_it() {
+        let docs_feature = tags(&[DOCS_TAG]);
+        assert_eq!(
+            scenario_gate_for_selection(
+                &inherited_tags(&docs_feature, &[], &tags(&[])),
+                NONE,
+                Some(DOCS_TAG)
+            ),
+            ScenarioGate::Run
+        );
+        assert_eq!(
+            scenario_gate_for_selection(
+                &inherited_tags(&[], &docs_feature, &tags(&[])),
+                NONE,
+                Some(DOCS_TAG)
+            ),
+            ScenarioGate::Run,
+            "a tag on a Rule: is inherited the same way"
+        );
+        assert_eq!(
+            scenario_gate_for_selection(
+                &inherited_tags(&tags(&["sdk"]), &[], &tags(&[])),
+                NONE,
+                Some(DOCS_TAG)
+            ),
+            ScenarioGate::OutsideSelectedTag
+        );
+    }
+
+    /// Inheritance narrows as well as selects: a capability tag on the feature
+    /// still gates a scenario inside the selected set.
+    #[test]
+    fn an_inherited_capability_tag_still_gates() {
+        assert_eq!(
+            scenario_gate_for_selection(
+                &inherited_tags(&tags(&[DOCS_TAG, LIVE_TAG]), &[], &tags(&[])),
+                NONE,
+                Some(DOCS_TAG)
+            ),
+            ScenarioGate::NeedsLiveOptIn
         );
     }
 }

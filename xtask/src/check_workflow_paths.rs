@@ -691,6 +691,8 @@ mod tests {
         assert!(
             lint_core.contains("./scripts/cargo-stable.sh clippy --all-targets -- -D warnings")
         );
+        assert!(lint_core.contains("cargo fmt -- --check"));
+        assert!(lint_core.contains("cargo metadata --locked --format-version 1 --no-deps"));
         let lint_policy = job_block(&workflow, "lint-policy");
         assert!(lint_policy.contains("name: Invariant"));
         assert!(lint_policy.contains("bash scripts/check-no-orchestration-server.sh"));
@@ -699,6 +701,8 @@ mod tests {
         // Asserting a particular gate's step here again would just be the
         // sixty-step list in another file.
         assert!(lint_policy.contains("cargo run -p xtask -- check-all"));
+        assert!(lint_policy.contains("bash scripts/cargo-target-dir-guard.test.sh"));
+        assert!(lint_policy.contains("bash scripts/dev-run-guard.test.sh"));
         assert!(lint_policy.contains("Policy gates (check-abi-layout) (single-network-path)"));
         assert!(
             crate::check_all::GATES
@@ -748,26 +752,30 @@ mod tests {
         let test = job_block(&workflow, "test");
         assert!(test.contains("name: Test"));
         assert!(test.contains("if: ${{ always() }}"));
+        assert!(test.contains("runs-on: ubuntu-slim"));
         assert!(
             test.contains("name: Require CI scope to pass")
                 && test.contains("CI scope did not pass: $SCOPE_RESULT"),
             "the required test context must fail closed when classification fails"
         );
         assert!(
-            test.contains("name: PR admission smoke")
-                && test.contains("cargo fmt -- --check")
-                && test.contains("cargo metadata --locked --format-version 1 --no-deps")
+            !test.contains("actions/checkout")
+                && !test.contains("cargo ")
                 && test.contains("name: Require every validation lane to pass"),
-            "pull requests must publish the required context after the full validation matrix"
+            "the aggregate must publish the required context without another full runner"
         );
         assert!(test.contains(
             "needs: [scope, lint-core, lint-policy, lint-features, \
-             lint-features-test-support, lint-features-embed, pr-regressions, \
-             test-workspace, test-workspace-aarch64, test-linux, \
-             test-release-witness, test-ebpf-telemetry, bdd-conformance, \
-             boot-latency, nix-flake-check]"
+             lint-features-test-support, lint-features-embed, lint-windows, \
+             test-workspace-build, test-workspace, test-workspace-extras, \
+             test-workspace-aarch64, test-linux, \
+             test-release-witness, test-musl-confinement, test-ebpf-telemetry, \
+             bdd-conformance, boot-latency, nix-flake-check]"
         ));
-        let preflight = job_block(&workflow, "pr-regressions");
+        assert!(
+            job_body(&workflow, "pr-regressions").is_none(),
+            "focused regressions must not allocate a separate PR runner"
+        );
         for expected in [
             "github.event_name == 'pull_request'",
             "shellcheck \"${scripts[@]}\"",
@@ -777,8 +785,8 @@ mod tests {
             "could not classify added shell scripts",
         ] {
             assert!(
-                preflight.contains(expected),
-                "PR focused regressions must contain {expected:?}"
+                lint_policy.contains(expected),
+                "the policy lane must keep the focused regression {expected:?}"
             );
         }
 
@@ -790,17 +798,25 @@ mod tests {
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
+            "lint-windows",
             "bdd-conformance",
+            "test-workspace-build",
             "test-workspace",
+            "test-workspace-extras",
             "test-workspace-aarch64",
             "test-release-witness",
+            "test-musl-confinement",
             "test-linux",
             "test-ebpf-telemetry",
         ] {
             let block = job_block(&workflow, lane);
+            let job_if = block
+                .lines()
+                .find(|line| line.starts_with("    if:"))
+                .expect("scoped CI lane must have a job-level if");
             assert!(
-                block.contains("if: needs.scope.outputs.code == 'true'")
-                    && !block.contains("github.event_name != 'pull_request'"),
+                job_if.contains("needs.scope.outputs.code == 'true'")
+                    && !job_if.contains("github.event_name != 'pull_request'"),
                 "{lane} must validate code pull requests before queue admission"
             );
         }
@@ -811,14 +827,18 @@ mod tests {
         // `bdd-conformance` joined the loop when it took the Gherkin suite, and
         // the `code` scope, off the Linux lane.
         for expected in [
+            "\"$WORKSPACE_BUILD_RESULT\"",
             "\"$WORKSPACE_RESULT\"",
+            "\"$WORKSPACE_EXTRAS_RESULT\"",
             "\"$CORE_RESULT\"",
             "\"$POLICY_RESULT\"",
             "\"$FEATURES_RESULT\"",
             "\"$FEATURES_SUPPORT_RESULT\"",
             "\"$FEATURES_EMBED_RESULT\"",
+            "\"$WINDOWS_RESULT\"",
             "\"$LINUX_RESULT\"",
             "\"$RELEASE_WITNESS_RESULT\"",
+            "\"$MUSL_CONFINEMENT_RESULT\"",
             "\"$EBPF_RESULT\"",
             "\"$BDD_RESULT\"",
             "\"$BOOT_RESULT\"",
@@ -848,12 +868,84 @@ mod tests {
             );
         }
 
+        // The Linux release ships static musl binaries, and the libc decides
+        // which syscalls reach a confined role's seccomp filter. Only this
+        // lane builds the endpoint the way the release does, so it must cover
+        // both shipped musl targets and stay in the aggregate.
+        let musl = job_block(&workflow, "test-musl-confinement");
+        for expected in [
+            "target: x86_64-unknown-linux-musl",
+            "target: aarch64-unknown-linux-musl",
+            "uses: ./.github/actions/install-zigbuild",
+            "cargo-zigbuild test --profile release-witness --target \"${TARGET}\"",
+            "--test confinement_self_test",
+            "--test network_endpoint_bin",
+            "--test seccomp_property",
+        ] {
+            assert!(
+                musl.contains(expected),
+                "musl confinement lane must contain {expected:?}"
+            );
+        }
+
         let test_workspace = job_block(&workflow, "test-workspace");
         assert!(!test_workspace.contains("uses: actions/cache@v5"));
-        assert!(test_workspace.contains("cargo nextest run -p xtask --features man"));
+        assert_workspace_suite_compiles_once_and_runs_everything(&workflow);
+        for expected in [
+            "permissions:",
+            "actions: read",
+            "shard: ['1', '2']",
+            "uses: ./.github/workflows/workspace-shard.yml",
+            "commit_sha: ${{ github.sha }}",
+            "shard: ${{ matrix.shard }}",
+            "runner_kind: github",
+        ] {
+            assert!(
+                test_workspace.contains(expected),
+                "workspace matrix must call the shard worker with {expected:?}"
+            );
+        }
+        assert!(!test_workspace.contains("actions: write"));
+        assert!(!test_workspace.contains("workflow_dispatch"));
+        let workspace_worker = self::workflow("workspace-shard.yml");
+        let safe_archive_root = "archive_root=\"$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}\"";
+        assert!(
+            workflow.contains(safe_archive_root) && workspace_worker.contains(safe_archive_root),
+            "archive build and shard must stay outside /tmp, which mvmctl cleanup tests clear"
+        );
+        assert!(!workflow.contains("archive_root=\"/tmp/mvm-workspace-"));
+        assert!(!workspace_worker.contains("/tmp/mvm-workspace-"));
+        for expected in [
+            "workflow_call:",
+            "workflow_dispatch:",
+            "fromJSON('[\"self-hosted\",\"Linux\",\"X64\",\"mvm\",\"hetzner\",\"kvm\"]')",
+            "if: inputs.runner_kind == 'github' && inputs.archive_run_id == ''",
+            "key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}",
+            "archive_run_id:",
+            "--archive-file \"$RUNNER_TEMP/workspace-tests.tar.zst\"",
+            "--partition hash:${{ inputs.shard }}/2",
+            "cargo nextest run -p xtask --features man",
+            "cargo nextest run --workspace --all-targets --partition hash:${{ inputs.shard }}/2",
+            "actions: read",
+            "workspace-archive-{0}",
+            "workspace-shard-{0}-{1}",
+            "if: inputs.archive_run_id == ''",
+            "if: inputs.archive_run_id != ''",
+            "cp -a \"$GITHUB_WORKSPACE/.\" \"$archive_root/\"",
+            "run-id: ${{ inputs.archive_run_id }}",
+            "github-token: ${{ secrets.GITHUB_TOKEN }}",
+            "--workspace-remap \"$archive_root\"",
+            "--extract-to \"$archive_root\"",
+        ] {
+            assert!(
+                workspace_worker.contains(expected),
+                "workspace shard worker must contain {expected:?}"
+            );
+        }
+        assert!(!workspace_worker.contains("actions: write"));
         let test_linux = job_block(&workflow, "test-linux");
         assert!(test_linux.contains("bash scripts/ci-linux-coverage.sh"));
-        assert!(!test_workspace.contains("ci-linux-coverage.sh"));
+        assert!(!workspace_worker.contains("ci-linux-coverage.sh"));
 
         let linux_coverage = std::fs::read_to_string(
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -899,12 +991,137 @@ mod tests {
             "bdd-conformance must still run the Gherkin suite"
         );
         // ...and it has to be reachable on every code run the Linux lane
-        // covers, including pull requests before queue admission.
+        // covers, including pull requests before queue admission, and on every
+        // change to the documentation its README and example features read.
+        // Like every other proof lane it reuses the PR's result in the queue.
+        let bdd = job_block(&workflow, "bdd-conformance");
         assert!(
-            job_block(&workflow, "bdd-conformance")
-                .contains("if: needs.scope.outputs.code == 'true'"),
-            "bdd-conformance must carry the broad code scope"
+            bdd.contains(
+                "if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'merge_group'"
+            ),
+            "bdd-conformance must run for the code scope and the docs scope, before queue admission"
         );
+        // A docs-only change gets the documentation scenarios; anything that
+        // compiles still gets the whole suite.
+        assert!(
+            bdd.contains("docs_only: ${{ needs.scope.outputs.code != 'true' }}"),
+            "bdd-conformance must narrow to the documentation scenarios only when code is out of scope"
+        );
+        for expected in [
+            "docs_only:",
+            "default: false",
+            "if: ${{ !inputs.docs_only }}\n        run: just bdd::run",
+            "if: ${{ inputs.docs_only }}\n        run: just bdd::docs",
+        ] {
+            assert!(
+                bdd_workflow.contains(expected),
+                "bdd.yml must keep the full suite as its default and gate the docs path: {expected:?}"
+            );
+        }
+    }
+
+    /// The workspace suite is compiled by one job and run by the shards out of
+    /// its archive. Pin the parts whose loss would shrink coverage without
+    /// turning anything red: the archive's target selection, the shards'
+    /// dependency on it and their partition of all of it, and the suites that
+    /// run exactly once.
+    fn assert_workspace_suite_compiles_once_and_runs_everything(workflow: &str) {
+        let build = job_block(workflow, "test-workspace-build");
+        assert!(
+            build.contains("cargo nextest archive --workspace --all-targets"),
+            "the archive must hold the whole workspace's tests, every target"
+        );
+        assert!(
+            build.contains("cargo run -p xtask -- check-nextest-groups"),
+            "the nextest override filters must be validated once, where the suite compiles"
+        );
+        let upload = build
+            .find("uses: actions/upload-artifact@")
+            .expect("the build job must hand the archive on");
+        assert!(build[upload..].contains("name: workspace-tests"));
+
+        let shards = job_block(workflow, "test-workspace");
+        assert!(
+            shards.contains("needs: [scope, test-workspace-build]")
+                && shards.contains("needs.scope.outputs.code == 'true'")
+                && shards.contains("github.event_name != 'merge_group'"),
+            "the shards must wait for the archive and keep the scope gate"
+        );
+        assert!(
+            !shards.contains("cargo build")
+                && !shards.contains("cargo nextest archive")
+                && !shards.contains("--features"),
+            "a shard must run the archive it was handed, not compile its own"
+        );
+        for expected in [
+            "uses: ./.github/workflows/workspace-shard.yml",
+            "archive_run_id: ${{ github.run_id }}",
+            "shard: ['1', '2']",
+        ] {
+            assert!(
+                shards.contains(expected),
+                "the caller must start two archive-backed shards: missing {expected:?}"
+            );
+        }
+
+        let extras = job_block(workflow, "test-workspace-extras");
+        for expected in [
+            "cargo nextest run -p xtask --features man",
+            "cargo nextest run -p mvm-agentd --features addons",
+            "cargo test --workspace --doc",
+        ] {
+            assert!(
+                extras.contains(expected),
+                "the once-only workspace suites must keep running: missing {expected:?}"
+            );
+        }
+        // The addons suite also runs on the stable toolchain in Lint feature
+        // coverage, so only these two are unique to this job.
+        for once in [
+            "cargo nextest run -p xtask --features man",
+            "cargo test --workspace --doc",
+        ] {
+            assert_eq!(
+                workflow.matches(once).count(),
+                1,
+                "{once:?} must run exactly once in ci.yml"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_coverage_tail_uses_existing_test_support_runner() {
+        let workflow = ci_workflow();
+        let core = job_block(&workflow, "lint-features");
+        let support = job_block(&workflow, "lint-features-test-support");
+
+        for expected in [
+            "name: wasm-backend feature tests (wasmtime tier)",
+            "cargo nextest run -p mvm-runtime --features wasm-backend",
+            "cargo nextest run -p mvm-hostd --features wasm-backend --test wasm_egress_witness",
+            "name: release artifact acquisition contract",
+            "cargo check -p mvm-cli --features release-artifact-bootstrap --lib",
+            "cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib",
+            "cargo test -p mvm-build --features release-channel --lib",
+            "name: Assert auto-detect still picks libkrun off Linux/HVF",
+            "name: In-process pure ext4 materialize tests",
+        ] {
+            assert!(
+                support.contains(expected),
+                "test-support must retain {expected:?}"
+            );
+            assert!(
+                !core.contains(expected),
+                "core feature lane must not repeat {expected:?}"
+            );
+            if expected.starts_with("name:") {
+                assert_eq!(
+                    workflow.matches(expected).count(),
+                    1,
+                    "feature coverage must run {expected:?} exactly once"
+                );
+            }
+        }
     }
 
     #[test]
@@ -925,6 +1142,7 @@ mod tests {
             "could not diff $BASE..$HEAD — running every lane to stay safe",
             "invalid or missing ${name} scope",
             "code=true",
+            "docs=true",
             "nix=true",
             "architecture=true",
             "just/",
@@ -943,8 +1161,11 @@ mod tests {
             "lint-features",
             "lint-features-test-support",
             "lint-features-embed",
-            "test-workspace",
+            "lint-windows",
+            "test-workspace-build",
+            "test-workspace-extras",
             "test-release-witness",
+            "test-musl-confinement",
             "test-linux",
             "test-ebpf-telemetry",
         ] {
@@ -980,14 +1201,19 @@ mod tests {
             policy.contains("if: github.event_name != 'merge_group'"),
             "policy invariants must fail deterministic PR defects before queue admission"
         );
-        assert!(!policy.contains("needs.scope.outputs.code == 'true'"));
         assert!(policy.contains("needs.scope.outputs.architecture == 'true'"));
 
         let nix = job_block(&ci, "nix-flake-check");
         assert!(nix.contains("needs: [scope]"));
         assert!(nix.contains(
-            "if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'"
+            "if: needs.scope.outputs.nix == 'true' && github.event_name != 'merge_group'"
         ));
+        let aggregate = job_block(&ci, "test");
+        assert!(aggregate.contains("SCOPE_NIX: ${{ needs.scope.outputs.nix }}"));
+        assert!(
+            aggregate.contains("pull_request:true|workflow_dispatch:true) nix_required=success")
+        );
+        assert!(aggregate.contains("pull_request:false|workflow_dispatch:false|merge_group:true|merge_group:false) nix_required=skipped"));
         assert!(nix.contains("needs.scope.outputs.nix == 'true'"));
         assert!(
             nix.contains("run: sh scripts/check-devshell-tiers.sh"),
@@ -1023,9 +1249,14 @@ mod tests {
             "the non-required Website workflow must not consume every merge-group runner slot"
         );
 
-        let aggregate = job_block(&ci, "test");
         assert!(aggregate.contains("needs.scope.result"));
         assert!(aggregate.contains("SCOPE_CODE: ${{ needs.scope.outputs.code }}"));
+        assert!(aggregate.contains("SCOPE_DOCS: ${{ needs.scope.outputs.docs }}"));
+        assert!(
+            aggregate.contains("false:false) bdd_required=skipped")
+                && aggregate.contains(r#"if [ "$BDD_RESULT" != "$bdd_required" ]"#),
+            "Test must require the BDD lane whenever code or docs is in scope"
+        );
         assert!(
             aggregate.contains("merge_group:true|merge_group:false)")
                 && aggregate.contains("required=skipped")
@@ -1034,6 +1265,39 @@ mod tests {
                 && aggregate.contains(r#"if [ "$result" != "$required" ]"#),
             "Test must reuse PR proof in the queue and enforce it before admission"
         );
+    }
+
+    #[test]
+    fn windows_compile_lane_checks_the_portable_crates_and_gates_the_merge() {
+        let ci = ci_workflow();
+        let lane = job_block(&ci, "lint-windows");
+        assert!(
+            lane.contains("rustup target add x86_64-pc-windows-gnu"),
+            "the lane must install the Windows GNU target into the pinned toolchain it checks with"
+        );
+        let check = "cargo check --locked --target x86_64-pc-windows-gnu";
+        assert_eq!(
+            lane.matches(check).count(),
+            2,
+            "the lane must check the crate set and the pure-Rust mvm-core features"
+        );
+        for krate in [
+            "mvm-contract",
+            "mvm-core",
+            "mvm-net",
+            "mvm-bundler",
+            "mvm-backends",
+        ] {
+            assert!(
+                lane.contains(&format!("-p {krate}")),
+                "the Windows compile check must cover {krate}"
+            );
+        }
+        assert!(lane.contains("--features provenance,client,hostd-transport"));
+
+        // A lane outside the aggregate cannot fail the merge.
+        let aggregate = job_block(&ci, "test");
+        assert!(aggregate.contains("WINDOWS_RESULT: ${{ needs.lint-windows.result }}"));
     }
 
     #[test]
@@ -1223,18 +1487,16 @@ mod tests {
         assert!(ci.contains(expected_group));
         assert!(ci.contains(expected_cancel));
         assert!(ci.contains("permissions:\n  contents: read"));
-        for required_name in [
-            "name: Test",
-            "name: Invariant",
-            "name: Nix flake check (Linux eval)",
-        ] {
-            assert!(ci.contains(required_name), "required check name drifted");
-        }
+        assert!(ci.contains("name: Test"), "required check name drifted");
+        assert!(ci.contains("name: Invariant"));
+        assert!(ci.contains("name: Nix flake check (Linux eval)"));
 
-        let architecture = workflow("architecture.yml");
-        assert!(!architecture.contains("pull_request:"));
-        assert!(!architecture.contains("merge_group:"));
-        assert!(architecture.contains("workflow_dispatch:"));
+        assert!(
+            !Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../.github/workflows/architecture.yml")
+                .exists(),
+            "the duplicate architecture diagnostic workflow must stay retired"
+        );
     }
 
     /// A branch ref re-resolves on every run, so what executes is whatever
@@ -1538,6 +1800,10 @@ mod tests {
         assert!(warm.contains("--out-link \"$RUNNER_TEMP/nix-cache-warm\""));
         assert!(warm.contains("Build Nix outputs to populate the binary cache"));
         assert!(warm.contains("save: \"true\""));
+        assert!(
+            job_body(&warm, "warm-hetzner").is_none(),
+            "the hosted-only PR shard path must not warm an unused runner pool"
+        );
         assert!(warm.contains("key: test-support"));
         assert!(warm.contains("Warm test-support feature tests"));
 

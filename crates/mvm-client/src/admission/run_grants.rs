@@ -204,12 +204,9 @@ pub fn enforced_network_policy(
                 ..Default::default()
             }),
         ),
-        None => super::run_network::resolve_run_network_policy_with_preset_and_peers(
-            net,
-            network_preset,
-            allow_host,
-            &[],
-        ),
+        None => {
+            super::run_network::resolve_run_network_policy(net, network_preset, allow_host, &[])
+        }
     }
 }
 
@@ -241,7 +238,8 @@ fn cli_layer(inputs: &GrantInputs<'_>) -> Result<Grants> {
         // Reuse the one `--allow-host` parser so the granted allow-list and the
         // legacy policy path agree on what `HOST` without a port means, and on
         // which ports are refused outright.
-        let policy = super::run_network::resolve_run_network_policy(false, inputs.allow_host)?;
+        let policy =
+            super::run_network::resolve_run_network_policy(false, None, inputs.allow_host, &[])?;
         Some(EgressGrant {
             allow: policy.resolve_rules().unwrap_or_default(),
         })
@@ -252,6 +250,7 @@ fn cli_layer(inputs: &GrantInputs<'_>) -> Result<Grants> {
         wall_clock,
         egress,
         drive: None,
+        display_input: None,
     })
 }
 

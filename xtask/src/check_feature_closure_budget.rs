@@ -85,7 +85,12 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 ///
 /// 489 (was 488): the first-party `mvm-bundler` crate, split out of `mvm-cli`;
 /// its dependencies were already present.
-const FEATURE_CLOSURE_BUDGET: usize = 489;
+///
+/// 485 (was 489): `vsock`, reached through `tokio-vsock` under
+/// `mvm-agentd/addons`, is held at the release that shares the workspace's
+/// nix 0.29, so the second nix major leaves the closure. The other three nodes
+/// had already dropped out on `main` without the budget following them.
+const FEATURE_CLOSURE_BUDGET: usize = 485;
 
 /// The two gates measure nested sets — everything in the default closure is
 /// reachable with all features on — so a feature budget at or below the default

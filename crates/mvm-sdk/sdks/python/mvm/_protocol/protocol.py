@@ -125,6 +125,125 @@ class ConsoleSessionInfo:
     exit_code: Optional[int] = None
 
 
+class DisplayDeliveryRefusal1(Enum):
+    no_bridge = 'no_bridge'
+
+
+class DisplayDeliveryRefusal2(Enum):
+    out_of_order = 'out_of_order'
+
+
+class DisplayDeliveryRefusal3(Enum):
+    malformed = 'malformed'
+
+
+class DisplayDeliveryRefusal4(Enum):
+    busy = 'busy'
+
+
+DisplayDeliveryRefusal = Union[
+    DisplayDeliveryRefusal1,
+    DisplayDeliveryRefusal2,
+    DisplayDeliveryRefusal3,
+    DisplayDeliveryRefusal4,
+]
+
+
+class Kind(Enum):
+    pointer_move = 'pointer-move'
+
+
+@dataclass
+class DisplayInputEvent1:
+    kind: Kind
+    x: int
+    y: int
+
+
+class Kind1(Enum):
+    pointer_button = 'pointer-button'
+
+
+class Kind2(Enum):
+    wheel = 'wheel'
+
+
+@dataclass
+class DisplayInputEvent3:
+    delta_x: int
+    delta_y: int
+    kind: Kind2
+    x: int
+    y: int
+
+
+class Kind3(Enum):
+    key = 'key'
+
+
+@dataclass
+class DisplayInputEvent4:
+    key: str
+    kind: Kind3
+    pressed: bool
+
+
+class Kind4(Enum):
+    text = 'text'
+
+
+@dataclass
+class DisplayInputEvent5:
+    kind: Kind4
+    text: str
+
+
+class Kind5(Enum):
+    paste = 'paste'
+
+
+@dataclass
+class DisplayInputEvent6:
+    kind: Kind5
+    text: str
+
+
+class Kind6(Enum):
+    credential_entry_begin = 'credential-entry-begin'
+
+
+@dataclass
+class DisplayInputEvent7:
+    kind: Kind6
+
+
+class Kind7(Enum):
+    credential_entry_end = 'credential-entry-end'
+
+
+@dataclass
+class DisplayInputEvent8:
+    kind: Kind7
+
+
+class DisplayInputResult1(Enum):
+    Accepted = 'Accepted'
+
+
+@dataclass
+class Refused:
+    kind: DisplayDeliveryRefusal
+    message: str
+
+
+@dataclass
+class DisplayInputResult2:
+    Refused: Refused
+
+
+DisplayInputResult = Union[DisplayInputResult1, DisplayInputResult2]
+
+
 @dataclass
 class Read:
     length: int
@@ -435,19 +554,27 @@ class GuestCapability1(Enum):
 
 
 class GuestCapability2(Enum):
-    mediated_exec = 'mediated_exec'
+    agent_prompt = 'agent_prompt'
 
 
 class GuestCapability3(Enum):
-    unix_socket_forward = 'unix_socket_forward'
+    mediated_exec = 'mediated_exec'
 
 
 class GuestCapability4(Enum):
+    unix_socket_forward = 'unix_socket_forward'
+
+
+class GuestCapability5(Enum):
     readiness = 'readiness'
 
 
 GuestCapability = Union[
-    GuestCapability1, GuestCapability2, GuestCapability3, GuestCapability4
+    GuestCapability1,
+    GuestCapability2,
+    GuestCapability3,
+    GuestCapability4,
+    GuestCapability5,
 ]
 
 
@@ -538,6 +665,18 @@ class GuestRequest15:
 
 
 @dataclass
+class AgentPrompt:
+    prompt: List[int]
+    timeout_secs: int
+    env: Optional[List[List[str]]] = field(default_factory=lambda: [])
+
+
+@dataclass
+class GuestRequest16:
+    AgentPrompt: AgentPrompt
+
+
+@dataclass
 class DriveOpen:
     cwd: str
     program_id: str
@@ -545,7 +684,7 @@ class DriveOpen:
 
 
 @dataclass
-class GuestRequest16:
+class GuestRequest17:
     DriveOpen: DriveOpen
 
 
@@ -555,7 +694,7 @@ class DriveFile:
 
 
 @dataclass
-class GuestRequest17:
+class GuestRequest18:
     DriveFile: DriveFile
 
 
@@ -566,18 +705,18 @@ class RunDetached:
 
 
 @dataclass
-class GuestRequest20:
+class GuestRequest21:
     RunDetached: RunDetached
 
 
 TokenItem = int
 
 
-class GuestRequest22(Enum):
+class GuestRequest23(Enum):
     FsDiff = 'FsDiff'
 
 
-class GuestRequest23(Enum):
+class GuestRequest24(Enum):
     SyncFilesystems = 'SyncFilesystems'
 
 
@@ -589,7 +728,7 @@ class StartUnixSocketForward:
 
 
 @dataclass
-class GuestRequest24:
+class GuestRequest25:
     StartUnixSocketForward: StartUnixSocketForward
 
 
@@ -603,7 +742,7 @@ class ConsoleOpen:
 
 
 @dataclass
-class GuestRequest25:
+class GuestRequest26:
     ConsoleOpen: ConsoleOpen
 
 
@@ -616,7 +755,7 @@ class ConsoleAttach:
 
 
 @dataclass
-class GuestRequest26:
+class GuestRequest27:
     ConsoleAttach: ConsoleAttach
 
 
@@ -626,11 +765,11 @@ class ConsoleDetach:
 
 
 @dataclass
-class GuestRequest27:
+class GuestRequest28:
     ConsoleDetach: ConsoleDetach
 
 
-class GuestRequest28(Enum):
+class GuestRequest29(Enum):
     ConsoleList = 'ConsoleList'
 
 
@@ -640,7 +779,7 @@ class ConsoleClose:
 
 
 @dataclass
-class GuestRequest29:
+class GuestRequest30:
     ConsoleClose: ConsoleClose
 
 
@@ -652,15 +791,15 @@ class ConsoleResize:
 
 
 @dataclass
-class GuestRequest30:
+class GuestRequest31:
     ConsoleResize: ConsoleResize
 
 
-class GuestRequest31(Enum):
+class GuestRequest32(Enum):
     EntrypointStatus = 'EntrypointStatus'
 
 
-class GuestRequest32(Enum):
+class GuestRequest33(Enum):
     ReadinessStatus = 'ReadinessStatus'
 
 
@@ -673,7 +812,7 @@ class FsRead:
 
 
 @dataclass
-class GuestRequest33:
+class GuestRequest34:
     FsRead: FsRead
 
 
@@ -689,7 +828,7 @@ class FsWrite:
 
 
 @dataclass
-class GuestRequest34:
+class GuestRequest35:
     FsWrite: FsWrite
 
 
@@ -700,7 +839,7 @@ class FsList:
 
 
 @dataclass
-class GuestRequest35:
+class GuestRequest36:
     FsList: FsList
 
 
@@ -711,7 +850,7 @@ class FsStat1:
 
 
 @dataclass
-class GuestRequest36:
+class GuestRequest37:
     FsStat: FsStat1
 
 
@@ -723,7 +862,7 @@ class FsMkdir:
 
 
 @dataclass
-class GuestRequest37:
+class GuestRequest38:
     FsMkdir: FsMkdir
 
 
@@ -735,7 +874,7 @@ class FsRemove:
 
 
 @dataclass
-class GuestRequest38:
+class GuestRequest39:
     FsRemove: FsRemove
 
 
@@ -747,7 +886,7 @@ class FsMove:
 
 
 @dataclass
-class GuestRequest39:
+class GuestRequest40:
     FsMove: FsMove
 
 
@@ -761,11 +900,11 @@ class ProcStart:
 
 
 @dataclass
-class GuestRequest40:
+class GuestRequest41:
     ProcStart: ProcStart
 
 
-class GuestRequest41(Enum):
+class GuestRequest42(Enum):
     ProcList = 'ProcList'
 
 
@@ -776,7 +915,7 @@ class ProcSignal:
 
 
 @dataclass
-class GuestRequest42:
+class GuestRequest43:
     ProcSignal: ProcSignal
 
 
@@ -787,7 +926,7 @@ class ProcSendInput:
 
 
 @dataclass
-class GuestRequest43:
+class GuestRequest44:
     ProcSendInput: ProcSendInput
 
 
@@ -798,7 +937,7 @@ class ProcWait:
 
 
 @dataclass
-class GuestRequest44:
+class GuestRequest45:
     ProcWait: ProcWait
 
 
@@ -808,7 +947,7 @@ class ProcKill:
 
 
 @dataclass
-class GuestRequest45:
+class GuestRequest46:
     ProcKill: ProcKill
 
 
@@ -820,7 +959,7 @@ class MountVolume:
 
 
 @dataclass
-class GuestRequest46:
+class GuestRequest47:
     MountVolume: MountVolume
 
 
@@ -831,7 +970,7 @@ class UnmountVolume:
 
 
 @dataclass
-class GuestRequest47:
+class GuestRequest48:
     UnmountVolume: UnmountVolume
 
 
@@ -841,7 +980,7 @@ class UpdateIdleTimeout:
 
 
 @dataclass
-class GuestRequest48:
+class GuestRequest49:
     UpdateIdleTimeout: UpdateIdleTimeout
 
 
@@ -852,12 +991,12 @@ class RunCode:
 
 
 @dataclass
-class GuestRequest49:
+class GuestRequest50:
     RunCode: RunCode
 
 
 @dataclass
-class GuestRequest51:
+class GuestRequest52:
     CloseStreamInput: CloseInput
 
 
@@ -1156,6 +1295,11 @@ class GuestResponse44:
 
 
 @dataclass
+class GuestResponse46:
+    DisplayInputResult: DisplayInputResult
+
+
+@dataclass
 class InputFrame:
     payload: List[int]
     seq: int
@@ -1202,11 +1346,18 @@ IntegrationStatus = Union[
 class MediatedExecCall:
     argv: List[str]
     tool: str
+    env: Optional[List[List[str]]] = None
     stdin: Optional[str] = None
     timeout_secs: Optional[int] = None
 
 
 Nonce = str
+
+
+class PointerButton(Enum):
+    left = 'left'
+    middle = 'middle'
+    right = 'right'
 
 
 @dataclass
@@ -1534,14 +1685,14 @@ class StreamInputResult2(Enum):
 
 
 @dataclass
-class Refused:
+class Refused1:
     kind: StreamInputRefusal
     message: str
 
 
 @dataclass
 class StreamInputResult3:
-    Refused: Refused
+    Refused: Refused1
 
 
 StreamInputResult = Union[StreamInputResult1, StreamInputResult2, StreamInputResult3]
@@ -1643,6 +1794,33 @@ VolumeMountResult = Union[VolumeMountResult1, VolumeMountResult2, VolumeMountRes
 class CapabilityId:
     service: ServiceId
     verb: str
+
+
+@dataclass
+class DisplayInputEvent2:
+    button: PointerButton
+    kind: Kind1
+    pressed: bool
+    x: int
+    y: int
+
+
+DisplayInputEvent = Union[
+    DisplayInputEvent1,
+    DisplayInputEvent2,
+    DisplayInputEvent3,
+    DisplayInputEvent4,
+    DisplayInputEvent5,
+    DisplayInputEvent6,
+    DisplayInputEvent7,
+    DisplayInputEvent8,
+]
+
+
+@dataclass
+class DisplayInputFrame:
+    events: List[DisplayInputEvent]
+    seq: int
 
 
 @dataclass
@@ -1761,7 +1939,7 @@ class RunExtension:
 
 
 @dataclass
-class GuestRequest18:
+class GuestRequest19:
     RunExtension: RunExtension
 
 
@@ -1771,13 +1949,18 @@ class CancelExtension:
 
 
 @dataclass
-class GuestRequest19:
+class GuestRequest20:
     CancelExtension: CancelExtension
 
 
 @dataclass
-class GuestRequest50:
+class GuestRequest51:
     StreamInput: InputFrame
+
+
+@dataclass
+class GuestRequest53:
+    DisplayInput: DisplayInputFrame
 
 
 @dataclass
@@ -1959,7 +2142,7 @@ class PostRestore:
 
 
 @dataclass
-class GuestRequest21:
+class GuestRequest22:
     PostRestore: PostRestore
 
 
@@ -2024,6 +2207,7 @@ GuestResponse = Union[
     GuestResponse43,
     GuestResponse44,
     GuestResponse45,
+    GuestResponse46,
 ]
 
 
@@ -2101,6 +2285,8 @@ GuestRequest = Union[
     GuestRequest49,
     GuestRequest50,
     GuestRequest51,
+    GuestRequest52,
+    GuestRequest53,
 ]
 
 

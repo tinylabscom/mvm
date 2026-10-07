@@ -259,6 +259,7 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(security_checks::security_proxy_socket_mode_check());
     checks.push(security_checks::security_dev_image_check());
     checks.push(security_checks::security_deny_config_check());
+    checks.push(security_checks::security_attended_display_check());
     checks.push(security_checks::security_default_network_check());
     checks.push(security_checks::security_network_policy_default_check());
     checks.push(security_checks::security_default_run_profile_check());

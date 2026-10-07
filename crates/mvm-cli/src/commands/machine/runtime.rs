@@ -1,8 +1,8 @@
 use super::*;
 use crate::commands::shared;
 use crate::commands::vm::denial_review::{ReviewOffer, ReviewSource};
-use crate::commands::vm::egress_denials::{DenialWatch, finish_and_summarize};
-use crate::commands::vm::{invoke, logs};
+use crate::commands::vm::egress_denials::{DenialWatch, Live, finish_and_summarize};
+use crate::commands::vm::{invoke, logs, workspace_apply};
 
 pub(super) fn resolve_persistent_spec(
     args: &MachineRunArgs,
@@ -69,12 +69,7 @@ fn run_persistent(
     // Watch for egress refusals from before the boot, so one the workload
     // hits while it starts is not lost to the moment before the attach.
     let denials = should_watch_denials(&args)
-        .then(|| {
-            super::super::vm::egress_denials::watch_machine(
-                &name,
-                super::super::vm::egress_denials::Live::Notices,
-            )
-        })
+        .then(|| super::super::vm::egress_denials::watch_machine(&name, denial_live(&args)))
         .flatten();
 
     if let SpecReconcile::Recreate { changed } = &action {
@@ -101,7 +96,17 @@ fn run_persistent(
     }
 
     let review = ReviewOffer::new(&name, persistent_review_source(review_source, booted));
-    run_persistent_post_start(cli, cfg, &args, &name, Denials { denials, review })
+    run_persistent_post_start(
+        cli,
+        cfg,
+        &args,
+        &name,
+        Denials {
+            denials,
+            review,
+            json: args.run.json,
+        },
+    )
 }
 
 /// A persistent machine's refusals, and how to offer them for review once
@@ -109,11 +114,18 @@ fn run_persistent(
 struct Denials {
     denials: Option<DenialWatch>,
     review: ReviewOffer,
+    json: bool,
 }
 
 impl Denials {
-    fn finish(self) {
-        finish_and_summarize(self.denials, &self.review);
+    fn finish(self) -> Result<()> {
+        if self.json {
+            let tally = self.denials.map(DenialWatch::finish).unwrap_or_default();
+            crate::commands::vm::denial_review::emit_json_denial_summary(&tally, &self.review)
+        } else {
+            finish_and_summarize(self.denials, &self.review);
+            Ok(())
+        }
     }
 }
 
@@ -138,9 +150,15 @@ fn check_pack_entrypoint(args: &MachineRunArgs) -> Result<()> {
 }
 
 fn should_watch_denials(args: &MachineRunArgs) -> bool {
-    !args.run.json
-        && !args.up_json
-        && (!args.run.argv.is_empty() || post_start_action(args) == PostStart::Attach)
+    !args.up_json && (!args.run.argv.is_empty() || post_start_action(args) == PostStart::Attach)
+}
+
+fn denial_live(args: &MachineRunArgs) -> Live {
+    if args.run.json {
+        Live::Quiet
+    } else {
+        Live::Notices
+    }
 }
 
 /// The secret references a persistent machine records beside its spec: those
@@ -200,7 +218,7 @@ fn run_persistent_post_start(
                 "guest agent for {name:?} not reachable to run the command"
             ))
         };
-        denials.finish();
+        denials.finish()?;
         let code = outcome?;
         if code != 0 {
             mvm_observability::exit(code);
@@ -309,7 +327,7 @@ fn attach_to_output(name: &str, denials: Denials) -> Result<()> {
     // stating rather than leaving to be discovered.
     eprintln!("attached to machine {name}; press Ctrl-C to detach (it keeps running)");
     let attached = logs::attach(name);
-    denials.finish();
+    denials.finish()?;
     match attached? {
         logs::AttachOutcome::Followed => Ok(()),
         logs::AttachOutcome::NoCapture => {
@@ -460,7 +478,7 @@ fn run_entrypoint_action(
     // transient argv path does, so a baked entrypoint enforces the same posture.
     let routes = crate::commands::vm::run_routes::launch_routes(&args.run)?;
     crate::approval::configure(crate::commands::vm::run_routes::launch_approval(&args.run)?);
-    let network_policy = shared::resolve_run_network_policy_with_preset_and_peers(
+    let network_policy = shared::resolve_run_network_policy(
         args.run.net,
         args.run.network_preset,
         &routes.with_allow_host(&args.run.allow_host),
@@ -469,7 +487,8 @@ fn run_entrypoint_action(
     .with_ai(shared::resolve_ai_policy(args.run.ai_token_budget))
     .with_routes(routes.routes);
     let stdin = resolve_entrypoint_stdin(args.stdin.as_deref())?;
-    invoke::run_entrypoint(invoke::EntrypointCall {
+    let exit_apply = exit_apply_request(&args);
+    let call = invoke::EntrypointCall {
         source,
         stdin,
         timeout: args.run.timeout.unwrap_or(30),
@@ -488,10 +507,33 @@ fn run_entrypoint_action(
         r#fn: None,
         attach: args.attach,
         show_denials: show_entrypoint_denials(&args),
+        json_denials: args.run.json,
         review_source,
         network_policy,
         hypervisor: args.run.hypervisor.clone(),
-    })
+    };
+    if !call.attach {
+        return invoke::run_entrypoint(call);
+    }
+    // A run on a named machine ends here, and that machine may carry a
+    // workspace the entrypoint wrote. Its changes are offered back before the
+    // entrypoint's own exit status is handed on.
+    let machine = call.source.clone();
+    let exit_code = invoke::dispatch_attached(call)?;
+    workspace_apply::offer_at_exit(&machine, exit_apply)?;
+    if exit_code != 0 {
+        mvm_observability::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// What the end of an attached run does with the machine's workspace changes.
+fn exit_apply_request(args: &MachineRunArgs) -> mvm_client::workspace_apply::ExitApplyRequest {
+    mvm_client::workspace_apply::ExitApplyRequest {
+        apply: args.apply,
+        json: args.run.json,
+        operator_at_terminal: crate::approval::operator_at_terminal(),
+    }
 }
 
 fn show_entrypoint_denials(args: &MachineRunArgs) -> bool {
@@ -573,16 +615,12 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // table is read from the flake directory the run names.
     crate::commands::vm::run_policy::apply_run_policy(&mut args.run)?;
     // The manifest that policy came from, for reviewing the run's refusals.
-    // Read now, while the arguments still name the flake directory.
+    // Read now, while the arguments still name the flake directory; the
+    // transient lanes carry it on the run arguments.
     let review_source = ReviewSource::for_launch(&args.run)?;
+    args.run.review_source = Some(review_source.clone());
     check_pack_entrypoint(&args)?;
-    let resolved_flake_slot = if let Some(flake_ref) = args.run.flake.take() {
-        let slot_hash = build::build_flake_to_slot(&flake_ref, args.run.flake_profile.as_deref())?;
-        args.run.manifest = Some(slot_hash.clone());
-        Some(slot_hash)
-    } else {
-        None
-    };
+    let resolved_flake_slot = crate::commands::vm::exec::build_flake_slot(&mut args.run)?;
     let local_deployment = args
         .run
         .deployment
@@ -637,7 +675,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -671,7 +709,7 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure_with_source(cli, run_args, cfg, source)
+            run_secure(cli, run_args, cfg, source)
         }
     }
 }
@@ -875,7 +913,7 @@ mod command_denial_tests {
     }
 
     #[test]
-    fn detached_and_machine_readable_runs_do_not_emit_denial_notices() {
+    fn detached_runs_do_not_watch_and_json_commands_watch_quietly() {
         let detached = MachineRunArgs {
             detach: true,
             ..Default::default()
@@ -889,7 +927,8 @@ mod command_denial_tests {
             },
             ..Default::default()
         };
-        assert!(!should_watch_denials(&json_command));
+        assert!(should_watch_denials(&json_command));
+        assert!(matches!(denial_live(&json_command), Live::Quiet));
     }
 
     /// A machine this invocation booted was admitted under the manifest this

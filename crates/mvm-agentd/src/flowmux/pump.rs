@@ -131,11 +131,11 @@ where
     async fn handle_request(&mut self, req: ClientRequest) -> Result<(), FlowMuxError> {
         match req {
             ClientRequest::OpenTcp {
-                target,
+                payload,
                 stream_id,
                 respond,
             } => {
-                self.do_open_tcp(target, stream_id, respond).await;
+                self.do_open_tcp(payload, stream_id, respond).await;
             }
             ClientRequest::OpenUdp { stream_id, respond } => {
                 self.do_open_udp(stream_id, respond).await;
@@ -179,7 +179,7 @@ where
 
     async fn do_open_tcp(
         &mut self,
-        target: String,
+        payload: Vec<u8>,
         stream_id: u32,
         respond: oneshot::Sender<Result<FlowMuxStream, FlowMuxError>>,
     ) {
@@ -189,7 +189,7 @@ where
                 Direction::GuestToHost,
                 Opcode::OpenTcp,
                 stream_id,
-                target.len() as u32,
+                payload.len() as u32,
             ))
             .is_err()
         {
@@ -207,9 +207,7 @@ where
             },
         );
 
-        if let Err(e) = self
-            .write_frame(Opcode::OpenTcp, stream_id, target.as_bytes())
-            .await
+        if let Err(e) = self.write_frame(Opcode::OpenTcp, stream_id, &payload).await
             && let Some(PendingOpen::Tcp { respond, .. }) = self.pending_opens.remove(&stream_id)
         {
             let _ = respond.send(Err(e));

@@ -104,13 +104,40 @@ directory. If dispatch fails without a reported code, the exit record says
 
 A transient `machine run --entrypoint` call ends the same way once its VM has
 stopped. `plan.exited` carries the entrypoint's exit code, and the seal reason
-is `exited`. A call that times out, is cancelled, or fails to dispatch records no exit code and seals as `failed`. If the VM could not be
-stopped, nothing is sealed and the session stays `UNSEALED`, because a guest
-that may still be running can extend it.
+is `exited`. A call that times out, is cancelled, or fails to dispatch records
+no exit code and seals as `failed`. If the VM could not be stopped, nothing is
+sealed and the session stays `UNSEALED`, because a guest that may still be
+running can extend it.
 
-A `machine session start` session, or an entrypoint call kept alive past its exit
-(`-d`, for example), is not sealed when it is killed or reaped for idling. It reports
-`UNSEALED`.
+A `machine session start` session, or an entrypoint call kept alive past its
+exit (`-d`, for example), has no workload exit to record. When it is killed,
+reaped for idling, or ends after its one ephemeral call, the host stops its VM
+and seals the session with reason `stopped`, as `machine stop` does. The same
+rule applies: a VM that could not be stopped leaves the session `UNSEALED`.
+
+### A session that ends without a seal
+
+For each session end the host observes, it writes a seal or records why the
+session remains unsealed:
+
+- **`plan.teardown_failed`**, chain-signed under the session's plan, when there
+  is an admitted plan and the chain accepts the write. Its `reason` label is
+  `stop-failed` (the VM could not be shown to be stopped) or `seal-failed` (the
+  exit record or the seal could not be written), and `error_message` carries
+  the error. It is synced to disk before the call returns, like every
+  terminal event.
+- **`session_unsealed`** in the local audit log, which
+  `mvmctl trust audit tail` reads without `--chain`, when there is no verified
+  plan to bind an entry to, or the chain refused the write. Its detail carries
+  the same `reason` tag, the plan id when one was known, and the error.
+  `no-verified-plan` is the reason for a session with no admitted plan
+  persisted, or a signed plan that did not verify.
+
+Neither record stands in for a seal: `trust audit verify <session>` still
+reports the session `UNSEALED`. Such a session may still be running, or have a
+record saying why it ended unsealed. One with neither may have ended in a way
+the host never saw, such as a crash or power loss, or its log write may have
+failed or been truncated.
 
 The seal records:
 

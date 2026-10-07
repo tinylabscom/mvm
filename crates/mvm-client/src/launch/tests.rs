@@ -42,6 +42,12 @@ impl Isolated {
         path.to_string_lossy().into_owned()
     }
 
+    /// The local (unsigned) audit log, where an end that cannot be bound to a
+    /// plan is recorded.
+    fn local_audit_text(&self) -> String {
+        std::fs::read_to_string(mvm_core::audit::default_audit_log()).unwrap_or_default()
+    }
+
     /// The tenant audit chain the admitted boot writes.
     fn audit_text(&self) -> String {
         let audit = mvm_core::config::mvm_audit_dir().join("local.jsonl");
@@ -325,6 +331,50 @@ fn malformed_transient_plan_cannot_create_an_exit_seal() {
 
     assert!(result.is_err());
     assert!(!home.audit_text().contains("session.sealed"));
+    let local = home.local_audit_text();
+    assert!(local.contains("session_unsealed"), "{local}");
+    assert!(local.contains("no-verified-plan"), "{local}");
+}
+
+#[tokio::test]
+async fn a_transient_stop_failure_is_recorded_under_its_plan_and_left_unsealed() {
+    let home = Isolated::new();
+    let client = mock_client();
+    let request = transient_request(&home.rootfs())
+        .name("t-stop-failed")
+        .build()
+        .expect("request");
+    let outcome = client.launch(request).await.expect("launch");
+    let signed_plan_json = serde_json::to_string(outcome.admitted.signed()).expect("signed plan");
+
+    record_transient_stop_failure(
+        TransientExitAudit {
+            signed_plan_json: &signed_plan_json,
+            vm_name: "t-stop-failed",
+            backend: "mock",
+            exit_code: Some(0),
+            completed: true,
+        },
+        "vmm still running",
+    );
+
+    let audit = home.audit_text();
+    assert!(audit.contains("plan.teardown_failed"), "got: {audit}");
+    assert!(audit.contains("stop-failed"), "got: {audit}");
+    assert!(!audit.contains("plan.exited"), "got: {audit}");
+    assert!(!audit.contains("session.sealed"), "got: {audit}");
+    let signer = mvm_hostd::audit::host_keypair::load_or_init().expect("host signer");
+    let verified = mvm_hostd::audit::session::verify_session(
+        &mvm_core::config::mvm_audit_dir(),
+        "local",
+        &outcome.plan_id,
+        &signer.verifying,
+    );
+    assert_eq!(
+        verified.verdict,
+        mvm_hostd::audit::session::Verdict::Unsealed,
+        "{verified:?}"
+    );
 }
 
 #[tokio::test]
@@ -440,7 +490,7 @@ async fn ttl_reaper_stops_and_cleans_expired_transients_only() {
 
     let short = transient_request(&rootfs)
         .name("t-ttl")
-        .ttl_seconds(1)
+        .ttl_seconds(3600)
         .build()
         .unwrap();
     client.launch(short).await.expect("launch with ttl");
@@ -461,7 +511,7 @@ async fn ttl_reaper_stops_and_cleans_expired_transients_only() {
     );
 
     // Past expiry the transient is stopped + cleaned; the definition stays.
-    let later = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let later = (chrono::Utc::now() + chrono::Duration::hours(2)).to_rfc3339();
     let reaped = client.reap_expired_transients(&later).expect("reap");
     assert_eq!(reaped, vec!["t-ttl".to_string()]);
     assert!(!listed_names(&client).await.contains(&"t-ttl".to_string()));

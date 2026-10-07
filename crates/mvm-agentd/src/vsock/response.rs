@@ -360,6 +360,9 @@ pub enum GuestResponse {
 
     /// Outcome of one `StreamInput` frame or one `CloseStreamInput`.
     StreamInputResult(StreamInputResult),
+
+    /// Outcome of one `DisplayInput` frame.
+    DisplayInputResult(DisplayInputResult),
 }
 /// Declares a unit enum that is the name-only projection of a wire enum,
 /// with a `ALL` slice (every variant, declaration order) and a `name()`
@@ -391,7 +394,7 @@ name_enum! {
         ActivateEnvironment, ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, ResourceUsage,
         IntegrationStatus,
         CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, MediatedExec, ExecBatch, RunEntrypoint,
-        DriveOpen, DriveFile, RunExtension,
+        AgentPrompt, DriveOpen, DriveFile, RunExtension,
         CancelExtension,
         RunDetached,
         PostRestore,
@@ -399,7 +402,7 @@ name_enum! {
         ConsoleList, ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
         FsWrite, FsList, FsStat, FsMkdir, FsRemove, FsMove, ProcStart,
         ProcList, ProcSignal, ProcSendInput, ProcWait, ProcKill, MountVolume,
-        UnmountVolume, UpdateIdleTimeout, RunCode, StreamInput, CloseStreamInput,
+        UnmountVolume, UpdateIdleTimeout, RunCode, StreamInput, CloseStreamInput, DisplayInput,
     }
 }
 
@@ -418,7 +421,7 @@ name_enum! {
         ConsoleDetached, ConsoleSessions, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
         ReadinessStatusReport, FsResult, ProcResult, ProcWaitEvent,
-        VolumeMountResult, UpdateIdleTimeoutAck, StreamInputResult,
+        VolumeMountResult, UpdateIdleTimeoutAck, StreamInputResult, DisplayInputResult,
     }
 }
 
@@ -450,11 +453,18 @@ pub enum ResponseKind {
 
 /// Host answer to a paused declared-command invocation. This is read only
 /// while a `MediatedExec` is waiting; it is not a standalone guest verb.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCheckReply {
     /// The host gate admitted and audited this invocation.
     Allow,
+    /// Admitted, and the tool owns routes or secrets: the guest starts the
+    /// command in a session of its own and attributes that session's flows to
+    /// this binding while the command runs.
+    AllowBound {
+        /// The host-minted binding for this invocation.
+        binding: mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding,
+    },
     /// The host gate refused it, or could not obtain an audited decision.
     Deny,
 }
@@ -489,6 +499,7 @@ impl Verb {
             | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::AgentPrompt
             | Self::DriveOpen
             | Self::DriveFile
             | Self::RunExtension
@@ -500,7 +511,8 @@ impl Verb {
             | Self::ProcWait
             | Self::RunCode
             | Self::StreamInput
-            | Self::CloseStreamInput => Data,
+            | Self::CloseStreamInput
+            | Self::DisplayInput => Data,
             Self::ActivateEnvironment
             | Self::ProtocolHello
             | Self::WorkerStatus
@@ -558,6 +570,7 @@ impl Verb {
             | Self::MediatedExec
             | Self::ExecBatch
             | Self::RunEntrypoint
+            | Self::AgentPrompt
             | Self::DriveOpen
             | Self::RunExtension
             | Self::RunDetached
@@ -616,6 +629,9 @@ impl Verb {
             // workload-spawning.
             | Self::StreamInput
             | Self::CloseStreamInput
+            // Delivers pointer and key events to the display bridge. It names
+            // no program and reaches no spawn site.
+            | Self::DisplayInput
             | Self::UpdateIdleTimeout => false,
         }
     }
@@ -671,6 +687,7 @@ impl Verb {
             Verb::MediatedExec => stream(&[R::ToolCheckRequired, R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::AgentPrompt => stream(&[R::EntrypointEvent]),
             Verb::DriveOpen => stream(&[R::DriveEvent, R::DriveRefused]),
             Verb::DriveFile => unary(&[R::FsResult, R::DriveRefused]),
             Verb::RunExtension => stream(&[R::EntrypointEvent]),
@@ -705,6 +722,7 @@ impl Verb {
             Verb::UpdateIdleTimeout => unary(&[R::UpdateIdleTimeoutAck]),
             Verb::RunCode => stream(&[R::ExecEvent]),
             Verb::StreamInput | Verb::CloseStreamInput => unary(&[R::StreamInputResult]),
+            Verb::DisplayInput => unary(&[R::DisplayInputResult]),
         }
     }
 }
@@ -765,6 +783,7 @@ impl GuestResponse {
             GuestResponse::FsResult(_) => ResponseVariant::FsResult,
             GuestResponse::ProcResult(_) => ResponseVariant::ProcResult,
             GuestResponse::StreamInputResult(_) => ResponseVariant::StreamInputResult,
+            GuestResponse::DisplayInputResult(_) => ResponseVariant::DisplayInputResult,
             GuestResponse::ProcWaitEvent(_) => ResponseVariant::ProcWaitEvent,
             GuestResponse::VolumeMountResult(_) => ResponseVariant::VolumeMountResult,
             GuestResponse::UpdateIdleTimeoutAck { .. } => ResponseVariant::UpdateIdleTimeoutAck,
@@ -824,6 +843,8 @@ pub enum GuestCapability {
     IntegrationStatus,
     EntrypointStatus,
     RunEntrypoint,
+    /// `AgentPrompt`: one prompt to the image's resident agent.
+    AgentPrompt,
     Drive,
     RunExtension,
     FilesystemRpc,
@@ -870,6 +891,7 @@ pub fn supported_capabilities() -> Vec<GuestCapability> {
         GuestCapability::IntegrationStatus,
         GuestCapability::EntrypointStatus,
         GuestCapability::RunEntrypoint,
+        GuestCapability::AgentPrompt,
         GuestCapability::Drive,
         GuestCapability::RunExtension,
         GuestCapability::FilesystemRpc,
@@ -1828,6 +1850,7 @@ mod tests {
         assert_eq!(
             streaming,
             BTreeSet::from([
+                "AgentPrompt",
                 "DriveOpen",
                 "Exec",
                 "MediatedExec",
@@ -1927,7 +1950,11 @@ mod tests {
             if verb.spawns_workload_process()
                 && !matches!(
                     verb,
-                    Verb::MediatedExec | Verb::RunEntrypoint | Verb::DriveOpen | Verb::RunExtension
+                    Verb::MediatedExec
+                        | Verb::RunEntrypoint
+                        | Verb::AgentPrompt
+                        | Verb::DriveOpen
+                        | Verb::RunExtension
                 )
             {
                 assert!(verb.bypasses_tool_mediation(), "{}", verb.name());

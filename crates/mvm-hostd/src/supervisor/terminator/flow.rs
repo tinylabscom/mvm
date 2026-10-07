@@ -31,8 +31,8 @@ use super::read::{ReadError, read_http_request};
 use super::request::{method_of, proxy_request_from_connect_authority};
 use super::tls::{is_framing_header, reason_phrase, server_config_for_sni, smuggles_crlf};
 use crate::supervisor::network_endpoint_proxy::{
-    ForwardStreamResponse, PLACEHOLDER_IN_BODY_MESSAGE, REASON_PLACEHOLDER_IN_BODY,
-    SubstitutionService, TerminationMode,
+    FlowAttribution, ForwardStreamResponse, PLACEHOLDER_IN_BODY_MESSAGE,
+    REASON_PLACEHOLDER_IN_BODY, SubstitutionService, TerminationMode,
 };
 
 /// Status written back when the request's `Host` disagrees with the authority
@@ -220,6 +220,8 @@ pub(crate) struct TerminatedFlow {
     leaves: Arc<LeafCache>,
     authority: Authority,
     mode: TerminationMode,
+    /// The tool invocation the guest attributed the flow to when it opened.
+    attribution: FlowAttribution,
 }
 
 /// The `host:port` a flow was opened and admitted against.
@@ -411,7 +413,10 @@ impl TerminatedFlow {
         }
         drop(sender);
         self.runtime
-            .block_on(self.service.process_body_stream(head, receiver))
+            .block_on(
+                self.service
+                    .process_body_stream(head, receiver, &self.attribution),
+            )
             .map_err(|refusal| match refusal {
                 WireResponse::Refused { message } => message,
                 // A refusal is the only variant this path returns; an `Ok`
@@ -541,7 +546,8 @@ fn write_refusal<T: Write>(
     Ok(())
 }
 
-/// Builder for [`TerminatedFlow`]. Every field is required.
+/// Builder for [`TerminatedFlow`]. Every field but the attribution is
+/// required; a flow nobody attributed belongs to no tool.
 #[derive(Default)]
 pub(crate) struct TerminatedFlowBuilder {
     service: Option<Arc<SubstitutionService>>,
@@ -549,6 +555,7 @@ pub(crate) struct TerminatedFlowBuilder {
     leaves: Option<Arc<LeafCache>>,
     authority: Option<Authority>,
     mode: Option<TerminationMode>,
+    attribution: FlowAttribution,
 }
 
 impl TerminatedFlowBuilder {
@@ -585,6 +592,12 @@ impl TerminatedFlowBuilder {
         self
     }
 
+    #[must_use]
+    pub(crate) fn attribution(mut self, value: FlowAttribution) -> Self {
+        self.attribution = value;
+        self
+    }
+
     pub(crate) fn build(self) -> Result<TerminatedFlow, &'static str> {
         Ok(TerminatedFlow {
             service: self.service.ok_or("terminated flow service missing")?,
@@ -592,6 +605,7 @@ impl TerminatedFlowBuilder {
             leaves: self.leaves.ok_or("terminated flow leaf cache missing")?,
             authority: self.authority.ok_or("terminated flow authority missing")?,
             mode: self.mode.ok_or("terminated flow mode missing")?,
+            attribution: self.attribution,
         })
     }
 }

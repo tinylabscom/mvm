@@ -19,6 +19,17 @@ use crate::vsock::{RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfi
 pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
+/// Group a host-bound tool invocation runs in.
+///
+/// The agent holds it as its saved gid and nothing else does: `execve` resets
+/// every workload process's saved gid to its effective gid, so no workload
+/// process can reach it. A tool invocation switches all three of its gids to
+/// it before exec. The kernel's ptrace access check requires the caller's gid
+/// to equal the target's real, effective and saved gids, so a workload
+/// process — same uid, different gid — cannot attach to the tool, read or
+/// write its memory through `process_vm_*` or `/proc/<pid>/mem`, or take its
+/// descriptors with `pidfd_getfd`.
+pub const TOOL_GID: u32 = 907;
 
 /// Home directory used by workload processes.
 ///
@@ -818,15 +829,29 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
 /// leaves the `pre_exec` hook and kills the agent before it ever runs. The
 /// bounding set is inherited across fork and exec and can only shrink, so
 /// applying it here binds the agent and everything under it just as firmly.
+///
+/// The agent keeps [`TOOL_GID`] as its saved gid, which is what lets it start
+/// a bound tool invocation in that group without any capability.
 #[cfg(target_os = "linux")]
 pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
-    assume_identity_retaining(uid, gid, RESTORE_AGENT_CAPABILITIES)
+    assume_identity_with_saved_gid(uid, gid, TOOL_GID, RESTORE_AGENT_CAPABILITIES)
 }
 
 /// Become `uid`/`gid` from root, keeping exactly `keep`. Async-signal-safe, so
 /// usable from `pre_exec`.
 #[cfg(target_os = "linux")]
 pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u32) -> std::io::Result<()> {
+    assume_identity_with_saved_gid(uid, gid, gid, keep)
+}
+
+/// [`assume_identity_retaining`], leaving `saved_gid` as the saved group id.
+#[cfg(target_os = "linux")]
+fn assume_identity_with_saved_gid(
+    uid: u32,
+    gid: u32,
+    saved_gid: u32,
+    keep: u32,
+) -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -834,7 +859,7 @@ pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u32) -> std::i
     if unsafe { libc::setgroups(0, std::ptr::null::<libc::gid_t>()) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    if unsafe { libc::setgid(gid) } != 0 {
+    if unsafe { libc::setresgid(gid, gid, saved_gid) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     if unsafe { libc::setuid(uid) } != 0 {
@@ -2711,6 +2736,69 @@ mod privilege_tests {
         assert!(
             status.contains("CapBnd:\t0000000002000020"),
             "CapBnd must be exactly CAP_KILL|CAP_SYS_TIME; got:\n{status}"
+        );
+        assert!(
+            status.contains(&format!(
+                "Gid:\t{WORKLOAD_GID}\t{WORKLOAD_GID}\t{TOOL_GID}\t{WORKLOAD_GID}"
+            )),
+            "the agent must hold the tool group as its saved gid only; got:\n{status}"
+        );
+    }
+
+    /// Live witness that a workload process cannot take over a bound tool
+    /// invocation: same uid, but the tool runs in [`TOOL_GID`], so the
+    /// kernel's ptrace access check refuses the attach and `/proc/<pid>/mem`.
+    /// Irreversible and gated like the drop witnesses above.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_workload_process_cannot_trace_a_bound_tool_invocation() {
+        if !privileged() {
+            return;
+        }
+        super::drop_guest_agent_privilege_raw(WORKLOAD_UID, WORKLOAD_GID)
+            .expect("the agent privilege drop must succeed as root");
+        let binding =
+            mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random(
+                [8; 16],
+            );
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30");
+        let (mut tool, _registration) =
+            crate::tool_attribution::spawn_attributed(&mut command, &binding)
+                .expect("the agent starts a bound tool in the tool group");
+        let tool_pid = tool.id() as libc::pid_t;
+        let mem = std::ffi::CString::new(format!("/proc/{tool_pid}/mem")).expect("path");
+        // SAFETY: the child runs only async-signal-safe syscalls, then exits.
+        let child = unsafe { libc::fork() };
+        if child == 0 {
+            // A workload process: its saved gid is its effective gid.
+            let code = unsafe {
+                if libc::setresgid(WORKLOAD_GID, WORKLOAD_GID, WORKLOAD_GID) != 0 {
+                    2
+                } else if libc::ptrace(
+                    libc::PTRACE_ATTACH,
+                    tool_pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::null_mut::<libc::c_void>(),
+                ) != -1
+                {
+                    3
+                } else if libc::open(mem.as_ptr(), libc::O_RDWR) != -1 {
+                    4
+                } else {
+                    0
+                }
+            };
+            unsafe { libc::_exit(code) };
+        }
+        let mut status = 0;
+        // SAFETY: waits for the child forked above.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        let _ = tool.kill();
+        let _ = crate::child_wait::wait(&mut tool);
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "a same-uid workload process reached the tool (status {status})"
         );
     }
 }

@@ -71,6 +71,55 @@ fn named_transient_with_registered_volume_explains_the_mount_is_not_attached() {
     assert!(warning.contains("Use `--mount` to attach one here"));
 }
 
+#[test]
+fn apply_is_accepted_on_a_run_attached_to_a_named_machine() {
+    let args = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--attach",
+        "--name",
+        "coding-agent",
+        "--apply",
+    ])
+    .expect("--apply parses on an attached run");
+    assert!(args.apply);
+    assert!(args.attach);
+    assert!(
+        !parse_run(&["run", "--entrypoint", "--attach", "--name", "coding-agent"])
+            .expect("parses")
+            .apply,
+        "nothing is applied unless asked"
+    );
+}
+
+#[test]
+fn apply_needs_a_run_on_a_named_machine() {
+    // A fresh boot has no workspace to apply: its image is discarded at exit.
+    let error = parse_run(&["run", "--entrypoint", "--manifest", "slot", "--apply"])
+        .expect_err("--apply without --attach is refused");
+    assert_eq!(
+        error.kind(),
+        clap::error::ErrorKind::MissingRequiredArgument
+    );
+}
+
+#[test]
+fn apply_and_json_are_mutually_exclusive() {
+    // Machine-readable output never applies: it gets the command to run
+    // instead, so the two flags cannot both be meant.
+    let error = parse_run(&[
+        "run",
+        "--entrypoint",
+        "--attach",
+        "--name",
+        "coding-agent",
+        "--apply",
+        "--json",
+    ])
+    .expect_err("--apply with --json is refused");
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
 fn parse_fork(argv: &[&str]) -> Result<MachineForkArgs, clap::Error> {
     parse(argv).map(|action| match action {
         MachineAction::Fork(f) => f,
@@ -1098,7 +1147,7 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
 }
 
 #[test]
-fn run_spec_records_tool_rules_but_refuses_unmediated_scope() {
+fn run_spec_records_tool_rules_with_their_scope() {
     let mut args =
         parse_run(&["run", "--image", "alpine:3.20", "--name", "toolbox"]).expect("parse");
     args.run.applied_policy = Some(
@@ -1117,9 +1166,8 @@ fn run_spec_records_tool_rules_but_refuses_unmediated_scope() {
         )
         .expect("scoped route parses"),
     );
-    let error = machine_run_spec(&args, "toolbox".to_string(), None)
-        .expect_err("unmediated tool route must be refused");
-    assert!(error.to_string().contains("tools.detail.routes"));
+    let spec = machine_run_spec(&args, "toolbox".to_string(), None).expect("scoped spec");
+    assert_eq!(spec.tools.detail["git"].routes, ["example.com:443"]);
 }
 
 #[test]
@@ -1808,7 +1856,7 @@ fn fixture_machine_run_default_fixture_uses_cli_default_deny_preflight() {
     let run = parse_owned_run(&sdk_args)
         .expect("the fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+    let summary = super::super::vm::exec::test_run_security_summary(&run, None, "firecracker")
         .expect("CLI preflight accepts the fixture");
 
     assert!(summary.dry_run);
@@ -1826,9 +1874,9 @@ fn fixture_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
     let run = parse_owned_run(&sdk_args)
         .expect("the fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+    let summary = super::super::vm::exec::test_run_security_summary(
         &run,
-        SDK_RUN_EGRESS_BACKEND,
+        Some(SDK_RUN_EGRESS_BACKEND),
         SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts the fixture");
@@ -1854,9 +1902,9 @@ fn fixture_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
     let run = parse_owned_run(&sdk_args)
         .expect("the fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+    let summary = super::super::vm::exec::test_run_security_summary(
         &run,
-        SDK_RUN_EGRESS_BACKEND,
+        Some(SDK_RUN_EGRESS_BACKEND),
         SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts the fixture");
@@ -3255,6 +3303,13 @@ fn machine_advanced_verbs_parse() {
         "proc: {r:?}"
     );
 
+    // prompt
+    let r = parse(&["prompt", "myvm", "summarize the diff"]);
+    assert!(
+        matches!(r, Ok(MachineAction::Vm(VmCmd::Prompt(_)))),
+        "prompt: {r:?}"
+    );
+
     // session
     let r = parse(&["session", "ls"]);
     assert!(
@@ -3895,6 +3950,7 @@ fn the_argv_the_sdk_facade_emits_parses_back_into_the_grant_it_encoded() {
                 ],
             }),
             drive: None,
+            display_input: None,
         })
     );
 }

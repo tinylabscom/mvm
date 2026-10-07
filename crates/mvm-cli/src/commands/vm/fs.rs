@@ -164,7 +164,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 pub(in crate::commands) use mvm_client::guest::fs_request;
 
 fn cmd_read(name: &str, path: &str, offset: u64, length: u64) -> Result<()> {
-    let content = read_guest_chunks(name, path, offset, length)?;
+    let content = guest::read_file_chunks(
+        name, path, offset, length, /* follow_symlinks = */ true,
+    )?;
     std::io::stdout().write_all(&content)?;
     Ok(())
 }
@@ -197,25 +199,6 @@ fn cmd_write(
     )?;
     eprintln!("wrote {} bytes", bytes_written);
     Ok(())
-}
-
-pub(in crate::commands) fn read_guest_chunks(
-    name: &str,
-    path: &str,
-    start_offset: u64,
-    length: u64,
-) -> Result<Vec<u8>> {
-    guest::read_file_chunks(name, path, start_offset, length, true)
-}
-
-pub(in crate::commands) fn read_guest_chunks_with_symlink_policy(
-    name: &str,
-    path: &str,
-    start_offset: u64,
-    length: u64,
-    follow_symlinks: bool,
-) -> Result<Vec<u8>> {
-    guest::read_file_chunks(name, path, start_offset, length, follow_symlinks)
 }
 
 pub(super) fn write_guest_chunks(

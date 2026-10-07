@@ -46,9 +46,6 @@ mvmctl why --tool mvm.machine.list
 mvmctl why --tool mvm.machine.stop
 ```
 
-`policy validate` prints a note that `[tools]` is not enforced by the runtime.
-That note is about a workload in a VM; the MCP gate described here does
-enforce these whole-tool decisions.
 [Policy and profiles](/guides/policy-and-profiles/) covers the rest of the
 policy language.
 

@@ -4,6 +4,27 @@ use mvm_core::plan::ExecutionPlan;
 use super::AuditEmitter;
 
 impl AuditEmitter {
+    /// Emit `plan.teardown_failed`: the session's VM could not be shown to be
+    /// stopped, or its exit and seal could not be written, so the session is
+    /// deliberately left `UNSEALED`. `reason` is a short tag (`stop-failed`,
+    /// `seal-failed`); `message` is the rendered error chain. The entry is the
+    /// record of why a session that ended carries no seal.
+    pub fn emit_teardown_failed(
+        &self,
+        plan: &ExecutionPlan,
+        reason: &str,
+        message: &str,
+    ) -> Result<()> {
+        self.emit(
+            plan,
+            "plan.teardown_failed",
+            [
+                ("reason".to_string(), reason.to_string()),
+                ("error_message".to_string(), message.to_string()),
+            ],
+        )
+    }
+
     /// Emit `session.parked` — a durable agent session released its sandbox.
     ///
     /// Bound to the plan the parked residency was admitted under, so the chain

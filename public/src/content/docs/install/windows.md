@@ -47,6 +47,8 @@ There isn't a maintained native-Windows microVM stack we support today. Hyper-V 
 
 That future backend needs its own lifecycle, filesystem, networking, and trust model. Until it lands, native Windows remains unsupported.
 
+What exists today is groundwork, not support. CI cross-compiles the portable crates — `mvm-contract`, `mvm-core`, `mvm-net`, `mvm-bundler`, and `mvm-backends` with its Unix-only drivers compiled out — for `x86_64-pc-windows-gnu`, so a Unix API used without a platform guard is caught when it is introduced. Where Windows lacks something mvm depends on, those crates refuse instead of degrading. `~/.mvm` and every key and secret in it must be readable only by its owner; no owner-only Windows ACL is implemented, so creating that state on Windows fails with an error rather than producing files another local account could read.
+
 Tracking issue: [Future work: Windows host support via Windows Hypervisor Platform](https://github.com/tinylabscom/mvm/issues/428).
 
 ## Troubleshooting

@@ -5,10 +5,13 @@
 //! malformed answer is never an allow.
 
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use mvm_contract::protocol::network_flow::attribution::{
+    ToolInvocationBinding, ToolInvocationRelease,
+};
 use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
 use mvm_core::net::session::{read_json_frame, write_json_frame};
 
@@ -19,29 +22,59 @@ const TOOL_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const TOOL_READ_TIMEOUT: Duration = Duration::from_secs(125);
 
 /// Ask this VM's admitted endpoint to decide and audit the exact invocation.
-/// Transport, parse, and endpoint failures are errors, never approvals.
-pub fn decide_declared_tool(vm_name: &str, question: &ToolCheckRequest) -> Result<bool> {
-    mvm_core::naming::validate_vm_name(vm_name).context("invalid VM name for tool decision")?;
-    let state_dir = mvm_core::config::vm_state_dir(vm_name);
-    let socket = mvm_core::config::vm_socket_dir_at(&state_dir)
-        .join(mvm_vmm::host::network_endpoint_spawn::SUBST_CONNECTOR_SOCKET);
-    decide_at(&socket, question)
+/// Transport, parse, and endpoint failures are errors, never approvals. An
+/// `AllowBound` answer carries the binding the guest attributes the
+/// invocation's flows to; release it with [`release_declared_tool`] once the
+/// command has finished.
+pub fn decide_declared_tool(
+    vm_name: &str,
+    question: &ToolCheckRequest,
+) -> Result<ToolDecisionReply> {
+    decide_at(&connector_socket(vm_name)?, question)
 }
 
-fn decide_at(socket: &Path, question: &ToolCheckRequest) -> Result<bool> {
-    ensure!(question.is_valid(), "invalid declared tool invocation");
-    let mut stream = UnixStream::connect(socket).context("tool decision endpoint unavailable")?;
+/// Retire an invocation's binding, so a flow opened after the command ended
+/// cannot use the tool's routes or secrets.
+pub fn release_declared_tool(vm_name: &str, binding: &ToolInvocationBinding) -> Result<()> {
+    release_at(&connector_socket(vm_name)?, binding)
+}
+
+fn connector_socket(vm_name: &str) -> Result<PathBuf> {
+    mvm_core::naming::validate_vm_name(vm_name).context("invalid VM name for tool decision")?;
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    Ok(mvm_core::config::vm_socket_dir_at(&state_dir)
+        .join(mvm_vmm::host::network_endpoint_spawn::SUBST_CONNECTOR_SOCKET))
+}
+
+fn connect(socket: &Path) -> Result<UnixStream> {
+    let stream = UnixStream::connect(socket).context("tool decision endpoint unavailable")?;
     stream
         .set_write_timeout(Some(TOOL_WRITE_TIMEOUT))
         .context("setting tool question write deadline")?;
     stream
         .set_read_timeout(Some(TOOL_READ_TIMEOUT))
         .context("setting tool decision read deadline")?;
+    Ok(stream)
+}
+
+fn decide_at(socket: &Path, question: &ToolCheckRequest) -> Result<ToolDecisionReply> {
+    ensure!(question.is_valid(), "invalid declared tool invocation");
+    let mut stream = connect(socket)?;
     write_json_frame(&mut stream, question, MAX_TOOL_FRAME_BYTES)
         .context("sending declared tool question")?;
-    let reply: ToolDecisionReply = read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES)
-        .context("reading declared tool decision")?;
-    Ok(matches!(reply, ToolDecisionReply::Allow))
+    read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).context("reading declared tool decision")
+}
+
+fn release_at(socket: &Path, binding: &ToolInvocationBinding) -> Result<()> {
+    let mut stream = connect(socket)?;
+    write_json_frame(
+        &mut stream,
+        &ToolInvocationRelease {
+            release: binding.clone(),
+        },
+        MAX_TOOL_FRAME_BYTES,
+    )
+    .context("releasing the declared tool invocation")
 }
 
 #[cfg(test)]
@@ -58,11 +91,15 @@ mod tests {
     }
 
     #[test]
-    fn host_local_decision_roundtrips_both_verdicts() {
-        for (reply, expected) in [
-            (ToolDecisionReply::Allow, true),
-            (ToolDecisionReply::Deny, false),
+    fn host_local_decision_roundtrips_every_verdict() {
+        for reply in [
+            ToolDecisionReply::Allow,
+            ToolDecisionReply::AllowBound {
+                binding: ToolInvocationBinding::from_random([4; 16]),
+            },
+            ToolDecisionReply::Deny,
         ] {
+            let expected = reply.clone();
             let dir = tempfile::tempdir().expect("temporary socket directory");
             let socket = dir.path().join("tool.sock");
             let listener = UnixListener::bind(&socket).expect("bind socket");
@@ -94,6 +131,23 @@ mod tests {
                 .expect("write malformed decision");
         });
         assert!(decide_at(&socket, &question()).is_err());
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn a_release_names_only_the_binding() {
+        let dir = tempfile::tempdir().expect("temporary socket directory");
+        let socket = dir.path().join("tool.sock");
+        let listener = UnixListener::bind(&socket).expect("bind socket");
+        let binding = ToolInvocationBinding::from_random([6; 16]);
+        let expected = binding.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept release");
+            let release: ToolInvocationRelease =
+                read_json_frame(&mut stream, MAX_TOOL_FRAME_BYTES).expect("read release");
+            assert_eq!(release.release, expected);
+        });
+        release_at(&socket, &binding).expect("release");
         server.join().expect("server join");
     }
 

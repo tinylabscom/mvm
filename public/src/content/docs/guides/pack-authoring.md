@@ -1,14 +1,14 @@
 ---
 title: Author and publish a signed pack
-description: Write a policy pack as a group or a profile, check it locally, publish it through the mvm-templates signing workflow, and decide which publishers your hosts trust.
+description: Write and validate a policy pack, publish it through mvm-packs, and decide which publishers your hosts trust.
 ---
 
 A pack is a named, versioned, signed bundle of policy and, optionally, a
 buildable workload image. It carries a policy group, a policy profile, or both,
 under a `namespace/name@version` reference,
 and `mvmctl` verifies its signature every time it is pulled and every time a
-policy that names it is loaded. The official registry is the
-[`mvm-templates`](https://github.com/tinylabscom/mvm-templates) repository.
+policy that names it is loaded. The registry source is the
+[`mvm-packs`](https://github.com/tinylabscom/mvm-packs) repository.
 
 This guide uses two published packs as its worked examples: `runtime/node`, a
 group, and `agent/codex`, a profile that includes it. For the policy language
@@ -16,7 +16,7 @@ itself, see [Policy and profiles](/guides/policy-and-profiles/).
 
 ## What a pack contains
 
-A pack source is a directory in `mvm-templates`:
+A pack source is a directory in `mvm-packs`:
 
 ```text
 pack-sources/runtime/node/
@@ -158,7 +158,7 @@ in full.
 
 ## Check it before you publish
 
-From a checkout of `mvm-templates`, validate each document with the client
+From a checkout of `mvm-packs`, validate each document with the client
 that will load it:
 
 ```sh
@@ -177,17 +177,26 @@ for a secret you have not stored.
 
 ## Publish
 
-Open a pull request against `mvm-templates` that adds or changes a directory
+Open a pull request against `mvm-packs` that adds or changes a directory
 under `pack-sources/`. Merging to `main` runs `.github/workflows/publish.yml`,
-which:
+which builds the registry layout by:
 
-1. builds a manifest for each source pack, listing every payload file with its
+1. building a manifest for each source pack, listing every payload file with its
    SHA-256 digest and size;
-2. signs each manifest keyless with `cosign sign-blob`, under the workflow's
-   GitHub OIDC identity, and writes the Sigstore bundle beside it;
-3. regenerates the registry index, `packs/index.json`;
-4. checks the result with `scripts/validate-packs.py`;
-5. commits the published layout under `packs/`.
+2. signing each manifest keyless with `cosign sign-blob`, under the workflow's
+   GitHub OIDC identity, and writing the Sigstore bundle beside it;
+3. regenerating the registry index, `packs/index.json`;
+4. checking the result with `scripts/validate-packs.py`;
+5. committing the published layout under `packs/`.
+
+The repository rename changes that workflow's signing identity. The built-in
+policy accepts both exact workflow identities for legacy `agent/` and
+`runtime/` packs until 2026-11-06 00:00 UTC, when the former identity expires.
+Publish newly signed bundles only after a client release with that policy is
+available; a repository URL change alone does not make a bundle trustworthy.
+Existing signed versions retain their old identity unless re-signed. Official
+`mvm/` status additionally requires revocation enforcement and a published,
+verified pack.
 
 ```text
 packs/index.json
@@ -234,7 +243,19 @@ each manifest. It does not verify a signature; `mvmctl pull` does.
 mvmctl search node
 mvmctl pull runtime/node
 mvmctl pack registry ls
+mvmctl pack info runtime/node
+mvmctl pack verify runtime/node
 ```
+
+`pack info` and `pack verify` work from the installed copy, without fetching a
+registry index. Both check the lock pin, publisher signature and every declared
+payload file before reporting success. `pack info --json` includes the signed
+policy text, file digests and the signing identities accepted by the local
+trust policy;
+when a policy accepts several identities, this list is not a claim that every
+identity signed the pack. A signature proves publisher identity and integrity,
+not safety. These commands do not assess whether a pack's policy is suitable
+for a particular invocation.
 
 `pull` downloads the manifest, the bundle and each declared file, verifies the
 signature against the publisher trust policy, checks every file against the
@@ -255,17 +276,19 @@ installed until `mvmctl pull` restores it.
 
 ## Decide who may publish
 
-With no trust policy file, `mvmctl` trusts exactly one signing identity, in
-every namespace: the official registry's publish workflow.
+With no trust policy file, `mvmctl` accepts the renamed publish workflow
+identity for the existing `agent/` and `runtime/` namespaces only:
 
 ```text
-https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main
+https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main
 ```
 
-under the issuer `https://token.actions.githubusercontent.com`. To make your
-own decision, write `$MVM_HOME/registry/publishers.toml`. It replaces the
-default wholesale. This one keeps the official workflow for `runtime` packs
-only:
+under the issuer `https://token.actions.githubusercontent.com`. The former
+`mvm-templates` workflow identity is also accepted until 2026-11-06 00:00
+UTC, after which its bundles fail under built-in trust. There is no default
+trust for `mvm/` or community namespaces. To make your own decision, write
+`$MVM_HOME/registry/publishers.toml`. It replaces the default wholesale. This
+one keeps the former workflow for `runtime` packs only:
 
 ```toml
 schema_version = 1
@@ -274,7 +297,7 @@ schema_version = 1
 namespace = "runtime"
 issuer = "https://token.actions.githubusercontent.com"
 accepted_identities = [
-  "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main",
+  "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main",
 ]
 ```
 
@@ -297,10 +320,37 @@ MVM_PACK_REGISTRY=file:///srv/mvm-packs mvmctl search
 MVM_PACK_REGISTRY=file:///srv/mvm-packs mvmctl pull runtime/node
 ```
 
-A mirror of the official `packs/` tree verifies under the default trust
-policy, because the signatures are unchanged. Packs you sign yourself need
-your signing identity in `publishers.toml`, and they need the Sigstore bundle
-format cosign v3 writes, which is what the official workflow pins.
+A mirror of the previously published `packs/` tree verifies under the default
+trust policy for `agent/` and `runtime/`, because the signatures are unchanged.
+Packs you sign yourself need your signing identity in `publishers.toml`, and
+they need the Sigstore bundle format cosign v3 writes.
+
+## Repository rename and compatibility
+
+The source repository is now `tinylabscom/mvm-packs`. The CLI fetches both
+pack and remote-template indexes from its new `raw.githubusercontent.com` URL;
+it does not depend on a redirect from the old path. These are the behavior
+changes for existing installations:
+
+- `MVM_PACK_REGISTRY` and `MVM_TEMPLATE_REGISTRY` keep their names and can
+  override the new defaults. A mirror may keep serving an old signed artifact.
+- Previously published Sigstore bundles remain bound to the
+  `mvm-templates` workflow identity. Renaming the repository cannot rewrite
+  them. Built-in trust accepts that identity for `agent/` and `runtime/` only
+  before 2026-11-06 00:00 UTC, including when reopening an installed pack.
+- A bundle newly signed by the `mvm-packs` workflow has a different identity.
+  The built-in policy accepts it for legacy `agent/` and `runtime/` packs, but
+  the publisher must wait until that client policy is released before replacing
+  the old bundles. Official `mvm/` publication still waits for revocation
+  enforcement.
+- Existing `agent/name` and `runtime/name` references and lock pins are not
+  rewritten. Future `mvm/name` references are distinct coordinates and need
+  an explicit pull and trust decision; no `mvm/` pack is published as official
+  by this rename.
+- An operator `publishers.toml` continues to replace the built-in policy
+  completely. Its explicitly listed identities are not changed by the built-in
+  cutoff; operators who intentionally keep the former identity must own that
+  trust and its revocation plan.
 
 The index is a small JSON document, and unknown fields in it are refused:
 
@@ -328,8 +378,9 @@ The index is a small JSON document, and unknown fields in it are refused:
   versions, more than 128 packs, or an unpublished dependency stop the pull.
   Packs already installed before a later dependency fails remain pinned, but a run
   cannot load a missing dependency.
-- A `[tools]` section in a pack composes like any other, and has the
-  enforcement limits listed under
+- A `[tools]` section in a pack composes like any other, and is enforced as
+  [Tool privileges](/guides/policy-and-profiles/#tool-privileges) describes,
+  with the limits listed under
   [Not yet](/guides/policy-and-profiles/#not-yet).
 - The official registry signs on `main` only. A pack on a branch or in a fork
   has no signature the default trust policy accepts.

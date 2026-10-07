@@ -25,11 +25,14 @@ pub struct ToolRuleDetail {
     /// Argv patterns refused whatever `argv` allows. Beats `argv`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deny: Vec<String>,
-    /// Destinations (`HOST[:PORT]`) this tool may reach through the one
-    /// egress gate.
+    /// Destinations (`HOST[:PORT]`) that belong to this tool. Only flows
+    /// attributed to an invocation of it may reach them, and its invocations
+    /// may reach only these. The egress gate must still admit each one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<String>,
-    /// Secret names bound to this tool.
+    /// Stored secret names that belong to this tool. Only flows attributed to
+    /// an invocation of it have them substituted, and its invocations may use
+    /// only these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
 }
@@ -53,13 +56,82 @@ pub struct ToolRules {
 }
 
 impl ToolRules {
-    /// Whether any rule claims endpoint authority that needs a trusted
-    /// invocation binding, beyond the whole-tool and argv command gate.
+    /// Whether any rule scopes routes or secrets to a tool, which the endpoint
+    /// enforces against flows attributed to an admitted invocation.
     #[must_use]
     pub fn has_endpoint_scope(&self) -> bool {
         self.detail
             .values()
             .any(|detail| !detail.routes.is_empty() || !detail.secrets.is_empty())
+    }
+
+    /// Decide whether a flow to `port` on one of `hosts` may use that
+    /// destination, given the tool invocation the flow is attributed to.
+    ///
+    /// `hosts` is every name the destination answers to as far as the caller
+    /// can tell: the name the flow used, plus any declared route host whose
+    /// admitted addresses include a literal address the flow dialled.
+    ///
+    /// A route declared by a tool belongs to that tool: a flow that is not an
+    /// invocation of it is refused there. A tool that declares routes may
+    /// reach only those. Everything else is left to the egress gate.
+    #[must_use]
+    pub fn route_scope(&self, tool: Option<&str>, hosts: &[&str], port: u16) -> RouteScope {
+        let declared = tool.and_then(|tool| self.detail.get(tool));
+        if let Some(detail) = declared.filter(|detail| !detail.routes.is_empty()) {
+            return match matching_route(&detail.routes, hosts, port) {
+                Some(route) => RouteScope::Owned {
+                    route: route.clone(),
+                },
+                None => RouteScope::Refused {
+                    route: None,
+                    reason: "the invocation's tool declares routes and none names this destination",
+                },
+            };
+        }
+        let scoped = self
+            .detail
+            .values()
+            .find_map(|detail| matching_route(&detail.routes, hosts, port));
+        match scoped {
+            Some(route) => RouteScope::Refused {
+                route: Some(route.clone()),
+                reason: "this destination is a tool's route and the flow is not that tool's invocation",
+            },
+            None => RouteScope::Unscoped,
+        }
+    }
+
+    /// Decide whether a flow attributed to `tool` may use the stored secret
+    /// named `secret`. A secret a tool declares belongs to that tool, and a
+    /// tool that declares secrets may use only those.
+    pub fn secret_scope(&self, tool: Option<&str>, secret: &str) -> Result<(), &'static str> {
+        let declared = tool.and_then(|tool| self.detail.get(tool));
+        if let Some(detail) = declared.filter(|detail| !detail.secrets.is_empty()) {
+            return if detail.secrets.iter().any(|listed| listed == secret) {
+                Ok(())
+            } else {
+                Err("the invocation's tool declares secrets and this is not one of them")
+            };
+        }
+        if self
+            .detail
+            .values()
+            .any(|detail| detail.secrets.iter().any(|listed| listed == secret))
+        {
+            Err("this secret is a tool's and the flow is not that tool's invocation")
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Every declared route, parsed: `(host, port)` for each `HOST[:PORT]`.
+    /// A route that does not parse names no destination and is skipped.
+    pub fn declared_routes(&self) -> impl Iterator<Item = (&str, Option<u16>)> {
+        self.detail
+            .values()
+            .flat_map(|detail| detail.routes.iter())
+            .filter_map(|route| parse_route(route))
     }
 
     /// Whether the section names no tool at all — the dimension is unused.
@@ -107,6 +179,62 @@ impl ToolRules {
             ToolDecision::Allow
         }
     }
+}
+
+/// How a declared tool route bears on one flow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteScope {
+    /// No tool route names the destination; the egress gate alone decides.
+    Unscoped,
+    /// The flow is an invocation of the tool whose route this is.
+    Owned {
+        /// The declared route that matched.
+        route: String,
+    },
+    /// Refused: the destination is another tool's route, or the flow's tool
+    /// declares routes and none of them names it.
+    Refused {
+        /// The declared route that matched, when one did.
+        route: Option<String>,
+        /// Operator-safe text naming the rule.
+        reason: &'static str,
+    },
+}
+
+/// Split a declared `HOST[:PORT]` route. A bracketed IPv6 literal may carry a
+/// port after the bracket. `None` for an empty host or an unparseable port.
+#[must_use]
+pub fn parse_route(route: &str) -> Option<(&str, Option<u16>)> {
+    let (host, port) = if let Some(rest) = route.strip_prefix('[') {
+        let (host, after) = rest.split_once(']')?;
+        match after {
+            "" => (host, None),
+            _ => (host, Some(after.strip_prefix(':')?.parse().ok()?)),
+        }
+    } else {
+        match route.split_once(':') {
+            Some((host, port)) => (host, Some(port.parse().ok()?)),
+            None => (route, None),
+        }
+    };
+    (!host.is_empty()).then_some((host, port))
+}
+
+fn route_matches(route: &str, hosts: &[&str], port: u16) -> bool {
+    let Some((route_host, route_port)) = parse_route(route) else {
+        return false;
+    };
+    route_port.is_none_or(|route_port| route_port == port)
+        && hosts.iter().any(|host| {
+            host.trim_end_matches('.')
+                .eq_ignore_ascii_case(route_host.trim_end_matches('.'))
+        })
+}
+
+fn matching_route<'a>(routes: &'a [String], hosts: &[&str], port: u16) -> Option<&'a String> {
+    routes
+        .iter()
+        .find(|route| route_matches(route, hosts, port))
 }
 
 /// The outcome of one tool decision, for any enforcement seam to render.
@@ -321,5 +449,150 @@ mod decide_tests {
         assert!(glob_match("**", "anything"));
         assert!(glob_match("literal", "literal"));
         assert!(!glob_match("literal", "literals"));
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+
+    fn rules() -> ToolRules {
+        let mut detail = BTreeMap::new();
+        detail.insert(
+            "gh".to_string(),
+            ToolRuleDetail {
+                routes: alloc::vec!["api.github.com:443".to_string()],
+                secrets: alloc::vec!["github_token".to_string()],
+                ..Default::default()
+            },
+        );
+        detail.insert(
+            "fetch".to_string(),
+            ToolRuleDetail {
+                routes: alloc::vec!["example.com".to_string()],
+                ..Default::default()
+            },
+        );
+        detail.insert("plain".to_string(), ToolRuleDetail::default());
+        ToolRules {
+            allow: alloc::vec!["gh".to_string(), "fetch".to_string(), "plain".to_string()],
+            detail,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn routes_parse_with_and_without_ports() {
+        assert_eq!(
+            parse_route("github.com:443"),
+            Some(("github.com", Some(443)))
+        );
+        assert_eq!(parse_route("github.com"), Some(("github.com", None)));
+        assert_eq!(parse_route("[::1]:8080"), Some(("::1", Some(8080))));
+        assert_eq!(parse_route("[::1]"), Some(("::1", None)));
+        assert_eq!(parse_route("github.com:https"), None);
+        assert_eq!(parse_route(":443"), None);
+        assert_eq!(parse_route("[::1]8080"), None);
+    }
+
+    #[test]
+    fn a_tool_route_is_refused_to_a_flow_that_is_not_its_invocation() {
+        let rules = rules();
+        for tool in [None, Some("plain")] {
+            assert_eq!(
+                rules.route_scope(tool, &["api.github.com"], 443),
+                RouteScope::Refused {
+                    route: Some("api.github.com:443".to_string()),
+                    reason: "this destination is a tool's route and the flow is not that tool's invocation",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn the_owning_invocation_may_use_its_route() {
+        assert_eq!(
+            rules().route_scope(Some("gh"), &["API.GitHub.com."], 443),
+            RouteScope::Owned {
+                route: "api.github.com:443".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn a_tool_with_routes_reaches_only_those() {
+        let refused = rules().route_scope(Some("gh"), &["example.com"], 443);
+        assert!(matches!(refused, RouteScope::Refused { route: None, .. }));
+        let other_port = rules().route_scope(Some("gh"), &["api.github.com"], 80);
+        assert!(matches!(
+            other_port,
+            RouteScope::Refused { route: None, .. }
+        ));
+    }
+
+    #[test]
+    fn a_portless_route_scopes_every_port() {
+        assert!(matches!(
+            rules().route_scope(None, &["example.com"], 8443),
+            RouteScope::Refused { .. }
+        ));
+        assert_eq!(
+            rules().route_scope(Some("fetch"), &["example.com"], 8443),
+            RouteScope::Owned {
+                route: "example.com".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn destinations_no_tool_names_are_left_to_the_gate() {
+        assert_eq!(
+            rules().route_scope(None, &["crates.io"], 443),
+            RouteScope::Unscoped
+        );
+        assert_eq!(
+            rules().route_scope(Some("plain"), &["crates.io"], 443),
+            RouteScope::Unscoped
+        );
+        assert_eq!(
+            ToolRules::default().route_scope(None, &["anything"], 443),
+            RouteScope::Unscoped
+        );
+    }
+
+    #[test]
+    fn any_name_the_destination_answers_to_can_match() {
+        assert!(matches!(
+            rules().route_scope(None, &["140.82.112.6", "api.github.com"], 443),
+            RouteScope::Refused { route: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn a_tool_secret_belongs_to_its_tool() {
+        let rules = rules();
+        assert!(rules.secret_scope(Some("gh"), "github_token").is_ok());
+        assert!(rules.secret_scope(None, "github_token").is_err());
+        assert!(rules.secret_scope(Some("plain"), "github_token").is_err());
+        assert!(rules.secret_scope(Some("gh"), "openai").is_err());
+        assert!(rules.secret_scope(None, "openai").is_ok());
+        assert!(rules.secret_scope(Some("fetch"), "openai").is_ok());
+    }
+
+    #[test]
+    fn declared_routes_skip_unparseable_entries() {
+        let mut rules = rules();
+        rules
+            .detail
+            .get_mut("plain")
+            .expect("plain")
+            .routes
+            .push("bad:port".to_string());
+        let mut routes: alloc::vec::Vec<_> = rules.declared_routes().collect();
+        routes.sort_unstable();
+        assert_eq!(
+            routes,
+            [("api.github.com", Some(443)), ("example.com", None)]
+        );
     }
 }

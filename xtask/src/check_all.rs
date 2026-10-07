@@ -103,6 +103,7 @@ pub const GATES: &[Gate] = &[
         "check-cli-runtime-surface",
         crate::check_cli_runtime_surface::run,
     ),
+    ("check-thin-cli", crate::check_thin_cli::run),
     (
         "check-cli-help-matches-docs",
         crate::check_cli_help_matches_docs::run,
@@ -131,6 +132,10 @@ pub const GATES: &[Gate] = &[
     (
         "check-single-display-path",
         crate::check_single_display_path::run,
+    ),
+    (
+        "check-single-workspace-write-path",
+        crate::check_single_workspace_write_path::run,
     ),
     ("check-no-virtio-fs", crate::check_no_virtio_fs::run),
     (
@@ -327,7 +332,7 @@ mod tests {
         ),
         (
             "check-nextest-groups",
-            "needs cargo-nextest; runs in the test job",
+            "needs cargo-nextest and the compiled suite; runs in CI's workspace test build",
         ),
         (
             "check-release-evidence",

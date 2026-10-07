@@ -1,13 +1,15 @@
 name: CI
 
 on:
-  # Pull requests run the full deterministic lint/test matrix, including Nix
-  # evaluation and the published-image boot witness. A PR must expose its own
-  # failures before admission; deferring them to the queue makes one bad entry
-  # poison every cumulative commit behind it. The merge queue validates the
-  # synthetic commit's scope and aggregate only, reusing the admitted PR proof.
-  # Expensive platform, live-VM, OCI ratification, security, Windows, and
-  # release artifact jobs live in release/manual workflows.
+  # Pull requests run the relevant deterministic lint/test matrix, including
+  # Nix evaluation for Nix-affecting changes and the boot-latency witness.
+  # A PR must expose its own failures before admission; deferring them to the
+  # queue makes one bad entry poison every cumulative commit behind it.
+  # The merge queue validates the synthetic commit's scope and aggregate only,
+  # reusing the admitted PR proof.
+  # Expensive platform, live-VM, OCI ratification, security, and release
+  # artifact jobs live in release/manual workflows. The Windows lane here
+  # cross-compiles portable crates; it does not run a Windows host.
   pull_request:
   # Required for the merge queue. The full proof already ran on the PR; the
   # synthetic merge commit gets the fail-closed scope/integration check and the
@@ -43,6 +45,7 @@ jobs:
     runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-latest' }}
     outputs:
       code: ${{ steps.validate.outputs.code }}
+      docs: ${{ steps.validate.outputs.docs }}
       nix: ${{ steps.validate.outputs.nix }}
       architecture: ${{ steps.validate.outputs.architecture }}
       guest_image: ${{ steps.validate.outputs.guest_image }}
@@ -88,7 +91,7 @@ jobs:
           set -euo pipefail
 
           set_all() {
-            for output in code nix architecture guest_image; do
+            for output in code docs nix architecture guest_image; do
               echo "${output}=true" >> "$GITHUB_OUTPUT"
             done
           }
@@ -161,6 +164,18 @@ jobs:
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
+          # The documentation corpus the README-contract and documented-example
+          # scenarios read. Without its own scope a change confined to these
+          # files resolved code=false and merged without the suite that checks
+          # it. `documentation_files()` in
+          # crates/mvm-conformance/src/doc_examples.rs walks the same roots,
+          # and a test there fails when the two lists differ.
+          if grep -zE '^(README\.md$|AGENTS\.md$|public/src/content/docs/|crates/mvm-sdk/sdks/|examples/)' "$CHANGED_FILE" >/dev/null; then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "docs=false" >> "$GITHUB_OUTPUT"
+          fi
+
           if grep -zE '^(nix/(lib|packaging|packages|profiles)/|flake\.(nix|lock)$|scripts/check-devshell-tiers\.sh$|Cargo\.(toml|lock)$|rust-toolchain\.toml$|crates/|src/|third_party/|\.github/workflows/(ci|cache-warm)\.yml$)' "$CHANGED_FILE" >/dev/null; then
             echo "nix=true" >> "$GITHUB_OUTPUT"
           else
@@ -189,6 +204,7 @@ jobs:
         id: validate
         env:
           CODE: ${{ steps.decide.outputs.code }}
+          DOCS: ${{ steps.decide.outputs.docs }}
           NIX: ${{ steps.decide.outputs.nix }}
           ARCHITECTURE: ${{ steps.decide.outputs.architecture }}
           GUEST_IMAGE: ${{ steps.decide.outputs.guest_image }}
@@ -202,6 +218,7 @@ jobs:
             esac
           }
           validate code "$CODE"
+          validate docs "$DOCS"
           validate nix "$NIX"
           validate architecture "$ARCHITECTURE"
           validate guest_image "$GUEST_IMAGE"
@@ -228,6 +245,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt -- --check
+
+      - name: Verify locked Cargo metadata
+        run: cargo metadata --locked --format-version 1 --no-deps >/dev/null
 
       - name: Shellcheck install.sh + uninstall.sh + release-asset verifier
         run: |
@@ -292,10 +312,9 @@ jobs:
         run: ./scripts/cargo-stable.sh clippy -p mvm-conformance --tests --features bdd -- -D warnings
 
   lint-policy:
-    # This real policy lane publishes the existing required `Invariant`
-    # context. The architecture scan used to occupy a separate workflow plus
-    # an aggregate runner; keeping it here preserves the gate without that
-    # merge-group fan-out.
+    # This policy lane publishes the `Invariant` context. The architecture
+    # scan used to occupy a separate workflow; keeping it here preserves the
+    # gate without another runner or workflow.
     name: Invariant
     needs: [scope]
     if: github.event_name != 'merge_group'
@@ -303,6 +322,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -366,6 +387,41 @@ jobs:
 
       - name: Dev-run guard tests
         run: bash scripts/dev-run-guard.test.sh
+
+      - name: ShellCheck added scripts
+        if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed=$(mktemp)
+          trap 'rm -f "$changed"' EXIT
+          if ! MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA"); then
+            echo "::error::could not resolve the pull-request merge base" >&2
+            exit 1
+          fi
+          if ! git diff --name-only --diff-filter=A -z \
+            "$MERGE_BASE" "$HEAD_SHA" -- '*.sh' '.githooks/*' >"$changed"; then
+            echo "::error::could not classify added shell scripts" >&2
+            exit 1
+          fi
+          mapfile -d '' scripts <"$changed"
+          if [ "${#scripts[@]}" -gt 0 ]; then
+            printf 'shellcheck %s\n' "${scripts[@]}"
+            shellcheck "${scripts[@]}"
+          else
+            echo "No added shell scripts."
+          fi
+
+      - name: Embedded helper recipe contract
+        if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          rustc +1.97.1 --edition=2024 -D warnings --test \
+            crates/mvm-cli/tests/embed_recipe.rs \
+            -o "$RUNNER_TEMP/embed-recipe-test"
+          "$RUNNER_TEMP/embed-recipe-test"
 
       # The nightly security lanes do not run on a PR, so this is the only
       # place their failure reporting is exercised before it has to work.
@@ -580,6 +636,7 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
           cargo nextest run -p mvm-cli --features manifest-verify --test signed_registry_pack
+          cargo nextest run -p mvm-hostd --features manifest-verify -E 'test(/real_signed_pack_identity_is_reverified_at_host_admission/)'
 
       # The other half: a build without the verifier must refuse every signature
       # and say why. The workspace lane unifies the verifier in, so those tests
@@ -619,42 +676,6 @@ jobs:
         run: |
           cargo nextest run -p mvm-agentd --features addons
           cargo check -p mvm-agentd --features addons --bins
-
-      # `wasm-backend` is off by default so the shipped closure carries no
-      # wasmtime. Nothing else in CI turns it on, so a wasmtime bump that
-      # changed the WASI preopen API merged green and broke the build of the
-      # whole wasm tier — including the read-only preopen grants and the
-      # egress witness that drives a real WasmBackend through the hostd
-      # substitution seam.
-      - name: wasm-backend feature tests (wasmtime tier)
-        run: |
-          cargo nextest run -p mvm-runtime --features wasm-backend -E 'test(/wasm/)'
-          cargo nextest run -p mvm-hostd --features wasm-backend --test wasm_egress_witness
-
-      # End-user release builds enable an acquisition policy that contributor
-      # builds deliberately omit: checkout proximity must never select a local
-      # compiler. Compile the CLI and execute the policy boundary tests on every
-      # code-changing merge group so the release workflow is not the first
-      # process to exercise that channel. The combined check matters: release
-      # builds enable manifest verification alongside the bootstrap policy, and
-      # an item gated for one and used under the other compiles cleanly on its
-      # own and breaks only the release.
-      - name: release artifact acquisition contract
-        run: |
-          cargo check -p mvm-cli --features release-artifact-bootstrap --lib
-          cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib
-          cargo test -p mvm-build --features release-channel --lib \
-            artifact_acquisition
-          cargo test -p mvm-build --features release-channel --lib \
-            official_build_does_not_detect
-
-      - name: Assert auto-detect still picks libkrun off Linux/HVF
-        run: |
-          cargo test -p mvm-build --lib \
-            builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
-
-      - name: In-process pure ext4 materialize tests
-        run: cargo test -p mvm-build --lib rootfs::tests::pure
 
   # Split out of `lint-features`, which was 35 minutes and the critical path for
   # every code-touching validation run; this step alone was 19 of them. Nothing
@@ -712,6 +733,40 @@ jobs:
             -p mvm-fs -p mvm-build
           cargo nextest run -p mvmctl --features test-support --test audit_emissions_live
           cargo check -p mvm-cli --features test-support --example verification_loop
+
+      # These independent feature suites used to extend the main feature lane
+      # by about seven minutes. This runner already has the stable toolchain,
+      # system linker and nextest, so it can run them without another job.
+      # Keep each command's feature selection unchanged: the default workspace
+      # build does not prove the Wasm or release-acquisition tiers.
+      # `wasm-backend` is off by default so the shipped closure carries no
+      # wasmtime. A wasmtime bump once broke the WASI preopen API without
+      # failing the default build; the hostd witness exercises the egress seam.
+      - name: wasm-backend feature tests (wasmtime tier)
+        run: |
+          cargo nextest run -p mvm-runtime --features wasm-backend -E 'test(/wasm/)'
+          cargo nextest run -p mvm-hostd --features wasm-backend --test wasm_egress_witness
+
+      # End-user release builds enable an acquisition policy that contributor
+      # builds deliberately omit: checkout proximity must never select a local
+      # compiler. Test both the bootstrap feature alone and combined with
+      # manifest verification before a pull request enters the merge queue.
+      - name: release artifact acquisition contract
+        run: |
+          cargo check -p mvm-cli --features release-artifact-bootstrap --lib
+          cargo check -p mvm-cli --features release-artifact-bootstrap,manifest-verify --lib
+          cargo test -p mvm-build --features release-channel --lib \
+            artifact_acquisition
+          cargo test -p mvm-build --features release-channel --lib \
+            official_build_does_not_detect
+
+      - name: Assert auto-detect still picks libkrun off Linux/HVF
+        run: |
+          cargo test -p mvm-build --lib \
+            builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
+
+      - name: In-process pure ext4 materialize tests
+        run: cargo test -p mvm-build --lib rootfs::tests::pure
 
   # Also split out of `lint-features`. `embed-host-bins` is what turns on
   # `mvm-cli`'s cross-compile of the embedded Linux binaries, so this lane needs
@@ -783,59 +838,46 @@ jobs:
           echo "release feature set: $features"
           cargo check --locked -p mvmctl --bins --features "$features"
 
-  # Deterministic failures should never reach the queue and poison every
-  # cumulative commit behind them. Keep this bounded: policy/workflow checks
-  # run in `lint-policy`; this companion catches changed shell scripts and the
-  # embed-recipe regression that previously failed both workspace arches.
-  pr-regressions:
-    name: PR focused regressions
+  # mvm does not run on Windows hosts, and nothing here claims it does. What
+  # this lane holds is the portable floor a future Windows host would build
+  # on: the foundation crates, and the backend crate with its Unix-only
+  # drivers compiled out, have to keep compiling for a Windows target. A Unix
+  # API used without a platform guard fails here instead of being found by
+  # whoever next attempts the port. It is a compile check only: no Windows
+  # runner, no tests, and the GNU target so no MSVC toolchain is needed. The
+  # crate list is exactly the set that builds without a C cross-compiler;
+  # anything reaching `ring` or `aws-lc-sys` needs mingw and is out of scope.
+  lint-windows:
+    name: Windows compile check (portable crates)
     needs: [scope]
-    if: github.event_name == 'pull_request' && needs.scope.outputs.code == 'true'
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.97.1
 
+      # rust-toolchain.toml overrides the action's toolchain, so a target
+      # installed through the action is not the one cargo builds with and
+      # every crate fails with `can't find crate for core`. Add it to the
+      # pinned toolchain instead.
+      - name: Install the Windows target for the pinned toolchain
+        run: rustup target add x86_64-pc-windows-gnu
+
       - uses: ./.github/actions/apt-deps
         with:
-          packages: shellcheck
+          packages: lld
 
-      - name: ShellCheck added scripts
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          set -euo pipefail
-          changed=$(mktemp)
-          trap 'rm -f "$changed"' EXIT
-          if ! MERGE_BASE=$(git merge-base "$BASE_SHA" "$HEAD_SHA"); then
-            echo "::error::could not resolve the pull-request merge base" >&2
-            exit 1
-          fi
-          if ! git diff --name-only --diff-filter=A -z \
-            "$MERGE_BASE" "$HEAD_SHA" -- '*.sh' '.githooks/*' >"$changed"; then
-            echo "::error::could not classify added shell scripts" >&2
-            exit 1
-          fi
-          mapfile -d '' scripts <"$changed"
-          if [ "${#scripts[@]}" -gt 0 ]; then
-            printf 'shellcheck %s\n' "${scripts[@]}"
-            shellcheck "${scripts[@]}"
-          else
-            echo "No added shell scripts."
-          fi
+      - uses: ./.github/actions/rust-cache
 
-      - name: Embedded helper recipe contract
+      - name: cargo check for x86_64-pc-windows-gnu
         run: |
-          rustc +1.97.1 --edition=2024 -D warnings --test \
-            crates/mvm-cli/tests/embed_recipe.rs \
-            -o "$RUNNER_TEMP/embed-recipe-test"
-          "$RUNNER_TEMP/embed-recipe-test"
+          cargo check --locked --target x86_64-pc-windows-gnu \
+            -p mvm-contract -p mvm-core -p mvm-net -p mvm-bundler -p mvm-backends
+          cargo check --locked --target x86_64-pc-windows-gnu \
+            -p mvm-core --features provenance,client,hostd-transport
 
   # The Gherkin scenarios previously ran only from release-tag workflows, so a
   # PR could break a scenario and merge green. Same reusable workflow the
@@ -846,20 +888,26 @@ jobs:
   # contains `crates/mvm-cli/`, `tests/` contains `tests/machine-fixtures/`, and
   # both cover `features/` and the Justfile — so this widening admits exactly
   # the runs the Linux lane was already covering and no others.
+  #
+  # It also runs for `docs`, because the README contract and the
+  # documented-example suite read the documentation tree directly. When `code`
+  # is false nothing that compiles changed, so only those `@docs` features run;
+  # every other scenario would re-prove behaviour the change cannot affect.
   bdd-conformance:
     name: BDD conformance
     needs: [scope]
-    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    if: (needs.scope.outputs.code == 'true' || needs.scope.outputs.docs == 'true') && github.event_name != 'merge_group'
     uses: ./.github/workflows/bdd.yml
+    with:
+      docs_only: ${{ needs.scope.outputs.code != 'true' }}
 
   test:
     name: Test
     if: ${{ always() }}
-    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, pr-regressions, test-workspace, test-workspace-aarch64, test-linux, test-release-witness, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
-    # The queue aggregate only inspects `needs` results, so use the small,
-    # fast-starting image. Pull requests still need the full image for the
-    # admission smoke below.
-    runs-on: ${{ github.event_name == 'merge_group' && 'ubuntu-slim' || 'ubuntu-latest' }}
+    needs: [scope, lint-core, lint-policy, lint-features, lint-features-test-support, lint-features-embed, lint-windows, test-workspace-build, test-workspace, test-workspace-extras, test-workspace-aarch64, test-linux, test-release-witness, test-musl-confinement, test-ebpf-telemetry, bdd-conformance, boot-latency, nix-flake-check]
+    # Every admission check runs in an upstream lane; this aggregate only
+    # inspects their results, so it needs no checkout or full hosted image.
+    runs-on: ubuntu-slim
     timeout-minutes: 5
     steps:
       - name: Require CI scope to pass
@@ -871,35 +919,26 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v6
-        if: github.event_name == 'pull_request'
-
-      # Keep these cheap admission checks explicit even though the full matrix
-      # below also runs on pull requests.
-      - name: PR admission smoke
-        if: github.event_name == 'pull_request'
-        run: |
-          set -euo pipefail
-          cargo fmt -- --check
-          cargo metadata --locked --format-version 1 --no-deps >/dev/null
-          bash scripts/cargo-target-dir-guard.test.sh
-          bash scripts/dev-run-guard.test.sh
-
       - name: Require every validation lane to pass
         env:
           EVENT_NAME: ${{ github.event_name }}
           SCOPE_RESULT: ${{ needs.scope.result }}
           SCOPE_CODE: ${{ needs.scope.outputs.code }}
-          PREFLIGHT_RESULT: ${{ needs.pr-regressions.result }}
+          SCOPE_DOCS: ${{ needs.scope.outputs.docs }}
+          SCOPE_NIX: ${{ needs.scope.outputs.nix }}
           CORE_RESULT: ${{ needs.lint-core.result }}
           POLICY_RESULT: ${{ needs.lint-policy.result }}
           FEATURES_RESULT: ${{ needs.lint-features.result }}
           FEATURES_SUPPORT_RESULT: ${{ needs.lint-features-test-support.result }}
           FEATURES_EMBED_RESULT: ${{ needs.lint-features-embed.result }}
+          WINDOWS_RESULT: ${{ needs.lint-windows.result }}
+          WORKSPACE_BUILD_RESULT: ${{ needs.test-workspace-build.result }}
           WORKSPACE_RESULT: ${{ needs.test-workspace.result }}
+          WORKSPACE_EXTRAS_RESULT: ${{ needs.test-workspace-extras.result }}
           WORKSPACE_AARCH64_RESULT: ${{ needs.test-workspace-aarch64.result }}
           LINUX_RESULT: ${{ needs.test-linux.result }}
           RELEASE_WITNESS_RESULT: ${{ needs.test-release-witness.result }}
+          MUSL_CONFINEMENT_RESULT: ${{ needs.test-musl-confinement.result }}
           EBPF_RESULT: ${{ needs.test-ebpf-telemetry.result }}
           BDD_RESULT: ${{ needs.bdd-conformance.result }}
           BOOT_RESULT: ${{ needs.boot-latency.result }}
@@ -925,35 +964,42 @@ jobs:
               ;;
             *) echo "Invalid event/scope: $EVENT_NAME/$SCOPE_CODE"; exit 1 ;;
           esac
+          # The BDD lane is the one lane `docs` also brings into scope. The
+          # merge queue reuses the PR's proof, so it skips there like the rest.
+          case "$SCOPE_DOCS" in
+            true|false) ;;
+            *) echo "Invalid docs scope: $SCOPE_DOCS"; exit 1 ;;
+          esac
+          case "$EVENT_NAME:$SCOPE_CODE:$SCOPE_DOCS" in
+            merge_group:*) bdd_required=skipped ;;
+            *:false:false) bdd_required=skipped ;;
+            *) bdd_required=success ;;
+          esac
           if [ "$POLICY_RESULT" != "$policy_required" ]; then
             echo "Policy lint did not match event $EVENT_NAME: $POLICY_RESULT"
             exit 1
           fi
-          case "$EVENT_NAME:$SCOPE_CODE" in
-            pull_request:true) preflight_required=success ;;
-            pull_request:false|merge_group:*|workflow_dispatch:*) preflight_required=skipped ;;
-            *) echo "Invalid preflight scope: event=$EVENT_NAME code=$SCOPE_CODE"; exit 1 ;;
-          esac
-          if [ "$PREFLIGHT_RESULT" != "$preflight_required" ]; then
-            echo "PR focused regressions did not match event/scope $EVENT_NAME/$SCOPE_CODE: $PREFLIGHT_RESULT"
-            exit 1
-          fi
           for result in "$CORE_RESULT" "$FEATURES_RESULT" \
-            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" \
-            "$WORKSPACE_RESULT" "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
-            "$RELEASE_WITNESS_RESULT" "$EBPF_RESULT" "$BDD_RESULT"; do
+            "$FEATURES_SUPPORT_RESULT" "$FEATURES_EMBED_RESULT" "$WINDOWS_RESULT" \
+            "$WORKSPACE_BUILD_RESULT" "$WORKSPACE_RESULT" "$WORKSPACE_EXTRAS_RESULT" \
+            "$WORKSPACE_AARCH64_RESULT" "$LINUX_RESULT" \
+            "$RELEASE_WITNESS_RESULT" "$MUSL_CONFINEMENT_RESULT" "$EBPF_RESULT"; do
             if [ "$result" != "$required" ]; then
               echo "A test lane did not match scope $SCOPE_CODE: $result"
               exit 1
             fi
           done
-          case "$EVENT_NAME" in
-            pull_request|workflow_dispatch) nix_required=success ;;
-            merge_group) nix_required=skipped ;;
-            *) echo "Invalid event name: $EVENT_NAME"; exit 1 ;;
+          if [ "$BDD_RESULT" != "$bdd_required" ]; then
+            echo "BDD conformance did not match scope code=$SCOPE_CODE docs=$SCOPE_DOCS: $BDD_RESULT"
+            exit 1
+          fi
+          case "$EVENT_NAME:$SCOPE_NIX" in
+            pull_request:true|workflow_dispatch:true) nix_required=success ;;
+            pull_request:false|workflow_dispatch:false|merge_group:true|merge_group:false) nix_required=skipped ;;
+            *) echo "Invalid Nix scope: event=$EVENT_NAME nix=$SCOPE_NIX"; exit 1 ;;
           esac
           if [ "$NIX_RESULT" != "$nix_required" ]; then
-            echo "Nix validation did not match event $EVENT_NAME: $NIX_RESULT"
+            echo "Nix validation did not match event/scope $EVENT_NAME/$SCOPE_NIX: $NIX_RESULT"
             exit 1
           fi
           case "$EVENT_NAME:$SCOPE_CODE" in
@@ -968,23 +1014,30 @@ jobs:
 
   test-workspace:
     name: Test workspace
-    needs: [scope]
+    needs: [scope, test-workspace-build]
     if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    permissions:
+      actions: read
+      contents: read
     strategy:
       fail-fast: false
       matrix:
-        # The suite is the merge queue's long pole (~23 min end to end, most
-        # of it the shared compile). Two shards halve the test pass; each
-        # shard pays the compile once on its own runner, which rust-cache
-        # warms from the same key. Extras that must run exactly once
-        # (addon tests, doctests) stay on shard 1.
-        shard: [1, 2]
+        shard: ['1', '2']
+    uses: ./.github/workflows/workspace-shard.yml
+    with:
+      commit_sha: ${{ github.sha }}
+      shard: ${{ matrix.shard }}
+      runner_kind: github
+      archive_run_id: ${{ github.run_id }}
+
+  test-workspace-build:
+    name: Build workspace tests
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
-
-      - uses: ./.github/actions/free-disk
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -1002,40 +1055,76 @@ jobs:
         with:
           tool: nextest
 
-      - name: Build
-        run: cargo build --all-targets
+      - name: Build the workspace test archive
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Some workspace tests clear /tmp on Linux; keep their own binaries safe.
+          archive_root="$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          mkdir -p -- "$archive_root"
+          cp -a "$GITHUB_WORKSPACE/." "$archive_root/"
+          cd "$archive_root"
+          cargo nextest archive --workspace --all-targets \
+            --archive-file "$RUNNER_TEMP/workspace-tests.tar.zst"
+          ls -lh "$RUNNER_TEMP/workspace-tests.tar.zst"
+          du -sh target
+          df -h /
+
+      - name: Upload the workspace test archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: workspace-tests
+          path: ${{ runner.temp }}/workspace-tests.tar.zst
+          compression-level: 0
+          retention-days: 1
+          overwrite: true
+          if-no-files-found: error
 
       - name: Validate nextest override filters
-        run: cargo run -p xtask -- check-nextest-groups
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: |
+          cd "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+          cargo run -p xtask -- check-nextest-groups
+
+      - name: Remove archived workspace
+        if: always()
+        env:
+          ARCHIVE_RUN_ID: ${{ github.run_id }}
+        run: rm -rf -- "$RUNNER_TEMP/mvm-workspace-${ARCHIVE_RUN_ID}"
+
+  test-workspace-extras:
+    name: Test workspace (doctests + feature suites)
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+
+      - uses: ./.github/actions/apt-deps
+        with:
+          packages: attr cryptsetup-bin lld
+
+      - uses: ./.github/actions/rust-cache
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
 
       - name: xtask man-page tests
-        # gen-man lives behind xtask's off-by-default `man` feature. It pulls
-        # mvm-cli and its build script, so exercise it on Test's already-warm
-        # test-profile graph instead of rebuilding that graph in Lint.
         run: cargo nextest run -p xtask --features man
 
-      - name: Run tests
-        run: cargo nextest run --workspace --all-targets --partition hash:${{ matrix.shard }}/2
-
-      # No separate `-p mvm-agentd --all-targets` run. It was a strict subset of
-      # the workspace run above — every test it ran, that run already ran, plus 21
-      # more `flowmux` tests feature unification enables there — and nothing in
-      # mvm-agentd is gated on a feature being *off*, so no test runs only under
-      # per-package resolution. It cost ~41 recompiled crates and a second pass
-      # over the same suite. The addons run below is different: `addons` is not
-      # enabled by unification, and it runs 61 tests nothing else does.
       - name: Run addon/egress helper tests
-        if: matrix.shard == 1
-        # The async loopback helper bins (mvm-addon-dns, mvm-addon-vsock-bridge,
-        # mvm-egress-client) and their shared vsock session helper live behind
-        # the off-by-default `addons` feature, so the default workspace run
-        # skips their tests. Run mvm-agentd with the feature on so they stay
-        # exercised on every integrated code change.
         run: cargo nextest run -p mvm-agentd --features addons
 
       - name: Run doctests
-        # nextest does not run doctests; gate them separately.
-        if: matrix.shard == 1
         run: cargo test --workspace --doc
 
   test-workspace-aarch64:
@@ -1166,6 +1255,60 @@ jobs:
         run: |
           cargo nextest run --cargo-profile release-witness \
             -p mvm-fs -p mvm-core -p mvm-contract -p mvm-hostd -p mvm-agentd
+
+  test-musl-confinement:
+    name: Confinement under the release libc (${{ matrix.target }})
+    needs: [scope]
+    if: needs.scope.outputs.code == 'true' && github.event_name != 'merge_group'
+    # The Linux release ships static musl binaries; every other lane here builds
+    # against the runner's glibc. The two libcs reach the kernel through
+    # different syscalls for the same call — on x86_64 musl's open() issues the
+    # legacy `open` where glibc issues `openat` — and a confined role's seccomp
+    # filter kills it for any call it does not list. v0.22.0's network endpoint
+    # died that way on every egress grant, with every glibc lane green.
+    #
+    # So the endpoint's confinement tests run here against the musl target, in
+    # the release-witness profile and through the same cargo-zigbuild the
+    # release uses: the filter applied in-process under a real self-test, and
+    # the endpoint binary itself spawned and driven through a session. aarch64
+    # keeps a separate syscall table, so it gets its own leg; neither needs KVM.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-25
+          targets: ${{ matrix.target }}
+
+      - uses: ./.github/actions/install-zigbuild
+
+      - name: Run the endpoint's confinement tests against the musl build
+        env:
+          TARGET: ${{ matrix.target }}
+          # zig's linker reports an optimisation flag it ignores on stderr, and
+          # rustc turns linker stderr into a warning. Every other warning stays
+          # an error.
+          RUSTFLAGS: -D warnings -A linker-messages
+        # `--include-ignored` runs the seccomp property test, which is ignored
+        # by default only because a contributor's kernel may predate 5.19.
+        run: |
+          cargo-zigbuild test --profile release-witness --target "${TARGET}" \
+            -p mvm-hostd \
+            --test confinement_self_test \
+            --test network_endpoint_bin \
+            --test seccomp_property \
+            -- --include-ignored
 
   test-linux:
     name: Test Linux and conformance
@@ -1624,24 +1767,21 @@ jobs:
     # flake, so prove its evaluation and lean-rootfs contracts before queue
     # admission. Canonical image builds and reproducibility belong to mvm-images.
     needs: [scope]
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: needs.scope.outputs.nix == 'true' && github.event_name != 'merge_group'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Nix
-        if: needs.scope.outputs.nix == 'true'
         uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       - name: Restore Nix binary cache
-        if: needs.scope.outputs.nix == 'true'
         uses: nix-community/cache-nix-action/restore@7df957e333c1e5da7721f60227dbba6d06080569 # v7.0.2
         with:
           primary-key: nix-${{ hashFiles('nix/**', 'crates/**/*.rs', 'crates/**/Cargo.toml', 'src/**', 'third_party/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'build.rs') }}
           restore-prefixes-first-match: nix-
 
       - name: Eval-check every flake
-        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           find nix -name flake.nix -type f -print0 | sort -z | while IFS= read -r -d '' flake; do
@@ -1653,14 +1793,12 @@ jobs:
       # The root flake's default dev shell stays lean: Zig, cargo-zigbuild and
       # libclang belong to `.#full`. Evaluation only; nothing is built.
       - name: Dev shell tiers stay split
-        if: needs.scope.outputs.nix == 'true'
         run: sh scripts/check-devshell-tiers.sh
 
       # This runner is x86_64, so only the x86_64-linux check variant builds
       # here; the aarch64-linux variant stays defined for parity and for a
       # future arm64 runner.
       - name: Baked guest rootfs closure stays lean and glibc-free
-        if: needs.scope.outputs.nix == 'true'
         run: |
           set -euo pipefail
           nix build --print-build-logs \

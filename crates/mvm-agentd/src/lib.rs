@@ -31,9 +31,12 @@ pub mod console;
 /// Immediate kernel CRNG reseed through a helper process that holds the one
 /// capability the agent does not.
 pub mod crng_reseed;
-/// Fixed-method Chrome DevTools screencast bridge. It emits view-only frames
-/// to the host and has no host-to-CDP command path.
+/// Fixed-method Chrome DevTools bridge. It emits view-only frames to the host,
+/// and with `--input` turns admitted display input into a fixed set of CDP
+/// input commands. No host byte is ever forwarded to Chrome verbatim.
 pub mod display_bridge;
+/// Delivery of host-admitted display input to the display bridge.
+pub mod display_input;
 /// Shared SOCKS5/HTTP parsing helpers for the FlowMux egress adapter.
 #[cfg(feature = "addons")]
 pub(crate) mod egress_client;
@@ -50,7 +53,7 @@ pub use mvm_setpriv::fd_hygiene;
 /// Guest-wide filesystem flush shared by forced-shutdown paths.
 pub mod filesystem_sync;
 /// Guest-side FlowMux client for the converged single networking path.
-#[cfg(feature = "flowmux-async")]
+#[cfg(feature = "addons")]
 pub mod flowmux;
 /// Load the per-boot FlowMux identity material used by the guest-side adapters.
 pub mod flowmux_drive;
@@ -140,6 +143,10 @@ pub mod telemetry_capture;
 /// Guest side of the dedicated telemetry service (authenticated session per
 /// host connection on the reserved telemetry port).
 pub mod telemetry_service;
+/// Attributes loopback egress connections to a host-admitted tool invocation.
+/// Linux only: it reads `/proc`, and no egress client runs anywhere else.
+#[cfg(any(target_os = "linux", test))]
+pub mod tool_attribution;
 pub mod volume;
 pub mod vsock;
 pub mod worker_pool;

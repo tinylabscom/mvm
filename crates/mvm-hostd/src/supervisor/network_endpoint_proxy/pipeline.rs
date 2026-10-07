@@ -116,7 +116,10 @@ impl SubstitutionService {
     /// destination binding, the claim-10 gate, payload-free audit — happens
     /// here and only here, on every transport.
     pub(crate) async fn process(&self, wire: WireRequest) -> WireResponse {
-        let mut flow = match self.prepare_flow(wire).await {
+        let mut flow = match self
+            .prepare_flow(wire, &super::tool_scope::FlowAttribution::default())
+            .await
+        {
             Ok(flow) => flow,
             Err(refusal) => return refusal,
         };
@@ -171,8 +174,9 @@ impl SubstitutionService {
     pub(crate) async fn process_stream(
         self: &Arc<Self>,
         wire: WireRequest,
+        attribution: &super::tool_scope::FlowAttribution,
     ) -> Result<ForwardStreamResponse, WireResponse> {
-        let mut flow = self.prepare_flow(wire).await?;
+        let mut flow = self.prepare_flow(wire, attribution).await?;
         let request = flow
             .request
             .take()
@@ -211,6 +215,7 @@ impl SubstitutionService {
         self: &Arc<Self>,
         head: mvm_core::substitution_wire::HttpFlowHead,
         mut body: tokio::sync::mpsc::Receiver<Zeroizing<Vec<u8>>>,
+        attribution: &super::tool_scope::FlowAttribution,
     ) -> Result<ForwardStreamResponse, WireResponse> {
         let destination = destination_host(&head.url).ok();
         let replacement_action = destination
@@ -271,12 +276,15 @@ impl SubstitutionService {
                 });
             }
             return self
-                .process_stream(WireRequest {
-                    method: head.method,
-                    url: head.url,
-                    headers: head.headers,
-                    body_b64: B64.encode(&*replay),
-                })
+                .process_stream(
+                    WireRequest {
+                        method: head.method,
+                        url: head.url,
+                        headers: head.headers,
+                        body_b64: B64.encode(&*replay),
+                    },
+                    attribution,
+                )
                 .await;
         }
 
@@ -286,7 +294,7 @@ impl SubstitutionService {
             headers: head.headers,
             body_b64: String::new(),
         };
-        let mut flow = self.prepare_flow(wire).await?;
+        let mut flow = self.prepare_flow(wire, attribution).await?;
         let request = flow
             .request
             .take()
@@ -889,6 +897,7 @@ mod server_tests {
             refresh_token: Some(OAuthSecretString::from(String::from("oauth-refresh-token"))),
             client_secret: None,
             expires_at: Utc::now() + Duration::minutes(5),
+            grant: Default::default(),
         }
     }
 
@@ -916,6 +925,7 @@ mod server_tests {
                     body_len,
                 },
                 receiver,
+                &Default::default(),
             )
             .await
             .expect("streamed request");
@@ -991,6 +1001,7 @@ mod server_tests {
                     body_len: body.len() as u64,
                 },
                 receiver,
+                &Default::default(),
             )
             .await
             .expect("signed request");
@@ -1021,6 +1032,7 @@ mod server_tests {
                         body_len: 1,
                     },
                     receiver,
+                    &Default::default(),
                 )
                 .await
         });
@@ -1085,6 +1097,7 @@ mod server_tests {
                     body_len: 0,
                 },
                 receiver,
+                &Default::default(),
             )
             .await
             .expect("redirect response");
@@ -1407,6 +1420,7 @@ mod server_tests {
                     body_len: 0,
                 },
                 receiver,
+                &Default::default(),
             )
             .await
             .expect("streamed oauth response");

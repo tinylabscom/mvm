@@ -119,13 +119,13 @@ use crate::transport::{AgentListener, accept_control, bind_listener};
 
 use handlers::{
     handle_cancel_extension, handle_checkpoint_integrations, handle_close_stream_input,
-    handle_drive_file, handle_drive_open, handle_entrypoint_status, handle_fs_diff, handle_fs_list,
-    handle_fs_mkdir, handle_fs_move, handle_fs_read, handle_fs_remove, handle_fs_stat,
-    handle_fs_write, handle_integration_status, handle_mount_volume, handle_ping,
-    handle_post_restore, handle_primed_status, handle_probe_status, handle_proc_kill,
-    handle_proc_list, handle_proc_send_input, handle_proc_signal, handle_proc_start,
-    handle_proc_wait, handle_readiness_status, handle_resource_usage,
-    handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
+    handle_display_input, handle_drive_file, handle_drive_open, handle_entrypoint_status,
+    handle_fs_diff, handle_fs_list, handle_fs_mkdir, handle_fs_move, handle_fs_read,
+    handle_fs_remove, handle_fs_stat, handle_fs_write, handle_integration_status,
+    handle_mount_volume, handle_ping, handle_post_restore, handle_primed_status,
+    handle_probe_status, handle_proc_kill, handle_proc_list, handle_proc_send_input,
+    handle_proc_signal, handle_proc_start, handle_proc_wait, handle_readiness_status,
+    handle_resource_usage, handle_run_entrypoint_request, handle_run_extension, handle_sleep_prep,
     handle_start_unix_socket_forward, handle_stream_input, handle_sync_filesystems,
     handle_unmount_volume, handle_update_idle_timeout, handle_wake, handle_worker_status,
 };
@@ -388,16 +388,20 @@ fn handle_client(
                     .read::<ToolCheckReply>(&mut file)
                     .map_err(std::io::Error::other)
             });
-            if !matches!(decision, Ok(ToolCheckReply::Allow)) {
-                send_authenticated_response(
-                    &mut file,
-                    &mut session,
-                    &GuestResponse::Error {
-                        message: "declared tool invocation denied".to_string(),
-                    },
-                );
-                return;
-            }
+            let binding = match decision {
+                Ok(ToolCheckReply::Allow) => None,
+                Ok(ToolCheckReply::AllowBound { binding }) => Some(binding),
+                Ok(ToolCheckReply::Deny) | Err(_) => {
+                    send_authenticated_response(
+                        &mut file,
+                        &mut session,
+                        &GuestResponse::Error {
+                            message: "declared tool invocation denied".to_string(),
+                        },
+                    );
+                    return;
+                }
+            };
             let resp = {
                 let mut sink = AuthenticatedWriter::new(&mut file, &mut session);
                 let mut ctx = HandlerCtx {
@@ -409,9 +413,13 @@ fn handle_client(
                 };
                 handle_mediated_exec(
                     &mut ctx,
-                    &call.argv,
-                    call.stdin.as_deref(),
-                    call.timeout_secs,
+                    mvm_agentd::exec_stream::MediatedCommand {
+                        argv: &call.argv,
+                        stdin: call.stdin.as_deref(),
+                        timeout_secs: call.timeout_secs,
+                        env: &call.env,
+                        binding: binding.as_ref(),
+                    },
                 )
             };
             send_authenticated_response(&mut file, &mut session, &resp);
@@ -516,6 +524,15 @@ fn handle_client(
                 stream_input,
             } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env, stream_input),
 
+            // The resident agent is the boot-validated entrypoint, so a prompt
+            // is served by the same handler, with the prompt as the agent's
+            // complete stdin. Never streamed: a prompt is one bounded input.
+            GuestRequest::AgentPrompt {
+                prompt,
+                timeout_secs,
+                env,
+            } => handle_run_entrypoint_request(&mut ctx, prompt, timeout_secs, env, false),
+
             GuestRequest::DriveOpen {
                 program_id: _,
                 cwd,
@@ -539,6 +556,9 @@ fn handle_client(
             // here is bytes it already cleared, in the order it cleared them.
             GuestRequest::StreamInput(frame) => handle_stream_input(frame),
             GuestRequest::CloseStreamInput(close) => handle_close_stream_input(close),
+            // Display input reaches here only after the host's display input
+            // gate admitted and recorded it, and the verb-grant check above.
+            GuestRequest::DisplayInput(frame) => handle_display_input(&frame),
 
             GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 
@@ -913,6 +933,22 @@ fn main() {
     // PID 1 must activate synchronously. `apply_activation` changes Linux
     // credentials and capability sets, which are per-thread at the kernel
     // boundary; no background or request thread may exist before it returns.
+    // Bound as PID 1 before any workload code can run, so nothing else holds
+    // the name; served only once activation has dropped privilege.
+    #[cfg(target_os = "linux")]
+    let attribution_listener = init::is_pid1()
+        .then(|| {
+            mvm_agentd::tool_attribution::bind_listener()
+                .map_err(|error| {
+                    eprintln!(
+                        "mvm-guest-agent: tool attribution unavailable, so tool routes and \
+                         secrets stay refused: {error}"
+                    );
+                })
+                .ok()
+        })
+        .flatten();
+
     if init::is_pid1() && serve_until_activated(&listener, &server) {
         init::start_orphan_reaper();
     }
@@ -920,6 +956,11 @@ fn main() {
     if !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
         let monitor_state = Arc::clone(&state);
         std::thread::spawn(move || monitoring_loop(monitor_state));
+
+        #[cfg(target_os = "linux")]
+        if let Some(listener) = attribution_listener {
+            std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
+        }
 
         // Defer integration and probe scans to background threads, but only
         // after PID-1 activation has completed its privilege transition.
@@ -1118,8 +1159,21 @@ mod tests {
         if current_uid() == Some(0) {
             return;
         }
-        for (reply, should_spawn) in [(ToolCheckReply::Deny, false), (ToolCheckReply::Allow, true)]
-        {
+        let bound = ToolCheckReply::AllowBound {
+            binding:
+                mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random(
+                    [3; 16],
+                ),
+        };
+        // A bound command runs only in a Linux guest and only in the tool
+        // group, which the dropped agent holds; this test process has
+        // neither, so the spawn must be refused rather than run the command
+        // where the workload could reach it.
+        for (reply, outcome) in [
+            (ToolCheckReply::Deny, Outcome::Denied),
+            (ToolCheckReply::Allow, Outcome::Spawned),
+            (bound, Outcome::SpawnRefused),
+        ] {
             let dir = tempfile::tempdir().expect("temporary directory");
             let marker = dir.path().join("spawned");
             let call = mvm_agentd::vsock::MediatedExecCall {
@@ -1127,6 +1181,7 @@ mod tests {
                 argv: vec!["/usr/bin/touch".to_string(), marker.display().to_string()],
                 stdin: None,
                 timeout_secs: Some(5),
+                env: Vec::new(),
             };
             let invocation = call.tool_check().expect("valid tool call");
             let (mut host, guest) = UnixStream::pair().expect("unix stream pair");
@@ -1185,18 +1240,47 @@ mod tests {
             assert!(!marker.exists(), "command spawned before the decision");
             session.write(&mut host, &reply).expect("tool decision");
             let answer: GuestResponse = session.read(&mut host).expect("command answer");
-            if should_spawn {
-                assert!(matches!(
-                    answer,
-                    GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Exit { code: 0 })
-                ));
-                assert!(marker.exists(), "allowed command did not spawn");
-            } else {
-                assert!(matches!(answer, GuestResponse::Error { .. }));
-                assert!(!marker.exists(), "denied command spawned");
+            match outcome {
+                Outcome::Spawned => {
+                    assert!(matches!(
+                        answer,
+                        GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Exit { code: 0 })
+                    ));
+                    assert!(marker.exists(), "allowed command did not spawn");
+                }
+                Outcome::Denied => {
+                    assert!(matches!(answer, GuestResponse::Error { .. }));
+                    assert!(!marker.exists(), "denied command spawned");
+                }
+                Outcome::SpawnRefused => {
+                    let mut answer = answer;
+                    while matches!(
+                        answer,
+                        GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Stderr { .. })
+                    ) {
+                        answer = session.read(&mut host).expect("command answer");
+                    }
+                    assert!(
+                        matches!(
+                            answer,
+                            GuestResponse::ExecEvent(mvm_agentd::vsock::ExecEvent::Exit {
+                                code: -1
+                            })
+                        ),
+                        "{answer:?}"
+                    );
+                    assert!(!marker.exists(), "bound command ran outside the tool group");
+                }
             }
             handle.join().expect("guest handler");
         }
+    }
+
+    /// What a mediated command's decision should lead to.
+    enum Outcome {
+        Spawned,
+        Denied,
+        SpawnRefused,
     }
 
     /// A control connection without the pinned host identity must fail during

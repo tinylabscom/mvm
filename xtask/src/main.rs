@@ -77,11 +77,13 @@ mod check_single_home;
 mod check_single_host_predicate;
 mod check_single_network_path;
 mod check_single_workload_env;
+mod check_single_workspace_write_path;
 mod check_spec_hygiene;
 mod check_stream_redaction_seam;
 mod check_telemetry_inventory;
 mod check_telemetry_sources;
 mod check_test_home_isolation;
+mod check_thin_cli;
 mod check_trust_gradient;
 mod check_two_surfaces;
 mod check_vcpu_ceilings;
@@ -336,6 +338,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_cli_runtime_surface::run(&workspace)
         }
+        Some("check-thin-cli") => {
+            let workspace = workspace_root();
+            check_thin_cli::run(&workspace)
+        }
         Some("check-abi-layout") => {
             let workspace = workspace_root();
             check_abi_layout::run(&workspace)
@@ -460,6 +466,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_single_display_path::run(&workspace)
         }
+        Some("check-single-workspace-write-path") => {
+            let workspace = workspace_root();
+            check_single_workspace_write_path::run(&workspace)
+        }
         Some("check-vcpu-ceilings") => {
             let workspace = workspace_root();
             check_vcpu_ceilings::run(&workspace)
@@ -534,7 +544,7 @@ fn main() -> Result<()> {
             check_all::run_all(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-spec-hygiene, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-cli-help-matches-docs, check-claim-catalog, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
+            "Unknown xtask: {:?}. Available: gen-man, check-all, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-doc-links, check-machine-doc-guards, check-forbidden-deps, check-core-module-ownership, check-public-function-names, check-core-runtime-free, check-no-cli-shellout, check-sdk-transport-free, check-sdk-cdylib-deps, check-content-address-determinism, check-deferrals, check-honesty, check-image-lock, check-closure-budget, publish-plan, check-publish-readiness, check-workspace-dep-inheritance, check-duplicate-majors, check-binary-size, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-entropy-seed, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-plan-names, check-spec-hygiene, record-release-evidence, check-release-evidence, release-boot-image, repin-image-lock, image-source-ref, check-single-home, check-single-fixture-corpus, check-test-home-isolation, check-no-network-literals, check-cli-runtime-surface, check-thin-cli, check-cli-help-matches-docs, check-claim-catalog, check-dormant-controls, check-witness-citations, check-asserted-absence, check-agent-notes, check-declared-backing, check-claim-witness-freshness, check-abi-layout, check-mutation-witnesses, check-nextest-groups, check-conformance, check-trust-gradient, check-single-network-path, check-single-display-path, check-single-workspace-write-path, check-no-virtio-fs, check-no-guest-tool-client, check-one-guest-protocol, check-single-workload-env, check-build-egress-callers, check-verified-kernel-reads, check-stream-redaction-seam, check-guest-init-parity, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-per-vm-host-binaries-sync, check-telemetry-inventory, check-workflow-paths, check-single-grants-projection, check-single-exec-secs-writer, check-helper-env-hygiene, check-single-host-predicate, check-backend-resource-controls, check-vcpu-ceilings, perf, network-perf, telemetry-baseline, gen-stubs, check-stubs, gen-ir-parity, check-ir-parity",
             other
         ),
         None => {
@@ -640,6 +650,9 @@ fn main() -> Result<()> {
                 "  check-cli-runtime-surface              Reject mvm_runtime::vm::name_registry + AnyBackend reaches in mvm-cli drive-a-machine code — route through the mvm-client facade"
             );
             eprintln!(
+                "  check-thin-cli                         Reject new mvm_hostd / mvm_runtime reaches in mvm-cli commands outside a shrink-only allowlist — land logic in mvm-client"
+            );
+            eprintln!(
                 "  check-no-network-literals              Reject baked IPs/ports/tmp-sockets — route through mvm-core::dev_network / guest_netd"
             );
             eprintln!(
@@ -704,6 +717,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-single-display-path              assert one view-only vsock display channel and a tokenized loopback viewer"
+            );
+            eprintln!(
+                "  check-single-workspace-write-path      assert the workspace apply store is reached only through the signed apply engine"
             );
             eprintln!(
                 "  check-vcpu-ceilings                    assert no backend derives its declared vCPU ceiling from a wire type's MAX"

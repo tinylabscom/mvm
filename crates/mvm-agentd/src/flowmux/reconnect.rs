@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use crate::flowmux_drive::GuestIngressTarget;
 
 use super::{FlowMuxClient, FlowMuxError, FlowMuxStream, FlowMuxUdpSocket, SessionState};
+use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
 
 /// Default timeout for an individual call that waits through reconnect.
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -181,10 +182,19 @@ impl FlowMuxReconnectClient {
 
     /// Open a TCP flow to `target` (`host:port`).
     pub async fn open_tcp(&self, target: &str) -> Result<FlowMuxStream, FlowMuxError> {
+        self.open_tcp_attributed(target, None).await
+    }
+
+    /// Open a TCP flow naming the tool invocation it is attributed to.
+    pub async fn open_tcp_attributed(
+        &self,
+        target: &str,
+        binding: Option<&ToolInvocationBinding>,
+    ) -> Result<FlowMuxStream, FlowMuxError> {
         let client = tokio::time::timeout(CALL_TIMEOUT, self.active_client())
             .await
             .map_err(|_| FlowMuxError::SessionClosed("reconnect timed out".into()))??;
-        client.open_tcp(target).await
+        client.open_tcp_attributed(target, binding).await
     }
 
     /// Open a UDP association.

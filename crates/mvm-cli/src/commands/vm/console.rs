@@ -282,6 +282,9 @@ pub(in crate::commands) fn run_declared_command(
         argv,
         stdin: None,
         timeout_secs: None,
+        // The proxy, CA bundle and secret placeholders the VM was provisioned
+        // with: what a tool needs to reach the routes its rules give it.
+        env: mvm_client::entrypoint::dispatch::workload_egress_env(name),
     };
     anyhow::ensure!(
         call.tool_check().is_some(),
@@ -294,13 +297,43 @@ pub(in crate::commands) fn run_declared_command(
         name,
         &mvm_agentd::vsock::GuestRequest::MediatedExec(call.clone()),
     );
-    let terminal = mvm_agentd::vsock::send_mediated_exec_streaming(
+    let mut bound = None;
+    let terminal = mvm_agentd::vsock::send_attributed_mediated_exec_streaming(
         &mut stream,
         call,
-        |question| mvm_client::tool_mediation::decide_declared_tool(name, question),
+        |question| {
+            let reply = guest_tool_reply(mvm_client::tool_mediation::decide_declared_tool(
+                name, question,
+            )?);
+            if let mvm_agentd::vsock::ToolCheckReply::AllowBound { binding } = &reply {
+                bound = Some(binding.clone());
+            }
+            Ok(reply)
+        },
         emit_exec_event,
-    )?;
-    finish_exec_terminal(terminal)
+    );
+    if let Some(binding) = &bound
+        && let Err(error) = mvm_client::tool_mediation::release_declared_tool(name, binding)
+    {
+        crate::ui::warn(&format!(
+            "could not release the tool invocation's binding; the endpoint retires it later: \
+             {error:#}"
+        ));
+    }
+    finish_exec_terminal(terminal?)
+}
+
+/// The guest's form of the endpoint's decision.
+fn guest_tool_reply(
+    reply: mvm_contract::protocol::network_flow::tool::ToolDecisionReply,
+) -> mvm_agentd::vsock::ToolCheckReply {
+    use mvm_agentd::vsock::ToolCheckReply;
+    use mvm_contract::protocol::network_flow::tool::ToolDecisionReply;
+    match reply {
+        ToolDecisionReply::Allow => ToolCheckReply::Allow,
+        ToolDecisionReply::AllowBound { binding } => ToolCheckReply::AllowBound { binding },
+        ToolDecisionReply::Deny => ToolCheckReply::Deny,
+    }
 }
 
 fn emit_exec_event(event: &mvm_agentd::vsock::ExecEvent) {
@@ -1163,6 +1196,28 @@ mod console_relay_tests {
     use super::*;
 
     #[test]
+    fn the_guest_gets_the_endpoints_decision_and_binding_unchanged() {
+        use mvm_agentd::vsock::ToolCheckReply;
+        use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
+        use mvm_contract::protocol::network_flow::tool::ToolDecisionReply;
+        let binding = ToolInvocationBinding::from_random([2; 16]);
+        assert_eq!(
+            guest_tool_reply(ToolDecisionReply::Allow),
+            ToolCheckReply::Allow
+        );
+        assert_eq!(
+            guest_tool_reply(ToolDecisionReply::AllowBound {
+                binding: binding.clone()
+            }),
+            ToolCheckReply::AllowBound { binding }
+        );
+        assert_eq!(
+            guest_tool_reply(ToolDecisionReply::Deny),
+            ToolCheckReply::Deny
+        );
+    }
+
+    #[test]
     fn command_exit_status_survives_for_host_cleanup() {
         assert_eq!(
             terminal_exit_code(mvm_agentd::vsock::ExecEvent::Exit { code: 0 })
@@ -1426,7 +1481,10 @@ mod accessible_gate_tests {
 
         let path = mvm_runtime::vm::name_registry::registry_path();
         let mut reg = mvm_runtime::vm::name_registry::VmNameRegistry::default();
-        reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
+        reg.register(mvm_runtime::vm::name_registry::RegisterParams::minimal(
+            "vm1", "/tmp/vm1", "default",
+        ))
+        .unwrap();
         reg.save(&path).unwrap();
         assert!(reg.lookup("vm1").unwrap().last_active.is_none());
 

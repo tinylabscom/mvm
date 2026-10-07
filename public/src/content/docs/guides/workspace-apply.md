@@ -10,7 +10,8 @@ this guide is the one reviewed path back across it.
 
 `mvmctl machine --help` lists `apply`, `undo`, and `redo`. These commands
 operate on named machines with workspace volumes, not transient `run --mount`
-copies.
+copies. A foreground run on such a machine offers the same apply when it ends
+— see [Apply when a run ends](#apply-when-a-run-ends).
 
 Everything here is journaled and reversible. An apply snapshots every host
 byte it will replace before touching anything, the snapshot's Merkle root
@@ -54,8 +55,10 @@ Without it, the apply prints the change count and asks:
 Apply to working tree? [y/N]
 ```
 
-Only a `y` proceeds. Piped or scripted runs pass `--yes` explicitly — an
-apply is never a silent non-interactive write:
+The question is asked on the controlling terminal (`/dev/tty`), not on
+standard input. Only `y` or `yes` proceeds; an empty line, anything else, or
+no answer within ten minutes applies nothing. Without a terminal, pass `--yes`
+explicitly — an apply is never a silent non-interactive write:
 
 ```sh
 mvmctl machine apply coding-agent --yes
@@ -104,6 +107,48 @@ Two gates shape the plan:
 mvmctl machine apply coding-agent --exclude '.git/**' --exclude 'target/**'
 ```
 
+## Apply when a run ends
+
+Run the agent's entrypoint in the foreground on the machine that holds the
+workspace:
+
+```sh
+mvmctl machine run --entrypoint --attach --name coding-agent
+```
+
+When the entrypoint exits, with any status, `mvmctl` offers each of the
+machine's workspaces back through the same apply `machine apply` uses:
+
+- **On a terminal**, it shows the diff and asks `Apply to working tree? [y/N]`.
+  The question is asked on the controlling terminal (`/dev/tty`), never on the
+  run's standard input, which belongs to the workload. Keys typed before the
+  question appears, or during a short arming window after it does, are
+  discarded, so type-ahead cannot answer it. Only `y` or `yes` applies; an empty
+  line, anything else, or no answer within ten minutes applies nothing. File
+  content in the diff is shown with terminal control sequences removed, since
+  the guest wrote it.
+- **With `--apply`**, it applies without asking:
+
+  ```sh
+  mvmctl machine run --entrypoint --attach --name coding-agent --apply
+  ```
+
+- **With no terminal and no `--apply`, or with `--json`**, nothing is applied.
+  The run prints the exact command that applies the changes later,
+  `mvmctl machine apply coding-agent`, with `--volume` added when the machine
+  has more than one workspace. `--apply` cannot be combined with `--json`.
+
+This is not a second way to write your tree. The prompt and `--apply` take the
+same pre-apply snapshot, write the same journal, pass the same protected-path
+gate, and record the same signed `workspace.snapshot` and `workspace.applied`
+entries, with the same restore when the signed entry cannot be shown written.
+A plan the gate refuses applies nothing; with `--apply` the run then fails.
+Otherwise the run exits with the entrypoint's status, unless the apply itself
+fails.
+
+Only a run on an existing named machine has a workspace to offer. A fresh
+boot, including a transient `run --mount`, discards its image when it exits.
+
 ## Undo and redo
 
 ```sh
@@ -115,7 +160,13 @@ mvmctl machine redo coding-agent
 apply deleted. `redo` re-applies, but only while the undo is still the newest
 entry: once anything else has been applied on top, redo says so instead of
 clobbering it. Each undo and redo is itself a journaled apply, so it carries
-the same crash guarantees and lands in the same audit history.
+the same crash guarantees and lands in the same audit history: a signed
+`workspace.snapshot` of the bytes it will replace, then a signed
+`workspace.undone` or `workspace.redone` entry naming the apply it traverses.
+If that entry cannot be shown written, the undo or redo is rolled back and the
+command fails, exactly as an apply would be. An undo or redo interrupted
+between its host writes and its signed entry is reconciled the same way the
+next time an apply command opens the workspace.
 
 ## Replay recorded input
 
