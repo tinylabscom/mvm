@@ -53,7 +53,7 @@ use mvm_runtime::machine::persist::{
 
 use super::Cli;
 use super::build::build;
-use super::vm::exec::{RunArgs, RunProfile, run_secure_with_source};
+use super::vm::exec::{RunArgs, RunProfile, run_secure};
 use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
@@ -1559,7 +1559,7 @@ fn complete_revert(
         super::vm::checkpoint::RevertOutcome::Done => Ok(()),
         super::vm::checkpoint::RevertOutcome::RunImage(run) => {
             let (args, source) = run_args_for_image_revert(run);
-            run_secure_with_source(cli, args.into_run_args(), cfg, source)
+            run_secure(cli, args.into_run_args(), cfg, source)
         }
     }
 }

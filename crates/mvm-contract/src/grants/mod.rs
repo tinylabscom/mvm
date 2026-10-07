@@ -14,8 +14,14 @@ use crate::policy::network_policy::HostPort;
 
 pub mod budget;
 pub mod ceiling;
+pub mod display;
 pub mod projection;
 pub mod subset;
+
+pub use display::{
+    DisplayClipboardGrant, DisplayGrantViolation, DisplayInputGrant, DisplayTier,
+    HumanCredentialGrant,
+};
 
 /// A workload's permission set. Every field is optional: absent means
 /// "unspecified", which each dimension resolves differently — an absent
@@ -31,6 +37,11 @@ pub struct Grants {
     pub egress: Option<EgressGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drive: Option<DriveGrant>,
+    /// Host-to-guest display input. Viewing is the separate
+    /// `host.display.view.v1` service token; this grants the input direction
+    /// only. Absent means no input path exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_input: Option<DisplayInputGrant>,
 }
 
 /// CPU bound. The two variants are different units, not different precisions,
@@ -337,6 +348,7 @@ mod tests {
                 allow: vec![HostPort::new("api.example.com", 443)],
             }),
             drive: Some(drive_grant()),
+            display_input: None,
         };
         let json = serde_json::to_string(&g).expect("serializes");
         let back: Grants = serde_json::from_str(&json).expect("deserializes");

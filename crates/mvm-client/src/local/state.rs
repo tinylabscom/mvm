@@ -126,7 +126,7 @@ mod tests {
         let mut tags = std::collections::BTreeMap::new();
         tags.insert("env".to_string(), "prod".to_string());
         registry
-            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
+            .register(mvm_runtime::vm::name_registry::RegisterParams {
                 name: "web",
                 vm_dir: "/tmp/web",
                 network: "default",

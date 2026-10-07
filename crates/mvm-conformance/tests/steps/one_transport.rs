@@ -337,7 +337,7 @@ fn established_tcp_ingress_validator() -> mvm_contract::protocol::network_flow::
         Direction, FrameFacts, IngressFlowKind, Opcode, SessionValidator,
     };
 
-    let mut validator = SessionValidator::new_with_ingress([(17, IngressFlowKind::Tcp)]);
+    let mut validator = SessionValidator::new([(17, IngressFlowKind::Tcp)]);
     validator
         .admit(&FrameFacts::new(Direction::GuestToHost, Opcode::Hello, 0))
         .expect("guest authenticates the FlowMux session");

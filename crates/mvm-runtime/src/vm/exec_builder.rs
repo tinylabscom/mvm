@@ -398,7 +398,7 @@ mod tests {
         // key root between those operations.
         let env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        let agent = match MockGuestAgent::start(dir.path()) {
+        let agent = match MockGuestAgent::start(dir.path(), None) {
             Ok(agent) => agent,
             Err(err)
                 if err

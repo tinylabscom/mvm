@@ -126,14 +126,9 @@ impl RunJsonSummary {
 }
 
 impl RunPreflightSummary {
-    pub(super) fn from_args(args: &RunArgs) -> Result<Self> {
-        Self::from_args_with_backend_override(args, None)
-    }
-
-    pub(super) fn from_args_with_backend_override(
-        args: &RunArgs,
-        backend_override: Option<&str>,
-    ) -> Result<Self> {
+    /// Summarize what a run of `args` would do. `backend_override` replaces
+    /// the backend the host would resolve; production passes `None`.
+    pub(super) fn from_args(args: &RunArgs, backend_override: Option<&str>) -> Result<Self> {
         let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
         let env = args
             .env
@@ -176,7 +171,7 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
-        let policy = super::super::shared::resolve_run_network_policy_with_preset_and_peers(
+        let policy = super::super::shared::resolve_run_network_policy(
             args.net,
             args.network_preset,
             &args.allow_host,

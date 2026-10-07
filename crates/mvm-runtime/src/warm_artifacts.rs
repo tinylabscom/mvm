@@ -453,18 +453,11 @@ impl PrewarmQueue {
     }
 
     /// Process one queued job. The caller supplies the worker that performs
-    /// all expensive preparation into `staging_root`; this method only owns
-    /// durable state transitions, verification, and atomic publication.
-    pub fn process_next<F>(&self, build: F) -> Result<Option<PrewarmJob>, WarmArtifactError>
-    where
-        F: FnOnce(&WarmPrewarmSource, &WarmArtifactKey, &Path) -> Result<Vec<WarmArtifactInput>>,
-    {
-        self.process_next_with_readiness(build, |_, _, _| Ok(()))
-    }
-
-    /// Process one queued job and require authenticated golden-VM readiness
-    /// before publishing its immutable artifact object.
-    pub fn process_next_with_readiness<F, V>(
+    /// all expensive preparation into `staging_root`, and the check that
+    /// must accept the prepared artifacts (authenticated golden-VM
+    /// readiness) before they are published; this method only owns durable
+    /// state transitions, verification, and atomic publication.
+    pub fn process_next<F, V>(
         &self,
         build: F,
         verify_readiness: V,
@@ -766,11 +759,14 @@ mod tests {
         let queue = PrewarmQueue::new(WarmArtifactStore::at(root.path()));
         queue.enqueue(source(), key()).expect("enqueue succeeds");
         let processed = queue
-            .process_next(|_, _, staging| {
-                let bytes = b"ready rootfs";
-                fs::write(staging.join("rootfs"), bytes).expect("write builder output");
-                Ok(vec![input("rootfs", bytes)])
-            })
+            .process_next(
+                |_, _, staging| {
+                    let bytes = b"ready rootfs";
+                    fs::write(staging.join("rootfs"), bytes).expect("write builder output");
+                    Ok(vec![input("rootfs", bytes)])
+                },
+                |_, _, _| Ok(()),
+            )
             .expect("worker succeeds")
             .expect("one job was queued");
         assert_eq!(processed.state, PrewarmJobState::Published);
@@ -789,7 +785,7 @@ mod tests {
         let queue = PrewarmQueue::new(WarmArtifactStore::at(root.path()));
         queue.enqueue(source(), key()).expect("enqueue succeeds");
         let error = queue
-            .process_next_with_readiness(
+            .process_next(
                 |_, _, staging| {
                     let bytes = b"ready rootfs";
                     fs::write(staging.join("rootfs"), bytes).expect("write builder output");
@@ -818,7 +814,10 @@ mod tests {
         let queue = PrewarmQueue::new(WarmArtifactStore::at(root.path()));
         queue.enqueue(source(), key()).expect("enqueue succeeds");
         let error = queue
-            .process_next(|_, _, _| Err(anyhow::anyhow!("builder unavailable")))
+            .process_next(
+                |_, _, _| Err(anyhow::anyhow!("builder unavailable")),
+                |_, _, _| Ok(()),
+            )
             .expect_err("builder failure is surfaced");
         assert!(error.to_string().contains("builder unavailable"));
         assert!(matches!(
