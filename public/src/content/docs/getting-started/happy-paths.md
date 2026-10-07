@@ -140,12 +140,12 @@ mvmctl bundle fetch ./my-app.mvmpkg          # verify the signed bundle
 mvmctl bundle install ./my-app.mvmpkg        # install it into ~/.mvm/bundles/
 ```
 
-`.mvmpkg` bundles go through `mvmctl bundle`. `mvmctl machine check-artifact` is
-a different verb for a different artifact kind — it verifies a signed `.mvm`
-artifact without booting:
+`mvmctl machine check-artifact` verifies the same bundle without installing
+or booting it, and shows the posture it declares — the ceilings any launch of
+it has to stay under:
 
 ```bash
-mvmctl machine check-artifact ./my-app.mvm
+mvmctl machine check-artifact ./my-app.mvmpkg
 ```
 
 `bundle-run` doctor scope explicitly drops `prerequisites` and

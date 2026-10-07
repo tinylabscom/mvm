@@ -179,6 +179,7 @@ impl Verdict {
             .env("WORKSPACE_AARCH64_RESULT", self.lanes)
             .env("LINUX_RESULT", self.lanes)
             .env("RELEASE_WITNESS_RESULT", self.lanes)
+            .env("MUSL_CONFINEMENT_RESULT", self.lanes)
             .env("EBPF_RESULT", self.lanes)
             .env("BDD_RESULT", self.bdd)
             .env("BOOT_RESULT", self.boot)

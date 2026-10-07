@@ -4,9 +4,6 @@
 //! re-exported here while callers migrate. This module retains only the
 //! `FlakeRunConfig`-dependent helpers that still need `mvm-runtime` types.
 
-use anyhow::Result;
-use tracing::instrument;
-
 pub use mvm_vmm::host::boot_config::*;
 
 use super::flake_run::FlakeRunConfig;
@@ -25,25 +22,6 @@ pub fn resolved_runtime_overlay(config: &FlakeRunConfig) -> Option<(&str, &str, 
         config.runtime_overlay_verity_path.as_deref()?,
         config.runtime_overlay_roothash.as_deref()?,
     ))
-}
-
-/// Configure a flake-built microVM via the Firecracker API (multi-VM).
-#[instrument(skip_all, fields(name = %config.name))]
-pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str) -> Result<()> {
-    let _ = (config, abs_dir, socket);
-    anyhow::bail!("raw Firecracker flake configuration is disabled; use the vsock workload runner")
-}
-
-/// Configure a flake-built microVM with custom config/secrets drive location.
-#[instrument(skip_all, fields(name = %config.name))]
-pub fn configure_flake_microvm_with_drives_dir(
-    config: &FlakeRunConfig,
-    abs_dir: &str,
-    socket: &str,
-    drives_dir: &str,
-) -> Result<()> {
-    let _ = (config, abs_dir, socket, drives_dir);
-    anyhow::bail!("raw Firecracker flake configuration is disabled; use the vsock workload runner")
 }
 
 #[cfg(test)]

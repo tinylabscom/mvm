@@ -43,6 +43,7 @@
 //! ```
 
 pub mod admission;
+pub mod agent_prompt;
 pub mod approval_broker;
 pub mod audit;
 pub mod boot;
@@ -50,7 +51,9 @@ pub mod builder_bundle;
 pub mod bundle;
 pub mod connect;
 pub mod drive;
+pub mod egress_denials;
 pub mod entrypoint;
+pub mod explain;
 pub mod grants;
 pub mod grants_resolve;
 pub mod guest;
@@ -58,6 +61,7 @@ pub mod instruction_trust;
 pub mod inventory;
 pub mod launch;
 pub mod local;
+pub mod notices;
 pub mod policy_profiles;
 pub mod profile;
 pub mod readiness;
