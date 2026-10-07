@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 5
+ABI_MINOR: Final = 6
 
 
 class Classification(str, Enum):
@@ -83,6 +83,11 @@ MACHINE_LOGS_STREAM_OPEN: Final = "machine.logs.stream.open"
 #: Pauses a running machine, sealing a snapshot where the backend
 #: uses one.
 MACHINE_PAUSE: Final = "machine.pause"
+
+
+#: Sends one prompt to a running machine's resident agent, granted by
+#: its plan, journaled, recorded encrypted and chain-audited.
+MACHINE_PROMPT: Final = "machine.prompt"
 
 
 #: Patches a machine's resources and relaunches it when running.
@@ -193,6 +198,16 @@ GUEST_PROC_STREAM_OPEN: Final = "guest.proc.stream.open"
 GUEST_PROC_WAIT: Final = "guest.proc.wait"
 
 
+#: Reads one cursor-paged page of a machine's collected telemetry
+#: records.
+TELEMETRY_RECORDS: Final = "telemetry.records"
+
+
+#: Reports whether telemetry collection was provisioned for a machine
+#: and how its collector stands.
+TELEMETRY_STATUS: Final = "telemetry.status"
+
+
 METHODS: dict[str, Method] = {
     "backend.capabilities": Method(key="backend_capabilities", classification=Classification.PROD_SAFE, summary="Reports what the backend can do."),
     "entrypoint.call": Method(key="entrypoint_call", classification=Classification.PROD_SAFE, summary="Calls a workload's entrypoint in a transient microVM, admitted under a signed plan."),
@@ -207,6 +222,7 @@ METHODS: dict[str, Method] = {
     "machine.logs.stream.next": Method(key="machine_logs_stream_next", classification=Classification.PROD_SAFE, summary="Returns the captured output that has arrived."),
     "machine.logs.stream.open": Method(key="machine_logs_stream_open", classification=Classification.PROD_SAFE, summary="Opens a stream over a machine's captured output, replayed then followed."),
     "machine.pause": Method(key="machine_pause", classification=Classification.PROD_SAFE, summary="Pauses a running machine, sealing a snapshot where the backend uses one."),
+    "machine.prompt": Method(key="machine_prompt", classification=Classification.PROD_SAFE, summary="Sends one prompt to a running machine's resident agent, granted by its plan, journaled, recorded encrypted and chain-audited."),
     "machine.reconfigure": Method(key="machine_reconfigure", classification=Classification.PROD_SAFE, summary="Patches a machine's resources and relaunches it when running."),
     "machine.resume": Method(key="machine_resume", classification=Classification.PROD_SAFE, summary="Resumes a paused machine, refusing a replayed snapshot."),
     "machine.run": Method(key="machine_run", classification=Classification.PROD_SAFE, summary="Boots a machine through the admitted local launch."),
@@ -234,6 +250,8 @@ METHODS: dict[str, Method] = {
     "guest.proc.stream.next": Method(key="guest_proc_stream_next", classification=Classification.DEV_ONLY, summary="Returns the process output that has arrived, and how it ended."),
     "guest.proc.stream.open": Method(key="guest_proc_stream_open", classification=Classification.DEV_ONLY, summary="Opens a stream over a guest process's output."),
     "guest.proc.wait": Method(key="guest_proc_wait", classification=Classification.DEV_ONLY, summary="Waits for a guest process to end, returning its output."),
+    "telemetry.records": Method(key="telemetry_records", classification=Classification.PROD_SAFE, summary="Reads one cursor-paged page of a machine's collected telemetry records."),
+    "telemetry.status": Method(key="telemetry_status", classification=Classification.PROD_SAFE, summary="Reports whether telemetry collection was provisioned for a machine and how its collector stands."),
 }
 
 __all__ = [
@@ -250,6 +268,7 @@ __all__ = [
     "MACHINE_LOGS_STREAM_NEXT",
     "MACHINE_LOGS_STREAM_OPEN",
     "MACHINE_PAUSE",
+    "MACHINE_PROMPT",
     "MACHINE_RECONFIGURE",
     "MACHINE_RESUME",
     "MACHINE_RUN",
@@ -277,6 +296,8 @@ __all__ = [
     "GUEST_PROC_STREAM_NEXT",
     "GUEST_PROC_STREAM_OPEN",
     "GUEST_PROC_WAIT",
+    "TELEMETRY_RECORDS",
+    "TELEMETRY_STATUS",
     "ABI_MAJOR",
     "ABI_MINOR",
     "Classification",

@@ -524,11 +524,11 @@ impl RegistryPackPublisherPolicy {
 
 /// Keyless signing identity of the official pack registry's publish workflow.
 ///
-/// Packs published from `tinylabscom/mvm-templates` are signed keyless in
+/// Packs published from `tinylabscom/mvm-packs` are signed keyless in
 /// `.github/workflows/publish.yml` on the main branch; every trust decision
 /// on an official pack checks this identity under the GitHub OIDC issuer.
 pub const OFFICIAL_PACK_SIGNING_IDENTITY: &str =
-    "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main";
+    "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main";
 
 /// OIDC issuer that vouches for [`OFFICIAL_PACK_SIGNING_IDENTITY`].
 pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubusercontent.com";
@@ -1314,12 +1314,14 @@ mod tests {
     }
 
     fn publisher_policy() -> RegistryPackPublisherPolicy {
-        RegistryPackPublisherPolicy::new(vec![RegistryPackPublisher::new(
-            "runtime",
-            "https://token.actions.githubusercontent.com",
-            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/main".to_string()],
-        )
-        .unwrap()])
+        RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new(
+                "runtime",
+                "https://token.actions.githubusercontent.com",
+                vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+            )
+            .unwrap(),
+        ])
         .unwrap()
     }
 
@@ -1399,6 +1401,16 @@ mod tests {
         let trust = policy.trust_for_namespace("any-future-namespace").unwrap();
         assert_eq!(trust.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
         assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
+        assert_eq!(
+            OFFICIAL_PACK_SIGNING_IDENTITY,
+            "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"
+        );
+        assert!(
+            !trust
+                .accepted_identities
+                .iter()
+                .any(|identity| identity.contains("/mvm-templates/"))
+        );
     }
 
     #[test]

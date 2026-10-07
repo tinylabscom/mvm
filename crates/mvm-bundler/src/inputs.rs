@@ -3,6 +3,8 @@
 use std::path::Path;
 
 use mvm_core::plan::BundleResources;
+use mvm_core::plan::types::BuildProvenance;
+use mvm_core::policy::security::AgentProfile;
 
 use crate::debug::DebugOutput;
 
@@ -33,6 +35,14 @@ pub struct BundleExportInputs<'a> {
     pub arch_label: &'a str,
     /// Human-readable workload label recorded in the manifest.
     pub label: Option<String>,
+    /// The kernel command line the workload was built and tested with.
+    pub cmdline: Option<&'a str>,
+    /// The ceilings the publisher places on any launch of this workload.
+    pub posture: Option<PostureInputs>,
+    /// What the workload was built from. Its kernel, rootfs, and initramfs
+    /// digests are replaced with those of the bytes actually sealed, so the
+    /// record cannot describe a build other than the one shipped.
+    pub provenance: Option<BuildProvenance>,
     /// Where the archive is written. Missing parent directories are created;
     /// an existing file is overwritten.
     pub out: &'a Path,
@@ -53,6 +63,9 @@ impl<'a> BundleExportInputs<'a> {
             resources: None,
             arch_label,
             label: None,
+            cmdline: None,
+            posture: None,
+            provenance: None,
             out,
             debug_out: None,
         }
@@ -85,8 +98,63 @@ impl<'a> BundleExportInputs<'a> {
         self
     }
 
+    pub fn cmdline(mut self, cmdline: &'a str) -> Self {
+        self.cmdline = Some(cmdline);
+        self
+    }
+
+    pub fn posture(mut self, posture: PostureInputs) -> Self {
+        self.posture = Some(posture);
+        self
+    }
+
+    pub fn provenance(mut self, provenance: BuildProvenance) -> Self {
+        self.provenance = Some(provenance);
+        self
+    }
+
     pub fn debug_out(mut self, debug_out: DebugOutput) -> Self {
         self.debug_out = Some(debug_out);
+        self
+    }
+}
+
+/// The posture a publisher declares. Whether the rootfs is dm-verity
+/// protected is not asked: the export records what it actually seals.
+///
+/// Every permission starts closed; [`PostureInputs::new`] grants nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostureInputs {
+    pub profile: AgentProfile,
+    pub requires_auth: bool,
+    pub allows_volumes: bool,
+    pub allows_egress: bool,
+}
+
+impl PostureInputs {
+    /// A posture for `profile` that requires authentication and allows
+    /// neither volumes nor egress.
+    pub fn new(profile: AgentProfile) -> Self {
+        Self {
+            profile,
+            requires_auth: true,
+            allows_volumes: false,
+            allows_egress: false,
+        }
+    }
+
+    pub fn requires_auth(mut self, requires_auth: bool) -> Self {
+        self.requires_auth = requires_auth;
+        self
+    }
+
+    pub fn allows_volumes(mut self, allows_volumes: bool) -> Self {
+        self.allows_volumes = allows_volumes;
+        self
+    }
+
+    pub fn allows_egress(mut self, allows_egress: bool) -> Self {
+        self.allows_egress = allows_egress;
         self
     }
 }

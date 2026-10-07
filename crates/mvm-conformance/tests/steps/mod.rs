@@ -2,6 +2,7 @@
 
 mod admission_audit;
 mod agent_capability;
+mod agent_prompt;
 mod agent_session;
 mod agent_workload;
 mod apple_container;

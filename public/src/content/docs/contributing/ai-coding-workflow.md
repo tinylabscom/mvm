@@ -262,13 +262,15 @@ Two notes from experience:
 - `ci.yml` runs on pull requests, merge-queue (`merge_group` with
   `checks_requested`), and manual dispatch — not on ordinary branch pushes.
   It covers check/fmt/clippy/nextest and related gates used for merge readiness.
+  Nix evaluation runs only when the changed paths can affect the Nix surface;
+  the required `Test` check still verifies its result for those changes.
 - `security.yml` runs on release tags, nightly schedule, and manual dispatch —
   it does not run on pull requests.
 - Website/docs changes under `public/` are built and validated on PRs by
   `website.yml` and deploy to Cloudflare Workers Static Assets only after merge.
-- The merge queue is maintained by `merge-queue-requeue.yml`; once a PR is
-  queued, further pushes restart its checks. Wait for green checks plus queue
-  merge before considering the work landed, and sync the main checkout
+- The merge queue runs the required `Test` check on the synthetic merge commit.
+  Once a PR is queued, further pushes restart its checks. Wait for green checks
+  plus queue merge before considering the work landed, and sync the main checkout
   (`git fetch origin && git pull --ff-only origin main`) immediately after.
 
 Treat CI as the outer loop of the ladder above: everything through rung 7 should
