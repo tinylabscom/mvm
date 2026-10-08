@@ -795,7 +795,7 @@ guest, on any tier.
 | `mvmctl machine run --image <ref> --json -- <cmd>`                                             | Print a redacted JSON execution summary with `egress_denials` and optional `egress_review`; no review prompt opens                                                                                                                                                                                                                  |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>`                                   | Write a signed execution receipt                                                                                                                                                                                                                                                                                                     |
 | `mvmctl machine run -d --image <ref>`                                                          | Boot a **persistent** machine, auto-name it (printed), return                                                                                                                                                                                                                                                                        |
-| `mvmctl machine run -d --name <name> --image <ref>`                                            | Boot a **persistent** named machine, return; reconnect via `machine shell <name>`                                                                                                                                                                                                                                                    |
+| `mvmctl machine run -d --name <name> --image <ref>`                                            | Boot a **persistent** named machine and return. Add `--profile dev` at launch if later `machine shell` or ad-hoc `machine exec` is needed; the standard profile's signed verb grant does not authorize those operations.                                                                                                                    |
 | `mvmctl machine run --healthcheck 'curl -fsS localhost/health' --image <ref>`                  | Boot a **persistent** machine in the foreground (registered, shows in `machine ps`); its presence alone promotes the lifecycle even without `-d`                                                                                                                                                                                     |
 | `mvmctl machine run -d --healthcheck 'curl -fsS localhost/health' --name <name> --image <ref>` | Same, detached — the usual way to run a long-lived service                                                                                                                                                                                                                                                                           |
 | `mvmctl machine run --name <name> --image <ref> -- <cmd>`                                      | Boot a named foreground transient machine, run `<cmd>`, tear down                                                                                                                                                                                                                                                                    |
@@ -935,7 +935,7 @@ mvmctl machine run -it --name debug --image <dev-image> -- /bin/sh
 Use the explicit persistent lifecycle when you want the VM to survive:
 
 ```bash
-mvmctl machine run -d --image alpine          # boots, prints e.g. "blue-fox-3f2a", returns
+mvmctl machine run -d --profile dev --image alpine  # boots, prints e.g. "blue-fox-3f2a", returns
 mvmctl machine shell blue-fox-3f2a            # reconnect (dev PTY)
 mvmctl machine exec  blue-fox-3f2a -- ps          # one-shot command in the running machine
 mvmctl machine exec  blue-fox-3f2a -it -- /bin/sh   # PTY command in the running machine
@@ -943,6 +943,9 @@ mvmctl machine stop  blue-fox-3f2a --yes      # tear it down when done
 ```
 
 `-d --name <N>` does the same with a name you choose.
+The explicit dev profile permits later shell and ad-hoc exec requests under
+the admitted plan's guest profile. A detached standard-profile service does
+not receive those verbs; attaching a dev command to it is refused.
 
 **Interactive is dev-only.** `-t`/`--tty` attaches the foreground command to a
 PTY and requires DevOnly verbs; it is refused for a sealed/production image

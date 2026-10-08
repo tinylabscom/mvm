@@ -25,7 +25,7 @@ Feature: README persistent machine lifecycle works end to end
   @live @firecracker @ci_live
   Scenario: detached start returns only after the guest control channel answers
     Given an isolated mvm home on encrypted backing storage
-    When I run mvmctl in an isolated live home with "machine run -d --name bdd-detached-ready --image alpine"
+    When I run mvmctl in an isolated live home with "machine run -d --profile dev --name bdd-detached-ready --image alpine"
     Then the command exits with code 0
     When I run mvmctl in the isolated mvm home with "machine ps"
     Then the command exits with code 0
