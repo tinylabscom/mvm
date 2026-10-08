@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use mvm_contract::policy::approval_prompt::ApprovalSubject;
 use mvm_contract::policy::tool_rules::{ToolDecision, ToolRules};
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
-use mvm_contract::protocol::network_flow::tool::ToolCheckRequest;
+use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolOrigin};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 
@@ -77,9 +77,13 @@ impl ToolDecisionGate {
 
     /// Decide and record one invocation. A recorder failure is an error, so
     /// the caller cannot mistake an unaudited decision for an allow.
-    pub async fn decide(&self, request: &ToolCheckRequest) -> Result<ToolVerdict, RecorderError> {
+    pub async fn decide(
+        &self,
+        request: &ToolCheckRequest,
+        origin: ToolOrigin,
+    ) -> Result<ToolVerdict, RecorderError> {
         let verdict = self.verdict(request).await;
-        self.record(request, verdict, None).await?;
+        self.record(request, verdict, None, origin).await?;
         Ok(verdict)
     }
 
@@ -89,6 +93,7 @@ impl ToolDecisionGate {
     pub async fn decide_invocation(
         &self,
         request: &ToolCheckRequest,
+        origin: ToolOrigin,
     ) -> Result<InvocationVerdict, RecorderError> {
         let verdict = self.verdict(request).await;
         let binding = match verdict {
@@ -97,7 +102,10 @@ impl ToolDecisionGate {
             }
             _ => None,
         };
-        if let Err(error) = self.record(request, verdict, binding.as_ref()).await {
+        if let Err(error) = self
+            .record(request, verdict, binding.as_ref(), origin)
+            .await
+        {
             if let Some(binding) = &binding {
                 self.release(binding);
             }
@@ -175,12 +183,14 @@ impl ToolDecisionGate {
         request: &ToolCheckRequest,
         verdict: ToolVerdict,
         binding: Option<&ToolInvocationBinding>,
+        origin: ToolOrigin,
     ) -> Result<(), RecorderError> {
         let (outcome, reason) = match verdict {
             ToolVerdict::Allow => ("allow", "allowed"),
             ToolVerdict::Deny(reason) => ("deny", reason),
         };
         let mut labels = vec![
+            ("origin".to_string(), origin.audit_label().to_string()),
             (
                 "tool_sha256".to_string(),
                 hex::encode(Sha256::digest(request.tool.as_bytes())),
@@ -263,11 +273,13 @@ mod tests {
             Arc::clone(&approver),
         );
         assert!(matches!(
-            gate.decide(&request("write", "write x")).await,
+            gate.decide(&request("write", "write x"), ToolOrigin::Host)
+                .await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert!(matches!(
-            gate.decide(&request("other", "other")).await,
+            gate.decide(&request("other", "other"), ToolOrigin::Host)
+                .await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert_eq!(approver.calls.load(Ordering::Relaxed), 0);
@@ -296,7 +308,7 @@ mod tests {
             Arc::clone(&approver),
         );
         assert_eq!(
-            gate.decide(&request("shell", "echo ok"))
+            gate.decide(&request("shell", "echo ok"), ToolOrigin::Host)
                 .await
                 .expect("audit"),
             ToolVerdict::Allow
@@ -325,12 +337,12 @@ mod tests {
         let (gate, signer) = gate(rules, Arc::clone(&approver));
         let mut spoof = request("gh", "gh api");
         assert!(matches!(
-            gate.decide(&spoof).await,
+            gate.decide(&spoof, ToolOrigin::Host).await,
             Ok(ToolVerdict::Deny(_))
         ));
         spoof.executable = None;
         assert!(matches!(
-            gate.decide(&spoof).await,
+            gate.decide(&spoof, ToolOrigin::Host).await,
             Ok(ToolVerdict::Deny(_))
         ));
         assert_eq!(approver.calls.load(Ordering::Relaxed), 0);
@@ -373,7 +385,7 @@ mod tests {
         let InvocationVerdict::Allow {
             binding: Some(binding),
         } = gate
-            .decide_invocation(&request("gh", "gh api"))
+            .decide_invocation(&request("gh", "gh api"), ToolOrigin::Host)
             .await
             .expect("audit")
         else {
@@ -394,13 +406,13 @@ mod tests {
     async fn unscoped_and_refused_invocations_get_no_binding() {
         let (gate, _signer) = gate(scoped_rules(), approving());
         assert_eq!(
-            gate.decide_invocation(&request("plain", "plain x"))
+            gate.decide_invocation(&request("plain", "plain x"), ToolOrigin::Host)
                 .await
                 .expect("audit"),
             InvocationVerdict::Allow { binding: None }
         );
         assert!(matches!(
-            gate.decide_invocation(&request("other", "other"))
+            gate.decide_invocation(&request("other", "other"), ToolOrigin::Host)
                 .await
                 .expect("audit"),
             InvocationVerdict::Deny(_)
@@ -416,7 +428,7 @@ mod tests {
         ));
         let gate = ToolDecisionGate::new(scoped_rules(), approving(), recorder);
         assert!(
-            gate.decide_invocation(&request("gh", "gh api"))
+            gate.decide_invocation(&request("gh", "gh api"), ToolOrigin::Host)
                 .await
                 .is_err()
         );
@@ -429,7 +441,7 @@ mod tests {
         let mut minted = Vec::new();
         for _ in 0..=MAX_LIVE_INVOCATIONS {
             match gate
-                .decide_invocation(&request("gh", "gh api"))
+                .decide_invocation(&request("gh", "gh api"), ToolOrigin::Host)
                 .await
                 .expect("audit")
             {
@@ -470,6 +482,10 @@ mod tests {
             approver,
             recorder,
         );
-        assert!(gate.decide(&request("shell", "echo ok")).await.is_err());
+        assert!(
+            gate.decide(&request("shell", "echo ok"), ToolOrigin::Host)
+                .await
+                .is_err()
+        );
     }
 }

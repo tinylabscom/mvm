@@ -65,3 +65,41 @@ impl ServiceIdentity {
 /// reserve the same number.
 pub const EGRESS_CLIENT_IDENTITY: ServiceIdentity =
     ServiceIdentity::new(989, 989, 1u32 << super::CAP_NET_BIND_SERVICE);
+
+/// Identity of the declared-command tool helper.
+///
+/// Linux-only: every consumer (the installer, the helper, the agent's
+/// decision socket, the shim's listener check) is Linux-only, and keeping
+/// the constant off other targets avoids a dead-code lint that an `allow`
+/// would only paper over.
+///
+/// The helper owns the root-only stash of substituted tool binaries and
+/// answers the in-guest shim, so it gets a uid of its own: the workload
+/// cannot signal it, pose as it on the agent's decision socket, or read the
+/// stash through its credentials. It keeps exactly `CAP_SETUID` and
+/// `CAP_SETGID` — the two transitions a mediated tool invocation needs onto
+/// [`super::TOOL_UID`] and [`super::TOOL_GID`] — and nothing else.
+#[cfg(any(target_os = "linux", test))]
+pub const TOOL_HELPER_IDENTITY: ServiceIdentity = ServiceIdentity::new(
+    906,
+    906,
+    (1u32 << super::CAP_SETUID) | (1u32 << super::CAP_SETGID),
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_tool_helper_keeps_exactly_the_uid_gid_transition_capabilities() {
+        let identity = TOOL_HELPER_IDENTITY;
+        assert_eq!(identity.uid(), 906);
+        assert_eq!(identity.gid(), 906);
+        assert_eq!(
+            identity.capabilities(),
+            (1u32 << super::super::CAP_SETUID) | (1u32 << super::super::CAP_SETGID)
+        );
+        assert_ne!(identity.uid(), super::super::WORKLOAD_UID);
+        assert_ne!(identity.uid(), super::EGRESS_CLIENT_IDENTITY.uid());
+    }
+}

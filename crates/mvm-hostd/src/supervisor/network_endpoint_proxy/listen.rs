@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationRelease;
-use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply, ToolOrigin};
 use mvm_core::substitution_wire::WireRequest;
 use serde::Deserialize;
 use tokio::net::{UnixListener, UnixStream};
@@ -31,7 +31,13 @@ enum ListenerMode {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum ConnectorRequest {
-    Tool(ToolCheckRequest),
+    /// A declared-tool question. `origin` is chosen by the host-side caller
+    /// (the connector socket is host-local; the guest can never dial it), so
+    /// the label a guest-origin decision carries is structurally honest.
+    Tool {
+        question: ToolCheckRequest,
+        origin: ToolOrigin,
+    },
     Release(ToolInvocationRelease),
     Http(WireRequest),
 }
@@ -165,9 +171,9 @@ impl SubstitutionService {
                 let response = self.process(wire).await;
                 write_json_frame(&mut stream, &response).await?;
             }
-            ConnectorRequest::Tool(request) => {
-                anyhow::ensure!(request.is_valid(), "invalid tool invocation");
-                let decision = self.decide_tool_invocation(&request).await;
+            ConnectorRequest::Tool { question, origin } => {
+                anyhow::ensure!(question.is_valid(), "invalid tool invocation");
+                let decision = self.decide_tool_invocation(&question, origin).await;
                 let response = match decision {
                     Ok(InvocationVerdict::Allow { binding: None }) => ToolDecisionReply::Allow,
                     Ok(InvocationVerdict::Allow {

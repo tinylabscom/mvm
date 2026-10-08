@@ -99,6 +99,9 @@ fn tool_mediation_for(plan: &ExecutionPlan) -> Result<Option<ToolMediationGrant>
     if plan.tools.is_empty() {
         return Ok(None);
     }
+    // The digest binds the exact tool-to-executable map the guest substitutes
+    // at activation: every admitted declared command is intercepted before it
+    // runs and only the root-only stash still holds the original bytes.
     let grant = ToolMediationGrant {
         class_gate_only: plan.agent_verbs.is_none(),
         command_map_digest: ToolMediationGrant::digest_commands(&plan.tools.command_executables())
@@ -230,6 +233,10 @@ mod tests {
                 .expect("valid map")
         );
 
+        // Two admitted tools claiming the same path are ambiguous at the
+        // command boundary: the guest cannot know which identity an
+        // invocation of that path names.
+        plan.tools.allow.push("other".into());
         plan.tools.detail.insert(
             "other".into(),
             ToolRuleDetail {
@@ -244,6 +251,23 @@ mod tests {
             .expect("other detail")
             .executable = Some("relative/sh".into());
         assert!(tool_mediation_for(&plan).is_err());
+        // A deny-only tool names no executable: it is decided at the gate
+        // without substituting anything.
+        plan.tools.allow.retain(|tool| tool != "other");
+        plan.tools.deny.push("other".into());
+        plan.tools
+            .detail
+            .get_mut("other")
+            .expect("other detail")
+            .executable = Some("/bin/zsh".into());
+        let map = tool_mediation_for(&plan)
+            .expect("deny-only tool maps")
+            .expect("tool grant");
+        assert_eq!(
+            map.command_map_digest,
+            ToolMediationGrant::digest_commands(&plan.tools.command_executables())
+                .expect("valid map")
+        );
     }
 
     #[test]

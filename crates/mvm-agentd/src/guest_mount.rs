@@ -31,6 +31,20 @@ pub const WORKLOAD_GID: u32 = 901;
 /// descriptors with `pidfd_getfd`.
 pub const TOOL_GID: u32 = 907;
 
+/// Fixed user a host-bound tool invocation runs as.
+///
+/// Chosen by the tool helper at spawn: the helper holds `CAP_SETUID` and
+/// `CAP_SETGID` for exactly this transition, and no workload process holds
+/// either. Where the group boundary ([`TOOL_GID`]) already refuses ptrace and
+/// descriptor theft, the distinct user additionally refuses signals from the
+/// workload (a same-uid `kill` is allowed; a cross-uid one is not) and keeps
+/// files the tool creates out of the workload's ownership. The guest agent
+/// cannot set this user — it is not root after the drop — so host-initiated
+/// `MediatedExec` children keep running as the workload user with only the
+/// tool group changed; both paths are recorded against the same attribution
+/// session either way.
+pub const TOOL_UID: u32 = 902;
+
 /// Home directory used by workload processes.
 ///
 /// The workload root is mounted read-only, so this is a *mount point*: image
@@ -46,6 +60,12 @@ pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
 /// Linux capability used by the authenticated guest agent to signal PID 1.
 pub const CAP_KILL: u32 = mvm_setpriv::CAP_KILL;
+/// Linux capability the tool helper needs to start a mediated tool invocation
+/// under [`TOOL_UID`].
+pub const CAP_SETUID: u32 = mvm_setpriv::CAP_SETUID;
+/// Linux capability the tool helper needs to start a mediated tool invocation
+/// under [`TOOL_GID`].
+pub const CAP_SETGID: u32 = mvm_setpriv::CAP_SETGID;
 /// Linux capability the egress client needs to serve the loopback DNS stub on
 /// port 53.
 pub const CAP_NET_BIND_SERVICE: u32 = mvm_setpriv::CAP_NET_BIND_SERVICE;
@@ -79,6 +99,8 @@ pub use cgroup2::{
     CGROUP_DELEGATION_DIR, CGROUP2_MOUNT_POINT, Cgroup2Status, DELEGATED_CONTROLLERS,
     mount_and_delegate_cgroup2,
 };
+#[cfg(any(target_os = "linux", test))]
+pub use service_identity::TOOL_HELPER_IDENTITY;
 pub use service_identity::{EGRESS_CLIENT_IDENTITY, ServiceIdentity};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no

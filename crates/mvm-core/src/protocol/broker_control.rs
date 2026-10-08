@@ -90,6 +90,7 @@ mod tests {
             workload_chain_path: "/audit/local.vm-1.workload.jsonl".into(),
             workload_chain_head_path: Some("/run/state/vm-1/audit-signer.head".into()),
             audit_signer_uds_path: Some("/run/state/vm-1/audit-signer.sock".into()),
+            tool_decision_socket: None,
             services_bindings: vec![
                 mvm_contract::protocol::broker::ServiceId::parse("host.time.v1").unwrap(),
             ],

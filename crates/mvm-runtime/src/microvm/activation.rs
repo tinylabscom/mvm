@@ -300,22 +300,23 @@ fn activation_tool_commands(
     config: &VmStartConfig,
     envelope: Option<&VerbGrantEnvelope>,
 ) -> Result<BTreeMap<String, String>> {
-    let expected = envelope
+    let Some(expected) = envelope
         .and_then(|envelope| envelope.grant.tool_mediation.as_ref())
-        .and_then(|mediation| mediation.command_map_digest.as_ref());
-    let Some(plan_json) = config.plan_json.as_deref() else {
-        if expected.is_some() {
-            bail!("signed tool executable map requires the admitted plan");
-        }
+        .and_then(|mediation| mediation.command_map_digest.as_ref())
+    else {
         return Ok(BTreeMap::new());
     };
+    let plan_json = config
+        .plan_json
+        .as_deref()
+        .context("signed tool executable map requires the admitted plan")?;
     let signed: SignedExecutionPlan =
         serde_json::from_str(plan_json).context("decode signed plan for tool executable map")?;
     let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
         .context("decode admitted plan for tool executable map")?;
     let commands = plan.tools.command_executables();
     let actual = ToolMediationGrant::digest_commands(&commands).map_err(anyhow::Error::msg)?;
-    if actual.as_ref() != expected {
+    if actual.as_ref() != Some(expected) {
         bail!("admitted plan's tool executable map differs from the signed guest grant");
     }
     Ok(commands)
@@ -849,15 +850,6 @@ mod tests {
             activation_tool_commands(&config, Some(&envelope)).expect("matching plan"),
             commands
         );
-        assert!(activation_tool_commands(&config, None).is_err());
-        let mut missing_digest = envelope.clone();
-        missing_digest
-            .grant
-            .tool_mediation
-            .as_mut()
-            .expect("mediation")
-            .command_map_digest = None;
-        assert!(activation_tool_commands(&config, Some(&missing_digest)).is_err());
         let mut mismatched = config.clone();
         mismatched.plan_json = None;
         assert!(activation_tool_commands(&mismatched, Some(&envelope)).is_err());

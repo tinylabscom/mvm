@@ -424,6 +424,22 @@ missing one.
   the decision in the chain-signed audit log before the guest may start it. A
   signed tool-bearing plan also makes the guest refuse the command RPCs that
   skip this step.
+- A process the workload starts itself is mediated too. Guest activation
+  substitutes the in-guest shim over every runnable path to a declared tool's
+  bytes — the exact signed path, its hard links, symlinks, and byte-identical
+  copies — and stashes the original bytes where only the tool helper can read
+  them. A workload that execs any of those paths reaches only the shim, which
+  reports the exact argv to the VM's endpoint through the authenticated
+  host channel (the `host.tool.v1` broker service, audited with the
+  `guest_broker` origin label) and runs nothing until the endpoint allows it.
+  The helper then executes the digest-verified stash as the tool identity —
+  uid 902 with the tool group — in a session of its own, so the workload can
+  neither signal nor trace the tool, and the tool's `routes` and `secrets`
+  bind to that invocation exactly as they do for `machine exec --tool`. A
+  denied or undecidable invocation never runs: the shim exits `126` (denied)
+  or `125` (mediation unavailable). On busybox-style multi-call binaries,
+  applet names other than the declared tool's keep working through the same
+  substitution, unmediated, with the caller's own identity.
 - `routes` and `secrets` belong to their tool. When an allowed invocation's
   tool declares either, the endpoint mints a binding for that invocation. The
   guest agent starts the command as the leader of a new session, and the
@@ -450,22 +466,25 @@ missing one.
 
 ## Not yet
 
-- A process the workload starts itself is not mediated: there are no
-  in-guest command shims. A tool's routes and secrets are therefore withheld
-  from everything but a declared `machine exec --tool` invocation; a workload
-  that runs the same binary on its own gets neither.
-- `machine exec --tool` requires `[tools.detail.<name>].executable` to name
-  exactly the guest command path passed after `--`. A missing path, a relative
-  command, or a differently spelled path is denied and audited. This path
-  check does not prove the executable's bytes or protect writable libraries
-  and configuration; use immutable image-owned tools as described below.
-- A declared tool still runs under the workload's uid, so it shares the
-  workload's files and the workload can signal it. A tool whose binary,
-  libraries or configuration live anywhere the workload can write — its home,
-  its working directory, a writable path — runs what the workload put there,
-  with the tool's routes and secrets. Declare only tools from the read-only
-  image whose behaviour such files cannot redirect. A separate tool uid would
-  close this and is not built.
+- Workload-origin mediation executes the activation-stashed bytes and runs
+  the tool under its own uid, but a declared tool's libraries and
+  configuration still come from the workload rootfs. Declare only tools from
+  the read-only image whose behaviour workload-writable files cannot
+  redirect.
+- Host-initiated `machine exec --tool` children still run under the workload's
+  uid with only the tool group changed: the agent cannot setuid after its
+  privilege drop, so on that path alone the tool shares the workload's files
+  and can be signalled by it. The workload-origin shim path (above) closes
+  both with the tool uid; prefer it for tools whose scope matters.
+- On busybox-style multi-call binaries, only the declared tool's own name is
+  mediated; other applet names to the same bytes run unmediated with the
+  caller's identity. Declare each name that must be mediated as its own tool.
+- Workload-origin mediation requires the runtime overlay to carry the shim and
+  helper binaries; an older overlay refuses a `[tools]` boot at activation
+  rather than starting it unmediated. `machine exec --tool` requires
+  `[tools.detail.<name>].executable` to name exactly the guest command path
+  passed after `--`: a missing, relative, or differently spelled path is
+  denied and audited.
 - Attribution needs the agent to be the guest's init (PID 1); a guest booted
   by another init attributes nothing, so its tool routes and secrets stay
   refused. The agent answers attribution questions one at a time, so a flood

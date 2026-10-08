@@ -173,7 +173,8 @@ impl VerbGrant {
         }
         let sig = Signature::from_slice(&self.sig).map_err(|_| VerbGrantError::BadSignature)?;
         key.verify(&self.signing_bytes(), &sig)
-            .map_err(|_| VerbGrantError::BadSignature)
+            .map_err(|_| VerbGrantError::BadSignature)?;
+        Ok(())
     }
 
     /// Baseline verbs (see `VERB_GRANT_BASELINE`) are always answerable regardless

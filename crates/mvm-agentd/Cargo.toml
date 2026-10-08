@@ -79,6 +79,23 @@ required-features = ["addons"]
 name = "mvm-ping"
 path = "src/bin/mvm-ping.rs"
 
+# In-guest client mounted over every declared tool's executable path at
+# activation (workload-origin command mediation). Holds no privilege: it
+# relays the exact invocation to the tool helper over a guest-local socket
+# and exits with the tool's status.
+[[bin]]
+name = "mvm-tool-shim"
+path = "src/bin/mvm-tool-shim.rs"
+
+# In-guest declared-command tool helper. Started by PID 1 under its own
+# ServiceIdentity (uid/gid 906, CAP_SETUID|CAP_SETGID); the only process that
+# can read the root-only stash of substituted tool bytes. Decides each
+# workload-origin invocation with the host over host.tool.v1 before spawning
+# the digest-verified stash as the tool identity.
+[[bin]]
+name = "mvm-tool-helper"
+path = "src/bin/mvm-tool-helper.rs"
+
 # In-guest one-shot workload-exit-code reporter over AF_VSOCK.
 [[bin]]
 name = "mvm-exit-report"
@@ -183,6 +200,7 @@ ed25519-dalek.workspace = true
 libc.workspace = true
 rand.workspace = true
 serde.workspace = true
+sha2.workspace = true
 socket2.workspace = true
 serde_json.workspace = true
 x25519-dalek.workspace = true

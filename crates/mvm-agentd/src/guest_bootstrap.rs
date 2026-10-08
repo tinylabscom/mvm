@@ -351,7 +351,7 @@ pub fn mount_mediated_tools() {
 /// the `/run` tmpfs, so the workload's unprivileged uid cannot reach it either.
 /// Scoped to the one directory holding a mediated tool rather than the whole
 /// root, so every other path keeps resolving straight to the sealed image.
-fn overlay_parent_for_write(target: &Path) -> Result<(), String> {
+pub(crate) fn overlay_parent_for_write(target: &Path) -> Result<(), String> {
     let dir = target
         .parent()
         .ok_or_else(|| format!("{} has no parent directory", target.display()))?;
@@ -411,7 +411,7 @@ fn mount_overlay(target: &Path, options: &str) -> Result<(), String> {
 }
 
 /// Replace the image's copy of a tool with the stand-in, in place.
-fn substitute_in_place(source: &str, target: &str) -> Result<(), String> {
+pub(crate) fn substitute_in_place(source: &str, target: &str) -> Result<(), String> {
     replace_symlink_target(Path::new(target))?;
     bind_mount_file(source, target)
 }

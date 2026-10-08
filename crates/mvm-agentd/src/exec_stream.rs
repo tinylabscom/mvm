@@ -192,7 +192,11 @@ pub fn stream_exec_mediated<F: FnMut(ExecEvent)>(
     );
     let leader = match command.binding {
         Some(binding) => Leader::AttributedSession(binding),
-        None => Leader::ProcessGroup,
+        // The host already decided this invocation on the authenticated
+        // control session; record that decision under the relay's pid so the
+        // shim it may turn out to be consults the marker instead of paying
+        // for a second host decision.
+        None => Leader::MediatedRelay,
     };
     stream_command_with_environment(
         builder,
@@ -211,6 +215,9 @@ enum Leader<'a> {
     ProcessGroup,
     /// A new session, attributed to a host binding while the child runs.
     AttributedSession(&'a ToolInvocationBinding),
+    /// A host-decided MediatedExec without a binding: an ordinary process
+    /// group spawn plus the decided marker the shim consults.
+    MediatedRelay,
 }
 
 fn stream_exec_with_environment<F: FnMut(ExecEvent)>(
@@ -272,6 +279,10 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
             crate::tool_attribution::spawn_attributed(&mut builder, binding)
                 .map(|(child, registration)| (child, Some(registration)))
         }
+        #[cfg(any(target_os = "linux", test))]
+        Leader::MediatedRelay => {
+            crate::tool_attribution::spawn_decided_relay(&mut builder).map(|child| (child, None))
+        }
         // Attribution and the tool group exist only in a Linux guest. Running
         // a bound command anywhere else would run it without either, so it
         // is refused.
@@ -280,6 +291,11 @@ fn stream_command_with_environment<F: FnMut(ExecEvent)>(
             std::io::ErrorKind::Unsupported,
             "a bound tool invocation runs only in a Linux guest",
         )),
+        // Off Linux the decided marker has no consumer (the decision socket
+        // is Linux-only), so the relay degrades to an ordinary process-group
+        // spawn and the host-decided semantics are unchanged.
+        #[cfg(not(any(target_os = "linux", test)))]
+        Leader::MediatedRelay => builder.spawn().map(|child| (child, None)),
     };
     let (mut child, _registration) = match spawned {
         Ok(spawned) => spawned,

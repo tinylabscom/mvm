@@ -30,7 +30,8 @@
 //!   `/proc/<pid>/mem` is not a syscall a filter could name. Yama is not in
 //!   the guest kernel.
 //!
-//! What it does not hold, because the tool still shares the workload's uid:
+//! What the host-initiated path does not hold, because that tool still
+//! shares the workload's uid:
 //!
 //! - Files. The tool reads the workload's home, working directory and any
 //!   workload-writable path, so a tool whose binary, libraries or
@@ -40,7 +41,12 @@
 //!   redirect.
 //! - Signals. The workload can stop or kill a tool invocation.
 //!
-//! A separate tool uid would close both, and is not done.
+//! The workload-origin path closes both: the tool helper starts those tools
+//! as [`crate::guest_mount::TOOL_UID`] with all three gids at
+//! [`crate::guest_mount::TOOL_GID`], so the tool neither reads
+//! workload-owned files it could not already read as the workload nor accepts
+//! the workload's signals, and its executable bytes come from the
+//! digest-verified stash rather than from any path the workload can write.
 //!
 //! The question travels over an abstract-namespace socket the agent binds as
 //! PID 1 before any workload runs. The egress client accepts an answer only
@@ -81,6 +87,135 @@ static LIVE: Mutex<Vec<LiveInvocation>> = Mutex::new(Vec::new());
 fn live() -> MutexGuard<'static, Vec<LiveInvocation>> {
     LIVE.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// One host decision the agent recorded when it spawned a `MediatedExec`
+/// relay. The in-guest shim asks the tool helper to consume it by pid, so a
+/// declared command started by the host is decided exactly once — on the
+/// authenticated control session — instead of being put to the per-VM gate a
+/// second time when the relayed exec reaches the shim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DecidedInvocation {
+    /// The relay shim's pid, from the spawn.
+    pid: u32,
+    /// The relay's start time, so a recycled pid cannot inherit the decision.
+    start_ticks: u64,
+    /// The binding from the host decision, when the tool scopes the endpoint.
+    binding: Option<ToolInvocationBinding>,
+}
+
+/// Decided markers share the live registry's lock: every mutation happens
+/// under the same `live()` guard that spawn paths already hold across the
+/// fork, which is what orders "decision recorded" before "shim can ask".
+static DECIDED: Mutex<Vec<DecidedInvocation>> = Mutex::new(Vec::new());
+
+fn decided() -> MutexGuard<'static, Vec<DecidedInvocation>> {
+    DECIDED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Record the host decision carried by one `MediatedExec` spawn under the
+/// relay's pid. Called with the registry lock already held, across the spawn,
+/// so the shim's later lookup cannot race the record.
+fn note_decided_locked(pid: u32, start_ticks: u64, binding: Option<&ToolInvocationBinding>) {
+    let mut decided = decided();
+    reap_decided_dead_locked(&mut decided);
+    decided.retain(|entry| entry.pid != pid);
+    decided.push(DecidedInvocation {
+        pid,
+        start_ticks,
+        binding: binding.cloned(),
+    });
+}
+
+/// Consume the recorded decision for `pid`. Validates that the process is
+/// still the exact one the agent spawned (same start time) and removes the
+/// marker so it answers at most once.
+///
+/// Takes the live registry's lock first: the spawn paths hold it across the
+/// fork and the record, so a shim that connects before its marker is written
+/// waits here instead of reading "not decided" and paying for a second host
+/// decision.
+#[cfg(target_os = "linux")]
+pub fn consume_decided(pid: u32) -> Option<Option<ToolInvocationBinding>> {
+    let _live = live();
+    let start_ticks = process_start_ticks(pid).ok()?;
+    let mut decided = decided();
+    reap_decided_dead_locked(&mut decided);
+    let index = decided
+        .iter()
+        .position(|entry| entry.pid == pid && entry.start_ticks == start_ticks)?;
+    Some(decided.remove(index).binding)
+}
+
+/// Drop decided markers whose process has exited or been recycled.
+/// `process_start_ticks` answers `Ok(0)` off Linux, where every marker is
+/// retained; the decision socket only exists on Linux either way.
+fn reap_decided_dead_locked(decided: &mut Vec<DecidedInvocation>) {
+    decided.retain(|entry| {
+        process_start_ticks(entry.pid)
+            .ok()
+            .is_some_and(|start_ticks| start_ticks == entry.start_ticks)
+    });
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn consume_decided(_pid: u32) -> Option<Option<ToolInvocationBinding>> {
+    None
+}
+
+/// Record a helper-spawned tool session for attribution. The agent reads the
+/// leader's start time itself: the tool runs under [`crate::guest_mount::TOOL_GID`],
+/// which the agent holds as its filesystem gid for exactly this read. A
+/// session whose leader cannot be read is left unrecorded, so nothing it left
+/// behind is attributed.
+#[cfg(target_os = "linux")]
+pub fn record_external(session: u32, binding: ToolInvocationBinding) -> Result<(), std::io::Error> {
+    let start_ticks = with_filesystem_gid(crate::guest_mount::TOOL_GID, || {
+        process_start_ticks(session)
+    })?;
+    let mut live = live();
+    reap_dead_locked(&Procfs, &mut live);
+    live.push(LiveInvocation {
+        session,
+        start_ticks,
+        binding,
+    });
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn record_external(
+    _session: u32,
+    _binding: ToolInvocationBinding,
+) -> Result<(), std::io::Error> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "tool sessions are attributed only in a Linux guest",
+    ))
+}
+
+/// Retire a helper-spawned tool session after its tool exited. Helper-spawned
+/// entries have no `Registration` owner to drop; retiring is explicit.
+pub fn retire_external(session: u32) {
+    live().retain(|entry| entry.session != session);
+}
+
+/// Drop entries whose session leader has exited or been recycled, in place.
+/// `Procfs` reads fail for the workload-origin tools whose descriptors the
+/// agent can only see through the tool group, so the start-time read uses the
+/// same filesystem-gid trick as the socket scan; a dead or recycled leader
+/// simply fails the comparison either way.
+#[cfg(target_os = "linux")]
+fn reap_dead_locked(source: &Procfs, live: &mut Vec<LiveInvocation>) {
+    live.retain(|entry| {
+        source
+            .stat(entry.session)
+            .as_deref()
+            .and_then(parse_stat)
+            .is_some_and(|fields| fields.start_ticks == entry.start_ticks)
+    });
 }
 
 /// Keeps one invocation's session attributed. Dropped when its command has
@@ -136,16 +271,31 @@ fn spawn_attributed_in_group(
     // A leader whose start time cannot be read has already exited and been
     // reaped; it is left unrecorded, so nothing it left behind is attributed.
     match process_start_ticks(session) {
-        Ok(start_ticks) => live.push(LiveInvocation {
-            session,
-            start_ticks,
-            binding: binding.clone(),
-        }),
+        Ok(start_ticks) => {
+            note_decided_locked(session, start_ticks, Some(binding));
+            live.push(LiveInvocation {
+                session,
+                start_ticks,
+                binding: binding.clone(),
+            });
+        }
         Err(error) => {
             eprintln!("mvm-guest-agent: tool invocation left unattributed: {error}");
         }
     }
     Ok((child, Registration { session }))
+}
+
+/// Spawn an unbound `MediatedExec` relay and record the host decision under
+/// its pid, so the shim it may turn out to be consults the marker instead of
+/// paying for a second decision. Mirrors [`spawn_attributed`]'s lock order.
+pub fn spawn_decided_relay(command: &mut Command) -> io::Result<Child> {
+    let _live = live();
+    let child = command.spawn()?;
+    if let Ok(start_ticks) = process_start_ticks(child.id()) {
+        note_decided_locked(child.id(), start_ticks, None);
+    }
+    Ok(child)
 }
 
 /// Make `gid` the real, effective and saved group id. Unprivileged, this

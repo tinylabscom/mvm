@@ -159,6 +159,18 @@ const fn on_host(
 /// Every raw process creation under `crates/`. Each is outside the host, or is
 /// the filter itself.
 const RAW_SITES: &[RawSite] = &[
+    guest(
+        "crates/mvm-agentd/src/tool_helper.rs",
+        "spawn_tool",
+        "fork",
+        "the mediated tool invocation, forked inside the guest by the tool helper before it drops to the tool identity",
+    ),
+    guest(
+        "crates/mvm-agentd/src/tool_install.rs",
+        "spawn_helper",
+        "Command::new(TOOL_HELPER_OVERLAY)",
+        "the declared-command tool helper, started by the guest init before its privilege drop",
+    ),
     builder(
         "crates/mvm-agentd/src/bin/mvm-builder-agent.rs",
         "child_command",

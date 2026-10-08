@@ -126,6 +126,8 @@ fn parse_capability(value: &str) -> Result<u32, String> {
     let number = match value {
         "kill" => Ok(CAP_KILL),
         "net_bind_service" => Ok(CAP_NET_BIND_SERVICE),
+        "setgid" => Ok(CAP_SETGID),
+        "setuid" => Ok(CAP_SETUID),
         "sys_admin" => Ok(CAP_SYS_ADMIN),
         "sys_time" => Ok(CAP_SYS_TIME),
         _ => Err(format!("unsupported capability {value:?}")),
@@ -187,7 +189,14 @@ fn prctl(option: libc::c_int, arg: libc::c_ulong, message: &str) -> Result<(), S
 
 #[cfg(target_os = "linux")]
 fn raise_ambient_capabilities(capabilities: u32) -> Result<(), String> {
-    for capability in [CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_ADMIN, CAP_SYS_TIME] {
+    for capability in [
+        CAP_KILL,
+        CAP_NET_BIND_SERVICE,
+        CAP_SETGID,
+        CAP_SETUID,
+        CAP_SYS_ADMIN,
+        CAP_SYS_TIME,
+    ] {
         if capabilities & (1u32 << capability) == 0 {
             continue;
         }
@@ -303,6 +312,10 @@ const _: () = {
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 /// `CAP_KILL` in `linux/capability.h`.
 pub const CAP_KILL: u32 = 5;
+/// `CAP_SETGID` in `linux/capability.h`.
+pub const CAP_SETGID: u32 = 6;
+/// `CAP_SETUID` in `linux/capability.h`.
+pub const CAP_SETUID: u32 = 7;
 /// `CAP_NET_BIND_SERVICE` in `linux/capability.h`.
 pub const CAP_NET_BIND_SERVICE: u32 = 10;
 /// `CAP_SYS_ADMIN` in `linux/capability.h`.
