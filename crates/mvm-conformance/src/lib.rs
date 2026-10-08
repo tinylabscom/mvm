@@ -16,6 +16,7 @@ pub mod doc_examples;
 pub mod journey;
 /// Same-page-merge confinement policy used by the warm-restore scenarios.
 pub mod page_merge;
+pub mod prompt_fixture;
 pub mod source_commands;
 
 /// Cucumber tag for a scenario whose steps aren't implemented yet; always skipped.
