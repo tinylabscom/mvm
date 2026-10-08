@@ -151,6 +151,20 @@ checkouts and commits not yet published from `main` have no remote artifact by
 construction; explicitly opt into local compilation with
 `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`.
 
+Source guest-runtime caches are keyed by the source fingerprint, version and
+guest architecture. On a miss in an isolated `MVM_HOME`, the resolver can copy
+a matching runtime from the default home cache, verifying its archive, member
+digests and executable modes before publishing the isolated copy. It never
+shares Cargo output, keys or VM state between homes.
+
+The live BDD harness (`just bdd::live-ci`) prewarms this source runtime once in
+the suite's cache (`MVM_E2E_HOME/cache` when configured, otherwise the invoking
+process's mvm cache). Scenario-declared isolated homes still take precedence
+over the warm home; the harness seeds only a verified runtime archive into
+those homes before live commands.
+This avoids recompiling guest binaries for every scenario without relaxing
+home isolation or increasing the lane timeout.
+
 ### Kernel builds
 
 The builder-VM and workload microVM kernels are slim custom Linux
