@@ -215,8 +215,8 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("dev", AuditPosture::DelegatesToSub(IMAGE_DEV_SUB)),
 ];
 
-// `mvmctl pack` — the versioned attested-pack cache lifecycle
-// (list/rollback/prune/download/update). `rollback` swaps the active pointer
+// `mvmctl pack` manages the versioned attested-pack cache and signed workload
+// packs. `rollback` swaps the active pointer
 // and emits `PackCacheChange`; `prune` removes bytes so it reuses
 // `CachePrune`. `download`/`update` refuse for every class — no pack is
 // published — so they change nothing and have nothing to record.
@@ -239,6 +239,8 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("list", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
+    ("search", AuditPosture::ReadOnly),
+    ("pull", AuditPosture::Emits("RegistryPackPin")),
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
     ("download", AuditPosture::ReadOnly),

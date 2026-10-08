@@ -1557,8 +1557,10 @@ running microVM.
 | `mvmctl pack prune`                                       | Reclaim non-active pack versions beyond the newest N per key                                                                                                      |
 | `mvmctl pack download`                                    | Fetch a pack version into the cache without changing the active one                                                                                               |
 | `mvmctl pack update`                                      | Fetch the latest pack version and activate it                                                                                                                     |
-| `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its signed manifest, accepted publisher identities, policy text, image source declaration, and payload digests  |
-| `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; fail if any check cannot complete                                 |
+| `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its manifest digest, actual signer and accepted publisher identities, policy text, image source declaration, and payload digests |
+| `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
+| `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
+| `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
 | `mvmctl pack registry ls`                                 | List pinned signed registry packs and whether each is installed (`--json` for machine-readable rows)                                                              |
 | `mvmctl pack registry rm ns/name`                         | Remove a signed registry pack's cache entry and lock pin                                                                                                          |
 | `mvmctl pack registry update ns/name[@version]`           | Re-pull a signed registry pack and its signed profile dependencies, adopting newer published versions when there are any                                                                              |
@@ -1579,6 +1581,14 @@ running microVM.
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
+
+Pack inspection reports `official_status: "not_established"`: verification under the
+current publisher policy does not by itself establish official MVM release
+status. Revocation checks cover an operator-configured signed feed when one is
+configured; a feed is not required by the current registry-pack model. The
+`revocation_scope: "operator_configured_only"` JSON field makes that limit
+explicit. A valid signature proves publisher identity and content integrity,
+not safety.
 
 ### Bundles in image registries
 

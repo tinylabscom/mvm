@@ -72,7 +72,6 @@ fn admit(f: &Fixture) -> Result<AdmissionContext> {
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: None,
-            mount_images: None,
             materialized_mounts: None,
             user_policy: Some(&f.policy),
         },
@@ -217,11 +216,10 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
         keys_dir: Some(&f.keys),
         audit_dir: Some(&f.audit),
-        shares: vec![share(&f.mount)],
+        shares: vec![share(&materialized)],
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: Some(&mount_roots),
-            mount_images: None,
             materialized_mounts: None,
             user_policy: Some(&f.policy),
         },
@@ -242,24 +240,82 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
 }
 
 #[test]
+fn legacy_scan_root_substitution_fails_before_plan_admitted() {
+    let f = fixture(Some("deny"));
+    let unrelated = f._dir.path().join("signed-extracted-root");
+    std::fs::create_dir_all(&unrelated).unwrap();
+    std::fs::write(unrelated.join("CLAUDE.md"), b"signed unrelated bytes\n").unwrap();
+    crate::instruction_trust::sign::sign_file(&unrelated.join("CLAUDE.md"), &publisher_key())
+        .unwrap();
+    let mount_roots = vec![unrelated];
+    let ledger = InMemoryNonceLedger::new();
+
+    let error = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            workload_dir: None,
+            mount_roots: Some(&mount_roots),
+            materialized_mounts: None,
+            user_policy: Some(&f.policy),
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("an unrelated extracted root must not stand in for the admitted share");
+
+    assert!(
+        error.to_string().contains("do not identify admitted"),
+        "{error:#}"
+    );
+    assert!(chain(&f).iter().all(|(event, _)| event != "plan.admitted"));
+}
+
+#[test]
+fn legacy_ext4_file_scan_root_fails_before_plan_admitted() {
+    let f = fixture(Some("deny"));
+    let ext4 = f._dir.path().join("unsigned.ext4");
+    std::fs::write(&ext4, b"unsigned ext4 bytes\n").unwrap();
+    let mount_roots = vec![ext4];
+    let ledger = InMemoryNonceLedger::new();
+
+    let error = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            workload_dir: None,
+            mount_roots: Some(&mount_roots),
+            materialized_mounts: None,
+            user_policy: Some(&f.policy),
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("a file must not be accepted as a legacy directory scan root");
+
+    assert!(error.to_string().contains("not a directory"), "{error:#}");
+    assert!(chain(&f).iter().all(|(event, _)| event != "plan.admitted"));
+}
+
+#[test]
 fn deny_audits_and_refuses_an_unsigned_instruction_in_a_host_snapshot_image() {
     let f = fixture(Some("deny"));
     let live = f.mount.join("CLAUDE.md");
     crate::instruction_trust::sign::sign_file(&live, &publisher_key()).unwrap();
     let image = unsigned_instruction_image(&f, "host-snapshot.ext4");
-    let images = vec![image.clone()];
-    let mut disk_share = share(&f.mount);
-    disk_share.kind = mvm_core::plan::ShareKind::Disk;
+    let mounts = vec![instructions::MaterializedMount {
+        host_path: f.mount.clone(),
+        image_path: image.clone(),
+    }];
     let ledger = InMemoryNonceLedger::new();
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
         keys_dir: Some(&f.keys),
         audit_dir: Some(&f.audit),
-        shares: vec![disk_share],
+        shares: vec![share(&f.mount)],
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: Some(&[]),
-            mount_images: Some(&images),
-            materialized_mounts: None,
+            materialized_mounts: Some(&mounts),
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)
@@ -298,6 +354,144 @@ fn unsigned_instruction_image(f: &Fixture, name: &str) -> PathBuf {
     image
 }
 
+fn signed_instruction_image(f: &Fixture, name: &str) -> PathBuf {
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    let source = f._dir.path().join(format!("{name}-source"));
+    std::fs::create_dir_all(&source).unwrap();
+    let instruction = source.join("CLAUDE.md");
+    std::fs::write(&instruction, b"guest-visible signed instructions\n").unwrap();
+    crate::instruction_trust::sign::sign_file(&instruction, &publisher_key()).unwrap();
+    let nodes = std::fs::read_dir(&source)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            Node::File {
+                path: format!("/{}", entry.file_name().to_string_lossy()),
+                mode: 0o644,
+                data: std::fs::read(entry.path()).unwrap(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            }
+        })
+        .collect();
+    let image = f._dir.path().join(name);
+    std::fs::write(&image, build_image(nodes, &Default::default()).unwrap()).unwrap();
+    image
+}
+
+#[test]
+fn explicit_materialized_identity_signs_ro_and_refuses_the_requested_rw_attachment() {
+    let f = fixture(Some("deny"));
+    let image = signed_instruction_image(&f, "signed.ext4");
+    let mount = instructions::MaterializedMount {
+        host_path: f.mount.clone(),
+        image_path: image.clone(),
+    };
+    let requested = mvm_core::vm_backend::VmVolume {
+        host: f.mount.display().to_string(),
+        guest: "/work".to_string(),
+        read_only: false,
+        materialized_image: Some(image.display().to_string()),
+        ..Default::default()
+    };
+    let managed = mvm_core::vm_backend::VmVolume {
+        host: f._dir.path().join("managed.ext4").display().to_string(),
+        guest: "/data".to_string(),
+        read_only: false,
+        ..Default::default()
+    };
+    std::fs::write(&managed.host, b"managed block").unwrap();
+    let shares = mvm_hostd::run::shares_from_vm_volumes(&[requested.clone(), managed.clone()]);
+    let ledger = InMemoryNonceLedger::new();
+    let admitted = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares,
+        instructions: InstructionSources {
+            user_policy: Some(&f.policy),
+            ..InstructionSources::for_workload(None)
+                .with_mount_roots(&[])
+                .with_materialized_mounts(std::slice::from_ref(&mount))
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect("the signed frozen instruction image admits");
+    let plan = admitted.admitted.plan();
+    assert!(plan.shares[0].read_only, "instruction share is signed ro");
+    assert!(!plan.shares[1].read_only, "managed block remains rw");
+
+    let mut read_only = requested.clone();
+    read_only.read_only = true;
+    mvm_hostd::plan_admission::enforce_admitted_shares(&[read_only, managed.clone()], plan)
+        .expect("the explicit ro attachment and managed block match the signed plan");
+    mvm_hostd::plan_admission::enforce_admitted_shares(&[requested], plan)
+        .expect_err("the originally requested rw attachment must not bypass signed ro");
+}
+
+#[test]
+fn malformed_materialized_identities_fail_before_plan_admitted() {
+    enum Malformed {
+        Missing,
+        Duplicate,
+        Unmatched,
+    }
+
+    let f = fixture(Some("deny"));
+    let ledger = InMemoryNonceLedger::new();
+    admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            user_policy: Some(&f.policy),
+            ..InstructionSources::for_workload(None).with_mount_roots(&[])
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("an unmapped materialized directory share fails closed");
+    assert!(chain(&f).iter().all(|(event, _)| event != "plan.admitted"));
+
+    for case in [
+        Malformed::Missing,
+        Malformed::Duplicate,
+        Malformed::Unmatched,
+    ] {
+        let f = fixture(Some("deny"));
+        let image = signed_instruction_image(&f, "signed.ext4");
+        let valid = instructions::MaterializedMount {
+            host_path: f.mount.clone(),
+            image_path: image.clone(),
+        };
+        let mappings = match case {
+            Malformed::Missing => Vec::new(),
+            Malformed::Duplicate => vec![valid.clone(), valid],
+            Malformed::Unmatched => vec![instructions::MaterializedMount {
+                host_path: f._dir.path().join("other"),
+                image_path: image,
+            }],
+        };
+        let ledger = InMemoryNonceLedger::new();
+        admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(&f.keys),
+            audit_dir: Some(&f.audit),
+            shares: vec![share(&f.mount)],
+            instructions: InstructionSources {
+                user_policy: Some(&f.policy),
+                ..InstructionSources::for_workload(None)
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&mappings)
+            },
+            ..pinning_params(&f.rootfs, &ledger)
+        })
+        .expect_err("malformed materialized identities fail closed");
+        assert!(
+            chain(&f).iter().all(|(event, _)| event != "plan.admitted"),
+            "identity failure must precede plan.admitted"
+        );
+    }
+}
+
 #[test]
 fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
     let f = fixture(Some("deny"));
@@ -311,7 +505,7 @@ fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
         materialized_image: Some(image.display().to_string()),
         ..Default::default()
     }];
-    let images = super::instructions::materialized_mount_images(&volumes);
+    let mounts = super::instructions::materialized_mounts(&volumes);
     let ledger = InMemoryNonceLedger::new();
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
         keys_dir: Some(&f.keys),
@@ -321,7 +515,7 @@ fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
             user_policy: Some(&f.policy),
             ..InstructionSources::for_workload(None)
                 .with_mount_roots(&[])
-                .with_mount_images(&images)
+                .with_materialized_mounts(&mounts)
         },
         ..pinning_params(&f.rootfs, &ledger)
     })
@@ -333,4 +527,217 @@ fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
         image.display().to_string()
     );
     entry(&entries, "plan.admission_refused");
+}
+
+#[cfg(feature = "manifest-verify")]
+mod ps11_keyless_witness {
+    use super::*;
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    const INSTRUCTION: &[u8] =
+        include_bytes!("../../tests/fixtures/ps11-instruction-provenance/PS11.instructions.md");
+    const BUNDLE: &[u8] = include_bytes!(
+        "../../tests/fixtures/ps11-instruction-provenance/PS11.instructions.md.sigstore.json"
+    );
+    const SIGNER: &str = "https://github.com/tinylabscom/mvm/.github/workflows/sign-instructions.yml@refs/heads/main";
+
+    fn file_node(path: &str, data: &[u8]) -> Node {
+        Node::File {
+            path: path.to_string(),
+            mode: 0o644,
+            data: data.to_vec(),
+            xattrs: Vec::new(),
+            owner: Owner::ROOT,
+        }
+    }
+
+    fn policy(path: &Path, repository: &str, workflow: &str, git_ref: &str) -> PathBuf {
+        let policy = path.join("instruction-trust.toml");
+        std::fs::write(
+            &policy,
+            format!(
+                "enforcement = \"deny\"\nincludes = [\"**/PS11.instructions.md\"]\n\
+                 [[publishers]]\nkind = \"keyless\"\nname = \"ps11-ci\"\n\
+                 issuer = \"https://token.actions.githubusercontent.com\"\n\
+                 repository = \"{repository}\"\nworkflow = \"{workflow}\"\nref = \"{git_ref}\"\n"
+            ),
+        )
+        .unwrap();
+        policy
+    }
+
+    fn image(dir: &Path, instruction: &[u8], bundle: &[u8]) -> PathBuf {
+        let image = dir.join("ps11.ext4");
+        std::fs::write(
+            &image,
+            build_image(
+                vec![
+                    file_node("/PS11.instructions.md", instruction),
+                    file_node("/PS11.instructions.md.sigstore.json", bundle),
+                ],
+                &Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        image
+    }
+
+    fn run(
+        instruction: &[u8],
+        bundle: &[u8],
+        repository: &str,
+        workflow: &str,
+        git_ref: &str,
+    ) -> (Fixture, Result<AdmissionContext>) {
+        let f = fixture(None);
+        let policy = policy(f._dir.path(), repository, workflow, git_ref);
+        let image = image(f._dir.path(), instruction, bundle);
+        let mounts = vec![super::super::instructions::MaterializedMount {
+            host_path: f.mount.clone(),
+            image_path: image,
+        }];
+        let ledger = InMemoryNonceLedger::new();
+        let mut requested_share = share(&f.mount);
+        requested_share.read_only = false;
+        let result = admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(&f.keys),
+            audit_dir: Some(&f.audit),
+            shares: vec![requested_share],
+            instructions: InstructionSources {
+                user_policy: Some(&policy),
+                ..InstructionSources::for_workload(None)
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&mounts)
+            },
+            ..pinning_params(&f.rootfs, &ledger)
+        });
+        (Fixture { policy, ..f }, result)
+    }
+
+    fn verify_chain(f: &Fixture) {
+        let signer = mvm_hostd::audit::host_keypair::load_or_init_at(&f.keys).unwrap();
+        let count = mvm_hostd::supervisor::verify_audit_chain(
+            &f.audit.join("local.jsonl"),
+            &signer.signing.verifying_key(),
+        )
+        .unwrap();
+        assert!(
+            count >= 2,
+            "trust and admission decisions must both be signed"
+        );
+    }
+
+    fn assert_refused(f: &Fixture, result: Result<AdmissionContext>, reason: &str) {
+        result.expect_err("invalid provenance must refuse admission");
+        let entries = chain(f);
+        let blocked = entry(&entries, "trust.instruction_blocked");
+        assert_eq!(blocked["reason"], reason);
+        entry(&entries, "plan.admission_refused");
+        assert!(
+            entries.iter().all(|(name, _)| name != "plan.admitted"),
+            "{entries:?}"
+        );
+        verify_chain(f);
+    }
+
+    #[test]
+    fn real_keyless_bundle_hardens_and_admits_the_materialized_ext4_share() {
+        let (f, result) = run(
+            INSTRUCTION,
+            BUNDLE,
+            "tinylabscom/mvm",
+            ".github/workflows/sign-instructions.yml",
+            "refs/heads/main",
+        );
+        let admitted = result.expect("the workflow-signed fixture admits");
+        let requested_attachment = mvm_core::vm_backend::VmVolume {
+            host: f.mount.display().to_string(),
+            guest: "/work".to_string(),
+            read_only: false,
+            materialized_image: Some(f._dir.path().join("ps11.ext4").display().to_string()),
+            ..Default::default()
+        };
+        let signed_share = admitted
+            .admitted
+            .plan()
+            .shares
+            .iter()
+            .find(|grant| grant.host_path == f.mount.display().to_string())
+            .expect("the effective plan carries the materialized host share");
+        assert!(
+            signed_share.read_only,
+            "evaluate_and_harden must convert the requested writable instruction share to read-only"
+        );
+        let rw_err = enforce_shares(&admitted, std::slice::from_ref(&requested_attachment))
+            .expect_err("backend enforcement must reject the original writable attachment");
+        assert!(
+            format!("{rw_err:#}").contains("not named in the signed"),
+            "rejection must come from the admitted-share boundary: {rw_err:#}"
+        );
+        let effective_attachment = mvm_core::vm_backend::VmVolume {
+            read_only: true,
+            ..requested_attachment
+        };
+        enforce_shares(&admitted, &[effective_attachment])
+            .expect("backend enforcement accepts the hardened read-only attachment");
+        let entries = chain(&f);
+        let verified = entry(&entries, "trust.instruction_verified");
+        assert_eq!(verified["signer"], SIGNER);
+        entry(&entries, "plan.admitted");
+        verify_chain(&f);
+    }
+
+    #[test]
+    fn tampered_instruction_bytes_are_refused_and_chain_signed() {
+        let mut instruction = INSTRUCTION.to_vec();
+        instruction.extend_from_slice(b"\ntampered\n");
+        let (f, result) = run(
+            &instruction,
+            BUNDLE,
+            "tinylabscom/mvm",
+            ".github/workflows/sign-instructions.yml",
+            "refs/heads/main",
+        );
+        assert_refused(&f, result, "bad_signature");
+    }
+
+    #[test]
+    fn tampered_bundle_bytes_are_refused_and_chain_signed() {
+        let mut bundle = BUNDLE.to_vec();
+        let byte = bundle.iter_mut().find(|byte| **byte == b'A').unwrap();
+        *byte = b'B';
+        let (f, result) = run(
+            INSTRUCTION,
+            &bundle,
+            "tinylabscom/mvm",
+            ".github/workflows/sign-instructions.yml",
+            "refs/heads/main",
+        );
+        assert_refused(&f, result, "bad_signature");
+    }
+
+    #[test]
+    fn wrong_repository_workflow_and_ref_are_publisher_mismatches() {
+        for (repository, workflow, git_ref) in [
+            (
+                "tinylabscom/not-mvm",
+                ".github/workflows/sign-instructions.yml",
+                "refs/heads/main",
+            ),
+            (
+                "tinylabscom/mvm",
+                ".github/workflows/not-sign-instructions.yml",
+                "refs/heads/main",
+            ),
+            (
+                "tinylabscom/mvm",
+                ".github/workflows/sign-instructions.yml",
+                "refs/heads/not-main",
+            ),
+        ] {
+            let (f, result) = run(INSTRUCTION, BUNDLE, repository, workflow, git_ref);
+            assert_refused(&f, result, "publisher_mismatch");
+        }
+    }
 }

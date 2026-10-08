@@ -1,5 +1,5 @@
-//! `mvmctl pack` - list, roll back and prune the versioned attested-pack
-//! cache. `download`/`update` refuse: no pack class is published today.
+//! `mvmctl pack` - manage the attested-pack cache and signed workload packs.
+//! Attested-pack `download`/`update` refuse: no pack class is published today.
 //!
 //! Mirrors `commands/image/`: a thin `Args`/`Subcommand` shell dispatching to
 //! one submodule per verb, each of which is a thin wrapper over the
@@ -11,7 +11,7 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use mvm_core::packs::PackKind;
 use mvm_core::user_config::MvmConfig;
 
-use super::Cli;
+use super::{Cli, pull, search};
 
 mod download;
 mod inspect;
@@ -87,6 +87,10 @@ pub(in crate::commands) enum PackAction {
         #[arg(long)]
         json: bool,
     },
+    /// Search available workload packs
+    Search(search::Args),
+    /// Fetch, verify, install, and pin a workload pack
+    Pull(pull::Args),
     /// Manage signed registry packs (list/remove/update)
     Registry(registry::Args),
 }
@@ -123,7 +127,7 @@ impl PackKindArg {
     }
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
     match args.action {
         PackAction::List { kind, json } => list::run(kind, json),
         PackAction::Rollback { kind, to } => rollback::run(kind, to),
@@ -136,6 +140,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         PackAction::Update { kind } => update::run(kind),
         PackAction::Info { reference, json } => inspect::run(&reference, json, false),
         PackAction::Verify { reference, json } => inspect::run(&reference, json, true),
-        PackAction::Registry(action) => registry::run(_cli, action, _cfg),
+        PackAction::Search(args) => search::run(cli, args, cfg),
+        PackAction::Pull(args) => pull::run(cli, args, cfg),
+        PackAction::Registry(action) => registry::run(cli, action, cfg),
     }
 }
