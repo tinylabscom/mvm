@@ -45,15 +45,28 @@ pub enum InvocationVerdict {
 /// that never released cannot exhaust the table.
 pub const MAX_LIVE_INVOCATIONS: usize = 256;
 
-struct LiveInvocation {
-    binding: ToolInvocationBinding,
-    tool: String,
+trait ActiveToolTrace: Send {
+    fn finish(self: Box<Self>, outcome: &'static str);
+}
+
+trait ToolTelemetry: Send + Sync {
+    fn start(
+        &self,
+        binding: &ToolInvocationBinding,
+        tool: &str,
+        origin: ToolOrigin,
+    ) -> Box<dyn ActiveToolTrace>;
+}
+
+struct TracingToolTelemetry;
+
+struct TracingToolInvocation {
     span: tracing::Span,
     started: Instant,
 }
 
-impl LiveInvocation {
-    fn finish(self, outcome: &'static str) {
+impl ActiveToolTrace for TracingToolInvocation {
+    fn finish(self: Box<Self>, outcome: &'static str) {
         let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
         self.span.in_scope(|| {
             tracing::info!(
@@ -67,12 +80,55 @@ impl LiveInvocation {
     }
 }
 
+impl ToolTelemetry for TracingToolTelemetry {
+    fn start(
+        &self,
+        binding: &ToolInvocationBinding,
+        tool: &str,
+        origin: ToolOrigin,
+    ) -> Box<dyn ActiveToolTrace> {
+        let binding_id = binding.audit_id();
+        let tool_sha256 = hex::encode(Sha256::digest(tool.as_bytes()));
+        let span = tracing::info_span!(
+            target: "mvm.tool",
+            "mvm.tool.invocation",
+            binding_id = %binding_id,
+            tool_sha256 = %tool_sha256,
+            origin = origin.audit_label(),
+        );
+        span.in_scope(|| {
+            tracing::info!(
+                target: "mvm.tool",
+                phase = "start",
+                "tool invocation started"
+            );
+        });
+        Box::new(TracingToolInvocation {
+            span,
+            started: Instant::now(),
+        })
+    }
+}
+
+struct LiveInvocation {
+    binding: ToolInvocationBinding,
+    tool: String,
+    trace: Box<dyn ActiveToolTrace>,
+}
+
+impl LiveInvocation {
+    fn finish(self, outcome: &'static str) {
+        self.trace.finish(outcome);
+    }
+}
+
 /// Rules, approver and chain recorder for one VM. Constructed only from the
 /// endpoint's admitted plan projection.
 pub struct ToolDecisionGate {
     rules: ToolRules,
     approver: Arc<dyn RuntimeApprover>,
     recorder: Arc<Recorder>,
+    telemetry: Arc<dyn ToolTelemetry>,
     /// Live invocation traces, oldest first.
     invocations: Mutex<VecDeque<LiveInvocation>>,
 }
@@ -85,10 +141,20 @@ impl ToolDecisionGate {
         approver: Arc<dyn RuntimeApprover>,
         recorder: Arc<Recorder>,
     ) -> Self {
+        Self::with_telemetry(rules, approver, recorder, Arc::new(TracingToolTelemetry))
+    }
+
+    fn with_telemetry(
+        rules: ToolRules,
+        approver: Arc<dyn RuntimeApprover>,
+        recorder: Arc<Recorder>,
+        telemetry: Arc<dyn ToolTelemetry>,
+    ) -> Self {
         Self {
             rules,
             approver,
             recorder,
+            telemetry,
             invocations: Mutex::new(VecDeque::new()),
         }
     }
@@ -170,27 +236,11 @@ impl ToolDecisionGate {
     }
 
     fn start_trace(&self, binding: ToolInvocationBinding, tool: &str, origin: ToolOrigin) {
-        let binding_id = binding.audit_id();
-        let tool_sha256 = hex::encode(Sha256::digest(tool.as_bytes()));
-        let span = tracing::info_span!(
-            target: "mvm.tool",
-            "mvm.tool.invocation",
-            binding_id = %binding_id,
-            tool_sha256 = %tool_sha256,
-            origin = origin.audit_label(),
-        );
-        span.in_scope(|| {
-            tracing::info!(
-                target: "mvm.tool",
-                phase = "start",
-                "tool invocation started"
-            );
-        });
+        let trace = self.telemetry.start(&binding, tool, origin);
         let invocation = LiveInvocation {
             binding,
             tool: tool.to_string(),
-            span,
-            started: Instant::now(),
+            trace,
         };
         let mut live = self.live();
         if live.len() >= MAX_LIVE_INVOCATIONS
@@ -268,10 +318,6 @@ mod tests {
 
     use async_trait::async_trait;
     use mvm_core::plan::TenantId;
-    use tracing::Subscriber;
-    use tracing_subscriber::Layer;
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::registry::LookupSpan;
 
     use super::*;
     use crate::supervisor::audit::{CapturingAuditSigner, NoopAuditSigner};
@@ -429,32 +475,32 @@ mod tests {
     }
 
     #[derive(Clone, Default)]
-    struct TraceCapture {
-        spans: Arc<Mutex<Vec<String>>>,
-        events: Arc<Mutex<Vec<String>>>,
+    struct FakeTelemetry {
+        starts: Arc<AtomicUsize>,
+        finishes: Arc<Mutex<Vec<&'static str>>>,
     }
 
-    impl<S> Layer<S> for TraceCapture
-    where
-        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
-    {
-        fn on_new_span(
+    impl ToolTelemetry for FakeTelemetry {
+        fn start(
             &self,
-            attributes: &tracing::span::Attributes<'_>,
-            _id: &tracing::span::Id,
-            _context: Context<'_, S>,
-        ) {
-            self.spans
-                .lock()
-                .unwrap()
-                .push(attributes.metadata().name().to_string());
+            _binding: &ToolInvocationBinding,
+            _tool: &str,
+            _origin: ToolOrigin,
+        ) -> Box<dyn ActiveToolTrace> {
+            self.starts.fetch_add(1, Ordering::Relaxed);
+            Box::new(FakeActiveTrace {
+                finishes: Arc::clone(&self.finishes),
+            })
         }
+    }
 
-        fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
-            self.events
-                .lock()
-                .unwrap()
-                .push(event.metadata().target().to_string());
+    struct FakeActiveTrace {
+        finishes: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl ActiveToolTrace for FakeActiveTrace {
+        fn finish(self: Box<Self>, outcome: &'static str) {
+            self.finishes.lock().unwrap().push(outcome);
         }
     }
 
@@ -481,57 +527,32 @@ mod tests {
         assert_eq!(gate.tool_for(&binding), None);
     }
 
-    #[test]
-    fn an_allowed_tool_has_one_telemetry_span_from_allow_through_release() {
-        let capture = TraceCapture::default();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        tracing::subscriber::with_default(subscriber, || {
-            runtime.block_on(async {
-                let (gate, _signer) = gate(scoped_rules(), approving());
-                let InvocationVerdict::Allow {
-                    binding: Some(binding),
-                } = gate
-                    .decide_invocation(&request("plain", "plain x"), ToolOrigin::GuestBroker)
-                    .await
-                    .expect("audit")
-                else {
-                    panic!("allowed tool use must carry its trace binding");
-                };
+    #[tokio::test]
+    async fn an_allowed_tool_has_one_telemetry_span_from_allow_through_release() {
+        let telemetry = Arc::new(FakeTelemetry::default());
+        let signer = Arc::new(CapturingAuditSigner::new());
+        let recorder = Arc::new(Recorder::new(signer, TenantId("local".into())));
+        let gate = ToolDecisionGate::with_telemetry(
+            scoped_rules(),
+            approving(),
+            recorder,
+            telemetry.clone(),
+        );
+        let InvocationVerdict::Allow {
+            binding: Some(binding),
+        } = gate
+            .decide_invocation(&request("plain", "plain x"), ToolOrigin::GuestBroker)
+            .await
+            .expect("audit")
+        else {
+            panic!("allowed tool use must carry its trace binding");
+        };
 
-                assert_eq!(
-                    capture.spans.lock().unwrap().as_slice(),
-                    ["mvm.tool.invocation"]
-                );
-                assert_eq!(
-                    capture
-                        .events
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|target| target.as_str() == "mvm.tool")
-                        .count(),
-                    1,
-                    "the invocation start is emitted inside the span"
-                );
+        assert_eq!(telemetry.starts.load(Ordering::Relaxed), 1);
+        assert!(telemetry.finishes.lock().unwrap().is_empty());
 
-                gate.release(&binding);
-                assert_eq!(
-                    capture
-                        .events
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .filter(|target| target.as_str() == "mvm.tool")
-                        .count(),
-                    2,
-                    "release emits the matching finish event before closing the span"
-                );
-            });
-        });
+        gate.release(&binding);
+        assert_eq!(telemetry.finishes.lock().unwrap().as_slice(), ["completed"]);
     }
 
     #[tokio::test]
