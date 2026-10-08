@@ -603,7 +603,7 @@ jobs:
           - mvm-client
           - mvm-core
           - mvm-fs
-          # Six, and the number is measured rather than chosen.
+          # Seven, and the number is measured rather than chosen.
           #
           # Raising the count is the second half of the fix; the first is
           # that xtask now packs shards longest-file-first instead of
@@ -614,17 +614,19 @@ jobs:
           # width — on 2026-08-21 shards 2of4 and 4of4 were both killed at
           # 330 minutes while 3of4 finished in 24.
           #
-          # With cost-aware packing the surface splits evenly, and six
-          # shards put the worst at ~181 measured minutes, 55% of the
-          # budget. That headroom is deliberate: two of the per-file costs
-          # behind it are lower bounds, measured on shards that were killed
-          # part-way through a file.
-          - mvm-hostd/1of6
-          - mvm-hostd/2of6
-          - mvm-hostd/3of6
-          - mvm-hostd/4of6
-          - mvm-hostd/5of6
-          - mvm-hostd/6of6
+          # Six stopped providing that headroom on 2026-10-07: 4of6 put
+          # audit/session.rs and supervisor/audit_file.rs together, completed
+          # the first in three hours, and was killed part-way through the
+          # second at 315 minutes. Seven separates those two dominant files;
+          # keep the spare capacity rather than tuning the timeout up toward
+          # the platform cap.
+          - mvm-hostd/1of7
+          - mvm-hostd/2of7
+          - mvm-hostd/3of7
+          - mvm-hostd/4of7
+          - mvm-hostd/5of7
+          - mvm-hostd/6of7
+          - mvm-hostd/7of7
           - mvm-contract
           - mvm-runtime
           - mvm-sdk

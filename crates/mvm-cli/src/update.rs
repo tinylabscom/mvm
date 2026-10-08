@@ -412,6 +412,18 @@ fn refuse_package_install(current_exe: &Path) -> Result<()> {
     }
 }
 
+/// Refuse an in-place update when another installer owns `current_exe`.
+///
+/// Check-only mode never writes the binary, so it remains useful for managed
+/// installs and must skip these refusals.
+fn refuse_managed_install_for_update(check_only: bool, current_exe: &Path) -> Result<()> {
+    if !check_only {
+        refuse_versioned_install(current_exe)?;
+        refuse_package_install(current_exe)?;
+    }
+    Ok(())
+}
+
 /// What to tell a user whose mvmctl came from a distribution package.
 fn package_install_refusal(install: &crate::install_layout::PackageInstall) -> String {
     use crate::install_layout::PackageFormat;
@@ -910,10 +922,7 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     // traffic: the answer does not depend on what the latest release is.
     let current_exe =
         std::env::current_exe().context("Failed to determine path of current executable")?;
-    if !check_only {
-        refuse_versioned_install(&current_exe)?;
-        refuse_package_install(&current_exe)?;
-    }
+    refuse_managed_install_for_update(check_only, &current_exe)?;
 
     let current = current_version();
     ui::info(&format!("Current version: {}", current));
@@ -1123,10 +1132,23 @@ mod tests {
         std::fs::write(release.join(RELEASE_MARKER), "complete\n").unwrap();
         std::fs::write(release.join("mvmctl"), "").unwrap();
 
-        let error = refuse_versioned_install(&release.join("mvmctl"))
+        let error = refuse_managed_install_for_update(false, &release.join("mvmctl"))
             .unwrap_err()
             .to_string();
         assert!(error.contains("install.sh"), "{error}");
+    }
+
+    #[test]
+    fn check_only_allows_a_binary_in_an_install_sh_release_directory() {
+        use crate::install_layout::{LIB_MARKER, RELEASE_MARKER};
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("lib").join("2-v0.18.0");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(root.path().join("lib").join(LIB_MARKER), "").unwrap();
+        std::fs::write(release.join(RELEASE_MARKER), "complete\n").unwrap();
+        std::fs::write(release.join("mvmctl"), "").unwrap();
+
+        assert!(refuse_managed_install_for_update(true, &release.join("mvmctl")).is_ok());
     }
 
     #[test]
@@ -1157,7 +1179,9 @@ mod tests {
     #[test]
     fn update_refuses_a_binary_a_deb_installed_and_names_apt() {
         let (_root, exe) = packaged_binary("deb\n");
-        let error = refuse_package_install(&exe).unwrap_err().to_string();
+        let error = refuse_managed_install_for_update(false, &exe)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("mvmctl .deb package"), "{error}");
         assert!(error.contains("dpkg owns it"), "{error}");
         assert!(

@@ -190,10 +190,12 @@ ideal even split against 1.70x. `xtask`'s
 `cost_packing_balances_a_surface_that_round_robin_left_lopsided` pins the
 ratio against those measurements, and fails on the old assignment.
 
-`mvm-hostd` is cut six ways on top of that, putting the worst shard at
-~181 measured minutes, 55% of the budget. The headroom is deliberate: two
-of the per-file costs behind it are lower bounds, taken from shards killed
-part-way through a file.
+`mvm-hostd` is cut seven ways on top of that. Six stopped leaving usable
+headroom on 2026-10-07: `4of6` spent three hours on `audit/session.rs`,
+then reached only 101 of 137 mutants in `supervisor/audit_file.rs` before
+the mutation step's 315-minute cutoff. Seven-way packing separates those
+two dominant files. The extra shard is deliberate headroom rather than a
+longer timeout close to the platform cap.
 
 These are **accepted rather than scoped out** on purpose. Scoping would
 stop the lane measuring those files at all; accepting keeps the ratchet
