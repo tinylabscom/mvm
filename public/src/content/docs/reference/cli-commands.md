@@ -1362,6 +1362,9 @@ cat ./results/status.txt ./results.manifest.json
 
 ### Run examples
 
+Read-only sized disk mounts require an existing ext4 image. A missing or empty
+read-only image is refused, not created or formatted.
+
 ```bash
 mvmctl run -- uname -a                                # default image
 mvmctl run --manifest minimal -- /bin/true            # named template

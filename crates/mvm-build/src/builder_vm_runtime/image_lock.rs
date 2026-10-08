@@ -1369,6 +1369,29 @@ mod tests {
     }
 
     #[test]
+    fn read_only_volume_refuses_missing_image_without_creating_parent() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let parent = scratch.path().join("absent");
+        let img = parent.join("image.ext4");
+
+        let err = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap_err();
+        assert!(err.to_string().contains("open persistent volume"), "{err}");
+        assert!(!parent.exists());
+        assert!(!img.exists());
+    }
+
+    #[test]
+    fn read_only_volume_refuses_empty_image_without_formatting_it() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let img = scratch.path().join("empty.ext4");
+        std::fs::File::create(&img).unwrap();
+
+        let err = ensure_persistent_volume_image(&img, 16 * 1024 * 1024, true).unwrap_err();
+        assert!(err.to_string().contains("read ext4 superblock"), "{err}");
+        assert_eq!(std::fs::metadata(&img).unwrap().len(), 0);
+    }
+
+    #[test]
     fn ensure_persistent_volume_image_ro_allows_concurrent_and_takes_no_lock() {
         let scratch = tempfile::TempDir::new().unwrap();
         let img = scratch.path().join("ro.img");

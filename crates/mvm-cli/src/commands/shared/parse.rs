@@ -963,6 +963,26 @@ mod volume_spec_tests {
             "a 10M request must produce very nearly 10 MiB, got {len} bytes"
         );
     }
+
+    #[test]
+    fn a_missing_read_only_disk_is_not_created_by_the_cli() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let host = tmp.path().join("missing.img");
+        let volume = VmVolume {
+            materialized_image: None,
+            volume_label: None,
+            host: host.to_string_lossy().into_owned(),
+            guest: "/data".to_string(),
+            size: "10M".to_string(),
+            read_only: true,
+            kind: VmVolumeKind::Disk,
+            encrypted: false,
+        };
+
+        let err = materialize_disk_volume(&volume).expect_err("missing read-only image");
+        assert!(err.to_string().contains("materializing disk volume"));
+        assert!(!host.exists());
+    }
 }
 
 #[cfg(test)]

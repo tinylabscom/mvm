@@ -94,7 +94,8 @@ Rules:
 - a directory's mode must be `ro` — a transient run refuses `:rw` on a
   directory under every profile. A sized disk image
   (`HOST.img:GUEST:SIZE:rw`) may be writable under any profile that accepts
-  `--mount`;
+  `--mount`. A sized read-only disk image (`HOST.img:GUEST:SIZE:ro`) must
+  already exist and contain ext4; MVM never creates or formats it;
 - `GUEST` must be under `/data` or `/work`; every other root is refused, and
   `/mnt/*` is refused specifically so a share cannot shadow the runtime's own
   config and secrets drives;
