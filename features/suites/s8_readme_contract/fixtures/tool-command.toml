@@ -5,11 +5,11 @@ allow = ["python"]
 # python:3.12 ships python3 as a standalone binary. Shared multi-call
 # binaries are refused because they cannot preserve per-tool scope.
 executable = "/usr/local/bin/python3"
-argv = ["python3", "python3 -c *"]
+argv = ["/usr/local/bin/python3", "/usr/local/bin/python3 -c *", "/usr/local/bin/python3 -h"]
 # Help is denied even though the argv pattern above
 # admits it: the live lane exercises both an allowed and a denied
 # workload-origin invocation through the in-guest shim.
-deny = ["python3 -h"]
+deny = ["/usr/local/bin/python3 -h"]
 # A declared route makes every allowed invocation bound, so the persistent
 # lifecycle lane also proves attribution survives restart.
 routes = ["example.com:443"]

@@ -333,6 +333,31 @@ pub(crate) fn run_mvmctl_isolated_live_home(world: &mut CliWorld, args: String) 
     run_mvmctl_isolated_live_home_argv(world, mvm_conformance::doc_examples::tokenize(&args));
 }
 
+#[when("I run the workload-origin scoped-secret live witness")]
+fn run_workload_origin_scoped_secret_live_witness(world: &mut CliWorld) {
+    run_mvmctl_isolated_live_home_argv(world, workload_origin_scoped_secret_argv());
+}
+
+fn workload_origin_scoped_secret_argv() -> Vec<String> {
+    [
+        "machine",
+        "run",
+        "--image",
+        "python:3.12",
+        "--policy",
+        "features/suites/s8_readme_contract/fixtures/tool-workload-origin.toml",
+        "--secret",
+        "tool-live",
+        "--",
+        "/bin/sh",
+        "-c",
+        r#"/usr/local/bin/python3 -c "import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).status==200)" https://httpbin.org/bearer "Bearer $TOOL_LIVE""#,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 /// The live-home run with an already-tokenized argv, so steps that
 /// substitute scenario state (e.g. a staging path) into the command line
 /// reuse exactly the home/cwd/PATH wiring the plain step uses.
@@ -1356,4 +1381,27 @@ fn failure_names_untrusted_key(world: &mut CliWorld) {
         "refusal must say the publisher is untrusted, not fail for some other \
          reason; output was:\n{text}"
     );
+}
+
+#[cfg(test)]
+mod workload_origin_witness_tests {
+    use super::workload_origin_scoped_secret_argv;
+    use std::process::Command;
+
+    #[test]
+    fn shell_receives_one_quoted_command_argument() {
+        let argv = workload_origin_scoped_secret_argv();
+        assert_eq!(&argv[9..11], ["/bin/sh", "-c"]);
+        let script = argv.last().expect("shell command argument exists");
+        assert!(script.contains("\"Bearer $TOOL_LIVE\""));
+        assert!(!script.contains("\\\""));
+        let status = Command::new("/bin/sh")
+            .args(["-n", "-c", script])
+            .status()
+            .expect("run shell syntax check");
+        assert!(
+            status.success(),
+            "workload-origin witness must be valid shell"
+        );
+    }
 }
