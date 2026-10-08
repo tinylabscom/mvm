@@ -28,7 +28,8 @@ impl VolumeImageLock {
 
 /// Materialize and validate a persistent ext4 image, returning its sidecar lock.
 ///
-/// Missing or empty files are sparse-created and formatted in-process. Existing
+/// Missing or empty read-write files are sparse-created and formatted in-process.
+/// Read-only files must already exist and are never created or modified. Existing
 /// files are never resized or reformatted, and are refused unless their ext4
 /// superblock magic is valid.
 pub fn ensure_persistent_volume_image(
@@ -48,6 +49,14 @@ pub(crate) fn ensure_persistent_volume_image_within(
     read_only: bool,
     wait: LockWait,
 ) -> Result<VolumeImageLock, BuilderVmError> {
+    if read_only {
+        validate_ext4(host_path)?;
+        return Ok(VolumeImageLock {
+            path: host_path.to_path_buf(),
+            _lock: None,
+        });
+    }
+
     if let Some(parent) = host_path.parent()
         && !parent.as_os_str().is_empty()
     {
@@ -75,14 +84,10 @@ pub(crate) fn ensure_persistent_volume_image_within(
     }
     validate_ext4(host_path)?;
 
-    let lock = if read_only {
-        None
-    } else {
-        Some(acquire_sidecar_lock_within(
-            &sidecar_lock_path(host_path),
-            wait,
-        )?)
-    };
+    let lock = Some(acquire_sidecar_lock_within(
+        &sidecar_lock_path(host_path),
+        wait,
+    )?);
     Ok(VolumeImageLock {
         path: host_path.to_path_buf(),
         _lock: lock,
