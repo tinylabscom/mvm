@@ -1202,13 +1202,13 @@ mod tests {
     fn open_session_rejects_invalid_argv_before_reserving_anything() {
         let sessions: &'static Mutex<Registry> = Box::leak(Box::new(Mutex::new(Registry::new(64))));
         let request = OpenRequest {
-            argv: vec!["sh".to_string()],
+            argv: vec!["./sh".to_string()],
             ..OpenRequest::default()
         };
         let err = open_session_in(sessions, &request)
             .expect_err("relative command should be rejected before PTY allocation");
         assert!(
-            err.to_string().contains("absolute path"),
+            err.to_string().contains("relative path"),
             "unexpected error: {err}"
         );
         let mut registry = lock(sessions);
