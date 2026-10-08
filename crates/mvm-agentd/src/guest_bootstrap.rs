@@ -1173,13 +1173,14 @@ pub fn plan_declared_substitution(
     let mut plan = Vec::with_capacity(tool_commands.len());
     for (index, (tool, path)) in tool_commands.iter().enumerate() {
         let guest_path = Path::new(path);
-        let resolved =
-            fs::canonicalize(root.join(guest_path.strip_prefix("/").unwrap_or(guest_path)))
-                .map_err(|error| {
-                    format!(
-                        "declared executable {path} for tool {tool} is not present in the image: {error}"
-                    )
-                })?;
+        let resolved = fs::canonicalize(
+            root.join(guest_path.strip_prefix("/").unwrap_or(guest_path)),
+        )
+        .map_err(|error| {
+            format!(
+                "declared executable {path} for tool {tool} is not present in the image: {error}"
+            )
+        })?;
         if !resolved.is_file() {
             return Err(format!(
                 "declared executable {path} for tool {tool} does not resolve to a file"
@@ -1460,9 +1461,11 @@ mod substitution_tests {
     #[test]
     fn a_standalone_tool_with_aliases_is_fully_shadowed() {
         let root = image_with_alias();
-        let plan =
-            plan_declared_substitution(&tools(&[("python", "/usr/local/bin/python3")]), root.path())
-                .expect("plan");
+        let plan = plan_declared_substitution(
+            &tools(&[("python", "/usr/local/bin/python3")]),
+            root.path(),
+        )
+        .expect("plan");
         assert_eq!(plan.len(), 1);
         assert_eq!(
             plan[0].aliases,
@@ -1482,7 +1485,7 @@ mod substitution_tests {
         for alias in [
             "sh", "ls", "cat", "echo", "ash", "sed", "awk", "mkdir", "mount",
         ] {
-            std::os::unix::fs::symlink("../busybox", root.path().join("bin").join(alias))
+            std::os::unix::fs::symlink("busybox", root.path().join("bin").join(alias))
                 .expect("applet symlink");
         }
         let error = plan_declared_substitution(&tools(&[("shell", "/bin/sh")]), root.path())
@@ -1502,7 +1505,10 @@ mod substitution_tests {
     fn a_duplicate_declared_path_is_refused() {
         let root = image_with_alias();
         let error = plan_declared_substitution(
-            &tools(&[("python", "/usr/local/bin/python3"), ("py", "/usr/local/bin/python3")]),
+            &tools(&[
+                ("python", "/usr/local/bin/python3"),
+                ("py", "/usr/local/bin/python3"),
+            ]),
             root.path(),
         )
         .expect_err("ambiguous mapping refused");
@@ -1527,8 +1533,8 @@ mod substitution_tests {
         std::fs::write(root.path().join("run/mvm/decoy"), b"not the tool").expect("decoy");
         std::fs::create_dir_all(root.path().join("opt")).expect("opt dir");
         std::fs::write(root.path().join("opt/tool"), b"tool").expect("tool");
-        let plan =
-            plan_declared_substitution(&tools(&[("tool", "/opt/tool")]), root.path()).expect("plan");
+        let plan = plan_declared_substitution(&tools(&[("tool", "/opt/tool")]), root.path())
+            .expect("plan");
         assert_eq!(plan[0].aliases, vec!["/opt/tool".to_string()]);
     }
 }

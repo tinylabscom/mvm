@@ -105,7 +105,6 @@ fn tool_mediation_for(plan: &ExecutionPlan) -> Result<Option<ToolMediationGrant>
             .map_err(anyhow::Error::msg)?,
     };
     Ok(Some(grant))
-
 }
 
 /// Refuse to mint a grant from a plan whose validity window has closed.
@@ -197,7 +196,6 @@ mod tests {
             Some(ToolMediationGrant {
                 class_gate_only: true,
                 command_map_digest: None,
-
             })
         );
         plan.agent_verbs = Some(Vec::new());
@@ -206,7 +204,6 @@ mod tests {
             Some(ToolMediationGrant {
                 class_gate_only: false,
                 command_map_digest: None,
-
             })
         );
     }
@@ -282,7 +279,6 @@ mod tests {
             Some(ToolMediationGrant {
                 class_gate_only: true,
                 command_map_digest: None,
-
             })
         );
         let key = crate::audit::host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir())

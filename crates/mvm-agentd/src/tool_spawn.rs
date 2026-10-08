@@ -224,9 +224,12 @@ fn send_request(stream: &UnixStream, request: &SpawnRequest, fds: &[OwnedFd]) ->
     if bytes.len() > MAX_TOOL_ARGV_BYTES + MAX_ENV_BYTES {
         return Err(invalid_data("request exceeds the mediation size cap"));
     }
+    let frame_len = u32::try_from(bytes.len())
+        .map_err(|_| invalid_data("request exceeds the mediation size cap"))?
+        .to_le_bytes();
     let mut iov = libc::iovec {
-        iov_base: bytes.as_ptr().cast_mut().cast(),
-        iov_len: bytes.len(),
+        iov_base: frame_len.as_ptr().cast_mut().cast(),
+        iov_len: frame_len.len(),
     };
     let mut control = [0u8; 128];
     // One cmsghdr carrying `fds.len()` raw fds. The length is computed by
@@ -263,11 +266,12 @@ fn send_request(stream: &UnixStream, request: &SpawnRequest, fds: &[OwnedFd]) ->
         if sent < 0 {
             return Err(io::Error::last_os_error());
         }
-        if sent as usize != bytes.len() {
+        if sent as usize != frame_len.len() {
             return Err(invalid_data("short send of the mediation request"));
         }
     }
-    Ok(())
+    let mut writer = stream;
+    writer.write_all(&bytes)
 }
 
 /// Receive the request frame and its attached fds, validating the count.
@@ -433,8 +437,7 @@ fn broker_call(verb: &str, payload: serde_json::Value) -> Option<serde_json::Val
         payload,
         capability: None,
     };
-    crate::broker_client::broker_call_bounded(&call, Duration::from_secs(10), DECIDE_TIMEOUT)
-        .ok()
+    crate::broker_client::broker_call_bounded(&call, Duration::from_secs(10), DECIDE_TIMEOUT).ok()
 }
 
 // ============================================================================

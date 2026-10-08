@@ -695,7 +695,6 @@ mod tests {
             tool_mediation: Some(ToolMediationGrant {
                 class_gate_only: true,
                 command_map_digest: None,
-
             }),
             sig: vec![],
         };
@@ -790,7 +789,6 @@ mod tests {
             tool_mediation: Some(ToolMediationGrant {
                 class_gate_only: false,
                 command_map_digest: None,
-
             }),
             sig: vec![],
         };

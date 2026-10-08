@@ -1931,7 +1931,7 @@ tmpfs /tmp tmpfs rw,nosuid,nodev,relatime 0 0
             .find("pivot_to_root(")
             .expect("activation must still pivot into the workload root");
         let bootstrap = init
-            .find("bootstrap_guest_environment()?")
+            .find("bootstrap_guest_environment(&env.tool_commands)?")
             .expect("activation must still run the provisioning steps");
         let drop = init
             .find("drop_guest_agent_privilege(")

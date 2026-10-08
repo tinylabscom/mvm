@@ -554,7 +554,7 @@ mod tests {
     fn the_identity_drive_is_provisioned_before_the_trust_bundle_is_built() {
         let source = include_str!("guest_bootstrap.rs");
         let body = source
-            .split_once("pub fn provision_guest_environment()")
+            .split_once("pub fn provision_guest_environment(")
             .expect("the shared bootstrap is in that file")
             .1;
         let identity = body
