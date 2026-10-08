@@ -305,7 +305,7 @@ Feature: every README-documented CLI launch mode boots a real guest
     Then the launch succeeds
     When I launch "machine inspect e2e-web"
     Then the launch succeeds
-    When I launch "machine ls"
+    When I launch "machine ps"
     Then the launch succeeds
     And the output mentions "e2e-web"
     When I launch "machine stop e2e-web --yes"

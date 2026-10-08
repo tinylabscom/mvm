@@ -523,6 +523,14 @@ pub fn registry_pack_publisher_policy_path() -> std::path::PathBuf {
         .join("publishers.toml")
 }
 
+/// Owner-only cache for the signed registry-pack revocation feed and its
+/// independently persisted rollback checkpoint.
+pub fn registry_pack_revocation_store_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(mvm_home())
+        .join("registry")
+        .join("revocations")
+}
+
 // ============================================================================
 // Per-VM host-side state paths
 // ============================================================================

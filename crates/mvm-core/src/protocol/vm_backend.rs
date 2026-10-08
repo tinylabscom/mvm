@@ -515,6 +515,15 @@ pub trait VmBackend: Send + Sync {
     /// Stop a running VM.
     fn stop(&self, id: &VmId) -> Result<()>;
 
+    /// Abort a VM whose launch has not been accepted.
+    ///
+    /// This path must not require guest cooperation: it is used precisely when
+    /// the guest control plane never became ready. Backends with no separate
+    /// graceful preparation may use their ordinary stop implementation.
+    fn abort_start(&self, id: &VmId) -> Result<()> {
+        self.stop(id)
+    }
+
     /// Fast teardown for an *ephemeral* VM — a transient `run` / `machine run`
     /// guest whose command has already returned, so there is nothing to
     /// flush. Implementors may skip the graceful-shutdown grace and kill the

@@ -16,6 +16,10 @@ pub const MAX_TOOL_ARGV_BYTES: usize = 16 * 1024;
 pub struct ToolCheckRequest {
     /// Name in the admitted plan's tool rules.
     pub tool: String,
+    /// Actual argv[0] the guest will spawn. A missing or differing path
+    /// cannot receive command authority from the signed plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
     /// Exact command line to compare with the admitted argv patterns.
     pub argv: String,
 }
@@ -25,6 +29,7 @@ impl fmt::Debug for ToolCheckRequest {
         formatter
             .debug_struct("ToolCheckRequest")
             .field("tool", &"[redacted]")
+            .field("executable", &"[redacted]")
             .field("argv", &"[redacted]")
             .finish()
     }
@@ -71,6 +76,7 @@ impl ToolCheckRequest {
         }
         let request = Self {
             tool,
+            executable: Some(first.clone()),
             argv: command_line,
         };
         request.is_valid().then_some(request)
@@ -82,6 +88,10 @@ impl ToolCheckRequest {
         !self.tool.is_empty()
             && self.tool.len() <= MAX_TOOL_NAME_BYTES
             && !self.tool.contains('\0')
+            && self
+                .executable
+                .as_ref()
+                .is_none_or(|path| !path.is_empty() && path.len() <= 4096 && !path.contains('\0'))
             && !self.argv.is_empty()
             && self.argv.len() <= MAX_TOOL_ARGV_BYTES
             && !self.argv.contains('\0')
@@ -138,6 +148,7 @@ mod tests {
     fn request_roundtrips_and_rejects_unknown_fields() {
         let request = ToolCheckRequest {
             tool: "shell".into(),
+            executable: Some("/bin/echo".into()),
             argv: "echo ok".into(),
         };
         let json = serde_json::to_vec(&request).expect("serialize");
@@ -157,6 +168,7 @@ mod tests {
     fn request_validation_covers_empty_oversized_and_nul_fields() {
         let mut request = ToolCheckRequest {
             tool: "shell".into(),
+            executable: Some("/bin/echo".into()),
             argv: "echo ok".into(),
         };
         assert!(request.is_valid());
@@ -171,16 +183,21 @@ mod tests {
         assert!(!request.is_valid());
         request.argv = "x\0y".into();
         assert!(!request.is_valid());
+        request.argv = "echo ok".into();
+        request.executable = Some("/bin/\0echo".into());
+        assert!(!request.is_valid());
     }
 
     #[test]
     fn debug_never_prints_the_tool_or_command() {
         let request = ToolCheckRequest {
             tool: "private-tool".into(),
+            executable: Some("/bin/private-tool".into()),
             argv: "secret-on-command-line".into(),
         };
         let debug = alloc::format!("{request:?}");
         assert!(!debug.contains("private-tool"));
+        assert!(!debug.contains("/bin/private-tool"));
         assert!(!debug.contains("secret-on-command-line"));
     }
 
@@ -191,6 +208,7 @@ mod tests {
             &["git".into(), "status; rm -rf /".into(), "a'b".into()],
         )
         .expect("valid argv");
+        assert_eq!(request.executable.as_deref(), Some("git"));
         assert_eq!(request.argv, "git 'status; rm -rf /' 'a'\\''b'");
         assert!(ToolCheckRequest::from_argv("git".into(), &[]).is_none());
         assert!(ToolCheckRequest::from_argv("git".into(), &["".into()]).is_none());

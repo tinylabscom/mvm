@@ -2050,6 +2050,37 @@ fn list_inspect_and_remove_parse() {
 }
 
 #[test]
+fn canonical_machine_lifecycle_and_compatibility_spellings_parse() {
+    assert!(matches!(parse(&["ps"]).unwrap(), MachineAction::Ls(_)));
+    assert!(matches!(parse(&["ls"]).unwrap(), MachineAction::Ls(_)));
+    for verb in ["attach", "console"] {
+        assert!(matches!(
+            parse(&[verb, "web"]).unwrap(),
+            MachineAction::Console(_)
+        ));
+    }
+    assert!(matches!(
+        parse(&["detach", "web"]).unwrap(),
+        MachineAction::Detach(_)
+    ));
+    let MachineAction::Logs(logs) = parse(&["logs", "-f", "web"]).unwrap() else {
+        panic!("expected logs action");
+    };
+    assert!(logs.follow);
+    assert!(matches!(
+        parse(&["stop", "web", "--yes"]).unwrap(),
+        MachineAction::Stop(_)
+    ));
+    assert!(matches!(
+        parse(&["inspect", "web"]).unwrap(),
+        MachineAction::Inspect(_)
+    ));
+    let help = TestCli::command().render_help().to_string();
+    assert!(help.contains("  ps "), "{help}");
+    assert!(help.contains("  attach "), "{help}");
+}
+
+#[test]
 fn rm_parses_multiple_names_and_all() {
     match parse(&["rm", "web", "db", "cache", "--yes"]).expect("parse") {
         MachineAction::Rm(args) => {

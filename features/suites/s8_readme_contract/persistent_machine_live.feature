@@ -22,6 +22,19 @@ Feature: README persistent machine lifecycle works end to end
     When I run mvmctl in the isolated mvm home with "machine rm bdd-readme-web --yes"
     Then the command exits with code 0
 
+  @live @firecracker @ci_live
+  Scenario: detached start returns only after the guest control channel answers
+    Given an isolated mvm home on encrypted backing storage
+    When I run mvmctl in an isolated live home with "machine run -d --name bdd-detached-ready --image alpine"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine ps"
+    Then the command exits with code 0
+    And the output contains "bdd-detached-ready"
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-detached-ready -- /bin/true"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-detached-ready --yes"
+    Then the command exits with code 0
+
   @live @firecracker @tool_live
   Scenario: a persistent machine mediates declared and bound commands across restart
     Given an isolated mvm home on encrypted backing storage
@@ -29,14 +42,17 @@ Feature: README persistent machine lifecycle works end to end
     Then the command exits with code 0
     When I run mvmctl in an isolated live home with "machine start bdd-tool-command"
     Then the command exits with code 0
-    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- sh -c 'echo mediated-ok'"
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- /bin/sh -c 'echo mediated-ok'"
     Then the command exits with code 0
     And the output contains "mediated-ok"
     When I run mvmctl in the isolated mvm home with "machine restart bdd-tool-command"
     Then the command exits with code 0
-    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- sh -c 'echo mediated-after-restart'"
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- /bin/sh -c 'echo mediated-after-restart'"
     Then the command exits with code 0
     And the output contains "mediated-after-restart"
+    When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool shell -- sh -c 'echo alias-should-not-run'"
+    Then the command exits with code 1
+    And the output does not contain "alias-should-not-run"
     When I run mvmctl in the isolated mvm home with "machine exec bdd-tool-command --tool unlisted -- sh -c 'echo should-not-run'"
     Then the command exits with code 1
     And the output does not contain "should-not-run"

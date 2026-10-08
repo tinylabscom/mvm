@@ -121,7 +121,7 @@ pub(in crate::commands) enum MachineAction {
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
     /// List persistent and transient microVMs
-    #[command(name = "ls", visible_alias = "ps", display_order = 7)]
+    #[command(name = "ps", visible_alias = "ls", display_order = 7)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
     #[command(display_order = 8)]
@@ -140,8 +140,9 @@ pub(in crate::commands) enum MachineAction {
     Logs(super::vm::logs::Args),
     /// Attach to a development VM's console session, or start one
     #[command(
+        name = "attach",
         display_order = 13,
-        visible_alias = "attach",
+        visible_alias = "console",
         after_help = super::vm::console::CONSOLE_SESSION_HELP
     )]
     Console(super::vm::console::Args),

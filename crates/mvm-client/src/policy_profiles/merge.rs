@@ -866,6 +866,15 @@ fn validate_tool_detail(
     detail: &crate::policy_profiles::model::ToolDetail,
 ) -> Result<(), PolicyError> {
     let key = |field: &str| format!("tools.detail.{tool}.{field}");
+    if let Some(executable) = &detail.executable
+        && !mvm_contract::policy::tool_rules::normalized_executable_path(executable)
+    {
+        return Err(layer_error(
+            layer,
+            &key("executable"),
+            "executable must be a normalized absolute guest path without aliases",
+        ));
+    }
     for pattern in &detail.argv {
         validate_argv_pattern(layer, &key("argv"), pattern)?;
     }
@@ -916,6 +925,24 @@ fn narrow_tool_detail(
             Ok(new.to_vec())
         };
     let argv = narrowed("argv", &merged.argv, &incoming.argv)?;
+    let executable = match (&merged.executable, &incoming.executable) {
+        (Some(existing), Some(new)) if existing != new => {
+            return Err(layer_error(
+                layer,
+                &format!("tools.detail.{tool}.executable"),
+                "a later layer cannot redirect a tool's executable",
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(layer_error(
+                layer,
+                &format!("tools.detail.{tool}.executable"),
+                "a later layer cannot add command authority to an existing tool",
+            ));
+        }
+        (Some(existing), _) => Some(existing.clone()),
+        (None, None) => None,
+    };
     let routes = narrowed("routes", &merged.routes, &incoming.routes)?;
     let secrets = narrowed("secrets", &merged.secrets, &incoming.secrets)?;
     let mut deny_argv = merged.deny.clone();
@@ -925,6 +952,7 @@ fn narrow_tool_detail(
         }
     }
     *merged = ToolDetail {
+        executable,
         argv,
         deny: deny_argv,
         routes,

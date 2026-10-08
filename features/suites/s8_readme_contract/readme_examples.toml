@@ -96,7 +96,7 @@ command = "mvmctl machine rm web"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
 
 [[example]]
-command = "mvmctl machine ls"
+command = "mvmctl machine ps"
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented persistent machine lifecycle operates one guest"
 
 [[example]]

@@ -1702,6 +1702,7 @@ StreamInputResult = Union[StreamInputResult1, StreamInputResult2, StreamInputRes
 class ToolCheckRequest:
     argv: str
     tool: str
+    executable: Optional[str] = None
 
 
 @dataclass

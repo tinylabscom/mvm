@@ -86,6 +86,7 @@ mod tests {
     fn question() -> ToolCheckRequest {
         ToolCheckRequest {
             tool: "read".into(),
+            executable: Some("/bin/read".into()),
             argv: "read private-file".into(),
         }
     }

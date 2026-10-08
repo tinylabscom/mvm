@@ -642,11 +642,7 @@ impl FlowMuxSession {
             .runtime_handle
             .as_ref()
             .zip(self.substitution.as_ref())
-            .and_then(|(runtime, service)| {
-                runtime
-                    .block_on(service.decide_tool(&request.tool, &request.argv))
-                    .ok()
-            });
+            .and_then(|(runtime, service)| runtime.block_on(service.decide_tool(&request)).ok());
         match verdict {
             Some(crate::supervisor::tool_decision::ToolVerdict::Allow) => {
                 self.write_frame(Opcode::ToolAllowed, 0, &[])
@@ -2420,6 +2416,14 @@ mod tests {
             ToolRules {
                 allow: vec!["read".into()],
                 deny: vec!["write".into()],
+                detail: [(
+                    "read".into(),
+                    mvm_contract::policy::tool_rules::ToolRuleDetail {
+                        executable: Some("/bin/read".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
                 ..ToolRules::default()
             },
             Arc::new(NoApprovalBackend),
@@ -2436,6 +2440,7 @@ mod tests {
         for (tool, expected) in [("read", Opcode::ToolAllowed), ("write", Opcode::ToolDenied)] {
             let payload = serde_json::to_vec(&ToolCheckRequest {
                 tool: tool.into(),
+                executable: Some(format!("/bin/{tool}")),
                 argv: format!("{tool} data"),
             })
             .expect("encode invocation");
@@ -2478,6 +2483,7 @@ mod tests {
         rules.detail.insert(
             "fetch".into(),
             ToolRuleDetail {
+                executable: Some("/bin/fetch".into()),
                 routes: vec![target.clone()],
                 ..Default::default()
             },
@@ -2491,7 +2497,11 @@ mod tests {
         ));
         let binding = match tokio::runtime::Runtime::new()
             .expect("runtime")
-            .block_on(tool_gate.decide_invocation("fetch", "fetch it"))
+            .block_on(tool_gate.decide_invocation(&ToolCheckRequest {
+                tool: "fetch".into(),
+                executable: Some("/bin/fetch".into()),
+                argv: "fetch it".into(),
+            }))
             .expect("audited decision")
         {
             InvocationVerdict::Allow {
@@ -2553,6 +2563,7 @@ mod tests {
         let (mut guest, mut session, host) = run_session(EgressGate::default_deny());
         let payload = serde_json::to_vec(&ToolCheckRequest {
             tool: "read".into(),
+            executable: Some("/bin/read".into()),
             argv: "read data".into(),
         })
         .expect("encode invocation");

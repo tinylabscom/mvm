@@ -199,16 +199,66 @@ pub fn verify_signed_payload_under_any_identity(
     identities: &[&str],
     expected_issuer: &str,
 ) -> VerifyResult<()> {
+    verify_signed_payload_and_signer_under_any_identity(
+        payload_bytes,
+        cosign_bundle,
+        identities,
+        expected_issuer,
+    )
+    .map(|_| ())
+}
+
+/// Verify against a closed identity set and return the identity that signed
+/// the payload. The returned signer is the certificate subject that satisfied
+/// the exact-identity policy, not a name copied from the payload.
+pub fn verify_signed_payload_and_signer_under_any_identity(
+    payload_bytes: &[u8],
+    cosign_bundle: &[u8],
+    identities: &[&str],
+    expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
     let mut failure: Option<VerifyError> = None;
     for identity in identities {
-        match verify_signed_payload(payload_bytes, cosign_bundle, identity, expected_issuer) {
-            Ok(()) => return Ok(()),
+        match verify_signed_payload_with_signer(
+            payload_bytes,
+            cosign_bundle,
+            identity,
+            expected_issuer,
+        ) {
+            Ok(signer) => return Ok(signer),
             Err(error) => failure = Some(error),
         }
     }
     Err(failure.unwrap_or_else(|| VerifyError::SignatureInvalid {
         reason: "no accepted identities configured for keyless verification".to_string(),
     }))
+}
+
+#[cfg(feature = "manifest-verify")]
+fn verify_signed_payload_with_signer(
+    payload_bytes: &[u8],
+    cosign_bundle: &[u8],
+    expected_identity: &str,
+    expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
+    verify_cosign_bundle(
+        payload_bytes,
+        cosign_bundle,
+        Some(expected_identity),
+        expected_issuer,
+    )
+}
+
+#[cfg(not(feature = "manifest-verify"))]
+fn verify_signed_payload_with_signer(
+    _payload_bytes: &[u8],
+    _cosign_bundle: &[u8],
+    _expected_identity: &str,
+    _expected_issuer: &str,
+) -> VerifyResult<VerifiedSigner> {
+    Err(VerifyError::SignatureInvalid {
+        reason: VERIFIER_DISABLED_REASON.to_string(),
+    })
 }
 
 /// Stream a file through SHA-256 and return the lowercase hex digest.

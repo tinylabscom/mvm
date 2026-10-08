@@ -167,9 +167,7 @@ impl SubstitutionService {
             }
             ConnectorRequest::Tool(request) => {
                 anyhow::ensure!(request.is_valid(), "invalid tool invocation");
-                let decision = self
-                    .decide_tool_invocation(&request.tool, &request.argv)
-                    .await;
+                let decision = self.decide_tool_invocation(&request).await;
                 let response = match decision {
                     Ok(InvocationVerdict::Allow { binding: None }) => ToolDecisionReply::Allow,
                     Ok(InvocationVerdict::Allow {
@@ -238,6 +236,14 @@ mod server_tests {
             ToolRules {
                 allow: vec!["read".into()],
                 deny: vec!["write".into()],
+                detail: [(
+                    "read".into(),
+                    mvm_contract::policy::tool_rules::ToolRuleDetail {
+                        executable: Some("/bin/read".into()),
+                        ..Default::default()
+                    },
+                )]
+                .into(),
                 ..ToolRules::default()
             },
             Arc::new(NoApprovalBackend),
@@ -255,6 +261,7 @@ mod server_tests {
                 tokio::spawn(async move { service.handle_connector_connection(server).await });
             let request = ToolCheckRequest {
                 tool: tool.into(),
+                executable: Some(format!("/bin/{tool}")),
                 argv: format!("{tool} data"),
             };
             write_json_frame(&mut client, &request)
@@ -306,6 +313,7 @@ mod server_tests {
             tokio::spawn(async move { service.handle_connector_connection(server).await });
         let invalid = ToolCheckRequest {
             tool: String::new(),
+            executable: Some("/bin/echo".into()),
             argv: "echo hello".into(),
         };
         write_json_frame(&mut client, &invalid)

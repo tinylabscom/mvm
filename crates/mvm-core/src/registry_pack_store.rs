@@ -537,15 +537,18 @@ mod tests {
         _payload: &[u8],
         _bundle: &[u8],
         _trust: &crate::packs::KeylessTrust,
-    ) -> Result<(), RegistryPackVerificationError> {
-        Ok(())
+    ) -> Result<crate::crypto::image_verify::VerifiedSigner, RegistryPackVerificationError> {
+        Ok(crate::crypto::image_verify::VerifiedSigner {
+            identity: crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY.to_string(),
+            issuer: crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER.to_string(),
+        })
     }
 
     fn reject(
         _payload: &[u8],
         _bundle: &[u8],
         _trust: &crate::packs::KeylessTrust,
-    ) -> Result<(), RegistryPackVerificationError> {
+    ) -> Result<crate::crypto::image_verify::VerifiedSigner, RegistryPackVerificationError> {
         Err(RegistryPackVerificationError::SignatureInvalid(
             "test refusal".to_string(),
         ))
