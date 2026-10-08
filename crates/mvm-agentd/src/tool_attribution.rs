@@ -513,10 +513,10 @@ impl ProcSource for Procfs {
     }
 
     fn fd_targets(&self, pid: u32) -> Vec<String> {
-        // A tool invocation's descriptors are readable only with the tool
-        // group's credentials; a workload process's only without them. The
-        // agent holds the tool group as its saved gid, so this thread takes it
-        // as its filesystem gid for the second look and gives it back.
+        // A tool under the distinct tool uid hides its descriptor links from
+        // the agent. The helper verifies those sockets under that uid when
+        // no readable holder exists. The saved tool gid fallback covers
+        // host-initiated commands that differ only by group.
         let found = read_fd_targets(pid);
         if !found.is_empty() {
             return found;
