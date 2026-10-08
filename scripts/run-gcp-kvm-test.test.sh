@@ -89,6 +89,11 @@ grep -Fq 'COPYFILE_DISABLE=1 tar' "$runner"
 remote_runner="$repo_root/scripts/run-gcp-kvm-test-remote.sh"
 grep -Fq 'selecting the canonical Ubuntu archive mirror' "$remote_runner"
 grep -Fq 'archive.ubuntu.com/ubuntu' "$remote_runner"
+grep -Fq 'just_version=1.58.0' "$remote_runner"
+grep -Fq 'just_sha256=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d' "$remote_runner"
+# This is a literal source fragment, not an expression for this test shell.
+# shellcheck disable=SC2016
+grep -Fq '[[ "$(just --version)" == "just $just_version" ]]' "$remote_runner"
 grep -Fq 'firecracker_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558' "$remote_runner"
 grep -Fq '| sha256sum -c -' "$remote_runner"
 
