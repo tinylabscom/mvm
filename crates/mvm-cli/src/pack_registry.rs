@@ -1,4 +1,4 @@
-//! Registry client for signed product packs (PS-06).
+//! Registry client for signed product packs.
 //!
 //! Fetches the pack index and pack payloads over HTTP(S) (or `file://` for
 //! tests and air-gapped mirrors), then hands every byte to
@@ -21,8 +21,8 @@ use mvm_core::registry_pack::{
     VerifiedRegistryPack, adopt_registry_pack, verify_registry_pack,
 };
 use mvm_core::registry_pack_store::{
-    PackPolicyDocument, adopt_install_and_pin, load_pack_lockfile,
-    load_publisher_policy_or_official_default, read_pack_policy_document,
+    PackPolicyDocument, adopt_install_and_pin, check_registry_pack_revocations_if_configured,
+    load_pack_lockfile, load_publisher_policy_or_official_default, read_pack_policy_document,
 };
 
 /// Environment override for the pack registry base URL.
@@ -456,6 +456,7 @@ fn pull_one(
             publisher_policy: &policy,
         })?
     };
+    check_registry_pack_revocations_if_configured(&verified)?;
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.

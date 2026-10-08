@@ -193,7 +193,7 @@ pub fn verify_registry_pack_revocations(
 }
 
 #[cfg(any(feature = "manifest-verify", test))]
-fn verify_registry_pack_revocations_with<F>(
+pub(crate) fn verify_registry_pack_revocations_with<F>(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,

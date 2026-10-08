@@ -10,6 +10,7 @@ use mvm_core::user_config::MvmConfig;
 use super::super::Cli;
 
 mod ls;
+mod revocations;
 mod rm;
 mod update;
 
@@ -27,6 +28,8 @@ pub(in crate::commands) enum RegistryAction {
     Rm(RmArgs),
     /// Re-pull a pack, adopting a newer published version when there is one
     Update(UpdateArgs),
+    /// Verify and update the locally cached signed revocation feed
+    Revocations(revocations::Args),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -55,5 +58,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         RegistryAction::Ls(action) => ls::run(action),
         RegistryAction::Rm(action) => rm::run(action),
         RegistryAction::Update(action) => update::run(action),
+        RegistryAction::Revocations(action) => revocations::run(action),
     }
 }

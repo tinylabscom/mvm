@@ -7,6 +7,36 @@ use clap::Parser;
 use std::path::Path;
 
 #[test]
+fn registry_revocation_update_requires_both_local_files() {
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "pack",
+            "registry",
+            "revocations",
+            "update",
+            "--document",
+            "/tmp/revocations.json",
+            "--bundle",
+            "/tmp/revocations.sigstore.json",
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "mvmctl",
+            "pack",
+            "registry",
+            "revocations",
+            "update",
+            "--document",
+            "/tmp/revocations.json",
+        ])
+        .is_err()
+    );
+}
+
+#[test]
 fn installed_pack_inspection_commands_parse() {
     let info = Cli::try_parse_from(["mvmctl", "pack", "info", "runtime/go", "--json"])
         .expect("pack info parse");
