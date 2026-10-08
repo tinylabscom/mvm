@@ -583,6 +583,34 @@ fn ci_full() -> String {
     fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
 }
 
+#[test]
+fn workspace_archive_workers_have_the_guest_binary_producer_toolchain() {
+    let worker = fs::read_to_string(".github/workflows/workspace-shard.yml")
+        .expect("read workspace shard worker");
+    let install = worker
+        .find("- uses: ./.github/actions/install-zigbuild")
+        .expect("GitHub workspace workers install the pinned Zig toolchain");
+    let archive = worker
+        .find("- name: Run archived workspace tests")
+        .expect("archive worker executes workspace tests");
+    assert!(
+        install < archive,
+        "toolchain must be installed before tests"
+    );
+    assert!(
+        worker.contains(
+            "- uses: ./.github/actions/install-zigbuild\n        if: inputs.runner_kind == 'github'"
+        ),
+        "the installer must run on GitHub-hosted shard workers"
+    );
+    for binary in ["command -v zig", "command -v cargo-zigbuild"] {
+        assert!(
+            worker.contains(binary),
+            "self-hosted worker must verify {binary}"
+        );
+    }
+}
+
 fn source_bootstrap_script() -> String {
     fs::read_to_string("scripts/e2e-source-bootstrap.sh").expect("read source bootstrap witness")
 }
