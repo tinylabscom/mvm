@@ -188,38 +188,44 @@ policy trusting exactly that workflow and ref, and uploads the bundles as the
 in the composite action `.github/actions/sign-instructions`, which is what
 another repository calls.
 
-### Where the bundles are published
+### How bundles reach the repository
 
-The bundles are published as that workflow artifact, not committed next to the
-files. Committing them was the obvious reading of "bundles beside the files" and
-was rejected for two reasons:
+The signing workflow is deliberately read-only. It signs under the main
+workflow identity, verifies the fresh bundles, and uploads them as the
+`instruction-signatures` artifact of that run. It does not push to `main`, open
+a pull request, or hold repository write permission: code that can trigger the
+signer must not also be able to decide what `main` vouches for.
 
-- **Nothing can land them automatically.** The signing job holds no write
-  access, deliberately: a workflow that pushed its own signatures to `main`
-  would let anything able to trigger it decide what `main` vouches for. Opening
-  a pull request instead is not available either — GitHub Actions is not
-  permitted to create pull requests in this repository; the release workflow's
-  prebuilt-pin job already fails there after pushing its branch.
-- **A committed bundle is wrong as often as it is right.** Every edit to
-  `CLAUDE.md` or `AGENTS.md` invalidates its bundle the moment it merges, and
-  the replacement could only follow in a second, hand-landed pull request.
-  These two files changed in 27 commits over the two weeks to 2026-10-04, so a
-  checkout of `main` would carry a bundle that fails as `bad_signature` for
-  much of the time — under `deny`, no better than carrying none.
+The intended publishing model is therefore a reviewed follow-up pull request:
 
-The verifier is unchanged by this: it reads `<file>.sigstore.json` beside the
-file, wherever the sidecar came from. Verifying a checkout is a download into
-it:
+1. merge the instruction-file change to `main`;
+2. let the read-only workflow generate keyless bundles for that exact `main`
+   revision under the main workflow identity;
+3. download the workflow artifact and commit its bundles beside the instruction
+   files in a separate bundle pull request; and
+4. review and merge that pull request normally.
+
+This is unavoidably a two-step process. Between the instruction change merging
+and its bundle pull request merging, `main` has either no bundle for the changed
+file or the previous, now-stale bundle. Another instruction edit can also make
+a pending bundle pull request stale before it lands. Do not describe a bundle
+as committed merely because the signing run succeeded: it is committed only
+after the follow-up bundle pull request has merged.
+
+To verify a checkout during that window, download the signing artifact whose
+`headSha` corresponds to the instruction-file contents in the checkout, place
+its sidecars beside the files, and run the verifier:
 
 ```sh
-# The most recent signing run on main. For an older checkout, pick the run
-# whose head commit has the same instruction files as yours
-# (`gh run list ... --json databaseId,headSha`).
-run=$(gh run list --repo tinylabscom/mvm --workflow sign-instructions.yml \
-  --branch main --status success --limit 1 --json databaseId --jq '.[0].databaseId')
+# Find a successful signing run. Confirm its headSha is the revision whose
+# instruction files your checkout contains before downloading its artifact.
+gh run list --repo tinylabscom/mvm --workflow sign-instructions.yml \
+  --branch main --status success --limit 20 \
+  --json databaseId,headSha
 
-# Writes CLAUDE.md.sigstore.json and the rest beside the files they sign.
-gh run download "$run" --repo tinylabscom/mvm --name instruction-signatures --dir .
+run=<matching-database-id>
+gh run download "$run" --repo tinylabscom/mvm \
+  --name instruction-signatures --dir .
 
 cat > mvm-instructions.toml <<'POLICY'
 enforcement = "deny"
@@ -236,12 +242,12 @@ POLICY
 mvmctl trust instructions verify . --policy mvm-instructions.toml
 ```
 
-A file edited since that run fails as `bad_signature`, which is the point. The
-downloaded sidecars are untracked; a `--mount` of the checkout carries them into
-the image admission scans, so the same files verify at boot.
-
-The artifact expires 90 days after the last instruction-file edit. A manual
-dispatch of the workflow on `main` signs the current files again.
+A checkout with committed sidecars needs no download, but verification is still
+the authority: `mvmctl trust instructions verify` detects an absent bundle and
+reports a bundle made stale by later edits as `bad_signature`. Downloaded
+sidecars remain untracked unless they are being prepared for the reviewed
+follow-up bundle pull request. The artifact expires 90 days after the signing
+run; a manual dispatch on `main` can regenerate bundles for the current files.
 
 ### Signing another repository
 
@@ -322,9 +328,10 @@ their signature sidecars out of that image — the bytes the guest will mount �
 rather than out of the directory they were copied from. The image is read in
 place; nothing is extracted to the host first.
 
-For a persistent machine this covers a `--rw` private copy reused across
-restarts and a snapshot refreshed after a host edit. An image that cannot be
-read fails admission.
+For a persistent machine this covers the snapshot reused across restarts and
+refreshed after a host edit. Host-directory snapshots are always attached
+read-only, even when the original mount request asked for write access. An image
+that cannot be read fails admission.
 
 Managed block volumes are not scanned. They hold guest-owned data with no host
 directory behind them, so they are not a host input, and an instruction file the
@@ -337,9 +344,10 @@ guest writes into one is outside this gate by design.
   private copy-on-write clone — not a live share, for transient runs and
   `machine run -d` alike, and it is scanned at every admission. What the guest
   reads is fixed at boot.
-- **`:rw` mounts are writable inside the guest.** `--mount` is read-only unless
-  `:rw` is given; with `:rw` an in-guest process can rewrite its own copy for
-  the rest of that boot. A transient run discards the copy on exit.
+- **Host-directory snapshots are read-only in the guest.** A requested `:rw`
+  or `--rw` mode does not make the materialized image writable. Admission scans
+  those snapshot bytes, so every backend attaches them read-only. Managed block
+  volumes remain guest-owned storage and retain their requested access mode.
 - **The image is scanned once, at admission.** It is not re-scanned when it is
   attached. The share's content digest recorded in the plan is re-checked at
   attach time, so a host edit made after admission is refused rather than

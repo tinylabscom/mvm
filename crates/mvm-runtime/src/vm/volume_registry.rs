@@ -485,7 +485,10 @@ fn resolve_mount_entry(
         volume_name,
         host_path,
         guest_path,
-        read_only: entry.read_only,
+        // A host-directory snapshot is the immutable artifact admission
+        // scanned. Direct block attachments, including managed volumes, keep
+        // the mode the operator requested.
+        read_only: entry.host_snapshot.is_some() || entry.read_only,
         kind,
         source: resolved_source,
     })
@@ -872,6 +875,34 @@ mod tests {
         assert_eq!(vm_volume.guest, "/data/work");
         assert_eq!(vm_volume.size, "16M");
         assert!(matches!(vm_volume.kind, VmVolumeKind::Disk));
+        assert!(!vm_volume.read_only, "managed block rw must remain rw");
+    }
+
+    #[test]
+    fn host_directory_snapshot_resolves_read_only_whatever_the_requested_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = tmp.path().join("snapshot.ext4");
+        create_ext4_image(&host, 16);
+
+        for requested_read_only in [false, true] {
+            let mut entry = make_entry("/work/input", "input");
+            entry.host_path = host.display().to_string();
+            entry.read_only = requested_read_only;
+            entry.source = VolumeMountSource::AdHocHost;
+            entry.host_snapshot = Some(HostSnapshotSource {
+                source_path: tmp.path().display().to_string(),
+                fingerprint: "a".repeat(64),
+            });
+            let registry = VolumeMountRegistry {
+                mounts: BTreeMap::from([("/work/input".to_string(), entry)]),
+            };
+
+            let resolved = registry
+                .resolve_for_launch(&LocalVolumeCatalog::default())
+                .unwrap();
+            assert!(resolved[0].read_only);
+            assert!(resolved[0].as_vm_volume().read_only);
+        }
     }
 
     #[test]

@@ -72,7 +72,10 @@ pub(crate) fn materialize_mount_volumes(
             Ok(VmVolume {
                 host: share.host_dir.clone(),
                 guest: share.guest_mount.clone(),
-                read_only: share.read_only,
+                // Directory snapshots are immutable launch inputs. Even when
+                // the caller requested `:rw`, admission scanned these exact
+                // bytes, so the guest must not be able to change them.
+                read_only: true,
                 materialized_image: Some(image.path().display().to_string()),
                 // Same authority the image was written with, so the guest
                 // mounts the label that is actually on the bytes.
@@ -108,6 +111,26 @@ mod tests {
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
         let err = materialize_mount_volumes(&[share], &mut sub).unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err:#}");
+    }
+
+    #[test]
+    fn materialized_mounts_are_read_only_whatever_the_requested_mode() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(scratch.path());
+        let source = scratch.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+
+        for requested_read_only in [false, true] {
+            let share = DirShareSpec {
+                host_dir: source.display().to_string(),
+                guest_mount: "/work".to_string(),
+                read_only: requested_read_only,
+            };
+            let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+            let volumes = materialize_mount_volumes(&[share], &mut sub).unwrap();
+            assert!(volumes[0].read_only);
+        }
     }
 
     #[test]

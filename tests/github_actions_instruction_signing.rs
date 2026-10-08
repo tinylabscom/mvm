@@ -22,8 +22,8 @@ fn the_signing_workflow_cannot_be_called_from_another_repository() {
     );
 }
 
-/// The job publishes bundles as an artifact and never writes to the
-/// repository.
+/// The job publishes bundles as an artifact for a separately reviewed bundle
+/// pull request and never writes to the repository itself.
 #[test]
 fn the_signing_workflow_holds_no_write_access() {
     let permissions = WORKFLOW
@@ -50,6 +50,31 @@ fn the_signing_workflow_runs_the_shared_action() {
         "signing steps belong in the composite action, not inline"
     );
     assert!(ACTION.contains("using: composite"));
+}
+
+/// This composite runs with an OIDC token, so every external action it loads
+/// is executable signing-job code and must be pinned to an immutable commit.
+#[test]
+fn the_signing_action_pins_every_external_action_to_a_full_sha() {
+    for line in ACTION.lines().map(str::trim) {
+        let Some(target) = line.strip_prefix("uses: ") else {
+            continue;
+        };
+        if target.starts_with("./") {
+            continue;
+        }
+        let (action, reference) = target
+            .split_once('@')
+            .unwrap_or_else(|| panic!("external action is missing a ref: {target}"));
+        let reference = reference
+            .split_whitespace()
+            .next()
+            .expect("action ref precedes its version comment");
+        assert!(
+            reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
+            "{action} must use an immutable full commit SHA, found {reference}"
+        );
+    }
 }
 
 /// Bundles for `.claude/**` and `.cursor/rules/**` sit under dot-directories,
