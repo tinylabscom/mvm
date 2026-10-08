@@ -1,13 +1,12 @@
 [overrides.tools]
-allow = ["shell"]
+allow = ["python"]
 
-[overrides.tools.detail.shell]
-executable = "/bin/sh"
-argv = ["/bin/sh -c *"]
-# A bare `id` command line is denied even though the argv pattern above
-# admits it: the live lane exercises both an allowed and a denied
-# workload-origin invocation through the in-guest shim.
-deny = ["/bin/sh -c id"]
+[overrides.tools.detail.python]
+executable = "/usr/local/bin/python3"
+argv = ["/usr/local/bin/python3 -c *"]
+# The live lane exercises both an allowed and a denied workload-origin
+# invocation through the in-guest shim.
+deny = ["/usr/local/bin/python3 -c print(31339)"]
 # A declared route makes every allowed invocation bound, so the live lane
 # exercises the guest starting the command in its own attributed session.
 routes = ["example.com:443"]

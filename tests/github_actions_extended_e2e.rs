@@ -583,6 +583,32 @@ fn ci_full() -> String {
     fs::read_to_string(".github/workflows/ci-full.yml").expect("read Extended CI workflow")
 }
 
+#[test]
+fn guest_binary_producer_lanes_install_the_cross_toolchain_before_tests() {
+    let ci = fs::read_to_string(".github/workflows/ci.yml").expect("read CI workflow");
+    for job in ["test-workspace-build", "test-workspace-aarch64"] {
+        let body = job_block(&ci, job);
+        let install = body
+            .find("- uses: ./.github/actions/install-zigbuild")
+            .expect("producer lane installs the pinned cross toolchain");
+        let tests = body
+            .find("- name: Install cargo-nextest")
+            .expect("producer lane runs nextest");
+        assert!(install < tests, "{job} must install Zig before tests");
+    }
+
+    let shard = fs::read_to_string(".github/workflows/workspace-shard.yml")
+        .expect("read workspace shard workflow");
+    assert!(shard.contains(
+        "- uses: ./.github/actions/install-zigbuild\n        if: inputs.runner_kind == 'github'"
+    ));
+    assert!(shard.contains("command -v cargo-zigbuild"));
+
+    let extended = ci_full();
+    let live = job_block(&extended, "bdd-live-readme");
+    assert!(live.contains("- uses: ./.github/actions/install-zigbuild"));
+}
+
 fn source_bootstrap_script() -> String {
     fs::read_to_string("scripts/e2e-source-bootstrap.sh").expect("read source bootstrap witness")
 }

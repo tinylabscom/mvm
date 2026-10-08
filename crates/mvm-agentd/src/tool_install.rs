@@ -92,6 +92,14 @@ pub fn build_tool_map(
                 }
             }
         })?;
+        let target_meta =
+            std::fs::metadata(&target).map_err(|error| InstallError::SubstitutionFailed {
+                path: target.to_string_lossy().into_owned(),
+                reason: error.to_string(),
+            })?;
+        if target_meta.len() > MAX_TOOL_BYTES {
+            return Err(InstallError::TooLarge { tool: tool.clone() });
+        }
         let bytes = std::fs::read(&target).map_err(|_| InstallError::DeclaredPathMissing {
             tool: tool.clone(),
             path: declared.clone(),
@@ -100,11 +108,6 @@ pub fn build_tool_map(
             return Err(InstallError::TooLarge { tool: tool.clone() });
         }
         let digest = mvm_contract::hash::sha256_hex(&bytes);
-        let target_meta =
-            std::fs::metadata(&target).map_err(|error| InstallError::SubstitutionFailed {
-                path: target.to_string_lossy().into_owned(),
-                reason: error.to_string(),
-            })?;
         let mut aliases = collect_aliases(
             root,
             &target,
@@ -126,16 +129,24 @@ pub fn build_tool_map(
         });
     }
     let map = ToolMap { tools };
-    check_map(&map);
+    check_map(&map)?;
     Ok(map)
 }
 
-/// Structural validation for a freshly built map (the helper's
-/// [`ToolMap::load`] runs the same checks on the written file). A failure
-/// here is a builder bug: refuse loudly in tests, and at read time in the
-/// helper.
-pub fn check_map(map: &ToolMap) {
-    debug_assert!(ToolMap::load(&serde_json::to_vec(map).expect("a built map serializes")).is_ok());
+/// Validate the complete map before changing any guest mount. An ambiguous
+/// path must refuse activation in both debug and release builds.
+fn check_map(map: &ToolMap) -> Result<(), InstallError> {
+    let path = crate::tool_map::TOOL_MAP_PATH;
+    let bytes = serde_json::to_vec(map).map_err(|error| InstallError::SubstitutionFailed {
+        path: path.into(),
+        reason: error.to_string(),
+    })?;
+    ToolMap::load(&bytes)
+        .map_err(|error| InstallError::SubstitutionFailed {
+            path: path.into(),
+            reason: error.to_string(),
+        })
+        .map(|_| ())
 }
 
 #[derive(Default)]
@@ -165,6 +176,43 @@ fn rooted(root: &Path, path: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+fn substitution_error(path: &Path, reason: impl ToString) -> InstallError {
+    InstallError::SubstitutionFailed {
+        path: path.to_string_lossy().into_owned(),
+        reason: reason.to_string(),
+    }
+}
+
+/// Re-read the image executable before stashing it. The map pins its digest,
+/// so a changed source cannot be installed under the earlier decision.
+#[cfg(any(target_os = "linux", test))]
+fn source_bytes(root: &Path, entry: &ToolEntry) -> Result<Vec<u8>, InstallError> {
+    let declared = Path::new(&entry.executable);
+    let source = resolve_target(root, declared)
+        .ok_or_else(|| substitution_error(declared, "declared executable is unavailable"))?;
+    let size = std::fs::metadata(&source)
+        .map_err(|error| substitution_error(&source, error))?
+        .len();
+    if size > MAX_TOOL_BYTES {
+        return Err(InstallError::TooLarge {
+            tool: entry.tool.clone(),
+        });
+    }
+    let bytes = std::fs::read(&source).map_err(|error| substitution_error(&source, error))?;
+    if bytes.len() as u64 > MAX_TOOL_BYTES {
+        return Err(InstallError::TooLarge {
+            tool: entry.tool.clone(),
+        });
+    }
+    if mvm_contract::hash::sha256_hex(&bytes) != entry.digest {
+        return Err(substitution_error(
+            declared,
+            "declared executable changed after alias discovery",
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Resolve a declared path to the regular file it ultimately names, following
@@ -200,40 +248,57 @@ fn alias_of(
     digest: &str,
     target_len: u64,
     budget: &mut ScanBudget,
-) -> Option<String> {
-    let guest_path = format!("/{}", path.strip_prefix(root).ok()?.to_string_lossy());
+) -> Result<Option<String>, InstallError> {
+    let guest_path = format!(
+        "/{}",
+        path.strip_prefix(root)
+            .map_err(|error| substitution_error(path, error))?
+            .to_string_lossy()
+    );
     if guest_path.len() > 4096 {
-        return None;
+        return Ok(None);
     }
-    let meta = std::fs::symlink_metadata(path).ok()?;
+    let meta = std::fs::symlink_metadata(path).map_err(|error| substitution_error(path, error))?;
     if meta.file_type().is_symlink() {
-        let resolved = resolve_target(root, Path::new(&guest_path))?;
-        let resolved_meta = std::fs::metadata(&resolved).ok()?;
+        let Some(resolved) = resolve_target(root, Path::new(&guest_path)) else {
+            return match std::fs::metadata(path) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) if error.raw_os_error() == Some(libc::ELOOP) => Ok(None),
+                Err(error) => Err(substitution_error(path, error)),
+                Ok(_) => Err(substitution_error(
+                    path,
+                    "could not resolve executable alias",
+                )),
+            };
+        };
+        let resolved_meta =
+            std::fs::metadata(&resolved).map_err(|error| substitution_error(&resolved, error))?;
         if !resolved_meta.file_type().is_file() || resolved_meta.len() != target_len {
-            return None;
+            return Ok(None);
         }
         if resolved == *target {
-            return Some(guest_path);
+            return Ok(Some(guest_path));
         }
-        budget.hash(target_len).ok()?;
-        let bytes = std::fs::read(&resolved).ok()?;
-        return (mvm_contract::hash::sha256_hex(&bytes) == digest).then_some(guest_path);
+        budget.hash(target_len)?;
+        let bytes =
+            std::fs::read(&resolved).map_err(|error| substitution_error(&resolved, error))?;
+        return Ok((mvm_contract::hash::sha256_hex(&bytes) == digest).then_some(guest_path));
     }
     if !meta.file_type().is_file() {
-        return None;
+        return Ok(None);
     }
     let same_inode = meta.dev() == target_meta.dev() && meta.ino() == target_meta.ino();
     if !same_inode && meta.len() != target_len {
-        return None;
+        return Ok(None);
     }
     if !same_inode {
-        budget.hash(target_len).ok()?;
-        let bytes = std::fs::read(path).ok()?;
+        budget.hash(target_len)?;
+        let bytes = std::fs::read(path).map_err(|error| substitution_error(path, error))?;
         if mvm_contract::hash::sha256_hex(&bytes) != digest {
-            return None;
+            return Ok(None);
         }
     }
-    Some(guest_path)
+    Ok(Some(guest_path))
 }
 
 /// Walk the root filesystem (never descending into other mounts) collecting
@@ -255,16 +320,12 @@ fn collect_aliases(
         .dev();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
+        let entries = std::fs::read_dir(&dir).map_err(|error| substitution_error(&dir, error))?;
+        for entry in entries {
+            let entry = entry.map_err(|error| substitution_error(&dir, error))?;
             let path = entry.path();
-            let meta = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(_) => continue,
-            };
+            let meta = std::fs::symlink_metadata(&path)
+                .map_err(|error| substitution_error(&path, error))?;
             if meta.file_type().is_dir() {
                 // Stay on the rootfs: other mounts hold no image bytes, and
                 // tmpfs trees can change under the walk.
@@ -274,7 +335,7 @@ fn collect_aliases(
                 continue;
             }
             if let Some(alias) =
-                alias_of(root, &path, target, target_meta, digest, target_len, budget)
+                alias_of(root, &path, target, target_meta, digest, target_len, budget)?
             {
                 aliases.push(alias);
             }
@@ -302,13 +363,7 @@ pub fn install(commands: &BTreeMap<String, String>, root: &Path) -> Result<(), I
 
     prepare_dirs()?;
     for entry in &map.tools {
-        let bytes =
-            std::fs::read(root.join(entry.stash.trim_start_matches('/'))).map_err(|error| {
-                InstallError::SubstitutionFailed {
-                    path: entry.stash.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let bytes = source_bytes(root, entry)?;
         write_stash(&entry.stash, &bytes)?;
     }
     write_map(&map)?;
@@ -335,7 +390,10 @@ fn prepare_dirs() -> Result<(), InstallError> {
     use std::os::unix::fs::PermissionsExt;
 
     let helper = crate::guest_mount::TOOL_HELPER_IDENTITY;
-    for (path, mode, gid) in [(TOOL_DIR, 0o755, 0), (STASH_DIR, 0o750, helper.gid())] {
+    for (path, mode, gid) in [
+        (TOOL_DIR, 0o775, helper.gid()),
+        (STASH_DIR, 0o750, helper.gid()),
+    ] {
         std::fs::create_dir_all(path).map_err(|error| InstallError::SubstitutionFailed {
             path: path.to_string(),
             reason: error.to_string(),
@@ -432,40 +490,94 @@ fn write_map(map: &ToolMap) -> Result<(), InstallError> {
 fn substitute(path: &str) -> Result<(), InstallError> {
     use crate::guest_bootstrap::{overlay_parent_for_write, substitute_in_place};
 
+    substitute_with_fallback(
+        path,
+        || substitute_in_place(TOOL_SHIM_OVERLAY, path),
+        || overlay_parent_for_write(Path::new(path)),
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn substitute_with_fallback(
+    path: &str,
+    mut substitute: impl FnMut() -> Result<(), String>,
+    make_writable: impl FnOnce() -> Result<(), String>,
+) -> Result<(), InstallError> {
     let fail = |reason: String| InstallError::SubstitutionFailed {
         path: path.to_string(),
         reason,
     };
-    substitute_in_place(TOOL_SHIM_OVERLAY, path).map_err(fail)?;
-    if let Err(first) = substitute_in_place(TOOL_SHIM_OVERLAY, path) {
-        overlay_parent_for_write(Path::new(path)).map_err(fail)?;
-        substitute_in_place(TOOL_SHIM_OVERLAY, path).map_err(fail)?;
-        let _ = first;
+    if let Err(first) = substitute() {
+        make_writable().map_err(fail)?;
+        substitute().map_err(|second| {
+            fail(format!(
+                "initial substitution failed ({first}); after overlay: {second}"
+            ))
+        })?;
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn spawn_helper() -> Result<(), InstallError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    let mut pipe = [-1; 2];
+    // SAFETY: pipe is a writable pair of integers.
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(InstallError::HelperSpawnFailed(format!(
+            "create readiness pipe: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: successful pipe2 returned two new owned descriptors.
+    let read_ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe[0]) };
+    let write_ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe[1]) };
+    let ready_fd = write_ready.as_raw_fd();
     let mut command = Command::new(TOOL_HELPER_OVERLAY);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        .stderr(Stdio::inherit())
+        .env("MVM_TOOL_READY_FD", ready_fd.to_string());
+    crate::fd_hygiene::configure_close_fds(&mut command, 3, Some(ready_fd as u32));
     let identity = crate::guest_mount::TOOL_HELPER_IDENTITY;
-    // SAFETY: the hook runs in the forked child before exec and calls only
-    // async-signal-safe syscalls, which is what `ServiceIdentity::assume`
-    // guarantees.
+    // SAFETY: both calls are async-signal-safe and run in the forked child;
+    // only the readiness writer survives exec, then the helper owns it.
     unsafe {
-        command.pre_exec(move || identity.assume());
+        command.pre_exec(move || {
+            if libc::fcntl(ready_fd, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            identity.assume()
+        });
     }
-    command.spawn().map(|_| ()).map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         InstallError::HelperSpawnFailed(format!("spawn {TOOL_HELPER_OVERLAY}: {error}"))
-    })
+    })?;
+    drop(write_ready);
+    let mut poll = libc::pollfd {
+        fd: read_ready.as_raw_fd(),
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    // SAFETY: poll points at one writable entry; read_ready stays open.
+    let signaled = unsafe { libc::poll(&mut poll, 1, 5_000) };
+    let mut byte = 0u8;
+    // SAFETY: byte is writable and the pipe reader remains open.
+    let ready = signaled > 0
+        && unsafe { libc::read(read_ready.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) } == 1
+        && byte == 1;
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::HelperSpawnFailed(
+            "helper did not bind its socket within five seconds".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -515,6 +627,20 @@ mod tests {
     }
 
     #[test]
+    fn a_shared_multi_call_binary_refuses_activation() {
+        let (_temp, root) = rootfs();
+        for name in ["cat", "echo", "id", "ls", "mkdir", "sed", "tar"] {
+            std::os::unix::fs::symlink("busybox", root.join("bin").join(name))
+                .expect("applet symlink");
+        }
+        let commands = BTreeMap::from([("shell".to_string(), "/bin/sh".to_string())]);
+        assert!(matches!(
+            build_tool_map(&commands, &root),
+            Err(InstallError::TooManyAliases { .. })
+        ));
+    }
+
+    #[test]
     fn missing_and_nonfile_declared_paths_refuse() {
         let (_temp, root) = rootfs();
         let missing = BTreeMap::from([("shell".to_string(), "/bin/nope".to_string())]);
@@ -530,16 +656,135 @@ mod tests {
     }
 
     #[test]
-    fn scan_budget_refuses_a_rootfs_of_copies() {
+    fn two_declared_tools_with_the_same_bytes_refuse_without_a_panic() {
         let (_temp, root) = rootfs();
-        // Two tools pointing at the same bytes are a duplicate-path refusal,
-        // not a budget failure; force the budget with a big file instead.
+        let commands = BTreeMap::from([
+            ("shell".to_string(), "/bin/sh".to_string()),
+            ("second".to_string(), "/usr/bin/busybox-real".to_string()),
+        ]);
+        assert!(matches!(
+            build_tool_map(&commands, &root),
+            Err(InstallError::SubstitutionFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn nonmatching_file_is_not_an_alias() {
+        let (_temp, root) = rootfs();
         let big = vec![7u8; 2048];
         std::fs::write(root.join("usr/bin/big-real"), &big).expect("write big");
         let commands = BTreeMap::from([("big".to_string(), "/usr/bin/big-real".to_string())]);
         let map = build_tool_map(&commands, &root).expect("small map builds");
         assert_eq!(map.tools[0].aliases.len(), 0);
-        let _ = (_temp, root);
+    }
+
+    #[test]
+    fn oversized_declared_executable_refuses_before_reading_its_bytes() {
+        let (_temp, root) = rootfs();
+        let large = root.join("usr/bin/oversized");
+        std::fs::File::create(&large)
+            .expect("create sparse file")
+            .set_len(MAX_TOOL_BYTES + 1)
+            .expect("extend sparse file");
+        let commands = BTreeMap::from([("large".to_string(), "/usr/bin/oversized".to_string())]);
+        assert!(matches!(
+            build_tool_map(&commands, &root),
+            Err(InstallError::TooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn fresh_rootfs_supplies_stash_bytes_from_the_declared_executable() {
+        let (_temp, root) = rootfs();
+        let commands = BTreeMap::from([("shell".to_string(), "/bin/sh".to_string())]);
+        let map = build_tool_map(&commands, &root).expect("map builds");
+        let entry = &map.tools[0];
+        assert!(!root.join(entry.stash.trim_start_matches('/')).exists());
+        assert_eq!(
+            source_bytes(&root, entry).expect("source bytes"),
+            b"busybox bytes"
+        );
+
+        std::fs::write(root.join("usr/bin/busybox-real"), b"tampered").expect("tamper source");
+        assert!(source_bytes(&root, entry).is_err());
+    }
+
+    #[test]
+    fn scan_budget_exhaustion_is_a_refusal() {
+        let (_temp, root) = rootfs();
+        let target = root.join("usr/bin/busybox-real");
+        let metadata = std::fs::metadata(&target).expect("target metadata");
+        let digest = mvm_contract::hash::sha256_hex(b"busybox bytes");
+        let mut budget = ScanBudget {
+            hashed: MAX_SCAN_BYTES,
+        };
+        assert!(matches!(
+            alias_of(
+                &root,
+                &root.join("usr/local/bin/sh-copy"),
+                &target,
+                &metadata,
+                &digest,
+                metadata.len(),
+                &mut budget,
+            ),
+            Err(InstallError::ScanBudgetExceeded)
+        ));
+    }
+
+    #[test]
+    fn an_unreadable_alias_is_not_silently_skipped() {
+        let (_temp, root) = rootfs();
+        let target = root.join("usr/bin/busybox-real");
+        let metadata = std::fs::metadata(&target).expect("target metadata");
+        let digest = mvm_contract::hash::sha256_hex(b"busybox bytes");
+        assert!(matches!(
+            alias_of(
+                &root,
+                &root.join("usr/local/bin/vanished"),
+                &target,
+                &metadata,
+                &digest,
+                metadata.len(),
+                &mut ScanBudget::default(),
+            ),
+            Err(InstallError::SubstitutionFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn substitution_retries_only_after_preparing_the_parent() {
+        let steps = std::cell::RefCell::new(Vec::new());
+        let result = substitute_with_fallback(
+            "/bin/tool",
+            || {
+                let mut steps = steps.borrow_mut();
+                steps.push("substitute");
+                if steps.len() == 1 {
+                    Err("read-only parent".into())
+                } else {
+                    Ok(())
+                }
+            },
+            || {
+                steps.borrow_mut().push("overlay");
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(*steps.borrow(), ["substitute", "overlay", "substitute"]);
+
+        let calls = std::cell::Cell::new(0);
+        let result = substitute_with_fallback(
+            "/bin/tool",
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+            || Err("unexpected overlay".into()),
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 1);
     }
 
     #[test]

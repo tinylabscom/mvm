@@ -25,6 +25,24 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+/// The executable image the kernel reports for a live process. A bind-mounted
+/// shim may acquire the kernel's deleted suffix after replacement; that
+/// suffix is not part of its admitted guest path.
+#[cfg(target_os = "linux")]
+pub fn process_executable(pid: u32) -> std::io::Result<String> {
+    let link = std::fs::read_link(format!("/proc/{pid}/exe"))?;
+    let text = link.to_str().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF-8 executable path")
+    })?;
+    Ok(text.strip_suffix(" (deleted)").unwrap_or(text).to_string())
+}
+
+/// A request names the exact substituted path the peer actually executed.
+#[must_use]
+pub fn provenance_matches(requested: &str, actual: &str) -> bool {
+    requested == actual
+}
+
 /// Directory holding the helper socket and the shim client copy.
 pub const TOOL_DIR: &str = "/run/mvm-tool";
 /// The helper's guest-local listening socket, inside [`TOOL_DIR`].
@@ -40,10 +58,9 @@ pub const MAX_MAP_BYTES: u64 = 64 * 1024;
 pub const MAX_SHIM_FRAME_BYTES: u64 = 256 * 1024;
 /// Largest helper-to-agent decision frame either side will read.
 pub const MAX_DECISION_FRAME_BYTES: u64 = 4 * 1024;
-/// Refuse to substitute a declared tool reached through more alias paths than
-/// this: a pathological image turns the boot into a mount-table denial of
-/// service long before the workload runs.
-pub const MAX_ALIASES_PER_TOOL: usize = 1024;
+/// Refuse large shared multi-call executables: shadowing every applet would
+/// break unrelated commands, while leaving one unshadowed bypasses mediation.
+pub const MAX_ALIASES_PER_TOOL: usize = 8;
 
 /// Exit code the shim uses when the host denied the invocation.
 pub const EXIT_DENIED: i32 = 126;
@@ -92,9 +109,8 @@ pub enum Dispatch<'a> {
     /// The invocation names this tool: ask the host, then run the stash as
     /// the tool identity in a fresh session.
     Mediate(&'a ToolEntry),
-    /// The bytes are a shared binary (busybox-style) invoked under a name
-    /// that is not the declared tool: run the stash with the caller's own
-    /// identity, no host decision.
+    /// The bytes are a shared binary invoked under another name. The helper
+    /// refuses this rather than letting argv select the tool without a gate.
     Direct(&'a ToolEntry),
     /// The shim is running at a path the map does not know: refuse.
     Unknown,
@@ -203,15 +219,17 @@ impl ToolMap {
     ///
     /// The tool identity is chosen from the path the kernel used to reach the
     /// shim, never from anything the caller wrote: `argv[0]` is attacker
-    /// controlled, so it only ever escalates mediation (claiming the declared
-    /// tool's name routes through the host gate) and never skips it. A shared
-    /// binary substituted for a declared tool keeps its other applet names
-    /// working by running the stash directly with the caller's identity.
+    /// controlled, so executing the signed path always mediates regardless
+    /// of that string. An alias claiming the declared name also mediates;
+    /// another applet name is refused by the helper.
     #[must_use]
     pub fn dispatch(&self, exe: &str, argv0: Option<&str>) -> Dispatch<'_> {
         let Some(entry) = self.by_path(exe) else {
             return Dispatch::Unknown;
         };
+        if exe == entry.executable {
+            return Dispatch::Mediate(entry);
+        }
         let claimed = argv0
             .and_then(|value| value.rsplit('/').next())
             .filter(|value| !value.is_empty());
@@ -276,7 +294,7 @@ pub struct ShimRequest {
     /// The shim's working directory, applied to the tool.
     pub cwd: String,
     /// The shim's environment. The helper sanitizes it before a mediated
-    /// spawn and passes it through unchanged for a direct one.
+    /// spawn; another applet name is refused.
     pub env: Vec<(String, String)>,
 }
 
@@ -345,6 +363,8 @@ pub enum DecisionReply {
     NotDecided,
     /// The request ran.
     Ok,
+    /// The agent could not register the tool session; it must not be released.
+    Unavailable,
 }
 
 #[cfg(test)]
@@ -363,6 +383,30 @@ mod tests {
 
     fn map(entries: Vec<ToolEntry>) -> ToolMap {
         ToolMap { tools: entries }
+    }
+
+    #[test]
+    fn a_client_cannot_claim_a_substituted_path_it_did_not_execute() {
+        assert!(provenance_matches(
+            "/usr/local/bin/python3",
+            "/usr/local/bin/python3"
+        ));
+        assert!(!provenance_matches(
+            "/usr/local/bin/python3",
+            "/mvm/runtime/tool-shim"
+        ));
+        assert!(!provenance_matches(
+            "/usr/local/bin/python3",
+            "/usr/local/bin/python"
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_executable_is_a_kernel_path_without_a_deleted_suffix() {
+        let path = process_executable(std::process::id()).expect("own executable");
+        assert!(path.starts_with('/'));
+        assert!(!path.ends_with(" (deleted)"));
     }
 
     #[test]
@@ -388,7 +432,7 @@ mod tests {
             tools.dispatch("/bin/busybox", Some("/bin/sh")),
             Dispatch::Mediate(_)
         ));
-        // The same bytes under a non-tool applet name run directly.
+        // A shared binary under another applet name cannot run directly.
         assert!(matches!(
             tools.dispatch("/bin/busybox", Some("ls")),
             Dispatch::Direct(_)
@@ -397,10 +441,14 @@ mod tests {
             tools.dispatch("/bin/ash", Some("ash")),
             Dispatch::Direct(_)
         ));
-        // No argv0 at all cannot claim the tool.
+        // A caller cannot bypass the gate by changing argv0 on the signed path.
         assert!(matches!(
             tools.dispatch("/bin/sh", None),
-            Dispatch::Direct(_)
+            Dispatch::Mediate(_)
+        ));
+        assert!(matches!(
+            tools.dispatch("/bin/sh", Some("ls")),
+            Dispatch::Mediate(_)
         ));
         // A path the map does not know is refused.
         assert!(matches!(
@@ -484,5 +532,11 @@ mod tests {
         let round: DecisionReply =
             serde_json::from_slice(&serde_json::to_vec(&decided).unwrap()).unwrap();
         assert_eq!(round, decided);
+        let unavailable = DecisionReply::Unavailable;
+        let round: DecisionReply = serde_json::from_slice(
+            &serde_json::to_vec(&unavailable).expect("serialize unavailable"),
+        )
+        .expect("deserialize unavailable");
+        assert_eq!(round, unavailable);
     }
 }

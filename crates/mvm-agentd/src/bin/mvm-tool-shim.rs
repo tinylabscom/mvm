@@ -62,14 +62,13 @@ fn shim_request() -> Result<ShimRequest, String> {
 /// This process's executable path, used to look the tool up in the map.
 #[cfg(target_os = "linux")]
 fn own_exe() -> Result<String, String> {
-    let path = std::fs::read_link("/proc/self/exe")
-        .map_err(|error| format!("read /proc/self/exe: {error}"))?;
-    Ok(path.to_string_lossy().into_owned())
+    mvm_agentd::tool_map::process_executable(std::process::id())
+        .map_err(|error| format!("read /proc/self/exe: {error}"))
 }
 
 /// Connect to the helper, proving the listener is the helper identity: the
-/// socket directory is root-owned, so nothing but the helper could be
-/// listening there, and the peer credentials say so concretely.
+/// socket directory is root-owned and writable only by the helper group;
+/// the peer credentials confirm who actually accepted the connection.
 #[cfg(target_os = "linux")]
 fn connect() -> Result<std::os::unix::net::UnixStream, String> {
     use std::os::unix::net::UnixStream;
@@ -164,13 +163,24 @@ fn send_request(
         // SAFETY: `fd` is one of the three well-known descriptors; fcntl
         // reports its flags or EINVAL when it is closed.
         let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags >= 0 {
-            // SAFETY: `fd` is open (fcntl succeeded), so dup is valid.
-            let owned = unsafe { libc::dup(fd) };
-            if owned >= 0 {
-                fds.push(owned);
-            }
+        if flags < 0 {
+            return Err("the tool invocation has a closed standard descriptor".into());
         }
+    }
+    for fd in [0, 1, 2] {
+        // SAFETY: the preflight above proved all three descriptors are open.
+        let owned = unsafe { libc::dup(fd) };
+        if owned < 0 {
+            for received in fds {
+                // SAFETY: each descriptor came from a successful dup above.
+                unsafe { libc::close(received) };
+            }
+            return Err(format!(
+                "duplicate tool descriptor: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        fds.push(owned);
     }
     let mut control = vec![0u8; unsafe { libc::CMSG_SPACE(24) } as usize];
     let mut iov = libc::iovec {

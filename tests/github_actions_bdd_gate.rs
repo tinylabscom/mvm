@@ -203,10 +203,11 @@ fn tool_live_witness_checks_mediation_after_restart_and_audit_chain() {
         )
     );
     for command in [
-        "machine create bdd-tool-command --image alpine --policy",
-        "machine exec bdd-tool-command --tool shell",
+        "machine create bdd-tool-command --image python:3.12 --policy",
+        "machine exec bdd-tool-command --tool python",
         "machine restart bdd-tool-command",
         "machine exec bdd-tool-command --tool unlisted",
+        "machine run --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/tool-command.toml",
         "trust audit tail --chain",
         "trust audit verify",
     ] {

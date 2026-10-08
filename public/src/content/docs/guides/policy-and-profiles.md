@@ -437,9 +437,10 @@ missing one.
   neither signal nor trace the tool, and the tool's `routes` and `secrets`
   bind to that invocation exactly as they do for `machine exec --tool`. A
   denied or undecidable invocation never runs: the shim exits `126` (denied)
-  or `125` (mediation unavailable). On busybox-style multi-call binaries,
-  applet names other than the declared tool's keep working through the same
-  substitution, unmediated, with the caller's own identity.
+  or `125` (mediation unavailable). A different applet name on a substituted
+  shared binary is refused; it never runs outside the tool gate. Activation
+  refuses a binary with more than eight alias paths, including typical
+  multi-call images. Use a standalone executable for a declared tool.
 - `routes` and `secrets` belong to their tool. When an allowed invocation's
   tool declares either, the endpoint mints a binding for that invocation. The
   guest agent starts the command as the leader of a new session, and the
@@ -476,9 +477,10 @@ missing one.
   privilege drop, so on that path alone the tool shares the workload's files
   and can be signalled by it. The workload-origin shim path (above) closes
   both with the tool uid; prefer it for tools whose scope matters.
-- On busybox-style multi-call binaries, only the declared tool's own name is
-  mediated; other applet names to the same bytes run unmediated with the
-  caller's identity. Declare each name that must be mediated as its own tool.
+- Shared multi-call binaries are not supported as declared tools when they
+  have more than eight alias paths. With fewer aliases, an invocation under
+  another applet name is refused rather than executed directly. Package a
+  standalone executable for each tool that requires mediation.
 - Workload-origin mediation requires the runtime overlay to carry the shim and
   helper binaries; an older overlay refuses a `[tools]` boot at activation
   rather than starting it unmediated. `machine exec --tool` requires
