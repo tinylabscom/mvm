@@ -59,6 +59,42 @@ fn installed_pack_inspection_commands_parse() {
 }
 
 #[test]
+fn workload_pack_search_and_pull_aliases_parse() {
+    let search = Cli::try_parse_from(["mvmctl", "pack", "search", "tool", "--json"])
+        .expect("pack search parse");
+    assert!(matches!(
+        search.command,
+        Commands::Pack(pack::Args {
+            action: pack::PackAction::Search(search::Args {
+                query: Some(query),
+                json: true,
+            }),
+        }) if query == "tool"
+    ));
+    let pull = Cli::try_parse_from(["mvmctl", "pack", "pull", "acme/tool@1.0.1", "--json"])
+        .expect("pack pull parse");
+    assert!(matches!(
+        pull.command,
+        Commands::Pack(pack::Args {
+            action: pack::PackAction::Pull(pull::Args { reference, json: true }),
+        }) if reference == "acme/tool@1.0.1"
+    ));
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "search", "one", "two"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "pack", "pull"]).is_err());
+
+    let search_help = Cli::try_parse_from(["mvmctl", "pack", "search", "--help"])
+        .expect_err("pack search help must exit after rendering")
+        .to_string();
+    assert!(search_help.contains("mvmctl pack search"));
+    assert!(search_help.contains("--json"));
+    let pull_help = Cli::try_parse_from(["mvmctl", "pack", "pull", "--help"])
+        .expect_err("pack pull help must exit after rendering")
+        .to_string();
+    assert!(pull_help.contains("mvmctl pack pull"));
+    assert!(pull_help.contains("ns/name[@version]"));
+}
+
+#[test]
 fn help_output_truncates_long_lines() {
     let help =
         "  command  A long description that must wrap before it exceeds the fixed output width";
