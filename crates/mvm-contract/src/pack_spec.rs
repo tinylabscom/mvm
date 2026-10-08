@@ -240,6 +240,9 @@ impl PackSpec {
         }
         for copy in &self.copy {
             relative_path(&copy.source, true)?;
+            if copy.destination.len() > 4096 {
+                return Err(PackSpecError::Path);
+            }
             let destination = copy
                 .destination
                 .strip_prefix('/')

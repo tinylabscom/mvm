@@ -169,6 +169,21 @@ fn paths_are_portable_and_fail_closed_without_filesystem_access() {
 }
 
 #[test]
+fn path_byte_limits_include_the_destination_root_slash() {
+    let mut value = document();
+    value["copy"][0]["destination"] = json!(format!("/{}", "é".repeat(2047)));
+    assert!(serde_json::from_value::<PackSpec>(value.clone()).is_ok());
+    value["copy"][0]["destination"] = json!(format!("/{}", "é".repeat(2048)));
+    assert!(serde_json::from_value::<PackSpec>(value).is_err());
+
+    let mut value = document();
+    value["copy"][0]["destination"] = json!(format!("/{}", "a".repeat(4095)));
+    assert!(serde_json::from_value::<PackSpec>(value.clone()).is_ok());
+    value["copy"][0]["destination"] = json!(format!("/{}", "a".repeat(4096)));
+    assert!(serde_json::from_value::<PackSpec>(value).is_err());
+}
+
+#[test]
 fn direct_construction_is_checked_before_normalization() {
     let mut spec: PackSpec = serde_json::from_str(MINIMAL).unwrap();
     spec.resources.cpu_cores = 0;
