@@ -13,6 +13,12 @@ on:
   schedule:
     - cron: "51 4 * * *"
   workflow_dispatch:
+    inputs:
+      tool_live_only:
+        description: Run only the tool_live KVM witness in the live BDD track
+        required: false
+        default: false
+        type: boolean
 
 # One Extended CI run at a time, across every ref and trigger. The
 # organization's hosted-runner pool is 20 concurrent jobs shared with the merge
@@ -138,6 +144,7 @@ jobs:
   # the Extended CI tracking issue through security-lane-watch.yml.
   bdd-live-warm-claim:
     name: BDD live warm claim (Linux, Firecracker)
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.tool_live_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
@@ -216,7 +223,10 @@ jobs:
     # timeout, and nothing should wait behind that.
     needs: bdd-live-warm-claim
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # A focused operator dispatch uses the dedicated Hetzner KVM runner. The
+    # nightly/full matrix stays on GitHub-hosted runners so it cannot monopolize
+    # the one self-hosted certification machine.
+    runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-latest' }}
     permissions:
       contents: read
     strategy:
@@ -225,12 +235,7 @@ jobs:
       # runner budget above.
       max-parallel: 1
       matrix:
-        include:
-          - witness: ci_live
-            # Cold compilation needs about 35 minutes, then the lifecycle up to 40.
-            timeout: 90
-          - witness: tool_live
-            timeout: 60
+        include: ${{ fromJSON(inputs.tool_live_only && '[{"witness":"tool_live","timeout":60}]' || '[{"witness":"ci_live","timeout":90},{"witness":"tool_live","timeout":60}]') }}
     timeout-minutes: ${{ matrix.timeout }}
     env:
       FC_VERSION: v1.17.0

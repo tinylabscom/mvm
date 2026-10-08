@@ -67,22 +67,29 @@ Feature: README persistent machine lifecycle works end to end
     Then the command exits with code 0
 
   @live @firecracker @tool_live
-  Scenario: a workload-origin declared command is mediated and audited before it runs
+  Scenario: a workload-origin tool receives only its scoped route and secret
     Given an isolated mvm home on encrypted backing storage
-    # The entrypoint shell is not a declared tool; its child python3 is.
-    When I run mvmctl in an isolated live home with "machine run --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/tool-command.toml -- /bin/sh -c '/usr/local/bin/python3 -c print(31337)'"
+    When I run mvmctl in the isolated mvm home with "secret set tool-live --host httpbin.org --type bearer --value tool-live-credential"
     Then the command exits with code 0
-    And the output contains "31337"
-    # This argv matches the deny pattern, so the workload sees only the shim's
-    # refusal and not the forbidden tool output.
-    When I run mvmctl in an isolated live home with "machine run --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/tool-command.toml -- /bin/sh -c '/usr/local/bin/python3 -c print(31339)'"
+    # /bin/sh is not declared. The python process it starts is workload-origin,
+    # so its route and secret work only after the broker returns a bound allow.
+    # The guest receives an opaque TOOL_LIVE placeholder, never the value.
+    When I run mvmctl in an isolated live home with "machine run --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/tool-command.toml --secret tool-live -- /bin/sh -c '/usr/local/bin/python3 -c \"import os,urllib.request,json;r=urllib.request.Request('\"'\"'https://httpbin.org/bearer'\"'\"',headers={'\"'\"'Authorization'\"'\"':'\"'\"'Bearer '\"'\"'+os.environ['\"'\"'TOOL_LIVE'\"'\"']});print(json.loads(urllib.request.urlopen(r).read())['\"'\"'authenticated'\"'\"'])\"'"
+    Then the command exits with code 0
+    And the output contains "True"
+    And the output does not contain "tool-live-credential"
+    # An argv outside the admitted patterns is refused before the tool runs.
+    When I run mvmctl in an isolated live home with "machine run --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/tool-command.toml --secret tool-live -- /bin/sh -c '/usr/local/bin/python3 -h'"
     Then the command exits with code 126
-    And the output does not contain "31339"
-    # Workload-origin decisions carry the guest_broker origin label next to
-    # the chain-signed host.tool.decision entry.
-    When I run mvmctl in the isolated mvm home with "trust audit tail --chain -n 40"
+    And the output does not contain "usage:"
+    When I run mvmctl in the isolated mvm home with "trust audit tail --chain -n 80"
     Then the command exits with code 0
     And the output contains "host.tool.decision"
     And the output contains "guest_broker"
+    And the output contains "secret.substituted"
+    And the output contains "httpbin.org"
+    And the output does not contain "tool-live-credential"
     When I run mvmctl in the isolated mvm home with "trust audit verify"
+    Then the command exits with code 0
+    When I run mvmctl in the isolated mvm home with "secret rm tool-live"
     Then the command exits with code 0
