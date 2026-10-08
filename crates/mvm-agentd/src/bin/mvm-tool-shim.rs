@@ -242,7 +242,7 @@ fn forward_signals(stream: &std::os::unix::net::UnixStream) {
         // the handler uses only async-signal-safe calls on plain values.
         unsafe {
             let action = libc::sigaction {
-                sa_sigaction: forward_handler as usize,
+                sa_sigaction: forward_handler as *const () as usize,
                 sa_mask: std::mem::zeroed(),
                 sa_flags: 0,
                 sa_restorer: None,

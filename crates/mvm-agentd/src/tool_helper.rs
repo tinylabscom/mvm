@@ -820,8 +820,8 @@ fn recv_request(
                 let count = ((*control_header).cmsg_len as usize - libc::CMSG_LEN(0) as usize)
                     / std::mem::size_of::<std::os::unix::io::RawFd>();
                 let data = libc::CMSG_DATA(control_header) as *const std::os::unix::io::RawFd;
-                for index in 0..count.min(3) {
-                    fds[index] = Some(*data.add(index));
+                for (slot, fd) in fds.iter_mut().enumerate().take(count) {
+                    *fd = Some(*data.add(slot));
                 }
             }
             control_header = libc::CMSG_NXTHDR(&header, control_header);
