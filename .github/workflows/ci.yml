@@ -1165,6 +1165,10 @@ jobs:
 
       - uses: ./.github/actions/rust-cache
 
+      # Guest-binary producer tests invoke cargo zigbuild for the Linux
+      # runtime, including the declared-tool shim and spawn helper.
+      - uses: ./.github/actions/install-zigbuild
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
