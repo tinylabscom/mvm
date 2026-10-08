@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use cucumber::World as _;
 use cucumber::gherkin::{Feature, Rule, Scenario};
+use mvm_conformance::sharding::ScenarioShard;
 use mvm_conformance::{RuntimeCaps, ScenarioGate, inherited_tags, scenario_gate_for_selection};
 use world::CliWorld;
 
@@ -42,6 +43,13 @@ async fn main() {
         eprintln!("\nconformance: {problem}\n");
         std::process::exit(2);
     }
+    let shard = match configured_shard() {
+        Ok(shard) => shard,
+        Err(problem) => {
+            eprintln!("\nconformance: {problem}\n");
+            std::process::exit(2);
+        }
+    };
 
     // Warm-restore scenarios mutate the process `MVM_HOME` and call
     // in-process seal/verify helpers. Run all scenarios sequentially so
@@ -64,16 +72,21 @@ async fn main() {
                 }
             })
         })
-        .filter_run(features_dir(), should_run)
+        .filter_run(features_dir(), move |feature, rule, scenario| {
+            should_run(feature, rule, scenario, shard)
+        })
         .await;
 
+    report_shard(shard);
     report_skips();
     let unexpected_skips = unexpected_skips();
 
     // `execution_has_failed` comes from the `Stats` trait, which the concrete
     // writer only exposes when the trait is in scope.
     use cucumber::writer::Stats as _;
-    if writer.execution_has_failed() {
+    if writer.execution_has_failed()
+        || shard.is_some_and(|_| SHARD_SELECTED.load(std::sync::atomic::Ordering::Relaxed) == 0)
+    {
         std::process::exit(1);
     }
     if !unexpected_skips.is_empty() {
@@ -175,7 +188,23 @@ fn newest_source(root: &Path) -> Option<(PathBuf, std::time::SystemTime)> {
 /// supplies the real host capabilities. An absent required capability yields a
 /// clean skip, never a failure — so the suite stays green on hosts without KVM
 /// (GitHub-hosted ARM runners, or any dev box lacking `/dev/kvm`).
-fn should_run(feature: &Feature, rule: Option<&Rule>, scenario: &Scenario) -> bool {
+fn should_run(
+    feature: &Feature,
+    rule: Option<&Rule>,
+    scenario: &Scenario,
+    shard: Option<ScenarioShard>,
+) -> bool {
+    if let Some(shard) = shard {
+        if !shard.contains(
+            &feature.name,
+            rule.map(|rule| rule.name.as_str()),
+            &scenario.name,
+        ) {
+            SHARD_EXCLUDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+        SHARD_SELECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     let only_tag = std::env::var("MVM_BDD_ONLY_TAG").ok();
     let tags = inherited_tags(
         &feature.tags,
@@ -185,6 +214,30 @@ fn should_run(feature: &Feature, rule: Option<&Rule>, scenario: &Scenario) -> bo
     let gate = scenario_gate_for_selection(&tags, probe_caps(), only_tag.as_deref());
     record_gate(gate);
     matches!(gate, ScenarioGate::Run)
+}
+
+static SHARD_SELECTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static SHARD_EXCLUDED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn configured_shard() -> Result<Option<ScenarioShard>, String> {
+    match std::env::var("MVM_BDD_SHARD") {
+        Ok(value) => ScenarioShard::parse(&value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            Err("MVM_BDD_SHARD is not valid Unicode".to_string())
+        }
+    }
+}
+
+fn report_shard(shard: Option<ScenarioShard>) {
+    if let Some(shard) = shard {
+        eprintln!(
+            "[bdd] shard {} selected {} scenario(s), excluded {}; this run alone is not full coverage",
+            shard.label(),
+            SHARD_SELECTED.load(std::sync::atomic::Ordering::Relaxed),
+            SHARD_EXCLUDED.load(std::sync::atomic::Ordering::Relaxed),
+        );
+    }
 }
 
 /// Tally of every filter decision, so the run can say what it declined to
