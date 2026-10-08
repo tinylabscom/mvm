@@ -27,7 +27,7 @@ use mvm_fs::snapshot_store::{FsSnapshotStore, SnapshotStore};
 
 use crate::checkpoint::{
     CaptureVmFullParams, CheckpointChainAnchor, CheckpointStore, VmFullControl,
-    capture_vm_full_with_snapshot_store, capture_vm_full_with_trusted_snapshot_backend,
+    capture_vm_full_into_snapshot_store, capture_vm_full_to_trusted_snapshot_backend,
     ensure_child_grants_within_parent, materialized_blob_sha256, verify_content, verify_lineage,
 };
 use crate::driver::{
@@ -1024,14 +1024,14 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
             None
         };
         let captured = if let Some(backend) = trusted_backend.as_deref() {
-            capture_vm_full_with_trusted_snapshot_backend(
+            capture_vm_full_to_trusted_snapshot_backend(
                 ctx.checkpoints,
                 capture_params,
                 control.as_ref(),
                 backend,
             )
         } else {
-            capture_vm_full_with_snapshot_store(
+            capture_vm_full_into_snapshot_store(
                 ctx.checkpoints,
                 capture_params,
                 control.as_ref(),

@@ -815,7 +815,7 @@ pub fn capture_vm_full(
 /// snapshot store before writing metadata. The resulting snapshot ID is part
 /// of the checkpoint's load-bearing digest, so later claims can materialize it
 /// without rereading the captured memory image.
-pub fn capture_vm_full_with_snapshot_store(
+pub fn capture_vm_full_into_snapshot_store(
     store: &CheckpointStore,
     params: CaptureVmFullParams,
     control: &dyn VmFullControl,
@@ -827,7 +827,7 @@ pub fn capture_vm_full_with_snapshot_store(
 /// Capture a vm_full checkpoint and publish its bytes through an immutable
 /// trusted-snapshot backend. The backend owns the publication proof, allowing
 /// a later claim to materialize without hashing the captured blobs again.
-pub fn capture_vm_full_with_trusted_snapshot_backend(
+pub fn capture_vm_full_to_trusted_snapshot_backend(
     store: &CheckpointStore,
     params: CaptureVmFullParams,
     control: &dyn VmFullControl,

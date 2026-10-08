@@ -91,7 +91,7 @@ impl VmBackend for WebLinuxBackend {
         }
     }
 
-    fn start_with_mode(&self, _config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
+    fn start_in_mode(&self, _config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         self.unavailable()
     }
 

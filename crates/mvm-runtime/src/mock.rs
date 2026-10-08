@@ -191,7 +191,7 @@ impl VmBackend for MockBackend {
         }
     }
 
-    fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
+    fn start_in_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         let mut state = self
             .state
             .lock()

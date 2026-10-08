@@ -142,9 +142,9 @@ impl VmBackend for AppleContainerBackend {
         self.runner.start(&self.config_with_kernel(config)?)
     }
 
-    fn start_with_mode(&self, config: &VmStartConfig, mode: StartMode) -> Result<VmId> {
+    fn start_in_mode(&self, config: &VmStartConfig, mode: StartMode) -> Result<VmId> {
         self.runner
-            .start_with_mode(&self.config_with_kernel(config)?, mode)
+            .start_in_mode(&self.config_with_kernel(config)?, mode)
     }
 
     fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
