@@ -86,10 +86,10 @@ construction lives in that repository.
 ## 3. Day-to-Day Commands
 
 ```bash
-mvmctl machine ls # List every microVM (alias: ps)
+mvmctl machine ps # List every microVM (alias: ls)
 mvmctl machine stop --all       # Stop all running VMs
 mvmctl doctor     # Check system dependencies and configuration
-mvmctl machine console vm # Interactive shell into a running VM (PTY-over-vsock)
+mvmctl machine attach vm # Interactive shell into a running VM (PTY-over-vsock)
 ```
 
 ## 4. Build and Run
@@ -157,7 +157,7 @@ mvmctl machine run --manifest my-app                          # Boot the VM
 Access a running VM without SSH -- uses PTY-over-vsock:
 
 ```bash
-mvmctl machine console myvm                    # Interactive shell
+mvmctl machine attach myvm                     # Interactive shell
 mvmctl machine console myvm --command "ls -la" # One-shot command
 ```
 

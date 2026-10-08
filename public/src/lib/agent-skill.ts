@@ -79,7 +79,7 @@ A named machine you keep around:
 \`\`\`bash
 mvmctl machine start alpine-dev --image alpine
 mvmctl machine exec alpine-dev -- uname -a
-mvmctl machine ls
+mvmctl machine ps
 mvmctl machine stop alpine-dev
 \`\`\`
 
@@ -101,7 +101,7 @@ mvmctl explain
 Two naming traps worth knowing: \`mvmctl build\` is the build-time command
 group (\`compile\`, \`validate\`, \`kernel\`), **not** the image build — that is
 \`mvmctl machine build\`. And there is no top-level \`mvmctl ls\`; the list verb
-is \`mvmctl machine ls\`.
+is \`mvmctl machine ps\`.
 
 ## Wire mvm into your agent
 

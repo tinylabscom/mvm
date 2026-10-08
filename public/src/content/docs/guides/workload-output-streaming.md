@@ -266,7 +266,7 @@ This happens when:
 In these cases, the error message will indicate which state directory it looked in, and suggest that the machine may have been removed or never booted. To verify if a machine still exists, run:
 
 ```sh
-mvmctl machine ls
+mvmctl machine ps
 ```
 
 If the machine is not listed, it was removed. If it shows with status "stopped" but `machine logs` fails, the state directory may be missing (perhaps due to a manual cleanup or an earlier failure).

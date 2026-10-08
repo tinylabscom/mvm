@@ -449,12 +449,12 @@ pub trait VmBackend: Send + Sync {
     /// Start a new VM from the given configuration.
     ///
     /// Returns the [`VmId`] assigned to the running VM.
-    /// Equivalent to [`start_with_mode`](Self::start_with_mode) with
+    /// Equivalent to [`start_in_mode`](Self::start_in_mode) with
     /// [`StartMode::Detached`], which is the right default for the most common
     /// path (`mvmctl machine run -d`) — this is a default-argument convenience, not a
     /// compatibility shim.
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
-        self.start_with_mode(config, StartMode::Detached)
+        self.start_in_mode(config, StartMode::Detached)
     }
 
     /// Host process that owns a running VM's address space, when the backend
@@ -471,9 +471,9 @@ pub trait VmBackend: Send + Sync {
     /// the other gets the default-trampoline. Most production
     /// backends override this method (the more general one) and let
     /// `start` delegate.
-    fn start_with_mode(&self, _config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
+    fn start_in_mode(&self, _config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         anyhow::bail!(
-            "{}: start_with_mode is not implemented for this backend",
+            "{}: start_in_mode is not implemented for this backend",
             self.name()
         )
     }
@@ -498,7 +498,7 @@ pub trait VmBackend: Send + Sync {
     /// Mirrors libkrun's `Sandbox::detach(self)` — disarms the
     /// SIGTERM safety net so the caller can exit without taking the
     /// VM down with it. After `detach`, `wait` is no longer
-    /// meaningful (you'd have to re-attach via `start_with_mode`
+    /// meaningful (you'd have to re-attach via `start_in_mode`
     /// against an existing name).
     ///
     /// Backends that always run detached (Firecracker, libkrun in

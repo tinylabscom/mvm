@@ -247,7 +247,7 @@ highest):
   process and the per-VM network endpoint don't get orphaned. (There is no
   tap interface to orphan — a workload microVM has no guest NIC.)
 - **Hard kill** (`kill -9` on `mvmctl machine run` itself): teardown is
-  best-effort; you may need `mvmctl machine ls` and `mvmctl machine stop <name>` to
+  best-effort; you may need `mvmctl machine ps` and `mvmctl machine stop <name>` to
   clean up. Each unnamed transient VM gets a generated name like
   `brisk-otter-a1b2`, so it is easy to spot.
 

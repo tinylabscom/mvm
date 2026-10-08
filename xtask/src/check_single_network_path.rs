@@ -221,7 +221,7 @@ fn check_runner_shape(workspace: &Path) -> Result<()> {
         .is_match(&apple)
         || ![
             r"self\s*\.\s*runner\s*\.\s*start\s*\(",
-            r"self\s*\.\s*runner\s*\.\s*start_with_mode\s*\(",
+            r"self\s*\.\s*runner\s*\.\s*start_in_mode\s*\(",
             r"self\s*\.\s*runner\s*\.\s*warm_start\s*\(",
         ]
         .iter()

@@ -316,7 +316,7 @@ impl ResourceObservation {
             // CPU number would assert a measurement that does not happen, and
             // the module runs in-process with no separate VMM to hold a
             // resident size. It does keep a host-side state directory,
-            // though: `start_with_mode` unconditionally writes
+            // though: `start_in_mode` unconditionally writes
             // `wasm-activation/activation.json` under `vm_state_dir`, and
             // that directory outlives the synchronous run (only the
             // egress-endpoint subdirectory, when spawned, is reaped inline),
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn the_wasm_tier_observes_its_activation_state_directory() {
-        // `WasmBackend::start_with_mode` unconditionally writes
+        // `WasmBackend::start_in_mode` unconditionally writes
         // `wasm-activation/activation.json` under `vm_state_dir` before
         // running the module, and that directory is not cleaned up when the
         // synchronous run finishes — only a spawned egress endpoint's own

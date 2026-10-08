@@ -49,7 +49,7 @@ mvmctl manifest info ./my-worker --json
 mvmctl manifest verify
 ```
 
-Use `mvmctl machine ls`, `mvmctl machine inspect`, `mvmctl machine logs`, and `mvmctl machine stop` for running
+Use `mvmctl machine ps`, `mvmctl machine inspect`, `mvmctl machine logs`, and `mvmctl machine stop` for running
 VMs. Use `mvmctl manifest *` for build slots and registry state.
 
 ## Boot after build

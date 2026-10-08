@@ -297,7 +297,7 @@ mod tests {
                 ..VmCapabilities::default()
             }
         }
-        fn start_with_mode(
+        fn start_in_mode(
             &self,
             _config: &VmStartConfig,
             _mode: mvm_core::vm_backend::StartMode,

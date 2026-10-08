@@ -1990,7 +1990,7 @@ fn readme_persistent_machine_workflow_parses() {
         MachineAction::Rm(_)
     ));
     assert!(matches!(
-        parse(&["ls"]).expect("README machine ls command parses"),
+        parse(&["ps"]).expect("README machine ps command parses"),
         MachineAction::Ls(_)
     ));
     assert!(matches!(
@@ -2001,12 +2001,12 @@ fn readme_persistent_machine_workflow_parses() {
 
 #[test]
 fn list_inspect_and_remove_parse() {
-    match parse(&["ls", "--json"]).expect("parse") {
+    match parse(&["ls", "--json"]).expect("parse ls compatibility alias") {
         MachineAction::Ls(args) => assert!(args.json),
         other => panic!("expected ls action, got {other:?}"),
     }
-    // `ps` is a docker-style visible alias for `ls`.
-    match parse(&["ps", "--json"]).expect("parse ps alias") {
+    // `ls` remains a visible compatibility alias for canonical `ps`.
+    match parse(&["ps", "--json"]).expect("parse canonical ps") {
         MachineAction::Ls(args) => assert!(args.json),
         other => panic!("expected ls action from `ps`, got {other:?}"),
     }
@@ -2873,7 +2873,7 @@ fn seed_runtime_state(name: &str) -> std::path::PathBuf {
 fn removing_a_machine_removes_its_runtime_state_not_only_its_spec() {
     // `machine rm` deletes `machines/<name>/`. It used to stop there, so a
     // removed machine kept its console log, sockets and pid file under
-    // `vms/<name>/` forever — and `machine ls`, which reads that directory,
+    // `vms/<name>/` forever — and `machine ps`, which reads that directory,
     // kept listing it.
     let _state = IsolatedMachineState::new();
     seed_machine_spec("web");
@@ -3028,13 +3028,13 @@ fn loading_a_missing_machine_spec_names_the_recovery_verbs() {
     let msg = format!("{err:#}");
     // Actionable not-found: names the machine and points at the recovery verbs.
     assert!(msg.contains("machine \"web\" does not exist"), "msg: {msg}");
-    assert!(msg.contains("machine ls"), "msg: {msg}");
+    assert!(msg.contains("machine ps"), "msg: {msg}");
     assert!(msg.contains("machine create"), "msg: {msg}");
 }
 
 /// `machine shell`/`exec` used to gate on a persisted spec, which a
 /// transient VM from `machine run` never has — so the console was refused for
-/// a machine `machine ls` was listing as running. The gate is existence now,
+/// a machine `machine ps` was listing as running. The gate is existence now,
 /// and a transient's existence is its runtime state dir.
 #[test]
 fn console_target_accepts_a_transient_vm_with_no_spec() {
@@ -3061,7 +3061,7 @@ fn console_target_rejects_a_name_with_neither_spec_nor_state() {
         msg.contains("machine \"ghost\" does not exist"),
         "msg: {msg}"
     );
-    assert!(msg.contains("machine ls"), "msg: {msg}");
+    assert!(msg.contains("machine ps"), "msg: {msg}");
 }
 
 /// Relaxing the gate to "has a runtime state dir" must not open the builder

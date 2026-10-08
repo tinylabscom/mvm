@@ -5,7 +5,7 @@
 //! registry (a machine the user created by name), the live backend scan
 //! joined with the VM name registry (what is actually booted), and the
 //! per-VM state dirs underneath both. This module joins them into one typed
-//! [`MachineInventoryRecord`] stream so `mvmctl machine ls` and local UI
+//! [`MachineInventoryRecord`] stream so `mvmctl machine ps` and local UI
 //! surfaces such as mvm-studio consume identical semantics instead of
 //! assembling their own.
 //!
