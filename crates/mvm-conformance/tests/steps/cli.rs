@@ -385,6 +385,35 @@ enum Terminal {
     Detached,
 }
 
+fn seed_live_guest_runtime(home: &Path) {
+    use mvm_build::guest_runtime::{
+        resolve_or_build_source_guest_runtime, seed_source_guest_runtime,
+    };
+    use std::sync::OnceLock;
+
+    // Seed only build artifacts, never keys or VM state. Scenario-declared
+    // isolated homes still win over MVM_E2E_HOME and receive separate extractions.
+    static SEED: OnceLock<PathBuf> = OnceLock::new();
+    let workspace = workspace_root();
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    let seed = SEED.get_or_init(|| {
+        let cache = std::env::var_os("MVM_E2E_HOME")
+            .map(|home| PathBuf::from(home).join("cache"))
+            .unwrap_or_else(|| PathBuf::from(mvm_core::config::mvm_cache_dir()));
+        eprintln!(
+            "conformance: prewarming source guest runtime in {}",
+            cache.display()
+        );
+        resolve_or_build_source_guest_runtime(&cache, version, arch, &workspace)
+            .expect("prewarm the live suite's source guest runtime");
+        cache
+    });
+    seed_source_guest_runtime(&home.join("cache"), seed, version, arch, &workspace)
+        .expect("verify and copy the live guest runtime into the scenario home")
+        .expect("prewarmed guest runtime must match the current source");
+}
+
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // Like `run_mvmctl_isolated_home`, but for scenarios that boot a real
     // microVM. The working directory is the workspace root so relative flake
@@ -392,17 +421,15 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
     // from the repo root, and the target directory is prepended to `PATH` so
     // helper binaries built alongside `mvmctl` are found.
     //
-    // The home is the artifact-warm one when `MVM_E2E_HOME` names it. A fresh
-    // tempdir per scenario looks like better isolation, but the guest binaries
-    // are cached *under the home*, so every such scenario re-cross-compiles
-    // them from scratch — minutes each, repeated across the live suite. The
-    // warm home is what makes a live run finish in a sane time.
+    // Prewarm source guest binaries once and admit independent verified copies
+    // into isolated homes, rather than cross-compiling again for every scenario.
     //
     // A home the scenario declared for itself still wins: `Given an isolated
     // mvm home` exists so a scenario can be hermetic, or can seed a cache and
     // then assert on it, and honouring the warm home over that put `machine
     // create` and `machine start` in two different directories.
     let home = selected_live_home(world);
+    seed_live_guest_runtime(&home);
     let mut command = mvmctl_command();
     command
         .current_dir(workspace_root())
