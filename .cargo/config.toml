@@ -14,6 +14,15 @@
 #   `[profile.test]` + per-package opt-level tuning in the root
 #   Cargo.toml is what makes macOS faster.
 
+[build]
+# Agent and worktree builds commonly run concurrently on the same host. Cargo's
+# CPU-count default lets every build schedule the whole machine, multiplying
+# rustc memory pressure until macOS spends most of its time compressing memory
+# instead of compiling. Keep aggregate concurrency predictable by default;
+# a developer running one isolated build can still override this with
+# `CARGO_BUILD_JOBS`.
+jobs = 2
+
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=lld"]
 
