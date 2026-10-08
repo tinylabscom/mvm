@@ -16,6 +16,7 @@ All notable changes to mvm are documented in this file.
 
 ### Fixed
 - Accept immutable sealed entrypoints while refusing writable entrypoint modes.
+- Show prompt-replay completion in default CLI output.
 - Fail closed when detached-machine readiness cannot be confirmed.
 - Preserve tool attribution for the egress-client identity.
 - Keep builder and telemetry outcome reporting bound to the active run.
