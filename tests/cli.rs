@@ -2186,6 +2186,16 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
     let details: serde_json::Value = serde_json::from_slice(&info.stdout).expect("pack info JSON");
     assert_eq!(details["manifest_sha256"], digest);
     assert_eq!(
+        details["signer_identity"],
+        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+    );
+    assert_eq!(
+        details["signer_issuer"],
+        mvm_core::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER
+    );
+    assert_eq!(details["official_status"], "not_established");
+    assert_eq!(details["revocation_scope"], "operator_configured_only");
+    assert_eq!(
         details["policy_documents"][0]["text"],
         String::from_utf8_lossy(policy).as_ref()
     );
@@ -2200,18 +2210,92 @@ fn pack_info_and_verify_recheck_signed_installed_content() {
         String::from_utf8_lossy(&verified.stderr)
     );
     assert!(String::from_utf8_lossy(&verified.stdout).contains("Verified runtime/go@1.0.0"));
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("Signer identity:"));
+    assert!(String::from_utf8_lossy(&verified.stdout).contains("Official status: not established"));
+
+    let verified_json = mvmctl_isolated(home.path())
+        .args(["pack", "verify", "runtime/go@1.0.0", "--json"])
+        .output()
+        .expect("verify installed pack as JSON");
+    assert!(verified_json.status.success());
+    let verification: serde_json::Value =
+        serde_json::from_slice(&verified_json.stdout).expect("pack verify JSON");
+    assert_eq!(verification["manifest_sha256"], digest);
+    assert_eq!(
+        verification["signer_identity"],
+        mvm_core::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
+    );
+    assert_eq!(verification["official_status"], "not_established");
 
     let cached_policy = mvm_core::config::mvm_cache_dir_at(home.path())
         .join("registry-packs")
         .join(digest)
         .join("payload/pack/group.toml");
-    std::fs::write(cached_policy, b"tampered").expect("tamper installed policy");
+    std::fs::write(&cached_policy, b"tampered").expect("tamper installed policy");
     let refused = mvmctl_isolated(home.path())
         .args(["pack", "info", "runtime/go"])
         .output()
         .expect("inspect tampered pack");
     assert!(!refused.status.success());
     assert!(!String::from_utf8_lossy(&refused.stdout).contains("Publisher issuer:"));
+
+    let refused_verify = mvmctl_isolated(home.path())
+        .args(["pack", "verify", "runtime/go"])
+        .output()
+        .expect("verify tampered pack");
+    assert!(!refused_verify.status.success());
+    assert!(!String::from_utf8_lossy(&refused_verify.stdout).contains("Verified runtime/go"));
+
+    std::fs::write(cached_policy, policy).expect("restore signed policy");
+    let cached_bundle = mvm_core::config::mvm_cache_dir_at(home.path())
+        .join("registry-packs")
+        .join(digest)
+        .join("manifest.sigstore.json");
+    std::fs::write(&cached_bundle, b"invalid signature bundle").expect("tamper installed bundle");
+    let refused_signature = mvmctl_isolated(home.path())
+        .args(["pack", "verify", "runtime/go"])
+        .output()
+        .expect("verify invalid signature");
+    assert!(!refused_signature.status.success());
+    assert!(!String::from_utf8_lossy(&refused_signature.stdout).contains("Signer identity:"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::write(
+            cached_bundle,
+            include_bytes!(
+                "../crates/mvm-cli/tests/fixtures/signed-registry-go/manifest.sigstore.json"
+            ),
+        )
+        .expect("restore signed bundle");
+        let revocation_dir = home.path().join("registry/revocations");
+        std::fs::create_dir_all(&revocation_dir).expect("revocation directory");
+        std::fs::set_permissions(&revocation_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("private revocation directory");
+        let trust_path = revocation_dir.join("trust.toml");
+        std::fs::write(
+            &trust_path,
+            "schema_version = 1\nissuer = 'independent release issuer'\naccepted_identities = ['independent release identity']\n",
+        )
+        .expect("revocation trust");
+        std::fs::set_permissions(&trust_path, std::fs::Permissions::from_mode(0o600))
+            .expect("private revocation trust");
+        let refused_missing_feed = mvmctl_isolated(home.path())
+            .args(["pack", "verify", "runtime/go"])
+            .output()
+            .expect("verify without configured revocation feed");
+        assert!(!refused_missing_feed.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused_missing_feed.stderr).contains("revocation"),
+            "{}",
+            String::from_utf8_lossy(&refused_missing_feed.stderr)
+        );
+        assert!(
+            !String::from_utf8_lossy(&refused_missing_feed.stdout).contains("Signer identity:")
+        );
+    }
 }
 
 #[test]
