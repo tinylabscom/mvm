@@ -597,21 +597,11 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     crate::commands::vm::exec::detect::refuse_machine_run_flag_after_double_dash(&args.run.argv)?;
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
-    // Fail prepared-only OCI launches before policy discovery, source
-    // inference, or admission does unrelated work. This is deliberately a
-    // duplicate cache read: the later resolver still owns the artifacts it
-    // returns, while this guard keeps a cache miss inside the same sub-300ms
-    // contract as a successful warm claim.
-    if !args.run.dry_run
-        && let Some(image) = args.run.image.as_deref()
-    {
-        crate::commands::image::resolve_or_pull_run_image(
-            &crate::commands::image::oci_cache_root(),
-            image,
-            args.run.prod,
-        )?;
-        crate::commands::env::builder_vm::ensure_workload_kernel()?;
-    }
+    // Syntax, policy, terminal, dry-run, and host-capability refusals must be
+    // decided before launch artifacts are consulted. The actual exec path
+    // resolves OCI artifacts and the workload kernel cache-only while carrying
+    // `startup_started`, so a real launch miss remains inside the same budget
+    // without masking an earlier, more specific refusal.
     // Settle the boot source before `resolve_mode` decides whether one is
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer
     // identically or not at all.
