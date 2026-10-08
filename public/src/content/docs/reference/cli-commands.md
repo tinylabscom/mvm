@@ -206,6 +206,30 @@ removes the installed `mvmctl` and its host binaries too.
 
 ### Inspection / registry (`mvmctl manifest *`)
 
+`ls`, `info`, and `verify` share their operations with the
+`mvm_client::manifest` library facade. The host library exposes the same
+operations as `manifest.list`, `manifest.info`, and `manifest.verify` (ABI
+1.7), with generated request/reply types and method constants for the Python
+and TypeScript SDK bindings. These inspect the local registry without booting
+a machine. Listing supports repeated `--tag` filters: a slot must have every
+requested tag. `info` keeps snapshot lookup best-effort; a missing snapshot
+does not make the persisted manifest unavailable. `verify` checks artifact
+checksums, not publisher trust: `--check-signature` remains explicitly refused.
+Persisted names and revision metadata are validated before resolving paths:
+invalid template names contribute no tags, and invalid snapshot references
+produce no snapshot. Verification refuses artifact paths that escape the
+selected revision rather than checking unrelated host files.
+
+The SDK adapters call these host-library operations in-process:
+`mvm.manifest.list()`, `mvm.manifest.info(path)`, and
+`mvm.manifest.verify(path)` in Python; `manifest.list()`,
+`manifest.info(path)`, and `manifest.verify(path)` from `@runmvm/mvm` in
+TypeScript. Listing takes `orphans` and `tags` options in both languages.
+An omitted inspection or verification path uses the same cwd discovery as
+the CLI. Verification takes `revision` and `check_signature` keyword arguments
+in Python, or `revision` and `checkSignature` in the TypeScript options object.
+The signature option is forwarded to the shared refusal, never ignored.
+
 | Command                                             | Description                                                                           |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `mvmctl manifest ls [--json]`                       | List built slots — manifest path, last-built timestamp, optional `name`               |
