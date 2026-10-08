@@ -3129,8 +3129,10 @@ mod tests {
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).expect("mkdir");
         std::fs::write(data.join("rows.csv"), b"a,b\n1,2\n").expect("write");
-
-        let digest = mvm_fs::hash::hash_source(&data).expect("hash admitted tree");
+        let image = tmp.path().join("mount.ext4");
+        std::fs::write(&image, b"frozen image bytes").expect("write image");
+        let digest =
+            mvm_core::crypto::image_verify::sha256_file(&image).expect("hash admitted image");
         let grant = mvm_core::plan::HostShareGrant {
             tag: "uvol0".into(),
             host_path: data.to_string_lossy().into_owned(),
@@ -3148,11 +3150,11 @@ mod tests {
             host: host.into(),
             guest: "/data".into(),
             read_only: true,
-            materialized_image: Some("/state/mount-0.ext4".into()),
+            materialized_image: Some(image.display().to_string()),
             ..Default::default()
         };
 
-        // Unchanged tree: the admitted identity still matches.
+        // Unchanged frozen image: the admitted identity still matches.
         enforce_admitted_shares(
             std::slice::from_ref(&volume(&plan.shares[0].host_path)),
             &plan,
@@ -3161,12 +3163,12 @@ mod tests {
 
         // A byte flips between admission and attach: refused, and the error
         // names both identities.
-        std::fs::write(data.join("rows.csv"), b"a,b\n1,TAMPERED\n").expect("tamper");
+        std::fs::write(&image, b"tampered frozen image").expect("tamper");
         let err = enforce_admitted_shares(
             std::slice::from_ref(&volume(&plan.shares[0].host_path)),
             &plan,
         )
-        .expect_err("a changed tree must not attach under the admitted identity");
+        .expect_err("a changed image must not attach under the admitted identity");
         let msg = format!("{err:#}");
         assert!(
             msg.contains(&digest),

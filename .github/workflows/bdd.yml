@@ -101,7 +101,7 @@ jobs:
     env:
       FC_VERSION: v1.17.0
       MVM_KERNEL_SOURCE: download
-      MVM_BDD_GUEST_BIN_DIR: ${{ github.workspace }}/dist
+      MVM_BDD_GUEST_BIN_DIR: ${{ github.workspace }}/dist/staged
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/free-disk
@@ -137,6 +137,10 @@ jobs:
       - name: Prepare the pinned workload kernel
         run: just kernel::workload
       - name: Build the pinned guest binaries
-        run: cargo run --locked -p mvmctl -- build guest-bins --out dist
+        run: |
+          cargo run --locked -p mvmctl -- build guest-bins --out dist
+          mkdir -p dist/extracted dist/staged
+          tar -xzf dist/mvm-guest-bins-v*.tar.gz -C dist/extracted
+          cp dist/extracted/x86_64/bin/mvm-* dist/staged/
       - name: Run the PS-11 live witness
         run: just bdd::live-ci ps11_live
