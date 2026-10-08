@@ -391,7 +391,7 @@ with no other config flags — a matching config reuses the running machine.
 `--name`). Reconnect with that name:
 
 ```bash
-mvmctl machine ls                 # list persisted machines
+mvmctl machine ps                 # list persisted machines
 mvmctl machine shell <N>          # interactive shell (dev)
 mvmctl machine exec  <N> -- <cmd>   # one-shot command
 mvmctl machine stop  <N>          # tear it down (prompts; add --yes to skip)

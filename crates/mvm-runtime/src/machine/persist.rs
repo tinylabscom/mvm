@@ -207,7 +207,7 @@ pub fn load_machine_spec(name: &str) -> Result<MachineSpec> {
         // through a raw `No such file or directory`.
         bail!(
             "machine {name:?} does not exist. \
-             Run `mvmctl machine ls` to list machines, \
+             Run `mvmctl machine ps` to list machines, \
              or `mvmctl machine create {name} --image <ref>` to create one."
         );
     }
@@ -760,7 +760,7 @@ mod tests {
         let err = load_machine_spec("nonexistent").expect_err("missing machine");
         let msg = err.to_string();
         assert!(msg.contains("does not exist"), "message: {msg}");
-        assert!(msg.contains("mvmctl machine ls"), "hints ls: {msg}");
+        assert!(msg.contains("mvmctl machine ps"), "hints ps: {msg}");
         assert!(msg.contains("mvmctl machine create"), "hints create: {msg}");
     }
 

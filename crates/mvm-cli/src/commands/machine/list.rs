@@ -1,4 +1,4 @@
-//! `mvmctl machine ls` — the single listing of every microVM on the host.
+//! `mvmctl machine ps` — the single listing of every microVM on the host.
 //!
 //! The spec×live join, the typed record, and the visibility semantics all
 //! live in the shared inventory service (`mvm_client::inventory`), so this

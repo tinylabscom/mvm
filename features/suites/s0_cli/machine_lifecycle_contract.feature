@@ -58,7 +58,7 @@ Feature: machine lifecycle request contract
     When I run mvmctl with "machine rm --yes ghost" and an isolated mvm home
     Then the command exits with code 1
     And the error output contains "does not exist"
-    And the error output contains "machine ls"
+    And the error output contains "machine ps"
 
   # The error names the command that would fix it, which is the difference
   # between a dead end and a next step.
