@@ -219,10 +219,19 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 // and emits `PackCacheChange`; `prune` removes bytes so it reuses
 // `CachePrune`. `download`/`update` refuse for every class — no pack is
 // published — so they change nothing and have nothing to record.
+const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
+    "update",
+    AuditPosture::Emits("RegistryPackRevocationUpdate"),
+)];
+
 const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("update", AuditPosture::ReadOnly),
+    (
+        "revocations",
+        AuditPosture::DelegatesToSub(PACK_REGISTRY_REVOCATIONS_SUB),
+    ),
 ];
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
@@ -936,6 +945,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // pin; `pack registry rm` records the pin and entry it dropped.
         "RegistryPackPin",
         "RegistryPackRemove",
+        "RegistryPackRevocationUpdate",
         // Secret-service entries: the recorder emits `secret.<action>`
         // for the action the service names, and a consent run names
         // `oauth_login` whatever its outcome.

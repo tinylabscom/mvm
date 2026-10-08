@@ -259,6 +259,24 @@ identity signed the pack. A signature proves publisher identity and integrity,
 not safety. These commands do not assess whether a pack's policy is suitable
 for a particular invocation.
 
+An operator may additionally configure a separately controlled revocation
+release identity in `$MVM_HOME/registry/revocations/trust.toml`. The file has
+`schema_version = 1`, an `issuer` string, and an `accepted_identities` array of exact release-workflow
+identities; the release identity must differ from the pack's authenticated
+signer. The file must be owned by the user running MVM, readable only by that
+user (mode `0600` or stricter), and its directory must be private (mode `0700`
+or stricter). When this file exists, pull, installed-pack verification, and host
+admission require a fresh signed feed in the private revocation cache and
+reject a revoked signer or manifest digest. A missing, expired, corrupt, or
+rolled-back feed fails closed. Removing the trust file returns to the legacy
+publisher-only behavior. After obtaining the signed JSON document and its
+signature bundle through an operator-controlled channel, run
+`mvmctl pack registry revocations update --document ./revocations.json
+--bundle ./revocations.sigstore.json`. The command verifies the exact
+document bytes under `trust.toml` before advancing the durable checkpoint.
+There is no built-in revocation identity or automatic feed fetch yet. This
+operator path does not confer official status on a pack.
+
 `pull` downloads the manifest, the bundle and each declared file, verifies the
 signature against the publisher trust policy, checks every file against the
 manifest, installs the pack content-addressed under `$MVM_HOME/cache/registry-packs/`,

@@ -7,10 +7,14 @@
 //! the facade through temp directories.
 
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 use thiserror::Error;
 
+use crate::packs::KeylessTrust;
 use crate::registry_pack::{
     InstalledRegistryPack, PackAdoption, PackLockfile, PackPin, PackReference, RegistryPackError,
     RegistryPackInstallError, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
@@ -18,6 +22,14 @@ use crate::registry_pack::{
     adopt_registry_pack_with, default_signature_checker, install_registry_pack_at,
     verify_registry_pack_contents, verify_registry_pack_with,
 };
+use crate::registry_pack_revocation::{
+    RegistryPackRevocationCheckpoint, RegistryPackRevocationError, VerifiedRegistryPackRevocations,
+};
+use crate::registry_pack_revocation_store::{
+    RegistryPackRevocationStore, RegistryPackRevocationStoreError,
+};
+
+const REVOCATION_TRUST_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Error)]
 pub enum RegistryPackStoreError {
@@ -39,6 +51,242 @@ pub enum RegistryPackStoreError {
     Verification(#[from] RegistryPackVerificationError),
     #[error(transparent)]
     Install(#[from] RegistryPackInstallError),
+    #[error("registry-pack revocation trust at {path} is invalid: {reason}")]
+    RevocationTrust { path: String, reason: String },
+    #[error("registry-pack revocation trust is not configured at {path}")]
+    MissingRevocationTrust { path: String },
+    #[error(transparent)]
+    RevocationStore(#[from] RegistryPackRevocationStoreError),
+    #[error(transparent)]
+    Revoked(#[from] RegistryPackRevocationError),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RevocationTrustFile {
+    schema_version: u32,
+    issuer: String,
+    accepted_identities: Vec<String>,
+}
+
+/// Check a signed pack against the operator's independently trusted cached
+/// revocation feed when one is configured. An enabled but missing or stale
+/// feed is an error. No built-in release identity is assumed here.
+pub fn check_registry_pack_revocations_if_configured(
+    verified: &VerifiedRegistryPack,
+) -> Result<(), RegistryPackStoreError> {
+    let trust_path = crate::config::registry_pack_revocation_trust_path();
+    let store = RegistryPackRevocationStore::in_mvm_home();
+    check_registry_pack_revocations_at(verified, &trust_path, &store, Utc::now())
+}
+
+/// Verify a locally supplied signed feed under an explicit operator release
+/// identity and persist its rollback checkpoint before the feed bytes.
+pub fn update_registry_pack_revocations(
+    document: &[u8],
+    bundle: &[u8],
+) -> Result<RegistryPackRevocationCheckpoint, RegistryPackStoreError> {
+    let trust_path = crate::config::registry_pack_revocation_trust_path();
+    let store = RegistryPackRevocationStore::in_mvm_home();
+    let checkpoint =
+        update_registry_pack_revocations_at(document, bundle, &trust_path, &store, Utc::now())?;
+    crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRevocationUpdate)
+        .detail(format!(
+            "sequence={} sha256={}",
+            checkpoint.sequence,
+            checkpoint.sha256.as_str()
+        ))
+        .emit();
+    Ok(checkpoint)
+}
+
+fn update_registry_pack_revocations_at(
+    document: &[u8],
+    bundle: &[u8],
+    trust_path: &Path,
+    store: &RegistryPackRevocationStore,
+    now: DateTime<Utc>,
+) -> Result<RegistryPackRevocationCheckpoint, RegistryPackStoreError> {
+    let trust = load_revocation_trust(trust_path)?.ok_or_else(|| {
+        RegistryPackStoreError::MissingRevocationTrust {
+            path: trust_path.display().to_string(),
+        }
+    })?;
+    store
+        .update(document, bundle, &trust, now)
+        .map_err(RegistryPackStoreError::from)
+}
+
+fn check_registry_pack_revocations_at(
+    verified: &VerifiedRegistryPack,
+    trust_path: &Path,
+    store: &RegistryPackRevocationStore,
+    now: DateTime<Utc>,
+) -> Result<(), RegistryPackStoreError> {
+    check_registry_pack_revocations_with(verified, trust_path, now, |trust, at| {
+        store.load(trust, at).map_err(RegistryPackStoreError::from)
+    })
+}
+
+fn check_registry_pack_revocations_with<F>(
+    verified: &VerifiedRegistryPack,
+    trust_path: &Path,
+    now: DateTime<Utc>,
+    load: F,
+) -> Result<(), RegistryPackStoreError>
+where
+    F: FnOnce(
+        &KeylessTrust,
+        DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
+{
+    let Some(trust) = load_revocation_trust(trust_path)? else {
+        return Ok(());
+    };
+    if trust
+        .accepted_identities
+        .iter()
+        .any(|identity| identity == &verified.signer().identity)
+    {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: trust_path.display().to_string(),
+            reason: "release identity must differ from the pack signer".to_string(),
+        });
+    }
+    let feed = load(&trust, now)?;
+    feed.check_verified_pack_at(verified, now)?;
+    Ok(())
+}
+
+fn load_revocation_trust(path: &Path) -> Result<Option<KeylessTrust>, RegistryPackStoreError> {
+    let observed = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(io_at(path)(error)),
+    };
+    if !observed.file_type().is_file() || observed.len() > 64 * 1024 {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: "trust file must be a regular file no larger than 64 KiB".to_string(),
+        });
+    }
+    if cfg!(not(unix)) {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: "private trust files require Unix permissions".to_string(),
+        });
+    }
+    let mut file = open_revocation_trust_no_follow(path)?;
+    let metadata = file.metadata().map_err(io_at(path))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let mode = crate::private_fs::mode_bits(path, &metadata).map_err(io_at(path))?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| RegistryPackStoreError::RevocationTrust {
+                path: path.display().to_string(),
+                reason: "trust file has no parent directory".to_string(),
+            })?;
+        let parent_metadata = std::fs::symlink_metadata(parent).map_err(io_at(parent))?;
+        let parent_mode =
+            crate::private_fs::mode_bits(parent, &parent_metadata).map_err(io_at(parent))?;
+        if !parent_metadata.is_dir()
+            || parent_metadata.file_type().is_symlink()
+            || parent_mode & 0o077 != 0
+            || !metadata.is_file()
+            || metadata.uid() != parent_metadata.uid()
+            || mode & 0o077 != 0
+            || observed.dev() != metadata.dev()
+            || observed.ino() != metadata.ino()
+        {
+            return Err(RegistryPackStoreError::RevocationTrust {
+                path: path.display().to_string(),
+                reason: "trust file and directory must be private, same-owner, and unchanged while opening"
+                    .to_string(),
+            });
+        }
+    }
+    if metadata.len() > 64 * 1024 {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: "trust file exceeds 64 KiB".to_string(),
+        });
+    }
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(io_at(path))?;
+    if bytes.len() > 64 * 1024 {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: "trust file exceeds 64 KiB".to_string(),
+        });
+    }
+    let text =
+        String::from_utf8(bytes).map_err(|error| RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    let parsed: RevocationTrustFile =
+        toml::from_str(&text).map_err(|error| RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    let valid = |value: &str| {
+        !value.trim().is_empty() && !value.bytes().any(|byte| byte.is_ascii_control())
+    };
+    if parsed.schema_version != REVOCATION_TRUST_SCHEMA_VERSION {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: format!("unsupported schema version {}", parsed.schema_version),
+        });
+    }
+    if !valid(&parsed.issuer)
+        || parsed.accepted_identities.is_empty()
+        || parsed.accepted_identities.iter().any(|value| !valid(value))
+        || parsed
+            .accepted_identities
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != parsed.accepted_identities.len()
+    {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: path.display().to_string(),
+            reason: "issuer and unique, nonempty accepted identities are required".to_string(),
+        });
+    }
+    Ok(Some(KeylessTrust {
+        accepted_identities: parsed.accepted_identities,
+        issuer: parsed.issuer,
+    }))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn open_revocation_trust_no_follow(path: &Path) -> Result<std::fs::File, RegistryPackStoreError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    #[cfg(target_os = "linux")]
+    let no_follow = libc::O_NOFOLLOW;
+    #[cfg(target_os = "macos")]
+    // macOS defines O_NOFOLLOW as 0x100 in the host fcntl ABI.
+    let no_follow = 0x0000_0100;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(no_follow)
+        .open(path)
+        .map_err(io_at(path))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn open_revocation_trust_no_follow(path: &Path) -> Result<std::fs::File, RegistryPackStoreError> {
+    Err(RegistryPackStoreError::RevocationTrust {
+        path: path.display().to_string(),
+        reason: "no-follow private trust files are unsupported on this host".to_string(),
+    })
 }
 
 fn io_at(path: &Path) -> impl Fn(std::io::Error) -> RegistryPackStoreError + '_ {
@@ -235,6 +483,7 @@ pub(crate) fn adopt_install_and_pin_with(
 ) -> Result<InstalledRegistryPack, RegistryPackStoreError> {
     let lock = load_pack_lockfile(lock_path)?;
     let verified = adopt_registry_pack_with(adoption, check_signature)?;
+    check_registry_pack_revocations_if_configured(&verified)?;
     let installed = install_registry_pack_at(cache_root, staged_root, &verified)?;
     let pin = PackPin::new(
         verified.manifest().reference.clone(),
@@ -331,6 +580,7 @@ pub(crate) fn open_installed_registry_pack_with(
     );
     let verified = verify_registry_pack_with(&verification, check_signature)?;
     verify_registry_pack_contents(&verified, &installed.payload_root())?;
+    check_registry_pack_revocations_if_configured(&verified)?;
     Ok((installed, verified))
 }
 
@@ -449,6 +699,8 @@ mod tests {
         PackAdoption, REGISTRY_PACK_MANIFEST_SCHEMA_VERSION, RegistryPackFile,
         RegistryPackManifest, RegistryPackPublisher,
     };
+    #[cfg(unix)]
+    use chrono::TimeZone;
 
     const PROFILE: &[u8] = b"[tools]\nallow = [\"git\"]\n";
     const GROUP: &[u8] = b"[network]\nallow = [\"pypi.org:443\"]\n";
@@ -572,6 +824,245 @@ mod tests {
             signature_bundle: b"test bundle",
             publisher_policy: policy,
         }
+    }
+
+    fn verified_for_revocation_test() -> VerifiedRegistryPack {
+        let requested = reference("runtime/python@1.2.3");
+        let manifest = manifest_bytes("runtime/python@1.2.3");
+        let policy = publisher_policy();
+        adopt_registry_pack_with(&adoption(&requested, &manifest, &policy), accept)
+            .expect("signed test pack")
+    }
+
+    #[cfg(unix)]
+    fn write_trust(path: &Path, contents: &str) {
+        crate::private_fs::set_mode(path.parent().expect("trust parent"), 0o700)
+            .expect("private trust directory");
+        std::fs::write(path, contents).expect("write trust");
+        crate::private_fs::set_mode(path, 0o600).expect("private trust mode");
+    }
+
+    #[cfg(unix)]
+    fn check_signed_test_document(
+        verified: &VerifiedRegistryPack,
+        trust_path: &Path,
+        day: u32,
+        revoked_identities: Vec<String>,
+        revoked_manifests: Vec<String>,
+    ) -> Result<(), RegistryPackStoreError> {
+        let now = Utc
+            .with_ymd_and_hms(2026, 10, day, 0, 0, 0)
+            .single()
+            .expect("valid test time");
+        let document = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "sequence": 1,
+            "issued_at": "2026-10-06T00:00:00Z",
+            "not_after": "2026-10-08T00:00:00Z",
+            "revoked_identities": revoked_identities,
+            "revoked_manifests": revoked_manifests,
+        }))
+        .expect("test document");
+        check_registry_pack_revocations_with(verified, trust_path, now, |trust, at| {
+            crate::registry_pack_revocation::verify_registry_pack_revocations_with(
+                &document,
+                b"signed",
+                trust,
+                at,
+                None,
+                |_, _, _| Ok(()),
+            )
+            .map_err(RegistryPackStoreError::Revoked)
+        })
+    }
+
+    #[test]
+    fn revocation_enforcement_is_disabled_without_operator_trust() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        check_registry_pack_revocations_at(
+            &verified_for_revocation_test(),
+            &home.path().join("missing.toml"),
+            &store,
+            Utc::now(),
+        )
+        .expect("legacy trust remains available");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_revocation_trust_requires_a_cached_feed() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let trust_path = home.path().join("trust.toml");
+        write_trust(
+            &trust_path,
+            "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        );
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        assert!(matches!(
+            check_registry_pack_revocations_at(
+                &verified_for_revocation_test(),
+                &trust_path,
+                &store,
+                Utc::now(),
+            ),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Missing
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_revocations_gate_authenticated_signer_digest_and_expiry() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let trust_path = home.path().join("trust.toml");
+        write_trust(
+            &trust_path,
+            "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        );
+        let verified = verified_for_revocation_test();
+        check_signed_test_document(&verified, &trust_path, 7, vec![], vec![])
+            .expect("valid pack and feed");
+        assert!(matches!(
+            check_signed_test_document(
+                &verified,
+                &trust_path,
+                7,
+                vec![verified.signer().identity.clone()],
+                vec![],
+            ),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::RevokedIdentity { .. }
+            ))
+        ));
+        assert!(matches!(
+            check_signed_test_document(
+                &verified,
+                &trust_path,
+                7,
+                vec![],
+                vec![verified.manifest_sha256().as_str().to_string()],
+            ),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::RevokedManifest { .. }
+            ))
+        ));
+        assert!(matches!(
+            check_signed_test_document(&verified, &trust_path, 8, vec![], vec![]),
+            Err(RegistryPackStoreError::Revoked(
+                RegistryPackRevocationError::Expired
+            ))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn malformed_or_same_signer_revocation_trust_is_refused() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let trust_path = home.path().join("trust.toml");
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        write_trust(&trust_path, "accepted_identities = []\n");
+        assert!(matches!(
+            check_registry_pack_revocations_at(
+                &verified_for_revocation_test(),
+                &trust_path,
+                &store,
+                Utc::now(),
+            ),
+            Err(RegistryPackStoreError::RevocationTrust { .. })
+        ));
+        write_trust(
+            &trust_path,
+            "schema_version = 2\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        );
+        assert!(matches!(
+            load_revocation_trust(&trust_path),
+            Err(RegistryPackStoreError::RevocationTrust { .. })
+        ));
+        write_trust(
+            &trust_path,
+            &format!(
+                "schema_version = 1\nissuer = '{}'\naccepted_identities = ['{}']\n",
+                crate::registry_pack::OFFICIAL_PACK_SIGNING_ISSUER,
+                crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+            ),
+        );
+        assert!(matches!(
+            check_registry_pack_revocations_at(
+                &verified_for_revocation_test(),
+                &trust_path,
+                &store,
+                Utc::now(),
+            ),
+            Err(RegistryPackStoreError::RevocationTrust { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn loose_or_symlinked_revocation_trust_is_refused() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let trust_path = home.path().join("trust.toml");
+        write_trust(
+            &trust_path,
+            "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        );
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(open_revocation_trust_no_follow(&trust_path).is_ok());
+        crate::private_fs::set_mode(&trust_path, 0o666).expect("loose mode");
+        assert!(matches!(
+            load_revocation_trust(&trust_path),
+            Err(RegistryPackStoreError::RevocationTrust { .. })
+        ));
+        let link = home.path().join("linked.toml");
+        std::os::unix::fs::symlink(&trust_path, &link).expect("link");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(open_revocation_trust_no_follow(&link).is_err());
+        assert!(matches!(
+            load_revocation_trust(&link),
+            Err(RegistryPackStoreError::RevocationTrust { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revocation_feed_update_requires_explicit_trust_and_valid_signature() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let trust_path = home.path().join("trust.toml");
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        assert!(matches!(
+            update_registry_pack_revocations_at(b"{}", b"bad", &trust_path, &store, Utc::now(),),
+            Err(RegistryPackStoreError::MissingRevocationTrust { .. })
+        ));
+        write_trust(
+            &trust_path,
+            "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        );
+        assert!(matches!(
+            update_registry_pack_revocations_at(b"{}", b"bad", &trust_path, &store, Utc::now(),),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Verification(
+                    RegistryPackRevocationError::SignatureInvalid(_)
+                )
+            ))
+        ));
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn configured_revocation_trust_is_refused_without_private_permissions() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let path = home.path().join("trust.toml");
+        std::fs::write(
+            &path,
+            "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        )
+        .expect("write trust");
+        assert!(matches!(
+            load_revocation_trust(&path),
+            Err(RegistryPackStoreError::RevocationTrust { .. })
+        ));
     }
 
     #[test]
