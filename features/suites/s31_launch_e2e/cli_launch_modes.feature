@@ -14,6 +14,8 @@ Feature: every README-documented CLI launch mode boots a real guest
 
   Background:
     Given an artifact-warm mvm home
+    And the documented launch images are prepared
+    And an Alpine warm parent is ready
 
   @live
   Scenario: a transient run boots an OCI image and runs one command
@@ -53,12 +55,24 @@ Feature: every README-documented CLI launch mode boots a real guest
     And the guest printed "console-ok"
     And the guest control plane came up
 
+  # Interactive commands use the image's PATH just like ordinary exec. This
+  # exact Docker-style invocation used to fail because the console transport
+  # accepted only an absolute argv[0], despite every other transport accepting
+  # a bare executable name.
+  @live
+  Scenario: an interactive run resolves a bare command from the image path
+    When I launch "machine run --image alpine -it -- ls /" on a terminal
+    Then the launch succeeds
+    And the guest printed "bin"
+    And the guest control plane came up
+
   # A host-directory mount used to route an otherwise absolute PTY command
   # through `/bin/sh -lc`. The image's `/etc/profile` then replaced its OCI
   # PATH before bash started, hiding tools such as Rust's cargo even though the
   # binaries were present in the rootfs.
   @live @dir_share
   Scenario: an interactive mounted run preserves the image environment
+    Given a Rust warm parent is ready
     When I launch "machine run --image rust --env NAME=ari --mount ./examples/python/hello-app:/work -it -- /bin/bash -c 'tty; command -v cargo; printf NAME=%s $NAME; test -f /work/README.md'" on a terminal
     Then the launch succeeds
     And the guest console is a pseudo-terminal
@@ -76,6 +90,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # both failed, the mount and the PTY were a red herring.
   @live
   Scenario: an image's declared environment reaches a plain run
+    Given a Rust warm parent is ready
     When I launch "machine run --image rust -- /bin/bash -c 'command -v cargo'"
     Then the launch succeeds
     And the guest printed "/usr/local/cargo/bin/cargo"
@@ -127,6 +142,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # the image the documentation actually puts in front of a first-time reader.
   @live
   Scenario: the documented python image runs a one-liner
+    Given a Python warm parent is ready
     When I launch "machine run --image python:3.12 -- python -c 'print(2 + 2)'"
     Then the launch succeeds
     And the guest printed "4"
@@ -229,6 +245,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # which is what made the defect visible in the first place.
   @live
   Scenario: --cpus is honoured on a real boot
+    Given an Alpine warm parent with 2 CPUs and 512M memory is ready
     When I launch "machine run --image alpine --cpus 2 --memory 512M -- sh -c 'echo $(nproc)/$(grep -c ^processor /proc/cpuinfo)'"
     Then the launch succeeds
     And the guest printed exactly "2/2"
@@ -236,6 +253,7 @@ Feature: every README-documented CLI launch mode boots a real guest
 
   @live
   Scenario: a single-vCPU launch with explicit memory boots
+    Given an Alpine warm parent with 1 CPUs and 512M memory is ready
     When I launch "machine run --image alpine --cpus 1 --memory 512M -- sh -c 'echo $(nproc)/$(grep -c ^processor /proc/cpuinfo)'"
     Then the launch succeeds
     And the guest printed exactly "1/1"
@@ -258,6 +276,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # rather than what it happens to be here.
   @live
   Scenario: a vCPU request beyond the backend ceiling is clamped and reported
+    Given an Alpine warm parent with 9999 CPUs and 512M memory is ready
     When I launch "machine run --image alpine --cpus 9999 -- sh -c 'echo clamped-and-booted'"
     Then the launch succeeds
     And the output mentions "supports at most"
@@ -277,6 +296,7 @@ Feature: every README-documented CLI launch mode boots a real guest
   # default" without pinning a number that drifts.
   @live
   Scenario: --memory is honoured on a real boot
+    Given an Alpine warm parent with 2 CPUs and 1024M memory is ready
     When I launch "machine run --image alpine --memory 1024M -- sh -c 'M=$(grep MemTotal /proc/meminfo | tr -cd 0-9); [ $M -gt 819200 ] && echo mem-ok || echo mem-only-$M'"
     Then the launch succeeds
     And the guest printed exactly "mem-ok"

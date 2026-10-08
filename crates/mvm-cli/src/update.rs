@@ -9,6 +9,8 @@ use mvm_core::release_version::{ReleaseVersion, VersionSyntax};
 use mvm_runtime::shell::run_host;
 
 const GITHUB_REPO: &str = "tinylabscom/mvm";
+const SOURCE_HELPER_RELEASE: &str = "source-builds";
+const SOURCE_HELPER_BASE_URL_ENV: &str = "MVM_SOURCE_HELPER_BASE_URL";
 const RELEASE_HOST_BINS: &[&str] = &[
     "mvm-hvf-supervisor",
     "mvm-libkrun-supervisor",
@@ -643,6 +645,152 @@ fn install_release_host_binaries(
     Ok(())
 }
 
+/// Install the signed release's host helpers beside a source-built `mvmctl`
+/// without replacing the CLI itself.
+pub(crate) fn prepare_release_host_binaries() -> Result<()> {
+    let current_exe = std::env::current_exe().context("resolve the running mvmctl")?;
+    let install_dir = current_exe
+        .parent()
+        .context("the running mvmctl has no parent directory")?;
+    anyhow::ensure!(
+        is_writable(install_dir),
+        "cannot install published host helpers beside {}",
+        current_exe.display()
+    );
+    let target = detect_target()?;
+    let tmp = tempfile::tempdir().context("create host-helper download directory")?;
+    if let Some(commit) = source_helper_commit()? {
+        return prepare_source_host_binaries(&commit, target, install_dir, tmp.path());
+    }
+    let tag = format!("v{}", current_version());
+    download_release(&tag, target, tmp.path())?;
+    let archive_name = format!("mvmctl-{target}.tar.gz");
+    let archive_path = tmp.path().join(&archive_name);
+    verify_signature(&tag, &archive_name, &archive_path)?;
+    let output = run_host(
+        "tar",
+        &[
+            "xzf",
+            archive_path
+                .to_str()
+                .expect("archive path must be valid UTF-8"),
+            "-C",
+            tmp.path()
+                .to_str()
+                .expect("temporary path must be valid UTF-8"),
+        ],
+    )?;
+    anyhow::ensure!(output.status.success(), "failed to extract host helpers");
+    let extracted = tmp.path().join(format!("mvmctl-{target}"));
+    install_release_host_binaries(&extracted, install_dir, false)?;
+    sign_installed_binaries(cfg!(target_os = "macos"), || {
+        let targets = mvm_runtime::codesign::collect_sign_targets();
+        mvm_runtime::codesign::sign_targets(&targets)
+    })?;
+    Ok(())
+}
+
+fn source_helper_commit() -> Result<Option<String>> {
+    if mvm_build::artifact_acquisition::compiled_channel()
+        == mvm_build::artifact_acquisition::DistributionChannel::Release
+    {
+        return Ok(None);
+    }
+    let commit = env!("MVM_SOURCE_COMMIT");
+    let dirty = env!("MVM_SOURCE_DIRTY");
+    validate_source_helper_identity(commit, dirty).map(Some)
+}
+
+fn validate_source_helper_identity(commit: &str, dirty: &str) -> Result<String> {
+    anyhow::ensure!(
+        dirty == "false",
+        "this mvmctl was built from a dirty or unidentified checkout, so no exact remote helper \
+         bundle can match it; \
+         explicitly compile local helpers with \
+         `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
+    );
+    anyhow::ensure!(
+        commit.len() == 40
+            && commit
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "this mvmctl carries no valid source commit; explicitly compile local helpers with \
+         `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
+    );
+    Ok(commit.to_string())
+}
+
+fn prepare_source_host_binaries(
+    commit: &str,
+    target: &str,
+    install_dir: &Path,
+    tmp_dir: &Path,
+) -> Result<()> {
+    let archive_name = format!("mvm-host-helpers-{commit}-{target}.tar.gz");
+    let base_url = std::env::var(SOURCE_HELPER_BASE_URL_ENV).unwrap_or_else(|_| {
+        format!(
+            "{}/{GITHUB_REPO}/releases/download/{SOURCE_HELPER_RELEASE}",
+            github_download_base()
+        )
+    });
+    let archive_path = tmp_dir.join(&archive_name);
+    download_release_asset(&format!("{base_url}/{archive_name}"), &archive_path).with_context(
+        || {
+            format!(
+                "no published host helpers match source commit {commit}; wait for the main-branch \
+                 source-helper workflow or explicitly compile local helpers with \
+                 `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
+            )
+        },
+    )?;
+    mvm_build::release_signature::verify_release_archive_signature(
+        &mvm_build::release_signature::ReleaseSignatureRequest {
+            base_url: &base_url,
+            asset: &archive_name,
+            archive_path: &archive_path,
+            version: commit,
+            train: mvm_build::release_signature::ReleaseTrain::SourceHelpers,
+        },
+    )
+    .context("verify the source helper bundle")?;
+    let output = run_host(
+        "tar",
+        &[
+            "xzf",
+            archive_path
+                .to_str()
+                .expect("archive path must be valid UTF-8"),
+            "-C",
+            tmp_dir
+                .to_str()
+                .expect("temporary path must be valid UTF-8"),
+        ],
+    )?;
+    anyhow::ensure!(
+        output.status.success(),
+        "failed to extract source host helpers"
+    );
+    let extracted = tmp_dir.join(format!("mvm-host-helpers-{commit}-{target}"));
+    validate_source_helper_bundle(&extracted, commit)?;
+    install_release_host_binaries(&extracted, install_dir, false)?;
+    sign_installed_binaries(cfg!(target_os = "macos"), || {
+        let targets = mvm_runtime::codesign::collect_sign_targets();
+        mvm_runtime::codesign::sign_targets(&targets)
+    })?;
+    Ok(())
+}
+
+fn validate_source_helper_bundle(extracted: &Path, expected_commit: &str) -> Result<()> {
+    let recorded = std::fs::read_to_string(extracted.join("SOURCE_COMMIT"))
+        .context("source helper bundle has no SOURCE_COMMIT")?;
+    anyhow::ensure!(
+        recorded.trim() == expected_commit,
+        "source helper bundle records commit {}, expected {expected_commit}",
+        recorded.trim()
+    );
+    Ok(())
+}
+
 /// Apply the macOS entitlements immediately after replacing a release binary
 /// and its adjacent supervisors. A successful update must not leave the next
 /// invocation dependent on a lazy first-boot repair.
@@ -992,7 +1140,32 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{UpdateAction, decide_update};
+    use super::{
+        UpdateAction, decide_update, validate_source_helper_bundle, validate_source_helper_identity,
+    };
+
+    #[test]
+    fn source_helper_identity_requires_a_clean_full_commit() {
+        let commit = "a".repeat(40);
+        assert_eq!(
+            validate_source_helper_identity(&commit, "false").unwrap(),
+            commit
+        );
+        assert!(validate_source_helper_identity(&commit, "true").is_err());
+        assert!(validate_source_helper_identity("abc", "false").is_err());
+        assert!(validate_source_helper_identity(&"A".repeat(40), "false").is_err());
+    }
+
+    #[test]
+    fn source_helper_bundle_must_record_the_requested_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commit = "a".repeat(40);
+        assert!(validate_source_helper_bundle(tmp.path(), &commit).is_err());
+
+        std::fs::write(tmp.path().join("SOURCE_COMMIT"), format!("{commit}\n")).unwrap();
+        validate_source_helper_bundle(tmp.path(), &commit).unwrap();
+        assert!(validate_source_helper_bundle(tmp.path(), &"b".repeat(40)).is_err());
+    }
 
     /// The bug, stated as the behaviour: an rc user's latest is the stable
     /// release, because the rc is published as a prerelease and deliberately is

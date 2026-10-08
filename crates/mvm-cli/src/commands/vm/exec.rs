@@ -563,9 +563,19 @@ pub(in crate::commands) fn run_transient(
 /// mutable template pointer would boot the wrong revision.
 pub(in crate::commands) fn run_secure(
     cli: &Cli,
+    args: RunArgs,
+    cfg: &MvmConfig,
+    source_override: Option<crate::exec::ImageSource>,
+) -> Result<()> {
+    run_secure_started(cli, args, cfg, source_override, std::time::Instant::now())
+}
+
+pub(in crate::commands) fn run_secure_started(
+    cli: &Cli,
     mut args: RunArgs,
     cfg: &MvmConfig,
     source_override: Option<crate::exec::ImageSource>,
+    startup_started: std::time::Instant,
 ) -> Result<()> {
     // When an SDK transport mode is requested, peel off the
     // SDK-shaped surface before the sandbox-runner validation kicks
@@ -818,7 +828,8 @@ pub(in crate::commands) fn run_secure(
             &oci_provenance,
         )?);
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let result = crate::exec::run_captured(req, Some(&admit), Some(&posture));
+        let result =
+            crate::exec::run_captured_started(req, Some(&admit), Some(&posture), startup_started);
         let refused = denials.finish_and_summarize(!json_requested);
         let output = outputs.close_run(&admit_ctx, &receipt_backend, posture.get(), result)?;
         if !json_requested && !output.stdout.is_empty() {
@@ -881,6 +892,7 @@ pub(in crate::commands) fn run_secure(
             denials: &denials,
             network: network_access,
             review_source: review_source.as_ref(),
+            startup_started,
         },
     )
 }
@@ -915,6 +927,7 @@ fn parse_transient_mounts(specs: &[String]) -> Result<TransientMounts> {
 /// (the audit emitter lives inside it) and the resolved backend name for the
 /// audit `backend` label.
 struct RunAudit<'a> {
+    startup_started: std::time::Instant,
     admit: Option<&'a crate::exec::SessionAdmit<'a>>,
     ctx: &'a std::cell::RefCell<Option<super::up::AdmissionContext>>,
     backend: &'a str,
@@ -973,7 +986,7 @@ fn run_run_args(
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     // A non-zero exit still means the VM booted and the command ran, so it
     // records as launched; only a failure to run at all records as failed.
-    let result = crate::exec::run(req, audit.admit, Some(&posture));
+    let result = crate::exec::run_started(req, audit.admit, Some(&posture), audit.startup_started);
     let refused = audit.denials.finish_and_summarize(true);
     let exit_code = audit
         .outputs

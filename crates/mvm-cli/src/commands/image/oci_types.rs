@@ -184,6 +184,20 @@ pub(super) struct OciTrustDecision {
 }
 
 impl OciTrustDecision {
+    pub(super) fn local_archive() -> Self {
+        Self {
+            trust_policy: "local-archive-digest-verified".to_string(),
+            verification_status: "content-digest-verified (dev)".to_string(),
+        }
+    }
+
+    pub(super) fn local_rootfs() -> Self {
+        Self {
+            trust_policy: "rootfs-dir-unverified".to_string(),
+            verification_status: "no-provenance (dev)".to_string(),
+        }
+    }
+
     pub(super) fn dev_digest_only(image_ref: &ImageReference) -> Self {
         let trust_policy = if image_ref.is_digest_pinned() {
             "digest-pinned"

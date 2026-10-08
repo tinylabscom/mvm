@@ -8,7 +8,7 @@
 //! A standby is claimable by a launch whose kernel, resources, **rootfs image**
 //! and **guest egress enablement** all match (`StandbyCompat`, exact equality) and whose
 //! shape a shared parent can serve at all (`warm_eligible_launch` — no extra volumes).
-//! Anything else cold-boots. Both halves of
+//! Anything else is refused by the strict startup contract. Both halves of
 //! the pool build that key and that eligibility test through one function each, because
 //! a spawn and a claim that compute them separately are free to disagree, and a
 //! disagreement is invisible: the pool fills and never drains. Multi-kernel keying and
@@ -572,15 +572,10 @@ fn residency_source() -> mvm_core::residency::ResidencySource {
 }
 
 fn warm_launch_mode(
-    source: mvm_core::residency::ResidencySource,
-    require_claim_override: bool,
+    _source: mvm_core::residency::ResidencySource,
+    _require_claim_override: bool,
 ) -> WarmLaunchMode {
-    if require_claim_override || matches!(source, mvm_core::residency::ResidencySource::EnvOverride)
-    {
-        WarmLaunchMode::Required
-    } else {
-        WarmLaunchMode::Optional
-    }
+    WarmLaunchMode::Required
 }
 
 pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Result<WarmResult> {
@@ -978,22 +973,16 @@ fn compat_for_launch(backend: &dyn VmBackend, cfg: &VmStartConfig) -> Result<Sta
 /// read-only image tree and a restored child inherits that device model, so the
 /// compatibility key distinguishes it from a block-backed parent.
 ///
-/// An egress-allowing policy is *not* excluded. `mvm.vsock_egress=1` is a
-/// kernel-cmdline token, and a forked child inherits its parent's cmdline out of
-/// restored memory rather than deriving its own — but the token carries only
-/// whether the guest starts an egress client, never a destination. So the pool
-/// partitions on that boolean instead of refusing the shape:
-/// [`StandbyCompat::vsock_egress`] makes a parent claimable only by launches
-/// whose guest boots the same way, and the destinations a workload may reach are
-/// resolved host-side on the claimed child's own egress endpoint, from that
-/// child's own policy. A shared parent therefore holds nothing per-launch that
-/// could reach the next claim.
+/// Egress-allowing launches stay on the explicitly measured cold path until
+/// `pool warm` can request an egress-enabled parent. The compatibility key
+/// already partitions on that bit, but the current CLI warm command only
+/// creates deny-all parents.
 ///
 /// Materialized directory grants are included in the volume check. The current
 /// factory-parent path has no late attachment operation for their image, so
 /// they remain cold-path-only.
 fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
-    cfg.volumes.is_empty()
+    cfg.volumes.is_empty() && !mvm_vmm::host::egress_shared::effective_vsock_egress(cfg)
 }
 
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
@@ -1015,24 +1004,24 @@ pub fn try_warm_claim(
     user_named: bool,
 ) -> Result<Option<VmId>> {
     if cfg.warm_pool_size == 0 {
+        anyhow::bail!(
+            "strict startup requires a prepared warm standby; warm this image with \
+             `mvmctl pool warm --image <IMAGE>` before launching"
+        );
+    }
+    if user_named {
         return Ok(None);
     }
-    if user_named || !warm_eligible_launch(cfg) {
+    if !warm_eligible_launch(cfg) {
         return Ok(None);
     }
     let Some(tenant) = cfg.tenant_id.clone() else {
-        // No admitted tenant threaded in → not an admitted workload → cold-boot.
         return Ok(None);
     };
     let Some(plan_json) = warm_claim_plan_json(backend.as_vm_backend(), cfg) else {
-        // libkrun claims need a signed envelope for the gateway-bridge
-        // supervisor attach path; without it, cold-boot.
         return Ok(None);
     };
     if !backend.capabilities().standby_pool {
-        if !unsupported_standby_pool_is_fatal(residency_source()) {
-            return Ok(None);
-        }
         return Err(anyhow::Error::new(StandbyError::Unsupported {
             backend: backend.name().to_string(),
         })
@@ -1242,11 +1231,11 @@ mod tests {
     }
 
     #[test]
-    fn try_warm_claim_cold_when_pool_size_zero() {
+    fn try_warm_claim_refuses_when_pool_size_is_zero() {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
-        assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
+        assert!(try_warm_claim(&b, &c, false).is_err());
     }
 
     // ── Auditing a captured factory parent ───────────────────────────────
@@ -1434,30 +1423,25 @@ mod tests {
         );
     }
 
-    /// The other half, and the regression: with no `MVM_RESIDENCY` the warm
-    /// target is the host tier's own default, which a run naming a pool-less
-    /// backend never opted into. It cold-boots instead of failing the launch.
+    /// A backend without standby support cannot satisfy strict startup,
+    /// regardless of how the residency target was selected.
     #[test]
-    fn try_warm_claim_cold_boots_a_host_default_pool_on_an_unsupported_backend() {
+    fn try_warm_claim_refuses_an_unsupported_backend() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.remove("MVM_RESIDENCY");
 
         let backend = AnyBackend::from_hypervisor("qemu");
-        assert_eq!(
-            try_warm_claim(&backend, &eligible_cfg(), false).unwrap(),
-            None,
-            "a default nobody configured must not fail the launch"
-        );
+        assert!(try_warm_claim(&backend, &eligible_cfg(), false).is_err());
     }
 
     #[test]
-    fn try_warm_claim_cold_when_user_named() {
+    fn try_warm_claim_cold_boots_a_user_named_transient() {
         let b = AnyBackend::from_hypervisor("libkrun");
         assert_eq!(try_warm_claim(&b, &eligible_cfg(), true).unwrap(), None);
     }
 
     #[test]
-    fn try_warm_claim_cold_with_materialized_directory_volume() {
+    fn try_warm_claim_cold_boots_an_ineligible_materialized_directory_volume() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
@@ -1529,10 +1513,10 @@ mod tests {
     }
 
     #[test]
-    fn try_warm_claim_cold_without_admitted_plan() {
+    fn try_warm_claim_cold_boots_without_an_admitted_plan() {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
-        c.plan_json = None; // not the gateway-bridge/admitted path → cold-boot
+        c.plan_json = None;
         assert_eq!(try_warm_claim(&b, &c, false).unwrap(), None);
     }
 
@@ -1591,10 +1575,10 @@ mod tests {
     }
 
     #[test]
-    fn a_host_default_warm_launch_may_fall_back_to_cold() {
+    fn a_host_default_warm_launch_refuses_a_cold_fallback() {
         assert_eq!(
             warm_launch_mode(mvm_core::residency::ResidencySource::AutoDetect, false),
-            WarmLaunchMode::Optional
+            WarmLaunchMode::Required
         );
     }
 
@@ -1650,25 +1634,15 @@ mod tests {
         }
     }
 
-    /// The launch shape the pool used to refuse outright now warms and claims
-    /// like any other. It is keyed, not excluded: the guest cmdline carries only
-    /// whether an egress client starts, so a parent can boot that and the
-    /// destinations stay host-side on the child's own endpoint.
-    ///
-    /// The assertion is equality with the baseline eligible launch rather than a
-    /// hard-coded outcome: whatever a default-shaped launch does at each gate, an
-    /// egress-allowing one must do too, so this keeps holding as the gates move.
+    /// Until `pool warm` can request an egress-enabled parent, egress launches
+    /// stay visibly cold rather than requiring a standby no command can create.
     #[test]
-    fn an_egress_allowing_launch_is_warm_eligible_exactly_like_a_deny_all_one() {
+    fn an_egress_allowing_launch_is_not_yet_warm_eligible() {
         use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
 
         let baseline = eligible_cfg();
         assert!(warm_eligible_launch(&baseline));
         let b = AnyBackend::from_hypervisor("libkrun");
-        // The disarmed pool refuses at the capability gate, which sits *after*
-        // the shape gate — so reaching the same verdict as the baseline is what
-        // proves the shape gate no longer short-circuits an egress launch.
-        let baseline_verdict = try_warm_claim(&b, &baseline, false).is_err();
 
         for (why, policy) in [
             (
@@ -1684,12 +1658,8 @@ mod tests {
                 cfg.network_policy.allows_egress(),
                 "{why} must actually allow egress, or this proves nothing"
             );
-            assert!(warm_eligible_launch(&cfg), "{why} must be warm-eligible");
-            assert_eq!(
-                try_warm_claim(&b, &cfg, false).is_err(),
-                baseline_verdict,
-                "{why} must reach the same gate a deny-all launch does"
-            );
+            assert!(!warm_eligible_launch(&cfg), "{why} must stay cold");
+            assert_eq!(try_warm_claim(&b, &cfg, false).unwrap(), None);
         }
     }
 
@@ -2383,7 +2353,7 @@ pub(in crate::commands) enum PoolAction {
     /// image, kernel, verity sidecars, runtime overlay and cmdline tokens — so a
     /// later `mvmctl machine run` with the same image and sizing claims what
     /// this spawned. A launch that differs in image, kernel, vCPUs, memory or
-    /// egress enablement is a different shape and cold-boots. Default count 1.
+    /// egress enablement is refused until that shape is warmed. Default count 1.
     Warm {
         /// How many idle standbys to warm the pool toward (default 1).
         count: Option<u32>,

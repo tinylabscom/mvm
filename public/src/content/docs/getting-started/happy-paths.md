@@ -29,15 +29,19 @@ You have an OCI image reference and want to run one command in a fresh
 microVM without writing a flake or installing host Nix.
 
 ```bash
-mvmctl doctor --workflow cli-run                # preflight
-mvmctl run --image alpine -- uname -a           # pull/cache, boot, run, tear down
-mvmctl image inspect alpine                     # inspect cached provenance
+mvmctl doctor --workflow cli-run                 # preflight
+mvmctl bootstrap                                # prepare shared artifacts
+mvmctl image pull alpine                        # prepare this OCI image
+mvmctl pool warm 1 --image alpine               # prepare its launch shape
+mvmctl run --image alpine -- uname -a            # claim, run, tear down
+mvmctl image inspect alpine                      # inspect cached provenance
 ```
 
-The first run may pull and materialize the image. Subsequent runs reuse the
-cache when the resolved image and policy inputs still match. Production image
-runs should use digest-pinned refs and the existing OCI policy verification
-path.
+`machine run` does not pull or materialize. Preparation is explicit so a
+successful warm-eligible launch remains strictly below 300ms; a cache or
+standby miss fails quickly with the command needed to prepare it. Production
+image runs should use digest-pinned refs and the existing OCI policy
+verification path.
 
 For the higher-level `mvmctl machine` workflow map, see
 [Machine use cases](/guides/machine-use-cases/). For explicit network, volume,

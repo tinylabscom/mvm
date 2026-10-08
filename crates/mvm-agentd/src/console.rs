@@ -875,7 +875,7 @@ fn build_shell_env_with(
 }
 
 fn build_console_argv(argv: &[String]) -> Result<Vec<std::ffi::CString>, ConsoleError> {
-    let effective = if argv.is_empty() {
+    let mut effective = if argv.is_empty() {
         vec!["/bin/sh".to_string(), "-i".to_string()]
     } else {
         argv.to_vec()
@@ -885,12 +885,8 @@ fn build_console_argv(argv: &[String]) -> Result<Vec<std::ffi::CString>, Console
             "argv[0] must not be empty".to_string(),
         ));
     }
-    if !effective[0].starts_with('/') {
-        return Err(ConsoleError::InvalidCommand(format!(
-            "argv[0] must be an absolute path, got {:?}",
-            effective[0]
-        )));
-    }
+    effective[0] = crate::process_rpc::resolve_image_argv0(&effective[0])
+        .map_err(ConsoleError::InvalidCommand)?;
     effective
         .into_iter()
         .map(|arg| {
@@ -1186,10 +1182,18 @@ mod tests {
     }
 
     #[test]
-    fn build_console_argv_rejects_relative_command() {
-        let err = build_console_argv(&["sh".to_string()]).expect_err("relative command is unsafe");
+    fn build_console_argv_resolves_a_bare_command() {
+        let argv = build_console_argv(&["sh".to_string()]).expect("bare command resolves");
+        let resolved = argv[0].to_str().expect("command is UTF-8");
+        assert!(resolved.starts_with('/'), "{resolved}");
+        assert!(resolved.ends_with("/sh"), "{resolved}");
+    }
+
+    #[test]
+    fn build_console_argv_rejects_a_relative_path() {
+        let err = build_console_argv(&["./sh".to_string()]).expect_err("relative path is unsafe");
         assert!(
-            err.to_string().contains("absolute path"),
+            err.to_string().contains("relative path"),
             "unexpected error: {err}"
         );
     }

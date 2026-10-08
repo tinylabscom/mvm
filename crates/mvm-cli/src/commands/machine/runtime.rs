@@ -585,6 +585,7 @@ fn resolve_entrypoint_stdin_with(
 }
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    let startup_started = std::time::Instant::now();
     // Settle the cold-build policy before any launch phase runs: `machine
     // run` builds what a cold cache lacks and announces the first such build,
     // unless the caller opted into failing fast (`--no-build`,
@@ -596,6 +597,19 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     crate::commands::vm::exec::detect::refuse_machine_run_flag_after_double_dash(&args.run.argv)?;
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
+    // Fail prepared-only OCI launches before policy discovery, source
+    // inference, or admission does unrelated work. This is deliberately a
+    // duplicate cache read: the later resolver still owns the artifacts it
+    // returns, while this guard keeps a cache miss inside the same sub-300ms
+    // contract as a successful warm claim.
+    if let Some(image) = args.run.image.as_deref() {
+        crate::commands::image::resolve_or_pull_run_image(
+            &crate::commands::image::oci_cache_root(),
+            image,
+            args.run.prod,
+        )?;
+        crate::commands::env::builder_vm::ensure_workload_kernel()?;
+    }
     // Settle the boot source before `resolve_mode` decides whether one is
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer
     // identically or not at all.
@@ -675,7 +689,13 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure(cli, run_args, cfg, source)
+            crate::commands::vm::exec::run_secure_started(
+                cli,
+                run_args,
+                cfg,
+                source,
+                startup_started,
+            )
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -709,7 +729,13 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure(cli, run_args, cfg, source)
+            crate::commands::vm::exec::run_secure_started(
+                cli,
+                run_args,
+                cfg,
+                source,
+                startup_started,
+            )
         }
     }
 }

@@ -40,7 +40,8 @@ Linux + /dev/kvm           →  Firecracker
 
 ## Highlights
 
-- **One command from image to isolated VM** — `mvmctl machine run --image alpine -- uname -a`
+- **Sub-300ms prepared launches** — after explicit bootstrap, pull, and warm,
+  `mvmctl machine run --image alpine -- uname -a` only claims and runs
 - **Three ways to define a workload** — an OCI image, a Nix flake (`mkGuest`), or
   a decorated function (`@mvm.app`) — all compile to the same signed, auditable
   microVM
@@ -57,10 +58,14 @@ Linux + /dev/kvm           →  Firecracker
 The steady state is deliberately simple: give mvm an image and a command, and
 it gives the workload its own Linux kernel, memory boundary, writable root, and
 host-brokered I/O. The warm path uses cached VM and image artifacts, so the
-microVM starts in milliseconds. Cold mode may download or build those
-artifacts; mvm explains that work and caches it for the next run.
+microVM starts in milliseconds. Launch never downloads, compiles, or materializes
+missing artifacts: `bootstrap`, `image pull`, and `pool warm` make that work
+explicit before the latency-sensitive command.
 
 ```bash
+mvmctl bootstrap
+mvmctl image pull python:3.12
+mvmctl pool warm 1 --image python:3.12
 mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 ```
 
@@ -78,6 +83,7 @@ curl -fsSL https://runmvm.com/install.sh | sh
 # From source
 git clone https://github.com/tinylabscom/mvm.git && cd mvm
 cargo build --release && cp target/release/mvmctl ~/.local/bin/
+mvmctl bootstrap
 
 # Language SDKs
 pip install mvm                 # Python  (or: pip install ./crates/mvm-sdk/sdks/python)
@@ -90,6 +96,12 @@ backend and builder are dependency-free); **Linux** needs `/dev/kvm`
 do not install, link, or require libkrun. `mvmctl doctor` diagnoses your host and
 prints exact install hints for anything missing.
 
+For source builds, `bootstrap` downloads signed host helpers matching the exact
+clean `main` commit embedded in `mvmctl`. A dirty checkout or a commit not yet
+published from `main` has no matching remote artifact; local compilation is
+available only through the explicit
+`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap` path.
+
 ## Quick start
 
 ### Transient machines
@@ -99,11 +111,18 @@ is registered, nothing persists. This is the default shape of `machine run`
 (no `--name`):
 
 ```bash
+# Acquisition is explicit and stays off the sub-300ms launch path.
+mvmctl bootstrap
+mvmctl image pull alpine
+mvmctl pool warm 1 --image alpine
+
 # Boot an OCI image, run a command, tear the VM down.
 # Networking is OFF by default (default-deny egress).
 mvmctl machine run --image alpine -- sh -c "echo hello from a microVM && uname -a"
 
 # Multiple args after `--` are the argv; the VM lives only for this command.
+mvmctl image pull python:3.12
+mvmctl pool warm 1 --image python:3.12
 mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 # Run a Python file from the host checkout (the mount is read-only).
@@ -125,8 +144,8 @@ mvmctl machine run --image python:3.12 \
   --mount "$PWD/examples/python/hello-app:/work:ro" \
   -- sh -c 'python -m pip install --no-cache-dir --target /tmp/python-deps pandas && PYTHONPATH=/tmp/python-deps python /work/app.py'
 
-# Interactive dev shell (dev-tier images) — still transient
-mvmctl machine run --image alpine -it -- /bin/sh
+# Interactive console with a bare command resolved through the image's PATH.
+mvmctl machine run --image alpine -it -- ls /
 
 # Give it resources; admit specific egress only (audited; TCP/22 always refused).
 # A request above the backend's vCPU ceiling is clamped to it, with a warning.
@@ -930,20 +949,23 @@ and emits install hints for anything missing.
 One clone of this repo is a complete development environment: every image a
 guest boots resolves from the released set pinned by `images.lock` — no image
 checkout, no image building. [`bin/dev`](bin/dev) runs this checkout's mvmctl
-with isolated state and pairs automatically when an `mvm-images` checkout is
-available:
+with isolated state. Prepare the launch inputs explicitly:
 
 ```sh
-bin/dev machine run -- uname -a     # solo: released images, nothing else needed
+bin/dev bootstrap
+bin/dev image pull alpine
+bin/dev pool warm 1 --image alpine
+bin/dev machine run --image alpine -- uname -a
+
 MVM_IMAGES_DIR=../mvm-images \
   MVM_ALLOW_LOCAL_BUILDER_BUILD=1 \
   bin/dev build image-set builder-vm  # paired (explicit opt-in): build images from that checkout
 ```
 
-`bin/dev` picks the image source itself — an explicit `MVM_IMAGES_DIR` wins, a
-sibling `mvm-images` checkout is discovered, and with neither the selector
-stays unset and the released set is used. Pairing is needed only for
-image-definition work; developing the in-guest binaries never leaves this repo.
+`bin/dev` uses the released image set unless `MVM_IMAGES_DIR` explicitly selects
+an `mvm-images` checkout. Sibling checkouts are never discovered implicitly.
+Pairing is needed only for image-definition work; developing the in-guest
+binaries never leaves this repo.
 
 ### Build, test, lint
 
@@ -1012,6 +1034,12 @@ This project maintains **two release trains** with independent lifecycles, in
 | ------------ | ------------------------ | ---------------------------- | ----------------------------------------------------------------------- | ------------------------ |
 | **CLI**      | this repo                | `v*` (e.g. `v0.18.3`)        | `mvmctl` binaries, manifests — no image bytes                             | `just release::pr 0.18.4`  |
 | **Images**   | `tinylabscom/mvm-images` | `image-set/v*` (e.g. `v0.2.2`) | The complete signed image set: builder/default images, kernels, overlay, SDK sidecars, initramfs | `just release 0.2.3`     |
+
+Source builds also use a non-versioned CI support channel:
+[`source-host-helpers.yml`](.github/workflows/source-host-helpers.yml) publishes
+Sigstore-signed helper bundles keyed by every exact `main` commit. This channel
+does not replace either release train and cannot satisfy dirty or unpublished
+source revisions.
 
 `mvm` consumes the image train through one checked-in lock
 (`crates/mvm-core/images.lock`) — every fetch cosign-verifies the signed
