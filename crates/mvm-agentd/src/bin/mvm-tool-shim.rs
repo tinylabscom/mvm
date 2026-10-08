@@ -114,10 +114,27 @@ fn connect() -> Result<std::os::unix::net::UnixStream, String> {
     Err("tools mediate only in a Linux guest".into())
 }
 
-/// `msghdr::msg_controllen`: `usize` on Linux, `socklen_t` elsewhere.
+/// `msghdr::msg_controllen` and `cmsghdr::cmsg_len` are `usize` on some
+/// libC/target combinations and `socklen_t` on others, and the set differs
+/// between the pinned embed toolchains and the host toolchain. This trait
+/// converts from `usize` for whichever field type the target libc declares.
 #[cfg(target_os = "linux")]
-fn msg_controllen_of(len: usize) -> usize {
-    len
+trait MsgLen {
+    fn of_len(len: usize) -> Self;
+}
+
+#[cfg(target_os = "linux")]
+impl MsgLen for usize {
+    fn of_len(len: usize) -> Self {
+        len
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MsgLen for u32 {
+    fn of_len(len: usize) -> Self {
+        u32::try_from(len).expect("a control buffer always fits msg_controllen")
+    }
 }
 
 /// `CMSG_LEN` speaks `socklen_t` on both Linux and BSD-ish targets while the
@@ -179,12 +196,12 @@ fn send_request(
                 / std::mem::size_of::<RawFd>())
             .min(fds.len());
             header.msg_controllen =
-                msg_controllen_of(cmsg_len(capacity * std::mem::size_of::<RawFd>()));
+                MsgLen::of_len(cmsg_len(capacity * std::mem::size_of::<RawFd>()));
             let control_header = libc::CMSG_FIRSTHDR(&header);
             (*control_header).cmsg_level = libc::SOL_SOCKET;
             (*control_header).cmsg_type = libc::SCM_RIGHTS;
             (*control_header).cmsg_len =
-                msg_controllen_of(cmsg_len(capacity * std::mem::size_of::<RawFd>()));
+                MsgLen::of_len(cmsg_len(capacity * std::mem::size_of::<RawFd>()));
             let data = libc::CMSG_DATA(control_header) as *mut RawFd;
             for (index, fd) in fds.iter().take(capacity).enumerate() {
                 *data.add(index) = *fd;

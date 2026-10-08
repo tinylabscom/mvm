@@ -278,12 +278,14 @@ pub enum ToolEvent {
 
 #[cfg(target_os = "linux")]
 fn child_code(status: i32) -> i32 {
-    use std::os::unix::process::ExitStatusExt;
-    // SAFETY: `status` was filled by a successful waitpid.
-    let status = unsafe { std::process::ExitStatus::from_raw(status) };
-    status
-        .code()
-        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+    // Reads the raw `waitpid` status directly: `ExitStatus::from_raw` is
+    // unsafe on some toolchains and not on others, which makes it a
+    // portability trap.
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else {
+        128 + libc::WTERMSIG(status)
+    }
 }
 
 /// Wait for `child`, forwarding the shim's signals to the tool's process
@@ -444,10 +446,27 @@ fn execveat_raw(
 #[cfg(target_os = "linux")]
 const AT_EMPTY_PATH_RAW: libc::c_int = 0x1000;
 
-/// `msghdr::msg_controllen`: `usize` on Linux, `socklen_t` elsewhere.
+/// `msghdr::msg_controllen` and `cmsghdr::cmsg_len` are `usize` on some
+/// libC/target combinations and `socklen_t` on others, and the set differs
+/// between the pinned embed toolchains and the host toolchain. This trait
+/// converts from `usize` for whichever field type the target libc declares.
 #[cfg(target_os = "linux")]
-fn control_msg_controllen(len: usize) -> usize {
-    len
+trait MsgLen {
+    fn of_len(len: usize) -> Self;
+}
+
+#[cfg(target_os = "linux")]
+impl MsgLen for usize {
+    fn of_len(len: usize) -> Self {
+        len
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MsgLen for u32 {
+    fn of_len(len: usize) -> Self {
+        u32::try_from(len).expect("a control buffer always fits msg_controllen")
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -775,7 +794,7 @@ fn recv_request(
     header.msg_iov = &mut iov;
     header.msg_iovlen = 1;
     header.msg_control = control.as_mut_ptr().cast();
-    header.msg_controllen = control_msg_controllen(control.len());
+    header.msg_controllen = MsgLen::of_len(control.len());
     header.msg_flags = 0;
     // SAFETY: `header` points at the live buffer and control vectors; the
     // kernel writes at most their lengths into them.
