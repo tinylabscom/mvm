@@ -74,6 +74,20 @@ pub struct ToolRules {
 }
 
 impl ToolRules {
+    /// Exact executable names admitted for guest command mediation.
+    #[must_use]
+    pub fn command_executables(&self) -> BTreeMap<String, String> {
+        self.detail
+            .iter()
+            .filter_map(|(tool, detail)| {
+                detail
+                    .executable
+                    .as_ref()
+                    .map(|path| (tool.clone(), path.clone()))
+            })
+            .collect()
+    }
+
     /// Decide a command only when its executable matches the path the signed
     /// plan assigned to the declared tool. MCP calls use [`Self::decide`].
     #[must_use]
