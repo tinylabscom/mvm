@@ -1060,6 +1060,7 @@ dependencies = [
  "seccompiler",
  "serde",
  "serde_json",
+ "socket2",
  "thiserror",
  "tracing",
  "x25519-dalek",
