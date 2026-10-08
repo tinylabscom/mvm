@@ -1,5 +1,7 @@
 //! Small hashing helpers shared by contract digests and their consumers.
 
+use alloc::string::String;
+
 /// sha256 of `bytes` as lowercase hex, the spelling the wire digests use.
 #[must_use]
 pub fn sha256_hex(bytes: &[u8]) -> String {
