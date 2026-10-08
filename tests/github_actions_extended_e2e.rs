@@ -59,6 +59,26 @@ fn the_live_warm_claim_runs_with_mount_namespace_privilege() {
     );
 }
 
+#[test]
+fn an_operator_can_dispatch_the_tool_witness_without_waiting_for_other_live_bdd() {
+    let workflow =
+        fs::read_to_string(".github/workflows/ci-full.yml").expect("read extended CI workflow");
+    assert!(
+        workflow.contains("tool_live_only:"),
+        "workflow_dispatch must expose the focused witness input"
+    );
+    let warm_claim = job_block(&workflow, "bdd-live-warm-claim");
+    assert!(
+        warm_claim.contains("!inputs.tool_live_only"),
+        "a focused tool witness must skip the warm-claim predecessor"
+    );
+    let readme = job_block(&workflow, "bdd-live-readme");
+    assert!(
+        readme.contains(r#"[{"witness":"tool_live","timeout":60}]"#),
+        "the focused matrix must contain only tool_live"
+    );
+}
+
 /// So must the release workflow. This is the gate that did not exist: a tag
 /// could be cut with only the hermetic BDD lane green, and the hermetic lane
 /// boots no guest.
