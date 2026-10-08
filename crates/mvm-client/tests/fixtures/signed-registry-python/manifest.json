@@ -1,0 +1,30 @@
+{
+  "description": "Python runtime policy and pinned guest image for package registries and common API hosts.",
+  "files": [
+    {
+      "path": "pack/group.toml",
+      "sha256": "d02a7f54ff33c96a0e690292016cee9d3b5d741569757a5965613e4e31563a10",
+      "size": 288
+    },
+    {
+      "path": "pack/image/flake.lock",
+      "sha256": "cb77a86e9593a8ee3f411743c72e71cbfb939d0a2deb91b99e59a1a46d77c9b1",
+      "size": 2614
+    },
+    {
+      "path": "pack/image/flake.nix",
+      "sha256": "c131ad49e9d5b17f9ef2fe427ced74c2136d53f1c473d4262dbedfbed4c6394a",
+      "size": 1508
+    },
+    {
+      "path": "pack/image/mvm.toml",
+      "sha256": "dd60fcf31e5ace4488bc62dbed87a716eef47db4360a08f8e4702b5422627546",
+      "size": 75
+    }
+  ],
+  "image": {
+    "manifest": "pack/image/mvm.toml"
+  },
+  "reference": "runtime/python@1.1.0",
+  "schema_version": 1
+}
