@@ -1109,6 +1109,10 @@ jobs:
 
       - uses: ./.github/actions/free-disk
 
+      # A cache miss rebuilds the source-matched guest runtime on this runner.
+      # Keep the cold path executable even when the bootstrap artifact is stale.
+      - uses: ./.github/actions/install-zigbuild
+
       - uses: ./.github/actions/apt-deps
         with:
           packages: qemu-system-x86 ipxe-qemu virtiofsd e2fsprogs attr jq
