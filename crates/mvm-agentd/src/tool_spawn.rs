@@ -575,7 +575,7 @@ fn forward_signals(pid: u32) {
         // records into `PENDING_SIGNALS` until the pid is published.
         unsafe {
             let action = libc::sigaction {
-                sa_sigaction: record_pending as usize,
+                sa_sigaction: record_pending as *const () as usize,
                 sa_mask: std::mem::zeroed(),
                 sa_flags: 0,
                 sa_restorer: None,
