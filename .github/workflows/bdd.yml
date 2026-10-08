@@ -133,5 +133,7 @@ jobs:
           test -e /dev/kvm
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
+      - name: Prepare the pinned workload kernel
+        run: just kernel::workload
       - name: Run the PS-11 live witness
         run: just bdd::live-ci ps11_live
