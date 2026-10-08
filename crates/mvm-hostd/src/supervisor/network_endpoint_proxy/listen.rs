@@ -258,11 +258,7 @@ mod server_tests {
             recorder,
         ));
         let (service, _dir) = super::super::test_support::service_with_tool_gate(gate);
-        for (tool, expected) in [
-            ("read", ToolDecisionReply::Allow),
-            ("write", ToolDecisionReply::Deny),
-            ("unlisted", ToolDecisionReply::Deny),
-        ] {
+        for tool in ["read", "write", "unlisted"] {
             let (mut client, server) = UnixStream::pair().expect("socket pair");
             let service = Arc::clone(&service);
             let handler =
@@ -286,7 +282,11 @@ mod server_tests {
             let reply: ToolDecisionReply = read_json_frame(&mut client, MAX_FRAME_BYTES)
                 .await
                 .expect("read decision");
-            assert_eq!(reply, expected);
+            if tool == "read" {
+                assert!(matches!(reply, ToolDecisionReply::AllowBound { .. }));
+            } else {
+                assert_eq!(reply, ToolDecisionReply::Deny);
+            }
             handler
                 .await
                 .expect("handler join")

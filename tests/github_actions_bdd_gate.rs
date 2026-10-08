@@ -80,10 +80,10 @@ fn broad_live_bdd_stays_extended_while_the_bounded_ps11_witness_runs_on_prs() {
     let live = job_block(&extended, "bdd-live-readme");
 
     for expected in [
-        "runs-on: ubuntu-latest",
-        "witness: ci_live",
-        "witness: tool_live",
-        "timeout: 60",
+        "runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-latest' }}",
+        "inputs.tool_live_only &&",
+        "\"witness\":\"ci_live\",\"timeout\":90",
+        "\"witness\":\"tool_live\",\"timeout\":60",
         "timeout-minutes: ${{ matrix.timeout }}",
         "FC_VERSION: v1.17.0",
         "MVM_KERNEL_SOURCE: download",
@@ -103,16 +103,13 @@ fn live_ci_budget_covers_cold_setup_and_measured_lifecycle() {
     let extended = workflow("ci-full.yml");
     let live = job_block(&extended, "bdd-live-readme");
     let lifecycle = live
-        .split("- witness: ci_live\n")
+        .split(r#""witness":"ci_live","timeout":"#)
         .nth(1)
         .expect("the lifecycle witness must remain in the matrix")
-        .split("- witness:")
+        .split('}')
         .next()
         .expect("the lifecycle witness has a matrix entry");
     let job_minutes: u32 = lifecycle
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("timeout:"))
-        .expect("the lifecycle witness must declare its own job budget")
         .trim()
         .parse()
         .expect("the job budget must be a number");
