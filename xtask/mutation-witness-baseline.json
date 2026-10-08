@@ -836,46 +836,6 @@
       "reason": "no unit test distinguishes this mutant; its only witness was an integration test that drove a real nix build of the in-tree overlay flake, deleted with that flake. Coverage debt tracked in #2033."
     },
     {
-      "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "mutant": "replace && with || in pull_image_with_trust",
-      "reason": "widens the prod digest-pin refusal to fire on any unpinned reference rather than only under --prod, so it refuses strictly more than the real gate. Fail-closed: claim 14 asks that --prod refuses a mutable tag, which it still does. Catching it needs a dev-mode pull asserted not to bail, which reaches the network."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "mutant": "replace fetch_or_read_layer -> Result<Vec<u8>> with Ok(vec![0])",
-      "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "mutant": "replace fetch_or_read_layer -> Result<Vec<u8>> with Ok(vec![1])",
-      "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "mutant": "replace fetch_or_read_layer -> Result<Vec<u8>> with Ok(vec![])",
-      "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "mutant": "replace write_config_blob -> Result<Option<String>> with Ok(None)",
-      "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "mutant": "replace write_config_blob -> Result<Option<String>> with Ok(Some(\"xyzzy\".into()))",
-      "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/commands/image/pull_core.rs",
-      "mutant": "replace write_config_blob -> Result<Option<String>> with Ok(Some(String::new()))",
-      "reason": "OCI registry and blob-cache I/O: fetching a layer or writing a config blob needs a registry double the crate does not have. The claim-14 witnesses in this file (both prod digest-pin refusals, asserted before any network call) are caught. Coverage debt tracked in #2033."
-    },
-    {
-      "file": "crates/mvm-cli/src/update.rs",
-      "mutant": "replace < with <= in install_announcement",
-      "reason": "provably equivalent: the `latest == current` equality short-circuits to `ForceReinstall` before this closure runs, so inside it `latest != current` holds and `latest <= current` coincides exactly with `latest < current`. No input can distinguish the two comparisons."
-    },
-    {
       "file": "crates/mvm-contract/src/plan/types.rs",
       "mutant": "replace | with ^ in CallerCommitment::from_hex",
       "reason": "equivalent mutant — no test can kill it. `caller_commitment_nibble` returns a value in 0..=15, so `high << 4` occupies bits 4-7 and `low` occupies bits 0-3. The bit sets are disjoint, which makes `|` and `^` the same function over every input the expression can receive; checked exhaustively over all 256 nibble pairs, and the whole 1007-test mvm-contract suite passes with the mutation applied. Accepted rather than scoped out, because the surrounding decoder is claim surface and is witnessed by caller_commitment_hex_decodes_to_the_bytes_it_names."

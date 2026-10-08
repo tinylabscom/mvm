@@ -603,7 +603,7 @@ jobs:
           - mvm-client
           - mvm-core
           - mvm-fs
-          # Six, and the number is measured rather than chosen.
+          # Eight, and the number is measured rather than chosen.
           #
           # Raising the count is the second half of the fix; the first is
           # that xtask now packs shards longest-file-first instead of
@@ -614,17 +614,18 @@ jobs:
           # width — on 2026-08-21 shards 2of4 and 4of4 were both killed at
           # 330 minutes while 3of4 finished in 24.
           #
-          # With cost-aware packing the surface splits evenly, and six
-          # shards put the worst at ~181 measured minutes, 55% of the
-          # budget. That headroom is deliberate: two of the per-file costs
-          # behind it are lower bounds, measured on shards that were killed
-          # part-way through a file.
-          - mvm-hostd/1of6
-          - mvm-hostd/2of6
-          - mvm-hostd/3of6
-          - mvm-hostd/4of6
-          - mvm-hostd/5of6
-          - mvm-hostd/6of6
+          # Six cost-aware shards still left audit_file.rs behind 183 minutes
+          # of earlier work in 4of6. The lane reached only 101 of that file's
+          # mutants before the 315-minute step deadline. Eight shards isolate
+          # that large file and keep accounting time inside the job budget.
+          - mvm-hostd/1of8
+          - mvm-hostd/2of8
+          - mvm-hostd/3of8
+          - mvm-hostd/4of8
+          - mvm-hostd/5of8
+          - mvm-hostd/6of8
+          - mvm-hostd/7of8
+          - mvm-hostd/8of8
           - mvm-contract
           - mvm-runtime
           - mvm-sdk
