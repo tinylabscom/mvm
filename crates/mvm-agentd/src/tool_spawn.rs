@@ -557,6 +557,10 @@ fn shim_inner() -> io::Result<i32> {
 /// after which the tool keeps running in its own session, same as any
 /// orphaned process group.
 fn forward_signals(pid: u32) {
+    // Signals that arrive between handler installation and the pid publish
+    // are recorded in a mask and drained below, so an early SIGTERM is not
+    // silently lost.
+    PENDING_SIGNALS.store(0, std::sync::atomic::Ordering::SeqCst);
     const FORWARDED: &[i32] = &[
         libc::SIGHUP,
         libc::SIGINT,
@@ -567,11 +571,11 @@ fn forward_signals(pid: u32) {
         libc::SIGWINCH,
     ];
     for signal in FORWARDED {
-        // SAFETY: sigaction with a plain fn pointer; no state. The handler
-        // reads `TOOL_PID`, set before any signal can arrive for it.
+        // SAFETY: sigaction with a plain fn pointer; the handler only
+        // records into `PENDING_SIGNALS` until the pid is published.
         unsafe {
             let action = libc::sigaction {
-                sa_sigaction: forward_one as usize,
+                sa_sigaction: record_pending as usize,
                 sa_mask: std::mem::zeroed(),
                 sa_flags: 0,
                 sa_restorer: None,
@@ -580,11 +584,34 @@ fn forward_signals(pid: u32) {
         }
     }
     TOOL_PID.store(pid as i32, std::sync::atomic::Ordering::SeqCst);
+    let pending = PENDING_SIGNALS.swap(0, std::sync::atomic::Ordering::SeqCst);
+    for (index, signal) in FORWARDED.iter().enumerate() {
+        if pending & (1 << index) != 0 {
+            relay(*signal);
+        }
+    }
 }
 
 static TOOL_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+static PENDING_SIGNALS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-extern "C" fn forward_one(signal: i32) {
+extern "C" fn record_pending(signal: i32) {
+    const FORWARDED: &[i32] = &[
+        libc::SIGHUP,
+        libc::SIGINT,
+        libc::SIGQUIT,
+        libc::SIGTERM,
+        libc::SIGUSR1,
+        libc::SIGUSR2,
+        libc::SIGWINCH,
+    ];
+    if let Some(index) = FORWARDED.iter().position(|forwarded| *forwarded == signal) {
+        PENDING_SIGNALS.fetch_or(1 << index, std::sync::atomic::Ordering::SeqCst);
+    }
+    relay(signal);
+}
+
+fn relay(signal: i32) {
     let pid = TOOL_PID.load(std::sync::atomic::Ordering::SeqCst);
     if pid > 0 {
         // SAFETY: plain kill of a same-uid pid; nothing depends on the
