@@ -79,10 +79,12 @@ When `run` or `machine run` names an installed image-bearing pack with
 `--policy` and no explicit boot source, the signed image is built and booted.
 The exact pack reference and manifest digest enter the signed execution plan
 and chain-signed audit record. Host admission reopens the installed pack under
-the current lock and publisher trust before boot. An explicit image, manifest,
-flake, deployment, or runtime source keeps its own boot-source precedence;
-the pack still contributes its policy. The separate `machine run --entrypoint`
-boot path refuses an image-bearing pack; use the ordinary machine run path.
+the current lock and publisher trust before boot. If the audit chain cannot
+record an admitted asset identity, admission refuses the launch. An explicit
+image, manifest, flake, deployment, or runtime source keeps its own
+boot-source precedence; the pack still contributes its policy. The separate
+`machine run --entrypoint` boot path refuses an image-bearing pack; use the
+ordinary machine run path.
 
 ## A group pack
 
