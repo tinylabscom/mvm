@@ -7,7 +7,7 @@ from mvm._errors.types import HostLibraryError, MachineBackendError
 
 
 @pytest.mark.parametrize(
-    ("operation", "method", "request", "reply"),
+    ("operation", "method", "expected_request", "reply"),
     [
         (lambda: mvm.manifest.list(), "manifest.list",
          {"orphans": False, "tags": []}, []),
@@ -33,10 +33,10 @@ from mvm._errors.types import HostLibraryError, MachineBackendError
          {"slot_hash": "abc", "manifest_path": "/build/manifest.json"}),
     ],
 )
-def test_requests_and_preserved_replies(hostlib, operation, method, request, reply):
+def test_requests_and_preserved_replies(hostlib, operation, method, expected_request, reply):
     hostlib.reply(method, reply)
     assert operation() == reply
-    assert hostlib.calls == [(method, request)]
+    assert hostlib.calls == [(method, expected_request)]
 
 
 @pytest.mark.parametrize(
