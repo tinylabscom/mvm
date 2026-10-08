@@ -77,6 +77,10 @@ fn an_operator_can_dispatch_the_tool_witness_without_waiting_for_other_live_bdd(
         readme.contains(r#"[{"witness":"tool_live","timeout":60}]"#),
         "the focused matrix must contain only tool_live"
     );
+    assert!(
+        readme.contains("inputs.tool_live_only && 'hetzner' || 'ubuntu-latest'"),
+        "the focused witness must use the dedicated self-hosted KVM runner"
+    );
 }
 
 /// So must the release workflow. This is the gate that did not exist: a tag

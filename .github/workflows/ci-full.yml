@@ -223,7 +223,10 @@ jobs:
     # timeout, and nothing should wait behind that.
     needs: bdd-live-warm-claim
     if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
+    # A focused operator dispatch uses the dedicated Hetzner KVM runner. The
+    # nightly/full matrix stays on GitHub-hosted runners so it cannot monopolize
+    # the one self-hosted certification machine.
+    runs-on: ${{ inputs.tool_live_only && 'hetzner' || 'ubuntu-latest' }}
     permissions:
       contents: read
     strategy:
