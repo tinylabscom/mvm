@@ -11,6 +11,7 @@ use mvm_runtime::shell::run_host;
 const GITHUB_REPO: &str = "tinylabscom/mvm";
 const SOURCE_HELPER_RELEASE: &str = "source-builds";
 const SOURCE_HELPER_BASE_URL_ENV: &str = "MVM_SOURCE_HELPER_BASE_URL";
+const SOURCE_HELPER_COMMIT_MARKER: &str = ".mvm-host-helpers-source-commit";
 const RELEASE_HOST_BINS: &[&str] = &[
     "mvm-hvf-supervisor",
     "mvm-libkrun-supervisor",
@@ -702,6 +703,17 @@ pub(crate) fn prepare_release_host_binaries() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn published_host_helpers_match_current_build() -> Result<bool> {
+    let Some(commit) = source_helper_commit()? else {
+        return Ok(true);
+    };
+    let current_exe = std::env::current_exe().context("resolve the running mvmctl")?;
+    let install_dir = current_exe
+        .parent()
+        .context("the running mvmctl has no parent directory")?;
+    Ok(source_helper_marker_matches(install_dir, &commit))
+}
+
 fn source_helper_commit() -> Result<Option<String>> {
     if mvm_build::artifact_acquisition::compiled_channel()
         == mvm_build::artifact_acquisition::DistributionChannel::Release
@@ -789,7 +801,17 @@ fn prepare_source_host_binaries(
         let targets = mvm_runtime::codesign::collect_sign_targets();
         mvm_runtime::codesign::sign_targets(&targets)
     })?;
+    mvm_core::util::atomic_io::atomic_write_durable(
+        &install_dir.join(SOURCE_HELPER_COMMIT_MARKER),
+        format!("{commit}\n").as_bytes(),
+    )
+    .context("record installed source-helper commit")?;
     Ok(())
+}
+
+fn source_helper_marker_matches(install_dir: &Path, expected_commit: &str) -> bool {
+    std::fs::read_to_string(install_dir.join(SOURCE_HELPER_COMMIT_MARKER))
+        .is_ok_and(|recorded| recorded.trim() == expected_commit)
 }
 
 fn validate_source_helper_bundle(extracted: &Path, expected_commit: &str) -> Result<()> {
@@ -1150,7 +1172,8 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateAction, decide_update, validate_source_helper_bundle, validate_source_helper_identity,
+        UpdateAction, decide_update, source_helper_marker_matches, validate_source_helper_bundle,
+        validate_source_helper_identity,
     };
 
     #[test]
@@ -1174,6 +1197,20 @@ mod tests {
         std::fs::write(tmp.path().join("SOURCE_COMMIT"), format!("{commit}\n")).unwrap();
         validate_source_helper_bundle(tmp.path(), &commit).unwrap();
         assert!(validate_source_helper_bundle(tmp.path(), &"b".repeat(40)).is_err());
+    }
+
+    #[test]
+    fn installed_source_helper_marker_must_match_the_cli_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let commit = "a".repeat(40);
+        assert!(!source_helper_marker_matches(tmp.path(), &commit));
+        std::fs::write(
+            tmp.path().join(super::SOURCE_HELPER_COMMIT_MARKER),
+            format!("{commit}\n"),
+        )
+        .unwrap();
+        assert!(source_helper_marker_matches(tmp.path(), &commit));
+        assert!(!source_helper_marker_matches(tmp.path(), &"b".repeat(40)));
     }
 
     /// The bug, stated as the behaviour: an rc user's latest is the stable

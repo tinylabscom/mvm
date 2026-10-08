@@ -235,9 +235,12 @@ fn prewarm_host_aux_helpers() -> Result<()> {
         mvm_build::artifact_acquisition::local_guest_runtime_build_requested()
             || mvm_build::image_source::configured_images_dir().is_some();
     if !local_build_requested {
-        let missing = launch_helper_specs()
-            .iter()
-            .any(|spec| mvm_vmm::host::aux_bin::resolve_verified_for(spec, &host).is_err());
+        let source_identity_mismatch =
+            !crate::update::published_host_helpers_match_current_build()?;
+        let missing = source_identity_mismatch
+            || launch_helper_specs()
+                .iter()
+                .any(|spec| mvm_vmm::host::aux_bin::resolve_verified_for(spec, &host).is_err());
         if missing {
             crate::update::prepare_release_host_binaries().with_context(|| {
                 format!(

@@ -23,6 +23,7 @@ pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<()
                 }
                 super::source::ImageSource::Registry(_) => unreachable!(),
             };
+            super::pull_core::publish_local_preparation(cache_root, &reference, &resolved)?;
             let provenance = &resolved.provenance;
             mvm_core::audit_emit!(
                 ImageFetch,
