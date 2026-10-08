@@ -1627,10 +1627,9 @@ pub(crate) mod admit_plan_tests {
         use mvm_core::registry_pack_store::{adopt_install_and_pin, save_publisher_policy};
 
         const MANIFEST: &[u8] =
-            include_bytes!("../../../mvm-cli/tests/fixtures/signed-registry-python/manifest.json");
-        const BUNDLE: &[u8] = include_bytes!(
-            "../../../mvm-cli/tests/fixtures/signed-registry-python/manifest.sigstore.json"
-        );
+            include_bytes!("../../tests/fixtures/signed-registry-python/manifest.json");
+        const BUNDLE: &[u8] =
+            include_bytes!("../../tests/fixtures/signed-registry-python/manifest.sigstore.json");
         let dir = tempfile::tempdir().expect("tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.isolate_mvm_home(dir.path().join("home"));
@@ -1647,7 +1646,7 @@ pub(crate) mod admit_plan_tests {
         )
         .expect("save fixture trust");
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../mvm-cli/tests/fixtures/signed-registry-python/files");
+            .join("tests/fixtures/signed-registry-python/files");
         let staged = dir.path().join("staged-pack");
         for relative in [
             "pack/group.toml",
