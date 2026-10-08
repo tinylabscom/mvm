@@ -34,6 +34,10 @@ pub const MAX_TOOL_BYTES: u64 = 512 * 1024 * 1024;
 /// that would exceed this refuses activation rather than booting half
 /// scanned.
 pub const MAX_SCAN_BYTES: u64 = 1024 * 1024 * 1024;
+/// More entry paths than this indicates a shared multi-call binary. Treating
+/// every applet as the declared tool would over-grant its routes and secrets;
+/// leaving any applet direct would bypass mediation.
+const MAX_STANDALONE_TOOL_PATHS: usize = 8;
 /// Deepest symlink chain the target resolution and alias scan will follow.
 const MAX_SYMLINK_HOPS: usize = 8;
 
@@ -117,6 +121,16 @@ pub fn build_tool_map(
         if aliases.len() > MAX_ALIASES_PER_TOOL {
             return Err(InstallError::TooManyAliases { tool: tool.clone() });
         }
+        if aliases.len().saturating_add(1) > MAX_STANDALONE_TOOL_PATHS {
+            return Err(InstallError::SubstitutionFailed {
+                path: declared.clone(),
+                reason: format!(
+                    "declared executable resolves through {} paths and appears to be a shared \
+                     multi-call binary; declare a standalone tool binary",
+                    aliases.len() + 1
+                ),
+            });
+        }
         tools.push(ToolEntry {
             tool: tool.clone(),
             executable: declared.clone(),
@@ -130,6 +144,36 @@ pub fn build_tool_map(
     Ok(map)
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn source_bytes(root: &Path, entry: &ToolEntry) -> Result<Vec<u8>, InstallError> {
+    let source = resolve_target(root, Path::new(&entry.executable)).ok_or_else(|| {
+        InstallError::DeclaredPathMissing {
+            tool: entry.tool.clone(),
+            path: entry.executable.clone(),
+        }
+    })?;
+    let bytes = std::fs::read(&source).map_err(|error| InstallError::SubstitutionFailed {
+        path: source.to_string_lossy().into_owned(),
+        reason: error.to_string(),
+    })?;
+    if bytes.len() as u64 > MAX_TOOL_BYTES {
+        return Err(InstallError::TooLarge {
+            tool: entry.tool.clone(),
+        });
+    }
+    let actual = mvm_contract::hash::sha256_hex(&bytes);
+    if actual != entry.digest {
+        return Err(InstallError::SubstitutionFailed {
+            path: entry.executable.clone(),
+            reason: format!(
+                "declared executable changed during activation (expected {}, got {actual})",
+                entry.digest
+            ),
+        });
+    }
+    Ok(bytes)
+}
+
 /// Structural validation for a freshly built map (the helper's
 /// [`ToolMap::load`] runs the same checks on the written file). A failure
 /// here is a builder bug: refuse loudly in tests, and at read time in the
@@ -138,15 +182,24 @@ pub fn check_map(map: &ToolMap) {
     debug_assert!(ToolMap::load(&serde_json::to_vec(map).expect("a built map serializes")).is_ok());
 }
 
-#[derive(Default)]
 struct ScanBudget {
     hashed: u64,
+    limit: u64,
+}
+
+impl Default for ScanBudget {
+    fn default() -> Self {
+        Self {
+            hashed: 0,
+            limit: MAX_SCAN_BYTES,
+        }
+    }
 }
 
 impl ScanBudget {
     fn hash(&mut self, len: u64) -> Result<(), InstallError> {
         self.hashed = self.hashed.saturating_add(len);
-        if self.hashed > MAX_SCAN_BYTES {
+        if self.hashed > self.limit {
             return Err(InstallError::ScanBudgetExceeded);
         }
         Ok(())
@@ -200,40 +253,60 @@ fn alias_of(
     digest: &str,
     target_len: u64,
     budget: &mut ScanBudget,
-) -> Option<String> {
-    let guest_path = format!("/{}", path.strip_prefix(root).ok()?.to_string_lossy());
-    if guest_path.len() > 4096 {
-        return None;
-    }
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if meta.file_type().is_symlink() {
-        let resolved = resolve_target(root, Path::new(&guest_path))?;
-        let resolved_meta = std::fs::metadata(&resolved).ok()?;
+) -> Result<Option<String>, InstallError> {
+    let fail = |error: std::io::Error| InstallError::SubstitutionFailed {
+        path: path.to_string_lossy().into_owned(),
+        reason: format!("alias scan could not prove coverage: {error}"),
+    };
+    let relative = path
+        .strip_prefix(root)
+        .map_err(|error| InstallError::SubstitutionFailed {
+            path: path.to_string_lossy().into_owned(),
+            reason: format!("alias scan escaped its root: {error}"),
+        })?;
+    let guest_path = format!("/{}", relative.to_string_lossy());
+    let meta = std::fs::symlink_metadata(path).map_err(fail)?;
+    let matches = if meta.file_type().is_symlink() {
+        let Some(resolved) = resolve_target(root, Path::new(&guest_path)) else {
+            // A dangling or looping symlink cannot execute the target bytes.
+            return Ok(None);
+        };
+        let resolved_meta = std::fs::metadata(&resolved).map_err(fail)?;
         if !resolved_meta.file_type().is_file() || resolved_meta.len() != target_len {
-            return None;
+            return Ok(None);
         }
         if resolved == *target {
-            return Some(guest_path);
+            true
+        } else {
+            budget.hash(target_len)?;
+            let bytes = std::fs::read(&resolved).map_err(fail)?;
+            mvm_contract::hash::sha256_hex(&bytes) == digest
         }
-        budget.hash(target_len).ok()?;
-        let bytes = std::fs::read(&resolved).ok()?;
-        return (mvm_contract::hash::sha256_hex(&bytes) == digest).then_some(guest_path);
-    }
-    if !meta.file_type().is_file() {
-        return None;
-    }
-    let same_inode = meta.dev() == target_meta.dev() && meta.ino() == target_meta.ino();
-    if !same_inode && meta.len() != target_len {
-        return None;
-    }
-    if !same_inode {
-        budget.hash(target_len).ok()?;
-        let bytes = std::fs::read(path).ok()?;
-        if mvm_contract::hash::sha256_hex(&bytes) != digest {
-            return None;
+    } else if meta.file_type().is_file() {
+        let same_inode = meta.dev() == target_meta.dev() && meta.ino() == target_meta.ino();
+        if !same_inode && meta.len() != target_len {
+            return Ok(None);
         }
+        if same_inode {
+            true
+        } else {
+            budget.hash(target_len)?;
+            let bytes = std::fs::read(path).map_err(fail)?;
+            mvm_contract::hash::sha256_hex(&bytes) == digest
+        }
+    } else {
+        false
+    };
+    if !matches {
+        return Ok(None);
     }
-    Some(guest_path)
+    if guest_path.len() > 4096 {
+        return Err(InstallError::SubstitutionFailed {
+            path: guest_path,
+            reason: "runnable alias exceeds the 4096-byte path bound".into(),
+        });
+    }
+    Ok(Some(guest_path))
 }
 
 /// Walk the root filesystem (never descending into other mounts) collecting
@@ -255,16 +328,23 @@ fn collect_aliases(
         .dev();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(entries) => entries,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
+        let entries =
+            std::fs::read_dir(&dir).map_err(|error| InstallError::SubstitutionFailed {
+                path: dir.to_string_lossy().into_owned(),
+                reason: format!("alias scan could not read directory: {error}"),
+            })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| InstallError::SubstitutionFailed {
+                path: dir.to_string_lossy().into_owned(),
+                reason: format!("alias scan could not read directory entry: {error}"),
+            })?;
             let path = entry.path();
-            let meta = match entry.metadata() {
-                Ok(meta) => meta,
-                Err(_) => continue,
-            };
+            let meta = std::fs::symlink_metadata(&path).map_err(|error| {
+                InstallError::SubstitutionFailed {
+                    path: path.to_string_lossy().into_owned(),
+                    reason: format!("alias scan could not inspect entry: {error}"),
+                }
+            })?;
             if meta.file_type().is_dir() {
                 // Stay on the rootfs: other mounts hold no image bytes, and
                 // tmpfs trees can change under the walk.
@@ -274,7 +354,7 @@ fn collect_aliases(
                 continue;
             }
             if let Some(alias) =
-                alias_of(root, &path, target, target_meta, digest, target_len, budget)
+                alias_of(root, &path, target, target_meta, digest, target_len, budget)?
             {
                 aliases.push(alias);
             }
@@ -302,13 +382,7 @@ pub fn install(commands: &BTreeMap<String, String>, root: &Path) -> Result<(), I
 
     prepare_dirs()?;
     for entry in &map.tools {
-        let bytes =
-            std::fs::read(root.join(entry.stash.trim_start_matches('/'))).map_err(|error| {
-                InstallError::SubstitutionFailed {
-                    path: entry.stash.clone(),
-                    reason: error.to_string(),
-                }
-            })?;
+        let bytes = source_bytes(root, entry)?;
         write_stash(&entry.stash, &bytes)?;
     }
     write_map(&map)?;
@@ -436,11 +510,13 @@ fn substitute(path: &str) -> Result<(), InstallError> {
         path: path.to_string(),
         reason,
     };
-    substitute_in_place(TOOL_SHIM_OVERLAY, path).map_err(fail)?;
     if let Err(first) = substitute_in_place(TOOL_SHIM_OVERLAY, path) {
-        overlay_parent_for_write(Path::new(path)).map_err(fail)?;
+        overlay_parent_for_write(Path::new(path)).map_err(|overlay| {
+            fail(format!(
+                "{first}; preparing writable parent also failed: {overlay}"
+            ))
+        })?;
         substitute_in_place(TOOL_SHIM_OVERLAY, path).map_err(fail)?;
-        let _ = first;
     }
     Ok(())
 }
@@ -515,6 +591,25 @@ mod tests {
     }
 
     #[test]
+    fn fresh_rootfs_source_bytes_are_staged_and_digest_checked() {
+        let (_temp, root) = rootfs();
+        let commands = BTreeMap::from([("shell".to_string(), "/bin/sh".to_string())]);
+        let map = build_tool_map(&commands, &root).expect("map builds");
+
+        assert_eq!(
+            source_bytes(&root, &map.tools[0]).expect("source bytes"),
+            b"busybox bytes"
+        );
+
+        std::fs::write(root.join("usr/bin/busybox-real"), b"changed").expect("change source");
+        assert!(matches!(
+            source_bytes(&root, &map.tools[0]),
+            Err(InstallError::SubstitutionFailed { reason, .. })
+                if reason.contains("changed during activation")
+        ));
+    }
+
+    #[test]
     fn missing_and_nonfile_declared_paths_refuse() {
         let (_temp, root) = rootfs();
         let missing = BTreeMap::from([("shell".to_string(), "/bin/nope".to_string())]);
@@ -530,16 +625,71 @@ mod tests {
     }
 
     #[test]
+    fn shared_multi_call_binaries_refuse_instead_of_overgranting_applets() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("bin")).expect("bin");
+        std::fs::write(root.join("bin/busybox"), b"busybox").expect("busybox");
+        for applet in [
+            "sh", "ls", "cat", "echo", "ash", "sed", "awk", "mkdir", "mount",
+        ] {
+            std::os::unix::fs::symlink("busybox", root.join("bin").join(applet))
+                .expect("applet link");
+        }
+        let commands = BTreeMap::from([("shell".to_string(), "/bin/sh".to_string())]);
+
+        assert!(matches!(
+            build_tool_map(&commands, root),
+            Err(InstallError::SubstitutionFailed { reason, .. })
+                if reason.contains("multi-call")
+        ));
+    }
+
+    #[test]
     fn scan_budget_refuses_a_rootfs_of_copies() {
         let (_temp, root) = rootfs();
-        // Two tools pointing at the same bytes are a duplicate-path refusal,
-        // not a budget failure; force the budget with a big file instead.
-        let big = vec![7u8; 2048];
-        std::fs::write(root.join("usr/bin/big-real"), &big).expect("write big");
-        let commands = BTreeMap::from([("big".to_string(), "/usr/bin/big-real".to_string())]);
-        let map = build_tool_map(&commands, &root).expect("small map builds");
-        assert_eq!(map.tools[0].aliases.len(), 0);
-        let _ = (_temp, root);
+        let target = resolve_target(&root, Path::new("/bin/sh")).expect("target");
+        let target_meta = std::fs::metadata(&target).expect("metadata");
+        let digest = mvm_contract::hash::sha256_hex(b"busybox bytes");
+        let mut budget = ScanBudget {
+            hashed: 0,
+            limit: 1,
+        };
+
+        assert_eq!(
+            collect_aliases(
+                &root,
+                &target,
+                &target_meta,
+                &digest,
+                b"busybox bytes".len() as u64,
+                &mut budget,
+            ),
+            Err(InstallError::ScanBudgetExceeded)
+        );
+    }
+
+    #[test]
+    fn unreadable_directory_refuses_instead_of_leaving_coverage_unknown() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_temp, root) = rootfs();
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).expect("locked dir");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock dir");
+        let commands = BTreeMap::from([("shell".to_string(), "/bin/sh".to_string())]);
+        let result = build_tool_map(&commands, &root);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock for cleanup");
+
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(matches!(
+                result,
+                Err(InstallError::SubstitutionFailed { reason, .. })
+                    if reason.contains("could not read directory")
+            ));
+        }
     }
 
     #[test]

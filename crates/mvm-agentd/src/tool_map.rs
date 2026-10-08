@@ -89,13 +89,9 @@ impl ToolEntry {
 /// How the helper resolves one shim invocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Dispatch<'a> {
-    /// The invocation names this tool: ask the host, then run the stash as
-    /// the tool identity in a fresh session.
+    /// The invocation reached a substituted path: ask the host, then run the
+    /// stash as the tool identity in a fresh session.
     Mediate(&'a ToolEntry),
-    /// The bytes are a shared binary (busybox-style) invoked under a name
-    /// that is not the declared tool: run the stash with the caller's own
-    /// identity, no host decision.
-    Direct(&'a ToolEntry),
     /// The shim is running at a path the map does not know: refuse.
     Unknown,
 }
@@ -202,28 +198,15 @@ impl ToolMap {
     /// Resolve one shim invocation.
     ///
     /// The tool identity is chosen from the path the kernel used to reach the
-    /// shim, never from anything the caller wrote: `argv[0]` is attacker
-    /// controlled, so it only ever escalates mediation (claiming the declared
-    /// tool's name routes through the host gate) and never skips it. A shared
-    /// binary substituted for a declared tool keeps its other applet names
-    /// working by running the stash directly with the caller's identity.
+    /// shim, never from attacker-controlled `argv[0]`. Every substituted path
+    /// is mediated; activation refuses shared multi-call binaries rather than
+    /// leaving an applet-shaped bypass or over-granting unrelated applets.
     #[must_use]
-    pub fn dispatch(&self, exe: &str, argv0: Option<&str>) -> Dispatch<'_> {
+    pub fn dispatch(&self, exe: &str, _argv0: Option<&str>) -> Dispatch<'_> {
         let Some(entry) = self.by_path(exe) else {
             return Dispatch::Unknown;
         };
-        let claimed = argv0
-            .and_then(|value| value.rsplit('/').next())
-            .filter(|value| !value.is_empty());
-        let declared = entry
-            .executable
-            .rsplit('/')
-            .next()
-            .unwrap_or(&entry.executable);
-        match claimed {
-            Some(claimed) if claimed == declared => Dispatch::Mediate(entry),
-            _ => Dispatch::Direct(entry),
-        }
+        Dispatch::Mediate(entry)
     }
 }
 
@@ -366,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_mediates_the_declared_name_and_only_it() {
+    fn dispatch_mediates_every_substituted_path_regardless_of_argv0() {
         let tools = map(vec![entry(
             "shell",
             "/bin/sh",
@@ -388,19 +371,19 @@ mod tests {
             tools.dispatch("/bin/busybox", Some("/bin/sh")),
             Dispatch::Mediate(_)
         ));
-        // The same bytes under a non-tool applet name run directly.
+        // argv[0] is attacker-controlled and cannot select a direct path.
         assert!(matches!(
             tools.dispatch("/bin/busybox", Some("ls")),
-            Dispatch::Direct(_)
+            Dispatch::Mediate(_)
         ));
         assert!(matches!(
             tools.dispatch("/bin/ash", Some("ash")),
-            Dispatch::Direct(_)
+            Dispatch::Mediate(_)
         ));
-        // No argv0 at all cannot claim the tool.
+        // The kernel-authenticated executable path is sufficient.
         assert!(matches!(
             tools.dispatch("/bin/sh", None),
-            Dispatch::Direct(_)
+            Dispatch::Mediate(_)
         ));
         // A path the map does not know is refused.
         assert!(matches!(

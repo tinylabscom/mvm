@@ -1010,6 +1010,8 @@ mod tests {
             &o.addon_dns,
             &o.exit_report,
             &o.ping,
+            &o.tool_shim,
+            &o.tool_helper,
             &oci.agent,
             &oci.netinit,
             &oci.egress_client,

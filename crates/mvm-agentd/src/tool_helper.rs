@@ -112,40 +112,24 @@ pub fn approve<'a>(
     map: &'a ToolMap,
     request: &ShimRequest,
     peer_pid: u32,
-    peer_uid: u32,
-    peer_gid: u32,
+    _peer_uid: u32,
+    _peer_gid: u32,
     agent: &dyn AgentDecisions,
     host: &dyn HostDecisions,
 ) -> Result<ApprovedRun<'a>, HelperReply> {
-    let (entry, mediate) =
-        match map.dispatch(&request.exe, request.argv.first().map(String::as_str)) {
-            Dispatch::Mediate(entry) => (entry, true),
-            Dispatch::Direct(entry) => (entry, false),
-            Dispatch::Unknown => {
-                return Err(HelperReply::Denied {
-                    reason: "the executed path is not a declared tool".into(),
-                });
-            }
-        };
+    let entry = match map.dispatch(&request.exe, request.argv.first().map(String::as_str)) {
+        Dispatch::Mediate(entry) => entry,
+        Dispatch::Unknown => {
+            return Err(HelperReply::Denied {
+                reason: "the executed path is not a declared tool".into(),
+            });
+        }
+    };
     let Some(argv) = non_empty_argv(&request.argv) else {
         return Err(HelperReply::Denied {
             reason: "empty declared command argv".into(),
         });
     };
-    if !mediate {
-        return Ok(ApprovedRun {
-            entry,
-            argv,
-            cwd: request.cwd.clone(),
-            env: request.env.clone(),
-            identity: RunIdentity::Caller {
-                uid: peer_uid,
-                gid: peer_gid,
-            },
-            binding: None,
-            helper_minted_binding: false,
-        });
-    }
 
     // The relayed argv is reported to the host with the declared executable
     // as argv[0]: the path that reached the shim is already verified to be
@@ -558,9 +542,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_runs_use_the_caller_identity_and_untouched_env() {
+    fn attacker_controlled_argv0_cannot_select_a_direct_run() {
         let tools = map(vec![entry("shell", "/bin/sh")]);
-        let run = approve(
+        let reply = approve(
             &tools,
             &request("/bin/sh", &["ls", "-l"]),
             10,
@@ -569,11 +553,8 @@ mod tests {
             &NoAgent,
             &NoHost,
         )
-        .expect("direct run approves without any decision");
-        assert_eq!(run.identity, RunIdentity::Caller { uid: 901, gid: 901 });
-        assert_eq!(run.argv, vec!["ls", "-l"]);
-        assert!(run.env.iter().any(|(key, _)| key == "LD_PRELOAD"));
-        assert!(run.binding.is_none());
+        .expect_err("a substituted path must ask the host regardless of argv0");
+        assert!(matches!(reply, HelperReply::Unavailable { .. }));
     }
 
     #[test]
