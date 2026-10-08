@@ -6,7 +6,12 @@
 .playwright-mcp/
 .superpowers/
 .codex/
-/.cursor/
+/.cursor/*
+!/.cursor/rules
+/.cursor/rules/*
+# Signature sidecars committed by the reviewed instruction-bundle PR (the
+# rule files they sign are tracked; only the sidecars are re-included).
+!/.cursor/rules/*.sigstore.json
 /.delta/
 .claude/*
 !.claude/settings.json
