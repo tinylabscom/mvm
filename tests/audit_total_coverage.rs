@@ -206,6 +206,7 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
 const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
 
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
+    ("build-layer", AuditPosture::InteractiveOrControl),
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
