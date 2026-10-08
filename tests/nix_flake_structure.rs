@@ -30,6 +30,19 @@ fn repo_dir() -> PathBuf {
     PathBuf::from(manifest)
 }
 
+#[test]
+fn mk_guest_sealed_entrypoint_is_executable_by_the_guest_agent() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+    assert!(
+        content.contains(
+            "cp ${entrypointFile} \"$out/etc/mvm/entrypoint\"\n          chmod 0755 \"$out/etc/mvm/entrypoint\""
+        ),
+        "the sealed script must use the executable mode required by the guest agent"
+    );
+}
+
 fn normalized_whitespace(content: &str) -> String {
     content.split_whitespace().collect::<Vec<_>>().join(" ")
 }

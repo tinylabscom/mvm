@@ -71,12 +71,10 @@ impl EntrypointPolicy {
             marker_path: PathBuf::from("/etc/mvm/entrypoint"),
             allowed_prefix: PathBuf::from("/etc/mvm/"),
             same_fs_as: Some(PathBuf::from("/etc/mvm")),
-            // mkGuest currently emits the script marker as 0755, so the
-            // fallback policy accepts either 0555 or 0755. Immutable baked
-            // files are still read-only in practice because the rootfs is
-            // mounted ro; tightening this to 0555 can follow the wrapper
-            // layout migration in mkGuest.
-            required_mode: 0o755,
+            // The sealed rootfs strips owner-write from the executable
+            // script, leaving mode 0555. Reject a writable script even when
+            // the rootfs is mounted read-only.
+            required_mode: 0o555,
             required_uid: 0,
             required_gid: 0,
             allow_shell_shebang: true,
@@ -1264,6 +1262,32 @@ mod tests {
         let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o555);
         let validated = policy.validate().expect("validate should succeed");
         assert_eq!(validated.resolved, std::fs::canonicalize(&wrapper).unwrap());
+    }
+
+    #[test]
+    fn sealed_script_policy_accepts_immutable_executable_and_rejects_writable_script() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let etc_mvm = tmp.path().join("etc/mvm");
+        std::fs::create_dir_all(&etc_mvm).expect("marker directory");
+        let marker = etc_mvm.join("entrypoint");
+        std::fs::write(&marker, "#!/bin/sh\nexit 7\n").expect("sealed script");
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o555))
+            .expect("sealed script mode");
+
+        let mut policy = EntrypointPolicy::sealed_script_marker();
+        policy.marker_path = marker.clone();
+        policy.allowed_prefix = etc_mvm.clone();
+        policy.same_fs_as = Some(etc_mvm);
+        policy.required_uid = nix_compat_geteuid();
+        policy.required_gid = nix_compat_getegid();
+        policy.validate().expect("immutable script is executable");
+
+        std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o755))
+            .expect("writable script mode");
+        assert!(matches!(
+            policy.validate(),
+            Err(ValidationError::WrongMode { mode: 0o755, .. })
+        ));
     }
 
     #[test]
