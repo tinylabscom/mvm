@@ -16,6 +16,7 @@
 
 use mvm_agentd::guest_mount;
 use mvm_agentd::vsock::ActivateEnvironment;
+use mvm_core::plan::{ToolMediationGrant, VerbGrant};
 
 use crate::globals::VALIDATED_EXTENSIONS;
 use crate::state::{ActivationState, AgentBootState};
@@ -124,6 +125,8 @@ pub(crate) fn apply_activation(
         return Ok(());
     }
 
+    let (_, pinned_grant) = boot_state.grant_state();
+    validate_tool_commands(env, pinned_grant.as_ref())?;
     boot_state.set_activation(ActivationState::Activating);
 
     let new_root = guest_mount::mount_rootfs(&env.rootfs)?;
@@ -168,6 +171,23 @@ pub(crate) fn apply_activation(
     Ok(())
 }
 
+fn validate_tool_commands(
+    env: &ActivateEnvironment,
+    grant: Option<&VerbGrant>,
+) -> Result<(), guest_mount::MountError> {
+    let actual = ToolMediationGrant::digest_commands(&env.tool_commands)
+        .map_err(|reason| guest_mount::MountError::InvalidConfig(reason.into()))?;
+    let expected = grant
+        .and_then(|grant| grant.tool_mediation.as_ref())
+        .and_then(|mediation| mediation.command_map_digest.as_ref());
+    if actual.as_ref() != expected {
+        return Err(guest_mount::MountError::InvalidConfig(
+            "tool executable map does not match the boot-pinned signed grant".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Log a fatal PID-1 error and exit.  There is no init to fall back to,
 /// so panicking or plain `exit` both surface the failure on the console.
 #[cfg(target_os = "linux")]
@@ -197,4 +217,61 @@ fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
 #[cfg(not(target_os = "linux"))]
 fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    fn environment(commands: BTreeMap<String, String>) -> ActivateEnvironment {
+        ActivateEnvironment {
+            rootfs: mvm_agentd::vsock::RootfsConfig {
+                data_dev: "/dev/vda".into(),
+                hash_dev: None,
+                roothash: None,
+                virtiofs_tag: None,
+                in_place: false,
+            },
+            runtime: None,
+            volumes: Vec::new(),
+            extensions: Vec::new(),
+            verb_grant_envelope: None,
+            tool_commands: commands,
+        }
+    }
+
+    fn grant(commands: &BTreeMap<String, String>) -> VerbGrant {
+        VerbGrant {
+            session_id: "session".into(),
+            plan_nonce: mvm_core::plan::Nonce::from_bytes([0; 16]),
+            not_after: chrono::Utc::now(),
+            verbs: Vec::new(),
+            drive: None,
+            tool_mediation: Some(ToolMediationGrant {
+                class_gate_only: true,
+                command_map_digest: ToolMediationGrant::digest_commands(commands)
+                    .expect("valid map"),
+            }),
+            sig: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn activation_requires_the_exact_boot_pinned_command_map() {
+        let commands = BTreeMap::from([("shell".into(), "/bin/sh".into())]);
+        let signed = grant(&commands);
+        let env = environment(commands.clone());
+        assert!(validate_tool_commands(&env, Some(&signed)).is_ok());
+        assert!(validate_tool_commands(&env, None).is_err());
+        assert!(validate_tool_commands(&environment(BTreeMap::new()), Some(&signed)).is_err());
+        let redirected = environment(BTreeMap::from([("shell".into(), "/bin/bash".into())]));
+        assert!(validate_tool_commands(&redirected, Some(&signed)).is_err());
+        let ambiguous = environment(BTreeMap::from([
+            ("shell".into(), "/bin/sh".into()),
+            ("other".into(), "/bin/sh".into()),
+        ]));
+        assert!(validate_tool_commands(&ambiguous, Some(&signed)).is_err());
+        assert!(validate_tool_commands(&environment(BTreeMap::new()), None).is_ok());
+    }
 }

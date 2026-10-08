@@ -1708,6 +1708,7 @@ class ToolCheckRequest:
 @dataclass
 class ToolMediationGrant:
     class_gate_only: bool
+    command_map_digest: Optional[Sha256Digest] = None
 
 
 VerbId = str
@@ -2225,6 +2226,7 @@ class ActivateEnvironment:
     rootfs: RootfsConfig
     extensions: Optional[List[ExtensionConfig]] = field(default_factory=lambda: [])
     runtime: Optional[RuntimeOverlayConfig] = None
+    tool_commands: Optional[Dict[str, str]] = None
     verb_grant_envelope: Optional[VerbGrantEnvelope] = None
     volumes: Optional[List[VolumeConfig]] = field(default_factory=lambda: [])
 

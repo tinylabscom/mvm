@@ -9,6 +9,7 @@
 
 use mvm_contract::assurance::{AssuranceId, Sha256Digest};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Host-to-guest activation message.  This is the only control verb
 /// accepted before privilege drop in PID-1 initramfs mode.
@@ -36,6 +37,10 @@ pub struct ActivateEnvironment {
     /// by the host-signer trust anchor.
     #[serde(default)]
     pub verb_grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+    /// Full tool-to-executable map, authenticated by the host control channel
+    /// and matched to the boot-pinned grant before activation changes mounts.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_commands: BTreeMap<String, String>,
 }
 
 /// One read-only extension artifact mounted for identity-only dispatch.
@@ -232,6 +237,7 @@ mod tests {
             }],
             extensions: Vec::new(),
             verb_grant_envelope: None,
+            tool_commands: BTreeMap::new(),
         };
         let json = serde_json::to_string(&env).expect("serialize");
         let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
@@ -242,6 +248,25 @@ mod tests {
         );
         assert_eq!(parsed.volumes.len(), 1);
         assert!(parsed.volumes[0].read_only);
+    }
+
+    #[test]
+    fn activation_command_map_round_trips_and_legacy_messages_default_empty() {
+        let legacy = serde_json::json!({
+            "rootfs": {
+                "data_dev": "/dev/vda"
+            }
+        });
+        let decoded: ActivateEnvironment = serde_json::from_value(legacy).expect("legacy message");
+        assert!(decoded.tool_commands.is_empty());
+        let mut mapped = decoded;
+        mapped
+            .tool_commands
+            .insert("shell".into(), "/bin/sh".into());
+        let round: ActivateEnvironment =
+            serde_json::from_slice(&serde_json::to_vec(&mapped).expect("serialize map"))
+                .expect("deserialize map");
+        assert_eq!(round.tool_commands, mapped.tool_commands);
     }
 
     #[test]
@@ -260,6 +285,7 @@ mod tests {
             volumes: Vec::new(),
             extensions: Vec::new(),
             verb_grant_envelope: None,
+            tool_commands: BTreeMap::new(),
         };
         let json = serde_json::to_string(&env).expect("serialize");
         let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
@@ -280,6 +306,7 @@ mod tests {
             volumes: Vec::new(),
             extensions: Vec::new(),
             verb_grant_envelope: None,
+            tool_commands: BTreeMap::new(),
         };
         let json = serde_json::to_string(&env).expect("serialize");
         let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");
@@ -310,6 +337,7 @@ mod tests {
             volumes: Vec::new(),
             extensions: Vec::new(),
             verb_grant_envelope: None,
+            tool_commands: BTreeMap::new(),
         };
         let json = serde_json::to_string(&env).expect("serialize");
         let parsed: ActivateEnvironment = serde_json::from_str(&json).expect("deserialize");

@@ -768,6 +768,7 @@ mod tests {
             }],
             extensions: Vec::new(),
             verb_grant_envelope: None,
+            tool_commands: Default::default(),
         });
         assert_eq!(req.verb(), Verb::ActivateEnvironment);
         assert_eq!(req.kind_name(), "activate-environment");

@@ -354,6 +354,7 @@ mod tests {
     fn mediation() -> Option<mvm_core::plan::ToolMediationGrant> {
         Some(mvm_core::plan::ToolMediationGrant {
             class_gate_only: true,
+            command_map_digest: None,
         })
     }
 

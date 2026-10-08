@@ -329,6 +329,12 @@ export type AssuranceId = string
  */
 export type Nonce = string
 /**
+ * A `sha256:<64 hex>` digest.
+ * 
+ * Stored in its wire form rather than as `[u8; 32]` so that a digest which round-trips through this contract is byte-identical to the one the counterparty computed, including its hex case. Equality is over those exact bytes, which is what the identity checks downstream depend on.
+ */
+export type Sha256Digest = string
+/**
  * A guest-agent control-verb identifier: the stable `kind_name()` token (non-empty kebab-case). Validated at construction so an `agent_verbs` grant can never carry an unparseable verb.
  */
 export type VerbId = string
@@ -371,12 +377,6 @@ follow_symlinks?: boolean
 path: string
 }
 })
-/**
- * A `sha256:<64 hex>` digest.
- * 
- * Stored in its wire form rather than as `[u8; 32]` so that a digest which round-trips through this contract is byte-identical to the one the counterparty computed, including its hex case. Equality is over those exact bytes, which is what the identity checks downstream depend on.
- */
-export type Sha256Digest = string
 /**
  * One input event bound for the guest display.
  */
@@ -899,6 +899,12 @@ rootfs: RootfsConfig
  */
 runtime?: (RuntimeOverlayConfig | null)
 /**
+ * Full tool-to-executable map, authenticated by the host control channel and matched to the boot-pinned grant before activation changes mounts.
+ */
+tool_commands?: {
+[k: string]: string
+}
+/**
  * Optional verb-grant envelope to pin before serving operational RPCs.  When present, the activation message itself must be signed by the host-signer trust anchor.
  */
 verb_grant_envelope?: (VerbGrantEnvelope | null)
@@ -1090,6 +1096,10 @@ export interface ToolMediationGrant {
  * A dev plan without an agent-verb list continues to use the profile class gate for non-command verbs. Command RPCs are still mediated.
  */
 class_gate_only: boolean
+/**
+ * Digest of the exact tool-to-executable map sent at activation. The complete map cannot ride this grant's bounded kernel command line.
+ */
+command_map_digest?: (Sha256Digest | null)
 }
 /**
  * User volume to mount after rootfs activation.

@@ -51,6 +51,13 @@
             }
           ]
         },
+        "tool_commands": {
+          "description": "Full tool-to-executable map, authenticated by the host control channel and matched to the boot-pinned grant before activation changes mounts.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
         "verb_grant_envelope": {
           "description": "Optional verb-grant envelope to pin before serving operational RPCs.  When present, the activation message itself must be signed by the host-signer trust anchor.",
           "default": null,
@@ -5431,6 +5438,17 @@
         "class_gate_only": {
           "description": "A dev plan without an agent-verb list continues to use the profile class gate for non-command verbs. Command RPCs are still mediated.",
           "type": "boolean"
+        },
+        "command_map_digest": {
+          "description": "Digest of the exact tool-to-executable map sent at activation. The complete map cannot ride this grant's bounded kernel command line.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Sha256Digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
