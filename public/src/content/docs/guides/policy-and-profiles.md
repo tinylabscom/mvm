@@ -231,15 +231,23 @@ profile = "policy/base.toml"    # a profile file shipped in the template
 include = ["policy/apis.toml"]  # extra groups
 ```
 
-`mvmctl generate template <name> <dir>` downloads the declared files with
+The `include` list may also name a versioned signed pack that provides a
+group, for example `"runtime/python@1.0.0"`. Run
+`mvmctl pull runtime/python@1.0.0` first. The template does not download the
+pack as a template file, install it, or grant it trust; generation verifies the
+installed pack while resolving the policy and refuses a missing or
+unverifiable pack.
+
+`mvmctl generate template <name> <dir>` downloads declared local files with
 the rest of the template, copies them into the project, and writes a
 `[policy]` table into the generated `mvm.toml` referencing them. Every
 launch of the project then composes the template's policy with any groups
 added to the generated `[policy] include` list. An explicit `--policy` replaces
 the project's `[policy]` table for that launch; list every policy you want in
-that invocation. Declared paths must stay
-inside the template directory, and generation refuses — naming the template
-and the file — when a declared policy file is missing or does not resolve,
+that invocation. Declared local paths must stay inside the template
+directory, and pack references must specify an exact version. Generation
+refuses — naming the template and the policy reference — when a declared
+policy file or pack is missing or does not resolve,
 so a broken template fails at generation time, not on the first run.
 
 The template's policy is project content: it can tighten, and it cannot

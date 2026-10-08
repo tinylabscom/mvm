@@ -27,20 +27,19 @@ pub struct TemplateEntry {
     pub default_cpus: u8,
     pub default_memory_mib: u32,
     pub tags: Vec<String>,
-    /// The policy the template ships, wired into the generated project's
+    /// The policy the template selects, wired into the generated project's
     /// `mvm.toml [policy]` table. Templates that declare none generate a
     /// project whose policy is whatever the operator passes.
     pub policy: Option<TemplatePolicy>,
     pub source: TemplateSource,
 }
 
-/// The policy a template ships: a profile file and/or extra group files,
-/// all relative to the template directory.
+/// The policy a template selects: a local profile and local or signed-pack groups.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemplatePolicy {
     /// A profile file, relative to the template directory.
     pub profile: Option<String>,
-    /// Extra group files, relative to the template directory.
+    /// Local group files or versioned signed-pack group references.
     pub include: Vec<String>,
 }
 
@@ -80,7 +79,7 @@ struct RemoteTemplateMeta {
     /// Additional files to download from the template directory.
     #[serde(default)]
     files: Vec<String>,
-    /// The policy this template ships, copied into generated projects.
+    /// The policy this template selects, copied into generated projects.
     #[serde(default)]
     policy: Option<RemotePolicyMeta>,
 }
@@ -95,7 +94,7 @@ struct RemotePolicyMeta {
 }
 
 impl RemotePolicyMeta {
-    /// Validate every declared path and lift it into a [`TemplatePolicy`].
+    /// Validate the declared policy and lift it into a [`TemplatePolicy`].
     fn into_template_policy(self, template: &str) -> Result<TemplatePolicy> {
         let profile = self
             .profile
@@ -104,17 +103,40 @@ impl RemotePolicyMeta {
         let include = self
             .include
             .iter()
-            .map(|raw| validate_policy_path(template, raw))
+            .map(|raw| validate_policy_include(template, raw))
             .collect::<Result<Vec<_>>>()?;
         Ok(TemplatePolicy { profile, include })
     }
 }
 
 impl TemplatePolicy {
-    /// Every declared file, profile first then includes.
+    /// Every local policy file, profile first then includes.
     pub(crate) fn paths(&self) -> impl Iterator<Item = &String> {
-        self.profile.iter().chain(self.include.iter())
+        self.profile.iter().chain(self.include.iter().filter(|raw| {
+            !matches!(
+                mvm_client::policy_profiles::PolicyRef::parse(raw),
+                Ok(mvm_client::policy_profiles::PolicyRef::Pack { .. })
+            )
+        }))
     }
+}
+
+fn validate_policy_include(template: &str, raw: &str) -> Result<String> {
+    if matches!(
+        mvm_client::policy_profiles::PolicyRef::parse(raw),
+        Ok(mvm_client::policy_profiles::PolicyRef::Pack { .. })
+    ) {
+        let reference: mvm_core::registry_pack::PackReference = raw.parse().with_context(|| {
+            format!("template {template:?} declares invalid pack policy include {raw:?}")
+        })?;
+        if reference.version().is_none() {
+            bail!(
+                "template {template:?} declares unpinned pack policy include {raw:?}: specify an exact version"
+            );
+        }
+        return Ok(raw.to_string());
+    }
+    validate_policy_path(template, raw)
 }
 
 /// A policy path must stay inside the template directory: relative, no
@@ -305,19 +327,15 @@ async fn fetch_and_cache_remote_template(
     .await?;
     download_text(&format!("{}/flake.nix", base), &cache_dir.join("flake.nix")).await?;
 
-    // Download any extra files declared by the template (SDK sources, app/
-    // directories, etc.), plus the policy files: a template ships its policy
-    // with everything else so offline scaffolds resolve the same way.
+    // Download extra files and local policy files; signed-pack references
+    // resolve from the verified local pack store instead of this template URL.
     let meta_text = std::fs::read_to_string(cache_dir.join("template.toml"))
         .with_context(|| format!("re-reading template.toml from {}", cache_dir.display()))?;
     let meta: RemoteTemplateMeta = toml::from_str(&meta_text)
         .with_context(|| format!("parsing template.toml from {}", cache_dir.display()))?;
     let mut downloads: Vec<String> = meta.files.clone();
-    if let Some(policy) = &meta.policy {
-        if let Some(profile) = &policy.profile {
-            downloads.push(profile.clone());
-        }
-        downloads.extend(policy.include.iter().cloned());
+    if let Some(policy) = meta.policy {
+        downloads.extend(policy.into_template_policy(&meta.name)?.paths().cloned());
     }
     for file in &downloads {
         let dest = cache_dir.join(file);
@@ -446,6 +464,30 @@ include = ["policy/apis.toml", "policy/secrets.toml"]
         assert_eq!(policy.profile.as_deref(), Some("policy/base.toml"));
         assert_eq!(policy.include, ["policy/apis.toml", "policy/secrets.toml"]);
         assert_eq!(policy.paths().count(), 3);
+    }
+
+    #[test]
+    fn policy_includes_keep_versioned_packs_out_of_local_file_paths() {
+        let meta: RemoteTemplateMeta = toml::from_str(
+            "name = \"demo\"\ndescription = \"demo\"\ndefault_vcpus = 2\n\
+             default_memory_mib = 512\n[policy]\ninclude = [\"runtime/python@1.1.0\", \
+             \"policy/apis.toml\"]\n",
+        )
+        .unwrap();
+        let policy = meta.policy.unwrap().into_template_policy("demo").unwrap();
+        assert_eq!(policy.include, ["runtime/python@1.1.0", "policy/apis.toml"]);
+        assert_eq!(
+            policy.paths().map(String::as_str).collect::<Vec<_>>(),
+            ["policy/apis.toml"]
+        );
+    }
+
+    #[test]
+    fn policy_include_refuses_unpinned_or_invalid_pack_references() {
+        for raw in ["runtime/python", "runtime/python@not-semver"] {
+            let error = validate_policy_include("demo", raw).unwrap_err();
+            assert!(format!("{error:#}").contains(raw), "{error:#}");
+        }
     }
 
     #[test]
@@ -583,5 +625,44 @@ tags = ["demo"]
             .block_on(search_remote(&cfg, "demo"))
             .unwrap();
         assert_eq!(filtered.len(), 1); // still one, demo is compatible
+    }
+
+    #[test]
+    fn remote_template_fetches_local_policy_but_not_pack_reference_as_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = tmp.path().join("registry");
+        let source = reg.join("templates/demo");
+        std::fs::create_dir_all(source.join("policy")).unwrap();
+        std::fs::write(
+            reg.join("index.json"),
+            r#"{"templates":[{"name":"demo","description":"demo","path":"templates/demo"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("template.toml"),
+            "name = \"demo\"\ndescription = \"demo\"\ndefault_vcpus = 2\n\
+             default_memory_mib = 512\n[policy]\ninclude = [\"runtime/python@1.1.0\", \
+             \"policy/apis.toml\"]\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("flake.nix"), "{ }").unwrap();
+        std::fs::write(source.join("policy/apis.toml"), "description = \"apis\"\n").unwrap();
+        let cfg = RegistryConfig {
+            registry_url: format!("file://{}", reg.display()),
+            cache_root: tmp.path().join("cache"),
+        };
+        let entry = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(resolve(&cfg, "demo"))
+            .expect("pack reference is not a template file URL");
+        let TemplateSource::Remote { cache_dir } = entry.source else {
+            panic!("expected remote template");
+        };
+        assert!(cache_dir.join("policy/apis.toml").is_file());
+        assert!(!cache_dir.join("runtime/python@1.1.0").exists());
+        assert_eq!(
+            entry.policy.unwrap().include,
+            ["runtime/python@1.1.0", "policy/apis.toml"]
+        );
     }
 }

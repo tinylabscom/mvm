@@ -1528,6 +1528,7 @@ running microVM.
 | `mvmctl template list`                 | List available templates (bundled plus cached remote)                                                                                                                     |
 | `mvmctl template search <query>`       | Search the remote registry for matching templates                                                                                                                         |
 | `mvmctl template info <name>`          | Show details for one bundled or remote template                                                                                                                           |
+| `mvmctl generate template <name> <dir>` | Scaffold a remote template, including local policy files and versioned signed-pack group includes; referenced packs must already be installed and verifiable |
 | `mvmctl deploy <ir.json> --boot-artifact <path>` | Build, seal, and record a workload into a local deployment directory (`image.tar.gz`, `rootfs.ext4`, `deploy.json`); optionally ship it to mvmd with `--mvmd-url` |
 | `mvmctl deploy --from-ir <path> --boot-artifact <path>` | Read the Workload IR from a file instead of a positional path or stdin; a boot artifact is still required |
 | `mvmctl deployments ls`                | Inventory of recorded local deployments (`--workload <ir-hash>` to filter, `--json` for machine output); unreadable records surface as named skips                        |
