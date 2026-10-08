@@ -748,10 +748,10 @@ required-features = ["addons"]
     }
 
     #[test]
-    fn real_workspace_overlay_lists_agree_on_the_nine_binaries() {
+    fn real_workspace_overlay_lists_agree_on_the_eleven_binaries() {
         let root = workspace_root();
         let universe = guest_bin_universe(&root).unwrap();
-        assert_eq!(check_overlay_parity(&root, &universe).unwrap(), 9);
+        assert_eq!(check_overlay_parity(&root, &universe).unwrap(), 11);
         let gab = read(&root, GUEST_AGENT_BUILD).unwrap();
         let sealed = extract_const_names(&gab, SEALED_BINS_CONST).unwrap();
         for name in ["mvm-ping", "mvm-display-bridge", "mvm-guest-agent"] {
