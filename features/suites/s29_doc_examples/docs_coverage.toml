@@ -158,7 +158,7 @@ covered = [
     'mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"',
     "mvmctl machine run --name debug --image alpine -- echo hi",
     "mvmctl machine run --name worker --image myworker --host-service host.kv.v1",
-    "mvmctl machine run -d --image alpine",
+    "mvmctl machine run -d --profile dev --image alpine",
     "mvmctl machine run examples/python/hello-app-with-deps/ --prod",
     "mvmctl machine start alpine-dev",
     "mvmctl machine start alpine-dev --image alpine",
