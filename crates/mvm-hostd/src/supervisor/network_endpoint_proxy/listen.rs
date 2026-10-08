@@ -233,7 +233,9 @@ mod server_tests {
         use crate::supervisor::runtime_approval::NoApprovalBackend;
         use crate::supervisor::tool_decision::ToolDecisionGate;
         use mvm_contract::policy::tool_rules::ToolRules;
-        use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+        use mvm_contract::protocol::network_flow::tool::{
+            ToolCheckRequest, ToolDecisionReply, ToolOrigin,
+        };
         use mvm_core::plan::TenantId;
 
         let signer = Arc::new(CapturingAuditSigner::new());
@@ -270,9 +272,17 @@ mod server_tests {
                 executable: Some(format!("/bin/{tool}")),
                 argv: format!("{tool} data"),
             };
-            write_json_frame(&mut client, &request)
-                .await
-                .expect("send question");
+            // The host-local client frames its question with the host-chosen
+            // origin label; a bare ToolCheckRequest no longer parses.
+            write_json_frame(
+                &mut client,
+                &serde_json::json!({
+                    "question": request,
+                    "origin": ToolOrigin::Host,
+                }),
+            )
+            .await
+            .expect("send question");
             let reply: ToolDecisionReply = read_json_frame(&mut client, MAX_FRAME_BYTES)
                 .await
                 .expect("read decision");
