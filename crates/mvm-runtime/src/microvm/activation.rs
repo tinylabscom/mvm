@@ -828,6 +828,7 @@ mod tests {
                 ..ToolRuleDetail::default()
             },
         );
+        plan.tools.allow.push("shell".into());
         let signed = mvm_core::plan::sign_plan(
             &plan,
             &ed25519_dalek::SigningKey::from_bytes(&[3; 32]),
