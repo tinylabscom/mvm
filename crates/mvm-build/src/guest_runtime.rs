@@ -114,6 +114,15 @@ pub fn resolve_or_build_source_guest_runtime(
     arch: GuestArch,
     workspace_root: &Path,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
+    if let Some(runtime) = seed_source_guest_runtime(
+        cache_root,
+        &crate::cache_install::default_cache_root(),
+        version,
+        arch,
+        workspace_root,
+    )? {
+        return Ok(runtime);
+    }
     let base = cache_root.join("guest-runtime").join("v1");
     fs::create_dir_all(&base)?;
     let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
@@ -144,6 +153,62 @@ pub fn resolve_or_build_source_guest_runtime(
     mvm_core::util::atomic_io::atomic_write(&pointer, format!("{}\n", runtime.digest).as_bytes())
         .map_err(|error| GuestRuntimeError::Cache(error.to_string()))?;
     Ok(runtime)
+}
+
+/// Copy a matching source runtime into an independent cache without compiling.
+///
+/// Both roots must be trusted local caches. The exact source/version/architecture
+/// pointer selects the donor; archive, member digests, member set and modes are
+/// verified before admission. Only the archive is copied (never hardlinked), and
+/// the destination pointer is published last. A corrupt cache is an error, not
+/// permission to rebuild over evidence of tampering.
+pub fn seed_source_guest_runtime(
+    cache_root: &Path,
+    seed_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &Path,
+) -> Result<Option<GuestRuntime>, GuestRuntimeError> {
+    if let Some(runtime) = cached_source_guest_runtime(cache_root, version, arch, workspace_root)? {
+        return Ok(Some(runtime));
+    }
+    if cache_root == seed_root {
+        return Ok(None);
+    }
+    let fingerprint = source_fingerprint(version, arch, workspace_root)?;
+    let Some(source) = cached_source_guest_runtime(seed_root, version, arch, workspace_root)?
+    else {
+        return Ok(None);
+    };
+    let base = cache_root.join("guest-runtime").join("v1");
+    fs::create_dir_all(&base)?;
+    let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
+    if let Some(runtime) = cached_source_guest_runtime(cache_root, version, arch, workspace_root)? {
+        return Ok(Some(runtime));
+    }
+    let archive = seed_root
+        .join("guest-runtime/v1/objects")
+        .join(&source.digest)
+        .join("archive.tar.gz");
+    let runtime = install_archive(&base, &archive, version, arch)?;
+    if runtime.digest != source.digest {
+        return Err(GuestRuntimeError::Cache(
+            "seed archive changed while guest runtime was copying".to_string(),
+        ));
+    }
+    validate_source_sdk_members(&runtime.manifest, workspace_root)?;
+    if source_fingerprint(version, arch, workspace_root)? != fingerprint {
+        return Err(GuestRuntimeError::Cache(
+            "source changed while guest runtime was copying".to_string(),
+        ));
+    }
+    fs::create_dir_all(base.join("sources"))?;
+    mvm_core::util::atomic_io::atomic_write(
+        &base.join("sources").join(fingerprint),
+        format!("{}\n", runtime.digest).as_bytes(),
+    )
+    .map_err(|error| GuestRuntimeError::Cache(error.to_string()))?;
+    Ok(Some(runtime))
 }
 
 /// Find the already-built runtime for this source tree without compiling it.
@@ -418,6 +483,17 @@ fn verify_tree(tree: &Path, manifest: &GuestBinsManifest) -> Result<(), GuestRun
             return Err(GuestRuntimeError::Cache(format!(
                 "cached member {member} is not a regular file"
             )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let actual = fs::symlink_metadata(&path)?.permissions().mode() & 0o7777;
+            let expected = GuestBinsMember::parse(member)?.mode();
+            if actual != expected {
+                return Err(GuestRuntimeError::Cache(format!(
+                    "cached member {member} has mode {actual:o}, expected {expected:o}"
+                )));
+            }
         }
         let actual = file_digest(&path)?;
         if actual != *expected {
@@ -744,5 +820,182 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    fn source_cache_fixture(cache: &Path, workspace: &Path) -> GuestRuntime {
+        let arch = GuestArch::X86_64;
+        fs::create_dir_all(cache).unwrap();
+        let input = archive(cache, &fixture_manifest_with_source_sdk(arch, workspace));
+        let base = cache.join("guest-runtime/v1");
+        let runtime = install_archive(&base, &input, "1.2.3", arch).unwrap();
+        fs::create_dir_all(base.join("sources")).unwrap();
+        fs::write(
+            base.join("sources")
+                .join(source_fingerprint("1.2.3", arch, workspace).unwrap()),
+            &runtime.digest,
+        )
+        .unwrap();
+        runtime
+    }
+
+    #[test]
+    fn source_seed_copies_verified_objects_without_sharing_mutable_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let original = source_cache_fixture(&source, &workspace);
+        let seeded =
+            seed_source_guest_runtime(&target, &source, "1.2.3", GuestArch::X86_64, &workspace)
+                .unwrap()
+                .unwrap();
+        assert_eq!(original.digest, seeded.digest);
+        assert!(seeded.root.starts_with(&target));
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+        assert!(
+            cached_source_guest_runtime(&target, "1.2.3", GuestArch::X86_64, &workspace)
+                .unwrap()
+                .is_some()
+        );
+        fs::write(seeded.root.join("sdk-py/mvm/__init__.py"), b"changed").unwrap();
+        assert!(
+            cached_source_guest_runtime(&source, "1.2.3", GuestArch::X86_64, &workspace)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            seed_source_guest_runtime(&target, &source, "1.2.3", GuestArch::X86_64, &workspace)
+                .is_err(),
+            "a corrupt destination must not be silently repaired"
+        );
+    }
+
+    #[test]
+    fn source_seed_requires_an_exact_source_version_and_arch_pointer() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        source_cache_fixture(&source, &workspace);
+        for (version, arch) in [("1.2.4", GuestArch::X86_64), ("1.2.3", GuestArch::Aarch64)] {
+            assert!(
+                seed_source_guest_runtime(&target, &source, version, arch, &workspace)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        let base = source.join("guest-runtime/v1");
+        fs::remove_dir_all(base.join("sources")).unwrap();
+        fs::create_dir(base.join("sources")).unwrap();
+        fs::write(base.join("sources").join("0".repeat(64)), "a".repeat(64)).unwrap();
+        assert!(
+            seed_source_guest_runtime(&target, &source, "1.2.3", GuestArch::X86_64, &workspace)
+                .unwrap()
+                .is_none()
+        );
+        assert!(!target.join("guest-runtime/v1/sources").exists());
+    }
+
+    #[test]
+    fn source_seed_distinguishes_absent_cache_from_malformed_or_dangling_pointer() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        assert!(
+            seed_source_guest_runtime(&target, &source, "1.2.3", GuestArch::X86_64, &workspace)
+                .unwrap()
+                .is_none()
+        );
+        let pointers = source.join("guest-runtime/v1/sources");
+        fs::create_dir_all(&pointers).unwrap();
+        let pointer =
+            pointers.join(source_fingerprint("1.2.3", GuestArch::X86_64, &workspace).unwrap());
+        for digest in [
+            "".to_string(),
+            "../outside".to_string(),
+            "z".repeat(64),
+            "a".repeat(64),
+        ] {
+            fs::write(&pointer, digest).unwrap();
+            assert!(
+                seed_source_guest_runtime(&target, &source, "1.2.3", GuestArch::X86_64, &workspace)
+                    .is_err()
+            );
+            assert!(!target.exists());
+        }
+    }
+
+    #[test]
+    fn source_resolver_seeds_default_cache_without_a_guest_build() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let temp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(temp.path());
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let source = crate::cache_install::default_cache_root();
+        let target = temp.path().join("isolated/cache");
+        let original = source_cache_fixture(&source, &workspace);
+        let runtime =
+            resolve_or_build_source_guest_runtime(&target, "1.2.3", GuestArch::X86_64, &workspace)
+                .unwrap();
+        assert_eq!(original.digest, runtime.digest);
+        assert!(runtime.root.starts_with(&target));
+        assert!(!guest_agent_build::guest_build_target_dir(&target, &workspace).exists());
+    }
+
+    #[test]
+    fn source_seed_refuses_corrupt_donors_before_publishing_a_pointer() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        for member in ["tree/sdk-py/mvm/__init__.py", "archive.tar.gz"] {
+            let fixture = tempfile::tempdir_in(temp.path()).unwrap();
+            let source = fixture.path().join("source");
+            let target = fixture.path().join("target");
+            let runtime = source_cache_fixture(&source, &workspace);
+            fs::write(runtime.root.parent().unwrap().join(member), b"tampered").unwrap();
+            assert!(
+                seed_source_guest_runtime(&target, &source, "1.2.3", GuestArch::X86_64, &workspace)
+                    .is_err()
+            );
+            assert!(!target.join("guest-runtime/v1/sources").exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_seed_refuses_wrong_executable_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let workspace =
+            guest_agent_build::source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+                .unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let runtime = source_cache_fixture(&source, &workspace);
+        let member = GuestBinsMember::executable(
+            GuestArch::X86_64,
+            guest_agent_build::RUNTIME_OVERLAY_SEALED_BINS[0],
+        )
+        .unwrap();
+        fs::set_permissions(
+            runtime.root.join(member.path()),
+            fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(
+            seed_source_guest_runtime(&target, &source, "1.2.3", GuestArch::X86_64, &workspace)
+                .is_err()
+        );
+        assert!(!target.join("guest-runtime/v1/sources").exists());
     }
 }
