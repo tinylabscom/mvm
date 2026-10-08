@@ -186,7 +186,7 @@ fn send_request(
     header.msg_iov = &mut iov;
     header.msg_iovlen = 1;
     header.msg_control = control.as_mut_ptr().cast();
-    header.msg_controllen = msg_controllen_of(control.len());
+    header.msg_controllen = MsgLen::of_len(control.len());
     header.msg_flags = 0;
     // SAFETY: with at least one descriptor attached, `header` describes a
     // control buffer large enough for `fds`; the CMSG writes stay within it.
