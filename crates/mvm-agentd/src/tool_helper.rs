@@ -31,12 +31,47 @@
 
 use std::io;
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::sync::{Mutex, MutexGuard};
 
 use mvm_contract::hash::sha256_hex;
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
 use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
 
 use crate::tool_map::{Dispatch, EXIT_SPAWN, HelperReply, ShimRequest, ToolEntry, ToolMap};
+
+#[cfg(target_os = "linux")]
+#[derive(Clone)]
+struct ActiveTool {
+    session: u32,
+    binding: ToolInvocationBinding,
+}
+
+#[cfg(target_os = "linux")]
+static ACTIVE_TOOLS: Mutex<Vec<ActiveTool>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "linux")]
+fn active_tools() -> MutexGuard<'static, Vec<ActiveTool>> {
+    ACTIVE_TOOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(target_os = "linux")]
+fn register_active(session: u32, binding: ToolInvocationBinding) {
+    active_tools().push(ActiveTool { session, binding });
+}
+
+#[cfg(target_os = "linux")]
+fn retire_active(session: u32) {
+    active_tools().retain(|active| active.session != session);
+}
+
+#[cfg(not(target_os = "linux"))]
+fn register_active(_session: u32, _binding: ToolInvocationBinding) {}
+
+#[cfg(not(target_os = "linux"))]
+fn retire_active(_session: u32) {}
 
 /// Largest tool binary the helper will hash and exec.
 pub const MAX_TOOL_BYTES: u64 = 512 * 1024 * 1024;
@@ -244,13 +279,14 @@ pub fn run_approved(
         return crate::tool_map::EXIT_UNAVAILABLE;
     };
     let recorded = if let Some(binding) = run.binding.clone() {
-        if let Err(error) = agent.record(child, binding) {
+        if let Err(error) = agent.record(child, binding.clone()) {
             eprintln!("mvm-tool-helper: attribution unavailable: {error}");
             drop(spawned.gate);
             kill_and_reap(spawned.pid);
             release_helper_binding(run, host);
             return crate::tool_map::EXIT_UNAVAILABLE;
         }
+        register_active(child, binding);
         true
     } else {
         false
@@ -261,6 +297,7 @@ pub fn run_approved(
         drop(gate);
         kill_and_reap(spawned.pid);
         if recorded {
+            retire_active(child);
             agent.retire(child);
         }
         release_helper_binding(run, host);
@@ -269,6 +306,7 @@ pub fn run_approved(
     drop(gate);
     let code = wait_or_kill(spawned.pid, events);
     if recorded {
+        retire_active(child);
         agent.retire(child);
     }
     release_helper_binding(run, host);
@@ -878,6 +916,18 @@ pub fn bind_and_serve(map: ToolMap, ready: std::os::fd::OwnedFd) -> io::Result<(
         use std::os::unix::fs::PermissionsExt;
         std::fs::Permissions::from_mode(0o666)
     })?;
+    let attribution = std::path::Path::new(crate::tool_map::TOOL_ATTRIBUTION_SOCKET);
+    let _ = std::fs::remove_file(attribution);
+    let attribution_listener = with_filesystem_ids(
+        crate::guest_mount::TOOL_HELPER_IDENTITY.uid(),
+        crate::guest_mount::TOOL_GID,
+        || std::os::unix::net::UnixListener::bind(attribution),
+    )??;
+    std::fs::set_permissions(attribution, {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::Permissions::from_mode(0o660)
+    })?;
+    std::thread::spawn(move || serve_attribution(attribution_listener));
     let mut ready = std::fs::File::from(ready);
     std::io::Write::write_all(&mut ready, &[1])?;
     drop(ready);
@@ -910,6 +960,7 @@ pub fn serve(map: ToolMap, listener: std::os::unix::net::UnixListener) -> io::Re
 fn recv_request(
     stream: &std::os::unix::net::UnixStream,
 ) -> io::Result<(ShimRequest, [Option<std::os::fd::OwnedFd>; 3])> {
+    use std::io::Read;
     use std::os::fd::{AsRawFd, FromRawFd};
 
     let mut buffer = vec![0u8; (crate::tool_map::MAX_SHIM_FRAME_BYTES + 1) as usize];
@@ -932,8 +983,14 @@ fn recv_request(
     // SAFETY: `header` points at the live buffer and control vectors; the
     // kernel writes at most their lengths into them.
     let received = unsafe { libc::recvmsg(stream.as_raw_fd(), &mut header, 0) };
-    if received <= 0 {
+    if received < 0 {
         return Err(io::Error::last_os_error());
+    }
+    if received == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "tool request ended before its frame",
+        ));
     }
     let mut fds: [Option<std::os::fd::OwnedFd>; 3] = [None, None, None];
     // SAFETY: `header` was filled by the successful recvmsg above; walking
@@ -972,7 +1029,34 @@ fn recv_request(
             "tool request did not carry all three standard descriptors",
         ));
     }
-    let line = std::str::from_utf8(&buffer[..received as usize])
+    let mut frame = buffer[..received as usize].to_vec();
+    while !frame.contains(&b'\n') {
+        if frame.len() >= crate::tool_map::MAX_SHIM_FRAME_BYTES as usize {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "tool request exceeds its frame bound",
+            ));
+        }
+        let mut next = [0u8; 4096];
+        let remaining = crate::tool_map::MAX_SHIM_FRAME_BYTES as usize - frame.len();
+        let limit = remaining.min(next.len());
+        let count = (&*stream).read(&mut next[..limit])?;
+        if count == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "tool request ended before its newline",
+            ));
+        }
+        frame.extend_from_slice(&next[..count]);
+    }
+    if frame.len() > crate::tool_map::MAX_SHIM_FRAME_BYTES as usize || frame.last() != Some(&b'\n')
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tool request contains data after its frame",
+        ));
+    }
+    let line = std::str::from_utf8(&frame)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let request: ShimRequest = serde_json::from_str(line.trim_end())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -1005,9 +1089,236 @@ fn peer_process(stream: &std::os::unix::net::UnixStream) -> io::Result<(u32, u32
     Ok((cred.pid as u32, cred.uid, cred.gid))
 }
 
+/// Read procfs metadata with the peer's filesystem IDs. Linux gates
+/// `/proc/<pid>/exe` and `/proc/<pid>/fd` on both filesystem IDs; the helper
+/// retains only the UID/GID transition capabilities needed for its tool
+/// child, rather than a process-inspection capability.
+#[cfg(target_os = "linux")]
+fn with_filesystem_ids<T>(uid: u32, gid: u32, read: impl FnOnce() -> T) -> io::Result<T> {
+    struct Restore {
+        uid: libc::c_int,
+        gid: libc::c_int,
+    }
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: these are the filesystem IDs returned by the kernel for
+            // this thread before the temporary transition.
+            unsafe {
+                libc::setfsuid(self.uid as libc::uid_t);
+                libc::setfsgid(self.gid as libc::gid_t);
+            }
+        }
+    }
+
+    let expected_uid = i32::try_from(uid)
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "peer UID is out of range"))?;
+    let expected_gid = i32::try_from(gid)
+        .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "peer GID is out of range"))?;
+    // SAFETY: these calls change only the calling thread's filesystem IDs.
+    let previous_gid = unsafe { libc::setfsgid(gid) };
+    let previous_uid = unsafe { libc::setfsuid(uid) };
+    let restore = Restore {
+        uid: previous_uid,
+        gid: previous_gid,
+    };
+    // A repeated request returns the current ID, detecting a refused
+    // transition without treating the previous ID as a success indicator.
+    // SAFETY: the same plain IDs are handed back to the kernel.
+    let current_uid = unsafe { libc::setfsuid(uid) };
+    let current_gid = unsafe { libc::setfsgid(gid) };
+    if current_uid != expected_uid || current_gid != expected_gid {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "tool helper could not adopt the peer's filesystem IDs",
+        ));
+    }
+    let result = read();
+    drop(restore);
+    Ok(result)
+}
+
 /// An event source over the shim's control socket. After its one request the
 /// shim sends nothing but forwarded signals (one byte each) and eventually
 /// closes; readable data is drained as signals, and a hangup kills the tool.
+/// Ask the helper whether a socket the agent cannot inspect belongs to a
+/// still-live bound tool session. Every transport or identity failure is an
+/// unattributed flow.
+#[cfg(target_os = "linux")]
+pub(crate) fn tool_socket_owned(
+    session: u32,
+    start_ticks: u64,
+    binding: &ToolInvocationBinding,
+    inode: u64,
+) -> bool {
+    use mvm_core::net::session::{read_json_frame, write_json_frame};
+    use std::os::unix::net::UnixStream;
+
+    let question = crate::tool_map::ToolSocketQuestion {
+        session,
+        start_ticks,
+        binding: binding.clone(),
+        inode,
+    };
+    let ask = || -> io::Result<bool> {
+        let mut stream = with_filesystem_ids(
+            crate::guest_mount::WORKLOAD_UID,
+            crate::guest_mount::TOOL_GID,
+            || UnixStream::connect(crate::tool_map::TOOL_ATTRIBUTION_SOCKET),
+        )??;
+        let (_, uid, gid) = peer_process(&stream)?;
+        let helper = crate::guest_mount::TOOL_HELPER_IDENTITY;
+        if uid != helper.uid() || gid != helper.gid() {
+            return Ok(false);
+        }
+        let deadline = Some(std::time::Duration::from_secs(2));
+        stream.set_read_timeout(deadline)?;
+        stream.set_write_timeout(deadline)?;
+        write_json_frame(
+            &mut stream,
+            &question,
+            crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES,
+        )
+        .map_err(io::Error::other)?;
+        let reply: crate::tool_map::ToolSocketAnswer =
+            read_json_frame(&mut stream, crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES)
+                .map_err(io::Error::other)?;
+        Ok(reply.owned)
+    };
+    ask().unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn owns_socket_in_live_tool(question: &crate::tool_map::ToolSocketQuestion) -> bool {
+    if question.session == 0 || question.inode == 0 {
+        return false;
+    }
+    if !active_tools()
+        .iter()
+        .any(|active| active.session == question.session && active.binding == question.binding)
+    {
+        return false;
+    }
+    with_filesystem_ids(
+        crate::guest_mount::TOOL_UID,
+        crate::guest_mount::TOOL_GID,
+        || {
+            if crate::tool_attribution::process_session_start(question.session).ok()
+                != Some((question.session, question.start_ticks))
+            {
+                return false;
+            }
+            let target = format!("socket:[{}]", question.inode);
+            let Ok(processes) = std::fs::read_dir("/proc") else {
+                return false;
+            };
+            let mut owned = false;
+            for (index, process) in processes.enumerate() {
+                if index >= 4096 {
+                    return false;
+                }
+                let Ok(process) = process else {
+                    return false;
+                };
+                let Some(pid) = process
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse().ok())
+                else {
+                    continue;
+                };
+                let status = match std::fs::read_to_string(format!("/proc/{pid}/status")) {
+                    Ok(status) => status,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return false,
+                };
+                let uid = status
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("Uid:")
+                            .and_then(|ids| ids.split_whitespace().next())
+                    })
+                    .and_then(|value| value.parse::<u32>().ok());
+                if uid != Some(crate::guest_mount::TOOL_UID) {
+                    continue;
+                }
+                let descriptors = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+                    Ok(descriptors) => descriptors,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(_) => return false,
+                };
+                let mut holds = false;
+                for descriptor in descriptors {
+                    let Ok(descriptor) = descriptor else {
+                        return false;
+                    };
+                    match std::fs::read_link(descriptor.path()) {
+                        Ok(path) if path.to_str() == Some(target.as_str()) => holds = true,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(_) => return false,
+                    }
+                }
+                if holds {
+                    if crate::tool_attribution::process_session_start(pid)
+                        .ok()
+                        .is_none_or(|(session, _)| session != question.session)
+                    {
+                        return false;
+                    }
+                    owned = true;
+                }
+            }
+            owned
+        },
+    )
+    .unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn handle_attribution(mut stream: std::os::unix::net::UnixStream) -> io::Result<()> {
+    use mvm_core::net::session::{read_json_frame, write_json_frame};
+
+    let (pid, uid, gid) = peer_process(&stream)?;
+    if pid != 1
+        || uid != crate::guest_mount::WORKLOAD_UID
+        || gid != crate::guest_mount::WORKLOAD_GID
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "tool attribution caller is not the guest agent",
+        ));
+    }
+    let deadline = Some(std::time::Duration::from_secs(2));
+    stream.set_read_timeout(deadline)?;
+    stream.set_write_timeout(deadline)?;
+    let question = read_json_frame::<crate::tool_map::ToolSocketQuestion>(
+        &mut stream,
+        crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES,
+    )
+    .map_err(io::Error::other)?;
+    let answer = crate::tool_map::ToolSocketAnswer {
+        owned: owns_socket_in_live_tool(&question),
+    };
+    write_json_frame(
+        &mut stream,
+        &answer,
+        crate::tool_map::MAX_ATTRIBUTION_FRAME_BYTES,
+    )
+    .map_err(io::Error::other)
+}
+
+#[cfg(target_os = "linux")]
+fn serve_attribution(listener: std::os::unix::net::UnixListener) {
+    for stream in listener.incoming() {
+        let Ok(stream) = stream else {
+            continue;
+        };
+        std::thread::spawn(move || {
+            let _ = handle_attribution(stream);
+        });
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn peer_events(stream: std::os::unix::net::UnixStream) -> impl FnMut() -> ToolEvent {
     use std::collections::VecDeque;
@@ -1065,9 +1376,44 @@ fn handle_connection(mut stream: std::os::unix::net::UnixStream, map: &ToolMap) 
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(
         crate::vsock::TOOL_REQUEST_TIMEOUT_SECS,
     )));
-    let (request, stdio) = recv_request(&stream)?;
-    let (peer_pid, peer_uid, peer_gid) = peer_process(&stream)?;
-    let actual_executable = crate::tool_map::process_executable(peer_pid)?;
+    let (request, stdio) = match recv_request(&stream) {
+        Ok(received) => received,
+        Err(error) => {
+            let _ = send_reply(
+                &mut stream,
+                &HelperReply::Unavailable {
+                    reason: format!("tool request could not be read: {error}"),
+                },
+            );
+            return Err(error);
+        }
+    };
+    let (peer_pid, peer_uid, peer_gid) = match peer_process(&stream) {
+        Ok(peer) => peer,
+        Err(error) => {
+            send_reply(
+                &mut stream,
+                &HelperReply::Unavailable {
+                    reason: format!("tool peer identity unavailable: {error}"),
+                },
+            )?;
+            return Ok(());
+        }
+    };
+    let actual_executable = match with_filesystem_ids(peer_uid, peer_gid, || {
+        crate::tool_map::process_executable(peer_pid)
+    }) {
+        Ok(Ok(path)) => path,
+        Ok(Err(error)) | Err(error) => {
+            send_reply(
+                &mut stream,
+                &HelperReply::Unavailable {
+                    reason: format!("tool executable identity unavailable: {error}"),
+                },
+            )?;
+            return Ok(());
+        }
+    };
     if !crate::tool_map::provenance_matches(&request.exe, &actual_executable) {
         return send_reply(
             &mut stream,
@@ -1236,5 +1582,67 @@ impl HostDecisions for BrokerHost {
         if let Ok(payload) = payload {
             let _ = Self::call(mvm_core::protocol::host_tool::RELEASE_VERB, payload);
         }
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod socket_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn helper_returns_a_typed_failure_for_a_malformed_request() {
+        let (mut shim, helper) = UnixStream::pair().expect("pair");
+        let server = std::thread::spawn(move || handle_connection(helper, &ToolMap::default()));
+        shim.write_all(b"not-json\n").expect("send malformed frame");
+        let mut answer = String::new();
+        shim.read_to_string(&mut answer)
+            .expect("read typed failure");
+        assert!(matches!(
+            serde_json::from_str::<HelperReply>(answer.trim_end()).expect("reply"),
+            HelperReply::Unavailable { .. }
+        ));
+        assert!(server.join().expect("server join").is_err());
+    }
+
+    #[test]
+    fn filesystem_identity_scope_restores_both_ids() {
+        // SAFETY: these calls read, rather than change, the thread's IDs.
+        let uid = unsafe { libc::geteuid() };
+        let gid = unsafe { libc::getegid() };
+        let executable = with_filesystem_ids(uid, gid, || {
+            crate::tool_map::process_executable(std::process::id())
+        })
+        .expect("adopt current filesystem IDs")
+        .expect("read own executable");
+        assert!(!executable.is_empty());
+        assert!(with_filesystem_ids(u32::MAX, gid, || ()).is_err());
+        // SAFETY: repeated setfsuid/setfsgid calls return the current IDs.
+        assert_eq!(unsafe { libc::setfsuid(uid) }, uid as libc::c_int);
+        assert_eq!(unsafe { libc::setfsgid(gid) }, gid as libc::c_int);
+    }
+
+    #[test]
+    fn attribution_socket_refuses_a_caller_that_is_not_pid_one() {
+        let (mut caller, helper) = UnixStream::pair().expect("pair");
+        let error = handle_attribution(helper).expect_err("only the guest agent may ask");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        let mut answer = Vec::new();
+        caller.read_to_end(&mut answer).expect("read closed socket");
+        assert!(answer.is_empty());
+    }
+
+    #[test]
+    fn an_unknown_or_zero_socket_never_receives_a_binding() {
+        let mut question = crate::tool_map::ToolSocketQuestion {
+            session: 424242,
+            start_ticks: 1,
+            binding: ToolInvocationBinding::from_random([9; 16]),
+            inode: 777,
+        };
+        assert!(!owns_socket_in_live_tool(&question));
+        question.inode = 0;
+        assert!(!owns_socket_in_live_tool(&question));
     }
 }

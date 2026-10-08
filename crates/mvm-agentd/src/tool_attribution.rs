@@ -10,12 +10,12 @@
 //!
 //! The egress client asks, for each loopback connection it accepts, which
 //! binding the connection belongs to. The agent finds the client socket in
-//! `/proc/net/tcp{,6}`, every process holding it through `/proc/<pid>/fd`, and
-//! answers with the binding only when every holder is in one recorded session
-//! whose leader is still the process that was recorded. Anything else — a
-//! socket nobody is found holding, holders in different sessions, a leader
-//! that has exited — answers no binding, and the endpoint treats the flow as
-//! belonging to no tool.
+//! `/proc/net/tcp{,6}` and checks readable descriptor holders. A tool child
+//! under a distinct uid has descriptors the agent cannot inspect, so the
+//! restricted helper checks that socket under the tool's filesystem identity
+//! against an active, recorded session. Unknown ownership, holders in other
+//! sessions, or a replaced leader answer no binding; the endpoint treats the
+//! flow as belonging to no tool.
 //!
 //! What this holds against a workload process outside the session, which
 //! runs as the same uid:
@@ -332,6 +332,16 @@ fn process_start_ticks(pid: u32) -> io::Result<u64> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unparseable /proc stat"))
 }
 
+/// Session and start time of a live process, for the helper's narrow socket
+/// ownership check under the tool's filesystem identity.
+#[cfg(target_os = "linux")]
+pub(crate) fn process_session_start(pid: u32) -> io::Result<(u32, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    parse_stat(&stat)
+        .map(|fields| (fields.session, fields.start_ticks))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unparseable /proc stat"))
+}
+
 /// The fields of `/proc/<pid>/stat` attribution needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct StatFields {
@@ -414,6 +424,16 @@ trait ProcSource {
     fn fd_targets(&self, pid: u32) -> Vec<String>;
     /// `/proc/<pid>/stat`.
     fn stat(&self, pid: u32) -> Option<String>;
+    /// Ask the tool helper about a socket the agent's UID cannot inspect.
+    fn tool_socket_owned(
+        &self,
+        _session: u32,
+        _start_ticks: u64,
+        _binding: &ToolInvocationBinding,
+        _inode: u64,
+    ) -> bool {
+        false
+    }
 }
 
 /// The binding a connection from `client` to `server` belongs to, if any.
@@ -437,6 +457,18 @@ fn attribute_with(
         .into_iter()
         .filter(|pid| source.fd_targets(*pid).contains(&target))
         .collect();
+    if holders.is_empty() {
+        let mut owner = None;
+        for entry in live.iter().take(256) {
+            if source.tool_socket_owned(entry.session, entry.start_ticks, &entry.binding, inode) {
+                if owner.is_some() {
+                    return None;
+                }
+                owner = Some(entry.binding.clone());
+            }
+        }
+        return owner;
+    }
     let mut sessions = holders.iter().map(|pid| {
         source
             .stat(*pid)
@@ -494,6 +526,16 @@ impl ProcSource for Procfs {
 
     fn stat(&self, pid: u32) -> Option<String> {
         std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()
+    }
+
+    fn tool_socket_owned(
+        &self,
+        session: u32,
+        start_ticks: u64,
+        binding: &ToolInvocationBinding,
+        inode: u64,
+    ) -> bool {
+        crate::tool_helper::tool_socket_owned(session, start_ticks, binding, inode)
     }
 }
 
@@ -690,6 +732,7 @@ mod tests {
         tcp6: Option<String>,
         fds: BTreeMap<u32, Vec<String>>,
         stats: BTreeMap<u32, String>,
+        helper_owns_tool_socket: bool,
     }
 
     impl ProcSource for FakeProc {
@@ -708,6 +751,19 @@ mod tests {
         }
         fn stat(&self, pid: u32) -> Option<String> {
             self.stats.get(&pid).cloned()
+        }
+        fn tool_socket_owned(
+            &self,
+            session: u32,
+            start_ticks: u64,
+            candidate: &ToolInvocationBinding,
+            inode: u64,
+        ) -> bool {
+            self.helper_owns_tool_socket
+                && session == 100
+                && start_ticks == 5000
+                && candidate == &binding()
+                && inode == 777
         }
     }
 
@@ -811,6 +867,18 @@ mod tests {
         let mut unknown_socket = proc_with_holders(&[100]);
         unknown_socket.tcp = Some(TCP.replace("9C40", "9C41"));
         assert_eq!(ask(&unknown_socket, &live_session(5000)), None);
+    }
+
+    #[test]
+    fn helper_may_confirm_a_distinct_uid_tool_socket_but_not_a_stale_session() {
+        let mut proc = proc_with_holders(&[]);
+        proc.helper_owns_tool_socket = true;
+        assert_eq!(ask(&proc, &live_session(5000)), Some(binding()));
+        assert_eq!(ask(&proc, &live_session(4999)), None);
+        assert_eq!(ask(&proc, &[]), None);
+
+        proc.fds.insert(200, vec!["socket:[777]".into()]);
+        assert_eq!(ask(&proc, &live_session(5000)), None);
     }
 
     #[test]

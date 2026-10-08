@@ -154,10 +154,14 @@ fn send_request(
     stream: &mut std::os::unix::net::UnixStream,
     request: &ShimRequest,
 ) -> Result<(), String> {
+    use std::io::Write;
     use std::os::unix::io::RawFd;
 
     let mut line = serde_json::to_vec(request).map_err(|error| error.to_string())?;
     line.push(b'\n');
+    if line.len() > MAX_SHIM_FRAME_BYTES as usize {
+        return Err("tool request exceeds its frame bound".into());
+    }
     let mut fds: Vec<RawFd> = Vec::new();
     for fd in [0, 1, 2] {
         // SAFETY: `fd` is one of the three well-known descriptors; fcntl
@@ -228,6 +232,13 @@ fn send_request(
                 std::io::Error::last_os_error()
             ));
         }
+        if sent == 0 {
+            return Err("send tool request: no bytes were written".into());
+        }
+        let sent = usize::try_from(sent).map_err(|error| error.to_string())?;
+        stream
+            .write_all(&line[sent..])
+            .map_err(|error| format!("finish tool request: {error}"))?;
     }
     Ok(())
 }

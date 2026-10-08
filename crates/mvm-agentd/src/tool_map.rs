@@ -47,6 +47,10 @@ pub fn provenance_matches(requested: &str, actual: &str) -> bool {
 pub const TOOL_DIR: &str = "/run/mvm-tool";
 /// The helper's guest-local listening socket, inside [`TOOL_DIR`].
 pub const HELPER_SOCKET: &str = "/run/mvm-tool/helper.sock";
+/// Sticky root-owned directory only the saved tool group can traverse.
+pub const TOOL_ATTRIBUTION_DIR: &str = "/run/mvm-tool/attribution";
+/// Guest-local helper socket restricted to the agent's saved tool group.
+pub const TOOL_ATTRIBUTION_SOCKET: &str = "/run/mvm-tool/attribution/helper.sock";
 /// Root-only stash of the substituted tools' original bytes.
 pub const STASH_DIR: &str = "/run/mvm/toolstash";
 /// The installed map, written by PID 1 and read by the helper at startup.
@@ -58,6 +62,8 @@ pub const MAX_MAP_BYTES: u64 = 64 * 1024;
 pub const MAX_SHIM_FRAME_BYTES: u64 = 256 * 1024;
 /// Largest helper-to-agent decision frame either side will read.
 pub const MAX_DECISION_FRAME_BYTES: u64 = 4 * 1024;
+/// Largest guest-local socket ownership question or answer.
+pub const MAX_ATTRIBUTION_FRAME_BYTES: usize = 512;
 /// Refuse large shared multi-call executables: shadowing every applet would
 /// break unrelated commands, while leaving one unshadowed bypasses mediation.
 pub const MAX_ALIASES_PER_TOOL: usize = 8;
@@ -304,6 +310,40 @@ pub enum HelperReply {
     },
 }
 
+/// A narrow question from the agent to the helper about one live tool flow.
+/// The binding is opaque and never supplied by the workload or egress client.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSocketQuestion {
+    /// Session leader whose identity the agent already recorded.
+    pub session: u32,
+    /// Leader start time, to reject a recycled process ID.
+    pub start_ticks: u64,
+    /// Binding minted by the host for this invocation.
+    pub binding: mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding,
+    /// Kernel socket inode resolved from the client and proxy endpoints.
+    pub inode: u64,
+}
+
+impl std::fmt::Debug for ToolSocketQuestion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolSocketQuestion")
+            .field("session", &self.session)
+            .field("start_ticks", &self.start_ticks)
+            .field("binding", &"[redacted]")
+            .field("inode", &self.inode)
+            .finish()
+    }
+}
+
+/// The helper's ownership verdict; a transport failure is never an allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolSocketAnswer {
+    pub owned: bool,
+}
+
 /// One helper-to-agent request on the agent's decision socket.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -492,5 +532,33 @@ mod tests {
         )
         .expect("deserialize unavailable");
         assert_eq!(round, unavailable);
+
+        let ownership = ToolSocketQuestion {
+            session: 100,
+            start_ticks: 5000,
+            binding: mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random([7; 16]),
+            inode: 777,
+        };
+        let round: ToolSocketQuestion = serde_json::from_slice(
+            &serde_json::to_vec(&ownership).expect("serialize ownership question"),
+        )
+        .expect("deserialize ownership question");
+        assert_eq!(round, ownership);
+        assert!(
+            serde_json::from_value::<ToolSocketQuestion>(serde_json::json!({
+                "session": 100,
+                "start_ticks": 5000,
+                "binding": ownership.binding,
+                "inode": 777,
+                "extra": 1,
+            }))
+            .is_err()
+        );
+        let answer = ToolSocketAnswer { owned: true };
+        let round: ToolSocketAnswer = serde_json::from_slice(
+            &serde_json::to_vec(&answer).expect("serialize ownership answer"),
+        )
+        .expect("deserialize ownership answer");
+        assert_eq!(round, answer);
     }
 }
