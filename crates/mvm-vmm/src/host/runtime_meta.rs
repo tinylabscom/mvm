@@ -45,7 +45,7 @@ pub static HOME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VmRuntimeMeta {
     /// Caller's start-mode intent. Written by libkrun's
-    /// `start_with_mode`; consumed by the handle registry for
+    /// `start_in_mode`; consumed by the handle registry for
     /// signal forwarding.
     pub mode: StartModeKind,
 
@@ -325,7 +325,7 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
 /// to `accessible: true` if absent), and writes it to
 /// `~/.mvm/vms/<name>/mode.json`.
 ///
-/// Cross-backend: call this from any `VmBackend::start_with_mode`
+/// Cross-backend: call this from any `VmBackend::start_in_mode`
 /// or `VmBackend::start` impl so `mvmctl console`'s accessible-vs-
 /// sealed gate works consistently regardless of which hypervisor is
 /// active.

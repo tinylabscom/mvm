@@ -310,7 +310,7 @@ pub trait RunningVm: Send {
     fn kill(&self) -> Result<()>;
     /// Force-terminate the VM and report backend-specific teardown phases when
     /// the implementation can observe them.
-    fn kill_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
+    fn terminate_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
         self.kill().map(|_| None)
     }
     fn pause(&self) -> Result<()>;

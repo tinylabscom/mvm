@@ -524,7 +524,7 @@ impl VmBackend for WasmBackend {
         }
     }
 
-    fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
+    fn start_in_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         reject_unsupported_start_config(config)?;
 
         // Admission for this tier's resource controls happens here, not in

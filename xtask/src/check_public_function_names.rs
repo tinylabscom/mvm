@@ -13,40 +13,7 @@ struct SiblingPair {
     extended: String,
 }
 
-// Temporary coordination exceptions for sibling pairs being renamed concurrently.
-// Exact entries make additions fail, and `validate` rejects them once stale.
-const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[
-    (
-        "crates/mvm-cli/src/commands/ops/cache.rs",
-        "mod ckpt_fixture",
-        "ckpt",
-        "ckpt_with_parent_digest",
-    ),
-    (
-        "crates/mvm-core/src/protocol/vm_backend.rs",
-        "trait VmBackend",
-        "start",
-        "start_with_mode",
-    ),
-    (
-        "crates/mvm-vmm/src/driver/traits.rs",
-        "trait RunningVm",
-        "kill",
-        "kill_with_timing",
-    ),
-    (
-        "crates/mvm-runtime/src/checkpoint/mod.rs",
-        "module",
-        "capture_vm_full",
-        "capture_vm_full_with_snapshot_store",
-    ),
-    (
-        "crates/mvm-runtime/src/checkpoint/mod.rs",
-        "module",
-        "capture_vm_full",
-        "capture_vm_full_with_trusted_snapshot_backend",
-    ),
-];
+const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[];
 const EXPECTED_UNEXPLAINED_PAIRS: usize = 0;
 
 pub fn run(workspace: &Path) -> Result<()> {
