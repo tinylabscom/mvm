@@ -65,7 +65,7 @@ pub(super) fn resolve_start_spec(args: &MachineStartArgs) -> Result<(MachineSpec
             Some(spec) => Ok((spec, SpecReconcile::Reuse)),
             None => anyhow::bail!(
                 "machine {name:?} does not exist.
-                 Run `mvmctl machine ls` to list machines,
+                 Run `mvmctl machine ps` to list machines,
                  or `mvmctl machine start {name} --image <ref>` to create and start one.",
                 name = args.name
             ),
@@ -296,7 +296,7 @@ impl mvm_client::launch::machine_start::StartHost for CliStartHost {
 /// `~/.mvm/vms/<name>/` and never read the spec they used to load — it was a
 /// bare existence check. But `machine run` boots a transient VM that has a
 /// live console and no spec, so that check refused, with "does not exist", a
-/// machine `machine ls` was listing as running.
+/// machine `machine ps` was listing as running.
 ///
 /// A builder VM is refused by name. It is headless by construction — no guest
 /// agent, no PTY — so admitting it would trade one wrong error for a worse
@@ -317,7 +317,7 @@ pub(super) fn require_console_target(name: &str) -> Result<()> {
         return Ok(());
     }
     bail!(
-        "machine {name:?} does not exist. Run `mvmctl machine ls` to list machines, \
+        "machine {name:?} does not exist. Run `mvmctl machine ps` to list machines, \
          or `mvmctl machine create {name} --image <ref>` to create one."
     )
 }

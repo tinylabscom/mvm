@@ -189,7 +189,7 @@ pub(super) fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
         validate_machine_name(name)?;
         if !config::machine_state_dir(name).exists() {
             anyhow::bail!(
-                "machine {name:?} does not exist. Run `mvmctl machine ls` to list machines."
+                "machine {name:?} does not exist. Run `mvmctl machine ps` to list machines."
             );
         }
     }

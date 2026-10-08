@@ -117,7 +117,7 @@ mvmctl machine run --flake . --cpus 2 --memory 1024
 
 ```bash
 # List running VMs
-mvmctl machine ls
+mvmctl machine ps
 
 # View guest console logs
 mvmctl machine logs hello
