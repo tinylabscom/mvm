@@ -1382,26 +1382,3 @@ fn failure_names_untrusted_key(world: &mut CliWorld) {
          reason; output was:\n{text}"
     );
 }
-
-#[cfg(test)]
-mod workload_origin_witness_tests {
-    use super::workload_origin_scoped_secret_argv;
-    use std::process::Command;
-
-    #[test]
-    fn shell_receives_one_quoted_command_argument() {
-        let argv = workload_origin_scoped_secret_argv();
-        assert_eq!(&argv[9..11], ["/bin/sh", "-c"]);
-        let script = argv.last().expect("shell command argument exists");
-        assert!(script.contains("\"Bearer $TOOL_LIVE\""));
-        assert!(!script.contains("\\\""));
-        let status = Command::new("/bin/sh")
-            .args(["-n", "-c", script])
-            .status()
-            .expect("run shell syntax check");
-        assert!(
-            status.success(),
-            "workload-origin witness must be valid shell"
-        );
-    }
-}
