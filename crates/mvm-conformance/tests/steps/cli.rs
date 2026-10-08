@@ -251,8 +251,8 @@ fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
     world.kernel_reacquisition_must_fail = true;
 }
 
-#[then(expr = "the incompatible workload kernel cache is evicted")]
-fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
+#[then(expr = "the incompatible workload kernel cache remains unchanged")]
+fn incompatible_workload_kernel_cache_remains_unchanged(world: &mut CliWorld) {
     let home = world
         .isolated_home
         .as_ref()
@@ -264,8 +264,8 @@ fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
     );
     for name in ["vmlinux", "vmlinux.sha256", "config"] {
         assert!(
-            !kernel_dir.join(name).exists(),
-            "incompatible cache member {name} survived"
+            kernel_dir.join(name).exists(),
+            "prepared-only launch mutated incompatible cache member {name}"
         );
     }
 }
