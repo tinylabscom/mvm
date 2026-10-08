@@ -524,6 +524,16 @@ mod tests {
     }
 
     #[test]
+    fn serving_guest_does_not_roll_back() {
+        let (_env, _home) = isolated();
+        let name = "serving";
+        require_serving_guest_result(name, std::time::Duration::from_secs(1), true, || {
+            bail!("a serving guest must not be stopped")
+        })
+        .expect("a serving guest is accepted");
+    }
+
+    #[test]
     fn failed_abort_retains_registry_ownership_for_recovery() {
         let (_env, _home) = isolated();
         let name = "abort-unresolved";

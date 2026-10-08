@@ -54,13 +54,25 @@ fn run_as_parent() {
 fn sections(stdout: &str) -> Vec<(&str, Vec<&str>)> {
     let mut sections: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in stdout.lines() {
-        if let Some(seam) = line.strip_prefix(SECTION) {
+        if let Some((_, seam)) = line.split_once(SECTION) {
             sections.push((seam, Vec::new()));
         } else if let Some((_, lines)) = sections.last_mut() {
             lines.push(line);
         }
     }
     sections
+}
+
+#[test]
+fn the_first_seam_is_found_after_the_test_harness_prefix() {
+    let stdout = "test a_helper_does_not_inherit_denied_variables ... --- seam helper_command\nA=1\n--- seam filtered_env\nB=2\n";
+    assert_eq!(
+        sections(stdout),
+        vec![
+            ("helper_command", vec!["A=1"]),
+            ("filtered_env", vec!["B=2"])
+        ]
+    );
 }
 
 #[test]

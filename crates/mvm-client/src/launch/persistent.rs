@@ -381,19 +381,14 @@ pub fn start_persistent_oci_machine(
         super::detached::require_serving_guest(name, &started, std::time::Duration::from_secs(30))
     {
         let abort_is_unresolved = error.abort_is_unresolved();
-        let error = anyhow::Error::new(error);
         if abort_is_unresolved {
             // The VMM may still hold block-device file descriptors. Preserve
             // the owner leases and registry for recovery; releasing or
             // re-sealing here could admit a second attachment while it lives.
             prepared_volumes.commit();
-            crate::launch::record_session_stop_failure(
-                Some(admission.admitted.plan()),
-                name,
-                &format!("{error:#}"),
-            );
+            audit_detached_readiness_failure(&admission, name, &error);
         } else {
-            emit_failed(&admission, "guest-readiness", &error);
+            audit_detached_readiness_failure(&admission, name, &error);
             // The failure record and session seal live under the runtime
             // state directory, so cleanup must follow audit finalization.
             if let Err(cleanup_error) = crate::local::remove_stopped_runtime_state(name) {
@@ -404,7 +399,7 @@ pub fn start_persistent_oci_machine(
                 );
             }
         }
-        return Err(error);
+        return Err(anyhow::Error::new(error));
     }
     // After the start, because a cgroup quota is read back off a process that
     // does not exist until then. This is the call that puts the backend's
@@ -426,11 +421,145 @@ pub fn start_persistent_oci_machine(
     Ok(admission.admitted)
 }
 
+fn audit_detached_readiness_failure(
+    admission: &crate::admission::AdmissionContext,
+    name: &str,
+    error: &super::detached::DetachedReadinessError,
+) {
+    if error.abort_is_unresolved() {
+        crate::launch::record_unsealed_end(
+            Some((&admission.emitter, admission.admitted.plan())),
+            crate::launch::UnsealedEnd::new(name, crate::launch::UnsealedReason::StopFailed)
+                .error(format!("{error:#}")),
+        );
+    } else {
+        emit_failed(admission, "guest-readiness", &anyhow::anyhow!("{error:#}"));
+    }
+}
+
 #[cfg(test)]
 mod persistent_oci_boot_tests {
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     use mvm_core::util::test_env::TestEnv;
+    use mvm_hostd::plan_admission::InMemoryNonceLedger;
+
+    use crate::admission::entrypoint_resolve::ResolvedEntrypoint;
+    use crate::admission::{AdmissionContext, AdmitPlanForBootParams, admit_plan_for_boot};
+
+    fn admitted(vm_name: &str) -> (AdmissionContext, tempfile::TempDir, tempfile::TempDir) {
+        let keys_dir = tempfile::tempdir().expect("keys dir");
+        let audit_dir = tempfile::tempdir().expect("audit dir");
+        let rootfs_dir = tempfile::tempdir().expect("rootfs dir");
+        let rootfs = rootfs_dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs bytes").expect("write rootfs");
+        let ledger = InMemoryNonceLedger::new();
+        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
+            tools: Default::default(),
+            instructions: Default::default(),
+            outputs: Vec::new(),
+            network_mode: mvm_contract::plan::NetworkMode::default(),
+            tenant: "local",
+            vm_name,
+            backend_name: "libkrun",
+            configured_images_dir: None,
+            rootfs_path: &rootfs,
+            kernel_path: None,
+            precomputed_image_sha256: None,
+            boot_artifact_identity: None,
+            cpus: 2,
+            mem_mib: 512,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::None,
+            secrets: Vec::new(),
+            caller_commitment: None,
+            ledger: &ledger,
+            keys_dir: Some(keys_dir.path()),
+            audit_dir: Some(audit_dir.path()),
+            policy_dir: None,
+            bundle_pin: None,
+            bundle_posture: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            assets: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: vec![],
+            restrict_agent_verbs: true,
+            services: Vec::new(),
+            grants: None,
+            backend_kind: Some(mvm_core::protocol::vm_backend::BackendKind::Libkrun),
+            entrypoint: ResolvedEntrypoint::unresolved("this test resolves no entrypoint"),
+        })
+        .expect("admission succeeds");
+        (ctx, keys_dir, audit_dir)
+    }
+
+    #[test]
+    fn readiness_audit_seals_completed_abort_but_leaves_unresolved_abort_unsealed() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+
+        let (resolved, _resolved_keys, resolved_audit) = admitted("resolved-abort");
+        super::audit_detached_readiness_failure(
+            &resolved,
+            "resolved-abort",
+            &crate::launch::detached::DetachedReadinessError::RolledBack {
+                name: "resolved-abort".into(),
+                timeout_secs: 1,
+            },
+        );
+        let resolved_chain = std::fs::read_to_string(resolved_audit.path().join("local.jsonl"))
+            .expect("resolved chain");
+        assert!(resolved_chain.contains("plan.failed"), "{resolved_chain}");
+        assert!(
+            resolved_chain.contains("guest-readiness"),
+            "{resolved_chain}"
+        );
+        assert!(
+            resolved_chain.contains("session.sealed"),
+            "{resolved_chain}"
+        );
+        assert!(
+            !resolved_chain.contains("plan.launched"),
+            "{resolved_chain}"
+        );
+
+        let (unresolved, _unresolved_keys, unresolved_audit) = admitted("unresolved-abort");
+        super::audit_detached_readiness_failure(
+            &unresolved,
+            "unresolved-abort",
+            &crate::launch::detached::DetachedReadinessError::AbortUnresolved {
+                name: "unresolved-abort".into(),
+                timeout_secs: 1,
+                source: anyhow::anyhow!("VMM still alive"),
+            },
+        );
+        let unresolved_chain = std::fs::read_to_string(unresolved_audit.path().join("local.jsonl"))
+            .expect("unresolved chain");
+        assert!(
+            unresolved_chain.contains("plan.teardown_failed"),
+            "{unresolved_chain}"
+        );
+        assert!(
+            unresolved_chain.contains("stop-failed"),
+            "{unresolved_chain}"
+        );
+        assert!(
+            !unresolved_chain.contains("plan.failed"),
+            "{unresolved_chain}"
+        );
+        assert!(
+            !unresolved_chain.contains("session.sealed"),
+            "{unresolved_chain}"
+        );
+        assert!(
+            !unresolved_chain.contains("plan.launched"),
+            "{unresolved_chain}"
+        );
+    }
 
     #[test]
     fn persistent_registration_records_the_runtime_directory() {

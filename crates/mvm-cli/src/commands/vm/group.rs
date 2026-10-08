@@ -3,7 +3,7 @@
 //!
 //! These are everything that acts on a VM that's already been launched.
 //! `machine` flattens this enum into its own subcommands, beside the
-//! everyday flow (`machine run`/`exec`/`ls`/`console`/`stop`/`logs`); there
+//! everyday flow (`machine run`/`exec`/`ps`/`attach`/`stop`/`logs`); there
 //! is no separate `vm` namespace. The leaf modules are unchanged — this is
 //! purely the grouped surface and its dispatch.
 

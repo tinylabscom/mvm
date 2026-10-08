@@ -66,16 +66,16 @@ fn hvf_console_arm_enabled(name: &str) -> bool {
 }
 
 /// How the interactive console's local escapes and disconnects behave. Shown
-/// under `machine console --help` so the difference between ending a session
+/// under `machine attach --help` so the difference between ending a session
 /// and leaving it is stated where the flag is.
 pub(in crate::commands) const CONSOLE_SESSION_HELP: &str = "\
 SESSIONS:
-    A console session outlives its client. `machine console <name>` attaches to
+    A console session outlives its client. `machine attach <name>` attaches to
     the VM's running session, replaying its recent output, or starts one if
     there is none. One client is attached at a time.
 
     Escapes (press Enter first; handled by mvmctl, never sent to the guest):
-        ~d   detach: the shell keeps running; run `machine console <name>`
+        ~d   detach: the shell keeps running; run `machine attach <name>`
              again to reattach
         ~.   end the session: the shell is hung up and the console exits
 
@@ -83,9 +83,9 @@ SESSIONS:
     when its shell exits, when it is ended with `~.`, after --detach-timeout
     with no client attached, or when the VM stops.
 
-    `machine console <name> --list` shows the session. `machine detach <name>`
+    `machine attach <name> --list` shows the session. `machine detach <name>`
     disconnects whoever is attached, and `--force` takes the session over
-    from them.";
+    from them. `machine console` remains a compatibility spelling.";
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -779,7 +779,7 @@ fn classify_guest_close(
     }
 }
 
-/// `machine console <name> --list`.
+/// `machine attach <name> --list`.
 fn list_console_sessions(name: &str) -> Result<()> {
     let transport = pick_console_transport(name)?;
     let sessions = fetch_sessions(&transport, name)?;
