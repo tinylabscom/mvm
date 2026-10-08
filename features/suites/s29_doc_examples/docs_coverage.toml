@@ -272,6 +272,7 @@ uncovered = [
     "mvmctl env verify-release mvmctl-aarch64-apple-darwin.tar.gz --tag v0.18.0-rc.1",
     "mvmctl explain agent-sandbox",
     "mvmctl explain agent-sandbox --review",
+    "mvmctl image build-layer --source ./staged-root --output ./app-assets",
     "mvmctl image inspect alpine",
     "mvmctl init .",
     "mvmctl init ./agent-sandbox --preset python",

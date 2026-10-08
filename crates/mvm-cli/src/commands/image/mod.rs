@@ -16,6 +16,7 @@ use super::Cli;
 
 mod base_image;
 pub(crate) mod boot;
+mod build_layer;
 mod cache;
 pub(in crate::commands) mod dev;
 mod ingest;
@@ -52,6 +53,15 @@ pub(in crate::commands) struct Args {
 
 #[derive(Subcommand, Debug, Clone)]
 pub(in crate::commands) enum ImageAction {
+    /// Build unsigned ext4 and verity assets from a staged application tree
+    BuildLayer {
+        /// Complete staged application root filesystem directory
+        #[arg(long, value_name = "DIR")]
+        source: PathBuf,
+        /// New directory for the three assets and their digest report
+        #[arg(long, value_name = "DIR")]
+        output: PathBuf,
+    },
     /// Pull, unpack, and materialize an OCI image into the local cache
     Pull {
         /// OCI image reference
@@ -97,6 +107,7 @@ pub(in crate::commands) enum ImageAction {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let cache_root = oci_cache_root();
     match args.action {
+        ImageAction::BuildLayer { source, output } => build_layer::run(&source, &output),
         ImageAction::Pull { reference, prod } => pull::run(&cache_root, reference, prod),
         ImageAction::Ls { registry, json } => ls::run(&cache_root, registry.as_deref(), json),
         ImageAction::Inspect { reference, json } => inspect::run(&cache_root, &reference, json),
