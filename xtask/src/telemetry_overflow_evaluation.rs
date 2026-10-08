@@ -95,6 +95,13 @@ impl Trace {
 
     fn check(&self) {
         for source in &self.sources {
+            assert_eq!(source.drained_sequences.len(), source.drained.records);
+            assert!(
+                source
+                    .drained_sequences
+                    .windows(2)
+                    .all(|pair| pair[0] < pair[1])
+            );
             assert_eq!(
                 source.attempted.records,
                 source.rejected.records + source.contended.records + source.admitted.records
@@ -460,6 +467,92 @@ mod tests {
                 Policy::ReservedDropNewest => unreachable!(),
             }
         }
+    }
+
+    #[test]
+    fn eviction_charges_the_victim_source_not_the_arrival() {
+        let queue = Queue::new(Policy::DropOldest);
+        let victim = Record {
+            source: 1,
+            sequence: 0,
+            bytes: BYTES,
+        };
+        let arrival = fixed(0, 64);
+        let mut trace = Trace::new();
+        trace.offered(victim, queue.offer(victim));
+        let outcome = queue.offer(arrival);
+        assert_eq!(outcome, Outcome::Admitted(vec![victim]));
+        trace.offered(arrival, outcome);
+        let drained = queue.take().unwrap();
+        assert_eq!(drained, arrival);
+        trace.drained(drained);
+        trace.check();
+        assert_eq!(trace.sources[0].evicted, Count::default());
+        assert_eq!(trace.sources[1].drained, Count::default());
+        assert_eq!(
+            trace.sources[1].evicted,
+            Count {
+                records: 1,
+                bytes: BYTES
+            }
+        );
+        assert_eq!(
+            trace.sources[0].drained,
+            Count {
+                records: 1,
+                bytes: 64
+            }
+        );
+    }
+
+    #[test]
+    fn scripted_retention_matches_the_recorded_outcomes() {
+        fn check_retention(
+            policy: Policy,
+            period: Option<usize>,
+            expected: [[usize; 3]; SOURCES],
+            quiet_sequences: &[usize],
+        ) {
+            let (trace, _) = scenario(policy, period);
+            for (source, counts) in trace.sources.iter().zip(expected) {
+                assert_eq!(
+                    [
+                        source.drained.records,
+                        source.rejected.records,
+                        source.evicted.records
+                    ],
+                    counts,
+                    "{policy:?}, drain period {period:?}",
+                );
+            }
+            assert_eq!(trace.sources[1].drained_sequences, quiet_sequences);
+        }
+        check_retention(Policy::DropNewest, None, [[10, 118, 0], [1, 15, 0]], &[0]);
+        check_retention(
+            Policy::DropNewest,
+            Some(4),
+            [[44, 84, 0], [3, 13, 0]],
+            &[0, 1, 3],
+        );
+        check_retention(Policy::DropOldest, None, [[8, 0, 120], [1, 0, 15]], &[15]);
+        check_retention(
+            Policy::DropOldest,
+            Some(4),
+            [[38, 0, 90], [2, 0, 14]],
+            &[0, 15],
+        );
+        check_retention(
+            Policy::ReservedDropNewest,
+            None,
+            [[8, 120, 0], [7, 9, 0]],
+            &[0, 1, 2, 3, 5, 7, 9],
+        );
+        check_retention(
+            Policy::ReservedDropNewest,
+            Some(4),
+            [[30, 98, 0], [13, 3, 0]],
+            &[0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 13, 15],
+        );
     }
 
     #[test]

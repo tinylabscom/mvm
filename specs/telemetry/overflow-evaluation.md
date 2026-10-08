@@ -60,6 +60,10 @@ worker schedule intentionally avoids sleep polling. Counts vary with host
 scheduling. This differs from the existing four-producer no-worker production
 fairness baseline: do not compare its ratios as like-for-like results.
 Reservation cannot guarantee fairness when the single lock is contended.
+These rounds stress accounting under scheduling variation; the start barrier
+does not guarantee that draining overlaps offers. A worker can finish its
+empty pop attempts before either producer runs. They are not an overlap or
+concurrent-fairness witness.
 
 Reports include per-source attempted, admitted, rejected, contended, evicted
 and drained **records and bytes**, plus exact drained sequence lists.
@@ -124,8 +128,12 @@ the worker's ownership of already-popped records.
   p95 ranges were 125–166 ns (drop-newest), 167–250 ns (drop-oldest), and
   125–208 ns (reserved). These numbers include model-specific scanning and
   allocation; they establish neither a production regression nor compliance.
-  Raw reports are generated at the `/tmp/overflow-evaluation-{1..5}.json`
-  paths above and are not committed as new reference baselines.
+  The five complete original reports, SHA-256 checksums and recovery instructions
+  are preserved in the [issue evidence](https://github.com/tinylabscom/mvm/issues/3942#issuecomment-6067625153).
+  Their measured source is commit `1999f048c4f7bb7d6f07e23cac895a8daac0ee75`.
+  They are local observations, not new reference baselines. Independent inspection
+  of all 780 recorded traces verified per-source record/byte conservation and
+  strictly ordered, unique drained sequences.
 
 Sequence lists expose gaps only within this finite trace, where every attempt
 is known. In production, absent tail records are not independently discoverable
