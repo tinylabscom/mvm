@@ -72,7 +72,6 @@ fn admit(f: &Fixture) -> Result<AdmissionContext> {
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: None,
-            mount_images: None,
             materialized_mounts: None,
             user_policy: Some(&f.policy),
         },
@@ -221,7 +220,6 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: Some(&mount_roots),
-            mount_images: None,
             materialized_mounts: None,
             user_policy: Some(&f.policy),
         },
@@ -247,19 +245,19 @@ fn deny_audits_and_refuses_an_unsigned_instruction_in_a_host_snapshot_image() {
     let live = f.mount.join("CLAUDE.md");
     crate::instruction_trust::sign::sign_file(&live, &publisher_key()).unwrap();
     let image = unsigned_instruction_image(&f, "host-snapshot.ext4");
-    let images = vec![image.clone()];
-    let mut disk_share = share(&f.mount);
-    disk_share.kind = mvm_core::plan::ShareKind::Disk;
+    let mounts = vec![instructions::MaterializedMount {
+        host_path: f.mount.clone(),
+        image_path: image.clone(),
+    }];
     let ledger = InMemoryNonceLedger::new();
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
         keys_dir: Some(&f.keys),
         audit_dir: Some(&f.audit),
-        shares: vec![disk_share],
+        shares: vec![share(&f.mount)],
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: Some(&[]),
-            mount_images: Some(&images),
-            materialized_mounts: None,
+            materialized_mounts: Some(&mounts),
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)
@@ -298,6 +296,144 @@ fn unsigned_instruction_image(f: &Fixture, name: &str) -> PathBuf {
     image
 }
 
+fn signed_instruction_image(f: &Fixture, name: &str) -> PathBuf {
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    let source = f._dir.path().join(format!("{name}-source"));
+    std::fs::create_dir_all(&source).unwrap();
+    let instruction = source.join("CLAUDE.md");
+    std::fs::write(&instruction, b"guest-visible signed instructions\n").unwrap();
+    crate::instruction_trust::sign::sign_file(&instruction, &publisher_key()).unwrap();
+    let nodes = std::fs::read_dir(&source)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            Node::File {
+                path: format!("/{}", entry.file_name().to_string_lossy()),
+                mode: 0o644,
+                data: std::fs::read(entry.path()).unwrap(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            }
+        })
+        .collect();
+    let image = f._dir.path().join(name);
+    std::fs::write(&image, build_image(nodes, &Default::default()).unwrap()).unwrap();
+    image
+}
+
+#[test]
+fn explicit_materialized_identity_signs_ro_and_refuses_the_requested_rw_attachment() {
+    let f = fixture(Some("deny"));
+    let image = signed_instruction_image(&f, "signed.ext4");
+    let mount = instructions::MaterializedMount {
+        host_path: f.mount.clone(),
+        image_path: image.clone(),
+    };
+    let requested = mvm_core::vm_backend::VmVolume {
+        host: f.mount.display().to_string(),
+        guest: "/work".to_string(),
+        read_only: false,
+        materialized_image: Some(image.display().to_string()),
+        ..Default::default()
+    };
+    let managed = mvm_core::vm_backend::VmVolume {
+        host: f._dir.path().join("managed.ext4").display().to_string(),
+        guest: "/data".to_string(),
+        read_only: false,
+        ..Default::default()
+    };
+    std::fs::write(&managed.host, b"managed block").unwrap();
+    let shares = mvm_hostd::run::shares_from_vm_volumes(&[requested.clone(), managed.clone()]);
+    let ledger = InMemoryNonceLedger::new();
+    let admitted = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares,
+        instructions: InstructionSources {
+            user_policy: Some(&f.policy),
+            ..InstructionSources::for_workload(None)
+                .with_mount_roots(&[])
+                .with_materialized_mounts(std::slice::from_ref(&mount))
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect("the signed frozen instruction image admits");
+    let plan = admitted.admitted.plan();
+    assert!(plan.shares[0].read_only, "instruction share is signed ro");
+    assert!(!plan.shares[1].read_only, "managed block remains rw");
+
+    let mut read_only = requested.clone();
+    read_only.read_only = true;
+    mvm_hostd::plan_admission::enforce_admitted_shares(&[read_only, managed.clone()], plan)
+        .expect("the explicit ro attachment and managed block match the signed plan");
+    mvm_hostd::plan_admission::enforce_admitted_shares(&[requested], plan)
+        .expect_err("the originally requested rw attachment must not bypass signed ro");
+}
+
+#[test]
+fn malformed_materialized_identities_fail_before_plan_admitted() {
+    enum Malformed {
+        Missing,
+        Duplicate,
+        Unmatched,
+    }
+
+    let f = fixture(Some("deny"));
+    let ledger = InMemoryNonceLedger::new();
+    admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            user_policy: Some(&f.policy),
+            ..InstructionSources::for_workload(None).with_mount_roots(&[])
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("an unmapped materialized directory share fails closed");
+    assert!(chain(&f).iter().all(|(event, _)| event != "plan.admitted"));
+
+    for case in [
+        Malformed::Missing,
+        Malformed::Duplicate,
+        Malformed::Unmatched,
+    ] {
+        let f = fixture(Some("deny"));
+        let image = signed_instruction_image(&f, "signed.ext4");
+        let valid = instructions::MaterializedMount {
+            host_path: f.mount.clone(),
+            image_path: image.clone(),
+        };
+        let mappings = match case {
+            Malformed::Missing => Vec::new(),
+            Malformed::Duplicate => vec![valid.clone(), valid],
+            Malformed::Unmatched => vec![instructions::MaterializedMount {
+                host_path: f._dir.path().join("other"),
+                image_path: image,
+            }],
+        };
+        let ledger = InMemoryNonceLedger::new();
+        admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(&f.keys),
+            audit_dir: Some(&f.audit),
+            shares: vec![share(&f.mount)],
+            instructions: InstructionSources {
+                user_policy: Some(&f.policy),
+                ..InstructionSources::for_workload(None)
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&mappings)
+            },
+            ..pinning_params(&f.rootfs, &ledger)
+        })
+        .expect_err("malformed materialized identities fail closed");
+        assert!(
+            chain(&f).iter().all(|(event, _)| event != "plan.admitted"),
+            "identity failure must precede plan.admitted"
+        );
+    }
+}
+
 #[test]
 fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
     let f = fixture(Some("deny"));
@@ -311,7 +447,7 @@ fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
         materialized_image: Some(image.display().to_string()),
         ..Default::default()
     }];
-    let images = super::instructions::materialized_mount_images(&volumes);
+    let mounts = super::instructions::materialized_mounts(&volumes);
     let ledger = InMemoryNonceLedger::new();
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
         keys_dir: Some(&f.keys),
@@ -321,7 +457,7 @@ fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
             user_policy: Some(&f.policy),
             ..InstructionSources::for_workload(None)
                 .with_mount_roots(&[])
-                .with_mount_images(&images)
+                .with_materialized_mounts(&mounts)
         },
         ..pinning_params(&f.rootfs, &ledger)
     })

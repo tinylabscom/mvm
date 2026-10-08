@@ -230,10 +230,12 @@ pub fn start_persistent_oci_machine(
             .volumes
             .iter()
             .filter_map(|volume| {
-                volume
-                    .materialized_image
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
+                volume.materialized_image.as_deref().map(|image| {
+                    crate::admission::instructions::MaterializedMount {
+                        host_path: std::path::PathBuf::from(&volume.host),
+                        image_path: std::path::PathBuf::from(image),
+                    }
+                })
             })
             .collect::<Vec<_>>(),
     )?;
