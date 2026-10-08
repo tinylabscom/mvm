@@ -804,6 +804,13 @@ mod tests {
             PathBuf::from(&prepared.volumes[0].host),
             fs::canonicalize(&image).unwrap()
         );
+        assert_eq!(
+            prepared.volumes[0]
+                .materialized_image
+                .as_deref()
+                .map(PathBuf::from),
+            Some(fs::canonicalize(&image).unwrap())
+        );
         assert!(matches!(
             prepared.volumes[0].kind,
             mvm_core::vm_backend::VmVolumeKind::Disk

@@ -73,6 +73,7 @@ fn admit(f: &Fixture) -> Result<AdmissionContext> {
             workload_dir: None,
             mount_roots: None,
             mount_images: None,
+            materialized_mounts: None,
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)
@@ -221,6 +222,7 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
             workload_dir: None,
             mount_roots: Some(&mount_roots),
             mount_images: None,
+            materialized_mounts: None,
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)
@@ -257,6 +259,7 @@ fn deny_audits_and_refuses_an_unsigned_instruction_in_a_host_snapshot_image() {
             workload_dir: None,
             mount_roots: Some(&[]),
             mount_images: Some(&images),
+            materialized_mounts: None,
             user_policy: Some(&f.policy),
         },
         ..pinning_params(&f.rootfs, &ledger)

@@ -219,6 +219,13 @@ fn host_directory_source(world: &CliWorld, volume_name: &str) -> std::path::Path
     isolated_home(world).join("dir-volumes").join(volume_name)
 }
 
+#[when(expr = "I add an instruction file to host directory volume {string}")]
+fn add_host_directory_instruction(world: &mut CliWorld, volume_name: String) {
+    let path = host_directory_source(world, &volume_name).join("AGENTS.md");
+    fs::write(&path, "guest instructions\n")
+        .unwrap_or_else(|error| panic!("write instruction file {path:?}: {error}"));
+}
+
 #[then(expr = "host directory volume {string} has file {string} containing {string}")]
 fn host_directory_has_file(world: &mut CliWorld, volume_name: String, file: String, text: String) {
     let path = host_directory_source(world, &volume_name).join(&file);

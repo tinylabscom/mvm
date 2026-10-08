@@ -41,6 +41,8 @@ pub struct SessionAuditSubstrate {
     pub bundle_json: Option<String>,
     /// Config-drive files the plan's guest boot config needs.
     pub config_files: Vec<mvm_core::vm_backend::VmFile>,
+    /// Frozen host-directory images admission hardened to read-only.
+    pub read_only_materialized_images: Vec<String>,
 }
 
 /// Admission callback: given what the boot resolved, produce the substrate the
