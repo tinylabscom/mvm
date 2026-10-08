@@ -81,7 +81,7 @@ pub(in crate::commands) fn run(args: &ReplayArgs) -> Result<()> {
     .with_context(|| format!("restoring checkpoint {:?} for replay", from.as_str()))?;
 
     let replayed = super::invoke::replay_prompts(&fork_name, &plan, &inputs, args.timeout)?;
-    ui::success(&format!(
+    ui::notice(&format!(
         "replayed {} prompt(s) from {} onto {fork_name:?}; the machine is running",
         replayed.report.applied,
         from.as_str(),

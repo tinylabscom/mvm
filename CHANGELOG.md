@@ -2,6 +2,25 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.23.1] — 2026-10-07
+
+### Added
+- Verify selected signed base-set artifacts with `mvmctl image boot verify --artifact`.
+- Verify signed registry-pack revocation documents and persist verified checkpoints.
+- Bind mediated tool calls to signed executable paths and tool-scoped routes and secrets.
+
+### Changed
+- Make named-machine lifecycle guidance and commands consistent.
+- Parallelize release optimization builds.
+- Assemble source guest artifacts from one archive.
+
+### Fixed
+- Accept immutable sealed entrypoints while refusing writable entrypoint modes.
+- Show prompt-replay completion in default CLI output.
+- Fail closed when detached-machine readiness cannot be confirmed.
+- Preserve tool attribution for the egress-client identity.
+- Keep builder and telemetry outcome reporting bound to the active run.
+
 ## [0.23.0] — 2026-10-07
 
 ### Added
