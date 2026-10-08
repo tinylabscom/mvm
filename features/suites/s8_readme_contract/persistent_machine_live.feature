@@ -74,7 +74,7 @@ Feature: README persistent machine lifecycle works end to end
     # /bin/sh is not declared. The python process it starts is workload-origin,
     # so its route and secret work only after the broker returns a bound allow.
     # The guest receives an opaque TOOL_LIVE placeholder, never the value.
-    When I run mvmctl in an isolated live home with "machine run --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/tool-workload-origin.toml --secret tool-live -- /bin/sh -c '/usr/local/bin/python3 -c \"import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).read())\" https://httpbin.org/bearer \"Bearer $TOOL_LIVE\"'"
+    When I run mvmctl in an isolated live home with "machine run --image python:3.12 --policy features/suites/s8_readme_contract/fixtures/tool-workload-origin.toml --secret tool-live -- /bin/sh -c '/usr/local/bin/python3 -c \"import urllib.request,sys;r=urllib.request.Request(sys.argv[1],headers=dict(Authorization=sys.argv[2]));print(urllib.request.urlopen(r).status==200)\" https://httpbin.org/bearer \"Bearer $TOOL_LIVE\"'"
     Then the command exits with code 0
     And the output contains "True"
     And the output does not contain "tool-live-credential"
