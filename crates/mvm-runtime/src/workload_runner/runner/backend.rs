@@ -70,7 +70,7 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
             if prepare_guest {
                 vm.prepare_stop()?;
             }
-            vm.kill_with_timing()
+            vm.terminate_with_timing()
         })();
         let driver_detail = match &kill_result {
             Ok(detail) => *detail,

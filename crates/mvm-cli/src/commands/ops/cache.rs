@@ -1369,10 +1369,10 @@ mod tests {
             parent: Option<&CheckpointMeta>,
             created_unix: u64,
         ) -> CheckpointMeta {
-            ckpt_with_parent_digest(id, tag, parent.map(|p| p.meta_digest.clone()), created_unix)
+            ckpt_from_parent_digest(id, tag, parent.map(|p| p.meta_digest.clone()), created_unix)
         }
 
-        pub fn ckpt_with_parent_digest(
+        pub fn ckpt_from_parent_digest(
             id: &str,
             tag: Option<&str>,
             parent: Option<CheckpointDigest>,
@@ -1600,7 +1600,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path());
         store
-            .write_meta(&ckpt_with_parent_digest(
+            .write_meta(&ckpt_from_parent_digest(
                 "young-orphan",
                 None,
                 Some(digest_of_nothing()),
@@ -1608,7 +1608,7 @@ mod tests {
             ))
             .unwrap();
         store
-            .write_meta(&ckpt_with_parent_digest(
+            .write_meta(&ckpt_from_parent_digest(
                 "aged-orphan",
                 None,
                 Some(digest_of_nothing()),

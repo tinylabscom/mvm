@@ -677,8 +677,14 @@ arrayref = { path = "third_party/arrayref" }
 [profile.release]
 opt-level = 3
 strip = true
-lto = true
-codegen-units = 1
+# Fat LTO plus one codegen unit serialized the entire 289-package mvm-mcp
+# closure and made a cold release build take more than 20 minutes. Thin LTO
+# retains cross-crate optimization while allowing LLVM to optimize in parallel;
+# 16 units also keeps individual crate compilation from becoming a serial
+# bottleneck. Reserve single-unit fat LTO for benchmark-driven exceptions
+# rather than charging every release build for it.
+lto = "thin"
+codegen-units = 16
 # Wrapping arithmetic is not a safe default for this workspace. The ext4
 # writer, the OCI unpacker, the vsock frame parser and the datapath ingress all
 # do length arithmetic over bytes an attacker chooses, and all four are fuzzed
@@ -705,6 +711,11 @@ strip = false
 inherits = "release"
 opt-level = "z"
 panic = "abort"
+# This profile explicitly pays the serialized optimization cost to minimize
+# published end-user binaries. Ordinary `--release` builds use parallel thin
+# LTO for developer turnaround.
+lto = true
+codegen-units = 1
 
 # Speed up `cargo test --workspace` by giving the test profile more
 # parallel codegen units and dropping debug info to line tables only.

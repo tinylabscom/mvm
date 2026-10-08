@@ -51,7 +51,7 @@ fn a_malformed_tag_flag_is_rejected() {
     assert!(err.to_string().contains("Invalid --tag"), "{err}");
 }
 
-/// SDK facades parse `machine ls --json`: the Rust `SubprocessBackend` reads
+/// SDK facades parse `machine ps --json`: the Rust `SubprocessBackend` reads
 /// `name` + `status`, and `Sandbox.connect(id)` reads `build_mode` to inherit
 /// the dev-only exec guard. Those keys ride on the shared inventory record,
 /// so the CLI JSON and the mvm-client inventory are one shape.
