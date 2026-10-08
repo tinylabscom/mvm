@@ -62,6 +62,17 @@ fn cached_live_workload_kernel(world: &mut CliWorld) {
         panic!("copy live workload kernel {source:?} to {destination:?}: {error}")
     });
     cache_live_guest_binaries(world);
+    let output = mvmctl_command()
+        .args(["image", "pull", "alpine"])
+        .isolated_home(isolated_home(world))
+        .output()
+        .expect("prepare Alpine in the isolated live home");
+    assert!(
+        output.status.success(),
+        "prepare Alpine in the isolated live home\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn cache_live_guest_binaries(world: &CliWorld) {

@@ -142,7 +142,5 @@ jobs:
           mkdir -p dist/extracted dist/staged
           tar -xzf dist/mvm-guest-bins-v*.tar.gz -C dist/extracted
           cp dist/extracted/x86_64/bin/mvm-* dist/staged/
-      - name: Prepare the PS-11 OCI image
-        run: cargo run --locked -p mvmctl -- image pull alpine
       - name: Run the PS-11 live witness
         run: just bdd::live-ci ps11_live
