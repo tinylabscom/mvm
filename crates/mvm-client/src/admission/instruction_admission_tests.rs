@@ -404,10 +404,12 @@ mod ps11_keyless_witness {
             image_path: image,
         }];
         let ledger = InMemoryNonceLedger::new();
+        let mut requested_share = share(&f.mount);
+        requested_share.read_only = false;
         let result = admit_plan_for_boot(AdmitPlanForBootParams {
             keys_dir: Some(&f.keys),
             audit_dir: Some(&f.audit),
-            shares: vec![share(&f.mount)],
+            shares: vec![requested_share],
             instructions: InstructionSources {
                 user_policy: Some(&policy),
                 ..InstructionSources::for_workload(None)
@@ -455,6 +457,13 @@ mod ps11_keyless_witness {
             "refs/heads/main",
         );
         let admitted = result.expect("the workflow-signed fixture admits");
+        let requested_attachment = mvm_core::vm_backend::VmVolume {
+            host: f.mount.display().to_string(),
+            guest: "/work".to_string(),
+            read_only: false,
+            materialized_image: Some(f._dir.path().join("ps11.ext4").display().to_string()),
+            ..Default::default()
+        };
         let signed_share = admitted
             .admitted
             .plan()
@@ -462,7 +471,22 @@ mod ps11_keyless_witness {
             .iter()
             .find(|grant| grant.host_path == f.mount.display().to_string())
             .expect("the effective plan carries the materialized host share");
-        assert!(signed_share.read_only);
+        assert!(
+            signed_share.read_only,
+            "evaluate_and_harden must convert the requested writable instruction share to read-only"
+        );
+        let rw_err = enforce_shares(&admitted, std::slice::from_ref(&requested_attachment))
+            .expect_err("backend enforcement must reject the original writable attachment");
+        assert!(
+            format!("{rw_err:#}").contains("not named in the signed"),
+            "rejection must come from the admitted-share boundary: {rw_err:#}"
+        );
+        let effective_attachment = mvm_core::vm_backend::VmVolume {
+            read_only: true,
+            ..requested_attachment
+        };
+        enforce_shares(&admitted, &[effective_attachment])
+            .expect("backend enforcement accepts the hardened read-only attachment");
         let entries = chain(&f);
         let verified = entry(&entries, "trust.instruction_verified");
         assert_eq!(verified["signer"], SIGNER);
