@@ -47,6 +47,7 @@ classes and method tables for both SDKs.
 | Family | Methods | Answered by |
 |---|---|---|
 | Lifecycle | `machine.list`, `machine.inspect`, `machine.logs`, `machine.start`, `machine.stop`, `machine.rm`, `machine.exec`, `machine.pause`, `machine.resume`, `machine.reconfigure`, `machine.set_ttl`, `machine.inventory`, `backend.capabilities` | the `MvmClient` trait, and `mvm_client::inventory` |
+| Telemetry | `telemetry.status`, `telemetry.records` | the `MvmClient` trait's collector read seam |
 | Launch | `machine.run`, `machine.create` | `LocalBackend::launch` / `create_from_request`, through `LaunchRequest` |
 | Guest (DevOnly) | `guest.proc.{start,list,signal,kill,stdin,wait}`, `guest.fs.{read,write,list,stat,mkdir,remove,rename}`, `guest.cp` | `mvm_client::guest` |
 | Streams (DevOnly) | `guest.proc.stream.{open,next,close}` | `mvm_client::guest::wait_process`, on a reader thread |

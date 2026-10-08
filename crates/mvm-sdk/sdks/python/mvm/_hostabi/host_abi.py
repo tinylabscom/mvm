@@ -667,6 +667,87 @@ class StreamName3(Enum):
 StreamName = Union[StreamName1, StreamName2, StreamName3]
 
 
+class State(Enum):
+    not_provisioned = 'not_provisioned'
+
+
+@dataclass
+class TelemetryCoverage1:
+    state: State
+
+
+class State1(Enum):
+    connecting = 'connecting'
+
+
+@dataclass
+class TelemetryCoverage2:
+    state: State1
+
+
+class State2(Enum):
+    collecting = 'collecting'
+
+
+@dataclass
+class TelemetryCoverage3:
+    generation: int
+    state: State2
+
+
+class State3(Enum):
+    degraded = 'degraded'
+
+
+@dataclass
+class TelemetryCoverage4:
+    code: str
+    state: State3
+
+
+class State4(Enum):
+    stopped = 'stopped'
+
+
+@dataclass
+class TelemetryCoverage5:
+    state: State4
+
+
+TelemetryCoverage = Union[
+    TelemetryCoverage1,
+    TelemetryCoverage2,
+    TelemetryCoverage3,
+    TelemetryCoverage4,
+    TelemetryCoverage5,
+]
+
+
+@dataclass
+class TelemetryRecordsReply:
+    more: bool
+    next: int
+    records: List
+
+
+@dataclass
+class TelemetryRecordsRequest:
+    id: str
+    after: Optional[int] = None
+    limit: Optional[int] = None
+
+
+@dataclass
+class TelemetryStatusReply:
+    coverage: TelemetryCoverage
+    shed: int
+
+
+@dataclass
+class TelemetryStatusRequest:
+    id: str
+
+
 class Kind(Enum):
     exited = 'exited'
 
@@ -853,6 +934,18 @@ class SessionStart:
 class SessionStop:
     reply: SessionStopReply
     request: SessionStopRequest
+
+
+@dataclass
+class TelemetryRecords:
+    reply: TelemetryRecordsReply
+    request: TelemetryRecordsRequest
+
+
+@dataclass
+class TelemetryStatus:
+    reply: TelemetryStatusReply
+    request: TelemetryStatusRequest
 
 
 @dataclass
@@ -1230,3 +1323,5 @@ class HostAbi:
     session_info: SessionInfo
     session_start: SessionStart
     session_stop: SessionStop
+    telemetry_records: TelemetryRecords
+    telemetry_status: TelemetryStatus

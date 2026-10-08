@@ -67,6 +67,7 @@ pub mod snapshot;
 pub mod stream;
 #[cfg(feature = "tracing-bridge")]
 pub mod stream_tracing;
+pub mod telemetry;
 pub mod tool_mediation;
 pub mod volume;
 
@@ -88,11 +89,13 @@ pub use mvm_core::client::gateway;
 pub use mvm_core::client::mock::{self, MockBackend};
 pub use mvm_core::client::{
     BackendCapabilityReport, ClientOperationCapabilities, ClientOperationCapabilitiesBuilder,
-    MvmClient, MvmError, Result,
+    MvmClient, MvmError, Result, TelemetryCoverage, TelemetryCursor, TelemetryPage,
+    TelemetryReadOpts, TelemetryStatus,
 };
 pub use mvm_core::error_codes;
 pub use mvm_core::naming::validate_vm_name;
 pub use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan};
+pub use mvm_core::protocol::telemetry::TelemetryRecord;
 pub use mvm_core::rootfs_source::{RootfsSource, RootfsSourceParseError};
 
 pub use boot::{

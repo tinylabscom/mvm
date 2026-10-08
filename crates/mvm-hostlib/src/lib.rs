@@ -89,8 +89,8 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// 4 added the process-wide runtime-approval callback and retained brokers for
 /// machines launched or started through the host library. 5 added
 /// `machine.pause`, `machine.resume`, `machine.reconfigure`, and
-/// `machine.set_ttl`.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 5;
+/// `machine.set_ttl`. 6 added `telemetry.status` and `telemetry.records`.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 6;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -614,6 +614,8 @@ mod tests {
             dispatch::MACHINE_RESUME,
             dispatch::MACHINE_RECONFIGURE,
             dispatch::MACHINE_SET_TTL,
+            dispatch::TELEMETRY_STATUS,
+            dispatch::TELEMETRY_RECORDS,
         ] {
             let request = br#"{"id":"ghost"}"#;
             let outcome = handle(false, method.as_bytes(), request, &Untouched);

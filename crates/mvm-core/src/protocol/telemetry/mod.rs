@@ -6,10 +6,16 @@
 //! Structural validation is not redaction: source and host policy must run too.
 
 mod bounded;
+mod collector;
 mod record;
 mod witness;
 
 pub use bounded::{BoundedList, Text};
+pub use collector::{
+    CollectorStatusSnapshot, DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PageError, TelemetryCoverage,
+    TelemetryCursor, TelemetryPage, TelemetryReadOpts, TelemetryStatus, UnknownStatus,
+    page_from_jsonl,
+};
 pub use record::{TelemetryRecord, TelemetryRecordBuilder};
 pub use witness::{
     Activation, FindingKind, MAX_WITNESS_PRODUCERS, Observation, WitnessFinding, WitnessLedger,

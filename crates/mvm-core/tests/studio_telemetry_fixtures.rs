@@ -1,12 +1,14 @@
-//! Frozen telemetry record streams for mvm studio.
+//! Frozen telemetry fixtures for mvm studio.
 //!
-//! `tests/vectors/studio-telemetry/*.jsonl` are the fixture streams the
-//! studio frontend renders against before the live read seam exists: each
-//! line is one `TelemetryRecord` in exactly the JSON the collector's records
-//! output carries, produced by the real builders and serde — never typed by
-//! hand, so a fixture cannot drift from the contract without this test going
-//! red. The companion contract document is
-//! `specs/telemetry/studio-contract.md`.
+//! `tests/vectors/studio-telemetry/*.jsonl` are the record streams the
+//! studio frontend renders against: each line is one `TelemetryRecord` in
+//! exactly the JSON the collector's records output carries and the read seam
+//! serves, produced by the real builders and serde — never typed by hand, so
+//! a fixture cannot drift from the contract without this test going red.
+//! Beside them, `collector-status.jsonl` freezes the typed status the seam
+//! answers for every coverage state, and `records-page.json` freezes one
+//! page cut from `healthy-boot.jsonl` so the cursor semantics are concrete.
+//! The companion contract document is `specs/telemetry/studio-contract.md`.
 //!
 //! The streams are deterministic (fixed epochs, sequences and monotonic
 //! timestamps), so the comparison is byte-exact. Regenerate after a
@@ -14,8 +16,9 @@
 //! `MVM_REGENERATE_VECTORS=1 cargo test -p mvm-core --test studio_telemetry_fixtures -- --ignored`.
 
 use mvm_core::protocol::telemetry::{
-    Attribute, AttributeValue, Attributes, CoverageState, GuestLossStage, Level, LossReason,
-    ProducerEpoch, RecordBody, SourceKind, TailState, TelemetryRecord,
+    Attribute, AttributeValue, Attributes, CollectorStatusSnapshot, CoverageState, GuestLossStage,
+    Level, LossReason, ProducerEpoch, RecordBody, SourceKind, TailState, TelemetryPage,
+    TelemetryRecord, TelemetryStatus, page_from_jsonl,
 };
 
 const VECTOR_DIR: &str = "../../tests/vectors/studio-telemetry";
@@ -239,6 +242,57 @@ fn vector_path(name: &str) -> std::path::PathBuf {
     std::path::Path::new(VECTOR_DIR).join(format!("{name}.jsonl"))
 }
 
+/// The status fixture: every label the collector writes, typed through the
+/// same conversion the read seam uses, one `TelemetryStatus` per line.
+const STATUS_FIXTURE: &str = "collector-status";
+
+fn on_disk_statuses() -> Vec<CollectorStatusSnapshot> {
+    let snapshot = |status: &str, generation, shed| CollectorStatusSnapshot {
+        vm_name: "fixture".into(),
+        status: status.into(),
+        generation,
+        shed,
+    };
+    vec![
+        snapshot("connecting", None, 0),
+        snapshot("collecting", Some(3), 0),
+        snapshot("collecting", Some(3), 37),
+        snapshot("degraded:auth_failed", None, 37),
+        snapshot("stopped", None, 37),
+    ]
+}
+
+fn render_statuses() -> String {
+    let mut out = String::new();
+    // The not-provisioned state has no on-disk form: it is what the seam
+    // answers when the collector wrote nothing at all.
+    out.push_str(&serde_json::to_string(&TelemetryStatus::not_provisioned()).unwrap());
+    out.push('\n');
+    for snapshot in on_disk_statuses() {
+        let typed = TelemetryStatus::try_from(&snapshot).expect("every written label types");
+        out.push_str(&serde_json::to_string(&typed).unwrap());
+        out.push('\n');
+    }
+    out
+}
+
+/// The page fixture: the first three records of `healthy-boot`, cut by the
+/// seam's own pager, so `next` is the byte position a consumer hands back.
+const PAGE_FIXTURE: &str = "records-page";
+
+fn render_page() -> String {
+    let stream = render(&healthy_boot());
+    let page = page_from_jsonl(stream.as_bytes(), 0, 3).expect("the fixture stream pages");
+    assert!(page.more, "three of five records leaves more");
+    let mut out = serde_json::to_string_pretty(&page).unwrap();
+    out.push('\n');
+    out
+}
+
+fn page_path() -> std::path::PathBuf {
+    std::path::Path::new(VECTOR_DIR).join(format!("{PAGE_FIXTURE}.json"))
+}
+
 #[test]
 fn studio_fixture_streams_match_the_committed_vectors() {
     for name in SCENARIOS {
@@ -251,6 +305,43 @@ fn studio_fixture_streams_match_the_committed_vectors() {
              with MVM_REGENERATE_VECTORS=1 (module docs)"
         );
     }
+}
+
+#[test]
+fn studio_status_fixture_matches_the_committed_vector() {
+    let committed = std::fs::read_to_string(vector_path(STATUS_FIXTURE))
+        .unwrap_or_else(|e| panic!("reading {STATUS_FIXTURE}.jsonl: {e}"));
+    assert_eq!(
+        committed,
+        render_statuses(),
+        "{STATUS_FIXTURE}.jsonl drifted from the generator; regenerate deliberately \
+         with MVM_REGENERATE_VECTORS=1 (module docs)"
+    );
+    for (index, line) in committed.lines().enumerate() {
+        let _: TelemetryStatus = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("{STATUS_FIXTURE}.jsonl line {}: {e}", index + 1));
+    }
+}
+
+#[test]
+fn studio_page_fixture_matches_the_committed_vector_and_continues_the_stream() {
+    let committed = std::fs::read_to_string(page_path())
+        .unwrap_or_else(|e| panic!("reading {PAGE_FIXTURE}.json: {e}"));
+    assert_eq!(
+        committed,
+        render_page(),
+        "{PAGE_FIXTURE}.json drifted from the generator; regenerate deliberately \
+         with MVM_REGENERATE_VECTORS=1 (module docs)"
+    );
+    let page: TelemetryPage = serde_json::from_str(&committed).expect("a page decodes");
+    assert_eq!(page.records, healthy_boot()[..3]);
+
+    // Handing `next` back reads exactly the rest of the committed stream.
+    let stream = std::fs::read(vector_path("healthy-boot")).unwrap();
+    let rest = page_from_jsonl(&stream[page.next.0 as usize..], page.next.0, 10).unwrap();
+    assert_eq!(rest.records, healthy_boot()[3..]);
+    assert!(!rest.more);
+    assert_eq!(rest.next.0 as usize, stream.len());
 }
 
 /// Every fixture line must decode back through the real contract — the same
@@ -277,4 +368,6 @@ fn regenerate_the_frozen_fixture_streams() {
     for name in SCENARIOS {
         std::fs::write(vector_path(name), render(&stream(name))).unwrap();
     }
+    std::fs::write(vector_path(STATUS_FIXTURE), render_statuses()).unwrap();
+    std::fs::write(page_path(), render_page()).unwrap();
 }

@@ -11,6 +11,7 @@ use mvm_core::client::MvmClient;
 use mvm_core::client::dto::{
     LogOpts, MachineFilter, MachineId, MachineStatus, PauseOpts, ReconfigureRequest, ResumeOpts,
 };
+use mvm_core::client::{TelemetryCursor, TelemetryReadOpts, TelemetryStatus};
 use serde::{Deserialize, Serialize};
 
 use crate::status::Outcome;
@@ -56,9 +57,20 @@ pub const MACHINE_RECONFIGURE: &str = "machine.reconfigure";
 /// `{"id", "expires_at": rfc3339 | null}`. Reply: `{}`. Errors when the
 /// machine is not registered.
 pub const MACHINE_SET_TTL: &str = "machine.set_ttl";
+/// Reports where host-side telemetry collection stands for a machine.
+/// Request: `{"id"}`. Reply: a `TelemetryStatus` — `coverage` is
+/// `not_provisioned` for a boot nobody asked to observe, never an error.
+pub const TELEMETRY_STATUS: &str = "telemetry.status";
+/// Reads one page of the telemetry records collected for a machine.
+/// Request: `{"id", "after"?: cursor, "limit"?: n}`. Reply: `{"records":
+/// [...], "next": cursor, "more": bool}`; each record is one
+/// `mvm.telemetry.v1` record exactly as the collector persisted it. Pass
+/// `next` back as `after` to continue; a cursor from before the machine's
+/// stream was reset is refused as `REJECTED`.
+pub const TELEMETRY_RECORDS: &str = "telemetry.records";
 
 /// Every method this library answers through the client.
-pub const METHODS: [&str; 13] = [
+pub const METHODS: [&str; 15] = [
     MACHINE_LIST,
     MACHINE_INSPECT,
     MACHINE_LOGS,
@@ -72,6 +84,8 @@ pub const METHODS: [&str; 13] = [
     MACHINE_RESUME,
     MACHINE_RECONFIGURE,
     MACHINE_SET_TTL,
+    TELEMETRY_STATUS,
+    TELEMETRY_RECORDS,
 ];
 
 /// Whether `method` is one this library answers, checked before a client is
@@ -240,6 +254,43 @@ impl SetTtlRequest {
     }
 }
 
+/// A `telemetry.records` request.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TelemetryRecordsRequest {
+    id: String,
+    /// The `next` of the previous page; absent reads from the start.
+    #[serde(default)]
+    after: Option<u64>,
+    /// At most this many records; absent uses the client's default page size.
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+impl TelemetryRecordsRequest {
+    fn into_parts(self) -> (MachineId, TelemetryReadOpts) {
+        (
+            MachineId(self.id),
+            TelemetryReadOpts {
+                after: self.after.map(TelemetryCursor),
+                limit: self.limit,
+            },
+        )
+    }
+}
+
+/// A `telemetry.records` reply. Records cross as the JSON the collector
+/// persisted, one `mvm.telemetry.v1` record each; the shape is the record
+/// contract's, not this library's, so it is not restated in the ABI schema.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Serialize)]
+pub(crate) struct TelemetryRecordsReply {
+    records: Vec<serde_json::Value>,
+    next: u64,
+    more: bool,
+}
+
 /// A `machine.exec` reply. Stream bytes cross as base64, because JSON
 /// strings are not byte strings — the same convention as `machine.logs`
 /// and every `guest.*` payload.
@@ -335,6 +386,26 @@ async fn answer(client: &dyn MvmClient, method: &str, request: &[u8]) -> Result<
             let (id, expires_at) = parse::<SetTtlRequest>(request)?.into_parts()?;
             client.set_ttl(&id, expires_at).await?;
             Outcome::ok(&Empty {})
+        }
+        TELEMETRY_STATUS => {
+            let target: MachineRef = parse(request)?;
+            let status: TelemetryStatus = client.telemetry_status(&MachineId(target.id)).await?;
+            Outcome::ok(&status)
+        }
+        TELEMETRY_RECORDS => {
+            let (id, opts) = parse::<TelemetryRecordsRequest>(request)?.into_parts();
+            let page = client.telemetry_records(&id, opts).await?;
+            let records = page
+                .records
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| Outcome::invalid_input(&format!("record did not serialize: {e}")))?;
+            Outcome::ok(&TelemetryRecordsReply {
+                records,
+                next: page.next.0,
+                more: page.more,
+            })
         }
         MACHINE_EXEC => {
             let target: ExecRequest = parse(request)?;
@@ -762,6 +833,92 @@ mod tests {
             br#"{"id":"ghost","expires_at":"2030-01-02T03:04:05Z"}"#,
         ));
         assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+    }
+
+    fn telemetry_record(sequence: u64) -> mvm_core::protocol::telemetry::TelemetryRecord {
+        use mvm_core::protocol::telemetry::{
+            Attributes, Level, ProducerEpoch, RecordBody, SourceKind, TelemetryRecord,
+        };
+        TelemetryRecord::builder()
+            .epoch(ProducerEpoch::new([5; 16]).unwrap())
+            .producer(1)
+            .sequence(sequence)
+            .monotonic_ns(sequence)
+            .source(SourceKind::GuestAgent)
+            .body(RecordBody::Event {
+                context: None,
+                level: Level::Info,
+                name: "tick".try_into().unwrap(),
+                attributes: Attributes::new(Vec::new()).unwrap(),
+            })
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn telemetry_status_answers_the_typed_coverage() {
+        let (client, state) = with_machine("alpha");
+        let request = serde_json::to_vec(&serde_json::json!({ "id": state.id.0 })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_STATUS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        assert_eq!(
+            body(&outcome),
+            serde_json::json!({ "coverage": { "state": "not_provisioned" }, "shed": 0 })
+        );
+
+        client.set_telemetry_status(
+            &state.id,
+            TelemetryStatus {
+                coverage: mvm_core::client::TelemetryCoverage::Degraded {
+                    code: "auth_failed".into(),
+                },
+                shed: 3,
+            },
+        );
+        let outcome = run(dispatch(&client, TELEMETRY_STATUS, &request));
+        assert_eq!(
+            body(&outcome),
+            serde_json::json!({ "coverage": { "state": "degraded", "code": "auth_failed" }, "shed": 3 })
+        );
+
+        let outcome = run(dispatch(&client, TELEMETRY_STATUS, br#"{"id":"ghost"}"#));
+        assert_eq!(outcome.status, MVM_HOSTLIB_NOT_FOUND);
+    }
+
+    #[test]
+    fn telemetry_records_page_as_the_collector_wrote_them() {
+        let (client, state) = with_machine("alpha");
+        client.push_telemetry_records(&state.id, (1..=3).map(telemetry_record));
+
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "limit": 2 })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_OK);
+        let page = body(&outcome);
+        assert_eq!(page["records"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            page["records"][0],
+            serde_json::to_value(telemetry_record(1)).unwrap()
+        );
+        assert_eq!(page["next"], 2);
+        assert_eq!(page["more"], true);
+
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "after": 2 })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, &request));
+        let page = body(&outcome);
+        assert_eq!(page["records"].as_array().unwrap().len(), 1);
+        assert_eq!(page["more"], false);
+
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "after": 99 })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, &request));
+        assert_eq!(body(&outcome)["code"], "REJECTED");
+
+        let request =
+            serde_json::to_vec(&serde_json::json!({ "id": state.id.0, "follow": true })).unwrap();
+        let outcome = run(dispatch(&client, TELEMETRY_RECORDS, &request));
+        assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
     }
 
     #[test]

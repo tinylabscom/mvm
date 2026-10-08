@@ -33,7 +33,9 @@ use mvm_core::client::dto::{
     PauseOpts, PauseOutcome, PortMapping, ResumeOpts, ResumeOutcome,
 };
 use mvm_core::client::{BackendCapabilityReport, ClientOperationCapabilities};
-use mvm_core::client::{MvmClient, MvmError, Result};
+use mvm_core::client::{
+    MvmClient, MvmError, Result, TelemetryPage, TelemetryReadOpts, TelemetryStatus,
+};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 #[cfg(feature = "test-support")]
@@ -728,6 +730,20 @@ fn set_registry_resumed(name: &str) -> Result<()> {
     .map_err(|e| backend_err(format!("updating the registry for VM {name:?}: {e:#}")))
 }
 
+impl LocalBackend {
+    /// The name of the machine `id` names, from the host-wide listing, so a
+    /// read against its state dir is refused as `NotFound` for a machine
+    /// this host has never had rather than answered from an empty directory.
+    async fn known_machine_name(&self, id: &MachineId) -> Result<String> {
+        self.list_machines(MachineFilter::all())
+            .await?
+            .into_iter()
+            .find(|m| m.id == *id)
+            .map(|m| m.name)
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
+    }
+}
+
 impl Default for LocalBackend {
     fn default() -> Self {
         Self::new()
@@ -1140,6 +1156,7 @@ impl MvmClient for LocalBackend {
                         .logs(true)
                         .reconfigure(true)
                         .set_ttl(true)
+                        .telemetry(true)
                         .build(),
                 ),
         )
@@ -1401,6 +1418,20 @@ impl MvmClient for LocalBackend {
             .logs(&VmId(id.0.clone()), lines, false)
             .map_err(backend_err)?;
         Ok(text.into_bytes())
+    }
+
+    async fn telemetry_status(&self, id: &MachineId) -> Result<TelemetryStatus> {
+        let name = self.known_machine_name(id).await?;
+        crate::telemetry::read_status(&vm_state_dir(&name))
+    }
+
+    async fn telemetry_records(
+        &self,
+        id: &MachineId,
+        opts: TelemetryReadOpts,
+    ) -> Result<TelemetryPage> {
+        let name = self.known_machine_name(id).await?;
+        crate::telemetry::read_records(&vm_state_dir(&name), opts)
     }
 
     async fn exec_machine(&self, _id: &MachineId, _command: Vec<String>) -> Result<ExecResult> {

@@ -710,17 +710,10 @@ impl RecordSink for CappedJsonlSink {
     }
 }
 
-/// The status snapshot the collector process persists beside the VM state,
-/// for `doctor` and the future CLI seam to read.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct CollectorStatusSnapshot {
-    pub vm_name: String,
-    pub status: String,
-    /// Boot generation when a session is live; absent otherwise.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub generation: Option<u64>,
-    pub shed: u64,
-}
+/// The status snapshot the collector persists beside the VM state. The type
+/// lives in `mvm-core` beside the record contract so the reader behind the
+/// `MvmClient` telemetry methods shares it with this writer.
+pub use mvm_core::protocol::telemetry::CollectorStatusSnapshot;
 
 fn status_snapshot(vm_name: &str, status: &CoverageStatus, shed: u64) -> CollectorStatusSnapshot {
     let (label, generation) = match status {

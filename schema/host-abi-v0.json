@@ -3048,6 +3048,193 @@
         }
       ]
     },
+    "TelemetryCoverage": {
+      "description": "Where collection stands for one machine, as the read seam reports it.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "No collector was provisioned for this boot. Collection is opt-in, so this is the ordinary state of a machine nobody asked to observe; it is not a failure and carries no code.",
+          "properties": {
+            "state": {
+              "enum": [
+                "not_provisioned"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The collector is resolving the guest registration or dialing it.",
+          "properties": {
+            "state": {
+              "enum": [
+                "connecting"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "An authenticated session is live under this boot generation.",
+          "properties": {
+            "generation": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "collecting"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "generation",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The last attempt failed for the named reason; the collector is backing off and will retry.",
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "degraded"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "code",
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The collector was stopped with the machine.",
+          "properties": {
+            "state": {
+              "enum": [
+                "stopped"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TelemetryRecordsReply": {
+      "description": "A `telemetry.records` reply. Records cross as the JSON the collector persisted, one `mvm.telemetry.v1` record each; the shape is the record contract's, not this library's, so it is not restated in the ABI schema.",
+      "properties": {
+        "more": {
+          "type": "boolean"
+        },
+        "next": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "records": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "more",
+        "next",
+        "records"
+      ],
+      "title": "TelemetryRecordsReply",
+      "type": "object"
+    },
+    "TelemetryRecordsRequest": {
+      "additionalProperties": false,
+      "description": "A `telemetry.records` request.",
+      "properties": {
+        "after": {
+          "default": null,
+          "description": "The `next` of the previous page; absent reads from the start.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "limit": {
+          "default": null,
+          "description": "At most this many records; absent uses the client's default page size.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "TelemetryRecordsRequest",
+      "type": "object"
+    },
+    "TelemetryStatusReply": {
+      "additionalProperties": false,
+      "description": "One machine's collector status: coverage plus the host-side shed count.\n\n`shed` counts records the host dropped because its own sink was full. It is distinct from the `loss` records inside the stream, which count what the guest shed before sending; a complete picture adds both.",
+      "properties": {
+        "coverage": {
+          "$ref": "#/definitions/TelemetryCoverage"
+        },
+        "shed": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "coverage",
+        "shed"
+      ],
+      "title": "TelemetryStatus",
+      "type": "object"
+    },
+    "TelemetryStatusRequest": {
+      "additionalProperties": false,
+      "description": "A request naming one machine.",
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "title": "MachineRef",
+      "type": "object"
+    },
     "WaitOutcome": {
       "description": "How a waited-on process ended.",
       "oneOf": [
@@ -3786,6 +3973,40 @@
       ],
       "title": "SessionStop",
       "type": "object"
+    },
+    "telemetry_records": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/TelemetryRecordsReply"
+        },
+        "request": {
+          "$ref": "#/definitions/TelemetryRecordsRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "TelemetryRecords",
+      "type": "object"
+    },
+    "telemetry_status": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/TelemetryStatusReply"
+        },
+        "request": {
+          "$ref": "#/definitions/TelemetryStatusRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "TelemetryStatus",
+      "type": "object"
     }
   },
   "required": [
@@ -3811,6 +4032,8 @@
     "session_call",
     "session_info",
     "session_start",
+    "telemetry_records",
+    "telemetry_status",
     "session_stop",
     "guest_cp",
     "guest_fs_list",

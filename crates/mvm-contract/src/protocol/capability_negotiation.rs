@@ -325,6 +325,8 @@ pub struct ClientOperationCapabilities {
     pub exec: bool,
     pub reconfigure: bool,
     pub set_ttl: bool,
+    /// The collector read seam: `telemetry_status` and `telemetry_records`.
+    pub telemetry: bool,
 }
 
 impl ClientOperationCapabilities {
@@ -364,6 +366,7 @@ impl ClientOperationCapabilitiesBuilder {
     operation_setter!(exec);
     operation_setter!(reconfigure);
     operation_setter!(set_ttl);
+    operation_setter!(telemetry);
 
     /// Finish the declaration.
     #[must_use]
@@ -728,6 +731,7 @@ mod report_tests {
             .exec(true)
             .reconfigure(true)
             .set_ttl(true)
+            .telemetry(true)
             .build();
 
         assert!(operations.list);
@@ -743,6 +747,7 @@ mod report_tests {
         assert!(operations.exec);
         assert!(operations.reconfigure);
         assert!(operations.set_ttl);
+        assert!(operations.telemetry);
     }
 
     #[test]

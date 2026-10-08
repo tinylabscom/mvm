@@ -14,6 +14,7 @@ use crate::client::dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
+use crate::protocol::telemetry::{TelemetryPage, TelemetryReadOpts, TelemetryStatus};
 use mvm_contract::protocol::capability_negotiation::{
     BackendCapabilityReport, ClientOperationCapabilities,
 };
@@ -782,6 +783,25 @@ impl MvmClient for GatewayBackend {
         // Symmetric with `pause_machine`: no remote snapshot restore endpoint yet.
         Err(MvmError::Backend {
             reason: "gateway resume is not wired (remote instance snapshot unsupported)".into(),
+        })
+    }
+
+    async fn telemetry_status(&self, _id: &MachineId) -> Result<TelemetryStatus> {
+        // The collector's status and records live in the host's VM state dir;
+        // the gateway exposes no telemetry endpoint. Refuse rather than report
+        // a machine as unobserved, which `NotProvisioned` would claim.
+        Err(MvmError::Backend {
+            reason: "gateway telemetry is not wired (no remote collector endpoint)".into(),
+        })
+    }
+
+    async fn telemetry_records(
+        &self,
+        _id: &MachineId,
+        _opts: TelemetryReadOpts,
+    ) -> Result<TelemetryPage> {
+        Err(MvmError::Backend {
+            reason: "gateway telemetry is not wired (no remote collector endpoint)".into(),
         })
     }
 

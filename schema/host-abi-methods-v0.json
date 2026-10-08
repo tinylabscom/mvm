@@ -1,6 +1,6 @@
 {
   "abi_major": 1,
-  "abi_minor": 5,
+  "abi_minor": 6,
   "methods": [
     {
       "classification": "prod_safe",
@@ -133,6 +133,18 @@
       "key": "session_start",
       "name": "session.start",
       "summary": "Boots a warm session for a workload, admitted under a signed plan."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "telemetry_records",
+      "name": "telemetry.records",
+      "summary": "Reads one cursor-paged batch of a machine's collected telemetry records."
+    },
+    {
+      "classification": "prod_safe",
+      "key": "telemetry_status",
+      "name": "telemetry.status",
+      "summary": "Reports where host-side telemetry collection stands for a machine."
     },
     {
       "classification": "prod_safe",

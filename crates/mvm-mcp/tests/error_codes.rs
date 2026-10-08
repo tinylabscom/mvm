@@ -145,6 +145,21 @@ impl MvmClient for FailingBackend {
     ) -> mvm_client::Result<()> {
         Err(self.error.clone())
     }
+
+    async fn telemetry_status(
+        &self,
+        _id: &MachineId,
+    ) -> mvm_client::Result<mvm_client::TelemetryStatus> {
+        Err(self.error.clone())
+    }
+
+    async fn telemetry_records(
+        &self,
+        _id: &MachineId,
+        _opts: mvm_client::TelemetryReadOpts,
+    ) -> mvm_client::Result<mvm_client::TelemetryPage> {
+        Err(self.error.clone())
+    }
 }
 
 /// Drive one `MvmError` variant through `mvm.machine.inspect` and assert the
@@ -359,6 +374,21 @@ impl MvmClient for FailingCapabilities {
         _id: &MachineId,
         _expires_at: Option<String>,
     ) -> mvm_client::Result<()> {
+        unreachable!("capability discovery already failed")
+    }
+
+    async fn telemetry_status(
+        &self,
+        _id: &MachineId,
+    ) -> mvm_client::Result<mvm_client::TelemetryStatus> {
+        unreachable!("capability discovery already failed")
+    }
+
+    async fn telemetry_records(
+        &self,
+        _id: &MachineId,
+        _opts: mvm_client::TelemetryReadOpts,
+    ) -> mvm_client::Result<mvm_client::TelemetryPage> {
         unreachable!("capability discovery already failed")
     }
 }

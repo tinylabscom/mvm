@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Final
 
 ABI_MAJOR: Final = 1
-ABI_MINOR: Final = 5
+ABI_MINOR: Final = 6
 
 
 class Classification(str, Enum):
@@ -121,6 +121,15 @@ SESSION_INFO: Final = "session.info"
 SESSION_START: Final = "session.start"
 
 
+#: Reads one cursor-paged batch of a machine's collected telemetry
+#: records.
+TELEMETRY_RECORDS: Final = "telemetry.records"
+
+
+#: Reports where host-side telemetry collection stands for a machine.
+TELEMETRY_STATUS: Final = "telemetry.status"
+
+
 #: Stops a session and tears down its microVM.
 SESSION_STOP: Final = "session.stop"
 
@@ -216,6 +225,8 @@ METHODS: dict[str, Method] = {
     "session.call": Method(key="session_call", classification=Classification.PROD_SAFE, summary="Calls the entrypoint in a running session's microVM."),
     "session.info": Method(key="session_info", classification=Classification.PROD_SAFE, summary="Reports a session's record."),
     "session.start": Method(key="session_start", classification=Classification.PROD_SAFE, summary="Boots a warm session for a workload, admitted under a signed plan."),
+    "telemetry.records": Method(key="telemetry_records", classification=Classification.PROD_SAFE, summary="Reads one cursor-paged batch of a machine's collected telemetry records."),
+    "telemetry.status": Method(key="telemetry_status", classification=Classification.PROD_SAFE, summary="Reports where host-side telemetry collection stands for a machine."),
     "session.stop": Method(key="session_stop", classification=Classification.PROD_SAFE, summary="Stops a session and tears down its microVM."),
     "guest.cp": Method(key="guest_cp", classification=Classification.DEV_ONLY, summary="Copies a file between the host and the guest."),
     "guest.fs.list": Method(key="guest_fs_list", classification=Classification.DEV_ONLY, summary="Lists a directory in the guest."),
@@ -259,6 +270,8 @@ __all__ = [
     "SESSION_CALL",
     "SESSION_INFO",
     "SESSION_START",
+    "TELEMETRY_RECORDS",
+    "TELEMETRY_STATUS",
     "SESSION_STOP",
     "GUEST_CP",
     "GUEST_FS_LIST",

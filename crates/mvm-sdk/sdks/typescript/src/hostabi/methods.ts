@@ -7,7 +7,7 @@
  * Owned by the Rust registry; the C ABI answers exactly these methods.
  */
 export const ABI_MAJOR = 1;
-export const ABI_MINOR = 5;
+export const ABI_MINOR = 6;
 
 export type Classification = "prod_safe" | "dev_only";
 
@@ -93,6 +93,15 @@ export const SESSION_INFO = "session.info";
 /** Boots a warm session for a workload, admitted under a signed plan. */
 export const SESSION_START = "session.start";
 
+/**
+ * Reads one cursor-paged batch of a machine's collected telemetry
+ * records.
+ */
+export const TELEMETRY_RECORDS = "telemetry.records";
+
+/** Reports where host-side telemetry collection stands for a machine. */
+export const TELEMETRY_STATUS = "telemetry.status";
+
 /** Stops a session and tears down its microVM. */
 export const SESSION_STOP = "session.stop";
 
@@ -170,6 +179,8 @@ export const METHODS: Readonly<Record<string, HostAbiMethod>> = {
   "session.call": { key: "session_call", classification: "prod_safe", summary: "Calls the entrypoint in a running session's microVM." },
   "session.info": { key: "session_info", classification: "prod_safe", summary: "Reports a session's record." },
   "session.start": { key: "session_start", classification: "prod_safe", summary: "Boots a warm session for a workload, admitted under a signed plan." },
+  "telemetry.records": { key: "telemetry_records", classification: "prod_safe", summary: "Reads one cursor-paged batch of a machine's collected telemetry records." },
+  "telemetry.status": { key: "telemetry_status", classification: "prod_safe", summary: "Reports where host-side telemetry collection stands for a machine." },
   "session.stop": { key: "session_stop", classification: "prod_safe", summary: "Stops a session and tears down its microVM." },
   "guest.cp": { key: "guest_cp", classification: "dev_only", summary: "Copies a file between the host and the guest." },
   "guest.fs.list": { key: "guest_fs_list", classification: "dev_only", summary: "Lists a directory in the guest." },

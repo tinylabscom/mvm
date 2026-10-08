@@ -1,0 +1,6 @@
+{"coverage":{"state":"not_provisioned"},"shed":0}
+{"coverage":{"state":"connecting"},"shed":0}
+{"coverage":{"state":"collecting","generation":3},"shed":0}
+{"coverage":{"state":"collecting","generation":3},"shed":37}
+{"coverage":{"state":"degraded","code":"auth_failed"},"shed":37}
+{"coverage":{"state":"stopped"},"shed":37}

@@ -96,6 +96,22 @@ export type MachineListReply = MachineState2[]
  * Whether the machine outlives the caller's session.
  */
 export type RunMode = ("transient" | "persistent")
+/**
+ * Where collection stands for one machine, as the read seam reports it.
+ */
+export type TelemetryCoverage = ({
+state: "not_provisioned"
+} | {
+state: "connecting"
+} | {
+generation: number
+state: "collecting"
+} | {
+code: string
+state: "degraded"
+} | {
+state: "stopped"
+})
 
 export interface HostAbi {
 backend_capabilities: BackendCapabilities
@@ -138,6 +154,8 @@ session_call: SessionCall
 session_info: SessionInfo
 session_start: SessionStart
 session_stop: SessionStop
+telemetry_records: TelemetryRecords
+telemetry_status: TelemetryStatus
 }
 export interface BackendCapabilities {
 reply: BackendCapabilitiesReply
@@ -1383,4 +1401,49 @@ export interface Empty12 {
  */
 export interface SessionRef1 {
 session_id: string
+}
+export interface TelemetryRecords {
+reply: TelemetryRecordsReply
+request: TelemetryRecordsRequest
+}
+/**
+ * A `telemetry.records` reply. Records cross as the JSON the collector persisted, one `mvm.telemetry.v1` record each; the shape is the record contract's, not this library's, so it is not restated in the ABI schema.
+ */
+export interface TelemetryRecordsReply {
+more: boolean
+next: number
+records: unknown[]
+}
+/**
+ * A `telemetry.records` request.
+ */
+export interface TelemetryRecordsRequest {
+/**
+ * The `next` of the previous page; absent reads from the start.
+ */
+after?: (number | null)
+id: string
+/**
+ * At most this many records; absent uses the client's default page size.
+ */
+limit?: (number | null)
+}
+export interface TelemetryStatus {
+reply: TelemetryStatus1
+request: MachineRef2
+}
+/**
+ * One machine's collector status: coverage plus the host-side shed count.
+ * 
+ * `shed` counts records the host dropped because its own sink was full. It is distinct from the `loss` records inside the stream, which count what the guest shed before sending; a complete picture adds both.
+ */
+export interface TelemetryStatus1 {
+coverage: TelemetryCoverage
+shed: number
+}
+/**
+ * A request naming one machine.
+ */
+export interface MachineRef2 {
+id: string
 }

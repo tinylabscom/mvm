@@ -1,6 +1,7 @@
 //! An in-memory `MvmClient` for tests and for callers to develop against before
 //! a real backend exists. Not a production path.
 
+use std::collections::BTreeMap;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -11,6 +12,9 @@ use crate::client::dto::{
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
+use crate::protocol::telemetry::{
+    TelemetryCursor, TelemetryPage, TelemetryReadOpts, TelemetryRecord, TelemetryStatus,
+};
 use mvm_contract::protocol::capability_negotiation::{
     BackendCapabilityReport, ClientOperationCapabilities,
 };
@@ -24,6 +28,17 @@ pub struct MockBackend {
     /// silently claims to do everything.
     capabilities: Mutex<VmCapabilities>,
     operations: Mutex<ClientOperationCapabilities>,
+    /// What the collector would have persisted per machine id. A machine
+    /// with no entry reads as not provisioned, like a real boot nobody asked
+    /// to observe; a cursor is the index into its record list.
+    telemetry: Mutex<BTreeMap<String, MockTelemetry>>,
+}
+
+/// One machine's mock collector state.
+#[derive(Debug, Clone, Default)]
+struct MockTelemetry {
+    status: Option<TelemetryStatus>,
+    records: Vec<TelemetryRecord>,
 }
 
 impl Default for MockBackend {
@@ -33,6 +48,7 @@ impl Default for MockBackend {
             next: Mutex::new(0),
             capabilities: Mutex::new(VmCapabilities::default()),
             operations: Mutex::new(all_mock_operations()),
+            telemetry: Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -52,6 +68,7 @@ fn all_mock_operations() -> ClientOperationCapabilities {
         .exec(true)
         .reconfigure(true)
         .set_ttl(true)
+        .telemetry(true)
         .build()
 }
 
@@ -71,6 +88,45 @@ impl MockBackend {
             .lock()
             .expect("mock operation capability lock poisoned") = operations;
         self
+    }
+
+    /// Set what `telemetry_status` answers for machine `id`.
+    pub fn set_telemetry_status(&self, id: &MachineId, status: TelemetryStatus) {
+        self.telemetry
+            .lock()
+            .expect("mock telemetry lock poisoned")
+            .entry(id.0.clone())
+            .or_default()
+            .status = Some(status);
+    }
+
+    /// Append records to what `telemetry_records` pages for machine `id`,
+    /// as if the collector had just received them.
+    pub fn push_telemetry_records(
+        &self,
+        id: &MachineId,
+        records: impl IntoIterator<Item = TelemetryRecord>,
+    ) {
+        self.telemetry
+            .lock()
+            .expect("mock telemetry lock poisoned")
+            .entry(id.0.clone())
+            .or_default()
+            .records
+            .extend(records);
+    }
+
+    /// Drop machine `id`'s records, as a reboot resets the real stream, so
+    /// a cursor into the old stream is refused.
+    pub fn reset_telemetry_records(&self, id: &MachineId) {
+        if let Some(entry) = self
+            .telemetry
+            .lock()
+            .expect("mock telemetry lock poisoned")
+            .get_mut(&id.0)
+        {
+            entry.records.clear();
+        }
     }
 }
 
@@ -227,6 +283,49 @@ impl MvmClient for MockBackend {
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
     }
 
+    async fn telemetry_status(&self, id: &MachineId) -> Result<TelemetryStatus> {
+        self.inspect_machine(id).await?;
+        Ok(self
+            .telemetry
+            .lock()
+            .expect("mock telemetry lock poisoned")
+            .get(&id.0)
+            .and_then(|t| t.status.clone())
+            .unwrap_or_else(TelemetryStatus::not_provisioned))
+    }
+
+    async fn telemetry_records(
+        &self,
+        id: &MachineId,
+        opts: TelemetryReadOpts,
+    ) -> Result<TelemetryPage> {
+        self.inspect_machine(id).await?;
+        let telemetry = self.telemetry.lock().expect("mock telemetry lock poisoned");
+        let records = telemetry
+            .get(&id.0)
+            .map(|t| t.records.as_slice())
+            .unwrap_or_default();
+        let start = opts.after.map_or(0, |c| c.0 as usize);
+        if start > records.len() {
+            return Err(MvmError::Rejected {
+                reason: format!(
+                    "telemetry cursor {start} is past the end of {}'s record stream ({} records); \
+                     the stream was reset, read again from the start",
+                    id.0,
+                    records.len()
+                ),
+            });
+        }
+        let end = start
+            .saturating_add(opts.effective_limit())
+            .min(records.len());
+        Ok(TelemetryPage {
+            records: records[start..end].to_vec(),
+            next: TelemetryCursor(end as u64),
+            more: end < records.len(),
+        })
+    }
+
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
         let mut all = self.machines.lock().unwrap();
         let m = all
@@ -263,6 +362,118 @@ mod tests {
         assert!(operations.exec);
         assert!(operations.reconfigure);
         assert!(operations.set_ttl);
+        assert!(operations.telemetry);
+    }
+
+    fn telemetry_record(sequence: u64) -> TelemetryRecord {
+        use crate::protocol::telemetry::{
+            Attributes, Level, ProducerEpoch, RecordBody, SourceKind,
+        };
+        TelemetryRecord::builder()
+            .epoch(ProducerEpoch::new([9; 16]).unwrap())
+            .producer(1)
+            .sequence(sequence)
+            .monotonic_ns(sequence)
+            .source(SourceKind::GuestAgent)
+            .body(RecordBody::Event {
+                context: None,
+                level: Level::Info,
+                name: "tick".try_into().unwrap(),
+                attributes: Attributes::new(Vec::new()).unwrap(),
+            })
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn telemetry_reads_not_provisioned_until_set_and_unknown_is_not_found() {
+        let mock = MockBackend::default();
+        let spec = MachineSpec::builder("quiet", "oci:alpine:3.20")
+            .unwrap()
+            .build();
+        let machine = mock.run_machine(spec).await.unwrap();
+
+        let status = mock.telemetry_status(&machine.id).await.unwrap();
+        assert_eq!(status, TelemetryStatus::not_provisioned());
+        let page = mock
+            .telemetry_records(&machine.id, TelemetryReadOpts::from_start())
+            .await
+            .unwrap();
+        assert!(page.records.is_empty());
+        assert_eq!(page.next, TelemetryCursor(0));
+        assert!(!page.more);
+
+        let collecting = TelemetryStatus {
+            coverage: crate::protocol::telemetry::TelemetryCoverage::Collecting { generation: 2 },
+            shed: 1,
+        };
+        mock.set_telemetry_status(&machine.id, collecting.clone());
+        assert_eq!(
+            mock.telemetry_status(&machine.id).await.unwrap(),
+            collecting
+        );
+
+        let ghost = MachineId("ghost".into());
+        assert!(matches!(
+            mock.telemetry_status(&ghost).await,
+            Err(MvmError::NotFound { .. })
+        ));
+        assert!(matches!(
+            mock.telemetry_records(&ghost, TelemetryReadOpts::from_start())
+                .await,
+            Err(MvmError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn telemetry_records_page_by_cursor_and_refuse_a_cursor_past_a_reset() {
+        let mock = MockBackend::default();
+        let spec = MachineSpec::builder("chatty", "oci:alpine:3.20")
+            .unwrap()
+            .build();
+        let machine = mock.run_machine(spec).await.unwrap();
+        mock.push_telemetry_records(&machine.id, (1..=3).map(telemetry_record));
+
+        let first = mock
+            .telemetry_records(
+                &machine.id,
+                TelemetryReadOpts {
+                    after: None,
+                    limit: Some(2),
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.records.len(), 2);
+        assert!(first.more);
+        assert_eq!(first.next, TelemetryCursor(2));
+
+        let second = mock
+            .telemetry_records(&machine.id, TelemetryReadOpts::after(first.next))
+            .await
+            .unwrap();
+        assert_eq!(second.records.len(), 1);
+        assert!(!second.more);
+        assert_eq!(second.next, TelemetryCursor(3));
+
+        let idle = mock
+            .telemetry_records(&machine.id, TelemetryReadOpts::after(second.next))
+            .await
+            .unwrap();
+        assert!(idle.records.is_empty());
+        assert_eq!(idle.next, second.next);
+
+        mock.reset_telemetry_records(&machine.id);
+        let err = mock
+            .telemetry_records(&machine.id, TelemetryReadOpts::after(second.next))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MvmError::Rejected { .. }), "{err}");
+        let fresh = mock
+            .telemetry_records(&machine.id, TelemetryReadOpts::from_start())
+            .await
+            .unwrap();
+        assert!(fresh.records.is_empty());
     }
 
     #[tokio::test]

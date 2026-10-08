@@ -25,6 +25,9 @@ pub mod mock;
 
 pub use error::{MvmError, Result};
 
+pub use crate::protocol::telemetry::{
+    TelemetryCoverage, TelemetryCursor, TelemetryPage, TelemetryReadOpts, TelemetryStatus,
+};
 use dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, PauseOpts,
     PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
@@ -91,6 +94,29 @@ pub trait MvmClient: Send + Sync {
     /// `Some(rfc3339)` arms it, `None` clears it. Errors if the machine is not
     /// registered.
     async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()>;
+
+    /// Where host-side telemetry collection stands for one machine.
+    ///
+    /// Collection is opt-in per boot, so a machine nobody asked to observe
+    /// answers `NotProvisioned` rather than an error; an unknown machine is
+    /// `NotFound`. A dashboard joins this with [`list_machines`](Self::list_machines)
+    /// for its per-machine health badge, and polls it: absence of records is
+    /// not evidence of health, this status is.
+    async fn telemetry_status(&self, id: &MachineId) -> Result<TelemetryStatus>;
+
+    /// One page of the records the collector persisted for a machine.
+    ///
+    /// Cursor-paged and poll-friendly: pass back the page's `next` to read
+    /// what arrived since, and an unchanged `next` means nothing did. A
+    /// cursor from before the machine's record stream was reset (a reboot)
+    /// is refused as `Rejected`, never silently rebased, so a reader restarts
+    /// from the beginning knowingly. Records never name their machine; this
+    /// call is what attributes them to `id`.
+    async fn telemetry_records(
+        &self,
+        id: &MachineId,
+        opts: TelemetryReadOpts,
+    ) -> Result<TelemetryPage>;
 
     /// What the backend behind this client can do.
     ///

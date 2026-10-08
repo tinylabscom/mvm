@@ -13,6 +13,7 @@
 //! runtime; the unit tests below hold the two lists to each other.
 
 use mvm_agentd::vsock::{FsStat, ProcInfo};
+use mvm_core::client::TelemetryStatus;
 use mvm_core::client::dto::{MachineFilter, MachineState, PauseOutcome, ResumeOutcome};
 use serde::Serialize;
 
@@ -21,7 +22,8 @@ use crate::dispatch::{
     MACHINE_EXEC, MACHINE_INSPECT, MACHINE_INVENTORY, MACHINE_LIST, MACHINE_LOGS, MACHINE_PAUSE,
     MACHINE_RECONFIGURE, MACHINE_RESUME, MACHINE_RM, MACHINE_SET_TTL, MACHINE_START, MACHINE_STOP,
     MachineRef, PauseRequest, ReconfigurePatchRequest, RemoveRequest as DispatchRemoveRequest,
-    ResumeRequest, SetTtlRequest, StopRequest,
+    ResumeRequest, SetTtlRequest, StopRequest, TELEMETRY_RECORDS, TELEMETRY_STATUS,
+    TelemetryRecordsReply, TelemetryRecordsRequest,
 };
 use crate::entrypoint::{
     ENTRYPOINT_CALL, EntrypointCallReply, EntrypointCallRequest, SESSION_CALL, SESSION_INFO,
@@ -323,6 +325,22 @@ pub const REGISTRY: &[MethodDef] = &[
         classification: Classification::ProdSafe,
         request: schema_of::<SessionStartRequest>,
         reply: schema_of::<SessionStartReply>,
+    },
+    MethodDef {
+        name: TELEMETRY_RECORDS,
+        key: "telemetry_records",
+        summary: "Reads one cursor-paged batch of a machine's collected telemetry records.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<TelemetryRecordsRequest>,
+        reply: schema_of::<TelemetryRecordsReply>,
+    },
+    MethodDef {
+        name: TELEMETRY_STATUS,
+        key: "telemetry_status",
+        summary: "Reports where host-side telemetry collection stands for a machine.",
+        classification: Classification::ProdSafe,
+        request: schema_of::<MachineRef>,
+        reply: schema_of::<TelemetryStatus>,
     },
     MethodDef {
         name: SESSION_STOP,
