@@ -577,8 +577,26 @@ pub fn admit_plan_for_boot_configured_ingress(
     // canonicalized first so a symlink alias (macOS `/tmp`) hashes the same
     // tree `hash_source` would refuse as a symlink root.
     let mut shares = p.shares.clone();
+    let materialized_images = p
+        .instructions
+        .materialized_mounts
+        .unwrap_or_default()
+        .iter()
+        .map(|mount| (mount.host_path.clone(), mount.image_path.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     for grant in &mut shares {
         if grant.kind == mvm_core::plan::ShareKind::DirShare && grant.content_sha256.is_none() {
+            if let Some(image) = materialized_images.get(std::path::Path::new(&grant.host_path)) {
+                grant.content_sha256 = Some(
+                    mvm_core::crypto::image_verify::sha256_file(image).with_context(|| {
+                        format!(
+                            "hashing frozen share image {} for its content identity",
+                            image.display()
+                        )
+                    })?,
+                );
+                continue;
+            }
             let resolved = std::fs::canonicalize(&grant.host_path)?;
             let digest = mvm_fs::hash::hash_source(&resolved).with_context(|| {
                 format!(
@@ -643,7 +661,8 @@ pub fn admit_plan_for_boot_configured_ingress(
     // operator's provenance policy now — before signing — so a broken policy
     // or an unreadable input fails here. The verdicts are recorded, and the
     // policy enforced, once the plan exists to bind them to.
-    let instruction_report = instructions::evaluate(&shares, &p.assets, p.instructions)?;
+    let instruction_report =
+        instructions::evaluate_and_harden(&mut shares, &p.assets, p.instructions)?;
 
     // The resolved network policy's identity: the plan pins policies by
     // reference name, so the caller adds the resolved bytes' hash — an

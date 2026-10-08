@@ -47,6 +47,38 @@ declare an `mvm.toml` and its neighboring Nix source and lock.
 
 ## An image-bearing pack
 
+### Build unsigned application filesystem assets offline
+
+If you already have a complete, immutable application root filesystem tree,
+`mvmctl image build-layer` creates deterministic ext4 and dm-verity assets
+without fetching software, building through Nix, or starting a VM:
+
+```sh
+mvmctl image build-layer --source ./staged-root --output ./app-assets
+```
+
+Pass your complete staged tree to `--source` and a new output directory to
+`--output`. The output directory must not exist and must be outside the source
+tree; its parent must exist. The command writes `rootfs.ext4`, `rootfs.verity`,
+`rootfs.roothash`, and `asset-report.json`; it prints the JSON report with each
+asset's SHA-256 digest and byte size. The completed directory appears only
+after every asset and the report have been written. Regular files and symlink
+targets are carried into the image. The writer also carries mode bits and
+readable guest semantic extended attributes on regular files and directories
+below the source root; unsupported host inode types are rejected. Files in a
+plain staged tree are root-owned in the guest, and
+timestamps are normalized by the deterministic writer. Prepare the tree with
+that ownership contract in mind.
+
+Use only a trusted, quiescent source tree. The command does not sandbox the
+source or prevent another process from replacing a path while it is read;
+concurrent mutation can change what lands in the unsigned image. Keep the tree
+private and unchanged through both the build and any later reproduction check.
+
+These are unsigned local assets. This command does not create pack metadata,
+signatures, provenance, a verified base-image claim, or an official `mvm/`
+pack. Publishing and activation have their own validation and trust steps.
+
 An optional `[image]` table in `pack.toml` names a signed workload manifest:
 
 ```toml

@@ -937,8 +937,12 @@ fn chown_root_owned_lines(root_owned: &mvm_fs::ownership::RootOwnedPaths) -> Str
 ///
 /// Stage-0 `/work` is mounted by label; every other caller leaves
 /// `volume_label` unset and gets the unchanged default-options image.
-fn pure_materialize_options(input: &MaterializeExt4Input) -> mvm_fs::rootfs::MaterializeOptions {
+fn pure_materialize_options(
+    input: &MaterializeExt4Input,
+    walk: mvm_fs::rootfs::WalkOptions,
+) -> mvm_fs::rootfs::MaterializeOptions {
     let options = mvm_fs::rootfs::MaterializeOptions::builder()
+        .walk(walk)
         .extra_nodes(input.deferred_nodes.clone())
         .owners(input.owners.clone())
         .root_owned(crate::oci_runtime_inject::injected_root_owned_paths())
@@ -963,12 +967,31 @@ fn pure_materialize_options(input: &MaterializeExt4Input) -> mvm_fs::rootfs::Mat
 pub fn materialize_ext4_pure(
     input: &MaterializeExt4Input,
 ) -> Result<MaterializedExt4, RootfsError> {
+    materialize_ext4_pure_with_walk(input, mvm_fs::rootfs::WalkOptions::default())
+}
+
+/// Materialize an image and verity sidecars, rejecting unsupported source
+/// nodes during the build walk rather than silently skipping them.
+pub fn materialize_ext4_rejecting_unsupported(
+    input: &MaterializeExt4Input,
+) -> Result<MaterializedExt4, RootfsError> {
+    let walk = mvm_fs::rootfs::WalkOptions {
+        on_unsupported: mvm_fs::rootfs::UnsupportedNodePolicy::Reject,
+        ..mvm_fs::rootfs::WalkOptions::default()
+    };
+    materialize_ext4_pure_with_walk(input, walk)
+}
+
+fn materialize_ext4_pure_with_walk(
+    input: &MaterializeExt4Input,
+    walk: mvm_fs::rootfs::WalkOptions,
+) -> Result<MaterializedExt4, RootfsError> {
     if !input.unpacked_root.is_dir() {
         return Err(RootfsError::UnpackedRootNotDirectory(
             input.unpacked_root.clone(),
         ));
     }
-    let options = pure_materialize_options(input);
+    let options = pure_materialize_options(input, walk);
     if !input.emit_verity {
         let materialized =
             mvm_fs::rootfs::materialize_ext4_pure(&input.unpacked_root, &input.output, &options)?;
@@ -1272,6 +1295,22 @@ mod tests {
             materialize_ext4_pure(&input),
             Err(RootfsError::UnpackedRootNotDirectory(_))
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pure_materialize_applies_reject_policy_during_the_build_walk() {
+        let source = tempfile::tempdir().unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(source.path().join("socket")).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let image = output.path().join("rootfs.ext4");
+        let input =
+            MaterializeExt4Input::new(source.path().to_path_buf(), image.clone(), 0).with_verity();
+        assert!(matches!(
+            materialize_ext4_rejecting_unsupported(&input),
+            Err(RootfsError::UnsupportedNodeType(_))
+        ));
+        assert!(!image.exists());
     }
 
     #[test]
@@ -1691,7 +1730,7 @@ mod injected_ownership_tests {
             MaterializeExt4Input::new(tree.path().to_path_buf(), tree.path().join("out.ext4"), 0)
                 .with_owners(hostile_owners());
 
-        let options = pure_materialize_options(&input);
+        let options = pure_materialize_options(&input, mvm_fs::rootfs::WalkOptions::default());
         let nodes = mvm_fs::rootfs::image_nodes(tree.path(), &options).unwrap();
 
         for injected in [

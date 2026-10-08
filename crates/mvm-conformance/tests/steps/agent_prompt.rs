@@ -8,14 +8,10 @@
 //! with a different turn.
 
 use cucumber::{given, then, when};
+use mvm_conformance::prompt_fixture::{AGENT_MACHINE, REPLAY_MACHINE, clear_stale_prompt_sessions};
 
 use crate::steps::machine_journey::{journey_home, run_in_journey_home};
 use crate::world::CliWorld;
-
-/// The machine the prompts are recorded against.
-const AGENT_MACHINE: &str = "bdd-prompt";
-/// The fork the recorded prompts are replayed onto.
-const REPLAY_MACHINE: &str = "bdd-prompt-replay";
 
 fn reclaim(name: &str) {
     let _ = run_in_journey_home(["machine", "stop", name, "--yes"]);
@@ -26,13 +22,9 @@ fn reclaim(name: &str) {
 fn prompt_agent_machine_is_running(_world: &mut CliWorld) {
     reclaim(REPLAY_MACHINE);
     reclaim(AGENT_MACHINE);
-    // A session left by an earlier run would put its prompts on this run's
-    // timeline. Sessions have no delete verb, so the record goes with its
-    // directory.
-    let stale = journey_home().join("agent-sessions").join(AGENT_MACHINE);
-    if stale.exists() {
-        std::fs::remove_dir_all(&stale).expect("remove the previous run's agent session");
-    }
+    // A previous run can leave either timeline behind. Never adopt a fork's
+    // history under a new workload identity.
+    clear_stale_prompt_sessions(journey_home()).expect("remove stale prompt sessions");
     let run = run_in_journey_home([
         "machine",
         "run",
@@ -58,6 +50,7 @@ fn run_against_prompt_agent(world: &mut CliWorld, args: String) {
 fn prompt_agent_machines_are_removed(_world: &mut CliWorld) {
     reclaim(REPLAY_MACHINE);
     reclaim(AGENT_MACHINE);
+    clear_stale_prompt_sessions(journey_home()).expect("remove completed prompt sessions");
 }
 
 /// Status lines go to whichever stream the CLI's chrome uses, so this reads

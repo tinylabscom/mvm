@@ -64,12 +64,17 @@ fn canonical_bdd_workflow_runs_the_full_suite() {
 }
 
 #[test]
-fn live_bdd_witness_runs_in_extended_ci_not_the_merge_queue() {
+fn broad_live_bdd_stays_extended_while_the_bounded_ps11_witness_runs_on_prs() {
     let required = workflow("bdd.yml");
     assert!(
-        !required.contains("bdd-live:") && !required.contains("just bdd::live-ci"),
-        "the long-running live lifecycle must not serialize the merge queue"
+        required.contains("ps11-live:")
+            && required.contains("just bdd::live-ci ps11_live")
+            && required.contains("timeout-minutes: 60"),
+        "the ordinary PR workflow must execute only the bounded PS-11 live witness"
     );
+    let ci = workflow("ci.yml");
+    assert!(ci.contains("github.event_name != 'merge_group'"));
+    assert!(ci.contains("run_ps11_live: ${{ needs.scope.outputs.code == 'true' }}"));
 
     let extended = workflow("ci-full.yml");
     let live = job_block(&extended, "bdd-live-readme");

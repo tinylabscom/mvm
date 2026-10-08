@@ -479,13 +479,15 @@ impl VolumeService for LocalVolumeService {
                         })?;
                 }
                 let vm_volume = attachment.as_vm_volume();
-                let runtime_volume = RuntimeVolume::from(&vm_volume);
+                let mut runtime_volume = RuntimeVolume::from(&vm_volume);
                 if registry
                     .mounts
                     .get(&guest)
                     .is_some_and(|entry| entry.host_snapshot.is_some())
                 {
                     instruction_images.push(attachment.host_path.clone());
+                    runtime_volume.materialized_image =
+                        Some(attachment.host_path.display().to_string());
                 }
                 if matches!(attachment.kind, LocalVolumeKind::BlockImage { .. }) {
                     intents.push(LeaseIntent {

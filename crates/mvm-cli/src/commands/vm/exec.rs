@@ -12,7 +12,6 @@ use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 use ed25519_dalek::Signer;
 
 use mvm_client::admission::InstructionSources;
-use mvm_client::admission::instructions::materialized_mount_images;
 use mvm_client::instruction_trust::gate::local_workload_dir;
 use mvm_core::plan::bundle::sha256_hex;
 use mvm_core::user_config::MvmConfig;
@@ -703,11 +702,12 @@ pub(in crate::commands) fn run_secure(
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
-        let instruction_mount_images = materialized_mount_images(volumes);
+        let instruction_mounts =
+            crate::exec::admitted_instruction_mounts(admit_backend_kind, volumes)?;
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
-                .with_mount_images(&instruction_mount_images),
+                .with_materialized_mounts(&instruction_mounts),
             outputs: admit_outputs.clone(),
             network_mode: admit_network_mode,
             tenant: "local",
@@ -783,6 +783,14 @@ pub(in crate::commands) fn run_secure(
             plan_json,
             bundle_json,
             config_files: start_config.config_files,
+            read_only_materialized_images: c
+                .admitted
+                .plan()
+                .shares
+                .iter()
+                .filter(|share| share.read_only)
+                .map(|share| share.host_path.clone())
+                .collect(),
         };
         // Bind the OCI provenance to the plan that was just admitted, before
         // the backend starts. Claim 14 wants the image's origin in the chain

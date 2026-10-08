@@ -485,6 +485,8 @@ fn resolve_mount_entry(
         volume_name,
         host_path,
         guest_path,
+        // Admission may harden a host snapshot after inspecting its frozen
+        // image. Resolution preserves the requested mode until then.
         read_only: entry.read_only,
         kind,
         source: resolved_source,
@@ -872,6 +874,34 @@ mod tests {
         assert_eq!(vm_volume.guest, "/data/work");
         assert_eq!(vm_volume.size, "16M");
         assert!(matches!(vm_volume.kind, VmVolumeKind::Disk));
+        assert!(!vm_volume.read_only, "managed block rw must remain rw");
+    }
+
+    #[test]
+    fn host_directory_snapshot_resolution_preserves_the_requested_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let host = tmp.path().join("snapshot.ext4");
+        create_ext4_image(&host, 16);
+
+        for requested_read_only in [false, true] {
+            let mut entry = make_entry("/work/input", "input");
+            entry.host_path = host.display().to_string();
+            entry.read_only = requested_read_only;
+            entry.source = VolumeMountSource::AdHocHost;
+            entry.host_snapshot = Some(HostSnapshotSource {
+                source_path: tmp.path().display().to_string(),
+                fingerprint: "a".repeat(64),
+            });
+            let registry = VolumeMountRegistry {
+                mounts: BTreeMap::from([("/work/input".to_string(), entry)]),
+            };
+
+            let resolved = registry
+                .resolve_for_launch(&LocalVolumeCatalog::default())
+                .unwrap();
+            assert_eq!(resolved[0].read_only, requested_read_only);
+            assert_eq!(resolved[0].as_vm_volume().read_only, requested_read_only);
+        }
     }
 
     #[test]
