@@ -18,6 +18,17 @@ Feature: every README-documented CLI launch mode boots a real guest
     And an Alpine warm parent is ready
 
   @live
+  Scenario: the documented preparation commands populate images and standbys explicitly
+    When I prepare launch artifacts with "image pull alpine"
+    Then the launch succeeds
+    When I prepare launch artifacts with "image pull python:3.12"
+    Then the launch succeeds
+    When I prepare launch artifacts with "pool warm 1 --image alpine"
+    Then the launch succeeds
+    When I prepare launch artifacts with "pool warm 1 --image python:3.12"
+    Then the launch succeeds
+
+  @live
   Scenario: a transient run boots an OCI image and runs one command
     When I launch "machine run --image alpine -- sh -c 'echo hello from a microVM'"
     Then the launch succeeds

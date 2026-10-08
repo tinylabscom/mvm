@@ -738,7 +738,7 @@ fn validate_source_helper_identity(commit: &str, dirty: &str) -> Result<String> 
             && commit
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
-        "this mvmctl carries no valid source commit; explicitly compile local helpers with \
+        "the source build metadata has no valid commit; explicitly compile local helpers with \
          `MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`"
     );
     Ok(commit.to_string())

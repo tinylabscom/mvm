@@ -602,7 +602,9 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     // duplicate cache read: the later resolver still owns the artifacts it
     // returns, while this guard keeps a cache miss inside the same sub-300ms
     // contract as a successful warm claim.
-    if let Some(image) = args.run.image.as_deref() {
+    if !args.run.dry_run
+        && let Some(image) = args.run.image.as_deref()
+    {
         crate::commands::image::resolve_or_pull_run_image(
             &crate::commands::image::oci_cache_root(),
             image,

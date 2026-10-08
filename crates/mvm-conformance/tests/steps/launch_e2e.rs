@@ -204,6 +204,11 @@ fn documented_launch_images_are_prepared(_world: &mut CliWorld) {
     }
 }
 
+#[when(expr = "I prepare launch artifacts with {string}")]
+fn prepare_launch_artifacts(world: &mut CliWorld, args: String) {
+    world.last_launch = Some(run_in_e2e_home(&args, &[]));
+}
+
 /// Prepare the exact standby shape the warm-budget launch will claim.
 ///
 /// Standbys expire and a successful claim consumes one, so this belongs in the
