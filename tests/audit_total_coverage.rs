@@ -206,6 +206,7 @@ const IMAGE_BOOT_SUB: &[(&str, AuditPosture)] = &[
 const IMAGE_DEV_SUB: &[(&str, AuditPosture)] = &[("ensure", AuditPosture::ReadOnly)];
 
 const IMAGE_SUB: &[(&str, AuditPosture)] = &[
+    ("build-layer", AuditPosture::InteractiveOrControl),
     ("pull", AuditPosture::Emits("ImageFetch")),
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
@@ -219,10 +220,19 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 // and emits `PackCacheChange`; `prune` removes bytes so it reuses
 // `CachePrune`. `download`/`update` refuse for every class — no pack is
 // published — so they change nothing and have nothing to record.
+const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
+    "update",
+    AuditPosture::Emits("RegistryPackRevocationUpdate"),
+)];
+
 const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("update", AuditPosture::ReadOnly),
+    (
+        "revocations",
+        AuditPosture::DelegatesToSub(PACK_REGISTRY_REVOCATIONS_SUB),
+    ),
 ];
 
 const PACK_SUB: &[(&str, AuditPosture)] = &[
@@ -239,7 +249,7 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
 /// `deployments` is a read-only inventory of the local deploy store.
 const DEPLOYMENTS_SUB: &[(&str, AuditPosture)] = &[("ls", AuditPosture::ReadOnly)];
 
-// Plan 200 — beginner machine UX. `machine run` translates into the same
+// Beginner machine UX. `machine run` translates into the same
 // transient-runner path as top-level `run`, so it shares `run`'s
 // `InteractiveOrControl` posture (it streams guest output; the admitted
 // execution path emits via the inner plan/run protocol). The persistent-spec
@@ -248,9 +258,9 @@ const DEPLOYMENTS_SUB: &[(&str, AuditPosture)] = &[("ls", AuditPosture::ReadOnly
 // surfaces after first resolving the named machine.
 const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("run", AuditPosture::InteractiveOrControl),
+    ("ps", AuditPosture::ReadOnly),
     ("build", AuditPosture::Emits("TemplateBuild")),
     ("create", AuditPosture::Emits("ConfigChange")),
-    ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("ConfigChange")),
     ("reconfigure", AuditPosture::Emits("ConfigChange")),
@@ -268,7 +278,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     // surface whose audit channel is the display input gate's own chain
     // entries (`display.granted`, `display.refused`, `display.input_event`).
     ("display", AuditPosture::InteractiveOrControl),
-    ("console", AuditPosture::InteractiveOrControl),
+    ("attach", AuditPosture::InteractiveOrControl),
     // Hangs up the client attached to a console session. The guest request is
     // recorded as an inbound RPC (`verb=console-detach`), and a detach that
     // disconnected someone closes their span with `ConsoleSessionEnd`.
@@ -936,6 +946,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         // pin; `pack registry rm` records the pin and entry it dropped.
         "RegistryPackPin",
         "RegistryPackRemove",
+        "RegistryPackRevocationUpdate",
         // Secret-service entries: the recorder emits `secret.<action>`
         // for the action the service names, and a consent run names
         // `oauth_login` whatever its outcome.

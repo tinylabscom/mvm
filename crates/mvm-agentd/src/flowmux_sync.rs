@@ -510,6 +510,7 @@ mod tests {
             client
                 .check_tool(&ToolCheckRequest {
                     tool: "read".into(),
+                    executable: Some("/bin/read".into()),
                     argv: "read data".into(),
                 })
                 .expect("tool answer"),
@@ -520,6 +521,7 @@ mod tests {
             client
                 .check_tool(&ToolCheckRequest {
                     tool: String::new(),
+                    executable: Some("/bin/read".into()),
                     argv: "read data".into(),
                 })
                 .is_err()

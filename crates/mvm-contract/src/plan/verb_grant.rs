@@ -1,3 +1,4 @@
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -6,6 +7,9 @@ use crate::plan::verb::VerbId;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::assurance::Sha256Digest;
 
 /// Verbs always permitted regardless of grant state or trust-policy configuration.
 /// Referenced by both the verb-grant gate and the verb-trust gate so the two
@@ -58,6 +62,38 @@ pub struct ToolMediationGrant {
     /// A dev plan without an agent-verb list continues to use the profile
     /// class gate for non-command verbs. Command RPCs are still mediated.
     pub class_gate_only: bool,
+    /// Digest of the exact tool-to-executable map sent at activation. The
+    /// complete map cannot ride this grant's bounded kernel command line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_map_digest: Option<Sha256Digest>,
+}
+
+impl ToolMediationGrant {
+    /// Hash a deterministic map encoding after rejecting paths whose tool
+    /// identity would be ambiguous at the guest command boundary.
+    pub fn digest_commands(
+        commands: &BTreeMap<String, String>,
+    ) -> Result<Option<Sha256Digest>, &'static str> {
+        let mut paths = BTreeSet::new();
+        let valid = commands.iter().all(|(tool, path)| {
+            !tool.is_empty()
+                && tool.len() <= crate::protocol::network_flow::tool::MAX_TOOL_NAME_BYTES
+                && !tool.contains('\0')
+                && crate::policy::tool_rules::normalized_executable_path(path)
+                && paths.insert(path)
+        });
+        if !valid {
+            return Err("invalid or ambiguous tool executable map");
+        }
+        if commands.is_empty() {
+            return Ok(None);
+        }
+        let encoded = serde_json::to_vec(commands).map_err(|_| "serialize tool executable map")?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"mvm-tool-command-map-v1\0");
+        hasher.update(encoded);
+        Ok(Some(Sha256Digest::from_bytes(&hasher.finalize().into())))
+    }
 }
 
 /// Serializes the raw signature bytes as a base64 string rather than a JSON
@@ -199,6 +235,11 @@ mod tests {
         let (mut grant, signer) = signed(now, vec![]);
         grant.tool_mediation = Some(ToolMediationGrant {
             class_gate_only: true,
+            command_map_digest: ToolMediationGrant::digest_commands(&BTreeMap::from([(
+                "shell".into(),
+                "/bin/sh".into(),
+            )]))
+            .expect("valid map"),
         });
         grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
         let json = serde_json::to_string(&grant).expect("serialize mediated grant");
@@ -226,6 +267,63 @@ mod tests {
             narrowed.verify(&signer.verifying_key(), "sess-A", &nonce(), now),
             Err(VerbGrantError::BadSignature)
         );
+
+        let mut redirected = grant;
+        redirected
+            .tool_mediation
+            .as_mut()
+            .expect("mediated grant")
+            .command_map_digest = ToolMediationGrant::digest_commands(&BTreeMap::from([(
+            "shell".into(),
+            "/bin/bash".into(),
+        )]))
+        .expect("valid map");
+        assert_eq!(
+            redirected.verify(&signer.verifying_key(), "sess-A", &nonce(), now),
+            Err(VerbGrantError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn command_map_digest_is_deterministic_and_rejects_ambiguous_paths() {
+        let commands = BTreeMap::from([("shell".into(), "/bin/sh".into())]);
+        let digest = ToolMediationGrant::digest_commands(&commands).expect("valid map");
+        assert!(digest.is_some());
+        assert_eq!(
+            digest,
+            ToolMediationGrant::digest_commands(&commands).expect("same map")
+        );
+        assert_eq!(
+            ToolMediationGrant::digest_commands(&BTreeMap::new()),
+            Ok(None)
+        );
+        let duplicates = BTreeMap::from([
+            ("shell".into(), "/bin/sh".into()),
+            ("other".into(), "/bin/sh".into()),
+        ]);
+        assert!(ToolMediationGrant::digest_commands(&duplicates).is_err());
+        let noncanonical = BTreeMap::from([("shell".into(), "/bin/../bin/sh".into())]);
+        assert!(ToolMediationGrant::digest_commands(&noncanonical).is_err());
+    }
+
+    #[test]
+    fn large_command_map_does_not_expand_kernel_cmdline_grant() {
+        let commands: BTreeMap<_, _> = (0..100)
+            .map(|index| {
+                (
+                    alloc::format!("tool-{index}"),
+                    alloc::format!("/bin/tool-{index}"),
+                )
+            })
+            .collect();
+        let (mut grant, signer) = signed(Utc::now(), vec![]);
+        grant.tool_mediation = Some(ToolMediationGrant {
+            class_gate_only: true,
+            command_map_digest: ToolMediationGrant::digest_commands(&commands).expect("valid map"),
+        });
+        grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
+        let encoded = serde_json::to_vec(&grant).expect("serialize grant");
+        assert!(encoded.len() < 512, "grant grew to {} bytes", encoded.len());
     }
 
     #[test]

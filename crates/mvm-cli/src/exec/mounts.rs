@@ -1,6 +1,15 @@
 use anyhow::{Context, Result};
 use mvm_core::vm_backend::VmVolume;
 
+pub(crate) fn admitted_instruction_mounts(
+    backend: mvm_contract::protocol::vm_backend::BackendKind,
+    volumes: &[VmVolume],
+) -> Result<Vec<mvm_client::admission::instructions::MaterializedMount>> {
+    let mounts = mvm_client::admission::instructions::materialized_mounts(volumes);
+    mvm_client::admission::instructions::refuse_wasm_host_snapshots(backend, &mounts)?;
+    Ok(mounts)
+}
+
 use crate::commands::DirShareSpec;
 
 /// The ext4 volume label for the `index`-th `--mount` image.
@@ -72,6 +81,8 @@ pub(crate) fn materialize_mount_volumes(
             Ok(VmVolume {
                 host: share.host_dir.clone(),
                 guest: share.guest_mount.clone(),
+                // Admission may harden this after inspecting these exact
+                // materialized bytes. Preserve the requested mode until then.
                 read_only: share.read_only,
                 materialized_image: Some(image.path().display().to_string()),
                 // Same authority the image was written with, so the guest
@@ -108,6 +119,26 @@ mod tests {
         let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
         let err = materialize_mount_volumes(&[share], &mut sub).unwrap_err();
         assert!(err.to_string().contains("does not exist"), "{err:#}");
+    }
+
+    #[test]
+    fn materialized_mounts_preserve_the_requested_mode_before_admission() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(scratch.path());
+        let source = scratch.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+
+        for requested_read_only in [false, true] {
+            let share = DirShareSpec {
+                host_dir: source.display().to_string(),
+                guest_mount: "/work".to_string(),
+                read_only: requested_read_only,
+            };
+            let mut sub = crate::commands::vm::phase_timing::LaunchSubMarks::new(true);
+            let volumes = materialize_mount_volumes(&[share], &mut sub).unwrap();
+            assert_eq!(volumes[0].read_only, requested_read_only);
+        }
     }
 
     #[test]

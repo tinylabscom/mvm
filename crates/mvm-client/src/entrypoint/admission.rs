@@ -112,8 +112,11 @@ impl EntrypointAdmission {
             bundle_archive,
         } = inputs;
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+        let materialized_mounts = crate::admission::instructions::materialized_mounts(volumes);
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            instructions: Default::default(),
+            instructions: crate::admission::InstructionSources::for_workload(None)
+                .with_mount_roots(&[])
+                .with_materialized_mounts(&materialized_mounts),
             outputs: Vec::new(),
             network_mode: crate::launch::persistent::preflight_network(),
             tenant: LOCAL_TENANT,
@@ -192,6 +195,14 @@ impl EntrypointAdmission {
                 plan_json,
                 bundle_json,
                 config_files: start_config.config_files,
+                read_only_materialized_images: ctx
+                    .admitted
+                    .plan()
+                    .shares
+                    .iter()
+                    .filter(|share| share.read_only)
+                    .map(|share| share.host_path.clone())
+                    .collect(),
             },
             context: ctx,
         })
@@ -376,6 +387,78 @@ mod tests {
         let policy: mvm_core::security::SecurityPolicy =
             serde_json::from_str(&policy_file.content).expect("parse security policy");
         assert_eq!(policy.profile, mvm_core::security::AgentProfile::SealedProd);
+    }
+
+    #[test]
+    fn entrypoint_admission_scans_the_complete_frozen_inventory_and_returns_effective_modes() {
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.isolate_mvm_home(dir.path());
+        let policy = mvm_core::config::instruction_trust_policy_path_at(dir.path());
+        std::fs::create_dir_all(policy.parent().unwrap()).unwrap();
+        std::fs::write(
+            &policy,
+            "enforcement = \"audit\"\nincludes = [\"AGENTS.md\"]\n",
+        )
+        .unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        GuestSidecar::for_oci_run("entrypoint-inventory", true, true)
+            .write_to_dir(dir.path())
+            .unwrap();
+        let make_image = |name: &str, path: &str| {
+            let image = dir.path().join(name);
+            let bytes = mvm_fs::ext4::build_image(
+                vec![mvm_fs::ext4::Node::File {
+                    path: path.into(),
+                    mode: 0o644,
+                    data: b"x".to_vec(),
+                    xattrs: Vec::new(),
+                    owner: mvm_fs::ext4::Owner::ROOT,
+                }],
+                &Default::default(),
+            )
+            .unwrap();
+            std::fs::write(&image, bytes).unwrap();
+            image
+        };
+        let ordinary = make_image("ordinary.ext4", "/data.txt");
+        let instruction = make_image("instruction.ext4", "/AGENTS.md");
+        let volumes = vec![
+            mvm_core::vm_backend::VmVolume {
+                host: "/host/ordinary".into(),
+                guest: "/ordinary".into(),
+                materialized_image: Some(ordinary.display().to_string()),
+                ..Default::default()
+            },
+            mvm_core::vm_backend::VmVolume {
+                host: "/managed.ext4".into(),
+                guest: "/managed".into(),
+                ..Default::default()
+            },
+            mvm_core::vm_backend::VmVolume {
+                host: "/host/instruction".into(),
+                guest: "/work".into(),
+                materialized_image: Some(instruction.display().to_string()),
+                ..Default::default()
+            },
+        ];
+        let admitted = EntrypointAdmission::builder("firecracker")
+            .build()
+            .unwrap()
+            .admit(AdmitInputs {
+                volumes: &volumes,
+                ..inputs(&rootfs, "entrypoint-inventory")
+            })
+            .unwrap();
+        let shares = &admitted.context.admitted.plan().shares;
+        assert!(!shares[0].read_only);
+        assert!(!shares[1].read_only);
+        assert!(shares[2].read_only);
+        assert_eq!(
+            admitted.substrate.read_only_materialized_images,
+            vec!["/host/instruction"]
+        );
     }
 
     #[test]

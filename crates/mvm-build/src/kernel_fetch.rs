@@ -643,7 +643,7 @@ mod tests {
         /// warm afterwards: a raw re-read leaves no entry behind.
         #[test]
         fn serving_a_pinned_kernel_leaves_its_digest_cache_warm() {
-            use mvm_core::crypto::image_verify::{DigestSource, sha256_file_cached_with_source};
+            use mvm_core::crypto::image_verify::{DigestSource, sha256_file_cached_report_source};
 
             let _env = env_guard();
             let dir = tempfile::tempdir().unwrap();
@@ -654,7 +654,7 @@ mod tests {
                 KernelResolution::Cached(_)
             ));
 
-            let (_, source) = sha256_file_cached_with_source(&kernel).unwrap();
+            let (_, source) = sha256_file_cached_report_source(&kernel).unwrap();
             assert_eq!(
                 source,
                 DigestSource::Sidecar,

@@ -75,7 +75,7 @@ runs:
       run: cd "$MVM_SIGN_SRC" && rustc --version
 
     - name: Restore the Rust build cache
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       with:
         prefix-key: v1-rust
         shared-key: ${{ inputs.cache-key }}
@@ -83,7 +83,7 @@ runs:
         save-if: ${{ inputs.cache-save }}
 
     - name: Install cosign
-      uses: sigstore/cosign-installer@v3
+      uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
 
     # `user` carries the Sigstore verifier; a build without it reports every
     # keyless signature as uncheckable.
@@ -164,7 +164,7 @@ runs:
     # Instruction files live under dot-directories (.claude/, .cursor/), and
     # upload-artifact drops hidden paths unless told otherwise.
     - name: Upload the bundles
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
       with:
         name: ${{ inputs.artifact-name }}
         path: ${{ runner.temp }}/bundles/

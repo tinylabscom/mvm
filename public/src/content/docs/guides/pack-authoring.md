@@ -47,6 +47,38 @@ declare an `mvm.toml` and its neighboring Nix source and lock.
 
 ## An image-bearing pack
 
+### Build unsigned application filesystem assets offline
+
+If you already have a complete, immutable application root filesystem tree,
+`mvmctl image build-layer` creates deterministic ext4 and dm-verity assets
+without fetching software, building through Nix, or starting a VM:
+
+```sh
+mvmctl image build-layer --source ./staged-root --output ./app-assets
+```
+
+Pass your complete staged tree to `--source` and a new output directory to
+`--output`. The output directory must not exist and must be outside the source
+tree; its parent must exist. The command writes `rootfs.ext4`, `rootfs.verity`,
+`rootfs.roothash`, and `asset-report.json`; it prints the JSON report with each
+asset's SHA-256 digest and byte size. The completed directory appears only
+after every asset and the report have been written. Regular files and symlink
+targets are carried into the image. The writer also carries mode bits and
+readable guest semantic extended attributes on regular files and directories
+below the source root; unsupported host inode types are rejected. Files in a
+plain staged tree are root-owned in the guest, and
+timestamps are normalized by the deterministic writer. Prepare the tree with
+that ownership contract in mind.
+
+Use only a trusted, quiescent source tree. The command does not sandbox the
+source or prevent another process from replacing a path while it is read;
+concurrent mutation can change what lands in the unsigned image. Keep the tree
+private and unchanged through both the build and any later reproduction check.
+
+These are unsigned local assets. This command does not create pack metadata,
+signatures, provenance, a verified base-image claim, or an official `mvm/`
+pack. Publishing and activation have their own validation and trust steps.
+
 An optional `[image]` table in `pack.toml` names a signed workload manifest:
 
 ```toml
@@ -79,10 +111,12 @@ When `run` or `machine run` names an installed image-bearing pack with
 `--policy` and no explicit boot source, the signed image is built and booted.
 The exact pack reference and manifest digest enter the signed execution plan
 and chain-signed audit record. Host admission reopens the installed pack under
-the current lock and publisher trust before boot. An explicit image, manifest,
-flake, deployment, or runtime source keeps its own boot-source precedence;
-the pack still contributes its policy. The separate `machine run --entrypoint`
-boot path refuses an image-bearing pack; use the ordinary machine run path.
+the current lock and publisher trust before boot. If the audit chain cannot
+record an admitted asset identity, admission refuses the launch. An explicit
+image, manifest, flake, deployment, or runtime source keeps its own
+boot-source precedence; the pack still contributes its policy. The separate
+`machine run --entrypoint` boot path refuses an image-bearing pack; use the
+ordinary machine run path.
 
 ## A group pack
 
@@ -256,6 +290,24 @@ when a policy accepts several identities, this list is not a claim that every
 identity signed the pack. A signature proves publisher identity and integrity,
 not safety. These commands do not assess whether a pack's policy is suitable
 for a particular invocation.
+
+An operator may additionally configure a separately controlled revocation
+release identity in `$MVM_HOME/registry/revocations/trust.toml`. The file has
+`schema_version = 1`, an `issuer` string, and an `accepted_identities` array of exact release-workflow
+identities; the release identity must differ from the pack's authenticated
+signer. The file must be owned by the user running MVM, readable only by that
+user (mode `0600` or stricter), and its directory must be private (mode `0700`
+or stricter). When this file exists, pull, installed-pack verification, and host
+admission require a fresh signed feed in the private revocation cache and
+reject a revoked signer or manifest digest. A missing, expired, corrupt, or
+rolled-back feed fails closed. Removing the trust file returns to the legacy
+publisher-only behavior. After obtaining the signed JSON document and its
+signature bundle through an operator-controlled channel, run
+`mvmctl pack registry revocations update --document ./revocations.json
+--bundle ./revocations.sigstore.json`. The command verifies the exact
+document bytes under `trust.toml` before advancing the durable checkpoint.
+There is no built-in revocation identity or automatic feed fetch yet. This
+operator path does not confer official status on a pack.
 
 `pull` downloads the manifest, the bundle and each declared file, verifies the
 signature against the publisher trust policy, checks every file against the

@@ -25,7 +25,7 @@ pub use diff::{BlobDelta, BlobStatus, CheckpointDiff, LineageRelation, diff_chec
 pub use params::{
     CaptureFsQuickParams, CaptureFsQuickParamsBuilder, CaptureVmFullParams,
     CaptureVmFullParamsBuilder, ForkParams, ForkParamsBuilder, ForkParentLiveness, WorkspaceVolume,
-    workspace_blob_name,
+    checked_workspace_blob_name, workspace_blob_name,
 };
 use restore_content::{
     content_with_load_memory_digest, reseed_forked_identity_drive, validate_fork_verity_binding,
@@ -815,7 +815,7 @@ pub fn capture_vm_full(
 /// snapshot store before writing metadata. The resulting snapshot ID is part
 /// of the checkpoint's load-bearing digest, so later claims can materialize it
 /// without rereading the captured memory image.
-pub fn capture_vm_full_with_snapshot_store(
+pub fn capture_vm_full_into_snapshot_store(
     store: &CheckpointStore,
     params: CaptureVmFullParams,
     control: &dyn VmFullControl,
@@ -827,7 +827,7 @@ pub fn capture_vm_full_with_snapshot_store(
 /// Capture a vm_full checkpoint and publish its bytes through an immutable
 /// trusted-snapshot backend. The backend owns the publication proof, allowing
 /// a later claim to materialize without hashing the captured blobs again.
-pub fn capture_vm_full_with_trusted_snapshot_backend(
+pub fn capture_vm_full_to_trusted_snapshot_backend(
     store: &CheckpointStore,
     params: CaptureVmFullParams,
     control: &dyn VmFullControl,

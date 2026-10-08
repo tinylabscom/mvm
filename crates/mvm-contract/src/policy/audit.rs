@@ -148,6 +148,9 @@ pub enum LocalAuditKind {
     /// lockfile pin. Detail carries the coordinate and manifest digest the
     /// pin had recorded.
     RegistryPackRemove,
+    /// A verified revocation feed advanced the local rollback checkpoint.
+    /// Detail carries the accepted sequence and document digest.
+    RegistryPackRevocationUpdate,
     /// `mvmctl cleanup` ran a host-side tier sweep
     /// (`--cache` / `--state` / `--nuclear`). The detail field carries
     /// the tier name, byte count freed, and number of top-level paths
@@ -1260,6 +1263,7 @@ mod tests {
             LocalAuditKind::SlotPrune,
             LocalAuditKind::RegistryPackPin,
             LocalAuditKind::RegistryPackRemove,
+            LocalAuditKind::RegistryPackRevocationUpdate,
             // Session lifecycle.
             LocalAuditKind::SessionStart,
             LocalAuditKind::SessionAttach,

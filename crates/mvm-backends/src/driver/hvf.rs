@@ -1112,10 +1112,10 @@ impl RunningVm for HvfRunningVm {
     }
 
     fn kill(&self) -> Result<()> {
-        self.kill_with_timing().map(|_| ())
+        self.terminate_with_timing().map(|_| ())
     }
 
-    fn kill_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
+    fn terminate_with_timing(&self) -> Result<Option<RunningVmStopTiming>> {
         let termination = hvf_backend::read_pid(&self.pid_file)
             .map(hvf_backend::terminate_pid_timed)
             .transpose()?

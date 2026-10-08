@@ -266,6 +266,15 @@ mod tests {
     }
 
     #[test]
+    fn flags_pr_ref_but_keeps_structural_source_reason() {
+        assert_eq!(rust_hits("// Temporary exception for PR #4164\n"), 1);
+        assert_eq!(
+            rust_hits("// Temporary exception for sibling pairs being renamed concurrently\n"),
+            0
+        );
+    }
+
+    #[test]
     fn ignores_token_inside_string_literal() {
         assert_eq!(rust_hits(r#"let s = "Plan 99 is data";"#), 0);
         assert_eq!(rust_hits(r#"bail!("predates ADR-001 W1.4b");"#), 0);

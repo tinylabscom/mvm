@@ -271,6 +271,13 @@ fn each_live_job_budget_exceeds_the_suite_deadline() {
             "{job}: setup measured 54 minutes on 2026-09-02; leave at least an hour \
              of the job budget for it, or the next slow checkout repeats the failure"
         );
+        if job == "e2e-docs-linux" {
+            assert!(
+                suite_seconds >= 10_800,
+                "{job}: the 120-minute suite reached only 287 of 367 scenarios on 2026-10-08; \
+                 leave enough time to run the remaining documented surface"
+            );
+        }
     }
 }
 

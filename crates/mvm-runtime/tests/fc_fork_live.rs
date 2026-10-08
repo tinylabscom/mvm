@@ -226,6 +226,7 @@ fn activate_parent(vsock_path: &str, images: &LiveImages) {
         volumes: Vec::new(),
         extensions: Vec::new(),
         verb_grant_envelope: None,
+        tool_commands: Default::default(),
     };
     let deadline = Instant::now() + Duration::from_secs(PARENT_READY_TIMEOUT_SECS);
     loop {

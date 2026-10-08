@@ -1237,15 +1237,29 @@ pub fn enforce_admitted_shares(
         if let Some(expected) = &grant.content_sha256 {
             // Canonicalize so a symlinked host dir (macOS `/tmp`) hashes
             // the same tree admission pinned, whichever alias names it.
-            let resolved = std::fs::canonicalize(&v.host)?;
-            let actual = mvm_fs::hash::hash_source(&resolved).map_err(|e| {
-                anyhow::anyhow!(
-                    "refusing to attach volume '{}' -> '{}': cannot re-hash the granted \
-                     directory to check its admitted content identity: {e}",
-                    v.host,
-                    v.guest,
-                )
-            })?;
+            let actual = if let Some(image) = &v.materialized_image {
+                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(image)).map_err(
+                    |e| {
+                        anyhow::anyhow!(
+                            "refusing to attach volume '{}' -> '{}': cannot re-hash frozen image \
+                             '{}': {e}",
+                            v.host,
+                            v.guest,
+                            image,
+                        )
+                    },
+                )?
+            } else {
+                let resolved = std::fs::canonicalize(&v.host)?;
+                mvm_fs::hash::hash_source(&resolved).map_err(|e| {
+                    anyhow::anyhow!(
+                        "refusing to attach volume '{}' -> '{}': cannot re-hash the granted \
+                         directory to check its admitted content identity: {e}",
+                        v.host,
+                        v.guest,
+                    )
+                })?
+            };
             if actual != *expected {
                 anyhow::bail!(
                     "refusing to attach volume '{}' -> '{}': the directory changed after \
@@ -3115,8 +3129,10 @@ mod tests {
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).expect("mkdir");
         std::fs::write(data.join("rows.csv"), b"a,b\n1,2\n").expect("write");
-
-        let digest = mvm_fs::hash::hash_source(&data).expect("hash admitted tree");
+        let image = tmp.path().join("mount.ext4");
+        std::fs::write(&image, b"frozen image bytes").expect("write image");
+        let digest =
+            mvm_core::crypto::image_verify::sha256_file(&image).expect("hash admitted image");
         let grant = mvm_core::plan::HostShareGrant {
             tag: "uvol0".into(),
             host_path: data.to_string_lossy().into_owned(),
@@ -3134,11 +3150,11 @@ mod tests {
             host: host.into(),
             guest: "/data".into(),
             read_only: true,
-            materialized_image: Some("/state/mount-0.ext4".into()),
+            materialized_image: Some(image.display().to_string()),
             ..Default::default()
         };
 
-        // Unchanged tree: the admitted identity still matches.
+        // Unchanged frozen image: the admitted identity still matches.
         enforce_admitted_shares(
             std::slice::from_ref(&volume(&plan.shares[0].host_path)),
             &plan,
@@ -3147,12 +3163,12 @@ mod tests {
 
         // A byte flips between admission and attach: refused, and the error
         // names both identities.
-        std::fs::write(data.join("rows.csv"), b"a,b\n1,TAMPERED\n").expect("tamper");
+        std::fs::write(&image, b"tampered frozen image").expect("tamper");
         let err = enforce_admitted_shares(
             std::slice::from_ref(&volume(&plan.shares[0].host_path)),
             &plan,
         )
-        .expect_err("a changed tree must not attach under the admitted identity");
+        .expect_err("a changed image must not attach under the admitted identity");
         let msg = format!("{err:#}");
         assert!(
             msg.contains(&digest),

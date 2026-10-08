@@ -229,7 +229,7 @@ pub(crate) fn seal_transient_end(
         mvm_hostd::audit::session::SealReason::Failed
     };
     let sealed = emitter
-        .emit_exited_with_capture(
+        .emit_exit_record(
             plan,
             ExitRecord {
                 exit_code: end.exit_code,
@@ -1330,7 +1330,7 @@ impl LocalBackend {
                     "audit emit_memory_limit_exceeded failed (non-fatal)"
                 );
             }
-            if let Err(e) = emitter.emit_exited_with_capture(
+            if let Err(e) = emitter.emit_exit_record(
                 &outcome.plan,
                 ExitRecord {
                     exit_code,

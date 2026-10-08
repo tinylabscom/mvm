@@ -92,6 +92,10 @@ impl AppleContainerBackend {
     pub(crate) fn stop_with_timing(&self, id: &VmId) -> Result<StopTiming> {
         self.runner.stop_with_timing(id)
     }
+
+    pub(crate) fn abort_start_with_timing(&self, id: &VmId) -> Result<StopTiming> {
+        self.runner.abort_start_with_timing(id)
+    }
 }
 
 impl Default for AppleContainerBackend {
@@ -138,9 +142,9 @@ impl VmBackend for AppleContainerBackend {
         self.runner.start(&self.config_with_kernel(config)?)
     }
 
-    fn start_with_mode(&self, config: &VmStartConfig, mode: StartMode) -> Result<VmId> {
+    fn start_in_mode(&self, config: &VmStartConfig, mode: StartMode) -> Result<VmId> {
         self.runner
-            .start_with_mode(&self.config_with_kernel(config)?, mode)
+            .start_in_mode(&self.config_with_kernel(config)?, mode)
     }
 
     fn wait(&self, id: &VmId) -> Result<VmExitStatus> {
@@ -157,6 +161,10 @@ impl VmBackend for AppleContainerBackend {
 
     fn stop(&self, id: &VmId) -> Result<()> {
         self.runner.stop(id)
+    }
+
+    fn abort_start(&self, id: &VmId) -> Result<()> {
+        self.runner.abort_start_with_timing(id).map(|_| ())
     }
 
     fn stop_all(&self) -> Result<()> {

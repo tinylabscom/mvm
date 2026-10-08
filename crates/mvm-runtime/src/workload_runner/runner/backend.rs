@@ -39,6 +39,16 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 {
     /// Stop a VM and expose timings for each runner-owned teardown phase.
     pub fn stop_with_timing(&self, id: &VmId) -> Result<StopTiming> {
+        self.terminate_with_timing(id, true)
+    }
+
+    /// Abort a launch that never reached readiness, without asking the guest
+    /// to flush or otherwise cooperate.
+    pub fn abort_start_with_timing(&self, id: &VmId) -> Result<StopTiming> {
+        self.terminate_with_timing(id, false)
+    }
+
+    fn terminate_with_timing(&self, id: &VmId, prepare_guest: bool) -> Result<StopTiming> {
         let total_started = Instant::now();
         let attach_started = Instant::now();
         let vm = match self.driver.attach(id) {
@@ -56,7 +66,12 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
         let endpoint_reaping = endpoint_started.elapsed();
 
         let kill_started = Instant::now();
-        let kill_result = vm.kill_with_timing();
+        let kill_result = (|| {
+            if prepare_guest {
+                vm.prepare_stop()?;
+            }
+            vm.terminate_with_timing()
+        })();
         let driver_detail = match &kill_result {
             Ok(detail) => *detail,
             Err(_) => None,
@@ -209,6 +224,10 @@ impl<D: VmmDriver + 'static, S: NetworkEndpointSpawner + 'static, B: BrokerRegis
 
     fn stop(&self, id: &VmId) -> Result<()> {
         self.stop_with_timing(id).map(|_| ())
+    }
+
+    fn abort_start(&self, id: &VmId) -> Result<()> {
+        self.abort_start_with_timing(id).map(|_| ())
     }
 
     fn stop_all(&self) -> Result<()> {

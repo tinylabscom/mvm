@@ -222,7 +222,7 @@ async fn encrypted_record_reaches_a_collector_using_the_resident_signer_socket()
         sender.send(&mut guest, &record).unwrap();
     });
     let collector = tokio::task::spawn_blocking(move || {
-        let mut receiver = TelemetryReceiver::connect_with_signer(
+        let mut receiver = TelemetryReceiver::connect_authenticated(
             &mut host,
             &anchor,
             &expected_guest,

@@ -34,7 +34,7 @@
 //! - `FileSecretStore` everywhere else (CI Linux, headless hosts).
 //!
 //! Tests inject temp-dir stores via [`SecretService::builder`] and
-//! [`run_with_service`].
+//! [`run_using_service`].
 
 use std::io::{IsTerminal, Read};
 use std::path::PathBuf;
@@ -252,12 +252,12 @@ impl From<AuthTypeArg> for AuthType {
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let service = SecretService::local()?;
-    run_with_service(&service, args)
+    run_using_service(&service, args)
 }
 
 /// Same dispatch as [`run`] but takes an injected service. Test seam for a
 /// `SecretService` built over temp-dir stores.
-pub(in crate::commands) fn run_with_service(service: &SecretService, args: Args) -> Result<()> {
+pub(in crate::commands) fn run_using_service(service: &SecretService, args: Args) -> Result<()> {
     match args.action {
         SecretAction::Put {
             name,

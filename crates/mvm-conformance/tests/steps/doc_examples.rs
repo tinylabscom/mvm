@@ -429,6 +429,12 @@ fn execute_in(
 /// between a tier that reflects the CLI and one that reflects the fixture set.
 fn stage_fixture(name: &str, dir: &Path, home: &Path) {
     match name {
+        "app-layer" => {
+            let root = dir.join("staged-root/bin");
+            std::fs::create_dir_all(&root).expect("create staged application tree");
+            std::fs::write(root.join("app"), b"offline application\n")
+                .expect("write staged application payload");
+        }
         // `manifest info|rm|verify` all resolve a manifest from the working
         // directory, which is what `init` writes.
         "manifest" => {

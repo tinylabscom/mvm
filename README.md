@@ -188,7 +188,7 @@ mvmctl machine display web
 mvmctl machine reconfigure web --memory 1G     # patch + relaunch
 mvmctl machine stop  web && mvmctl machine rm web
 
-mvmctl machine ls                              # list (alias: ps)
+mvmctl machine ps                              # list (alias: ls)
 mvmctl machine inspect web
 ```
 

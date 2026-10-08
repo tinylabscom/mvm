@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolRuleDetail {
+    /// Exact guest executable path for command mediation. No path aliases or
+    /// basename inference are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable: Option<String>,
     /// Argv patterns permitted for this tool (glob-style, matched against
     /// the command line). Empty means any argv.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -35,6 +39,20 @@ pub struct ToolRuleDetail {
     /// only these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+}
+
+/// Canonical spelling required for a signed guest executable path. The guest
+/// still resolves and verifies the actual file before spawning it.
+#[must_use]
+pub fn normalized_executable_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() <= 4096
+        && path != "/"
+        && path
+            .split('/')
+            .skip(1)
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && !path.chars().any(char::is_control)
 }
 
 /// Whole-tool decisions plus per-tool detail, after composition.
@@ -56,6 +74,40 @@ pub struct ToolRules {
 }
 
 impl ToolRules {
+    /// Exact executable names admitted for guest command mediation.
+    #[must_use]
+    pub fn command_executables(&self) -> BTreeMap<String, String> {
+        self.detail
+            .iter()
+            .filter_map(|(tool, detail)| {
+                detail
+                    .executable
+                    .as_ref()
+                    .map(|path| (tool.clone(), path.clone()))
+            })
+            .collect()
+    }
+
+    /// Decide a command only when its executable matches the path the signed
+    /// plan assigned to the declared tool. MCP calls use [`Self::decide`].
+    #[must_use]
+    pub fn decide_command(&self, tool: &str, executable: &str, argv: &str) -> ToolDecision {
+        let Some(expected) = self
+            .detail
+            .get(tool)
+            .and_then(|detail| detail.executable.as_deref())
+        else {
+            return ToolDecision::Deny("this tool has no signed executable path");
+        };
+        if !normalized_executable_path(executable)
+            || !normalized_executable_path(expected)
+            || executable != expected
+        {
+            return ToolDecision::Deny("the executable does not match this tool's signed path");
+        }
+        self.decide(tool, Some(argv))
+    }
+
     /// Whether any rule scopes routes or secrets to a tool, which the endpoint
     /// enforces against flows attributed to an admitted invocation.
     #[must_use]
@@ -298,6 +350,7 @@ mod tests {
         detail.insert(
             "bash".to_string(),
             ToolRuleDetail {
+                executable: Some("/bin/bash".to_string()),
                 argv: vec!["git *".to_string()],
                 deny: vec!["rm *".to_string()],
                 routes: vec!["github.com:443".to_string()],
@@ -321,6 +374,8 @@ mod tests {
     fn unknown_fields_are_refused() {
         let json = r#"{"allow":[],"unexpected":true}"#;
         assert!(serde_json::from_str::<ToolRules>(json).is_err());
+        let detail: ToolRuleDetail = serde_json::from_str("{}").expect("legacy detail");
+        assert_eq!(detail.executable, None);
     }
 
     #[test]
@@ -346,6 +401,7 @@ mod decide_tests {
         detail.insert(
             "bash".to_string(),
             ToolRuleDetail {
+                executable: None,
                 argv: vec!["git *".to_string(), "cargo *".to_string()],
                 deny: vec!["* --force*".to_string()],
                 routes: Vec::new(),
@@ -424,6 +480,40 @@ mod decide_tests {
         assert_eq!(
             rules().decide("bash", Some("git push --force")),
             ToolDecision::Deny("an argv pattern this tool denies matches the command line")
+        );
+    }
+
+    #[test]
+    fn command_executable_must_match_signed_exact_path() {
+        let mut rules = rules();
+        rules
+            .detail
+            .get_mut("bash")
+            .expect("bash detail")
+            .executable = Some("/bin/bash".to_string());
+        assert_eq!(
+            rules.decide_command("bash", "/bin/bash", "git status"),
+            ToolDecision::Allow
+        );
+        assert_eq!(
+            rules.decide_command("bash", "/tmp/bash", "git status"),
+            ToolDecision::Deny("the executable does not match this tool's signed path")
+        );
+        assert_eq!(
+            rules.decide_command("bash", "/bin/../bin/bash", "git status"),
+            ToolDecision::Deny("the executable does not match this tool's signed path")
+        );
+    }
+
+    #[test]
+    fn command_without_signed_executable_is_refused() {
+        assert_eq!(
+            rules().decide_command("read", "/bin/read", "read x"),
+            ToolDecision::Deny("this tool has no signed executable path")
+        );
+        assert_eq!(
+            ToolRules::default().decide_command("read", "/bin/read", "read x"),
+            ToolDecision::Deny("this tool has no signed executable path")
         );
     }
 

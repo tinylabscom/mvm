@@ -636,7 +636,9 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
           cargo nextest run -p mvm-cli --features manifest-verify --test signed_registry_pack
+          cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/scaffold_resolves_an_installed_verified_signed_pack_include/)'
           cargo nextest run -p mvm-hostd --features manifest-verify -E 'test(/real_signed_pack_identity_is_reverified_at_host_admission/)'
+          cargo nextest run -p mvm-client --features manifest-verify -E 'test(/signed_pack_identity_is_in_admitted_plan_and_audit_chain/)'
 
       # The other half: a build without the verifier must refuse every signature
       # and say why. The workspace lane unifies the verifier in, so those tests
@@ -900,6 +902,7 @@ jobs:
     uses: ./.github/workflows/bdd.yml
     with:
       docs_only: ${{ needs.scope.outputs.code != 'true' }}
+      run_ps11_live: ${{ needs.scope.outputs.code == 'true' }}
 
   test:
     name: Test
@@ -1209,6 +1212,10 @@ jobs:
             sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" --exact "guest_mount::privilege_tests::$witness" 2>&1 | tee witness.log
             grep -q "1 passed" witness.log
           done
+          sudo -E env MVM_GUEST_PRIVILEGED_TESTS=1 "$lib" \
+            --exact tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials \
+            2>&1 | tee attribution.log
+          grep -q "1 passed" attribution.log
 
   test-release-witness:
     name: Test release profile (overflow + no debug assertions)

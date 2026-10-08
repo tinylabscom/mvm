@@ -414,6 +414,18 @@ fn refuse_package_install(current_exe: &Path) -> Result<()> {
     }
 }
 
+/// Validate the running binary only when this invocation may replace it.
+///
+/// `--check` is deliberately read-only: package ownership and install layout
+/// affect replacement, not whether a newer release can be reported.
+fn validate_install_target(check_only: bool, current_exe: &Path) -> Result<()> {
+    if check_only {
+        return Ok(());
+    }
+    refuse_versioned_install(current_exe)?;
+    refuse_package_install(current_exe)
+}
+
 /// What to tell a user whose mvmctl came from a distribution package.
 fn package_install_refusal(install: &crate::install_layout::PackageInstall) -> String {
     use crate::install_layout::PackageFormat;
@@ -1058,10 +1070,7 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     // traffic: the answer does not depend on what the latest release is.
     let current_exe =
         std::env::current_exe().context("Failed to determine path of current executable")?;
-    if !check_only {
-        refuse_versioned_install(&current_exe)?;
-        refuse_package_install(&current_exe)?;
-    }
+    validate_install_target(check_only, &current_exe)?;
 
     let current = current_version();
     ui::info(&format!("Current version: {}", current));
@@ -1300,6 +1309,25 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("install.sh"), "{error}");
+    }
+
+    #[test]
+    fn check_only_does_not_refuse_an_install_sh_release_directory() {
+        use crate::install_layout::{LIB_MARKER, RELEASE_MARKER};
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("lib").join("2-v0.18.0");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::write(root.path().join("lib").join(LIB_MARKER), "").unwrap();
+        std::fs::write(release.join(RELEASE_MARKER), "complete\n").unwrap();
+        let executable = release.join("mvmctl");
+        std::fs::write(&executable, "").unwrap();
+
+        validate_install_target(true, &executable)
+            .expect("checking for updates never replaces the managed binary");
+        assert!(
+            validate_install_target(false, &executable).is_err(),
+            "an actual update must preserve the atomic install.sh layout"
+        );
     }
 
     #[test]

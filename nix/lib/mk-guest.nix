@@ -1397,8 +1397,8 @@ let
     ln -sf /init "$out/sbin/init"
 
     # mvm metadata. The PID 1 boot command is the load-bearing file —
-    # /init sources it. Mode 0500 so non-root processes in the guest
-    # can't read or replace it (a later layer makes /etc read-only as well).
+    # /init sources it. The sealed entrypoint must be executable by the
+    # non-root guest agent; a later layer makes /etc read-only.
     # When `bootCommand` is set it lands at /etc/mvm/boot and the caller's
     # extraFiles owns /etc/mvm/entrypoint (the agent marker); otherwise
     # the rendered entrypoint is both. `_bootContract` is forced here so
@@ -1407,7 +1407,7 @@ let
       if bootCommand == null then
         ''
           cp ${entrypointFile} "$out/etc/mvm/entrypoint"
-          chmod 0500 "$out/etc/mvm/entrypoint"
+          chmod 0755 "$out/etc/mvm/entrypoint"
         ''
       else
         ''

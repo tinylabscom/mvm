@@ -275,20 +275,7 @@ pub(in crate::commands) struct CheckpointForkJson<'a> {
 /// directory component under `checkpoints_dir()`, so path-traversal and
 /// control bytes must never reach the filesystem.
 pub(in crate::commands) fn validated_checkpoint_id(raw: &str) -> Result<CheckpointId> {
-    if raw.is_empty() {
-        bail!("invalid checkpoint id: empty");
-    }
-    let bad = raw.contains('/')
-        || raw.contains('\\')
-        || raw.contains("..")
-        || raw.bytes().any(|b| b == 0 || b.is_ascii_control());
-    if bad {
-        bail!(
-            "invalid checkpoint id {raw:?}: must not contain '/', '\\', '..', \
-             NUL, or control characters"
-        );
-    }
-    Ok(CheckpointId::new(raw.to_string()))
+    mvm_client::checkpoint::validated_id(raw)
 }
 
 pub(in crate::commands) fn now_unix() -> u64 {

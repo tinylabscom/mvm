@@ -9,10 +9,9 @@
 
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use mvm_client::volume::{AccessMode, AttachmentRecord, LocalVolumeService, VolumeService};
-use mvm_core::checkpoint::CheckpointMeta;
-use mvm_runtime::checkpoint::{CheckpointStore, WorkspaceVolume, workspace_blob_name};
+use mvm_runtime::checkpoint::WorkspaceVolume;
 
 /// One workspace volume attached to a machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,23 +85,6 @@ pub(in crate::commands) fn baseline_image(workspace: &Workspace) -> Result<PathB
         })
 }
 
-/// The image of `volume` frozen in checkpoint `meta`.
-pub(in crate::commands) fn checkpoint_image(
-    store: &CheckpointStore,
-    meta: &CheckpointMeta,
-    volume: &str,
-) -> Result<PathBuf> {
-    let blob = workspace_blob_name(volume);
-    if !meta.content.iter().any(|content| content.name == blob) {
-        bail!(
-            "checkpoint {} did not capture volume {volume:?}: it predates the volume, or \
-             was not a full-machine checkpoint",
-            meta.id.as_str()
-        );
-    }
-    Ok(store.content_dir(&meta.id).join(blob))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,18 +119,5 @@ mod tests {
         assert_eq!(found[1].source_dir, PathBuf::from("/home/me/src"));
         assert_eq!(found[1].baseline_key, "key-src");
         assert_eq!(found[1].image, PathBuf::from("/state/src.ext4"));
-    }
-
-    #[test]
-    fn a_checkpoint_without_the_volume_names_why() {
-        let store = CheckpointStore::at(tempfile::tempdir().unwrap().path());
-        let meta = CheckpointMeta::builder(
-            mvm_core::checkpoint::CheckpointId::new("ckpt-a"),
-            mvm_core::checkpoint::CheckpointClass::VmFull,
-            "vm".to_string(),
-        )
-        .build();
-        let err = checkpoint_image(&store, &meta, "src").unwrap_err();
-        assert!(err.to_string().contains("did not capture volume"), "{err}");
     }
 }

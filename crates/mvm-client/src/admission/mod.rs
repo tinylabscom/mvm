@@ -367,12 +367,12 @@ pub fn admit_plan_for_boot(p: AdmitPlanForBootParams<'_>) -> Result<AdmissionCon
     // Hashing a freshly built root filesystem for the plan reads every byte
     // of it; later boots are served from the digest cache and stay silent.
     let phase = mvm_runtime::ui::activity::start("Signing and admitting the execution plan");
-    let admitted = admit_plan_for_boot_with_ingress(p, Vec::new())?;
+    let admitted = admit_plan_for_boot_configured_ingress(p, Vec::new())?;
     phase.finish();
     Ok(admitted)
 }
 
-pub fn admit_plan_for_boot_with_ingress(
+pub fn admit_plan_for_boot_configured_ingress(
     p: AdmitPlanForBootParams<'_>,
     ingress: Vec<mvm_core::plan::IngressMapping>,
 ) -> Result<AdmissionContext> {
@@ -555,8 +555,26 @@ pub fn admit_plan_for_boot_with_ingress(
     // canonicalized first so a symlink alias (macOS `/tmp`) hashes the same
     // tree `hash_source` would refuse as a symlink root.
     let mut shares = p.shares.clone();
+    let materialized_images = p
+        .instructions
+        .materialized_mounts
+        .unwrap_or_default()
+        .iter()
+        .map(|mount| (mount.host_path.clone(), mount.image_path.clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
     for grant in &mut shares {
         if grant.kind == mvm_core::plan::ShareKind::DirShare && grant.content_sha256.is_none() {
+            if let Some(image) = materialized_images.get(std::path::Path::new(&grant.host_path)) {
+                grant.content_sha256 = Some(
+                    mvm_core::crypto::image_verify::sha256_file(image).with_context(|| {
+                        format!(
+                            "hashing frozen share image {} for its content identity",
+                            image.display()
+                        )
+                    })?,
+                );
+                continue;
+            }
             let resolved = std::fs::canonicalize(&grant.host_path)?;
             let digest = mvm_fs::hash::hash_source(&resolved).with_context(|| {
                 format!(
@@ -621,7 +639,8 @@ pub fn admit_plan_for_boot_with_ingress(
     // operator's provenance policy now — before signing — so a broken policy
     // or an unreadable input fails here. The verdicts are recorded, and the
     // policy enforced, once the plan exists to bind them to.
-    let instruction_report = instructions::evaluate(&shares, &p.assets, p.instructions)?;
+    let instruction_report =
+        instructions::evaluate_and_harden(&mut shares, &p.assets, p.instructions)?;
 
     // The resolved network policy's identity: the plan pins policies by
     // reference name, so the caller adds the resolved bytes' hash — an
@@ -894,10 +913,10 @@ pub fn admit_plan_for_boot_with_ingress(
         }
         // Record every bound asset's content-derived identity in the
         // chain-signed log alongside the grants (no-op when the plan
-        // records none).
-        if let Err(e) = emitter.emit_asset_identities(admitted.plan()) {
-            tracing::warn!(error = %e, "audit emit_asset_identities failed (non-fatal)");
-        }
+        // records none). An admitted asset without this record must not boot.
+        emitter
+            .emit_asset_identities(admitted.plan())
+            .context("recording admitted asset identities in the audit chain")?;
         Ok(())
     })?;
     tracing::debug!(
@@ -1589,6 +1608,117 @@ pub(crate) mod admit_plan_tests {
             !keys_dir.exists(),
             "refusal must not initialize signer keys"
         );
+    }
+
+    #[test]
+    fn asset_identity_audit_failure_refuses_admission_before_boot() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = write_rootfs(dir.path(), b"asset audit rootfs");
+        let declared = dir.path().join("declared-input.txt");
+        std::fs::write(&declared, b"bound asset").expect("declared asset");
+        let audit_dir = dir.path().join("audit");
+        std::fs::create_dir_all(audit_dir.join("local.jsonl"))
+            .expect("block the chain file with a directory");
+        let keys_dir = dir.path().join("keys");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.restrict_agent_verbs = false;
+        params.assets = vec![AssetSpec::File {
+            kind: mvm_core::plan::AssetKind::Dataset,
+            host_path: declared.to_string_lossy().into_owned(),
+        }];
+
+        let error = admit_plan_for_boot(params).expect_err("asset identity must be audited");
+        assert!(
+            format!("{error:#}").contains("recording admitted asset identities"),
+            "{error:#}"
+        );
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn signed_pack_identity_is_in_admitted_plan_and_audit_chain() {
+        use mvm_core::registry_pack::{
+            PackAdoption, PackPin, RegistryPackPublisher, RegistryPackPublisherPolicy,
+        };
+        use mvm_core::registry_pack_store::{adopt_install_and_pin, save_publisher_policy};
+
+        const MANIFEST: &[u8] =
+            include_bytes!("../../tests/fixtures/signed-registry-python/manifest.json");
+        const BUNDLE: &[u8] =
+            include_bytes!("../../tests/fixtures/signed-registry-python/manifest.sigstore.json");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(dir.path().join("home"));
+        let publisher = RegistryPackPublisher::new(
+            "runtime",
+            "https://token.actions.githubusercontent.com",
+            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/feat/3716-python-image-pack".to_string()],
+        )
+        .expect("fixture signer identity");
+        let policy = RegistryPackPublisherPolicy::new(vec![publisher]).expect("publisher policy");
+        save_publisher_policy(
+            &mvm_core::config::registry_pack_publisher_policy_path(),
+            &policy,
+        )
+        .expect("save fixture trust");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/signed-registry-python/files");
+        let staged = dir.path().join("staged-pack");
+        for relative in [
+            "pack/group.toml",
+            "pack/image/mvm.toml",
+            "pack/image/flake.nix",
+            "pack/image/flake.lock",
+        ] {
+            let destination = staged.join(relative);
+            std::fs::create_dir_all(destination.parent().expect("payload parent"))
+                .expect("create payload directory");
+            std::fs::copy(fixture.join(relative), destination).expect("stage signed payload");
+        }
+        let reference = "runtime/python@1.1.0".parse().expect("pack reference");
+        adopt_install_and_pin(
+            &PackAdoption {
+                requested: &reference,
+                manifest_bytes: MANIFEST,
+                signature_bundle: BUNDLE,
+                publisher_policy: &policy,
+            },
+            &staged,
+            &mvm_core::config::registry_pack_cache_dir(),
+            &mvm_core::config::pack_lockfile_path(),
+        )
+        .expect("install signed fixture pack");
+
+        let digest = mvm_core::packs::Sha256Hex::from_bytes(MANIFEST);
+        let pin = PackPin::new(reference.clone(), digest.clone()).expect("signed pack pin");
+        let rootfs = write_rootfs(dir.path(), b"pack rootfs");
+        let keys_dir = dir.path().join("keys");
+        let audit_dir = dir.path().join("audit");
+        let ledger = InMemoryNonceLedger::new();
+        let mut params = pinning_params(&rootfs, &ledger);
+        params.keys_dir = Some(&keys_dir);
+        params.audit_dir = Some(&audit_dir);
+        params.assets = vec![AssetSpec::RegistryPack(pin)];
+
+        let admitted = admit_plan_for_boot(params).expect("signed pack admission");
+        let asset = admitted
+            .admitted
+            .plan()
+            .asset_identities
+            .iter()
+            .find(|asset| asset.kind == mvm_core::plan::AssetKind::RegistryPack)
+            .expect("signed plan pins pack identity");
+        assert_eq!(asset.name, reference.to_string());
+        assert_eq!(asset.digest, digest.as_str());
+
+        let chain = std::fs::read_to_string(audit_dir.join("local.jsonl"))
+            .expect("read admitted audit chain");
+        assert!(chain.contains("plan.asset_identities"), "{chain}");
+        assert!(chain.contains("registry_pack"), "{chain}");
+        assert!(chain.contains(digest.as_str()), "{chain}");
     }
 
     /// The image digest says what the workload *is* and nothing about what

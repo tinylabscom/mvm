@@ -47,7 +47,7 @@ backend.
 The backend descriptor registry in `crates/mvm-runtime/src/catalog.rs` is the single source of
 truth for backend discovery: each `BackendDescriptor` carries the selector, aliases, isolation
 tier, per-VM marker file, started-VM probe order, and the listing/support sets that `mvmctl
-doctor` and `mvmctl machine ls` read. Both enum (`AnyBackend`) and trait-object (`Arc<dyn VmBackend>`)
+doctor` and `mvmctl machine ps` read. Both enum (`AnyBackend`) and trait-object (`Arc<dyn VmBackend>`)
 consumers construct from the same descriptors via `instantiate` / `instantiate_dyn`.
 
 ## What runs where: the trust gradient

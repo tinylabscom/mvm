@@ -6,6 +6,7 @@
 //! virtio-blk slot layout produced by [`mvm_vmm::host::spec_map::workload_blocks`],
 //! then sends it over the agent vsock channel.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -13,6 +14,7 @@ use mvm_agentd::vsock::{
     ActivateEnvironment, ExtensionConfig, GuestRequest, GuestResponse, RootfsConfig,
     RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind,
 };
+use mvm_core::plan::{ExecutionPlan, SignedExecutionPlan, ToolMediationGrant};
 use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmStartConfig};
 
 use crate::driver::traits::RunningVm;
@@ -282,6 +284,7 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
     let volumes = build_volume_configs(config)?;
     let extensions = build_extension_configs(config)?;
     let verb_grant_envelope = read_verb_grant_envelope(&config.name)?;
+    let tool_commands = activation_tool_commands(config, verb_grant_envelope.as_ref())?;
 
     Ok(ActivateEnvironment {
         rootfs,
@@ -289,7 +292,33 @@ fn build_activation_environment(config: &VmStartConfig) -> Result<ActivateEnviro
         volumes,
         extensions,
         verb_grant_envelope,
+        tool_commands,
     })
+}
+
+fn activation_tool_commands(
+    config: &VmStartConfig,
+    envelope: Option<&VerbGrantEnvelope>,
+) -> Result<BTreeMap<String, String>> {
+    let expected = envelope
+        .and_then(|envelope| envelope.grant.tool_mediation.as_ref())
+        .and_then(|mediation| mediation.command_map_digest.as_ref());
+    let Some(plan_json) = config.plan_json.as_deref() else {
+        if expected.is_some() {
+            bail!("signed tool executable map requires the admitted plan");
+        }
+        return Ok(BTreeMap::new());
+    };
+    let signed: SignedExecutionPlan =
+        serde_json::from_str(plan_json).context("decode signed plan for tool executable map")?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
+        .context("decode admitted plan for tool executable map")?;
+    let commands = plan.tools.command_executables();
+    let actual = ToolMediationGrant::digest_commands(&commands).map_err(anyhow::Error::msg)?;
+    if actual.as_ref() != expected {
+        bail!("admitted plan's tool executable map differs from the signed guest grant");
+    }
+    Ok(commands)
 }
 
 fn build_extension_configs(config: &VmStartConfig) -> Result<Vec<ExtensionConfig>> {
@@ -784,6 +813,63 @@ mod tests {
 
         let env = build_activation_environment(&config).unwrap();
         assert!(env.verb_grant_envelope.is_some());
+    }
+
+    #[test]
+    fn activation_projects_only_the_signed_command_map() {
+        use mvm_contract::policy::tool_rules::ToolRuleDetail;
+
+        let mut plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        plan.tools.detail.insert(
+            "shell".into(),
+            ToolRuleDetail {
+                executable: Some("/bin/sh".into()),
+                ..ToolRuleDetail::default()
+            },
+        );
+        let signed = mvm_core::plan::sign_plan(
+            &plan,
+            &ed25519_dalek::SigningKey::from_bytes(&[3; 32]),
+            "test",
+        );
+        let config = VmStartConfig {
+            plan_json: Some(serde_json::to_string(&signed).expect("signed plan")),
+            ..base_config()
+        };
+        let commands = plan.tools.command_executables();
+        let digest = ToolMediationGrant::digest_commands(&commands)
+            .expect("valid map")
+            .expect("nonempty map");
+        let mut envelope = grant_until(chrono::Utc::now() + chrono::Duration::minutes(1));
+        envelope.grant.tool_mediation = Some(ToolMediationGrant {
+            class_gate_only: true,
+            command_map_digest: Some(digest),
+        });
+        assert_eq!(
+            activation_tool_commands(&config, Some(&envelope)).expect("matching plan"),
+            commands
+        );
+        assert!(activation_tool_commands(&config, None).is_err());
+        let mut missing_digest = envelope.clone();
+        missing_digest
+            .grant
+            .tool_mediation
+            .as_mut()
+            .expect("mediation")
+            .command_map_digest = None;
+        assert!(activation_tool_commands(&config, Some(&missing_digest)).is_err());
+        let mut mismatched = config.clone();
+        mismatched.plan_json = None;
+        assert!(activation_tool_commands(&mismatched, Some(&envelope)).is_err());
+        let altered = BTreeMap::from([("shell".into(), "/bin/bash".into())]);
+        envelope
+            .grant
+            .tool_mediation
+            .as_mut()
+            .expect("mediation")
+            .command_map_digest =
+            ToolMediationGrant::digest_commands(&altered).expect("valid altered map");
+        assert!(activation_tool_commands(&config, Some(&envelope)).is_err());
     }
 
     #[test]

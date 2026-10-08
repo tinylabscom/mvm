@@ -60,7 +60,7 @@ pub(in crate::commands) fn run(args: &ReplayArgs) -> Result<()> {
     let plan = prepare_replay(&checkpoints, &inputs, &from, &record, &anchor)
         .with_context(|| format!("planning the replay of session {session_id}"))?;
 
-    let fork_name = super::replay::fork_name(&from, args.as_name.as_deref())?;
+    let fork_name = mvm_client::replay::replay_target_name(&from, args.as_name.as_deref())?;
     if args.dry_run {
         print_plan(&plan, &fork_name);
         return Ok(());
@@ -81,7 +81,7 @@ pub(in crate::commands) fn run(args: &ReplayArgs) -> Result<()> {
     .with_context(|| format!("restoring checkpoint {:?} for replay", from.as_str()))?;
 
     let replayed = super::invoke::replay_prompts(&fork_name, &plan, &inputs, args.timeout)?;
-    ui::success(&format!(
+    ui::notice(&format!(
         "replayed {} prompt(s) from {} onto {fork_name:?}; the machine is running",
         replayed.report.applied,
         from.as_str(),

@@ -8,7 +8,7 @@ Feature: The documented flake build runs for real
   This is what backs the `machine build` entry's `live` tier in
   `tiers.toml`; without it, that tier would be a label with nothing behind it.
 
-  @live
+  @live @release_gate_flake
   Scenario: the documented flake build produces an image
     When I run mvmctl in an isolated live home with "machine build --flake examples/exit_code"
     Then the command exits with code 0
@@ -21,7 +21,7 @@ Feature: The documented flake build runs for real
   #
   # Shares this feature rather than the launch suite because the builder VM is
   # the expensive part and this scenario reuses what the one above just built.
-  @live
+  @live @release_gate_flake
   Scenario: the documented entrypoint launch runs the compiled workload
     When I run mvmctl in an isolated live home with "machine run --entrypoint --flake examples/exit_code"
     Then the command exits with code 7

@@ -767,7 +767,7 @@ fn load_name_registry() -> VmNameRegistry {
 /// cleanup; reaping here would delete that unconsumed exit before it is read.
 /// A persistent machine — the restored-checkpoint case this exists for —
 /// reports no exit through the stop path, so it always reaps.
-fn remove_stopped_runtime_state(name: &str) -> Result<()> {
+pub(crate) fn remove_stopped_runtime_state(name: &str) -> Result<()> {
     let state_dir = vm_state_dir(name);
     let transient_exit_pending = !mvm_core::config::machine_spec_path(name).exists()
         && mvm_core::exit_capture::exit_file_path(&state_dir).exists();

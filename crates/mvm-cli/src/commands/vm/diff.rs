@@ -13,20 +13,17 @@
 mod render;
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use mvm_core::naming::validate_vm_name;
-use mvm_core::net::session::SessionError;
 use mvm_core::user_config::MvmConfig;
 use mvm_fs::tree_diff::{DiffLimits, TreeDiff, diff_images};
-use mvm_runtime::checkpoint::CheckpointStore;
 use serde::Serialize;
 
 use super::Cli;
 use super::shared::clap_vm_name;
-use super::workspace::{Workspace, baseline_image, checkpoint_image, workspaces_of};
+use super::workspace::{Workspace, baseline_image, workspaces_of};
 use render::VolumeDiff;
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -114,17 +111,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let workspaces = selected_workspaces(&args)?;
     let from = side_for(args.from.as_deref(), Side::Baseline)?;
     let to = side_for(args.to.as_deref(), Side::Live)?;
-    let unsynced = (to == Side::Live && mvm_runtime::checkpoint::vm_is_running(&args.name))
-        .then(|| flush_guest(&args.name).err())
+    let unsynced = (to == Side::Live)
+        .then(|| mvm_client::guest::sync_filesystems_if_running(&args.name).err())
         .flatten()
         .map(|error| format!("{error:#}"));
 
-    let store = CheckpointStore::open();
+    let checkpoints = mvm_client::checkpoint::Checkpoints::open();
     let limits = args.limits();
     let mut volumes = Vec::with_capacity(workspaces.len());
     for workspace in &workspaces {
-        let old = image_for(&store, workspace, &from)?;
-        let new = image_for(&store, workspace, &to)?;
+        let old = image_for(&checkpoints, workspace, &from)?;
+        let new = image_for(&checkpoints, workspace, &to)?;
         let diff = diff_images(&old, &new, limits)
             .with_context(|| format!("diffing workspace volume {:?}", workspace.volume))?;
         volumes.push(VolumeReport {
@@ -216,16 +213,17 @@ fn side_for(checkpoint: Option<&str>, default: Side) -> Result<Side> {
     })
 }
 
-fn image_for(store: &CheckpointStore, workspace: &Workspace, side: &Side) -> Result<PathBuf> {
+fn image_for(
+    checkpoints: &mvm_client::checkpoint::Checkpoints,
+    workspace: &Workspace,
+    side: &Side,
+) -> Result<PathBuf> {
     match side {
         Side::Baseline => baseline_image(workspace),
         Side::Live => Ok(workspace.image.clone()),
         Side::Checkpoint { id } => {
             let id = mvm_core::checkpoint::CheckpointId::new(id.clone());
-            let meta = store
-                .read_meta(&id)
-                .with_context(|| format!("no checkpoint {:?} found", id.as_str()))?;
-            checkpoint_image(store, &meta, &workspace.volume)
+            checkpoints.workspace_image(&id, &workspace.volume)
         }
     }
 }
@@ -256,21 +254,7 @@ pub(in crate::commands) fn workspace_changes_text(workspace: &Workspace) -> Resu
 
 /// Ask the running guest to flush its writes before its volume image is read.
 pub(in crate::commands) fn flush_guest(name: &str) -> Result<()> {
-    #[cfg(feature = "test-support")]
-    {
-        let mock_socket = mvm_runtime::MockBackend::vm_dir(name)
-            .join("runtime")
-            .join("v.sock");
-        if mock_socket.exists() {
-            let mut stream = mvm_agentd::vsock::connect_to(&mock_socket.to_string_lossy(), 10)?;
-            return mvm_agentd::vsock::sync_filesystems_on(&mut stream);
-        }
-    }
-    retry_initial_handshake(|| {
-        let mut stream = mvm_runtime::vsock_transport::for_vm(name)?
-            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
-        mvm_agentd::vsock::sync_filesystems_on(&mut stream)
-    })
+    mvm_client::guest::sync_filesystems(name)
 }
 
 fn terminal_width() -> usize {
@@ -285,81 +269,9 @@ fn terminal_width() -> usize {
     }
 }
 
-/// Retry only an authenticated-session handshake that ended before the peer
-/// sent any proof. The request cannot have reached the guest in that state, so
-/// replaying it on a fresh connection is safe. An EOF after the request was
-/// sent has a different error chain and is returned without retrying.
-fn retry_initial_handshake<T>(mut attempt: impl FnMut() -> Result<T>) -> Result<T> {
-    match attempt() {
-        Err(error) if is_handshake_peer_hangup(&error) => {
-            std::thread::sleep(Duration::from_millis(100));
-            attempt()
-        }
-        outcome => outcome,
-    }
-}
-
-fn is_handshake_peer_hangup(error: &anyhow::Error) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<SessionError>()
-            .is_some_and(SessionError::is_peer_hangup)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::Cell;
-    use std::io::{Error, ErrorKind};
-
-    fn handshake_hangup() -> anyhow::Error {
-        anyhow::Error::new(SessionError::Io(Error::from(ErrorKind::UnexpectedEof)))
-            .context("host session handshake failed")
-    }
-
-    #[test]
-    fn a_peer_hangup_before_authentication_is_retried_once() {
-        let attempts = Cell::new(0);
-        let value = retry_initial_handshake(|| {
-            attempts.set(attempts.get() + 1);
-            if attempts.get() == 1 {
-                Err(handshake_hangup())
-            } else {
-                Ok(7)
-            }
-        })
-        .expect("second connection succeeds");
-
-        assert_eq!(value, 7);
-        assert_eq!(attempts.get(), 2);
-    }
-
-    #[test]
-    fn an_eof_after_authentication_is_not_replayed() {
-        let attempts = Cell::new(0);
-        let error = retry_initial_handshake::<()>(|| {
-            attempts.set(attempts.get() + 1);
-            Err(anyhow::Error::new(Error::from(ErrorKind::UnexpectedEof))
-                .context("control frame read failed"))
-        })
-        .expect_err("post-request EOF must be returned");
-
-        assert_eq!(attempts.get(), 1);
-        assert!(error.to_string().contains("control frame read failed"));
-    }
-
-    #[test]
-    fn a_second_handshake_hangup_is_bounded() {
-        let attempts = Cell::new(0);
-        retry_initial_handshake::<()>(|| {
-            attempts.set(attempts.get() + 1);
-            Err(handshake_hangup())
-        })
-        .expect_err("the retry budget must be bounded");
-
-        assert_eq!(attempts.get(), 2);
-    }
 
     #[test]
     fn an_unnamed_side_is_the_default_and_a_named_one_is_a_checkpoint() {

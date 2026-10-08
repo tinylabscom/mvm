@@ -1167,7 +1167,7 @@ mod tests {
 
     /// Export a `plan.launched` + `plan.exited` pair where the exit entry
     /// carries a `usage` label encoding `capture` as compact JSON, mirroring
-    /// what Task 4's `emit_exited_with_capture` writes.
+    /// what Task 4's `emit_exit_record` writes.
     fn export_fixture_with_usage(
         capture: mvm_core::usage_capture::UsageCapture,
     ) -> Vec<SignedExecutionReceipt> {

@@ -41,6 +41,15 @@ Feature: mvmctl template registry
     Then the command exits with code 1
     And the error output contains "does not resolve"
 
+  @template_policy
+  Scenario: a template requiring an uninstalled signed pack refuses generation
+    Given an isolated mvm home with an empty pack trust policy
+    And a local template registry with a demo template selecting a signed pack group
+    When I generate a project from template "demo"
+    Then the command exits with code 1
+    And the error output contains "runtime/python@1.0.0"
+    And the error output contains "mvmctl pull"
+
   Scenario: template search finds a remote template
     Given a local template registry with a demo template
     When I run mvmctl with "template search demo" against the local template registry

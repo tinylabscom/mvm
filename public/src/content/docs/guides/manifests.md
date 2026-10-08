@@ -198,7 +198,7 @@ An unsupported request fails closed instead of downgrading to image-only.
 
 ## Listing / inspecting / removing
 
-Manifest registry operations live under `mvmctl manifest`. (`mvmctl machine ls` / `mvmctl machine inspect` / `mvmctl machine stop` continue to operate on **machines** — those are unchanged. `machine ls` has a visible `ps` alias.)
+Manifest registry operations live under `mvmctl manifest`. (`mvmctl machine ps` / `mvmctl machine inspect` / `mvmctl machine stop` continue to operate on **machines** — those are unchanged. `machine ps` has a visible `ls` alias.)
 
 ```bash
 mvmctl manifest ls                            # list built slots (manifest path, name, last built)
@@ -214,7 +214,7 @@ mvmctl manifest rm /path/to/project --force   # idempotent
 mvmctl manifest rm --manifest-file            # also delete mvm.toml on disk (off by default)
 ```
 
-For running VMs (separate concern), continue to use `mvmctl machine ls` / `mvmctl machine stop <vm>` / `mvmctl machine logs <vm>` etc.
+For running VMs (separate concern), continue to use `mvmctl machine ps` / `mvmctl machine stop <vm>` / `mvmctl machine logs <vm>` etc.
 
 ## Booting
 

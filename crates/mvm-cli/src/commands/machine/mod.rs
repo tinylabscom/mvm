@@ -121,7 +121,7 @@ pub(in crate::commands) enum MachineAction {
     #[command(name = "rm", display_order = 6)]
     Rm(MachineRemoveArgs),
     /// List persistent and transient microVMs
-    #[command(name = "ls", visible_alias = "ps", display_order = 7)]
+    #[command(name = "ps", visible_alias = "ls", display_order = 7)]
     Ls(MachineListArgs),
     /// Show one persistent named machine spec
     #[command(display_order = 8)]
@@ -140,8 +140,9 @@ pub(in crate::commands) enum MachineAction {
     Logs(super::vm::logs::Args),
     /// Attach to a development VM's console session, or start one
     #[command(
+        name = "attach",
         display_order = 13,
-        visible_alias = "attach",
+        visible_alias = "console",
         after_help = super::vm::console::CONSOLE_SESSION_HELP
     )]
     Console(super::vm::console::Args),
@@ -1330,21 +1331,21 @@ pub(super) fn validate_machine_name(name: &str) -> Result<()> {
 /// `machines/<name>/` is the declarative spec and `vms/<name>/` is the state a
 /// boot leaves behind — console log, sockets, pid file. They are separate
 /// namespaces, and `machine rm` used to delete only the first, so a removed
-/// machine kept the second forever and `machine ls`, which reads `vms/`, went
+/// machine kept the second forever and `machine ps`, which reads `vms/`, went
 /// on reporting it.
 ///
 /// Returns `false` when a live process still owns the directory rather than
 /// deleting it. `--force` stops the machine first but only warns if that stop
 /// failed, so "we asked it to stop" is not "nothing is using this any more";
 /// removing a live supervisor's pid file and sockets would strand it and hide
-/// it from every later `machine ls` at the same time. Uses the same liveness
+/// it from every later `machine ps` at the same time. Uses the same liveness
 /// probe `env cleanup` and the reconciler make this decision with.
 ///
 /// `instances/<name>/` goes with it: it holds the machine's volume mount
 /// registry and any sealed snapshot, both keyed by name. Left behind, a
 /// machine later created under the same name inherits the removed machine's
 /// mounts and refuses its own.
-/// Health label for a machine's readiness, as shown in `machine ls`'s HEALTH
+/// Health label for a machine's readiness, as shown in `machine ps`'s HEALTH
 /// column and `machine inspect`'s `health:` line. `None` covers both a
 /// registry entry with no readiness signal yet and a machine absent from the
 /// registry entirely.

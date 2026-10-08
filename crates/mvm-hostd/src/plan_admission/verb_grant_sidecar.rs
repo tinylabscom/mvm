@@ -38,7 +38,7 @@ pub(super) fn mint_verb_grant_sidecar(
     // already dead guarantees the guest refuses activation, and the guest can
     // only say `VerbNotAuthorized`; refusing here says what actually expired.
     refuse_expired_plan(&plan, chrono::Utc::now())?;
-    let tool_mediation = tool_mediation_for(&plan);
+    let tool_mediation = tool_mediation_for(&plan)?;
     let drive = plan.grants.as_ref().and_then(|grants| grants.drive.clone());
     let Some(verbs) = granted_verbs(&plan, drive.is_some() || tool_mediation.is_some()) else {
         return Ok(None);
@@ -95,10 +95,16 @@ fn granted_verbs(plan: &ExecutionPlan, other_authority: bool) -> Option<Vec<Verb
     Some(verbs)
 }
 
-fn tool_mediation_for(plan: &ExecutionPlan) -> Option<ToolMediationGrant> {
-    (!plan.tools.is_empty()).then_some(ToolMediationGrant {
+fn tool_mediation_for(plan: &ExecutionPlan) -> Result<Option<ToolMediationGrant>> {
+    if plan.tools.is_empty() {
+        return Ok(None);
+    }
+    let grant = ToolMediationGrant {
         class_gate_only: plan.agent_verbs.is_none(),
-    })
+        command_map_digest: ToolMediationGrant::digest_commands(&plan.tools.command_executables())
+            .map_err(anyhow::Error::msg)?,
+    };
+    Ok(Some(grant))
 }
 
 /// Refuse to mint a grant from a plan whose validity window has closed.
@@ -183,21 +189,61 @@ mod tests {
     #[test]
     fn tool_rules_require_a_signed_guest_mediation_grant() {
         let mut plan = plan_valid(5, 600);
-        assert!(tool_mediation_for(&plan).is_none());
+        assert!(tool_mediation_for(&plan).expect("empty plan").is_none());
         plan.tools.allow.push("shell".to_string());
         assert_eq!(
-            tool_mediation_for(&plan),
+            tool_mediation_for(&plan).expect("tool plan"),
             Some(ToolMediationGrant {
                 class_gate_only: true,
+                command_map_digest: None,
             })
         );
         plan.agent_verbs = Some(Vec::new());
         assert_eq!(
-            tool_mediation_for(&plan),
+            tool_mediation_for(&plan).expect("explicit verbs"),
             Some(ToolMediationGrant {
                 class_gate_only: false,
+                command_map_digest: None,
             })
         );
+    }
+
+    #[test]
+    fn signed_guest_map_comes_from_plan_paths_and_refuses_ambiguous_ownership() {
+        use mvm_contract::policy::tool_rules::ToolRuleDetail;
+
+        let mut plan = plan_valid(5, 600);
+        plan.tools.allow.push("shell".into());
+        plan.tools.detail.insert(
+            "shell".into(),
+            ToolRuleDetail {
+                executable: Some("/bin/sh".into()),
+                ..ToolRuleDetail::default()
+            },
+        );
+        let map = tool_mediation_for(&plan)
+            .expect("valid map")
+            .expect("tool grant");
+        assert_eq!(
+            map.command_map_digest,
+            ToolMediationGrant::digest_commands(&plan.tools.command_executables())
+                .expect("valid map")
+        );
+
+        plan.tools.detail.insert(
+            "other".into(),
+            ToolRuleDetail {
+                executable: Some("/bin/sh".into()),
+                ..ToolRuleDetail::default()
+            },
+        );
+        assert!(tool_mediation_for(&plan).is_err());
+        plan.tools
+            .detail
+            .get_mut("other")
+            .expect("other detail")
+            .executable = Some("relative/sh".into());
+        assert!(tool_mediation_for(&plan).is_err());
     }
 
     #[test]
@@ -232,6 +278,7 @@ mod tests {
             envelope.grant.tool_mediation,
             Some(ToolMediationGrant {
                 class_gate_only: true,
+                command_map_digest: None,
             })
         );
         let key = crate::audit::host_keypair::load_or_init_at(&mvm_core::config::mvm_keys_dir())

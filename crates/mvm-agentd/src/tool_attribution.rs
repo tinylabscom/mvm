@@ -44,12 +44,13 @@
 //!
 //! The question travels over an abstract-namespace socket the agent binds as
 //! PID 1 before any workload runs. The egress client accepts an answer only
-//! from a listener PID 1 created, and the agent answers only uid 0, which is
-//! what the egress client runs as on this boot path. A guest booted by another
-//! init has no such listener, so its flows are never attributed and tool
-//! routes and secrets stay refused. The agent answers one question at a time,
-//! with a two-second deadline on each side, so a flood of proxy connections
-//! can delay attribution; a delayed answer is no answer, which refuses.
+//! from a listener PID 1 created, and the agent answers only the dedicated
+//! egress service identity (`EGRESS_CLIENT_IDENTITY`, uid/gid 989). Root, the
+//! workload and unrelated identities are refused. A guest booted by another
+//! init has no such listener, so its flows are never attributed and tool routes
+//! and secrets stay refused. The agent answers one question at a time, with a
+//! two-second deadline on each side, so a flood of proxy connections can delay
+//! attribution; a delayed answer is no answer, which refuses.
 
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -420,11 +421,10 @@ mod linux {
     use std::time::Duration;
 
     use super::*;
+    use crate::guest_mount::EGRESS_CLIENT_IDENTITY;
 
     /// How long either side waits on the other before answering "no binding".
     const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-    /// The one uid allowed to ask: the egress client on the PID-1 boot path.
-    const QUERY_UID: u32 = 0;
     /// The process that must have created the listener the egress client asks.
     const ANSWER_PID: i32 = 1;
 
@@ -463,34 +463,49 @@ mod linux {
         UnixListener::bind_addr(&address()?)
     }
 
-    /// Answer questions for the life of the agent. Only uid 0 is answered.
-    pub fn serve(listener: UnixListener) {
-        for stream in listener.incoming() {
-            let Ok(mut stream) = stream else {
-                continue;
-            };
-            if !peer_credentials(&stream).is_ok_and(|cred| cred.uid == QUERY_UID) {
-                continue;
-            }
-            let _ = stream.set_read_timeout(Some(QUERY_TIMEOUT));
-            let _ = stream.set_write_timeout(Some(QUERY_TIMEOUT));
-            if let Err(error) = answer(&mut stream, &Procfs) {
-                eprintln!("mvm-guest-agent: tool attribution question failed: {error}");
-            }
+    pub(super) fn serve_connection(mut stream: UnixStream, source: &dyn ProcSource) {
+        if !peer_credentials(&stream).is_ok_and(|cred| {
+            cred.uid == EGRESS_CLIENT_IDENTITY.uid() && cred.gid == EGRESS_CLIENT_IDENTITY.gid()
+        }) {
+            return;
+        }
+        let _ = stream.set_read_timeout(Some(QUERY_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(QUERY_TIMEOUT));
+        if let Err(error) = answer(&mut stream, source) {
+            eprintln!("mvm-guest-agent: tool attribution question failed: {error}");
         }
     }
 
-    /// Ask the agent which binding a connection belongs to. Any failure,
-    /// and any listener PID 1 did not create, answers none.
-    pub fn query(client: SocketAddr, server: SocketAddr) -> Option<ToolInvocationBinding> {
+    /// Answer questions for the life of the agent. Only the dedicated egress
+    /// client identity is answered.
+    pub fn serve(listener: UnixListener) {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else {
+                continue;
+            };
+            serve_connection(stream, &Procfs);
+        }
+    }
+
+    pub(super) fn query_from(
+        client: SocketAddr,
+        server: SocketAddr,
+        answer_pid: i32,
+    ) -> Option<ToolInvocationBinding> {
         let mut stream = UnixStream::connect_addr(&address().ok()?).ok()?;
-        if peer_credentials(&stream).ok()?.pid != ANSWER_PID {
+        if peer_credentials(&stream).ok()?.pid != answer_pid {
             return None;
         }
         stream.set_read_timeout(Some(QUERY_TIMEOUT)).ok()?;
         stream.set_write_timeout(Some(QUERY_TIMEOUT)).ok()?;
         write_line(&mut stream, &AttributionQuery { client, server }).ok()?;
         read_line::<AttributionAnswer>(&mut stream).ok()?.binding
+    }
+
+    /// Ask the agent which binding a connection belongs to. Any failure,
+    /// and any listener PID 1 did not create, answers none.
+    pub fn query(client: SocketAddr, server: SocketAddr) -> Option<ToolInvocationBinding> {
+        query_from(client, server, ANSWER_PID)
     }
 }
 
@@ -679,6 +694,160 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn only_the_egress_service_identity_is_authorized_to_query() {
+        assert_ne!(crate::guest_mount::EGRESS_CLIENT_IDENTITY.uid(), 0);
+        assert_ne!(
+            crate::guest_mount::EGRESS_CLIENT_IDENTITY.uid(),
+            crate::guest_mount::WORKLOAD_UID
+        );
+    }
+
+    /// Real `SO_PEERCRED` witness for the production listener and query paths.
+    ///
+    /// The parent owns a live TCP connection attributed to an admitted
+    /// invocation. Each child runs the actual query client with a different
+    /// kernel identity. Only the dedicated egress service uid receives the
+    /// binding; root, the workload, and an unrelated guest uid are disconnected.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn egress_identity_alone_receives_live_attribution_over_unix_credentials() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        const ROLE: &str = "MVM_ATTRIBUTION_CREDENTIAL_WITNESS";
+        if let Ok(expected) = std::env::var(ROLE) {
+            let client: SocketAddr = std::env::var("MVM_ATTRIBUTION_CLIENT")
+                .expect("client address")
+                .parse()
+                .expect("valid client address");
+            let server: SocketAddr = std::env::var("MVM_ATTRIBUTION_SERVER")
+                .expect("server address")
+                .parse()
+                .expect("valid server address");
+            let answer_pid = std::env::var("MVM_ATTRIBUTION_ANSWER_PID")
+                .expect("answer pid")
+                .parse()
+                .expect("valid answer pid");
+            let got = linux::query_from(client, server, answer_pid);
+            let wanted = (expected == "allowed").then(binding);
+            assert_eq!(got, wanted);
+            return;
+        }
+
+        let requested = std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok();
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        match (requested.as_deref(), euid) {
+            (Some("1"), 0) => {}
+            (Some("1"), uid) => {
+                panic!("MVM_GUEST_PRIVILEGED_TESTS=1 is set but this test runs as euid {uid}")
+            }
+            _ => return,
+        }
+
+        let listener = linux::bind_listener().expect("bind attribution listener");
+        let tcp_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind TCP server");
+        let server = tcp_listener.local_addr().expect("server address");
+        let tcp_client = std::net::TcpStream::connect(server).expect("connect TCP client");
+        let client = tcp_client.local_addr().expect("client address");
+        let (_accepted, _) = tcp_listener.accept().expect("accept TCP client");
+
+        let admitted = binding();
+        let stat = fs::read_to_string("/proc/self/stat").expect("read parent stat");
+        let fields = parse_stat(&stat).expect("parse parent stat");
+        let session_start_ticks =
+            process_start_ticks(fields.session).expect("read session leader start ticks");
+        let _registration = {
+            let mut entries = live();
+            entries.push(LiveInvocation {
+                session: fields.session,
+                start_ticks: session_start_ticks,
+                binding: admitted.clone(),
+            });
+            Registration {
+                session: fields.session,
+            }
+        };
+
+        let fixture = tempfile::Builder::new()
+            .prefix("mvm-attribution-witness-")
+            .tempdir_in("/tmp")
+            .expect("create executable fixture directory");
+        fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o755))
+            .expect("make fixture directory traversable");
+        let executable = fixture.path().join("witness");
+        fs::copy(
+            std::env::current_exe().expect("current test binary"),
+            &executable,
+        )
+        .expect("copy test binary");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("make test binary executable");
+
+        let egress = crate::guest_mount::EGRESS_CLIENT_IDENTITY;
+        let cases = [
+            ("allowed", egress.uid(), egress.gid()),
+            ("refused-root", 0, 0),
+            (
+                "refused-workload",
+                crate::guest_mount::WORKLOAD_UID,
+                crate::guest_mount::WORKLOAD_GID,
+            ),
+            ("refused-wrong-group", egress.uid(), 990),
+            ("refused-unrelated", 990, 990),
+        ];
+        for (expected, uid, gid) in cases {
+            let mut command = Command::new(&executable);
+            command
+                .args([
+                    "--exact",
+                    "tool_attribution::tests::egress_identity_alone_receives_live_attribution_over_unix_credentials",
+                    "--nocapture",
+                ])
+                .env(ROLE, expected)
+                .env("MVM_ATTRIBUTION_CLIENT", client.to_string())
+                .env("MVM_ATTRIBUTION_SERVER", server.to_string())
+                .env(
+                    "MVM_ATTRIBUTION_ANSWER_PID",
+                    std::process::id().to_string(),
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if uid != 0 {
+                // SAFETY: this hook runs after fork and before exec. The libc
+                // calls are async-signal-safe and use plain integer arguments.
+                unsafe {
+                    command.pre_exec(move || {
+                        if libc::setgroups(0, std::ptr::null()) != 0
+                            || libc::setresgid(gid, gid, gid) != 0
+                            || libc::setresuid(uid, uid, uid) != 0
+                        {
+                            return Err(io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
+                }
+            }
+            let child = command.spawn().expect("spawn credential witness");
+            let (stream, _) = listener.accept().expect("accept attribution query");
+            linux::serve_connection(stream, &Procfs);
+            let output = child
+                .wait_with_output()
+                .expect("wait for credential witness");
+            assert!(
+                output.status.success(),
+                "{expected} child failed:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
     }
 
     #[cfg(unix)]

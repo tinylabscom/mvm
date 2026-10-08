@@ -430,7 +430,7 @@ pub(crate) fn launch_carries_restricted_grant(args: &MachineRunArgs) -> bool {
 
 /// Resolve a machine's `build_mode` (`"dev"` / `"prod"`) for the boot-time
 /// SDK envelope. Delegates to the shared inventory service's fail-closed
-/// posture resolution so this envelope, `machine ls --json`, and every other
+/// posture resolution so this envelope, `machine ps --json`, and every other
 /// inventory consumer read the same value — only an explicitly dev-built
 /// template or an accessible (dev) runtime resolves to `"dev"`.
 pub(super) fn resolve_machine_build_mode(manifest: Option<&str>, name: &str) -> &'static str {

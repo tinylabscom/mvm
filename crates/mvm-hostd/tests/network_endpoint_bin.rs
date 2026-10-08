@@ -1319,6 +1319,7 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
     tools.detail.insert(
         "fetch".into(),
         ToolRuleDetail {
+            executable: Some("/bin/fetch".into()),
             routes: vec![target.clone()],
             ..Default::default()
         },
@@ -1418,6 +1419,7 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
         &mut ask,
         &ToolCheckRequest {
             tool: "fetch".into(),
+            executable: Some("/bin/fetch".into()),
             argv: "fetch it".into(),
         },
     );

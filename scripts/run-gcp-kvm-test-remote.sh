@@ -66,7 +66,21 @@ timeout 300 apt-get "${apt_opts[@]}" install -y --no-install-recommends \
   build-essential ca-certificates clang cmake curl file git lld \
   libcap-ng-dev libssl-dev musl-tools pkg-config protobuf-compiler \
   qemu-system-x86 qemu-utils xz-utils zstd dpkg-dev cpio gzip perl \
-  coreutils busybox-static just
+  coreutils busybox-static
+
+# Ubuntu 24.04 ships just 1.21, which cannot parse namespaced recipe
+# dependencies in this checkout's Justfile.
+just_version=1.58.0
+just_archive="just-${just_version}-x86_64-unknown-linux-musl.tar.gz"
+just_sha256=4a5cc2f53e6f0f8c59092a6cc38291eb729d46a7dd95d3ae582008881b84931d
+curl -fsSL -o "/tmp/$just_archive" \
+  "https://github.com/casey/just/releases/download/$just_version/$just_archive"
+printf '%s  %s\n' "$just_sha256" "/tmp/$just_archive" | sha256sum -c -
+tar -xzf "/tmp/$just_archive" -C /usr/local/bin just
+[[ "$(just --version)" == "just $just_version" ]] || {
+  echo "error: unexpected just version" >&2
+  exit 1
+}
 
 firecracker_version=1.17.0
 firecracker_sha256=06094a1108ae9e82aa4c23a775aa92758f53f1175d422270d9d6162cb9ade558

@@ -316,6 +316,43 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
     anyhow::bail!("no host-side vsock transport found for VM {:?}", vm_name)
 }
 
+/// Connect to a running VM's port under one absolute deadline.
+///
+/// Unlike [`for_vm`], selection and the returned connection are one operation:
+/// there is no unbounded throwaway probe before the caller installs I/O bounds.
+pub fn connect_for_vm_before(
+    vm_name: &str,
+    port: u32,
+    deadline: std::time::Instant,
+) -> Result<UnixStream> {
+    let hvf = DevConsoleTransport::for_vm(vm_name);
+    if let Ok(stream) = mvm_agentd::vsock::connect_unix_before(&hvf.socket_path(port), deadline) {
+        return Ok(stream);
+    }
+
+    let libkrun = LibkrunTransport::for_vm(vm_name);
+    if let Ok(stream) = mvm_agentd::vsock::connect_unix_before(&libkrun.socket_path(port), deadline)
+    {
+        return Ok(stream);
+    }
+
+    let hvf_vsock = HvfVsockTransport::for_vm(vm_name);
+    if let Ok(stream) =
+        mvm_agentd::vsock::connect_unix_before(&hvf_vsock.socket_path(port), deadline)
+    {
+        return Ok(stream);
+    }
+
+    if firecracker_transport_supported(mvm_core::platform::current()) {
+        let fc = FirecrackerTransport::for_vm(vm_name)
+            .with_context(|| format!("no vsock transport found for VM {vm_name:?}"))?;
+        let uds = mvm_agentd::vsock::vsock_uds_path(&fc.instance_dir);
+        return mvm_agentd::vsock::connect_to_port_before(&uds, port, deadline);
+    }
+
+    anyhow::bail!("no host-side vsock transport found for VM {vm_name:?}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

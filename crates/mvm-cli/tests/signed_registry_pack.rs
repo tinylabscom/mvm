@@ -39,6 +39,12 @@ const PYTHON_FILES: [(&str, &[u8]); 4] = [
         include_bytes!("fixtures/signed-registry-python/files/pack/image/flake.lock"),
     ),
 ];
+const CLAUDE_MANIFEST: &[u8] = include_bytes!("fixtures/signed-registry-claude/manifest.json");
+const CLAUDE_BUNDLE: &[u8] =
+    include_bytes!("fixtures/signed-registry-claude/manifest.sigstore.json");
+const CLAUDE_PROFILE: &[u8] =
+    include_bytes!("fixtures/signed-registry-claude/files/pack/profile.toml");
+const PYTHON_BRANCH_PUBLISHER_IDENTITY: &str = "https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/feat/3716-python-image-pack";
 
 fn registry_files(root: &Path, manifest: &[u8], group: &[u8]) -> PathBuf {
     let registry = root.join("registry");
@@ -76,6 +82,68 @@ fn isolated_registry(temp: &TempDir, manifest: &[u8], group: &[u8]) -> TestEnv {
     )
     .expect("save explicit historical fixture trust");
     env
+}
+
+fn isolated_signed_dependency_registry(
+    temp: &TempDir,
+    python_group: &[u8],
+) -> (TestEnv, RegistryPackPublisherPolicy) {
+    let registry = temp.path().join("registry");
+    let parent = registry.join("packs/agent/claude/1.0.1");
+    let dependency = registry.join("packs/runtime/python/1.1.0");
+    std::fs::create_dir_all(parent.join("files/pack")).expect("parent payload directory");
+    std::fs::create_dir_all(dependency.join("files/pack/image"))
+        .expect("dependency payload directory");
+    std::fs::write(
+        registry.join("packs/index.json"),
+        br#"{"schema_version":1,"packs":[{"namespace":"agent","name":"claude","description":"Agent policy","versions":["1.0.1"]},{"namespace":"runtime","name":"python","description":"Runtime policy","versions":["1.1.0"]}]}"#,
+    )
+    .expect("registry index");
+    std::fs::write(parent.join("manifest.json"), CLAUDE_MANIFEST).expect("parent manifest");
+    std::fs::write(parent.join("manifest.sigstore.json"), CLAUDE_BUNDLE).expect("parent signature");
+    std::fs::write(parent.join("files/pack/profile.toml"), CLAUDE_PROFILE).expect("parent profile");
+    std::fs::write(dependency.join("manifest.json"), PYTHON_MANIFEST).expect("dependency manifest");
+    std::fs::write(dependency.join("manifest.sigstore.json"), PYTHON_BUNDLE)
+        .expect("dependency signature");
+    for (path, bytes) in PYTHON_FILES {
+        std::fs::write(
+            dependency.join("files").join(path),
+            if path == "pack/group.toml" {
+                python_group
+            } else {
+                bytes
+            },
+        )
+        .expect("dependency payload");
+    }
+
+    let mut env = TestEnv::new();
+    env.isolate_mvm_home(temp.path().join("home"));
+    env.set(
+        "MVM_PACK_REGISTRY",
+        format!("file://{}", registry.display()),
+    );
+    let policy = RegistryPackPublisherPolicy::new(vec![
+        RegistryPackPublisher::new(
+            "agent",
+            "https://token.actions.githubusercontent.com",
+            vec![HISTORICAL_PUBLISHER_IDENTITY.to_string()],
+        )
+        .expect("parent publisher identity"),
+        RegistryPackPublisher::new(
+            "runtime",
+            "https://token.actions.githubusercontent.com",
+            vec![PYTHON_BRANCH_PUBLISHER_IDENTITY.to_string()],
+        )
+        .expect("dependency publisher identity"),
+    ])
+    .expect("publisher policy");
+    save_publisher_policy(
+        &mvm_core::config::registry_pack_publisher_policy_path(),
+        &policy,
+    )
+    .expect("save explicit fixture trust");
+    (env, policy)
 }
 
 #[test]
@@ -126,6 +194,73 @@ fn published_signed_pack_pulls_pins_and_loads_without_network() {
             .network
             .allow
             .contains(&"proxy.golang.org:443".to_string())
+    );
+}
+
+#[test]
+fn a_signed_profile_include_fetches_verifies_and_pins_its_dependency() {
+    let temp = TempDir::new().expect("tempdir");
+    let (_env, policy) = isolated_signed_dependency_registry(&temp, PYTHON_FILES[0].1);
+
+    let parent = mvm_cli::pack_registry::pull("agent/claude").expect("signed dependency pull");
+    assert_eq!(parent.reference.to_string(), "agent/claude@1.0.1");
+    assert_eq!(parent.files, 1);
+
+    let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
+    assert_eq!(
+        lock.pins().len(),
+        2,
+        "parent and dependency must both be pinned"
+    );
+    for reference in ["agent/claude@1.0.1", "runtime/python@1.1.0"] {
+        let reference = reference.parse().expect("pack reference");
+        let (_, verified) = open_installed_registry_pack(
+            &mvm_core::config::registry_pack_cache_dir(),
+            &lock,
+            &policy,
+            &reference,
+        )
+        .expect("signed installed pack reopens under its pin");
+        assert_eq!(verified.manifest().reference, reference);
+        assert_eq!(
+            verified.signer().issuer,
+            "https://token.actions.githubusercontent.com"
+        );
+        assert_eq!(
+            verified.signer().identity,
+            if reference.namespace() == "agent" {
+                HISTORICAL_PUBLISHER_IDENTITY
+            } else {
+                PYTHON_BRANCH_PUBLISHER_IDENTITY
+            },
+            "each pack must verify under its explicitly trusted fixture signer"
+        );
+    }
+
+    let store = PolicyStore::at(temp.path().join("policy"));
+    let reference = PolicyRef::parse("runtime/python").expect("dependency policy reference");
+    let loaded = store
+        .load_group(&reference, None, LayerOrigin::User, "test")
+        .expect("dependency policy is installed and loadable");
+    assert_eq!(loaded.origin, LayerOrigin::Pack);
+}
+
+#[test]
+fn a_tampered_signed_dependency_is_not_pinned() {
+    let temp = TempDir::new().expect("tempdir");
+    let mut tampered = PYTHON_FILES[0].1.to_vec();
+    tampered[0] = b'X';
+    let (_env, _) = isolated_signed_dependency_registry(&temp, &tampered);
+
+    let error = mvm_cli::pack_registry::pull("agent/claude")
+        .expect_err("tampered dependency must stop the pull");
+    assert!(format!("{error:#}").contains("digest mismatch"));
+    let lock = load_pack_lockfile(&mvm_core::config::pack_lockfile_path()).expect("lockfile");
+    assert!(
+        lock.pins()
+            .iter()
+            .all(|pin| pin.reference().to_string() != "runtime/python@1.1.0"),
+        "the unverified dependency must not be installed or pinned"
     );
 }
 

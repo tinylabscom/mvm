@@ -120,6 +120,9 @@ pub enum WasmBackendError {
     )]
     DiskVolumeNotSupported { host: String },
 
+    #[error("wasm cannot attach frozen host-directory image '{image}' or substitute live bytes")]
+    MaterializedHostDirectoryNotSupported { image: String },
+
     #[error(
         "wasm backend cannot resolve the runtime-overlay guest binaries: {reason}. They \
          cross-compile from a source checkout (or a warm cache) — populate the cache with a \
@@ -293,8 +296,6 @@ fn wasm_bounds_for(config: &VmStartConfig, grants: &Grants) -> WasmBounds {
     }
 }
 
-/// Reject every launch request this tier cannot honestly satisfy before
-/// touching the engine. Each check names the supported alternative.
 fn reject_unsupported_start_config(
     config: &VmStartConfig,
 ) -> std::result::Result<(), WasmBackendError> {
@@ -316,9 +317,15 @@ fn reject_unsupported_start_config(
             host: volume.host.clone(),
         });
     }
-    // Every materialized directory grant becomes a WASI preopen of its
-    // original host path, so its guest mountpoint must pass the mount-path
-    // policy before any of it starts.
+    if let Some(image) = config
+        .volumes
+        .iter()
+        .find_map(|volume| volume.materialized_image.as_ref())
+    {
+        return Err(WasmBackendError::MaterializedHostDirectoryNotSupported {
+            image: image.clone(),
+        });
+    }
     for volume in &config.volumes {
         crate::wasm_activation::validate_wasm_volume_guest_path(&volume.guest)?;
     }
@@ -328,10 +335,6 @@ fn reject_unsupported_start_config(
     Ok(())
 }
 
-/// Record of a WASI module run to completion by [`WasmBackend::start`].
-/// There is no "running" state to observe: a module runs synchronously
-/// inside `start`, so by the time any other trait method can see it, it has
-/// already exited.
 #[derive(Debug, Clone)]
 struct WasmRun {
     exit: VmExitStatus,
@@ -524,7 +527,7 @@ impl VmBackend for WasmBackend {
         }
     }
 
-    fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
+    fn start_in_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         reject_unsupported_start_config(config)?;
 
         // Admission for this tier's resource controls happens here, not in
@@ -1743,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn disk_volume_fails_closed_materialized_directory_grant_passes() {
+    fn every_volume_kind_fails_closed_before_wasm_execution() {
         let mut config = cfg("x", "/tmp/mod.wasm");
         config.volumes = vec![mvm_core::vm_backend::VmVolume {
             materialized_image: None,
@@ -1763,11 +1766,19 @@ mod tests {
         );
 
         config.volumes[0].materialized_image = Some("/state/mount.ext4".to_string());
-        assert!(reject_unsupported_start_config(&config).is_ok());
+        for read_only in [false, true] {
+            config.volumes[0].read_only = read_only;
+            assert_eq!(
+                reject_unsupported_start_config(&config),
+                Err(WasmBackendError::MaterializedHostDirectoryNotSupported {
+                    image: "/state/mount.ext4".into()
+                })
+            );
+        }
     }
 
     #[test]
-    fn volume_mountpoint_shadowing_the_handshake_fails_closed() {
+    fn unsupported_materialized_images_are_rejected_before_mountpoint_handling() {
         for bad in ["mnt/relative", "/run/mvm", "/mvm/runtime"] {
             let mut config = cfg("x", "/tmp/mod.wasm");
             config.volumes = vec![mvm_core::vm_backend::VmVolume {
@@ -1783,7 +1794,7 @@ mod tests {
             assert!(
                 matches!(
                     reject_unsupported_start_config(&config),
-                    Err(WasmBackendError::VolumePathDenied { .. })
+                    Err(WasmBackendError::MaterializedHostDirectoryNotSupported { .. })
                 ),
                 "guest path {bad:?} must be refused"
             );

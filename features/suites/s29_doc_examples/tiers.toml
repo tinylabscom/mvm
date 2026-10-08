@@ -145,6 +145,11 @@ tier = "parse"
 reason = "needs an OCI image already pulled into the cache"
 
 [[command]]
+path = "image build-layer"
+tier = "exec"
+fixture = "app-layer"
+
+[[command]]
 path = "image boot"
 tier = "parse"
 reason = "check queries live release state and update downloads a signed release before replacing the cache; focused tests cover comparison, verification, and fail-closed behavior"
@@ -190,7 +195,7 @@ tier = "parse"
 reason = "documented only as a placeholder template, so there is no concrete invocation to execute"
 
 [[command]]
-path = "machine console"
+path = "machine attach"
 tier = "parse"
 reason = "an interactive PTY; driving it needs a pty harness rather than captured stdio"
 
@@ -243,7 +248,7 @@ path = "machine logs"
 tier = "live"
 
 [[command]]
-path = "machine ls"
+path = "machine ps"
 tier = "exec"
 
 [[command]]
@@ -293,7 +298,7 @@ tier = "exec"
 [[command]]
 path = "machine shell"
 tier = "parse"
-reason = "an interactive shell; same pty constraint as machine console"
+reason = "an interactive shell; same pty constraint as machine attach"
 
 [[command]]
 path = "machine snapshot ls"

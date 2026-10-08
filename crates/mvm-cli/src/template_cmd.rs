@@ -133,7 +133,7 @@ net = false
 /// The `[policy]` table wiring a template's shipped policy into the project.
 fn policy_table_toml(policy: &crate::template_registry::TemplatePolicy) -> String {
     let mut out = String::from(
-        "\n# Policy this template ships. Add policy groups to `include` to compose them.\n# An explicit `--policy` replaces this table for that launch.\n[policy]\n",
+        "\n# Policy selected by this template. Add local groups or pinned signed pack groups to `include`.\n# An explicit `--policy` replaces this table for that launch.\n[policy]\n",
     );
     if let Some(profile) = &policy.profile {
         out.push_str(&format!("profile = \"{profile}\"\n"));
@@ -1135,8 +1135,8 @@ pub fn scaffold_from_template_entry(
             scaffold_template_files(dir, name, preset, None)?;
         }
         TemplateSource::Remote { cache_dir } => {
-            // The template's policy ships with its other files; refuse to
-            // generate a half-wired project when a declared file is missing.
+            // Local policy files ship with the template; pack references
+            // resolve separately from the verified local pack store.
             if let Some(policy) = &entry.policy {
                 for rel in policy.paths() {
                     if !cache_dir.join(rel).is_file() {
@@ -1862,6 +1862,123 @@ mod tests {
         .unwrap();
         let text = std::fs::read_to_string(target.path().join("mvm.toml")).unwrap();
         assert!(!text.contains("[policy]"), "{text}");
+    }
+
+    #[test]
+    fn scaffold_refuses_an_uninstalled_signed_pack_include() {
+        let _env = isolated();
+        let cache = policy_cache(&[]);
+        let policy = TemplatePolicy {
+            profile: None,
+            include: vec!["runtime/python@1.1.0".to_string()],
+        };
+        let target = tempfile::tempdir().unwrap();
+        let error = super::scaffold_from_template_entry(
+            target.path(),
+            "demo",
+            &remote_entry(cache.path(), Some(policy)),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("does not resolve"), "{message}");
+        assert!(message.contains("runtime/python@1.1.0"), "{message}");
+        assert!(
+            message.contains("mvmctl pull") || message.contains("publisher trust policy"),
+            "{message}"
+        );
+        let manifest = std::fs::read_to_string(target.path().join("mvm.toml")).unwrap();
+        assert!(
+            manifest.contains("include = [\"runtime/python@1.1.0\"]"),
+            "{manifest}"
+        );
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn scaffold_resolves_an_installed_verified_signed_pack_include() {
+        use mvm_core::registry_pack::{
+            PackAdoption, RegistryPackPublisher, RegistryPackPublisherPolicy,
+        };
+        use mvm_core::registry_pack_store::{adopt_install_and_pin, save_publisher_policy};
+
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let publisher = RegistryPackPublisher::new(
+            "runtime",
+            "https://token.actions.githubusercontent.com",
+            vec!["https://github.com/tinylabscom/mvm-templates/.github/workflows/publish.yml@refs/heads/feat/3716-python-image-pack".to_string()],
+        )
+        .unwrap();
+        let trust = RegistryPackPublisherPolicy::new(vec![publisher]).unwrap();
+        save_publisher_policy(
+            &mvm_core::config::registry_pack_publisher_policy_path(),
+            &trust,
+        )
+        .unwrap();
+        let staged = home.path().join("signed-pack");
+        std::fs::create_dir_all(staged.join("pack/image")).unwrap();
+        for (path, bytes) in [
+            (
+                "pack/group.toml",
+                &include_bytes!("../tests/fixtures/signed-registry-python/files/pack/group.toml")[..],
+            ),
+            (
+                "pack/image/mvm.toml",
+                &include_bytes!(
+                    "../tests/fixtures/signed-registry-python/files/pack/image/mvm.toml"
+                )[..],
+            ),
+            (
+                "pack/image/flake.nix",
+                &include_bytes!(
+                    "../tests/fixtures/signed-registry-python/files/pack/image/flake.nix"
+                )[..],
+            ),
+            (
+                "pack/image/flake.lock",
+                &include_bytes!(
+                    "../tests/fixtures/signed-registry-python/files/pack/image/flake.lock"
+                )[..],
+            ),
+        ] {
+            std::fs::write(staged.join(path), bytes).unwrap();
+        }
+        let reference = "runtime/python@1.1.0".parse().unwrap();
+        let _installed = adopt_install_and_pin(
+            &PackAdoption {
+                requested: &reference,
+                manifest_bytes: include_bytes!(
+                    "../tests/fixtures/signed-registry-python/manifest.json"
+                ),
+                signature_bundle: include_bytes!(
+                    "../tests/fixtures/signed-registry-python/manifest.sigstore.json"
+                ),
+                publisher_policy: &trust,
+            },
+            &staged,
+            &mvm_core::config::registry_pack_cache_dir(),
+            &mvm_core::config::pack_lockfile_path(),
+        )
+        .expect("verified signed fixture installs");
+
+        let cache = policy_cache(&[]);
+        let target = tempfile::tempdir().unwrap();
+        super::scaffold_from_template_entry(
+            target.path(),
+            "demo",
+            &remote_entry(
+                cache.path(),
+                Some(TemplatePolicy {
+                    profile: None,
+                    include: vec![reference.to_string()],
+                }),
+            ),
+        )
+        .expect("project policy resolves the verified group pack");
+        let text = std::fs::read_to_string(target.path().join("mvm.toml")).unwrap();
+        let manifest = mvm_core::domain::manifest::Manifest::from_toml_str(&text).unwrap();
+        assert_eq!(manifest.policy.include, ["runtime/python@1.1.0"]);
     }
 
     #[test]
