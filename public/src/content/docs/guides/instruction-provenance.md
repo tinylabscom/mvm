@@ -217,13 +217,13 @@ To verify a checkout during that window, download the signing artifact whose
 its sidecars beside the files, and run the verifier:
 
 ```sh
-# Find a successful signing run. Confirm its headSha is the revision whose
-# instruction files your checkout contains before downloading its artifact.
-gh run list --repo tinylabscom/mvm --workflow sign-instructions.yml \
+# Select the successful run for this checkout's exact revision.
+revision="$(git rev-parse HEAD)"
+run="$(gh run list --repo tinylabscom/mvm --workflow sign-instructions.yml \
   --branch main --status success --limit 20 \
-  --json databaseId,headSha
-
-run=<matching-database-id>
+  --json databaseId,headSha \
+  --jq ".[] | select(.headSha == \"$revision\") | .databaseId" | sed -n '1p')"
+test -n "$run"
 gh run download "$run" --repo tinylabscom/mvm \
   --name instruction-signatures --dir .
 
@@ -328,10 +328,12 @@ their signature sidecars out of that image — the bytes the guest will mount �
 rather than out of the directory they were copied from. The image is read in
 place; nothing is extracted to the host first.
 
-For a persistent machine this covers the snapshot reused across restarts and
-refreshed after a host edit. Host-directory snapshots are always attached
-read-only, even when the original mount request asked for write access. An image
-that cannot be read fails admission.
+For a persistent machine this covers the cached immutable snapshot reused across
+restarts and refreshed after a host edit. A snapshot containing a file selected
+by the effective instruction include rules is attached read-only, even when the
+original request asked for write access. A snapshot with no selected instruction
+file retains its requested mode, preserving writable workspace/apply flows. An
+image that cannot be classified safely fails admission.
 
 Managed block volumes are not scanned. They hold guest-owned data with no host
 directory behind them, so they are not a host input, and an instruction file the
@@ -339,15 +341,21 @@ guest writes into one is outside this gate by design.
 
 ## Limits
 
-- **A `--mount` never changes under a running guest.** `--mount` is
-  materialized into an ext4 image — a snapshot, handed to each launch as a
-  private copy-on-write clone — not a live share, for transient runs and
-  `machine run -d` alike, and it is scanned at every admission. What the guest
-  reads is fixed at boot.
-- **Host-directory snapshots are read-only in the guest.** A requested `:rw`
-  or `--rw` mode does not make the materialized image writable. Admission scans
-  those snapshot bytes, so every backend attaches them read-only. Managed block
-  volumes remain guest-owned storage and retain their requested access mode.
+- **A `--mount` is a cached immutable host snapshot, not a live share.** It is
+  materialized into an ext4 image and scanned at every admission. The guest may
+  write an instruction-free snapshot requested as `:rw`, but those writes do not
+  mutate the live host tree.
+- **Instruction-bearing host snapshots are read-only in the guest.** A
+  requested `:rw` or `--rw` mode is hardened to read-only when the frozen image
+  contains a file selected by the effective instruction rules. The signed plan,
+  launch audit, and backend attachment all use that effective mode. A host
+  directory cannot be both writable and provenance-enforced with this
+  whole-volume model. Managed block volumes remain guest-owned storage and
+  retain their requested access mode.
+- **Wasm refuses host-directory snapshots.** The Wasm backend cannot consume the
+  scanned frozen ext4 snapshot and therefore refuses both read-only and writable
+  materialized host-directory grants before execution. It never falls back to
+  exposing live host bytes. Managed block and non-host inputs are unaffected.
 - **The image is scanned once, at admission.** It is not re-scanned when it is
   attached. The share's content digest recorded in the plan is re-checked at
   attach time, so a host edit made after admission is refused rather than

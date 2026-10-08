@@ -224,6 +224,20 @@ pub fn start_persistent_oci_machine(
         );
         cpus = granted;
     }
+    crate::admission::instructions::refuse_wasm_host_snapshots(
+        backend.kind(),
+        &prepared_volumes.instruction_images,
+    )?;
+    let instruction_images = crate::admission::instructions::instruction_bearing_images(
+        &prepared_volumes.instruction_images,
+        workload_dir,
+        None,
+    )?;
+    for volume in &mut prepared_volumes.volumes {
+        if instruction_images.contains(std::path::Path::new(&volume.host)) {
+            volume.read_only = true;
+        }
+    }
     let volumes = &prepared_volumes.volumes;
     register_vm_name(name, "default");
     let (verity_path, roothash) =

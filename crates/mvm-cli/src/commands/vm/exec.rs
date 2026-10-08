@@ -703,7 +703,18 @@ pub(in crate::commands) fn run_secure(
         } = inputs;
         denials_for_admit.arm(vm_name);
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
-        let instruction_mount_images = materialized_mount_images(volumes);
+        mvm_client::admission::instructions::refuse_wasm_host_snapshots(
+            admit_backend_kind,
+            &materialized_mount_images(volumes),
+        )?;
+        let mut effective_volumes = volumes.to_vec();
+        mvm_client::admission::instructions::harden_instruction_mounts(
+            &mut effective_volumes,
+            &[],
+            admit_workload_dir.as_deref(),
+            None,
+        )?;
+        let instruction_mount_images = materialized_mount_images(&effective_volumes);
         let c = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             instructions: InstructionSources::for_workload(admit_workload_dir.as_deref())
                 .with_mount_roots(&[])
@@ -734,7 +745,10 @@ pub(in crate::commands) fn run_secure(
             // The grants come from the launch config's own volume list, so the
             // plan names exactly what the backend will mount and every
             // attachment has something to be checked against (claim 1).
-            shares: mvm_client::admission::policy::admitted_shares_for_boot(volumes, sdk_sidecar),
+            shares: mvm_client::admission::policy::admitted_shares_for_boot(
+                &effective_volumes,
+                sdk_sidecar,
+            ),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             tools: applied_tool_rules.clone(),
             network_policy: admit_network_policy.clone(),
@@ -783,6 +797,11 @@ pub(in crate::commands) fn run_secure(
             plan_json,
             bundle_json,
             config_files: start_config.config_files,
+            read_only_materialized_images: effective_volumes
+                .iter()
+                .filter(|volume| volume.read_only)
+                .filter_map(|volume| volume.materialized_image.clone())
+                .collect(),
         };
         // Bind the OCI provenance to the plan that was just admitted, before
         // the backend starts. Claim 14 wants the image's origin in the chain

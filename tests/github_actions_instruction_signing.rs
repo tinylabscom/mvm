@@ -1,8 +1,47 @@
 //! Structure checks for the instruction-file signing workflow and the
 //! composite action other repositories call.
 
+use serde::Deserialize;
+
 const WORKFLOW: &str = include_str!("../.github/workflows/sign-instructions.yml");
 const ACTION: &str = include_str!("../.github/actions/sign-instructions/action.yml");
+
+#[derive(Deserialize)]
+struct CompositeAction {
+    runs: CompositeRuns,
+}
+
+#[derive(Deserialize)]
+struct CompositeRuns {
+    steps: Vec<CompositeStep>,
+}
+
+#[derive(Deserialize)]
+struct CompositeStep {
+    uses: Option<String>,
+}
+
+fn validate_action_pins(yaml: &str) -> Result<(), String> {
+    let action: CompositeAction =
+        serde_yaml::from_str(yaml).map_err(|error| format!("invalid action YAML: {error}"))?;
+    for step in action.runs.steps {
+        let Some(target) = step.uses else {
+            continue;
+        };
+        if target.starts_with("./") {
+            continue;
+        }
+        let (action, reference) = target
+            .split_once('@')
+            .ok_or_else(|| format!("external action is missing a ref: {target}"))?;
+        if reference.len() != 40 || !reference.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!(
+                "{action} must use an immutable full commit SHA, found {reference}"
+            ));
+        }
+    }
+    Ok(())
+}
 
 /// A called workflow signs under the called file's identity whoever called
 /// it. This repository is public, so a `workflow_call` trigger would let any
@@ -56,23 +95,29 @@ fn the_signing_workflow_runs_the_shared_action() {
 /// is executable signing-job code and must be pinned to an immutable commit.
 #[test]
 fn the_signing_action_pins_every_external_action_to_a_full_sha() {
-    for line in ACTION.lines().map(str::trim) {
-        let Some(target) = line.strip_prefix("uses: ") else {
-            continue;
-        };
-        if target.starts_with("./") {
-            continue;
-        }
-        let (action, reference) = target
-            .split_once('@')
-            .unwrap_or_else(|| panic!("external action is missing a ref: {target}"));
-        let reference = reference
-            .split_whitespace()
-            .next()
-            .expect("action ref precedes its version comment");
+    if let Err(error) = validate_action_pins(ACTION) {
+        panic!("{error}");
+    }
+}
+
+#[test]
+fn the_signing_action_pin_guard_rejects_every_mutable_yaml_form() {
+    for step in [
+        "- uses: owner/action@v1",
+        "- name: tagged\n  uses: owner/action@v1",
+        "- uses: \"owner/action@main\"",
+        "- uses: 'owner/action@feature-branch'",
+        "- uses: owner/action",
+    ] {
+        let indented = step
+            .lines()
+            .map(|line| format!("    {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let action = format!("runs:\n  steps:\n{indented}");
         assert!(
-            reference.len() == 40 && reference.bytes().all(|byte| byte.is_ascii_hexdigit()),
-            "{action} must use an immutable full commit SHA, found {reference}"
+            validate_action_pins(&action).is_err(),
+            "mutable action reference was accepted:\n{step}"
         );
     }
 }

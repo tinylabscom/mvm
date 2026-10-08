@@ -82,6 +82,75 @@ pub fn materialized_mount_images(volumes: &[VmVolume]) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Refuse host-directory snapshots on Wasm, which cannot mount the verified
+/// ext4 bytes and must never substitute the live host source.
+pub fn refuse_wasm_host_snapshots(
+    backend: mvm_contract::protocol::vm_backend::BackendKind,
+    images: &[PathBuf],
+) -> Result<()> {
+    if backend == mvm_contract::protocol::vm_backend::BackendKind::Wasm && !images.is_empty() {
+        anyhow::bail!(
+            "the Wasm backend cannot safely expose a verified materialized \
+             host-directory snapshot; use a managed block volume or another backend"
+        );
+    }
+    Ok(())
+}
+
+/// Harden instruction-bearing host snapshots to read-only using the same
+/// effective policy and ext4 scanner admission uses.
+///
+/// Classification reads the frozen image, never the live source directory.
+/// An unreadable or malformed image is therefore an error rather than a clean
+/// classification.
+pub fn harden_instruction_mounts(
+    volumes: &mut [VmVolume],
+    additional_snapshot_images: &[PathBuf],
+    workload_dir: Option<&Path>,
+    user_policy: Option<&Path>,
+) -> Result<()> {
+    let mut images = materialized_mount_images(volumes);
+    images.extend_from_slice(additional_snapshot_images);
+    let instruction_images = instruction_bearing_images(&images, workload_dir, user_policy)?;
+    for volume in volumes {
+        if volume
+            .materialized_image
+            .as_deref()
+            .is_some_and(|image| instruction_images.contains(Path::new(image)))
+            || instruction_images.contains(Path::new(&volume.host))
+        {
+            volume.read_only = true;
+        }
+    }
+    Ok(())
+}
+
+/// Classify frozen snapshot images using the effective instruction policy.
+pub fn instruction_bearing_images(
+    images: &[PathBuf],
+    workload_dir: Option<&Path>,
+    user_policy: Option<&Path>,
+) -> Result<std::collections::BTreeSet<PathBuf>> {
+    if images.is_empty() {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    let report = evaluate_boot_inputs(
+        &BootInputs {
+            mount_images: images.to_vec(),
+            workload_dir: workload_dir.map(Path::to_path_buf),
+            ..BootInputs::default()
+        },
+        user_policy,
+    )
+    .context("classifying materialized host-directory snapshots")?
+    .context("materialized host-directory snapshots require a scan report")?;
+    Ok(report
+        .files
+        .into_iter()
+        .map(|file| file.file.root)
+        .collect())
+}
+
 /// The host paths this boot copies into the guest.
 ///
 /// Directory shares and materialized host-directory images are scanned.
@@ -266,6 +335,91 @@ mod tests {
         assert_eq!(
             materialized_mount_images(&volumes),
             vec![PathBuf::from("/cache/mounts/key.ext4")]
+        );
+    }
+
+    fn image_with(path: &Path, guest_path: &str) {
+        use mvm_fs::ext4::{Node, Owner, build_image};
+        let bytes = build_image(
+            vec![Node::File {
+                path: guest_path.to_string(),
+                mode: 0o644,
+                data: b"content\n".to_vec(),
+                xattrs: Vec::new(),
+                owner: Owner::ROOT,
+            }],
+            &Default::default(),
+        )
+        .unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn hardening_depends_on_the_frozen_images_instruction_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let instruction = dir.path().join("instruction.ext4");
+        let ordinary = dir.path().join("ordinary.ext4");
+        image_with(&instruction, "/AGENTS.md");
+        image_with(&ordinary, "/app.txt");
+        let mut volumes = vec![
+            VmVolume {
+                materialized_image: Some(instruction.display().to_string()),
+                read_only: false,
+                ..Default::default()
+            },
+            VmVolume {
+                materialized_image: Some(ordinary.display().to_string()),
+                read_only: false,
+                ..Default::default()
+            },
+            VmVolume {
+                host: "/managed.ext4".to_string(),
+                read_only: false,
+                ..Default::default()
+            },
+        ];
+        harden_instruction_mounts(&mut volumes, &[], None, None).unwrap();
+        assert!(volumes[0].read_only, "instruction-bearing rw becomes ro");
+        assert!(!volumes[1].read_only, "ordinary rw remains rw");
+        assert!(!volumes[2].read_only, "managed block rw remains rw");
+        volumes[1].read_only = true;
+        harden_instruction_mounts(&mut volumes, &[], None, None).unwrap();
+        assert!(volumes[1].read_only, "requested ro remains ro");
+    }
+
+    #[test]
+    fn unreadable_snapshot_classification_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("tampered.ext4");
+        std::fs::write(&image, b"not ext4").unwrap();
+        let mut volumes = vec![VmVolume {
+            materialized_image: Some(image.display().to_string()),
+            ..Default::default()
+        }];
+        assert!(harden_instruction_mounts(&mut volumes, &[], None, None).is_err());
+    }
+
+    #[test]
+    fn wasm_refuses_every_host_snapshot_mode_but_not_managed_blocks() {
+        use mvm_contract::protocol::vm_backend::BackendKind;
+        for read_only in [false, true] {
+            let volume = VmVolume {
+                read_only,
+                materialized_image: Some("/frozen/snapshot.ext4".to_string()),
+                ..Default::default()
+            };
+            let images = materialized_mount_images(&[volume]);
+            let error = refuse_wasm_host_snapshots(BackendKind::Wasm, &images)
+                .expect_err("Wasm must refuse both rw and ro host snapshots");
+            assert!(error.to_string().contains("cannot safely expose"));
+        }
+        assert!(refuse_wasm_host_snapshots(BackendKind::Wasm, &[]).is_ok());
+        assert!(
+            refuse_wasm_host_snapshots(
+                BackendKind::Firecracker,
+                &[PathBuf::from("/frozen/snapshot.ext4")]
+            )
+            .is_ok()
         );
     }
 }

@@ -485,10 +485,9 @@ fn resolve_mount_entry(
         volume_name,
         host_path,
         guest_path,
-        // A host-directory snapshot is the immutable artifact admission
-        // scanned. Direct block attachments, including managed volumes, keep
-        // the mode the operator requested.
-        read_only: entry.host_snapshot.is_some() || entry.read_only,
+        // Admission may harden a host snapshot after inspecting its frozen
+        // image. Resolution preserves the requested mode until then.
+        read_only: entry.read_only,
         kind,
         source: resolved_source,
     })
@@ -879,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn host_directory_snapshot_resolves_read_only_whatever_the_requested_mode() {
+    fn host_directory_snapshot_resolution_preserves_the_requested_mode() {
         let tmp = tempfile::tempdir().unwrap();
         let host = tmp.path().join("snapshot.ext4");
         create_ext4_image(&host, 16);
@@ -900,8 +899,8 @@ mod tests {
             let resolved = registry
                 .resolve_for_launch(&LocalVolumeCatalog::default())
                 .unwrap();
-            assert!(resolved[0].read_only);
-            assert!(resolved[0].as_vm_volume().read_only);
+            assert_eq!(resolved[0].read_only, requested_read_only);
+            assert_eq!(resolved[0].as_vm_volume().read_only, requested_read_only);
         }
     }
 

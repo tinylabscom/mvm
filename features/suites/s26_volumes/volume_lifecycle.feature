@@ -172,6 +172,23 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine stop bdd-refresh-dir-volume --yes"
     Then the command exits with code 0
 
+  @live @firecracker @workload_kernel @guest_bins
+  Scenario: an instruction-bearing writable host snapshot is effectively read-only
+    Given an isolated mvm home
+    And a cached live workload kernel
+    When I run mvmctl in the isolated mvm home with "machine create bdd-instruction-ro --image alpine"
+    Then the command exits with code 0
+    When I register host directory volume "instruction-ro" read-write at "/data/work" for machine "bdd-instruction-ro"
+    Then the command exits with code 0
+    When I add an instruction file to host directory volume "instruction-ro"
+    And I run mvmctl in an isolated live home with "machine start bdd-instruction-ro --hypervisor firecracker"
+    Then the command exits with code 0
+    When I execute shell command "touch /data/work/refused" in machine "bdd-instruction-ro"
+    Then the command exits with code 1
+    And the error output contains "Read-only file system"
+    When I run mvmctl in the isolated mvm home with "machine stop bdd-instruction-ro --yes"
+    Then the command exits with code 0
+
   # Reviewed workspace apply (PS-08): the registered snapshot is both the
   # baseline and the live image until a guest writes, so these scenarios
   # exercise the apply surface — refusal, prompting, and empty history —

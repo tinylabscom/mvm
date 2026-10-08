@@ -426,7 +426,8 @@ fn mount_with_service(
         None => volume_service.prepare_attachment(&request)?,
     };
     println!(
-        "{vm_name}: registered volume {volume_name:?} → {} (host={}, ro={})",
+        "{vm_name}: registered volume {volume_name:?} → {} (host={}, requested_ro={}; \
+         launch may harden a host snapshot to read-only)",
         record.guest_path,
         record.host_path,
         record.access.is_read_only()
@@ -461,12 +462,12 @@ fn ls(vm_name: &str, json: bool) -> Result<()> {
         return Ok(());
     }
     println!(
-        "{:<22} {:<22} {:<14} {:<4} HOST",
-        "GUEST", "VOLUME", "ATTACHED", "RO"
+        "{:<22} {:<22} {:<14} {:<12} HOST",
+        "GUEST", "VOLUME", "ATTACHED", "REQUESTED_RO"
     );
     for record in &records {
         println!(
-            "{:<22} {:<22} {:<14} {:<4} {}",
+            "{:<22} {:<22} {:<14} {:<12} {}",
             record.guest_path,
             record.volume,
             &record.attached_at[..record.attached_at.len().min(14)],

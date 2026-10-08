@@ -1374,6 +1374,15 @@ pub fn resolve_launch(
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
         start_config.config_files.extend(sub.config_files);
+        for volume in &mut start_config.volumes {
+            if volume
+                .materialized_image
+                .as_ref()
+                .is_some_and(|image| sub.read_only_materialized_images.contains(image))
+            {
+                volume.read_only = true;
+            }
+        }
         use_snapshot = false;
 
         refuse_unloadable_sidecar(

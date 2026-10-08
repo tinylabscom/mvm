@@ -192,6 +192,7 @@ impl EntrypointAdmission {
                 plan_json,
                 bundle_json,
                 config_files: start_config.config_files,
+                read_only_materialized_images: Vec::new(),
             },
             context: ctx,
         })
