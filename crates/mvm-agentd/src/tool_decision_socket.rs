@@ -50,12 +50,20 @@ fn answer(stream: &mut (impl io::Read + Write)) -> io::Result<()> {
             write_line(stream, &reply)
         }
         DecisionRequest::Record { session, binding } => {
-            if let Some(binding) = binding
-                && let Err(error) = crate::tool_attribution::record_external(session, binding)
-            {
-                eprintln!("mvm-guest-agent: tool session {session} left unattributed: {error}");
-            }
-            write_line(stream, &DecisionReply::Ok)
+            let reply = if let Some(binding) = binding {
+                match crate::tool_attribution::record_external(session, binding) {
+                    Ok(()) => DecisionReply::Ok,
+                    Err(error) => {
+                        eprintln!(
+                            "mvm-guest-agent: tool session {session} left unattributed: {error}"
+                        );
+                        DecisionReply::Unavailable
+                    }
+                }
+            } else {
+                DecisionReply::Ok
+            };
+            write_line(stream, &reply)
         }
         DecisionRequest::Retire { session } => {
             crate::tool_attribution::retire_external(session);
@@ -197,6 +205,21 @@ mod tests {
                 binding: None,
             }),
             DecisionReply::Ok
+        );
+    }
+
+    #[test]
+    fn a_missing_session_refuses_attribution() {
+        let binding =
+            mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding::from_random(
+                [8; 16],
+            );
+        assert_eq!(
+            exchange(&DecisionRequest::Record {
+                session: u32::MAX,
+                binding: Some(binding),
+            }),
+            DecisionReply::Unavailable
         );
     }
 }

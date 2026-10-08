@@ -19,25 +19,33 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn main() {
+    use std::os::fd::FromRawFd;
+
+    let ready_fd = std::env::var("MVM_TOOL_READY_FD")
+        .ok()
+        .and_then(|value| value.parse::<i32>().ok())
+        .filter(|fd| *fd >= 3);
+    let Some(ready_fd) = ready_fd else {
+        eprintln!("mvm-tool-helper: missing readiness descriptor");
+        std::process::exit(1);
+    };
+    // SAFETY: the parent passes this one live descriptor across exec and
+    // gives ownership to the helper process.
+    let ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(ready_fd) };
     let map = match std::fs::read(TOOL_MAP_PATH) {
         Ok(bytes) => match ToolMap::load(&bytes) {
             Ok(map) => map,
             Err(error) => {
-                eprintln!(
-                    "mvm-tool-helper: {TOOL_MAP_PATH}: {error}; declared commands stay refused"
-                );
-                // Serve an empty map: every shim request is refused as an
-                // unknown path, which keeps fail-closed semantics without
-                // trusting the corrupt file.
-                ToolMap::default()
+                eprintln!("mvm-tool-helper: {TOOL_MAP_PATH}: {error}");
+                std::process::exit(1);
             }
         },
         Err(error) => {
-            eprintln!("mvm-tool-helper: {TOOL_MAP_PATH}: {error}; declared commands stay refused");
-            ToolMap::default()
+            eprintln!("mvm-tool-helper: {TOOL_MAP_PATH}: {error}");
+            std::process::exit(1);
         }
     };
-    if let Err(error) = bind_and_serve(map) {
+    if let Err(error) = bind_and_serve(map, ready) {
         eprintln!("mvm-tool-helper: serve: {error}");
         std::process::exit(1);
     }

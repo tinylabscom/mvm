@@ -96,6 +96,14 @@ pub fn build_tool_map(
                 }
             }
         })?;
+        let target_meta =
+            std::fs::metadata(&target).map_err(|error| InstallError::SubstitutionFailed {
+                path: target.to_string_lossy().into_owned(),
+                reason: error.to_string(),
+            })?;
+        if target_meta.len() > MAX_TOOL_BYTES {
+            return Err(InstallError::TooLarge { tool: tool.clone() });
+        }
         let bytes = std::fs::read(&target).map_err(|_| InstallError::DeclaredPathMissing {
             tool: tool.clone(),
             path: declared.clone(),
@@ -104,11 +112,6 @@ pub fn build_tool_map(
             return Err(InstallError::TooLarge { tool: tool.clone() });
         }
         let digest = mvm_contract::hash::sha256_hex(&bytes);
-        let target_meta =
-            std::fs::metadata(&target).map_err(|error| InstallError::SubstitutionFailed {
-                path: target.to_string_lossy().into_owned(),
-                reason: error.to_string(),
-            })?;
         let mut aliases = collect_aliases(
             root,
             &target,
@@ -118,9 +121,6 @@ pub fn build_tool_map(
             &mut budget,
         )?;
         aliases.retain(|alias| alias != declared);
-        if aliases.len() > MAX_ALIASES_PER_TOOL {
-            return Err(InstallError::TooManyAliases { tool: tool.clone() });
-        }
         if aliases.len().saturating_add(1) > MAX_STANDALONE_TOOL_PATHS {
             return Err(InstallError::SubstitutionFailed {
                 path: declared.clone(),
@@ -131,6 +131,9 @@ pub fn build_tool_map(
                 ),
             });
         }
+        if aliases.len() > MAX_ALIASES_PER_TOOL {
+            return Err(InstallError::TooManyAliases { tool: tool.clone() });
+        }
         tools.push(ToolEntry {
             tool: tool.clone(),
             executable: declared.clone(),
@@ -140,46 +143,24 @@ pub fn build_tool_map(
         });
     }
     let map = ToolMap { tools };
-    check_map(&map);
+    check_map(&map)?;
     Ok(map)
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn source_bytes(root: &Path, entry: &ToolEntry) -> Result<Vec<u8>, InstallError> {
-    let source = resolve_target(root, Path::new(&entry.executable)).ok_or_else(|| {
-        InstallError::DeclaredPathMissing {
-            tool: entry.tool.clone(),
-            path: entry.executable.clone(),
-        }
-    })?;
-    let bytes = std::fs::read(&source).map_err(|error| InstallError::SubstitutionFailed {
-        path: source.to_string_lossy().into_owned(),
-        reason: error.to_string(),
-    })?;
-    if bytes.len() as u64 > MAX_TOOL_BYTES {
-        return Err(InstallError::TooLarge {
-            tool: entry.tool.clone(),
-        });
-    }
-    let actual = mvm_contract::hash::sha256_hex(&bytes);
-    if actual != entry.digest {
-        return Err(InstallError::SubstitutionFailed {
-            path: entry.executable.clone(),
-            reason: format!(
-                "declared executable changed during activation (expected {}, got {actual})",
-                entry.digest
-            ),
-        });
-    }
-    Ok(bytes)
 }
 
 /// Structural validation for a freshly built map (the helper's
 /// [`ToolMap::load`] runs the same checks on the written file). A failure
-/// here is a builder bug: refuse loudly in tests, and at read time in the
-/// helper.
-pub fn check_map(map: &ToolMap) {
-    debug_assert!(ToolMap::load(&serde_json::to_vec(map).expect("a built map serializes")).is_ok());
+/// here must refuse activation in every build profile.
+pub fn check_map(map: &ToolMap) -> Result<(), InstallError> {
+    let bytes = serde_json::to_vec(map).map_err(|error| InstallError::SubstitutionFailed {
+        path: crate::tool_map::TOOL_MAP_PATH.to_string(),
+        reason: error.to_string(),
+    })?;
+    ToolMap::load(&bytes)
+        .map(|_| ())
+        .map_err(|error| InstallError::SubstitutionFailed {
+            path: crate::tool_map::TOOL_MAP_PATH.to_string(),
+            reason: error.to_string(),
+        })
 }
 
 struct ScanBudget {
@@ -218,6 +199,44 @@ fn rooted(root: &Path, path: &Path) -> PathBuf {
     } else {
         root.join(path)
     }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn substitution_error(path: &Path, reason: impl ToString) -> InstallError {
+    InstallError::SubstitutionFailed {
+        path: path.to_string_lossy().into_owned(),
+        reason: reason.to_string(),
+    }
+}
+
+/// Re-read the image executable before stashing it. The map pins its digest,
+/// so a changed source cannot be installed under the earlier decision.
+#[cfg(any(target_os = "linux", test))]
+fn source_bytes(root: &Path, entry: &ToolEntry) -> Result<Vec<u8>, InstallError> {
+    let declared = Path::new(&entry.executable);
+    let source = resolve_target(root, declared)
+        .ok_or_else(|| substitution_error(declared, "declared executable is unavailable"))?;
+    let size = std::fs::metadata(&source)
+        .map_err(|error| substitution_error(&source, error))?
+        .len();
+    if size > MAX_TOOL_BYTES {
+        return Err(InstallError::TooLarge {
+            tool: entry.tool.clone(),
+        });
+    }
+    let bytes = std::fs::read(&source).map_err(|error| substitution_error(&source, error))?;
+    if bytes.len() as u64 > MAX_TOOL_BYTES {
+        return Err(InstallError::TooLarge {
+            tool: entry.tool.clone(),
+        });
+    }
+    if mvm_contract::hash::sha256_hex(&bytes) != entry.digest {
+        return Err(substitution_error(
+            declared,
+            "declared executable changed during activation",
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Resolve a declared path to the regular file it ultimately names, following
@@ -409,7 +428,10 @@ fn prepare_dirs() -> Result<(), InstallError> {
     use std::os::unix::fs::PermissionsExt;
 
     let helper = crate::guest_mount::TOOL_HELPER_IDENTITY;
-    for (path, mode, gid) in [(TOOL_DIR, 0o755, 0), (STASH_DIR, 0o750, helper.gid())] {
+    for (path, mode, gid) in [
+        (TOOL_DIR, 0o775, helper.gid()),
+        (STASH_DIR, 0o750, helper.gid()),
+    ] {
         std::fs::create_dir_all(path).map_err(|error| InstallError::SubstitutionFailed {
             path: path.to_string(),
             reason: error.to_string(),
@@ -506,42 +528,94 @@ fn write_map(map: &ToolMap) -> Result<(), InstallError> {
 fn substitute(path: &str) -> Result<(), InstallError> {
     use crate::guest_bootstrap::{overlay_parent_for_write, substitute_in_place};
 
+    substitute_with_fallback(
+        path,
+        || substitute_in_place(TOOL_SHIM_OVERLAY, path),
+        || overlay_parent_for_write(Path::new(path)),
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn substitute_with_fallback(
+    path: &str,
+    mut substitute: impl FnMut() -> Result<(), String>,
+    make_writable: impl FnOnce() -> Result<(), String>,
+) -> Result<(), InstallError> {
     let fail = |reason: String| InstallError::SubstitutionFailed {
         path: path.to_string(),
         reason,
     };
-    if let Err(first) = substitute_in_place(TOOL_SHIM_OVERLAY, path) {
-        overlay_parent_for_write(Path::new(path)).map_err(|overlay| {
+    if let Err(first) = substitute() {
+        make_writable().map_err(|overlay| {
             fail(format!(
                 "{first}; preparing writable parent also failed: {overlay}"
             ))
         })?;
-        substitute_in_place(TOOL_SHIM_OVERLAY, path).map_err(fail)?;
+        substitute().map_err(fail)?;
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn spawn_helper() -> Result<(), InstallError> {
+    use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
+    let mut pipe = [-1; 2];
+    // SAFETY: pipe is a writable pair of integers.
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(InstallError::HelperSpawnFailed(format!(
+            "create readiness pipe: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: successful pipe2 returned two new owned descriptors.
+    let read_ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe[0]) };
+    let write_ready = unsafe { std::os::fd::OwnedFd::from_raw_fd(pipe[1]) };
+    let ready_fd = write_ready.as_raw_fd();
     let mut command = Command::new(TOOL_HELPER_OVERLAY);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit());
-    crate::fd_hygiene::configure_close_fds(&mut command, 3, None);
+        .stderr(Stdio::inherit())
+        .env("MVM_TOOL_READY_FD", ready_fd.to_string());
+    crate::fd_hygiene::configure_close_fds(&mut command, 3, Some(ready_fd as u32));
     let identity = crate::guest_mount::TOOL_HELPER_IDENTITY;
-    // SAFETY: the hook runs in the forked child before exec and calls only
-    // async-signal-safe syscalls, which is what `ServiceIdentity::assume`
-    // guarantees.
+    // SAFETY: both calls are async-signal-safe and run in the forked child;
+    // only the readiness writer survives exec, then the helper owns it.
     unsafe {
-        command.pre_exec(move || identity.assume());
+        command.pre_exec(move || {
+            if libc::fcntl(ready_fd, libc::F_SETFD, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            identity.assume()
+        });
     }
-    command.spawn().map(|_| ()).map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         InstallError::HelperSpawnFailed(format!("spawn {TOOL_HELPER_OVERLAY}: {error}"))
-    })
+    })?;
+    drop(write_ready);
+    let mut poll = libc::pollfd {
+        fd: read_ready.as_raw_fd(),
+        events: libc::POLLIN | libc::POLLHUP,
+        revents: 0,
+    };
+    // SAFETY: poll points at one writable entry; read_ready stays open.
+    let signaled = unsafe { libc::poll(&mut poll, 1, 5_000) };
+    let mut byte = 0u8;
+    // SAFETY: byte is writable and the pipe reader remains open.
+    let ready = signaled > 0
+        && unsafe { libc::read(read_ready.as_raw_fd(), (&mut byte as *mut u8).cast(), 1) } == 1
+        && byte == 1;
+    if !ready {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(InstallError::HelperSpawnFailed(
+            "helper did not bind its socket within five seconds".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -690,6 +764,29 @@ mod tests {
                     if reason.contains("could not read directory")
             ));
         }
+    }
+
+    #[test]
+    fn substitution_retries_once_after_making_the_parent_writable() {
+        let calls = std::cell::Cell::new(0);
+        let writable = std::cell::Cell::new(false);
+        let result = substitute_with_fallback(
+            "/bin/tool",
+            || {
+                calls.set(calls.get() + 1);
+                if writable.get() {
+                    Ok(())
+                } else {
+                    Err("read-only".into())
+                }
+            },
+            || {
+                writable.set(true);
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert_eq!(calls.get(), 2);
     }
 
     #[test]

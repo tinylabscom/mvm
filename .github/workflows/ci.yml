@@ -1053,6 +1053,9 @@ jobs:
 
       - uses: ./.github/actions/rust-cache
 
+      # Guest-binary producer tests build the declared-tool shim and helper.
+      - uses: ./.github/actions/install-zigbuild
+
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
         with:
@@ -1165,6 +1168,9 @@ jobs:
           packages: attr cryptsetup-bin libcap-ng-dev lld
 
       - uses: ./.github/actions/rust-cache
+
+      # Producer tests cross-build the guest shim and helper on this runner.
+      - uses: ./.github/actions/install-zigbuild
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2

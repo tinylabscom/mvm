@@ -94,11 +94,16 @@ jobs:
           command -v cryptsetup
           command -v getfattr
           command -v ld.lld
+          command -v zig
+          command -v cargo-zigbuild
 
       - uses: ./.github/actions/rust-cache
         if: inputs.archive_run_id == ''
         with:
           key: ${{ inputs.runner_kind == 'hetzner' && 'hetzner-workspace' || 'workspace' }}
+
+      - uses: ./.github/actions/install-zigbuild
+        if: inputs.runner_kind == 'github'
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2
