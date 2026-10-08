@@ -75,11 +75,18 @@ pub const CAP_SYS_TIME: u32 = mvm_setpriv::CAP_SYS_TIME;
 /// is exactly why the bounding set has to be narrowed before the capability
 /// sets are, and not after.
 pub const CAP_SETPCAP: u32 = 8;
+/// Linux capability required to inspect descriptor links owned by the
+/// distinct tool uid. Held only by the attribution-reader thread.
+pub const CAP_SYS_PTRACE: u32 = 19;
 /// Linux capability `RNDRESEEDCRNG` requires. Held only by the CRNG reseed
 /// helper, never by the agent.
 pub const CAP_SYS_ADMIN: u32 = mvm_setpriv::CAP_SYS_ADMIN;
-/// Capabilities explicitly retained by the guest agent after boot setup.
+/// Capabilities retained by ordinary guest-agent threads after boot setup.
 pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SYS_TIME);
+/// Capabilities present during activation. `CAP_SYS_PTRACE` is inherited by
+/// the attribution-reader thread, then removed from the main thread before it
+/// starts any workload-facing thread.
+pub const GUEST_AGENT_CAPABILITIES: u32 = RESTORE_AGENT_CAPABILITIES | (1u32 << CAP_SYS_PTRACE);
 /// Capabilities retained by the CRNG reseed helper, and nothing else.
 pub const CRNG_RESEED_HELPER_CAPABILITIES: u32 = 1u32 << CAP_SYS_ADMIN;
 /// Identity of the CRNG reseed helper. Distinct from [`WORKLOAD_UID`], which
@@ -856,14 +863,20 @@ pub fn drop_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
 /// a bound tool invocation in that group without any capability.
 #[cfg(target_os = "linux")]
 pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()> {
-    assume_identity_with_saved_gid(uid, gid, TOOL_GID, RESTORE_AGENT_CAPABILITIES)
+    assume_identity_with_saved_gid(
+        uid,
+        gid,
+        TOOL_GID,
+        GUEST_AGENT_CAPABILITIES,
+        RESTORE_AGENT_CAPABILITIES,
+    )
 }
 
 /// Become `uid`/`gid` from root, keeping exactly `keep`. Async-signal-safe, so
 /// usable from `pre_exec`.
 #[cfg(target_os = "linux")]
 pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u32) -> std::io::Result<()> {
-    assume_identity_with_saved_gid(uid, gid, gid, keep)
+    assume_identity_with_saved_gid(uid, gid, gid, keep, keep)
 }
 
 /// [`assume_identity_retaining`], leaving `saved_gid` as the saved group id.
@@ -873,6 +886,7 @@ fn assume_identity_with_saved_gid(
     gid: u32,
     saved_gid: u32,
     keep: u32,
+    ambient: u32,
 ) -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -888,12 +902,21 @@ fn assume_identity_with_saved_gid(
         return Err(std::io::Error::last_os_error());
     }
     set_capabilities(keep)?;
-    raise_ambient_capabilities(keep)?;
+    raise_ambient_capabilities(ambient)?;
     set_no_new_privileges()?;
     if unsafe { libc::getuid() } == 0 {
         return Err(std::io::Error::from_raw_os_error(libc::EPERM));
     }
     Ok(())
+}
+
+/// Remove the attribution reader's extra capability from the calling thread.
+///
+/// Call this immediately after spawning the one thread that answers
+/// attribution queries and before starting any workload-facing thread.
+#[cfg(target_os = "linux")]
+pub fn drop_attribution_reader_capability() -> std::io::Result<()> {
+    set_capabilities(RESTORE_AGENT_CAPABILITIES)
 }
 
 /// The capability slots `PR_CAPBSET_DROP` is asked about.
@@ -952,10 +975,11 @@ fn drop_capability_bounding_set_to(keep: u32) -> std::io::Result<()> {
 /// bounding set and `NoNewPrivs=0`.
 ///
 /// Note what is retained. The bounding set is narrowed to
-/// [`RESTORE_AGENT_CAPABILITIES`] — `CAP_KILL` and `CAP_SYS_TIME`, which the
-/// agent genuinely needs to reap workload processes and to correct a restored
-/// wall clock — not to zero. The workload itself needs neither, and gets an
-/// empty bounding set from [`drop_workload_capability_bounding_set`] at spawn.
+/// [`GUEST_AGENT_CAPABILITIES`]. `CAP_SYS_PTRACE` lets only the dedicated
+/// attribution-reader thread inspect a distinct-uid tool's descriptors;
+/// ordinary agent threads retain only `CAP_KILL` and `CAP_SYS_TIME`. The
+/// workload gets an empty bounding set from
+/// [`drop_workload_capability_bounding_set`] at spawn.
 #[cfg(target_os = "linux")]
 pub fn harden_init_process() -> std::io::Result<()> {
     // `NoNewPrivs` first: it is the control that actually makes file
@@ -963,7 +987,7 @@ pub fn harden_init_process() -> std::io::Result<()> {
     // privilege, and ordering it first means a bounding-set failure can never
     // leave a descendant running without it.
     set_no_new_privileges()?;
-    drop_capability_bounding_set_to(RESTORE_AGENT_CAPABILITIES)
+    drop_capability_bounding_set_to(GUEST_AGENT_CAPABILITIES)
 }
 
 /// Empty the bounding set for a workload process, immediately before exec.
@@ -2423,6 +2447,18 @@ mod privilege_tests {
     }
 
     #[test]
+    fn activation_mask_adds_only_ptrace_for_the_attribution_reader() {
+        let retained: Vec<u32> = CAPABILITY_SLOTS_FOR_TEST
+            .filter(|cap| bounding_set_retains(GUEST_AGENT_CAPABILITIES, *cap))
+            .collect();
+        assert_eq!(
+            retained,
+            vec![CAP_KILL, CAP_SYS_PTRACE, CAP_SYS_TIME],
+            "activation must add only CAP_SYS_PTRACE to the ordinary agent mask"
+        );
+    }
+
+    #[test]
     fn crng_reseed_helper_keep_mask_retains_exactly_sys_admin() {
         let retained: Vec<u32> = CAPABILITY_SLOTS_FOR_TEST
             .filter(|cap| bounding_set_retains(CRNG_RESEED_HELPER_CAPABILITIES, *cap))
@@ -2756,8 +2792,8 @@ mod privilege_tests {
             "NoNewPrivs must be 1 after the drop; got:\n{status}"
         );
         assert!(
-            status.contains("CapBnd:\t0000000002000020"),
-            "CapBnd must be exactly CAP_KILL|CAP_SYS_TIME; got:\n{status}"
+            status.contains("CapBnd:\t0000000002080020"),
+            "CapBnd must add CAP_SYS_PTRACE for the attribution reader; got:\n{status}"
         );
         assert!(
             status.contains(&format!(
@@ -2765,6 +2801,60 @@ mod privilege_tests {
             )),
             "the agent must hold the tool group as its saved gid only; got:\n{status}"
         );
+    }
+
+    /// The attribution-reader capability is the narrow exception that lets the
+    /// agent inspect a helper-spawned tool after tools moved to a distinct uid.
+    /// Removing it must immediately restore the cross-uid `/proc` boundary.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn attribution_reader_alone_can_inspect_a_distinct_uid_tool() {
+        use std::os::unix::process::CommandExt;
+
+        if !privileged() {
+            return;
+        }
+        let mut command = std::process::Command::new("/bin/sleep");
+        command.arg("30");
+        // SAFETY: the hook calls only async-signal-safe credential syscalls.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setgroups(0, std::ptr::null()) != 0
+                    || libc::setresgid(TOOL_GID, TOOL_GID, TOOL_GID) != 0
+                    || libc::setresuid(TOOL_UID, TOOL_UID, TOOL_UID) != 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let mut tool = command.spawn().expect("spawn distinct-uid tool");
+        super::drop_guest_agent_privilege_raw(WORKLOAD_UID, WORKLOAD_GID)
+            .expect("activate the guest-agent identity");
+
+        let fd_dir = format!("/proc/{}/fd", tool.id());
+        let visible_descriptors = || {
+            std::fs::read_dir(&fd_dir)
+                .into_iter()
+                .flatten()
+                .filter_map(Result::ok)
+                .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+                .count()
+        };
+        assert!(
+            visible_descriptors() > 0,
+            "the attribution reader must inspect the distinct-uid tool"
+        );
+        super::drop_attribution_reader_capability()
+            .expect("remove ptrace from the ordinary agent thread");
+        assert!(
+            visible_descriptors() == 0,
+            "ordinary agent and workload threads must not inspect the tool"
+        );
+
+        tool.kill()
+            .expect("CAP_KILL terminates the distinct-uid tool");
+        tool.wait().expect("reap tool");
     }
 
     /// Live witness that a workload process cannot take over a bound tool
@@ -2789,6 +2879,8 @@ mod privilege_tests {
             crate::tool_attribution::spawn_attributed(&mut command, &binding)
                 .expect("the agent starts a bound tool in the tool group");
         let tool_pid = tool.id() as libc::pid_t;
+        super::drop_attribution_reader_capability()
+            .expect("ordinary agent and workload threads do not retain ptrace");
         let mem = std::ffi::CString::new(format!("/proc/{tool_pid}/mem")).expect("path");
         // SAFETY: the child runs only async-signal-safe syscalls, then exits.
         let child = unsafe { libc::fork() };

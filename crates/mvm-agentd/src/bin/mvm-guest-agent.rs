@@ -975,13 +975,25 @@ fn main() {
     }
 
     if !SHUTDOWN_REQUESTED.load(Ordering::Acquire) {
-        let monitor_state = Arc::clone(&state);
-        std::thread::spawn(move || monitoring_loop(monitor_state));
-
         #[cfg(target_os = "linux")]
         if let Some(listener) = attribution_listener {
             std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
         }
+
+        // The attribution reader alone needs CAP_SYS_PTRACE: declared tools
+        // run under a distinct uid, so Linux otherwise hides their descriptor
+        // links. Spawn that reader first, then irreversibly remove the
+        // capability before any workload-facing thread can inherit it.
+        #[cfg(target_os = "linux")]
+        if init::is_pid1()
+            && let Err(error) = mvm_agentd::guest_mount::drop_attribution_reader_capability()
+        {
+            eprintln!("mvm-guest-agent: could not confine attribution-reader capability: {error}");
+            return;
+        }
+
+        let monitor_state = Arc::clone(&state);
+        std::thread::spawn(move || monitoring_loop(monitor_state));
 
         #[cfg(target_os = "linux")]
         if let Some(listener) = decision_listener {

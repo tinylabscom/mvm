@@ -481,10 +481,10 @@ impl ProcSource for Procfs {
     }
 
     fn fd_targets(&self, pid: u32) -> Vec<String> {
-        // A tool invocation's descriptors are readable only with the tool
-        // group's credentials; a workload process's only without them. The
-        // agent holds the tool group as its saved gid, so this thread takes it
-        // as its filesystem gid for the second look and gives it back.
+        // The dedicated attribution thread holds CAP_SYS_PTRACE, which is
+        // required for helper-spawned tools under the distinct tool uid. The
+        // saved tool gid fallback covers host-initiated attributed commands,
+        // which retain the workload uid and differ only by group.
         let found = read_fd_targets(pid);
         if !found.is_empty() {
             return found;

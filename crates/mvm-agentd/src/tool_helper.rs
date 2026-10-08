@@ -859,6 +859,26 @@ mod tests {
         std::fs::write(&stash, b"other bytes").expect("tamper");
         assert!(verify_stash(&tool, &stash).is_err());
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_connected_shim_gets_a_structured_reply_when_request_validation_fails() {
+        use std::io::Read;
+        use std::os::unix::net::UnixStream;
+
+        let (mut shim, helper) = UnixStream::pair().expect("socket pair");
+        shim.shutdown(std::net::Shutdown::Write)
+            .expect("finish malformed request");
+        handle_connection(helper, &ToolMap::default()).expect("send refusal");
+
+        let mut reply = String::new();
+        shim.read_to_string(&mut reply).expect("read refusal");
+        let reply: HelperReply = serde_json::from_str(reply.trim()).expect("structured reply");
+        assert!(
+            matches!(reply, HelperReply::Unavailable { .. }),
+            "validation failure must be unavailable, got {reply:?}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,32 +1085,46 @@ fn handle_connection(mut stream: std::os::unix::net::UnixStream, map: &ToolMap) 
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(
         crate::vsock::TOOL_REQUEST_TIMEOUT_SECS,
     )));
+    let outcome =
+        connection_outcome(&stream, map).unwrap_or_else(|error| HelperReply::Unavailable {
+            reason: format!("tool helper could not validate the invocation: {error}"),
+        });
+    send_reply(&mut stream, &outcome)
+}
+
+/// Validate and run one request. Keeping transport failures inside the reply
+/// boundary is load-bearing: once a shim has connected, every pre-spawn
+/// failure must become a structured refusal rather than an empty EOF that
+/// leaves the caller unable to distinguish denial from an approved run.
+#[cfg(target_os = "linux")]
+fn connection_outcome(
+    stream: &std::os::unix::net::UnixStream,
+    map: &ToolMap,
+) -> io::Result<HelperReply> {
     let (request, stdio) = recv_request(&stream)?;
     let (peer_pid, peer_uid, peer_gid) = peer_process(&stream)?;
     let actual_executable = crate::tool_map::process_executable(peer_pid)?;
     if !crate::tool_map::provenance_matches(&request.exe, &actual_executable) {
-        return send_reply(
-            &mut stream,
-            &HelperReply::Denied {
-                reason: "the executable path does not match the connecting process".into(),
-            },
-        );
+        return Ok(HelperReply::Denied {
+            reason: "the executable path does not match the connecting process".into(),
+        });
     }
     use std::os::fd::AsRawFd;
     let stdio_raw: [std::os::unix::io::RawFd; 3] = stdio
         .each_ref()
         .map(|fd| fd.as_ref().map(AsRawFd::as_raw_fd).unwrap_or(-1));
 
-    let outcome = match approve(map, &request, peer_pid, peer_uid, peer_gid, agent(), host()) {
-        Ok(run) => {
-            let mut events = peer_events(stream.try_clone()?);
-            HelperReply::Exited {
-                code: run_approved(&run, stdio_raw, &mut events, agent(), host()),
+    Ok(
+        match approve(map, &request, peer_pid, peer_uid, peer_gid, agent(), host()) {
+            Ok(run) => {
+                let mut events = peer_events(stream.try_clone()?);
+                HelperReply::Exited {
+                    code: run_approved(&run, stdio_raw, &mut events, agent(), host()),
+                }
             }
-        }
-        Err(reply) => reply,
-    };
-    send_reply(&mut stream, &outcome)
+            Err(reply) => reply,
+        },
+    )
 }
 
 /// The production agent-transport singleton.
