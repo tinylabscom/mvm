@@ -20,6 +20,7 @@ Feature: installed pack inspection
     When I run mvmctl with "pack verify runtime/go@1.0.0"
     Then the command exits with code 1
     And the error output contains "not pinned"
+    And the output does not contain "Official status"
 
   Scenario: pack information does not claim an uninstalled artifact
     Given an isolated mvm home
