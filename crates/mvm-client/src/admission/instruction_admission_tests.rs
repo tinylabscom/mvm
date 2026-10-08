@@ -528,3 +528,216 @@ fn deny_refuses_an_unsigned_instruction_in_a_transient_mount_image() {
     );
     entry(&entries, "plan.admission_refused");
 }
+
+#[cfg(feature = "manifest-verify")]
+mod ps11_keyless_witness {
+    use super::*;
+    use mvm_fs::ext4::{Node, Owner, build_image};
+
+    const INSTRUCTION: &[u8] =
+        include_bytes!("../../tests/fixtures/ps11-instruction-provenance/PS11.instructions.md");
+    const BUNDLE: &[u8] = include_bytes!(
+        "../../tests/fixtures/ps11-instruction-provenance/PS11.instructions.md.sigstore.json"
+    );
+    const SIGNER: &str = "https://github.com/tinylabscom/mvm/.github/workflows/sign-instructions.yml@refs/heads/main";
+
+    fn file_node(path: &str, data: &[u8]) -> Node {
+        Node::File {
+            path: path.to_string(),
+            mode: 0o644,
+            data: data.to_vec(),
+            xattrs: Vec::new(),
+            owner: Owner::ROOT,
+        }
+    }
+
+    fn policy(path: &Path, repository: &str, workflow: &str, git_ref: &str) -> PathBuf {
+        let policy = path.join("instruction-trust.toml");
+        std::fs::write(
+            &policy,
+            format!(
+                "enforcement = \"deny\"\nincludes = [\"**/PS11.instructions.md\"]\n\
+                 [[publishers]]\nkind = \"keyless\"\nname = \"ps11-ci\"\n\
+                 issuer = \"https://token.actions.githubusercontent.com\"\n\
+                 repository = \"{repository}\"\nworkflow = \"{workflow}\"\nref = \"{git_ref}\"\n"
+            ),
+        )
+        .unwrap();
+        policy
+    }
+
+    fn image(dir: &Path, instruction: &[u8], bundle: &[u8]) -> PathBuf {
+        let image = dir.join("ps11.ext4");
+        std::fs::write(
+            &image,
+            build_image(
+                vec![
+                    file_node("/PS11.instructions.md", instruction),
+                    file_node("/PS11.instructions.md.sigstore.json", bundle),
+                ],
+                &Default::default(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        image
+    }
+
+    fn run(
+        instruction: &[u8],
+        bundle: &[u8],
+        repository: &str,
+        workflow: &str,
+        git_ref: &str,
+    ) -> (Fixture, Result<AdmissionContext>) {
+        let f = fixture(None);
+        let policy = policy(f._dir.path(), repository, workflow, git_ref);
+        let image = image(f._dir.path(), instruction, bundle);
+        let mounts = vec![super::super::instructions::MaterializedMount {
+            host_path: f.mount.clone(),
+            image_path: image,
+        }];
+        let ledger = InMemoryNonceLedger::new();
+        let mut requested_share = share(&f.mount);
+        requested_share.read_only = false;
+        let result = admit_plan_for_boot(AdmitPlanForBootParams {
+            keys_dir: Some(&f.keys),
+            audit_dir: Some(&f.audit),
+            shares: vec![requested_share],
+            instructions: InstructionSources {
+                user_policy: Some(&policy),
+                ..InstructionSources::for_workload(None)
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&mounts)
+            },
+            ..pinning_params(&f.rootfs, &ledger)
+        });
+        (Fixture { policy, ..f }, result)
+    }
+
+    fn verify_chain(f: &Fixture) {
+        let signer = mvm_hostd::audit::host_keypair::load_or_init_at(&f.keys).unwrap();
+        let count = mvm_hostd::supervisor::verify_audit_chain(
+            &f.audit.join("local.jsonl"),
+            &signer.signing.verifying_key(),
+        )
+        .unwrap();
+        assert!(
+            count >= 2,
+            "trust and admission decisions must both be signed"
+        );
+    }
+
+    fn assert_refused(f: &Fixture, result: Result<AdmissionContext>, reason: &str) {
+        result.expect_err("invalid provenance must refuse admission");
+        let entries = chain(f);
+        let blocked = entry(&entries, "trust.instruction_blocked");
+        assert_eq!(blocked["reason"], reason);
+        entry(&entries, "plan.admission_refused");
+        assert!(
+            entries.iter().all(|(name, _)| name != "plan.admitted"),
+            "{entries:?}"
+        );
+        verify_chain(f);
+    }
+
+    #[test]
+    fn real_keyless_bundle_hardens_and_admits_the_materialized_ext4_share() {
+        let (f, result) = run(
+            INSTRUCTION,
+            BUNDLE,
+            "tinylabscom/mvm",
+            ".github/workflows/sign-instructions.yml",
+            "refs/heads/main",
+        );
+        let admitted = result.expect("the workflow-signed fixture admits");
+        let requested_attachment = mvm_core::vm_backend::VmVolume {
+            host: f.mount.display().to_string(),
+            guest: "/work".to_string(),
+            read_only: false,
+            materialized_image: Some(f._dir.path().join("ps11.ext4").display().to_string()),
+            ..Default::default()
+        };
+        let signed_share = admitted
+            .admitted
+            .plan()
+            .shares
+            .iter()
+            .find(|grant| grant.host_path == f.mount.display().to_string())
+            .expect("the effective plan carries the materialized host share");
+        assert!(
+            signed_share.read_only,
+            "evaluate_and_harden must convert the requested writable instruction share to read-only"
+        );
+        let rw_err = enforce_shares(&admitted, std::slice::from_ref(&requested_attachment))
+            .expect_err("backend enforcement must reject the original writable attachment");
+        assert!(
+            format!("{rw_err:#}").contains("not named in the signed"),
+            "rejection must come from the admitted-share boundary: {rw_err:#}"
+        );
+        let effective_attachment = mvm_core::vm_backend::VmVolume {
+            read_only: true,
+            ..requested_attachment
+        };
+        enforce_shares(&admitted, &[effective_attachment])
+            .expect("backend enforcement accepts the hardened read-only attachment");
+        let entries = chain(&f);
+        let verified = entry(&entries, "trust.instruction_verified");
+        assert_eq!(verified["signer"], SIGNER);
+        entry(&entries, "plan.admitted");
+        verify_chain(&f);
+    }
+
+    #[test]
+    fn tampered_instruction_bytes_are_refused_and_chain_signed() {
+        let mut instruction = INSTRUCTION.to_vec();
+        instruction.extend_from_slice(b"\ntampered\n");
+        let (f, result) = run(
+            &instruction,
+            BUNDLE,
+            "tinylabscom/mvm",
+            ".github/workflows/sign-instructions.yml",
+            "refs/heads/main",
+        );
+        assert_refused(&f, result, "bad_signature");
+    }
+
+    #[test]
+    fn tampered_bundle_bytes_are_refused_and_chain_signed() {
+        let mut bundle = BUNDLE.to_vec();
+        let byte = bundle.iter_mut().find(|byte| **byte == b'A').unwrap();
+        *byte = b'B';
+        let (f, result) = run(
+            INSTRUCTION,
+            &bundle,
+            "tinylabscom/mvm",
+            ".github/workflows/sign-instructions.yml",
+            "refs/heads/main",
+        );
+        assert_refused(&f, result, "bad_signature");
+    }
+
+    #[test]
+    fn wrong_repository_workflow_and_ref_are_publisher_mismatches() {
+        for (repository, workflow, git_ref) in [
+            (
+                "tinylabscom/not-mvm",
+                ".github/workflows/sign-instructions.yml",
+                "refs/heads/main",
+            ),
+            (
+                "tinylabscom/mvm",
+                ".github/workflows/not-sign-instructions.yml",
+                "refs/heads/main",
+            ),
+            (
+                "tinylabscom/mvm",
+                ".github/workflows/sign-instructions.yml",
+                "refs/heads/not-main",
+            ),
+        ] {
+            let (f, result) = run(INSTRUCTION, BUNDLE, repository, workflow, git_ref);
+            assert_refused(&f, result, "publisher_mismatch");
+        }
+    }
+}
