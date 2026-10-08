@@ -636,6 +636,7 @@ jobs:
           cargo nextest run -p mvm-build --features manifest-verify -E 'test(/release_signature/)'
           cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/^update::|verify_release/)'
           cargo nextest run -p mvm-cli --features manifest-verify --test signed_registry_pack
+          cargo nextest run -p mvm-cli --features manifest-verify -E 'test(/scaffold_resolves_an_installed_verified_signed_pack_include/)'
           cargo nextest run -p mvm-hostd --features manifest-verify -E 'test(/real_signed_pack_identity_is_reverified_at_host_admission/)'
           cargo nextest run -p mvm-client --features manifest-verify -E 'test(/signed_pack_identity_is_in_admitted_plan_and_audit_chain/)'
 

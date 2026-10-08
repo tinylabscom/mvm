@@ -1084,6 +1084,27 @@ profile = "policy/base.toml"
     );
 }
 
+#[given(expr = "a local template registry with a demo template selecting a signed pack group")]
+fn local_template_registry_with_demo_pack_group(world: &mut CliWorld) {
+    write_demo_registry(
+        world,
+        Some(("\n[policy]\ninclude = [\"runtime/python@1.0.0\"]\n", &[])),
+    );
+}
+
+#[given(expr = "an isolated mvm home with an empty pack trust policy")]
+fn isolated_home_with_empty_pack_trust(world: &mut CliWorld) {
+    let home = tempfile::tempdir().expect("create isolated MVM_HOME");
+    let policy = mvm_core::registry_pack::RegistryPackPublisherPolicy::new(Vec::new())
+        .expect("empty publisher policy is valid");
+    mvm_core::registry_pack_store::save_publisher_policy(
+        &home.path().join("registry/publishers.toml"),
+        &policy,
+    )
+    .expect("write empty publisher policy");
+    world.isolated_home = Some(home);
+}
+
 /// Run mvmctl against the local registry created by the `Given` step.
 #[when(expr = "I run mvmctl with {string} against the local template registry")]
 fn run_mvmctl_against_local_registry(world: &mut CliWorld, args: String) {
@@ -1115,9 +1136,15 @@ fn generate_project_from_template(world: &mut CliWorld, name: String) {
     world.generated_project_dir = Some(project_dir.clone());
     world.generated_project_dir_tmp = Some(out);
 
-    let home = tempfile::tempdir().expect("create isolated template home");
-    let home_path = home.path().to_path_buf();
-    world.isolated_home = Some(home);
+    if world.isolated_home.is_none() {
+        world.isolated_home = Some(tempfile::tempdir().expect("create isolated template home"));
+    }
+    let home_path = world
+        .isolated_home
+        .as_ref()
+        .expect("template home exists")
+        .path()
+        .to_path_buf();
 
     let output = mvmctl_command()
         .args([
