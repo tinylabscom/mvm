@@ -39,6 +39,7 @@ pub mod grants;
 /// the crate that detects it and the crate that keys the SDK sidecar cache on
 /// it; those are siblings, so it sits underneath both.
 pub mod guest_libc;
+pub mod hash;
 #[cfg(feature = "protocol")]
 pub mod ir;
 /// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).

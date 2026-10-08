@@ -99,7 +99,7 @@ pub fn build_tool_map(
         if bytes.len() as u64 > MAX_TOOL_BYTES {
             return Err(InstallError::TooLarge { tool: tool.clone() });
         }
-        let digest = crate::tool_map::sha256_hex(&bytes);
+        let digest = mvm_contract::hash::sha256_hex(&bytes);
         let target_meta =
             std::fs::metadata(&target).map_err(|error| InstallError::SubstitutionFailed {
                 path: target.to_string_lossy().into_owned(),
@@ -217,7 +217,7 @@ fn alias_of(
         }
         budget.hash(target_len).ok()?;
         let bytes = std::fs::read(&resolved).ok()?;
-        return (crate::tool_map::sha256_hex(&bytes) == digest).then_some(guest_path);
+        return (mvm_contract::hash::sha256_hex(&bytes) == digest).then_some(guest_path);
     }
     if !meta.file_type().is_file() {
         return None;
@@ -229,7 +229,7 @@ fn alias_of(
     if !same_inode {
         budget.hash(target_len).ok()?;
         let bytes = std::fs::read(path).ok()?;
-        if crate::tool_map::sha256_hex(&bytes) != digest {
+        if mvm_contract::hash::sha256_hex(&bytes) != digest {
             return None;
         }
     }
@@ -499,7 +499,10 @@ mod tests {
         let entry = &map.tools[0];
         assert_eq!(entry.tool, "shell");
         assert_eq!(entry.executable, "/bin/sh");
-        assert_eq!(entry.digest, crate::tool_map::sha256_hex(b"busybox bytes"));
+        assert_eq!(
+            entry.digest,
+            mvm_contract::hash::sha256_hex(b"busybox bytes")
+        );
         assert!(entry.stash.starts_with(STASH_DIR));
         // The declared symlink target, the hard link, and the same-byte copy
         // are all runnable paths to the tool's bytes.

@@ -32,12 +32,11 @@
 use std::io;
 use std::path::Path;
 
+use mvm_contract::hash::sha256_hex;
 use mvm_contract::protocol::network_flow::attribution::ToolInvocationBinding;
 use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
 
-use crate::tool_map::{
-    Dispatch, EXIT_SPAWN, HelperReply, ShimRequest, ToolEntry, ToolMap, sha256_hex,
-};
+use crate::tool_map::{Dispatch, EXIT_SPAWN, HelperReply, ShimRequest, ToolEntry, ToolMap};
 
 /// Largest tool binary the helper will hash and exec.
 pub const MAX_TOOL_BYTES: u64 = 512 * 1024 * 1024;
