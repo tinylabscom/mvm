@@ -20,6 +20,8 @@
 //! that doesn't need cucumber's macros belongs in `src/lib.rs` instead,
 //! where it can be unit-tested independent of the cucumber runner.
 
+#[path = "support/live_artifacts.rs"]
+mod live_artifacts;
 mod steps;
 mod support;
 mod world;
@@ -352,19 +354,19 @@ fn local_images_checkout_selected() -> bool {
     })
 }
 
-/// Whether the SDK sidecar image is in the version-keyed cache.
+/// Whether a verified SDK sidecar is in the CLI or pinned image-set cache.
 ///
 /// Admission refuses a workload that binds an SDK host service without it, so
 /// a scenario that binds one cannot pass on a host where the image was never
-/// built. Globbed on version rather than hardcoded so a bump does not silently
-/// turn this into "never available".
+/// prepared. Use the resolver's own layout and recorded member version rather
+/// than assuming every image was installed under the running CLI's version.
 fn sdk_sidecar_cached() -> bool {
-    let sidecar_root = mvm_core::config::mvm_cache_dir_at(live_home())
-        .join(mvm_fs::sdk_sidecar::SDK_SIDECAR_CACHE_DIR);
-    mvm_conformance::sidecar_image_cached_in(
-        &sidecar_root,
-        mvm_fs::sdk_sidecar::SDK_SIDECAR_IMAGE_FILE,
-    )
+    // The runner prepares the live cache before starting cucumber. Verify it
+    // once, rather than hashing the same image for every scenario's tag filter.
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        live_artifacts::sdk_sidecar_cached_in(&mvm_core::config::mvm_cache_dir_at(live_home()))
+    })
 }
 
 /// The mvm home the live scenarios actually run against.
