@@ -1,0 +1,12 @@
+{
+  "description": "Claude Code agent policy: LLM APIs, GitHub, and the Anthropic secret binding.",
+  "files": [
+    {
+      "path": "pack/profile.toml",
+      "sha256": "a170852578d5c62d1711fe037682edf6c79bc46d5acc56fb52d1adabed2be1be",
+      "size": 235
+    }
+  ],
+  "reference": "agent/claude@1.0.1",
+  "schema_version": 1
+}

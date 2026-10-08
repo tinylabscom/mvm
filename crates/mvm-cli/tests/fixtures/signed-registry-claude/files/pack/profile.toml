@@ -1,0 +1,8 @@
+description = "What a Claude Code agent workload may reach and which stored secrets it may use."
+
+[groups]
+include = ["llm-apis", "github", "runtime/python"]
+
+[[overrides.secrets.bind]]
+name = "anthropic"
+hosts = ["api.anthropic.com"]
