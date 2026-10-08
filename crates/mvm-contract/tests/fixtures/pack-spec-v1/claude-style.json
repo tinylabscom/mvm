@@ -1,0 +1,11 @@
+{
+  "schema": "mvm.pack-spec/v1",
+  "identity": { "name": "claude-style", "version": "0.1.0" },
+  "target": "x86_64-linux",
+  "source": { "kind": "local", "path": "app" },
+  "packages": [],
+  "dependencies": [],
+  "copy": [{ "source": "bin/claude", "destination": "/app/bin/claude" }],
+  "entrypoint": ["/app/bin/claude", "--version"],
+  "resources": { "cpu_cores": 2, "memory_mb": 1024 }
+}

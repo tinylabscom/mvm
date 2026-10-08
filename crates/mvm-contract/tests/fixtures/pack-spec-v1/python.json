@@ -1,0 +1,20 @@
+{
+  "schema": "mvm.pack-spec/v1",
+  "identity": { "name": "python-app", "version": "1.2.3" },
+  "target": "aarch64-linux",
+  "source": { "kind": "local", "path": "app" },
+  "packages": [
+    { "name": "python3", "version": "3.13.1", "scope": "runtime" },
+    { "name": "pkg-config", "scope": "build" }
+  ],
+  "dependencies": [
+    { "kind": "python", "tool": "uv", "manifest": "pyproject.toml", "lockfile": "uv.lock" },
+    { "kind": "python", "tool": "pip_tools", "manifest": "tools/requirements.in", "lockfile": "tools/requirements.txt" }
+  ],
+  "copy": [
+    { "source": "main.py", "destination": "/app/main.py" },
+    { "source": "data", "destination": "/app/data" }
+  ],
+  "entrypoint": ["python3", "/app/main.py", "one argument", ""],
+  "resources": { "cpu_cores": 1, "memory_mb": 256 }
+}

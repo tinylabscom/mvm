@@ -1,0 +1,11 @@
+{
+  "schema": "mvm.pack-spec/v1",
+  "identity": { "name": "hello", "version": "1.0.0" },
+  "target": "aarch64-linux",
+  "source": { "kind": "local", "path": "." },
+  "packages": [{ "name": "busybox", "scope": "runtime" }],
+  "dependencies": [],
+  "copy": [{ "source": "hello.txt", "destination": "/app/hello.txt" }],
+  "entrypoint": ["cat", "/app/hello.txt"],
+  "resources": { "cpu_cores": 1, "memory_mb": 128 }
+}
