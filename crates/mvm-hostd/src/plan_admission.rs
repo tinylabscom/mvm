@@ -1237,15 +1237,29 @@ pub fn enforce_admitted_shares(
         if let Some(expected) = &grant.content_sha256 {
             // Canonicalize so a symlinked host dir (macOS `/tmp`) hashes
             // the same tree admission pinned, whichever alias names it.
-            let resolved = std::fs::canonicalize(&v.host)?;
-            let actual = mvm_fs::hash::hash_source(&resolved).map_err(|e| {
-                anyhow::anyhow!(
-                    "refusing to attach volume '{}' -> '{}': cannot re-hash the granted \
-                     directory to check its admitted content identity: {e}",
-                    v.host,
-                    v.guest,
-                )
-            })?;
+            let actual = if let Some(image) = &v.materialized_image {
+                mvm_core::crypto::image_verify::sha256_file(std::path::Path::new(image)).map_err(
+                    |e| {
+                        anyhow::anyhow!(
+                            "refusing to attach volume '{}' -> '{}': cannot re-hash frozen image \
+                             '{}': {e}",
+                            v.host,
+                            v.guest,
+                            image,
+                        )
+                    },
+                )?
+            } else {
+                let resolved = std::fs::canonicalize(&v.host)?;
+                mvm_fs::hash::hash_source(&resolved).map_err(|e| {
+                    anyhow::anyhow!(
+                        "refusing to attach volume '{}' -> '{}': cannot re-hash the granted \
+                         directory to check its admitted content identity: {e}",
+                        v.host,
+                        v.guest,
+                    )
+                })?
+            };
             if actual != *expected {
                 anyhow::bail!(
                     "refusing to attach volume '{}' -> '{}': the directory changed after \

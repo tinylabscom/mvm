@@ -172,7 +172,7 @@ Feature: Encrypted block volume lifecycle and attachment
     When I run mvmctl in the isolated mvm home with "machine stop bdd-refresh-dir-volume --yes"
     Then the command exits with code 0
 
-  @live @firecracker @workload_kernel @guest_bins
+  @live @ci_live @ps11_live @firecracker @workload_kernel @guest_bins
   Scenario: an instruction-bearing writable host snapshot is effectively read-only
     Given an isolated mvm home
     And a cached live workload kernel

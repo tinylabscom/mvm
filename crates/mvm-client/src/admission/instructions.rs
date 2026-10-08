@@ -32,6 +32,9 @@ pub struct InstructionSources<'a> {
     pub mount_roots: Option<&'a [PathBuf]>,
     /// Materialized host-directory images attached to the guest.
     pub mount_images: Option<&'a [PathBuf]>,
+    /// Explicit host-source to frozen-image identities for materialized
+    /// directory grants.
+    pub materialized_mounts: Option<&'a [MaterializedMount]>,
     /// Override for the user policy path. `None` reads
     /// `mvm_core::config::instruction_trust_policy_path()`; tests inject a
     /// tempdir so they never read the real user's policy.
@@ -46,6 +49,7 @@ impl<'a> InstructionSources<'a> {
             workload_dir,
             mount_roots: None,
             mount_images: None,
+            materialized_mounts: None,
             user_policy: None,
         }
     }
@@ -64,6 +68,19 @@ impl<'a> InstructionSources<'a> {
         self.mount_images = Some(images);
         self
     }
+
+    #[must_use]
+    pub fn with_materialized_mounts(mut self, mounts: &'a [MaterializedMount]) -> Self {
+        self.materialized_mounts = Some(mounts);
+        self.mount_images = None;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterializedMount {
+    pub host_path: PathBuf,
+    pub image_path: PathBuf,
 }
 
 /// The ext4 images a boot attaches in place of host directories.
@@ -79,6 +96,22 @@ pub fn materialized_mount_images(volumes: &[VmVolume]) -> Vec<PathBuf> {
     volumes
         .iter()
         .filter_map(|volume| volume.materialized_image.as_deref().map(PathBuf::from))
+        .collect()
+}
+
+#[must_use]
+pub fn materialized_mounts(volumes: &[VmVolume]) -> Vec<MaterializedMount> {
+    volumes
+        .iter()
+        .filter_map(|volume| {
+            volume
+                .materialized_image
+                .as_deref()
+                .map(|image| MaterializedMount {
+                    host_path: PathBuf::from(&volume.host),
+                    image_path: PathBuf::from(image),
+                })
+        })
         .collect()
 }
 
@@ -103,52 +136,9 @@ pub fn refuse_wasm_host_snapshots(
 /// Classification reads the frozen image, never the live source directory.
 /// An unreadable or malformed image is therefore an error rather than a clean
 /// classification.
-pub fn harden_instruction_mounts(
-    volumes: &mut [VmVolume],
-    additional_snapshot_images: &[PathBuf],
-    workload_dir: Option<&Path>,
-    user_policy: Option<&Path>,
-) -> Result<()> {
-    let mut images = materialized_mount_images(volumes);
-    images.extend_from_slice(additional_snapshot_images);
-    let instruction_images = instruction_bearing_images(&images, workload_dir, user_policy)?;
-    for volume in volumes {
-        if volume
-            .materialized_image
-            .as_deref()
-            .is_some_and(|image| instruction_images.contains(Path::new(image)))
-            || instruction_images.contains(Path::new(&volume.host))
-        {
-            volume.read_only = true;
-        }
-    }
-    Ok(())
-}
-
-/// Classify frozen snapshot images using the effective instruction policy.
-pub fn instruction_bearing_images(
-    images: &[PathBuf],
-    workload_dir: Option<&Path>,
-    user_policy: Option<&Path>,
-) -> Result<std::collections::BTreeSet<PathBuf>> {
-    if images.is_empty() {
-        return Ok(std::collections::BTreeSet::new());
-    }
-    let report = evaluate_boot_inputs(
-        &BootInputs {
-            mount_images: images.to_vec(),
-            workload_dir: workload_dir.map(Path::to_path_buf),
-            ..BootInputs::default()
-        },
-        user_policy,
-    )
-    .context("classifying materialized host-directory snapshots")?
-    .context("materialized host-directory snapshots require a scan report")?;
-    Ok(report
-        .files
-        .into_iter()
-        .map(|file| file.file.root)
-        .collect())
+struct Evaluation {
+    report: ScanReport,
+    instruction_images: std::collections::BTreeSet<PathBuf>,
 }
 
 /// The host paths this boot copies into the guest.
@@ -171,9 +161,19 @@ fn boot_inputs(
             },
             <[PathBuf]>::to_vec,
         ),
-        mount_images: sources
-            .mount_images
-            .map_or_else(Vec::new, <[PathBuf]>::to_vec),
+        mount_images: sources.materialized_mounts.map_or_else(
+            || {
+                sources
+                    .mount_images
+                    .map_or_else(Vec::new, <[PathBuf]>::to_vec)
+            },
+            |mounts| {
+                mounts
+                    .iter()
+                    .map(|mount| mount.image_path.clone())
+                    .collect()
+            },
+        ),
         assets: assets
             .iter()
             .filter_map(|asset| match asset {
@@ -188,13 +188,95 @@ fn boot_inputs(
 /// Load the policy and verify every instruction file under the boot's inputs.
 ///
 /// `Ok(None)` when the boot copies nothing from the host.
-pub(super) fn evaluate(
+fn evaluate(
     shares: &[HostShareGrant],
     assets: &[AssetSpec],
     sources: InstructionSources<'_>,
+) -> Result<Option<Evaluation>> {
+    let Some(report) =
+        evaluate_boot_inputs(&boot_inputs(shares, assets, sources), sources.user_policy)
+            .context("checking the provenance of instruction files copied into the guest")?
+    else {
+        return Ok(None);
+    };
+    let instruction_images = report
+        .files
+        .iter()
+        .map(|file| file.file.root.clone())
+        .collect();
+    Ok(Some(Evaluation {
+        report,
+        instruction_images,
+    }))
+}
+
+pub(super) fn evaluate_and_harden(
+    shares: &mut [HostShareGrant],
+    assets: &[AssetSpec],
+    sources: InstructionSources<'_>,
 ) -> Result<Option<ScanReport>> {
-    evaluate_boot_inputs(&boot_inputs(shares, assets, sources), sources.user_policy)
-        .context("checking the provenance of instruction files copied into the guest")
+    if let Some(mounts) = sources.materialized_mounts {
+        anyhow::ensure!(
+            !mounts.is_empty() || !shares.iter().any(|share| share.kind == ShareKind::DirShare),
+            "directory share has no materialized-image identity"
+        );
+    }
+    let Some(evaluation) = evaluate(shares, assets, sources)? else {
+        return Ok(None);
+    };
+    if let Some(mounts) = sources.materialized_mounts {
+        let mut by_host = std::collections::BTreeMap::new();
+        let mut images = std::collections::BTreeSet::new();
+        for mount in mounts {
+            anyhow::ensure!(
+                by_host
+                    .insert(mount.host_path.clone(), mount.image_path.clone())
+                    .is_none(),
+                "duplicate materialized host-directory source {}",
+                mount.host_path.display()
+            );
+            anyhow::ensure!(
+                images.insert(mount.image_path.clone()),
+                "duplicate materialized host-directory image {}",
+                mount.image_path.display()
+            );
+        }
+        for share in shares
+            .iter_mut()
+            .filter(|share| share.kind == ShareKind::DirShare)
+        {
+            let image = by_host
+                .remove(Path::new(&share.host_path))
+                .with_context(|| {
+                    format!(
+                        "directory share {} has no materialized-image identity",
+                        share.host_path
+                    )
+                })?;
+            if evaluation.instruction_images.contains(&image) {
+                share.read_only = true;
+            }
+        }
+        anyhow::ensure!(
+            by_host.is_empty(),
+            "materialized-image identity has no admitted directory share: {}",
+            by_host
+                .keys()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        for share in shares {
+            if evaluation
+                .instruction_images
+                .contains(Path::new(&share.host_path))
+            {
+                share.read_only = true;
+            }
+        }
+    }
+    Ok(Some(evaluation.report))
 }
 
 /// Record every verdict under `plan`, then apply the enforcement mode.
@@ -248,6 +330,9 @@ pub(super) fn record_and_enforce(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn share(host: &str, kind: ShareKind) -> HostShareGrant {
         HostShareGrant {
@@ -361,13 +446,15 @@ mod tests {
         let ordinary = dir.path().join("ordinary.ext4");
         image_with(&instruction, "/AGENTS.md");
         image_with(&ordinary, "/app.txt");
-        let mut volumes = vec![
+        let volumes = vec![
             VmVolume {
+                host: "/host/instruction".into(),
                 materialized_image: Some(instruction.display().to_string()),
                 read_only: false,
                 ..Default::default()
             },
             VmVolume {
+                host: "/host/ordinary".into(),
                 materialized_image: Some(ordinary.display().to_string()),
                 read_only: false,
                 ..Default::default()
@@ -378,13 +465,20 @@ mod tests {
                 ..Default::default()
             },
         ];
-        harden_instruction_mounts(&mut volumes, &[], None, None).unwrap();
-        assert!(volumes[0].read_only, "instruction-bearing rw becomes ro");
-        assert!(!volumes[1].read_only, "ordinary rw remains rw");
-        assert!(!volumes[2].read_only, "managed block rw remains rw");
-        volumes[1].read_only = true;
-        harden_instruction_mounts(&mut volumes, &[], None, None).unwrap();
-        assert!(volumes[1].read_only, "requested ro remains ro");
+        let mounts = materialized_mounts(&volumes);
+        let mut shares = mvm_hostd::run::shares_from_vm_volumes(&volumes);
+        shares.swap(0, 1);
+        evaluate_and_harden(
+            &mut shares,
+            &[],
+            InstructionSources::default()
+                .with_mount_roots(&[])
+                .with_materialized_mounts(&mounts),
+        )
+        .unwrap();
+        assert!(!shares[0].read_only, "ordinary rw remains rw after reorder");
+        assert!(shares[1].read_only, "instruction-bearing rw becomes ro");
+        assert!(!shares[2].read_only, "managed block rw remains rw");
     }
 
     #[test]
@@ -392,11 +486,96 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("tampered.ext4");
         std::fs::write(&image, b"not ext4").unwrap();
-        let mut volumes = vec![VmVolume {
+        let volumes = vec![VmVolume {
             materialized_image: Some(image.display().to_string()),
             ..Default::default()
         }];
-        assert!(harden_instruction_mounts(&mut volumes, &[], None, None).is_err());
+        let mounts = materialized_mounts(&volumes);
+        let mut shares = mvm_hostd::run::shares_from_vm_volumes(&volumes);
+        assert!(
+            evaluate_and_harden(
+                &mut shares,
+                &[],
+                InstructionSources::default()
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&mounts)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn materialized_identity_mapping_rejects_missing_duplicate_and_unmatched_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("ordinary.ext4");
+        image_with(&image, "/ordinary.txt");
+        let volume = VmVolume {
+            host: "/host/source".into(),
+            materialized_image: Some(image.display().to_string()),
+            ..Default::default()
+        };
+        let mut shares = mvm_hostd::run::shares_from_vm_volumes(std::slice::from_ref(&volume));
+        let run = |shares: &mut [HostShareGrant], mounts: &[MaterializedMount]| {
+            evaluate_and_harden(
+                shares,
+                &[],
+                InstructionSources::default()
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(mounts),
+            )
+        };
+        assert!(run(&mut shares.clone(), &[]).is_err());
+        let mapping = materialized_mounts(&[volume]);
+        assert!(
+            run(
+                &mut shares.clone(),
+                &[mapping[0].clone(), mapping[0].clone()]
+            )
+            .is_err()
+        );
+        let unmatched = MaterializedMount {
+            host_path: "/host/other".into(),
+            image_path: image,
+        };
+        assert!(run(&mut shares, &[unmatched]).is_err());
+    }
+
+    #[test]
+    fn prepared_result_cannot_disagree_after_policy_changes_to_empty_includes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(dir.path());
+        let image = dir.path().join("source.ext4");
+        image_with(&image, "/AGENTS.md");
+        let policy = dir.path().join("instruction-trust.toml");
+        std::fs::write(
+            &policy,
+            "enforcement = \"audit\"\nincludes = [\"AGENTS.md\"]\n",
+        )
+        .unwrap();
+        let volume = VmVolume {
+            host: "/host/source".into(),
+            materialized_image: Some(image.display().to_string()),
+            ..Default::default()
+        };
+        let mounts = materialized_mounts(std::slice::from_ref(&volume));
+        let mut shares = mvm_hostd::run::shares_from_vm_volumes(&[volume]);
+        let report = evaluate_and_harden(
+            &mut shares,
+            &[],
+            InstructionSources {
+                user_policy: Some(&policy),
+                ..InstructionSources::default()
+                    .with_mount_roots(&[])
+                    .with_materialized_mounts(&mounts)
+            },
+        )
+        .unwrap()
+        .unwrap();
+        std::fs::write(&policy, "enforcement = \"deny\"\nincludes = []\n").unwrap();
+        assert!(shares[0].read_only);
+        assert_eq!(report.files.len(), 1);
     }
 
     #[test]

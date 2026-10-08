@@ -226,18 +226,17 @@ pub fn start_persistent_oci_machine(
     }
     crate::admission::instructions::refuse_wasm_host_snapshots(
         backend.kind(),
-        &prepared_volumes.instruction_images,
+        &prepared_volumes
+            .volumes
+            .iter()
+            .filter_map(|volume| {
+                volume
+                    .materialized_image
+                    .as_deref()
+                    .map(std::path::PathBuf::from)
+            })
+            .collect::<Vec<_>>(),
     )?;
-    let instruction_images = crate::admission::instructions::instruction_bearing_images(
-        &prepared_volumes.instruction_images,
-        workload_dir,
-        None,
-    )?;
-    for volume in &mut prepared_volumes.volumes {
-        if instruction_images.contains(std::path::Path::new(&volume.host)) {
-            volume.read_only = true;
-        }
-    }
     let volumes = &prepared_volumes.volumes;
     register_vm_name(name, "default");
     let (verity_path, roothash) =
@@ -286,18 +285,22 @@ pub fn start_persistent_oci_machine(
         |config| {
             let admission_ledger = InMemoryNonceLedger::new();
             let ingress = machine_port_ingress(ports)?;
-            let mut instruction_mount_images = prepared_volumes.instruction_images.clone();
-            instruction_mount_images.extend(volumes.iter().filter_map(|volume| {
-                volume
-                    .materialized_image
-                    .as_deref()
-                    .map(std::path::PathBuf::from)
-            }));
+            let instruction_mounts = volumes
+                .iter()
+                .filter_map(|volume| {
+                    volume.materialized_image.as_deref().map(|image| {
+                        crate::admission::instructions::MaterializedMount {
+                            host_path: std::path::PathBuf::from(&volume.host),
+                            image_path: std::path::PathBuf::from(image),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>();
             admit_plan_for_boot_configured_ingress(
                 AdmitPlanForBootParams {
                     instructions: crate::admission::InstructionSources::for_workload(workload_dir)
                         .with_mount_roots(&[])
-                        .with_mount_images(&instruction_mount_images),
+                        .with_materialized_mounts(&instruction_mounts),
                     outputs: Vec::new(),
                     network_mode: preflight_network(),
                     tenant: "local",
@@ -354,6 +357,17 @@ pub fn start_persistent_oci_machine(
             )
         },
     )?;
+    for volume in &mut start_config.volumes {
+        if admission
+            .admitted
+            .plan()
+            .shares
+            .iter()
+            .any(|share| share.host_path == volume.host && share.read_only)
+        {
+            volume.read_only = true;
+        }
+    }
     emit_runtime_source_status(&start_config);
     thread_tenant_id(&mut start_config, &admission.admitted);
     populate_audit_substrate(

@@ -32,6 +32,7 @@ mod launch_plan;
 mod mounts;
 mod oci_boot;
 use either::Either;
+pub(crate) use mounts::admitted_instruction_mounts;
 use mounts::refuse_unloadable_sidecar;
 mod session;
 mod sidecar_selection;
@@ -1375,10 +1376,11 @@ pub fn resolve_launch(
         start_config.bundle_json = sub.bundle_json;
         start_config.config_files.extend(sub.config_files);
         for volume in &mut start_config.volumes {
-            if volume
-                .materialized_image
-                .as_ref()
-                .is_some_and(|image| sub.read_only_materialized_images.contains(image))
+            if sub.read_only_materialized_images.contains(&volume.host)
+                || volume
+                    .materialized_image
+                    .as_ref()
+                    .is_some_and(|image| sub.read_only_materialized_images.contains(image))
             {
                 volume.read_only = true;
             }

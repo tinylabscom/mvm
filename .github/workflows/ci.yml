@@ -901,6 +901,7 @@ jobs:
     uses: ./.github/workflows/bdd.yml
     with:
       docs_only: ${{ needs.scope.outputs.code != 'true' }}
+      run_ps11_live: ${{ needs.scope.outputs.code == 'true' }}
 
   test:
     name: Test
