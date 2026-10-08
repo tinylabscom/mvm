@@ -197,6 +197,13 @@ pub fn admit_and_boot_local(
     req: &LocalRunRequest,
     ctx: LocalRunContext<'_>,
 ) -> Result<StartedMachine> {
+    anyhow::ensure!(
+        req.volumes
+            .iter()
+            .all(|volume| volume.materialized_image.is_none()),
+        "raw local admission does not accept materialized directory images; \
+         route them through instruction admission with explicit source identity"
+    );
     let sha = mvm_core::crypto::image_verify::sha256_file_cached(&req.rootfs_path)
         .with_context(|| format!("hashing rootfs at {}", req.rootfs_path.display()))?;
 
@@ -463,6 +470,59 @@ mod tests {
             SecretReleasePolicy::PlanBound
         );
         assert_eq!(started.admitted.plan().secrets, req.secrets);
+    }
+
+    #[test]
+    fn raw_local_admission_refuses_ro_and_rw_materialized_images_before_boot() {
+        let data = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(data.path());
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable rootfs\n").unwrap();
+        let backend = AnyBackend::from_hypervisor("mock");
+        let ledger = InMemoryNonceLedger::new();
+        let clock = SystemClock;
+
+        for read_only in [false, true] {
+            let req = LocalRunRequest {
+                name: format!("raw-materialized-{read_only}"),
+                rootfs_path: rootfs.clone(),
+                kernel_path: None,
+                verity_path: None,
+                roothash: None,
+                cpus: 1,
+                mem_mib: 128,
+                backend_name: "mock".into(),
+                volumes: vec![VmVolume {
+                    host: data.path().display().to_string(),
+                    guest: "/data".into(),
+                    read_only,
+                    materialized_image: Some(data.path().join("source.ext4").display().to_string()),
+                    ..Default::default()
+                }],
+                destroy_on_exit: false,
+                grants: None,
+                secrets: Vec::new(),
+                secret_release: SecretReleasePolicy::PlanBound,
+                signed_plan: None,
+            };
+            let error = admit_and_boot_local(
+                &backend,
+                &req,
+                LocalRunContext {
+                    clock: &clock,
+                    ledger: &ledger,
+                    host_signer_keys_dir: Some(data.path()),
+                    emitter: None,
+                    assurance: None,
+                },
+            )
+            .expect_err("raw materialized images must not reach the backend");
+            assert!(
+                error.to_string().contains("raw local admission"),
+                "{error:#}"
+            );
+        }
     }
 
     /// The launch volume set is baked into the signed plan's shares in the

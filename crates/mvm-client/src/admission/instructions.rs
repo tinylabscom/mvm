@@ -176,11 +176,76 @@ fn evaluate(
     }))
 }
 
+fn validate_legacy_mount_roots(
+    shares: &[HostShareGrant],
+    mount_roots: &[PathBuf],
+) -> Result<std::collections::BTreeMap<PathBuf, PathBuf>> {
+    let directory_shares = shares
+        .iter()
+        .filter(|share| share.kind == ShareKind::DirShare)
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        mount_roots.len() == directory_shares.len(),
+        "legacy directory scan roots must match admitted directory shares one-to-one"
+    );
+
+    let mut roots_by_identity = std::collections::BTreeMap::new();
+    for root in mount_roots {
+        let identity = root.canonicalize().with_context(|| {
+            format!(
+                "canonicalizing legacy directory scan root {}",
+                root.display()
+            )
+        })?;
+        anyhow::ensure!(
+            identity.is_dir(),
+            "legacy directory scan root is not a directory: {}",
+            root.display()
+        );
+        anyhow::ensure!(
+            roots_by_identity.insert(identity, root.clone()).is_none(),
+            "duplicate legacy directory scan root identity: {}",
+            root.display()
+        );
+    }
+
+    let mut share_identities = std::collections::BTreeSet::new();
+    for share in directory_shares {
+        let host_path = Path::new(&share.host_path);
+        let identity = host_path.canonicalize().with_context(|| {
+            format!(
+                "canonicalizing admitted directory share {}",
+                host_path.display()
+            )
+        })?;
+        anyhow::ensure!(
+            identity.is_dir(),
+            "admitted directory share is not a directory: {}",
+            host_path.display()
+        );
+        anyhow::ensure!(
+            share_identities.insert(identity.clone()),
+            "duplicate admitted directory share identity: {}",
+            host_path.display()
+        );
+        anyhow::ensure!(
+            roots_by_identity.contains_key(&identity),
+            "legacy directory scan roots do not identify admitted directory share {}",
+            host_path.display()
+        );
+    }
+    Ok(roots_by_identity)
+}
+
 pub(super) fn evaluate_and_harden(
     shares: &mut [HostShareGrant],
     assets: &[AssetSpec],
     sources: InstructionSources<'_>,
 ) -> Result<Option<ScanReport>> {
+    let legacy_roots = match (sources.mount_roots, sources.materialized_mounts) {
+        (Some(roots), None) => Some(validate_legacy_mount_roots(shares, roots)?),
+        _ => None,
+    };
     anyhow::ensure!(
         !(sources.mount_roots.is_some_and(<[PathBuf]>::is_empty)
             && sources.materialized_mounts.is_none()
@@ -240,10 +305,23 @@ pub(super) fn evaluate_and_harden(
         );
     } else {
         for share in shares {
-            if evaluation
-                .instruction_images
-                .contains(Path::new(&share.host_path))
-            {
+            let scan_root = if let Some(roots) = &legacy_roots {
+                if share.kind != ShareKind::DirShare {
+                    continue;
+                }
+                let identity = Path::new(&share.host_path)
+                    .canonicalize()
+                    .with_context(|| {
+                        format!(
+                            "canonicalizing admitted directory share {}",
+                            share.host_path
+                        )
+                    })?;
+                roots.get(&identity).map(PathBuf::as_path)
+            } else {
+                Some(Path::new(&share.host_path))
+            };
+            if scan_root.is_some_and(|root| evaluation.instruction_images.contains(root)) {
                 share.read_only = true;
             }
         }

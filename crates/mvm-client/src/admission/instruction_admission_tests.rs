@@ -216,7 +216,7 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
     let err = admit_plan_for_boot(AdmitPlanForBootParams {
         keys_dir: Some(&f.keys),
         audit_dir: Some(&f.audit),
-        shares: vec![share(&f.mount)],
+        shares: vec![share(&materialized)],
         instructions: InstructionSources {
             workload_dir: None,
             mount_roots: Some(&mount_roots),
@@ -237,6 +237,64 @@ fn deny_scans_the_materialized_mount_root_not_the_live_source_tree() {
         !message.contains(&live.display().to_string()),
         "the live source tree must not be what admission reports: {message}"
     );
+}
+
+#[test]
+fn legacy_scan_root_substitution_fails_before_plan_admitted() {
+    let f = fixture(Some("deny"));
+    let unrelated = f._dir.path().join("signed-extracted-root");
+    std::fs::create_dir_all(&unrelated).unwrap();
+    std::fs::write(unrelated.join("CLAUDE.md"), b"signed unrelated bytes\n").unwrap();
+    crate::instruction_trust::sign::sign_file(&unrelated.join("CLAUDE.md"), &publisher_key())
+        .unwrap();
+    let mount_roots = vec![unrelated];
+    let ledger = InMemoryNonceLedger::new();
+
+    let error = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            workload_dir: None,
+            mount_roots: Some(&mount_roots),
+            materialized_mounts: None,
+            user_policy: Some(&f.policy),
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("an unrelated extracted root must not stand in for the admitted share");
+
+    assert!(
+        error.to_string().contains("do not identify admitted"),
+        "{error:#}"
+    );
+    assert!(chain(&f).iter().all(|(event, _)| event != "plan.admitted"));
+}
+
+#[test]
+fn legacy_ext4_file_scan_root_fails_before_plan_admitted() {
+    let f = fixture(Some("deny"));
+    let ext4 = f._dir.path().join("unsigned.ext4");
+    std::fs::write(&ext4, b"unsigned ext4 bytes\n").unwrap();
+    let mount_roots = vec![ext4];
+    let ledger = InMemoryNonceLedger::new();
+
+    let error = admit_plan_for_boot(AdmitPlanForBootParams {
+        keys_dir: Some(&f.keys),
+        audit_dir: Some(&f.audit),
+        shares: vec![share(&f.mount)],
+        instructions: InstructionSources {
+            workload_dir: None,
+            mount_roots: Some(&mount_roots),
+            materialized_mounts: None,
+            user_policy: Some(&f.policy),
+        },
+        ..pinning_params(&f.rootfs, &ledger)
+    })
+    .expect_err("a file must not be accepted as a legacy directory scan root");
+
+    assert!(error.to_string().contains("not a directory"), "{error:#}");
+    assert!(chain(&f).iter().all(|(event, _)| event != "plan.admitted"));
 }
 
 #[test]
