@@ -424,6 +424,21 @@ missing one.
   the decision in the chain-signed audit log before the guest may start it. A
   signed tool-bearing plan also makes the guest refuse the command RPCs that
   skip this step.
+- A process the workload starts itself is mediated too. When the plan declares
+  a tool with an exact `executable` path, activation installs an in-guest shim
+  at that path — and at every other image path resolving to the same bytes —
+  and moves the original into a store only the spawn helper can read. The shim
+  reports the exact invocation to the helper; the helper proves from the
+  peer's `/proc/<pid>/exe` that the caller is the signed shim, asks the host
+  through the plan-authorized broker service `host.tool.v1`, and only then
+  executes the original, as the workload uid in the tool group, leading a new
+  session with the caller's stdio and working directory. A refusal, a
+  transport failure, or a missing decision all exit nonzero without the tool
+  ever running. Every guest-origin decision is recorded in the chain-signed
+  audit log with an `origin` label distinguishing it from a host-initiated
+  one. Activation refuses to boot when any runnable path to a declared
+  executable cannot be shadowed — including shared multi-call binaries such
+  as busybox applets — so a declared tool never runs unmediated.
 - `routes` and `secrets` belong to their tool. When an allowed invocation's
   tool declares either, the endpoint mints a binding for that invocation. The
   guest agent starts the command as the leader of a new session, and the
@@ -448,12 +463,8 @@ missing one.
   `[tools]`, routes and secrets included, in their spec and re-admit it on
   every start.
 
-## Not yet
+## Limits
 
-- A process the workload starts itself is not mediated: there are no
-  in-guest command shims. A tool's routes and secrets are therefore withheld
-  from everything but a declared `machine exec --tool` invocation; a workload
-  that runs the same binary on its own gets neither.
 - `machine exec --tool` requires `[tools.detail.<name>].executable` to name
   exactly the guest command path passed after `--`. A missing path, a relative
   command, or a differently spelled path is denied and audited. This path

@@ -9,13 +9,39 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The egress client could not be resolved while egress was required.
+/// A provisioning step refused to let the boot continue.
 ///
-/// Fail-closed: a workload that boots without it silently cannot reach the
-/// network its plan admitted, which reads as a policy denial rather than a
-/// missing binary.
+/// Fail-closed by construction: a workload that activated with an unmediated
+/// declared command, or without the egress its plan requires, would read a
+/// policy hole as a missing binary.
 #[derive(Debug, PartialEq, Eq)]
-pub struct EgressClientMissing;
+pub enum ProvisioningError {
+    /// The egress client could not be resolved while egress was required.
+    EgressClientMissing,
+    /// A declared tool's executable paths could not all be shadowed, so the
+    /// workload would keep an unmediated way to run a signed tool. Carries
+    /// the refusal reason.
+    DeclaredToolSubstitution(String),
+}
+
+impl std::fmt::Display for ProvisioningError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EgressClientMissing => {
+                write!(
+                    formatter,
+                    "egress was required but no egress client resolved"
+                )
+            }
+            Self::DeclaredToolSubstitution(reason) => {
+                write!(
+                    formatter,
+                    "declared tool mediation could not be installed: {reason}"
+                )
+            }
+        }
+    }
+}
 
 /// Run every post-mount setup step the workload environment depends on.
 ///
@@ -98,7 +124,9 @@ fn report_read_only_skips() {
     );
 }
 
-pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
+pub fn provision_guest_environment(
+    tool_commands: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ProvisioningError> {
     provision_hostname();
     ensure_runtime_dirs();
     provision_pty_devices();
@@ -106,6 +134,11 @@ pub fn provision_guest_environment() -> Result<(), EgressClientMissing> {
     provision_workload_identity();
     mount_mediated_tools();
     provision_verb_grant();
+    // Fail-closed: once the signed grant maps declared executables (the map
+    // was verified against the grant's digest at activation), every runnable
+    // path to those bytes must be shadowed before the workload can run. An
+    // incomplete substitution refuses activation.
+    substitute_declared_tools(tool_commands)?;
     // Before `provision_egress_ca`: the certificate it builds a trust bundle
     // from arrives on the identity drive this copies out.
     provision_flowmux_identity();
@@ -229,7 +262,7 @@ fn provision_workload_identity() {
     }
 }
 
-fn start_vsock_egress() -> Result<(), EgressClientMissing> {
+fn start_vsock_egress() -> Result<(), ProvisioningError> {
     bring_loopback_up();
     if let Err(error) = crate::guest_net::seed_loopback_resolver() {
         // Non-fatal: a read-only image rootfs may have no writable
@@ -246,7 +279,7 @@ fn start_vsock_egress() -> Result<(), EgressClientMissing> {
              /mvm/runtime and no baked fallback — refusing to boot a workload that \
              cannot reach its admitted egress"
         );
-        return Err(EgressClientMissing);
+        return Err(ProvisioningError::EgressClientMissing);
     };
     spawn_one_as(
         &egress_client,
@@ -1073,5 +1106,429 @@ proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
     #[test]
     fn malformed_lines_are_ignored() {
         assert!(!root_is_read_only_in("\n/ ro\ngarbage\n"));
+    }
+}
+
+// ============================================================================
+// Declared-tool substitution (workload-origin mediation)
+// ============================================================================
+
+/// Maximum rootfs paths that may resolve to one declared executable's bytes
+/// before it is treated as a shared multi-call binary (busybox-style) that
+/// cannot be mediated soundly: shadowing every alias would break unrelated
+/// commands, and shadowing only some leaves an unmediated runnable path.
+const MAX_EXECUTABLE_ALIASES: usize = 8;
+
+/// Where the runtime overlay carries the mediation binaries.
+pub const TOOL_SHIM_OVERLAY: &str = "/mvm/runtime/tool-shim";
+pub const TOOL_SPAWN_OVERLAY: &str = "/mvm/runtime/tool-spawn";
+
+/// What activation must install for one declared tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredSubstitution {
+    /// Tool name from the signed mapping.
+    pub tool: String,
+    /// The declared executable path (a signed entry the shim is installed at).
+    pub path: String,
+    /// Every rootfs path that resolves to the same bytes; each gets the shim.
+    pub aliases: Vec<String>,
+    /// File name of the original binary inside the helper's store.
+    pub store: String,
+}
+
+/// Decide what substitution must install. Pure with respect to mounts: it
+/// walks the rootfs and refuses every shape that could leave a runnable,
+/// unmediated path to a declared tool's bytes.
+///
+/// `root` is `/` in the guest and a tempdir in tests; the map is the
+/// signed mapping. Refusals carry a reason an operator can act on.
+pub fn plan_declared_substitution(
+    tool_commands: &std::collections::BTreeMap<String, String>,
+    root: &Path,
+) -> Result<Vec<DeclaredSubstitution>, String> {
+    // The map was digest-checked against the signed grant at activation;
+    // these checks are the guest's own defense against acting on a map the
+    // rest of activation would refuse.
+    let mut seen = std::collections::BTreeSet::new();
+    for (tool, path) in tool_commands {
+        if !mvm_contract::policy::tool_rules::normalized_executable_path(path) {
+            return Err(format!(
+                "the signed executable path for tool {tool} is not a normalized absolute path"
+            ));
+        }
+        if !seen.insert(path.clone()) {
+            return Err(format!(
+                "two tools declare the executable path {path}; the mapping is ambiguous"
+            ));
+        }
+    }
+
+    // One walk for every tool: canonical target -> every rootfs entry path
+    // that resolves to it. Virtual filesystems and the mediation store itself
+    // are not the workload's rootfs and cannot hold an image alias.
+    let mut aliases: std::collections::BTreeMap<PathBuf, Vec<String>> =
+        std::collections::BTreeMap::new();
+    collect_aliases(root, &mut aliases)?;
+
+    let mut plan = Vec::with_capacity(tool_commands.len());
+    for (index, (tool, path)) in tool_commands.iter().enumerate() {
+        let guest_path = Path::new(path);
+        let resolved =
+            fs::canonicalize(root.join(guest_path.strip_prefix("/").unwrap_or(guest_path)))
+                .map_err(|error| {
+                    format!(
+                        "declared executable {path} for tool {tool} is not present in the image: {error}"
+                    )
+                })?;
+        if !resolved.is_file() {
+            return Err(format!(
+                "declared executable {path} for tool {tool} does not resolve to a file"
+            ));
+        }
+        let mut paths = aliases.get(&resolved).cloned().unwrap_or_default();
+        paths.sort();
+        if paths.is_empty() {
+            return Err(format!(
+                "declared executable {path} for tool {tool} has no runnable rootfs path"
+            ));
+        }
+        if paths.len() > MAX_EXECUTABLE_ALIASES {
+            let shown = paths.iter().take(3).cloned().collect::<Vec<_>>().join(", ");
+            return Err(format!(
+                "declared executable {path} for tool {tool} resolves to a shared multi-call-style \
+                 binary with {} entry paths ({shown}, ...); declare a standalone tool binary \
+                 from an image that ships one",
+                paths.len()
+            ));
+        }
+        plan.push(DeclaredSubstitution {
+            tool: tool.clone(),
+            path: path.clone(),
+            aliases: paths,
+            store: format!("tool-{index}"),
+        });
+    }
+    Ok(plan)
+}
+
+/// Walk `root`, mapping every file and symlink's canonical target to the list
+/// of entry paths resolving to it. Unresolvable entries (broken symlinks,
+/// permission edges) cannot run the target binary and are skipped.
+fn collect_aliases(
+    root: &Path,
+    aliases: &mut std::collections::BTreeMap<PathBuf, Vec<String>>,
+) -> Result<(), String> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let entries = fs::read_dir(&dir).map_err(|error| {
+            format!(
+                "cannot scan {} for executable aliases: {error}",
+                dir.display()
+            )
+        })?;
+        for entry in entries {
+            let entry = entry.map_err(|error| format!("cannot read {}: {error}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("cannot stat {}: {error}", path.display()))?;
+            if file_type.is_dir() {
+                // Virtual filesystems and the mediation store are not the
+                // image rootfs; /run is tmpfs and holds only what this boot
+                // created.
+                if matches!(
+                    path.file_name().and_then(|name| name.to_str()),
+                    Some("proc" | "sys" | "dev" | "run")
+                ) && path.parent().is_some_and(|parent| parent == root)
+                {
+                    continue;
+                }
+                pending.push(path);
+                continue;
+            }
+            if !(file_type.is_file() || file_type.is_symlink()) {
+                continue;
+            }
+            let Ok(canonical) = fs::canonicalize(&path) else {
+                continue;
+            };
+            let guest_path = format!(
+                "/{}",
+                path.strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .trim_start_matches('/')
+            );
+            aliases.entry(canonical).or_default().push(guest_path);
+        }
+    }
+    Ok(())
+}
+
+/// Fail-closed declared-tool substitution. With a signed mapping present,
+/// every substitution must succeed or activation is refused; without one,
+/// this is a silent no-op. The map arrived in the activation request and was
+/// verified against the signed grant's digest before provisioning runs.
+pub fn substitute_declared_tools(
+    tool_commands: &std::collections::BTreeMap<String, String>,
+) -> Result<(), ProvisioningError> {
+    if tool_commands.is_empty() {
+        return Ok(());
+    }
+    let plan = plan_declared_substitution(tool_commands, Path::new("/"))
+        .map_err(ProvisioningError::DeclaredToolSubstitution)?;
+    let shim = Path::new(TOOL_SHIM_OVERLAY);
+    if !is_executable(shim) {
+        return Err(ProvisioningError::DeclaredToolSubstitution(format!(
+            "the mediation shim is not available at {TOOL_SHIM_OVERLAY}; a boot that cannot \
+             shadow declared tools must not run the workload"
+        )));
+    }
+    apply_declared_substitution(&plan, Path::new("/"), shim)
+        .map_err(ProvisioningError::DeclaredToolSubstitution)?;
+    start_tool_spawn_helper()?;
+    Ok(())
+}
+
+/// Move the originals aside, write the manifest, and shadow every alias with
+/// the shim. Linux-only: the shadow is a bind mount.
+#[cfg(target_os = "linux")]
+fn apply_declared_substitution(
+    plan: &[DeclaredSubstitution],
+    root: &Path,
+    shim: &Path,
+) -> Result<(), String> {
+    let spawn_dir = Path::new(crate::tool_spawn::SPAWN_DIR);
+    let store_dir = Path::new(crate::tool_spawn::STORE_DIR);
+    for dir in [spawn_dir, store_dir] {
+        fs::create_dir_all(dir).map_err(|error| format!("mkdir {}: {error}", dir.display()))?;
+        chown_path(
+            dir,
+            crate::guest_mount::TOOL_SPAWN_IDENTITY.uid(),
+            crate::guest_mount::TOOL_SPAWN_IDENTITY.gid(),
+        )?;
+        fs::set_permissions(dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .map_err(|error| format!("chmod {}: {error}", dir.display()))?;
+    }
+
+    // Read every original's bytes before any mount shadows them. The
+    // canonical target is the true inode; every alias resolves to it.
+    for substitution in plan {
+        let guest_path = Path::new(&substitution.path);
+        let resolved =
+            fs::canonicalize(root.join(guest_path.strip_prefix("/").unwrap_or(guest_path)))
+                .map_err(|error| format!("resolve {}: {error}", substitution.path))?;
+        let bytes = fs::read(&resolved)
+            .map_err(|error| format!("read original {}: {error}", resolved.display()))?;
+        let store = store_dir.join(&substitution.store);
+        fs::write(&store, bytes)
+            .map_err(|error| format!("write store {}: {error}", store.display()))?;
+        chown_path(
+            &store,
+            crate::guest_mount::TOOL_SPAWN_IDENTITY.uid(),
+            crate::guest_mount::TOOL_SPAWN_IDENTITY.gid(),
+        )?;
+        fs::set_permissions(&store, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .map_err(|error| format!("chmod {}: {error}", store.display()))?;
+    }
+
+    for substitution in plan {
+        for alias in &substitution.aliases {
+            shadow_alias(shim, alias)?;
+        }
+    }
+
+    let manifest = crate::tool_spawn::ToolSpawnManifest {
+        tools: plan
+            .iter()
+            .map(|substitution| crate::tool_spawn::ToolSpawnEntry {
+                tool: substitution.tool.clone(),
+                path: substitution.path.clone(),
+                store: substitution.store.clone(),
+            })
+            .collect(),
+    };
+    let manifest_bytes = serde_json::to_vec(&manifest).map_err(|error| error.to_string())?;
+    fs::write(crate::tool_spawn::MANIFEST_PATH, manifest_bytes)
+        .map_err(|error| format!("write {}: {error}", crate::tool_spawn::MANIFEST_PATH))?;
+    chown_path(
+        Path::new(crate::tool_spawn::MANIFEST_PATH),
+        crate::guest_mount::TOOL_SPAWN_IDENTITY.uid(),
+        crate::guest_mount::TOOL_SPAWN_IDENTITY.gid(),
+    )?;
+    // The helper must read it through its 0700 directory; nothing else needs
+    // to.
+    fs::set_permissions(
+        crate::tool_spawn::MANIFEST_PATH,
+        std::os::unix::fs::PermissionsExt::from_mode(0o600),
+    )
+    .map_err(|error| format!("chmod manifest: {error}"))?;
+    Ok(())
+}
+
+/// One alias becomes the shim: swap a symlink for a plain file (so the bind
+/// mount cannot land on a multi-call sibling), bind the shim over it, and
+/// fall back to an overlay of just the parent directory on a read-only
+/// rootfs. Any failure propagates: activation is refused.
+#[cfg(target_os = "linux")]
+fn shadow_alias(shim: &Path, alias: &str) -> Result<(), String> {
+    replace_symlink_target(Path::new(alias))?;
+    bind_mount_file(&shim.to_string_lossy(), alias).or_else(|first| {
+        overlay_parent_for_write(Path::new(alias))?;
+        bind_mount_file(&shim.to_string_lossy(), alias).map_err(|second| {
+            format!("shadowing {alias} failed ({first}; after overlay: {second})")
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn chown_path(path: &Path, uid: u32, gid: u32) -> Result<(), String> {
+    // SAFETY: `path_c` is NUL-terminated and outlives the call; -1 leaves
+    // the id unchanged.
+    let path_c = cstring_str(&path.to_string_lossy()).ok_or("path contains NUL")?;
+    let rc = unsafe { libc::chown(path_c.as_ptr(), uid, gid) };
+    if rc != 0 {
+        return Err(format!(
+            "chown {}: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+/// Substitution effects are Linux-only (bind mounts); on a host build the
+/// planning logic is still unit-tested, but activation never runs.
+#[cfg(not(target_os = "linux"))]
+fn apply_declared_substitution(
+    _plan: &[DeclaredSubstitution],
+    _root: &Path,
+    _shim: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_tool_spawn_helper() -> Result<(), ProvisioningError> {
+    Ok(())
+}
+
+/// Start the spawn helper as its dedicated identity, before the privilege
+/// drop. A helper that cannot start means every shim fails closed, but the
+/// mapping promised mediation, so refuse the boot instead.
+#[cfg(target_os = "linux")]
+fn start_tool_spawn_helper() -> Result<(), ProvisioningError> {
+    let helper = Path::new(TOOL_SPAWN_OVERLAY);
+    if !is_executable(helper) {
+        return Err(ProvisioningError::DeclaredToolSubstitution(format!(
+            "the spawn helper is not available at {TOOL_SPAWN_OVERLAY}"
+        )));
+    }
+    spawn_one_as(
+        helper,
+        "tool-spawn",
+        crate::guest_mount::TOOL_SPAWN_IDENTITY,
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod substitution_tests {
+    use super::*;
+
+    fn tools(entries: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+        entries
+            .iter()
+            .map(|(tool, path)| (tool.to_string(), path.to_string()))
+            .collect()
+    }
+
+    /// An image root with one standalone binary and its alias symlink.
+    fn image_with_alias() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("image root");
+        std::fs::create_dir_all(root.path().join("usr/local/bin")).expect("bin dir");
+        std::fs::write(root.path().join("usr/local/bin/python3.12"), b"#!bytes")
+            .expect("write tool");
+        std::os::unix::fs::symlink(
+            root.path().join("usr/local/bin/python3.12"),
+            root.path().join("usr/local/bin/python3"),
+        )
+        .expect("alias symlink");
+        root
+    }
+
+    #[test]
+    fn a_standalone_tool_with_aliases_is_fully_shadowed() {
+        let root = image_with_alias();
+        let plan =
+            plan_declared_substitution(&tools(&[("python", "/usr/local/bin/python3")]), root.path())
+                .expect("plan");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(
+            plan[0].aliases,
+            vec![
+                "/usr/local/bin/python3".to_string(),
+                "/usr/local/bin/python3.12".to_string(),
+            ]
+        );
+        assert_eq!(plan[0].store, "tool-0");
+    }
+
+    #[test]
+    fn a_shared_multi_call_binary_is_refused() {
+        let root = tempfile::tempdir().expect("image root");
+        std::fs::create_dir_all(root.path().join("bin")).expect("bin dir");
+        std::fs::write(root.path().join("bin/busybox"), b"busybox").expect("write busybox");
+        for alias in [
+            "sh", "ls", "cat", "echo", "ash", "sed", "awk", "mkdir", "mount",
+        ] {
+            std::os::unix::fs::symlink("../busybox", root.path().join("bin").join(alias))
+                .expect("applet symlink");
+        }
+        let error = plan_declared_substitution(&tools(&[("shell", "/bin/sh")]), root.path())
+            .expect_err("busybox shapes are refused");
+        assert!(error.contains("multi-call"), "{error}");
+    }
+
+    #[test]
+    fn a_missing_declared_executable_is_refused() {
+        let root = tempfile::tempdir().expect("image root");
+        let error = plan_declared_substitution(&tools(&[("git", "/usr/bin/git")]), root.path())
+            .expect_err("absent tool refused");
+        assert!(error.contains("not present"), "{error}");
+    }
+
+    #[test]
+    fn a_duplicate_declared_path_is_refused() {
+        let root = image_with_alias();
+        let error = plan_declared_substitution(
+            &tools(&[("python", "/usr/local/bin/python3"), ("py", "/usr/local/bin/python3")]),
+            root.path(),
+        )
+        .expect_err("ambiguous mapping refused");
+        assert!(error.contains("ambiguous"), "{error}");
+    }
+
+    #[test]
+    fn an_unnormalized_signed_path_is_refused() {
+        let root = tempfile::tempdir().expect("image root");
+        let error = plan_declared_substitution(&tools(&[("bad", "/bin/../bin/sh")]), root.path())
+            .expect_err("unnormalized path refused");
+        assert!(error.contains("normalized"), "{error}");
+    }
+
+    #[test]
+    fn virtual_filesystems_and_run_are_not_scanned() {
+        let root = tempfile::tempdir().expect("image root");
+        std::fs::create_dir_all(root.path().join("proc/1")).expect("proc dir");
+        std::fs::create_dir_all(root.path().join("run/mvm")).expect("run dir");
+        // A decoy that resolves "to" the declared path by name only — it is
+        // a different file and must not be treated as an alias.
+        std::fs::write(root.path().join("run/mvm/decoy"), b"not the tool").expect("decoy");
+        std::fs::create_dir_all(root.path().join("opt")).expect("opt dir");
+        std::fs::write(root.path().join("opt/tool"), b"tool").expect("tool");
+        let plan =
+            plan_declared_substitution(&tools(&[("tool", "/opt/tool")]), root.path()).expect("plan");
+        assert_eq!(plan[0].aliases, vec!["/opt/tool".to_string()]);
     }
 }

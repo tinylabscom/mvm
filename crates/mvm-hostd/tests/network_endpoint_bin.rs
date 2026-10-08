@@ -1270,7 +1270,9 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
     use mvm_contract::protocol::network_flow::attribution::{
         ToolInvocationRelease, encode_open_tcp,
     };
-    use mvm_contract::protocol::network_flow::tool::{ToolCheckRequest, ToolDecisionReply};
+    use mvm_contract::protocol::network_flow::tool::{
+        ToolCheckRequest, ToolDecisionReply, ToolOrigin,
+    };
     use mvm_core::net::session::Session;
     use mvm_hostd::supervisor::network_endpoint::FlowMuxIdentity;
 
@@ -1417,11 +1419,14 @@ fn a_tool_route_is_reachable_only_with_a_live_invocation_binding() {
     let mut ask = UnixStream::connect(&connector).expect("connect to connector");
     write_frame(
         &mut ask,
-        &ToolCheckRequest {
-            tool: "fetch".into(),
-            executable: Some("/bin/fetch".into()),
-            argv: "fetch it".into(),
-        },
+        &serde_json::json!({
+            "question": ToolCheckRequest {
+                tool: "fetch".into(),
+                executable: Some("/bin/fetch".into()),
+                argv: "fetch it".into(),
+            },
+            "origin": ToolOrigin::Host,
+        }),
     );
     let ToolDecisionReply::AllowBound { binding } = read_frame(&mut ask) else {
         panic!("an allowed invocation of a tool with routes is bound");

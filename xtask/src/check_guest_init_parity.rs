@@ -63,6 +63,10 @@ const REQUIRED_STEPS: &[(&str, &str)] = &[
         "the CA the egress substitution presents",
     ),
     ("provision_verb_grant", "the plan-bound verb grant"),
+    (
+        "substitute_declared_tools",
+        "fail-closed shadows for the plan's declared tool executables",
+    ),
     ("netinit", "the guest network defense install"),
     (
         "start_vsock_egress",

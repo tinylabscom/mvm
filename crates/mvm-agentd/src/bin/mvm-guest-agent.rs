@@ -962,6 +962,29 @@ fn main() {
             std::thread::spawn(move || mvm_agentd::tool_attribution::serve(listener));
         }
 
+        // The spawn helper registers its attributed invocations here. Bound
+        // as PID 1 like the query socket, answered only to the helper
+        // identity, and only once activation has dropped privilege.
+        #[cfg(target_os = "linux")]
+        {
+            let registration_listener = init::is_pid1()
+                .then(|| {
+                    mvm_agentd::tool_attribution::bind_registration_listener()
+                        .map_err(|error| {
+                            eprintln!(
+                                "mvm-guest-agent: tool attribution registration unavailable,                                  so helper-started invocations stay unattributed: {error}"
+                            );
+                        })
+                        .ok()
+                })
+                .flatten();
+            if let Some(listener) = registration_listener {
+                std::thread::spawn(move || {
+                    mvm_agentd::tool_attribution::serve_registration(listener)
+                });
+            }
+        }
+
         // Defer integration and probe scans to background threads, but only
         // after PID-1 activation has completed its privilege transition.
         {

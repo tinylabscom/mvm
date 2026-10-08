@@ -44,6 +44,12 @@ pub const WORKLOAD_HOME_REL: &str = "home/mvm-worker";
 /// point — one mvm neither built nor materialized.
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
+/// Linux capability the spawn helper needs to place a tool invocation in the
+/// tool group.
+pub const CAP_SETGID: u32 = mvm_setpriv::CAP_SETGID;
+/// Linux capability the spawn helper needs to run a tool invocation as the
+/// workload uid.
+pub const CAP_SETUID: u32 = mvm_setpriv::CAP_SETUID;
 /// Linux capability used by the authenticated guest agent to signal PID 1.
 pub const CAP_KILL: u32 = mvm_setpriv::CAP_KILL;
 /// Linux capability the egress client needs to serve the loopback DNS stub on
@@ -79,7 +85,7 @@ pub use cgroup2::{
     CGROUP_DELEGATION_DIR, CGROUP2_MOUNT_POINT, Cgroup2Status, DELEGATED_CONTROLLERS,
     mount_and_delegate_cgroup2,
 };
-pub use service_identity::{EGRESS_CLIENT_IDENTITY, ServiceIdentity};
+pub use service_identity::{EGRESS_CLIENT_IDENTITY, ServiceIdentity, TOOL_SPAWN_IDENTITY};
 
 /// Boot-time mount error.  Every failure path is terminal: PID 1 has no
 /// init to fall back to, so the agent logs and exits non-zero.

@@ -93,6 +93,7 @@ impl ToolMediationGrant {
         hasher.update(b"mvm-tool-command-map-v1\0");
         hasher.update(encoded);
         Ok(Some(Sha256Digest::from_bytes(&hasher.finalize().into())))
+
     }
 }
 
@@ -240,6 +241,7 @@ mod tests {
                 "/bin/sh".into(),
             )]))
             .expect("valid map"),
+
         });
         grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
         let json = serde_json::to_string(&grant).expect("serialize mediated grant");

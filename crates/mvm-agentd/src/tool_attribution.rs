@@ -83,6 +83,62 @@ fn live() -> MutexGuard<'static, Vec<LiveInvocation>> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Abstract-namespace name of the helper-registration listener. Distinct
+/// from the egress query socket: a different peer identity speaks here, with
+/// a different (write-only) message shape.
+pub const REGISTRATION_SOCKET_NAME: &[u8] = b"mvm-tool-attribution-register";
+
+/// One write-only registration message from the spawn helper.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum RegistrationMessage {
+    /// The helper started `session` for a bound invocation; attribute its
+    /// flows to `binding` for as long as the session lives.
+    Register {
+        /// The tool leader's pid, which is its session id.
+        session: u32,
+        /// The leader's start time in clock ticks, so a reused pid is never
+        /// mistaken for it.
+        start_ticks: u64,
+        /// The binding the host minted for the invocation.
+        binding: ToolInvocationBinding,
+    },
+    /// The helper's leader exited; its flows belong to no tool from here.
+    Unregister {
+        /// The session to retire.
+        session: u32,
+    },
+}
+
+/// The leader's start time in clock ticks, so a reused pid is never mistaken
+/// for the leader. `None` when the leader already exited.
+#[must_use]
+pub fn process_start_ticks_for(pid: u32) -> Option<u64> {
+    process_start_ticks(pid).ok()
+}
+
+/// Tell the agent a helper-started invocation's session carries `binding`.
+/// Any failure leaves the invocation unattributed, which refuses the scoped
+/// routes — the fail-closed direction.
+pub fn register_invocation(session: u32, start_ticks: u64, binding: &ToolInvocationBinding) {
+    #[cfg(target_os = "linux")]
+    linux::send_registration(&RegistrationMessage::Register {
+        session,
+        start_ticks,
+        binding: binding.clone(),
+    });
+    #[cfg(not(target_os = "linux"))]
+    let _ = (session, start_ticks, binding);
+}
+
+/// Retire an invocation's session once its command finished.
+pub fn unregister_invocation(session: u32) {
+    #[cfg(target_os = "linux")]
+    linux::send_registration(&RegistrationMessage::Unregister { session });
+    #[cfg(not(target_os = "linux"))]
+    let _ = session;
+}
+
 /// Keeps one invocation's session attributed. Dropped when its command has
 /// been waited for, which ends the attribution.
 #[derive(Debug)]
@@ -421,7 +477,7 @@ mod linux {
     use std::time::Duration;
 
     use super::*;
-    use crate::guest_mount::EGRESS_CLIENT_IDENTITY;
+    use crate::guest_mount::{EGRESS_CLIENT_IDENTITY, TOOL_SPAWN_IDENTITY};
 
     /// How long either side waits on the other before answering "no binding".
     const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -455,6 +511,71 @@ mod linux {
 
     fn address() -> io::Result<UnixAddr> {
         UnixAddr::from_abstract_name(ATTRIBUTION_SOCKET_NAME)
+    }
+
+    pub(super) fn send_registration(message: &RegistrationMessage) {
+        let Ok(address) = registration_address() else {
+            return;
+        };
+        let _ = address;
+        let Ok(mut stream) = UnixStream::connect_addr(&address) else {
+            return;
+        };
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        if let Err(error) = write_line(&mut stream, message) {
+            eprintln!("mvm-tool-spawn: attribution registration failed: {error}");
+        }
+    }
+
+    fn registration_address() -> io::Result<UnixAddr> {
+        UnixAddr::from_abstract_name(REGISTRATION_SOCKET_NAME)
+    }
+
+    /// Bind the helper-registration listener. Called by PID 1 before any
+    /// workload runs, like [`bind_listener`].
+    pub fn bind_registration_listener() -> io::Result<UnixListener> {
+        UnixListener::bind_addr(&registration_address()?)
+    }
+
+    /// Serve registration writes for the life of the agent. Only the spawn
+    /// helper's identity is accepted; anything else is dropped unread.
+    pub fn serve_registration(listener: UnixListener) {
+        for stream in listener.incoming() {
+            let Ok(stream) = stream else {
+                continue;
+            };
+            serve_registration_connection(stream);
+        }
+    }
+
+    fn serve_registration_connection(mut stream: UnixStream) {
+        if !peer_credentials(&stream).is_ok_and(|cred| {
+            cred.uid == TOOL_SPAWN_IDENTITY.uid() && cred.gid == TOOL_SPAWN_IDENTITY.gid()
+        }) {
+            return;
+        }
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let Ok(message) = read_line::<RegistrationMessage>(&mut stream) else {
+            return;
+        };
+        match message {
+            RegistrationMessage::Register {
+                session,
+                start_ticks,
+                binding,
+            } => {
+                live().retain(|entry| entry.session != session);
+                live().push(LiveInvocation {
+                    session,
+                    start_ticks,
+                    binding,
+                });
+            }
+            RegistrationMessage::Unregister { session } => {
+                live().retain(|entry| entry.session != session);
+            }
+        }
     }
 
     /// Bind the attribution listener. Called by PID 1 before any workload
@@ -510,7 +631,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::{bind_listener, query, serve};
+pub use linux::{bind_listener, bind_registration_listener, query, serve, serve_registration};
 
 #[cfg(test)]
 mod tests {

@@ -14,6 +14,7 @@ struct SiblingPair {
 }
 
 const EXCEPTIONS: &[(&str, &str, &str, &str)] = &[];
+
 const EXPECTED_UNEXPLAINED_PAIRS: usize = 0;
 
 pub fn run(workspace: &Path) -> Result<()> {

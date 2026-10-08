@@ -1090,6 +1090,8 @@ mod tests {
                 "mvm-ping",
                 "mvm-oci-entrypoint",
                 "mvm-setpriv",
+                "mvm-tool-shim",
+                "mvm-tool-spawn",
             ]
             .iter()
             .map(|name| format!("{arch}/bin/{name}"))

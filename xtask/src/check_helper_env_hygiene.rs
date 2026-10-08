@@ -190,6 +190,12 @@ const RAW_SITES: &[RawSite] = &[
         "the OCI image entrypoint, exec'd inside the guest",
     ),
     guest(
+        "crates/mvm-agentd/src/tool_spawn.rs",
+        "spawn_store",
+        "Command::new(&store_path)",
+        "a declared tool's original binary, spawned inside the guest by the mediation helper",
+    ),
+    guest(
         "crates/mvm-agentd/src/bin/mvm-runner.rs",
         "dispatch",
         "Command::new(config.language.interpreter())",

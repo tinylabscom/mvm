@@ -65,3 +65,18 @@ impl ServiceIdentity {
 /// reserve the same number.
 pub const EGRESS_CLIENT_IDENTITY: ServiceIdentity =
     ServiceIdentity::new(989, 989, 1u32 << super::CAP_NET_BIND_SERVICE);
+/// Identity of the declared-tool spawn helper.
+///
+/// The helper is the only process that can read the original tool binaries
+/// (moved aside into its mode-0700 store at activation), and it rewrites a
+/// tool invocation's identity before exec: workload uid, tool group, new
+/// session, empty capability sets. It therefore holds exactly the three
+/// capabilities that transition needs — `CAP_SETUID`, `CAP_SETGID`, and
+/// `CAP_SETPCAP` for the bounding-set drop — and nothing else. It does not
+/// hold the FlowMux key; host decisions travel through the broker service
+/// the admitted plan binds, not through the egress identity.
+pub const TOOL_SPAWN_IDENTITY: ServiceIdentity = ServiceIdentity::new(
+    986,
+    986,
+    (1u32 << super::CAP_SETUID) | (1u32 << super::CAP_SETGID) | (1u32 << super::CAP_SETPCAP),
+);

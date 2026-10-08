@@ -1,9 +1,12 @@
 [overrides.tools]
-allow = ["shell"]
+allow = ["python"]
 
-[overrides.tools.detail.shell]
-executable = "/bin/sh"
-argv = ["/bin/sh -c *"]
+[overrides.tools.detail.python]
+# python:3.12 ships python3 as a standalone binary, so activation can shadow
+# every runnable path to it. A busybox applet (alpine /bin/sh) is refused:
+# a shared multi-call binary cannot be fully shadowed.
+executable = "/usr/local/bin/python3"
+argv = ["python3", "python3 -c *"]
 # A declared route makes every allowed invocation bound, so the live lane
 # exercises the guest starting the command in its own attributed session.
 routes = ["example.com:443"]

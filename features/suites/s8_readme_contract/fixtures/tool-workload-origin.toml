@@ -1,0 +1,8 @@
+[overrides.tools]
+allow = ["python"]
+
+[overrides.tools.detail.python]
+executable = "/usr/local/bin/python3"
+# Only -c invocations are admitted; the scenario's refusal case runs the
+# tool with argv outside these patterns.
+argv = ["python3 -c *"]

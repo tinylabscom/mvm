@@ -301,6 +301,10 @@ const _: () = {
 
 #[cfg(target_os = "linux")]
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+/// `CAP_SETGID` in `linux/capability.h`.
+pub const CAP_SETGID: u32 = 6;
+/// `CAP_SETUID` in `linux/capability.h`.
+pub const CAP_SETUID: u32 = 7;
 /// `CAP_KILL` in `linux/capability.h`.
 pub const CAP_KILL: u32 = 5;
 /// `CAP_NET_BIND_SERVICE` in `linux/capability.h`.

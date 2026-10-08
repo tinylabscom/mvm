@@ -152,6 +152,7 @@ async fn start_tenant(id: &str) -> TenantHandle {
     let daemon_pid_path = config::host_agent_dir(id).join("daemon.pid");
 
     let reg = RegisterVm {
+        tool_decision_socket: None,
         vm_id: vm.clone(),
         workload_id: Some(format!("wl-{vm}")),
         tenant_id: id.to_string(),

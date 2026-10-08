@@ -179,7 +179,7 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 // stale staged content.
 const LOCAL_BUILD_EPOCH: &str = "5";
 
-const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
+const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 11] = [
     ("mvm-guest-agent", "agent"),
     ("mvm-guest-netinit", "netinit"),
     ("mvm-ping", "ping"),
@@ -189,6 +189,8 @@ const GUEST_RUNTIME_OVERLAY_BINARIES: [(&str, &str); 9] = [
     ("mvm-egress-client", "egress-client"),
     ("mvm-addon-dns", "addon-dns"),
     ("mvm-exit-report", "exit-report"),
+    ("mvm-tool-shim", "tool-shim"),
+    ("mvm-tool-spawn", "tool-spawn"),
 ];
 const GPU_SHIM_SONAMES: [&str; 3] = ["libcuda.so.1", "libcudart.so", "libnvidia-ml.so.1"];
 
@@ -291,6 +293,8 @@ pub fn build_runtime_overlay_from_guest_binaries(
         (&bins.egress_client, root.join("egress-client")),
         (&bins.addon_dns, root.join("addon-dns")),
         (&bins.exit_report, root.join("exit-report")),
+        (&bins.tool_shim, root.join("tool-shim")),
+        (&bins.tool_spawn, root.join("tool-spawn")),
     ];
     par_map(binaries.to_vec(), |(src, dst)| {
         stage_runtime_overlay_binary(src, &dst)
@@ -2432,6 +2436,8 @@ mod tests {
             egress_client: make_bin("egress-client"),
             addon_dns: make_bin("addon-dns"),
             exit_report: make_bin("exit-report"),
+            tool_shim: make_bin("tool-shim"),
+            tool_spawn: make_bin("tool-spawn"),
         };
 
         let artifact = build_runtime_overlay_from_guest_binaries(

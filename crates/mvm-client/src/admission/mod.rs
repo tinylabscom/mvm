@@ -66,6 +66,27 @@ pub enum AssetSpec {
 
 pub const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
 
+/// Add the tool-decision service binding when the plan declares tools.
+///
+/// Keeps caller order and deduplicates: a caller that already bound
+/// `host.tool.v1` does not get a duplicate entry.
+fn services_with_tool_decision(
+    mut services: Vec<mvm_contract::protocol::broker::ServiceId>,
+    tools: &mvm_contract::policy::tool_rules::ToolRules,
+) -> Vec<mvm_contract::protocol::broker::ServiceId> {
+    if tools.is_empty() {
+        return services;
+    }
+    let tool_decision = mvm_contract::protocol::broker::ServiceId::parse(
+        mvm_contract::protocol::host_tool::HOST_TOOL_SERVICE,
+    )
+    .expect("host.tool.v1 is a valid ServiceId");
+    if !services.contains(&tool_decision) {
+        services.push(tool_decision);
+    }
+    services
+}
+
 pub struct AdmitPlanForBootParams<'a> {
     pub tenant: &'a str,
     pub vm_name: &'a str,
@@ -177,6 +198,7 @@ pub struct AdmitPlanForBootParams<'a> {
     /// template default, or deny-all default). Non-deny
     /// policies are lowered into a generated PolicyBundle and referenced by the
     /// signed plan so the bridge never relies on an unsigned bare carrier to
+
     /// authorize outbound traffic.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
@@ -694,7 +716,13 @@ pub fn admit_plan_for_boot_configured_ingress(
                 mvm_contract::stream::input::grants_input_for(&p.services),
             )
         }),
-        services: p.services.clone(),
+        // Tool rules need a guest-origin decision channel: the in-guest spawn
+        // helper asks `host.tool.v1` over the broker, and the broker refuses
+        // any service the signed plan does not bind. Injecting the binding
+        // here (before signing) means an authored `[tools]` section always
+        // carries its enforcement channel; an author cannot forget it, and
+        // dropping it while tools remain is not expressible.
+        services: services_with_tool_decision(p.services.clone(), &p.tools),
         extensions: Vec::new(),
         // Recorded, always, and not reachable from a flag. A caller who could
         // turn the transcript off from the command line would leave an absent

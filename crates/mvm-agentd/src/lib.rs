@@ -133,6 +133,12 @@ pub mod stream_pump;
 /// substitution endpoint over vsock (the relay half of the guest-local forward
 /// proxy).
 pub mod substitution_client;
+/// Workload-origin declared-tool mediation: the `mvm-tool-shim` /
+/// `mvm-tool-spawn` pair and the protocol between them. Linux-only: it
+/// passes fds and peers over abstract sockets and rewrites identity in
+/// `pre_exec`.
+#[cfg(target_os = "linux")]
+pub mod tool_spawn;
 
 /// Guest telemetry capture core: process-wide epoch/sequence identity, one
 /// non-waiting bounded emission path into the shared telemetry outbox, and a
@@ -146,6 +152,8 @@ pub mod telemetry_service;
 /// Attributes loopback egress connections to a host-admitted tool invocation.
 /// Linux only: it reads `/proc`, and no egress client runs anywhere else.
 #[cfg(any(target_os = "linux", test))]
+/// Workload-origin declared-tool mediation: the `mvm-tool-shim` /
+/// `mvm-tool-spawn` pair and the protocol between them. Linux-only: it
 pub mod tool_attribution;
 pub mod volume;
 pub mod vsock;

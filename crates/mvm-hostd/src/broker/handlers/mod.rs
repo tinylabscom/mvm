@@ -8,6 +8,7 @@ pub mod host_audit_v1;
 pub mod host_beacon_v1;
 pub mod host_kv_v1;
 pub mod host_time_v1;
+pub mod host_tool_v1;
 
 use std::sync::Arc;
 

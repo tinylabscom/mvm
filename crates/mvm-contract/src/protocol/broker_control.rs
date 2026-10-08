@@ -147,6 +147,14 @@ pub struct RegisterVm {
     /// disables `host.audit.v1` for this VM (the handler returns `NotBound`).
     #[serde(default)]
     pub audit_signer_uds_path: Option<String>,
+    /// The per-VM network endpoint connector socket. When set (and the plan
+    /// binds `host.tool.v1`), the daemon registers the guest-origin
+    /// tool-decision handler forwarding `decide`/`release` calls here.
+    /// Callers predating the field omit it and get no tool service.
+    /// Skip-serialized when absent so registrations from before the field
+    /// keep their signed canonical bytes byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_decision_socket: Option<String>,
     /// The services the admitted plan authorizes for this VM (claim 12). The
     /// daemon dispatch-gates every call on this set. `host.audit.v1` is
     /// implicitly available and need not be listed.
@@ -269,6 +277,7 @@ mod tests {
             workload_chain_path: "/audit/local.vm-1.workload.jsonl".into(),
             workload_chain_head_path: Some("/run/state/vm-1/audit-signer.head".into()),
             audit_signer_uds_path: Some("/run/state/vm-1/audit-signer.sock".into()),
+            tool_decision_socket: None,
             services_bindings: vec![ServiceId::parse("host.time.v1").unwrap()],
             capability_bindings: vec![],
             assurance: None,

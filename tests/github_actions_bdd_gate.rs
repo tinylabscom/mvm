@@ -198,8 +198,8 @@ fn tool_live_witness_checks_mediation_after_restart_and_audit_chain() {
         )
     );
     for command in [
-        "machine create bdd-tool-command --image alpine --policy",
-        "machine exec bdd-tool-command --tool shell",
+        "machine create bdd-tool-command --image python:3.12 --policy",
+        "machine exec bdd-tool-command --tool python",
         "machine restart bdd-tool-command",
         "machine exec bdd-tool-command --tool unlisted",
         "trust audit tail --chain",
@@ -208,6 +208,18 @@ fn tool_live_witness_checks_mediation_after_restart_and_audit_chain() {
         assert!(
             feature.contains(command),
             "the live tool witness must execute {command:?}"
+        );
+    }
+    // The workload-origin half: a command the workload spawns itself must be
+    // mediated before it runs, with its guest-origin decision in the chain.
+    for command in [
+        "machine run --image python:3.12 --policy",
+        "a command the workload starts itself is mediated before it runs",
+        "guest_broker",
+    ] {
+        assert!(
+            feature.contains(command),
+            "the live tool witness must cover workload-origin mediation: {command:?}"
         );
     }
 }

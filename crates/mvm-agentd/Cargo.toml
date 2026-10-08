@@ -83,6 +83,18 @@ path = "src/bin/mvm-ping.rs"
 [[bin]]
 name = "mvm-exit-report"
 path = "src/bin/mvm-exit-report.rs"
+# In-guest declared-tool mediation pair: the workload-facing shadow
+# (`mvm-tool-shim`, installed at each signed declared executable path) and
+# the privileged spawn helper (`mvm-tool-spawn`) that asks the host before
+# executing the original from its protected store. Linux-only.
+[[bin]]
+name = "mvm-tool-shim"
+path = "src/bin/mvm-tool-shim.rs"
+
+[[bin]]
+name = "mvm-tool-spawn"
+path = "src/bin/mvm-tool-spawn.rs"
+
 
 # Test-only probe used by `tests/seccomp_apply.rs` to verify that
 # tier allowlists actually deny what they claim. Not

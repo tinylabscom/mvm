@@ -346,6 +346,18 @@ anchor = "MEDIATED_TOOLS"
 activation = "mediated"
 
 [[launch_edge]]
+producer = "mvm-agentd/mvm-tool-shim"
+launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
+anchor = "TOOL_SHIM_OVERLAY"
+activation = "mediated"
+
+[[launch_edge]]
+producer = "mvm-agentd/mvm-tool-spawn"
+launcher = "crates/mvm-agentd/src/guest_bootstrap.rs"
+anchor = "TOOL_SPAWN_OVERLAY"
+activation = "mediated"
+
+[[launch_edge]]
 producer = "mvm-agentd/mvm-builder-agent"
 launcher = "crates/mvm-agentd/Cargo.toml"
 anchor = "mvm-builder-agent"

@@ -407,7 +407,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           ]
         },
         "tools": {
-          "description": "Per-tool privileges. Command decisions are enforced; endpoint scope is pending.",
+          "description": "Per-tool privileges. Command decisions and endpoint scope are enforced.",
           "allOf": [
             {
               "$ref": "#/definitions/ToolsSection"
@@ -657,7 +657,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
           }
         },
         "executable": {
-          "description": "Exact absolute executable path in the guest for declared-command mediation. A command with no path is refused, while an MCP-only tool may omit it. Composition cannot redirect a previously named path.",
+          "description": "Exact absolute executable path in the guest for declared-command mediation. A command with no path is refused, while an MCP-only tool may omit it. Composition cannot redirect a previously named path. Activation shadows this path (and every image path resolving to the same bytes) with an in-guest shim, refusing to boot when the shadow cannot be made complete; shared multi-call binaries such as busybox applets are refused rather than half-shadowed.",
           "type": [
             "string",
             "null"
@@ -681,7 +681,7 @@ cargo run -p mvm-client --features schema --bin emit_policy_schema > schema/poli
       "additionalProperties": false
     },
     "ToolsSection": {
-      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls (the MCP tool-call gate and declared `machine exec --tool` invocations); declared commands also require the exact signed `executable` path and enforce `argv`. A tool's `routes` and `secrets` are enforced at the per-VM endpoint against flows attributed to an admitted invocation of that tool.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union. The first executable path cannot be changed or added after a detail is defined.",
+      "description": "`[tools]` — per-tool privileges. Whole-tool `allow` / `ask` / `deny` decisions are enforced at the seams the host controls: the MCP tool-call gate, declared `machine exec --tool` invocations, and — for tools with an exact signed `executable` path — commands the workload starts itself, which an in-guest shim intercepts and the host decides before spawn. Declared commands enforce the signed `executable` path and `argv`. A tool's `routes` and `secrets` are enforced at the per-VM endpoint against flows attributed to an admitted invocation of that tool.\n\nComposition only narrows. Whole-tool lists union (`deny` beats `ask` beats `allow`); per-tool detail is first-defined-then-narrowed: a later layer may repeat or restrict the `argv`, `routes` and `secrets` an earlier layer set for a tool, never extend them, and `deny` argv patterns union. The first executable path cannot be changed or added after a detail is defined.",
       "type": "object",
       "properties": {
         "allow": {

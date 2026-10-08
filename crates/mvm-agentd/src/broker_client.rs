@@ -24,6 +24,7 @@
 //! substitution relay and the host-side broker proxy.
 
 use std::os::unix::net::UnixStream;
+use std::time::Duration;
 
 use mvm_contract::protocol::agent_capability::{CapabilityBinding, CapabilityInvocation};
 use mvm_contract::protocol::agent_session::AgentRequestId;
@@ -74,6 +75,26 @@ pub fn broker_call(
     timeout_secs: u64,
 ) -> Result<serde_json::Value, BrokerError> {
     let mut stream = connect_host_vsock(BROKER_PORT, timeout_secs)?;
+    call(&mut stream, request)
+}
+
+/// [`broker_call`] with explicit socket I/O deadlines in addition to the
+/// connect deadline. Callers whose host leg can wait on an operator
+/// decision (the tool-decision service holds an approval window) use this
+/// so a slow answer fails as a timeout rather than hanging forever.
+pub fn broker_call_bounded(
+    request: &ServiceCall,
+    connect_timeout: Duration,
+    io_timeout: Duration,
+) -> Result<serde_json::Value, BrokerError> {
+    let mut stream = connect_host_vsock(BROKER_PORT, connect_timeout.as_secs())
+        .map_err(BrokerError::Transport)?;
+    stream
+        .set_read_timeout(Some(io_timeout))
+        .map_err(|error| BrokerError::Transport(anyhow::Error::from(error)))?;
+    stream
+        .set_write_timeout(Some(io_timeout))
+        .map_err(|error| BrokerError::Transport(anyhow::Error::from(error)))?;
     call(&mut stream, request)
 }
 

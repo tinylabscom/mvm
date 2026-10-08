@@ -148,7 +148,7 @@ pub(crate) fn apply_activation(
     // tools, egress CA, verb grant, netinit, loopback + resolver, egress client.
     // It has to land after the pivot (it writes into the workload's root) and
     // before the privilege drop (mounts and interface changes need root).
-    bootstrap_guest_environment()?;
+    bootstrap_guest_environment(&env.tool_commands)?;
     let validated_extensions = mvm_agentd::extension::validate_extensions(
         &env.extensions,
         std::path::Path::new("/run/mvm/extension-markers"),
@@ -203,19 +203,20 @@ fn fatal(message: &str) -> ! {
 
 /// Run the post-mount setup shared with the legacy per-rootfs init.
 #[cfg(target_os = "linux")]
-fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
-    mvm_agentd::guest_bootstrap::provision_guest_environment().map_err(|_| {
-        guest_mount::MountError::GuestBootstrap(
-            "egress was required but no egress client resolved".to_string(),
-        )
-    })
+fn bootstrap_guest_environment(
+    tool_commands: &std::collections::BTreeMap<String, String>,
+) -> Result<(), guest_mount::MountError> {
+    mvm_agentd::guest_bootstrap::provision_guest_environment(tool_commands)
+        .map_err(|error| guest_mount::MountError::GuestBootstrap(error.to_string()))
 }
 
 /// The agent is PID 1 only inside a Linux guest, so there is nothing to set up
 /// on a host build. Spelled out rather than left as a `cfg`-erased call site so
 /// the Linux path cannot quietly disappear.
 #[cfg(not(target_os = "linux"))]
-fn bootstrap_guest_environment() -> Result<(), guest_mount::MountError> {
+fn bootstrap_guest_environment(
+    _tool_commands: &std::collections::BTreeMap<String, String>,
+) -> Result<(), guest_mount::MountError> {
     Ok(())
 }
 
