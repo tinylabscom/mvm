@@ -1,11 +1,105 @@
 //! A fresh, privately owned OCI materialization and its content bindings.
 
-use super::{TreeMaterializeOptions, backend_err, materialize_tree, pull_image_to_dir};
+use super::{
+    TreeMaterializeOptions, UnpackedLayers, backend_err, materialize_tree, unpack_one_layer,
+};
 use mvm_build::oci_runtime_inject::MvmRuntimeBinaries;
 use mvm_core::arch::GuestArch;
 use mvm_core::client::Result;
-use mvm_fs::oci::{FetchedManifest, ImageReference};
+use mvm_fs::oci::{
+    FetchedManifest, ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher,
+    OciManifestFetcher, current_linux_platform,
+};
 use std::path::{Path, PathBuf};
+
+pub(super) struct PulledImage {
+    pub(super) layers: UnpackedLayers,
+    pub(super) config: mvm_build::oci_runtime_inject::ImageRuntimeConfig,
+    digest: String,
+    canonical_reference: String,
+}
+
+// Config is small JSON metadata, not a filesystem layer. Match the manifest
+// reader's 4 MiB ceiling without granting it the layer fetcher's 2 GiB budget.
+const MAX_OCI_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Pull a public OCI registry reference and unpack every layer into `dest`,
+/// reusing mvm-oci's fetch + hardened unpacker (gzip is decoded here, at the
+/// crate boundary, keeping mvm-oci decompressor-free by design).
+pub(super) async fn pull_image_to_dir(
+    image_ref: &ImageReference,
+    dest: &Path,
+) -> Result<PulledImage> {
+    let manifest_fetcher = OciManifestFetcher::new();
+    pull_image_to_dir_with_fetcher(image_ref, dest, &manifest_fetcher).await
+}
+
+async fn pull_image_to_dir_with_fetcher(
+    image_ref: &ImageReference,
+    dest: &Path,
+    manifest_fetcher: &OciManifestFetcher,
+) -> Result<PulledImage> {
+    let reference = image_ref.canonical();
+    let manifest = manifest_fetcher
+        .fetch_linux_platform_manifest(image_ref, &current_linux_platform())
+        .await
+        .map_err(|e| backend_err(format!("fetch manifest for {reference}: {e}")))?;
+    let layers = manifest
+        .layers()
+        .map_err(|e| backend_err(format!("parse layers for {reference}: {e}")))?;
+    if layers.is_empty() {
+        return Err(backend_err(format!("OCI image {reference} has no layers")));
+    }
+    let layer_fetcher =
+        OciLayerFetcher::from_manifest_fetcher(manifest_fetcher, LayerFetchOptions::default());
+    let canonical_reference = digest_reference(image_ref, &manifest)?;
+    let image: mvm_contract::oci::manifest_types::ImageManifest =
+        serde_json::from_slice(&manifest.bytes).map_err(backend_err)?;
+    let config_descriptor = LayerDescriptor {
+        digest: image.config.digest,
+        size: u64::try_from(image.config.size).map_err(backend_err)?,
+        media_type: image.config.media_type,
+    };
+    let config_fetcher = OciLayerFetcher::from_manifest_fetcher(
+        manifest_fetcher,
+        LayerFetchOptions::builder()
+            .max_size(MAX_OCI_CONFIG_BYTES)
+            .build(),
+    );
+    let mut config_bytes = Vec::new();
+    config_fetcher
+        .fetch_layer(image_ref, &config_descriptor, &mut config_bytes)
+        .await
+        .map_err(|e| backend_err(format!("fetch OCI config: {e}")))?;
+    let config = mvm_fs::oci::config::OciImageConfig::parse(&config_bytes).map_err(backend_err)?;
+    config
+        .validate_platform(&current_linux_platform())
+        .map_err(backend_err)?;
+    let config = mvm_build::oci_runtime_inject::ImageRuntimeConfig {
+        argv: config.argv,
+        env: config.env,
+        working_dir: config.working_dir,
+    };
+    let mut prior_layer_paths = std::collections::HashSet::new();
+    let mut unpacked = UnpackedLayers::default();
+    for layer in &layers {
+        let mut bytes = Vec::new();
+        layer_fetcher
+            .fetch_layer(image_ref, layer, &mut bytes)
+            .await
+            .map_err(|e| backend_err(format!("fetch layer {}: {e}", layer.digest)))?;
+        let report = unpack_one_layer(layer, &bytes, dest, &prior_layer_paths)?;
+        unpacked.owners.absorb(&report.ownership);
+        prior_layer_paths.extend(report.paths_written);
+        unpacked.deferred_nodes.extend(report.deferred_nodes);
+    }
+    Ok(PulledImage {
+        layers: unpacked,
+        config,
+        digest: manifest.digest,
+        canonical_reference,
+    })
+}
 
 /// Keeps the output directory alive through bundle export. There is no public
 /// constructor or deserializer: metadata can only come from verified acquisition.
@@ -226,6 +320,117 @@ mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
 
+    fn config_registry(
+        config: &[u8],
+        declared_size: u64,
+    ) -> (
+        mvm_fs::oci::test_registry::MemoryRegistry,
+        ImageReference,
+        OciManifestFetcher,
+        String,
+    ) {
+        use mvm_fs::oci::{ClientConfig, ClientProtocol, RegistryAuthConfig};
+        let registry = mvm_fs::oci::test_registry::MemoryRegistry::start();
+        let digest = registry.insert_blob(config);
+        let layer = tar::Builder::new(Vec::new()).into_inner().unwrap();
+        let layer_digest = registry.insert_blob(&layer);
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": digest, "size": declared_size
+            },
+            "layers": [{
+                "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                "digest": layer_digest, "size": layer.len()
+            }]
+        });
+        registry.insert_manifest(
+            "test/image",
+            "latest",
+            "application/vnd.oci.image.manifest.v1+json",
+            &serde_json::to_vec(&manifest).unwrap(),
+        );
+        let reference = format!("{}/test/image:latest", registry.host())
+            .parse()
+            .unwrap();
+        let fetcher = OciManifestFetcher::with_config_and_auth(
+            ClientConfig {
+                protocol: ClientProtocol::Http,
+            },
+            RegistryAuthConfig::Anonymous,
+        );
+        (registry, reference, fetcher, digest)
+    }
+
+    #[tokio::test]
+    async fn oci_config_descriptor_over_cap_never_requests_body() {
+        let (registry, reference, fetcher, digest) =
+            config_registry(b"{}", MAX_OCI_CONFIG_BYTES + 1);
+        let dest = tempfile::tempdir().unwrap();
+        let error = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .err()
+            .expect("descriptor must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert!(
+            !registry
+                .requests()
+                .iter()
+                .any(|request| request.path.ends_with(&digest))
+        );
+    }
+
+    #[tokio::test]
+    async fn oci_config_lying_small_descriptor_cannot_exceed_stream_cap() {
+        let bytes = vec![b' '; MAX_OCI_CONFIG_BYTES as usize + 1];
+        let (registry, reference, fetcher, digest) = config_registry(&bytes, 1);
+        let dest = tempfile::tempdir().unwrap();
+        let error = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .err()
+            .expect("body must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert!(
+            registry
+                .requests()
+                .iter()
+                .any(|request| request.path.ends_with(&digest))
+        );
+        assert_eq!(std::fs::read_dir(dest.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn oci_config_digest_platform_and_runtime_metadata_are_verified() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "os": "linux", "architecture": current_linux_platform().architecture,
+            "config": { "Entrypoint": ["/app"], "Cmd": ["serve"], "Env": ["A=B"], "WorkingDir": "/work" }
+        })).unwrap();
+        let (registry, reference, fetcher, digest) = config_registry(&bytes, bytes.len() as u64);
+        let dest = tempfile::tempdir().unwrap();
+        let image = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(image.config.argv, ["/app", "serve"]);
+        assert_eq!(image.config.env, ["A=B"]);
+        assert_eq!(image.config.working_dir.as_deref(), Some("/work"));
+        registry.serve_blob_as(&digest, b"tampered");
+        assert!(
+            pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+                .await
+                .is_err()
+        );
+
+        let wrong = br#"{"os":"windows","architecture":"wrong"}"#;
+        let (_registry, reference, fetcher, _) = config_registry(wrong, wrong.len() as u64);
+        let error = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .err()
+            .expect("wrong platform must fail");
+        assert!(error.to_string().contains("platform"), "{error}");
+    }
+
     #[test]
     fn selected_manifest_identity_is_content_bound_and_drops_mutable_tag() {
         let reference: ImageReference = "alpine:latest".parse().unwrap();
@@ -296,10 +501,9 @@ mod tests {
             protocol: ClientProtocol::Http,
         });
         let output = tempfile::tempdir().unwrap();
-        let pulled =
-            super::super::pull_image_to_dir_with_fetcher(&reference, output.path(), &fetcher)
-                .await
-                .unwrap();
+        let pulled = pull_image_to_dir_with_fetcher(&reference, output.path(), &fetcher)
+            .await
+            .unwrap();
         assert_eq!(pulled.config.argv, ["/app", "--serve"]);
         assert_eq!(pulled.config.env, ["A=B"]);
         assert_eq!(
@@ -308,7 +512,7 @@ mod tests {
         );
         registry.serve_blob_as(&config_digest, b"tampered config");
         assert!(
-            super::super::pull_image_to_dir_with_fetcher(&reference, output.path(), &fetcher)
+            pull_image_to_dir_with_fetcher(&reference, output.path(), &fetcher)
                 .await
                 .is_err()
         );
@@ -324,11 +528,10 @@ mod tests {
             "application/vnd.oci.image.manifest.v1+json",
             &serde_json::to_vec(&wrong_manifest).unwrap(),
         );
-        let error =
-            super::super::pull_image_to_dir_with_fetcher(&reference, output.path(), &fetcher)
-                .await
-                .err()
-                .unwrap();
+        let error = pull_image_to_dir_with_fetcher(&reference, output.path(), &fetcher)
+            .await
+            .err()
+            .unwrap();
         assert!(error.to_string().contains("config platform"));
     }
 

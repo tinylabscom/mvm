@@ -147,9 +147,9 @@ for family, address in [
             try:
                 s.connect(address)
             except OSError as e:
-                if e.errno not in (errno.ENETUNREACH, errno.EHOSTUNREACH,
+                if e.errno not in (errno.ENETUNREACH, errno.EHOSTUNREACH, errno.EADDRNOTAVAIL,
                                    errno.EPERM, errno.EACCES):
-                    raise SystemExit("not isolation evidence: " + str(e))
+                    raise SystemExit(f"not isolation evidence for {family}/{kind}/{address}: {e}")
             else:
                 raise SystemExit("IP was permitted")
 a, b = socket.socketpair(socket.AF_UNIX)
@@ -591,6 +591,8 @@ class HelperTests(unittest.TestCase):
             return fake_socket
 
         sockets = run_probe()
+        self.assertEqual(sockets.socket.return_value.connect.call_count, 8)
+        sockets = run_probe(connect_errno=errno.EADDRNOTAVAIL)
         self.assertEqual(sockets.socket.return_value.connect.call_count, 8)
         for empty_table in ("", "\n", "Iface\tDestination\tGateway\tFlags\n\n"):
             sockets = run_probe(route_text=empty_table)

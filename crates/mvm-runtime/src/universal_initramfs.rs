@@ -281,7 +281,9 @@ mod tests {
 
     #[test]
     fn bundle_initrd_is_preserved_and_tampering_never_falls_back() {
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(tmp.path());
         let image = tmp.path().join("bundle-initrd");
         std::fs::write(&image, b"signed initrd").unwrap();
         let mut config = VmStartConfig {
