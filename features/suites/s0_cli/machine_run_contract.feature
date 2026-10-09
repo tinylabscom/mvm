@@ -10,12 +10,25 @@ Feature: machine run request contract
   default, so a change can break every guest boot with a green suite. What can be
   decided without a VM is decided here instead.
 
+  # A transient run infers its image from the command or the working directory,
+  # and this suite runs inside a Rust crate. `--no-detect` keeps the answer a
+  # function of the request alone.
   Scenario: machine run without a source names every way to give it one
-    When I run mvmctl with "machine run" and an isolated mvm home
+    When I run mvmctl with "machine run --no-detect" and an isolated mvm home
     Then the command exits with code 1
     And the error output contains "--image"
     And the error output contains "--manifest"
     And the error output contains "--flake"
+
+  # A machine that outlives the command never takes its image from the working
+  # directory, even inside a project that would select one for a transient run.
+  Scenario: a persistent machine run is never given an inferred image
+    When I run mvmctl with "machine run -d" and an isolated mvm home
+    Then the command exits with code 1
+    And the error output contains "--image"
+    And the error output contains "--manifest"
+    And the error output contains "--flake"
+    And the error output does not contain "detected"
 
   Scenario: machine run without a command names the three ways to supply one
     When I run mvmctl with "machine run --image alpine" and an isolated mvm home

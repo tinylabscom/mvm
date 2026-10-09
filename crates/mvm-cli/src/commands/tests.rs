@@ -4217,7 +4217,10 @@ fn run_image_prod_flag_parses_as_image_policy() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::TransientRunArgs { run, sdk }) => {
+        Commands::Run(exec::RunVerbArgs {
+            machine: machine::MachineRunArgs { run, .. },
+            sdk,
+        }) => {
             assert_eq!(run.image.as_deref(), Some(pinned));
             assert!(run.prod);
             assert!(sdk.mode.is_none());
@@ -4611,7 +4614,10 @@ fn run_transient_with_launch_plan_no_argv() {
     let cli =
         Cli::try_parse_from(["mvmctl", "run", "--launch-plan", "./plan.json"]).expect("parse");
     match cli.command {
-        Commands::Run(exec::TransientRunArgs { run, .. }) => {
+        Commands::Run(exec::RunVerbArgs {
+            machine: machine::MachineRunArgs { run, .. },
+            ..
+        }) => {
             assert_eq!(run.launch_plan.as_deref(), Some("./plan.json"));
             assert!(run.argv.is_empty());
         }
@@ -4737,7 +4743,10 @@ fn direct_run_accepts_a_read_only_mount() {
     ])
     .expect("parse");
     match cli.command {
-        Commands::Run(exec::TransientRunArgs { run, .. }) => {
+        Commands::Run(exec::RunVerbArgs {
+            machine: machine::MachineRunArgs { run, .. },
+            ..
+        }) => {
             assert_eq!(run.mounts, vec!["/tmp:/work:ro"]);
             assert_eq!(run.argv, vec!["ls", "/work"]);
         }
@@ -4746,15 +4755,15 @@ fn direct_run_accepts_a_read_only_mount() {
 }
 
 #[test]
-fn run_transient_requires_argv() {
+fn a_bare_run_requires_a_command() {
     // `argv` is shared with `machine run`, which legitimately boots with no
-    // command (`-d`), so the requirement moved off the clap attribute and onto
-    // `run_transient`. It parses; running it is what refuses.
+    // command (`-d`), so the requirement is the run path's, not clap's. It
+    // parses; running it is what refuses.
     let cli = Cli::try_parse_from(["mvmctl", "run"]).expect("parses");
     let Commands::Run(args) = cli.command else {
         panic!("expected Commands::Run");
     };
-    let err = exec::run_transient(
+    let err = exec::run_verb(
         &Cli::parse_from(["mvmctl", "doctor"]),
         args,
         &mvm_core::user_config::MvmConfig::default(),
@@ -4781,7 +4790,7 @@ fn direct_production_oci_run_accepts_the_baked_entrypoint() {
         panic!("expected Commands::Run");
     };
 
-    exec::run_transient(
+    exec::run_verb(
         &Cli::parse_from(["mvmctl", "doctor"]),
         args,
         &mvm_core::user_config::MvmConfig::default(),
@@ -6346,4 +6355,81 @@ fn machine_verbs_reject_the_admission_bypass_flag() {
             "{with_flag:?} must be refused as an unknown argument: {err}"
         );
     }
+}
+
+fn words(args: &[&str]) -> Vec<String> {
+    args.iter().map(|arg| arg.to_string()).collect()
+}
+
+#[test]
+fn a_run_parse_error_points_at_the_separator() {
+    for args in [
+        &["run", "--image", "alpine", "echo", "hi"][..],
+        &["machine", "run", "--image", "alpine", "echo"][..],
+    ] {
+        for kind in [ErrorKind::UnknownArgument, ErrorKind::ArgumentConflict] {
+            let tip = separator_tip(kind, &words(args)).expect("a tip");
+            assert!(tip.contains("-- <cmd>"), "{tip}");
+        }
+    }
+}
+
+#[test]
+fn the_separator_tip_stays_off_other_commands_and_errors() {
+    assert!(
+        separator_tip(
+            ErrorKind::UnknownArgument,
+            &words(&["bundle", "export", "x"])
+        )
+        .is_none()
+    );
+    assert!(separator_tip(ErrorKind::UnknownArgument, &words(&["machine", "ls", "x"])).is_none());
+    assert!(
+        separator_tip(ErrorKind::InvalidValue, &words(&["run", "--cpus", "lots"])).is_none(),
+        "a bad value is not a missing separator"
+    );
+}
+
+#[test]
+fn run_takes_a_positional_source_and_the_command_only_after_the_separator() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "alpine:3.20", "--", "echo", "hi"])
+        .expect("source then command");
+    let Commands::Run(exec::RunVerbArgs {
+        machine: machine::MachineRunArgs { run, .. },
+        ..
+    }) = cli.command
+    else {
+        panic!("expected Commands::Run");
+    };
+    assert_eq!(run.source.as_deref(), Some("alpine:3.20"));
+    assert_eq!(run.argv, ["echo", "hi"]);
+
+    assert!(Cli::try_parse_from(["mvmctl", "run", "--image", "alpine", "echo", "hi"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "run", "--image", "alpine", "alpine:3.20"]).is_err());
+    assert!(Cli::try_parse_from(["mvmctl", "machine", "run", "alpine", "echo"]).is_err());
+}
+
+#[test]
+fn run_carries_machine_run_flags_and_the_sdk_transport() {
+    let cli = Cli::try_parse_from(["mvmctl", "run", "-d", "--name", "web", "nginx"])
+        .expect("machine run's lifecycle flags parse on run");
+    let Commands::Run(args) = cli.command else {
+        panic!("expected Commands::Run");
+    };
+    assert!(args.machine.detach);
+    assert_eq!(args.machine.name.as_deref(), Some("web"));
+    assert_eq!(args.machine.run.source.as_deref(), Some("nginx"));
+
+    let cli = Cli::try_parse_from(["mvmctl", "run", "--mode", "plan", "./script.py"])
+        .expect("the SDK transport still parses, the script as the positional");
+    let Commands::Run(args) = cli.command else {
+        panic!("expected Commands::Run");
+    };
+    assert_eq!(args.sdk.mode, Some(exec::RunMode::Plan));
+    assert_eq!(args.machine.run.source.as_deref(), Some("./script.py"));
+
+    assert!(
+        Cli::try_parse_from(["mvmctl", "machine", "run", "--mode", "plan", "./script.py"]).is_err(),
+        "the SDK transport stays off machine run"
+    );
 }

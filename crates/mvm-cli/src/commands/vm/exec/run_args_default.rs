@@ -63,6 +63,7 @@ impl Default for RunArgs {
             launch_plan: None,
             from_workload_ir: None,
             prod: false,
+            source: None,
             argv: Vec::new(),
             agent_verb: Vec::new(),
             host_service: Vec::new(),
