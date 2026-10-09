@@ -319,11 +319,12 @@ impl BuiltPackImageDescriptor {
         {
             return Err(invalid_provenance("publisher workflow or invocation"));
         }
-        if build.resolved_dependencies.len() != 4 {
+        if build.resolved_dependencies.len() != 5 {
             return Err(invalid_provenance("resolved dependency set"));
         }
         let mut seen = BTreeSet::new();
         let mut git_source = false;
+        let mut images_lock = false;
         for dependency in build.resolved_dependencies {
             if !seen.insert(dependency.uri.clone()) || dependency.digest.len() != 1 {
                 return Err(invalid_provenance("duplicate or ambiguous dependency"));
@@ -344,6 +345,15 @@ impl BuiltPackImageDescriptor {
                         return Err(invalid_provenance("signed base manifest digest"));
                     }
                 }
+                "mvm/images.lock" => {
+                    let Some(digest) = dependency.digest.get("sha256") else {
+                        return Err(invalid_provenance("images lock digest type"));
+                    };
+                    if Sha256Hex::new(digest.clone()).is_err() {
+                        return Err(invalid_provenance("images lock digest syntax"));
+                    }
+                    images_lock = true;
+                }
                 source if source.starts_with("git+https://github.com/tinylabscom/mvm-packs@") => {
                     let commit = source.rsplit_once('@').map(|(_, commit)| commit);
                     if !commit.is_some_and(|value| {
@@ -361,6 +371,7 @@ impl BuiltPackImageDescriptor {
             }
         }
         if !git_source
+            || !images_lock
             || !seen.contains("candidate.json")
             || !seen.contains("application-layer/rootfs.ext4")
             || !seen.contains("image-set.json")
@@ -437,6 +448,7 @@ mod tests {
                         {"uri": "candidate.json", "digest": {"sha256": "b".repeat(64)}},
                         {"uri": "application-layer/rootfs.ext4", "digest": {"sha256": "c".repeat(64)}},
                         {"uri": "image-set.json", "digest": {"sha256": base.manifest_sha256.as_str()}},
+                        {"uri": "mvm/images.lock", "digest": {"sha256": "e".repeat(64)}},
                         {"uri": format!("git+https://github.com/tinylabscom/mvm-packs@{}", "d".repeat(40)),
                          "digest": {"gitCommit": "d".repeat(40)}}
                     ]
@@ -465,7 +477,7 @@ mod tests {
     #[test]
     fn producer_provenance_refuses_changed_subject_base_signer_or_materials() {
         let identity = "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main";
-        for field in ["subject", "base", "signer", "material"] {
+        for field in ["subject", "base", "signer", "material", "lock"] {
             let mut statement = provenance();
             match field {
                 "subject" => {
@@ -483,6 +495,10 @@ mod tests {
                 "material" => {
                     statement["predicate"]["buildDefinition"]["resolvedDependencies"][2]["digest"]
                         ["sha256"] = serde_json::Value::String("e".repeat(64))
+                }
+                "lock" => {
+                    statement["predicate"]["buildDefinition"]["resolvedDependencies"][3]["digest"]
+                        ["sha256"] = serde_json::Value::String("not-a-digest".to_string())
                 }
                 _ => unreachable!("test enumerates each tamper target"),
             }
