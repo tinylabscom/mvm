@@ -896,6 +896,18 @@ fn assume_identity_with_saved_gid(
     Ok(())
 }
 
+/// Remove all active capability sets after a non-root identity transition.
+///
+/// Clearing permitted and inheritable also clears ambient capabilities: Linux
+/// requires every ambient bit to remain in both sets. Unlike a root-to-non-root
+/// transition, changing between non-root uids does not do this automatically.
+/// Uses only the allocation-free capset helper, so it is safe between fork
+/// and exec. The caller must also set `no_new_privs` before executing code.
+#[cfg(target_os = "linux")]
+pub(crate) fn clear_process_capabilities() -> std::io::Result<()> {
+    set_capabilities(0)
+}
+
 /// The capability slots `PR_CAPBSET_DROP` is asked about.
 ///
 /// The kernel's own ceiling is `CAP_LAST_CAP`, which grows between releases.

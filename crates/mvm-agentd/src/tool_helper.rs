@@ -497,6 +497,12 @@ fn spawn_tool(
             if libc::setresuid(uid, uid, uid) != 0 {
                 libc::_exit(EXIT_SPAWN);
             }
+            // A non-root-to-non-root transition retains the helper's
+            // SETUID/SETGID capabilities, including its ambient set. Revoke
+            // them before reporting readiness or executing untrusted code.
+            if crate::guest_mount::clear_process_capabilities().is_err() {
+                libc::_exit(EXIT_SPAWN);
+            }
             if libc::chdir(cwd.as_ptr()) != 0 && libc::chdir(c"/".as_ptr()) != 0 {
                 libc::_exit(EXIT_SPAWN);
             }
@@ -616,6 +622,10 @@ impl MsgLen for u32 {
         u32::try_from(len).expect("a control buffer always fits msg_controllen")
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "tool_helper/capability_tests.rs"]
+mod capability_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1412,8 +1422,8 @@ fn connection_outcome(
     stream: &std::os::unix::net::UnixStream,
     map: &ToolMap,
 ) -> io::Result<HelperReply> {
-    let (request, stdio) = recv_request(&stream)?;
-    let (peer_pid, peer_uid, peer_gid) = peer_process(&stream)?;
+    let (request, stdio) = recv_request(stream)?;
+    let (peer_pid, peer_uid, peer_gid) = peer_process(stream)?;
     let actual_executable = agent().executable(peer_pid).map_err(io::Error::other)?;
     if !crate::tool_map::provenance_matches(&request.exe, &actual_executable) {
         return Ok(HelperReply::Denied {

@@ -2,8 +2,6 @@
 //! the effective, permitted and inheritable sets, and `PR_CAP_AMBIENT` for the
 //! ambient set that lets a non-root process keep a capability across exec.
 
-use super::{CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_ADMIN, CAP_SYS_TIME};
-
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
 const PR_CAP_AMBIENT: libc::c_int = 47;
 const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
@@ -30,7 +28,7 @@ pub(super) fn set_capabilities(capabilities: u32) -> std::io::Result<()> {
 }
 
 pub(super) fn raise_ambient_capabilities(capabilities: u32) -> std::io::Result<()> {
-    for capability in [CAP_KILL, CAP_NET_BIND_SERVICE, CAP_SYS_ADMIN, CAP_SYS_TIME] {
+    for capability in 0..u32::BITS {
         if capabilities & (1u32 << capability) == 0 {
             continue;
         }

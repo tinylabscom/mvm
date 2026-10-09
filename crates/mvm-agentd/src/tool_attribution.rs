@@ -553,6 +553,21 @@ fn read_fd_targets(pid: u32) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Read shim provenance under either supported relay identity. Ordinary
+/// workload shims use the agent's group; host-bound relays use its saved tool
+/// group. Both reads remain subject to the kernel's procfs permission check.
+#[cfg(target_os = "linux")]
+pub(crate) fn relay_executable(pid: u32) -> io::Result<String> {
+    crate::tool_map::process_executable(pid).or_else(|error| {
+        if error.kind() != io::ErrorKind::PermissionDenied {
+            return Err(error);
+        }
+        with_filesystem_gid(crate::guest_mount::TOOL_GID, || {
+            crate::tool_map::process_executable(pid)
+        })
+    })
+}
+
 /// Run `read` with `gid` as this thread's filesystem gid, then restore it.
 /// The filesystem gid is per thread, and the attribution listener answers on
 /// a thread of its own.
@@ -721,6 +736,50 @@ mod tests {
         format!(
             "{pid} (tool (x) y) S 1 {pid} {session} 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0"
         )
+    }
+
+    /// Irreversible credential transition: run with the privileged nextest
+    /// harness, which gives this test its own process.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn relay_provenance_reads_the_isolated_group_and_restores_credentials() {
+        if std::env::var("MVM_GUEST_PRIVILEGED_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        // SAFETY: geteuid has no preconditions.
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "privileged witness needs root"
+        );
+        crate::guest_mount::drop_guest_agent_privilege_raw(
+            crate::guest_mount::WORKLOAD_UID,
+            crate::guest_mount::WORKLOAD_GID,
+        )
+        .expect("assume agent identity");
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let (mut child, registration) =
+            spawn_attributed(&mut command, &binding()).expect("spawn bound relay");
+        let direct = crate::tool_map::process_executable(child.id());
+        let attributed = relay_executable(child.id());
+        // SAFETY: setfsgid(-1) queries without changing the filesystem gid.
+        let restored = unsafe { libc::setfsgid(u32::MAX) };
+        child.kill().expect("stop relay");
+        child.wait().expect("reap relay");
+        drop(registration);
+        assert_eq!(
+            direct
+                .expect_err("normal group cannot inspect relay")
+                .kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(
+            attributed
+                .expect("saved group can inspect relay")
+                .ends_with("/sleep")
+        );
+        assert_eq!(restored as u32, crate::guest_mount::WORKLOAD_GID);
     }
 
     /// `127.0.0.1:40000 -> 127.0.0.1:1080`, inode 777.

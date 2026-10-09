@@ -46,7 +46,7 @@ fn answer(stream: &mut (impl io::Read + Write)) -> io::Result<()> {
             #[cfg(not(target_os = "linux"))]
             let _ = pid;
             #[cfg(target_os = "linux")]
-            let reply = match crate::tool_map::process_executable(pid) {
+            let reply = match crate::tool_attribution::relay_executable(pid) {
                 Ok(path) => DecisionReply::Executable { path },
                 Err(_) => DecisionReply::Unavailable,
             };

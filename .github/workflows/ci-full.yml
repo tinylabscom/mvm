@@ -284,6 +284,32 @@ jobs:
           sudo chmod 666 /dev/kvm
           ls -la /dev/kvm
 
+      - name: Verify tool credential boundaries on Linux
+        if: matrix.witness == 'tool_live'
+        run: |
+          set -euo pipefail
+          cargo test -p mvm-agentd --lib --no-run --message-format=json > "$RUNNER_TEMP/tool-tests.jsonl"
+          test_binary="$(python3 - "$RUNNER_TEMP/tool-tests.jsonl" <<'PY'
+          import json, sys
+          with open(sys.argv[1]) as records:
+              binaries = [
+                  item["executable"]
+                  for line in records
+                  if (item := json.loads(line)).get("reason") == "compiler-artifact"
+                  and item.get("executable")
+                  and item["target"]["name"] == "mvm_agentd"
+              ]
+          assert len(binaries) == 1, binaries
+          print(binaries[0])
+          PY
+          )"
+          for test in \
+            tool_helper::capability_tests::helper_exec_retains_transition_caps_but_tool_exec_cannot_regain_privilege \
+            tool_attribution::tests::relay_provenance_reads_the_isolated_group_and_restores_credentials; do
+            "$test_binary" --list --exact "$test" | grep -Fx "$test: test"
+            sudo env MVM_GUEST_PRIVILEGED_TESTS=1 "$test_binary" --exact "$test" --nocapture
+          done
+
       - name: Run the selected live witness
         run: just bdd::live-ci ${{ matrix.witness }}
 
