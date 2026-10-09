@@ -68,6 +68,7 @@ impl TranscriptCaptureSink {
                 // operator's retention choice is what the sealed root commits
                 // to, and re-opening must not quietly change it.
                 retention: manifest.retention,
+                at_rest: manifest.at_rest,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -156,6 +157,7 @@ mod tests {
                 max_chunks: 64,
             },
             retention: RetentionPolicy::FailClosed,
+            at_rest: None,
             created_unix_secs: 1_700_000_000,
             recipient: "transcript-kek".into(),
             wrapped_data_key_b64: transcript::wrap_data_key(&kek, &data_key),

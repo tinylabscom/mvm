@@ -572,6 +572,7 @@ mod tests {
                     max_chunks: 1_000_000,
                 },
                 retention: RetentionPolicy::Ring,
+                at_rest: None,
                 created_unix_secs: 0,
                 recipient: "host:test".to_string(),
                 wrapped_data_key_b64: String::new(),

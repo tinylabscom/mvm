@@ -108,6 +108,7 @@ pub fn stream_capture_config(identity: StreamCaptureIdentity) -> TranscriptWrite
         binding: identity.binding,
         bounds: DEFAULT_CAPTURE_BOUNDS,
         retention: DEFAULT_STREAM_RETENTION,
+        at_rest: None,
         created_unix_secs: identity.created_unix_secs,
         recipient: identity.recipient,
         wrapped_data_key_b64: identity.wrapped_data_key_b64,

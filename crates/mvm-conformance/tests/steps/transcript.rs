@@ -61,6 +61,7 @@ async fn sealed_transcript_with_chain_anchor(world: &mut CliWorld) {
                 // A forensic capture of discrete frames, not a log stream: it
                 // must refuse at its bound rather than quietly drop its head.
                 retention: RetentionPolicy::FailClosed,
+                at_rest: None,
                 created_unix_secs: 1_700_000_000,
                 recipient: "transcript-kek".to_string(),
                 wrapped_data_key_b64,

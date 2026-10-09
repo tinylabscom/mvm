@@ -1,0 +1,120 @@
+//! At-rest lifetime, independent of the plaintext byte/chunk admission budget.
+use super::{TranscriptError, TranscriptManifest, sealed_root_hex, verify_sealed_root};
+use serde::{Deserialize, Serialize};
+
+/// Explicit enrollment for a newly opened protected capture. Absence means
+/// legacy retention-ineligible data, never implicit enrollment on read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AtRestRetention {
+    pub payload_after_seal_secs: u64,
+    pub max_generation_secs: u64,
+}
+
+impl Default for AtRestRetention {
+    fn default() -> Self {
+        Self {
+            payload_after_seal_secs: 604_800,
+            max_generation_secs: 3_600,
+        }
+    }
+}
+
+impl AtRestRetention {
+    pub fn generation_deadline(self, opened: u64) -> Result<u64, TranscriptError> {
+        if opened == 0
+            || self.payload_after_seal_secs == 0
+            || self.max_generation_secs == 0
+            || self.max_generation_secs > 3_600
+        {
+            return Err(TranscriptError::RetentionClock);
+        }
+        let end = opened
+            .checked_add(self.max_generation_secs)
+            .ok_or(TranscriptError::RetentionClock)?;
+        end.checked_add(self.payload_after_seal_secs)
+            .ok_or(TranscriptError::RetentionClock)?;
+        Ok(end)
+    }
+}
+
+/// Read the wall clock without turning a pre-epoch clock into timestamp zero.
+pub fn retention_now() -> Result<u64, TranscriptError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .map_err(|_| TranscriptError::RetentionClock)
+}
+
+impl TranscriptManifest {
+    /// A terminal seal is required for destructive retirement. Integrity
+    /// snapshots have roots too, but do not attest that the producer stopped.
+    pub fn retention_deadline(&self) -> Result<Option<u64>, TranscriptError> {
+        let Some(policy) = self.at_rest else {
+            return Ok(None);
+        };
+        policy.generation_deadline(self.created_unix_secs)?;
+        let Some(sealed) = self.sealed_unix_secs else {
+            return Ok(None);
+        };
+        if sealed < self.created_unix_secs {
+            return Err(TranscriptError::RetentionClock);
+        }
+        sealed
+            .checked_add(policy.payload_after_seal_secs)
+            .map(Some)
+            .ok_or(TranscriptError::RetentionClock)
+    }
+
+    /// Refuse managed payload reads at the exact deadline, even if maintenance
+    /// has not run. Unfinalized recovery snapshots cannot extend readable age.
+    pub fn check_readable_at(&self, now: u64) -> Result<(), TranscriptError> {
+        let Some(policy) = self.at_rest else {
+            return Ok(());
+        };
+        if now < self.created_unix_secs {
+            return Err(TranscriptError::RetentionClock);
+        }
+        let deadline = match self.retention_deadline()? {
+            Some(deadline) => deadline,
+            None => policy
+                .generation_deadline(self.created_unix_secs)?
+                .checked_add(policy.payload_after_seal_secs)
+                .ok_or(TranscriptError::RetentionClock)?,
+        };
+        if self.sealed_unix_secs.is_some_and(|sealed| now < sealed) {
+            return Err(TranscriptError::RetentionClock);
+        }
+        if now >= deadline {
+            return Err(TranscriptError::PayloadExpired);
+        }
+        Ok(())
+    }
+}
+
+/// Finalize an abandoned generation only after its lifecycle owner establishes
+/// that no producer remains. Recovery never grants seven fresh days at restart.
+/// Existing terminal seals and all legacy captures are left unchanged.
+pub fn recover_abandoned_at(
+    manifest: &mut TranscriptManifest,
+    now: u64,
+) -> Result<(), TranscriptError> {
+    verify_sealed_root(manifest)?;
+    let Some(policy) = manifest.at_rest else {
+        return Ok(());
+    };
+    if now < manifest.created_unix_secs {
+        return Err(TranscriptError::RetentionClock);
+    }
+    if let Some(sealed) = manifest.sealed_unix_secs {
+        if now < sealed {
+            return Err(TranscriptError::RetentionClock);
+        }
+        return Ok(());
+    }
+    let generation_end = policy.generation_deadline(manifest.created_unix_secs)?;
+    manifest.sealed_unix_secs = Some(now.min(generation_end));
+    manifest.adopted = true;
+    manifest.sealed_root_hex = sealed_root_hex(manifest)?;
+    Ok(())
+}

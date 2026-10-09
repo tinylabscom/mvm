@@ -1186,6 +1186,7 @@ mod tests {
                         max_chunks: 4096,
                     },
                     retention: RetentionPolicy::Ring,
+                    at_rest: None,
                     created_unix_secs: 0,
                     recipient: "transcript-kek".to_string(),
                     wrapped_data_key_b64: wrapped,

@@ -233,6 +233,7 @@ impl TranscriptCtx {
             // A forensic capture of discrete frames is right to stop at its
             // bound rather than quietly drop the start of what it recorded.
             retention: RetentionPolicy::FailClosed,
+            at_rest: None,
             created_unix_secs: now_unix_secs(),
             recipient: KEK_RECIPIENT.to_string(),
             wrapped_data_key_b64: wrapped,
@@ -659,6 +660,7 @@ mod tests {
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
                 retention: manifest.retention,
+                at_rest: manifest.at_rest,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
@@ -716,6 +718,7 @@ mod tests {
                 binding: manifest.binding.clone(),
                 bounds: manifest.bounds,
                 retention: manifest.retention,
+                at_rest: manifest.at_rest,
                 created_unix_secs: manifest.created_unix_secs,
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
