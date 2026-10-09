@@ -216,10 +216,10 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
 ];
 
 // `mvmctl pack` manages the versioned attested-pack cache and signed workload
-// packs. `rollback` swaps the active pointer
-// and emits `PackCacheChange`; `prune` removes bytes so it reuses
-// `CachePrune`. `download`/`update` refuse for every class — no pack is
-// published — so they change nothing and have nothing to record.
+// packs. `rollback` swaps the active pointer and emits `PackCacheChange`;
+// `prune` removes bytes and reuses `CachePrune`. System `download` and
+// `update` refuse while no system pack class is published. Workload `update`
+// follows the verified pull path and records its pin.
 const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
     "update",
     AuditPosture::Emits("RegistryPackRevocationUpdate"),
@@ -228,14 +228,24 @@ const PACK_REGISTRY_REVOCATIONS_SUB: &[(&str, AuditPosture)] = &[(
 const PACK_REGISTRY_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("RegistryPackRemove")),
-    ("update", AuditPosture::ReadOnly),
+    ("update", AuditPosture::Emits("RegistryPackPin")),
     (
         "revocations",
         AuditPosture::DelegatesToSub(PACK_REGISTRY_REVOCATIONS_SUB),
     ),
 ];
 
+const PACK_SYSTEM_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("rollback", AuditPosture::Emits("PackCacheChange")),
+    ("prune", AuditPosture::Emits("CachePrune")),
+    ("download", AuditPosture::ReadOnly),
+    ("update", AuditPosture::ReadOnly),
+];
+
 const PACK_SUB: &[(&str, AuditPosture)] = &[
+    ("ls", AuditPosture::ReadOnly),
+    ("rm", AuditPosture::Emits("RegistryPackRemove")),
     ("list", AuditPosture::ReadOnly),
     ("info", AuditPosture::ReadOnly),
     ("verify", AuditPosture::ReadOnly),
@@ -244,8 +254,9 @@ const PACK_SUB: &[(&str, AuditPosture)] = &[
     ("rollback", AuditPosture::Emits("PackCacheChange")),
     ("prune", AuditPosture::Emits("CachePrune")),
     ("download", AuditPosture::ReadOnly),
-    ("update", AuditPosture::ReadOnly),
+    ("update", AuditPosture::Emits("RegistryPackPin")),
     ("registry", AuditPosture::DelegatesToSub(PACK_REGISTRY_SUB)),
+    ("system", AuditPosture::DelegatesToSub(PACK_SYSTEM_SUB)),
 ];
 
 /// `deployments` is a read-only inventory of the local deploy store.

@@ -50,6 +50,9 @@ pub mod lifecycle;
 pub mod merkle;
 /// OCI distribution types with no host dependency (manifest parsing).
 pub mod oci;
+/// Language-neutral authored pack input, not a resolved build or release.
+#[cfg(feature = "protocol")]
+pub mod pack_spec;
 /// Names one workload uses to address another over the existing
 /// host-mediated egress path.
 #[cfg(feature = "protocol")]

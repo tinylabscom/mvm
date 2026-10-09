@@ -457,6 +457,21 @@ fn pull_one(
         })?
     };
     check_registry_pack_revocations_if_configured(&verified)?;
+    if let Some(mvm_core::registry_pack::RegistryPackImage::Built(descriptor)) =
+        &verified.manifest().image
+    {
+        download_built_image_assets(descriptor, fetched.staged_path())?;
+        mvm_core::registry_pack::verify_registry_pack_contents(&verified, fetched.staged_path())?;
+        let verifier = mvm_core::registry_pack::verify_built_image_provenance(
+            &verified,
+            fetched.staged_path(),
+        )?;
+        crate::ui::info(&format!(
+            "built image provenance verified for {} (verifier {})",
+            verified.manifest().reference,
+            verifier.as_str()
+        ));
+    }
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.
@@ -486,6 +501,37 @@ fn pull_one(
         },
         dependencies,
     ))
+}
+
+fn download_built_image_assets(
+    descriptor: &mvm_core::registry_pack_image::BuiltPackImageDescriptor,
+    staged: &Path,
+) -> Result<()> {
+    for asset in descriptor.assets() {
+        let url = built_image_asset_url(&descriptor.release, asset.name.as_str());
+        let destination = staged.join(asset.name.as_str());
+        let destination_str = destination
+            .to_str()
+            .with_context(|| format!("image asset path is not UTF-8: {}", destination.display()))?;
+        crate::commands::env::artifact_verify::download_file_bounded(
+            &url,
+            destination_str,
+            asset.size,
+        )
+        .with_context(|| format!("downloading signed pack image asset {}", asset.name))?;
+    }
+    Ok(())
+}
+
+fn built_image_asset_url(
+    release: &mvm_core::registry_pack_image::BuiltImageRelease,
+    name: &str,
+) -> String {
+    format!(
+        "https://github.com/{}/releases/download/{}/{name}",
+        release.repository.as_str(),
+        release.tag,
+    )
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -532,6 +578,19 @@ async fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn built_image_assets_use_the_descriptor_pinned_release() {
+        let release = mvm_core::registry_pack_image::BuiltImageRelease {
+            repository: mvm_core::image_set::RepositorySlug::new("tinylabscom/mvm-packs")
+                .expect("fixed repository"),
+            tag: "pack-runtime-python-v1.0.0".to_string(),
+        };
+        assert_eq!(
+            built_image_asset_url(&release, "rootfs.ext4"),
+            "https://github.com/tinylabscom/mvm-packs/releases/download/pack-runtime-python-v1.0.0/rootfs.ext4"
+        );
+    }
 
     #[test]
     fn default_registry_points_to_the_official_packs_repository() {

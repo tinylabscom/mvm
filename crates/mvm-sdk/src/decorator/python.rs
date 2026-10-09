@@ -10,7 +10,7 @@
 //! is a pure read of the AST. The decorated function becomes the
 //! microVM's primary entrypoint; the bundled source tree (everything
 //! under the script's directory, scoped by the existing reachability
-//! walker in [`crate::compile::reachability`]) ships as
+//! walker in `mvm_compiler::reachability`) ships as
 //! `app.source = LocalPath`.
 
 use std::collections::BTreeMap;

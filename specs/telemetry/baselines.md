@@ -69,6 +69,15 @@ fairness across producers does not exist today and nothing claims it does.
 Whatever fairness the capture design later provides (or explicitly declines
 to provide) must be stated against this baseline rather than assumed.
 
+### Offline overflow-policy evaluation
+
+The same baseline command now includes an additive
+`experimental_overflow_models` section. Its independent model schema, exact
+workloads, interpretation and remaining evidence requirements are documented
+in [Overflow-policy evaluation](overflow-evaluation.md). These metadata-only
+models do not change the production outbox or establish its admission cost;
+the existing baseline schema, measurements and budgets remain unchanged.
+
 ## Regression budgets
 
 Rule: budget = worst observed value of that statistic across the five runs,

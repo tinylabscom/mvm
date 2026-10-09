@@ -251,8 +251,8 @@ fn isolated_mvm_home_with_non_verity_kernel(world: &mut CliWorld) {
     world.kernel_reacquisition_must_fail = true;
 }
 
-#[then(expr = "the incompatible workload kernel cache is evicted")]
-fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
+#[then(expr = "the incompatible workload kernel cache remains unchanged")]
+fn incompatible_workload_kernel_cache_remains_unchanged(world: &mut CliWorld) {
     let home = world
         .isolated_home
         .as_ref()
@@ -264,8 +264,8 @@ fn incompatible_workload_kernel_cache_is_evicted(world: &mut CliWorld) {
     );
     for name in ["vmlinux", "vmlinux.sha256", "config"] {
         assert!(
-            !kernel_dir.join(name).exists(),
-            "incompatible cache member {name} survived"
+            kernel_dir.join(name).exists(),
+            "prepared-only launch mutated incompatible cache member {name}"
         );
     }
 }
@@ -385,7 +385,7 @@ enum Terminal {
     Detached,
 }
 
-fn seed_live_guest_runtime(home: &Path) {
+pub(crate) fn seed_live_guest_runtime(home: &Path) -> mvm_build::guest_runtime::GuestRuntime {
     use mvm_build::guest_runtime::{
         resolve_or_build_source_guest_runtime, seed_source_guest_runtime,
     };
@@ -411,7 +411,7 @@ fn seed_live_guest_runtime(home: &Path) {
     });
     seed_source_guest_runtime(&home.join("cache"), seed, version, arch, &workspace)
         .expect("verify and copy the live guest runtime into the scenario home")
-        .expect("prewarmed guest runtime must match the current source");
+        .expect("prewarmed guest runtime must match the current source")
 }
 
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
@@ -435,6 +435,11 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
         .current_dir(workspace_root())
         .args(&argv)
         .isolated_home(&home);
+    if argv.first().is_some_and(|arg| arg == "machine")
+        && argv.get(1).is_some_and(|arg| arg == "start")
+    {
+        command.env("MVM_COLD_BUILD", "refuse");
+    }
     apply_encrypted_volume_probe_path(world, &mut command);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");

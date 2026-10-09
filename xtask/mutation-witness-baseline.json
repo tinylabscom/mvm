@@ -361,8 +361,8 @@
       ]
     },
     {
-      "path": "crates/mvm-sdk/src/compile/deps_audit.rs",
-      "package": "mvm-sdk",
+      "path": "crates/mvm-compiler/src/deps_audit.rs",
+      "package": "mvm-compiler",
       "claims": [
         11
       ]
@@ -1061,7 +1061,7 @@
       "reason": "Warm-claim snapshot manifest verification and checkpoint reclamation depend on the on-disk snapshot store and backend snapshot semantics; the behavior is covered by the warm-pool BDD suite and backend-specific integration tests."
     },
     {
-      "file": "crates/mvm-sdk/src/compile/deps_audit.rs",
+      "file": "crates/mvm-compiler/src/deps_audit.rs",
       "mutant": "replace * with + in hash_file_raw",
       "reason": "equivalent: the mutated expression is the read-buffer size (64 * 1024 versus 64 + 1024). It changes how many bytes are read per iteration and nothing else; the resulting SHA-256 is identical, so no assertion on behaviour can separate them."
     },

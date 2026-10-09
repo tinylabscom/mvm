@@ -161,10 +161,14 @@ from mvm._runtime.runtime import (
 # first call, never at import — so this stays inert in host authoring use.
 from mvm import audit, host, kv
 
+# Host-side built-manifest inspection; the host library loads only on use.
+from mvm import manifest
+
 __all__ = [
     "audit",
     "host",
     "kv",
+    "manifest",
     "DEFAULT_TTL_SECONDS",
     "MVM_HOSTLIB_PATH_ENV",
     "MVM_SDK_MODE_ENV",

@@ -6,7 +6,7 @@
 //! egress, OCI provenance, receipts) is identical to the lower-level verbs.
 //!
 //! The flagship verb is `machine run`: boot a fresh VM from an OCI image, run a
-//! command, tear down. It routes straight into `vm::exec::run_secure` (the same
+//! command, tear down. It routes straight into `vm::exec::run_secure_started` (the same
 //! code path as `mvmctl run --image`), so it inherits deny-all networking by
 //! default. Persistent machine specs (`create`/`ls`/`inspect`/`rm`) store the
 //! declarative image/network/profile shape for later lifecycle starts; `start`
@@ -53,7 +53,7 @@ use mvm_runtime::machine::persist::{
 
 use super::Cli;
 use super::build::build;
-use super::vm::exec::{RunArgs, RunProfile, run_secure};
+use super::vm::exec::{RunArgs, RunProfile, run_secure_started};
 use super::vm::group::VmCmd;
 #[cfg(test)]
 use super::vm::host_signer::PUBLIC_FILENAME;
@@ -531,7 +531,7 @@ pub(super) fn local_deployment_image_source(
 /// the persistence flags is present.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MachineRunMode {
-    /// Default one-shot: boot, run argv, tear down. Unchanged `run_secure`.
+    /// Default one-shot: boot, run argv, tear down.
     Transient,
     /// Persistent (detached or lifecycle-managed), non-interactive.
     Persistent,
@@ -1561,7 +1561,13 @@ fn complete_revert(
         super::vm::checkpoint::RevertOutcome::Done => Ok(()),
         super::vm::checkpoint::RevertOutcome::RunImage(run) => {
             let (args, source) = run_args_for_image_revert(run);
-            run_secure(cli, args.into_run_args(), cfg, source)
+            run_secure_started(
+                cli,
+                args.into_run_args(),
+                cfg,
+                source,
+                std::time::Instant::now(),
+            )
         }
     }
 }

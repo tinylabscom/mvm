@@ -206,6 +206,30 @@ removes the installed `mvmctl` and its host binaries too.
 
 ### Inspection / registry (`mvmctl manifest *`)
 
+`ls`, `info`, and `verify` share their operations with the
+`mvm_client::manifest` library facade. The host library exposes the same
+operations as `manifest.list`, `manifest.info`, and `manifest.verify` (ABI
+1.7), with generated request/reply types and method constants for the Python
+and TypeScript SDK bindings. These inspect the local registry without booting
+a machine. Listing supports repeated `--tag` filters: a slot must have every
+requested tag. `info` keeps snapshot lookup best-effort; a missing snapshot
+does not make the persisted manifest unavailable. `verify` checks artifact
+checksums, not publisher trust: `--check-signature` remains explicitly refused.
+Persisted names and revision metadata are validated before resolving paths:
+invalid template names contribute no tags, and invalid snapshot references
+produce no snapshot. Verification refuses artifact paths that escape the
+selected revision rather than checking unrelated host files.
+
+The SDK adapters call these host-library operations in-process:
+`mvm.manifest.list()`, `mvm.manifest.info(path)`, and
+`mvm.manifest.verify(path)` in Python; `manifest.list()`,
+`manifest.info(path)`, and `manifest.verify(path)` from `@runmvm/mvm` in
+TypeScript. Listing takes `orphans` and `tags` options in both languages.
+An omitted inspection or verification path uses the same cwd discovery as
+the CLI. Verification takes `revision` and `check_signature` keyword arguments
+in Python, or `revision` and `checkSignature` in the TypeScript options object.
+The signature option is forwarded to the shared refusal, never ignored.
+
 | Command                                             | Description                                                                           |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `mvmctl manifest ls [--json]`                       | List built slots — manifest path, last-built timestamp, optional `name`               |
@@ -1552,21 +1576,24 @@ running microVM.
 
 | Command                                                   | Description                                                                                                                                                       |
 | --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mvmctl pack list`                                        | List every recorded pack version, marking each key's active one                                                                                                   |
-| `mvmctl pack rollback`                                    | Point a pack class's active version at an already-cached one                                                                                                      |
-| `mvmctl pack prune`                                       | Reclaim non-active pack versions beyond the newest N per key                                                                                                      |
-| `mvmctl pack download`                                    | Fetch a pack version into the cache without changing the active one                                                                                               |
-| `mvmctl pack update`                                      | Fetch the latest pack version and activate it                                                                                                                     |
+| `mvmctl pack ls [--json]`                                 | List pinned workload packs and whether each is installed                                                                                                          |
+| `mvmctl pack rm ns/name[@version]`                        | Remove a workload pack's cache entry and lock pin; a supplied version must match the pin                                                                           |
+| `mvmctl pack update ns/name[@version]`                    | Re-pull a signed workload pack and its signed profile dependencies, adopting a newer published version when available                                             |
+| `mvmctl pack system list [--kind KIND] [--json]`          | List every recorded builder, runtime, image-project, or extension pack version, marking each active one                                                            |
+| `mvmctl pack system rollback KIND [--to VERSION]`        | Point a system pack class's active version at an already-cached one                                                                                                |
+| `mvmctl pack system prune [--keep-recent N] [--dry-run]`   | Reclaim non-active system pack versions beyond the newest N per key                                                                                                |
+| `mvmctl pack system download KIND`                        | Fetch a system pack version into the cache without changing the active one; no system pack class is published yet                                                  |
+| `mvmctl pack system update KIND`                          | Fetch and activate a system pack version; no system pack class is published yet                                                                                    |
 | `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its manifest digest, actual signer and accepted publisher identities, policy text, image source declaration, and payload digests |
 | `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
-| `mvmctl pack registry ls`                                 | List pinned signed registry packs and whether each is installed (`--json` for machine-readable rows)                                                              |
-| `mvmctl pack registry rm ns/name`                         | Remove a signed registry pack's cache entry and lock pin                                                                                                          |
-| `mvmctl pack registry update ns/name[@version]`           | Re-pull a signed registry pack and its signed profile dependencies, adopting newer published versions when there are any                                                                              |
+| `mvmctl pack registry ls`                                 | Compatibility spelling of `pack ls`                                                                                                                               |
+| `mvmctl pack registry rm ns/name[@version]`               | Compatibility spelling of `pack rm`                                                                                                                               |
+| `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --help` | Show the required `--document` signed-feed path and `--bundle` signature-bundle path. Updating verifies the supplied bytes under the operator's configured release identity before advancing the durable cache checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. A built-image pack also downloads its fixed-name immutable release assets, checks their descriptor-pinned lengths and digests, and verifies rootfs and provenance signatures before installation; admission rechecks the installed bytes. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -1582,6 +1609,23 @@ running microVM.
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch without extra volumes or allowed egress,
+enable claims explicitly:
+
+```bash
+export MVM_RESIDENCY=warm
+mvmctl pool warm --image alpine
+mvmctl machine run --image alpine -- /bin/true
+```
+
+Remove any explicit `warm_pool_size=0` configuration override: an explicit
+size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
+capacity and fail rather than silently cold-booting. Named launches and shapes
+with extra volumes (including directory mounts) or allowed egress retain their
+cold path, including when the pool size is zero.
+
 Pack inspection reports `official_status: "not_established"`: verification under the
 current publisher policy does not by itself establish official MVM release
 status. Revocation checks cover an operator-configured signed feed when one is
@@ -1589,6 +1633,16 @@ configured; a feed is not required by the current registry-pack model. The
 `revocation_scope: "operator_configured_only"` JSON field makes that limit
 explicit. A valid signature proves publisher identity and content integrity,
 not safety.
+
+The workload pack commands `pack ls`, `pack rm`, and `pack update ns/name[@version]`
+use the signed registry-pack cache and lockfile. Existing `pack registry`
+commands remain available. The former system-cache commands are now grouped
+under `pack system`; their original `pack list`, `pack rollback`, `pack prune`,
+`pack download KIND`, and `pack update KIND` spellings remain compatible.
+`pack update` selects the system cache only for the exact class names
+`builder`, `runtime`, `dev-image`, and `extension`; a namespaced reference
+selects a workload pack. Other targets are rejected. This command migration
+does not change pack trust or establish any pack as official.
 
 ### Bundles in image registries
 
@@ -1736,7 +1790,7 @@ All commands accept these global options:
 | `MVM_TEMPLATE_REGISTRY_SECRET_ACCESS_KEY` | S3 secret access key                                                                                                                                                                                                                                                                                                                                                                        | None                             |
 | `MVM_TEMPLATE_REGISTRY_PREFIX`            | Key prefix inside the bucket                                                                                                                                                                                                                                                                                                                                                                | `mvm`                            |
 | `MVM_TEMPLATE_REGISTRY`                   | Base URL of the remote template index and files used by `mvmctl template search` and remote scaffolds (`https://` or `file://`)                                                                                                                                                                                                                                                              | `https://raw.githubusercontent.com/tinylabscom/mvm-packs/main` |
-| `MVM_PACK_REGISTRY`                       | Base URL of the signed pack registry `mvmctl search`, `pull` and `pack registry update` read (`https://` or `file://`). Packs from another registry still have to verify under the publisher trust policy                                                                                                                                                                                     | `https://raw.githubusercontent.com/tinylabscom/mvm-packs/main` |
+| `MVM_PACK_REGISTRY`                       | Base URL of the signed pack registry `mvmctl pack search`, `pack pull`, and `pack update ns/name` read (`https://` or `file://`). The original top-level and `pack registry` spellings share this setting. Packs from another registry still have to verify under the publisher trust policy | `https://raw.githubusercontent.com/tinylabscom/mvm-packs/main` |
 | `MVM_TEMPLATE_REGISTRY_REGION`            | S3 region                                                                                                                                                                                                                                                                                                                                                                                   | `us-east-1`                      |
 | `OPENAI_API_KEY`                          | Enables LLM-backed template planning for `template init --prompt`                                                                                                                                                                                                                                                                                                                           | None                             |
 | `MVM_TEMPLATE_PROVIDER`                   | Prompt planning provider: `auto`, `openai`, `local`, or `heuristic`                                                                                                                                                                                                                                                                                                                         | `auto`                           |

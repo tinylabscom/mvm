@@ -20,7 +20,22 @@ fn tree_contains_crate(tree: &str, crate_name: &str) -> bool {
 
 #[test]
 fn default_sdk_does_not_link_client_surface_or_backend() {
-    let tree = cargo_tree(&["tree", "-p", "mvm-sdk", "-e", "no-dev", "--prefix", "none"]);
+    let tree = cargo_tree(&[
+        "tree",
+        "-p",
+        "mvm-sdk",
+        "--no-default-features",
+        "-e",
+        "no-dev",
+        "--prefix",
+        "none",
+    ]);
+    for forbidden in ["mvm-compiler", "globset", "mvm-http"] {
+        assert!(
+            !tree_contains_crate(&tree, forbidden),
+            "base mvm-sdk must not link {forbidden}:\n{tree}"
+        );
+    }
     // The heavy client crate (LocalBackend) and the runtime backend must never
     // reach the default closure.
     assert!(

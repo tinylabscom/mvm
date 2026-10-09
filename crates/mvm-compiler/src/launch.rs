@@ -4,15 +4,15 @@
 //! run. It carries the IR's effective fields plus toolchain/IR provenance so
 //! `mvm` can fail fast on configuration errors before evaluating the flake.
 
-use crate::compile::hooks::merge_hooks;
-use crate::compile::source::SourcePlan;
-use crate::ir::{Hooks, Workload, canonicalize, ir_hash};
+use crate::hooks::merge_hooks;
+use crate::source::SourcePlan;
+use mvm_contract::ir::{Hooks, Workload, canonicalize, ir_hash};
 use serde::Serialize;
 
-/// Bumped from `"1.0"` to `"1.1"` at addon GA. The
-/// `addons` and `mesh` fields below are the additive payload; older
-/// mvmd MUST refuse `1.1` artifacts with a clear "requires mvmd ≥ X.Y"
-/// error so consumers can't silently lose addon connectivity.
+/// Version `"1.1"` adds the `addons` and `mesh` fields. Supervisors
+/// that do not support these fields must reject the artifact with
+/// a clear unsupported-version error rather than silently lose
+/// addon connectivity.
 pub const ARTIFACT_FORMAT_VERSION: &str = "1.1";
 pub const TOOLCHAIN_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -113,7 +113,7 @@ pub fn build_launch_json(
         .dependencies
         .as_ref()
         .and_then(|d| match d {
-            crate::ir::Dependencies::None => None,
+            mvm_contract::ir::Dependencies::None => None,
             other => Some(serde_json::to_value(other)),
         })
         .transpose()?;
@@ -148,7 +148,7 @@ pub fn build_launch_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{App, Entrypoint, Image, Resources, Source};
+    use mvm_contract::ir::{App, Entrypoint, Image, Resources, Source};
 
     fn sample() -> Workload {
         Workload {
@@ -227,7 +227,7 @@ mod tests {
     fn launch_json_carries_declarative_files() {
         let src = empty_source_plan();
         let mut w = sample();
-        w.apps[0].files = vec![crate::ir::MaterializedFile {
+        w.apps[0].files = vec![mvm_contract::ir::MaterializedFile {
             path: "/app/note.txt".into(),
             bytes_b64: "aGkK".into(),
             mode: Some("0600".into()),
