@@ -428,15 +428,10 @@ fn prepare_dirs() -> Result<(), InstallError> {
     use std::os::unix::fs::PermissionsExt;
 
     let helper = crate::guest_mount::TOOL_HELPER_IDENTITY;
-    for (path, mode, uid, gid) in [
-        (TOOL_DIR, 0o775, 0, helper.gid()),
-        (STASH_DIR, 0o750, 0, helper.gid()),
-        (
-            crate::tool_map::TOOL_ATTRIBUTION_DIR,
-            0o750,
-            helper.uid(),
-            crate::guest_mount::TOOL_GID,
-        ),
+    for (path, mode, gid) in [
+        (TOOL_DIR, 0o775, helper.gid()),
+        (STASH_DIR, 0o750, helper.gid()),
+        (crate::tool_map::TOOL_ATTRIBUTION_DIR, 0o775, helper.gid()),
     ] {
         std::fs::create_dir_all(path).map_err(|error| InstallError::SubstitutionFailed {
             path: path.to_string(),
@@ -448,7 +443,7 @@ fn prepare_dirs() -> Result<(), InstallError> {
                 reason: error.to_string(),
             }
         })?;
-        chown(path, uid, gid)?;
+        chown(path, 0, gid)?;
     }
     Ok(())
 }

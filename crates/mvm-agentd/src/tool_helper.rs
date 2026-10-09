@@ -938,14 +938,10 @@ pub fn bind_and_serve(map: ToolMap, ready: std::os::fd::OwnedFd) -> io::Result<(
     })?;
     let attribution = std::path::Path::new(crate::tool_map::TOOL_ATTRIBUTION_SOCKET);
     let _ = std::fs::remove_file(attribution);
-    let attribution_listener = with_filesystem_ids(
-        crate::guest_mount::TOOL_HELPER_IDENTITY.uid(),
-        crate::guest_mount::TOOL_GID,
-        || std::os::unix::net::UnixListener::bind(attribution),
-    )??;
+    let attribution_listener = std::os::unix::net::UnixListener::bind(attribution)?;
     std::fs::set_permissions(attribution, {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::Permissions::from_mode(0o660)
+        std::fs::Permissions::from_mode(0o666)
     })?;
     std::thread::spawn(move || serve_attribution(attribution_listener));
     let mut ready = std::fs::File::from(ready);
@@ -1180,11 +1176,7 @@ pub(crate) fn tool_socket_owned(
         inode,
     };
     let ask = || -> io::Result<bool> {
-        let mut stream = with_filesystem_ids(
-            crate::guest_mount::WORKLOAD_UID,
-            crate::guest_mount::TOOL_GID,
-            || UnixStream::connect(crate::tool_map::TOOL_ATTRIBUTION_SOCKET),
-        )??;
+        let mut stream = UnixStream::connect(crate::tool_map::TOOL_ATTRIBUTION_SOCKET)?;
         let (_, uid, gid) = peer_process(&stream)?;
         let helper = crate::guest_mount::TOOL_HELPER_IDENTITY;
         if uid != helper.uid() || gid != helper.gid() {
