@@ -1013,14 +1013,92 @@ pub fn bind_and_serve(map: ToolMap, ready: std::os::fd::OwnedFd) -> io::Result<(
     serve(map, listener)
 }
 
+/// Maximum shim connections handled concurrently. Each may block up to the
+/// host-decision deadline, so an unbounded thread-per-connection lets any
+/// guest process exhaust the helper by connecting in parallel; excess
+/// connections are refused fail-closed with an explicit `Unavailable` reply.
+#[cfg(any(target_os = "linux", test))]
+const MAX_CONCURRENT_CONNECTIONS: usize = 8;
+
+/// A bounded set of connection slots shared by the accept loop.
+///
+/// Pure counting (no I/O) so the bound is unit-testable off-Linux.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Default)]
+struct ConnectionSlots {
+    in_flight: std::sync::atomic::AtomicUsize,
+}
+
+/// One held slot; released on drop, wherever the handling thread ends.
+#[cfg(any(target_os = "linux", test))]
+struct ConnectionGuard {
+    slots: std::sync::Arc<ConnectionSlots>,
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl ConnectionSlots {
+    /// Take a slot, or `None` when the bound is reached.
+    fn try_acquire(self: &std::sync::Arc<Self>) -> Option<ConnectionGuard> {
+        use std::sync::atomic::Ordering;
+        let mut current = self.in_flight.load(Ordering::Relaxed);
+        loop {
+            if current >= MAX_CONCURRENT_CONNECTIONS {
+                return None;
+            }
+            match self.in_flight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => {
+                    return Some(ConnectionGuard {
+                        slots: std::sync::Arc::clone(self),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.slots
+            .in_flight
+            .fetch_sub(1, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+impl ConnectionGuard {
+    /// Test-only: consume the guard so its slot frees, without naming Drop.
+    fn slot_released_on_drop(self) {}
+}
+
 #[cfg(target_os = "linux")]
 pub fn serve(map: ToolMap, listener: std::os::unix::net::UnixListener) -> io::Result<()> {
+    let slots = std::sync::Arc::new(ConnectionSlots::default());
     for stream in listener.incoming() {
-        let Ok(stream) = stream else {
+        let Ok(mut stream) = stream else {
+            continue;
+        };
+        let Some(guard) = slots.try_acquire() else {
+            // Fail closed and explicit: the shim treats a refused connection
+            // as mediation unavailable and exits nonzero without the tool
+            // ever running.
+            let _ = send_reply(
+                &mut stream,
+                &crate::tool_map::HelperReply::Unavailable {
+                    reason: "tool mediation is at its concurrent connection limit".into(),
+                },
+            );
             continue;
         };
         let map = map.clone();
         std::thread::spawn(move || {
+            let _guard = guard;
             if let Err(error) = handle_connection(stream, &map) {
                 eprintln!("mvm-tool-helper: connection failed: {error}");
             }
@@ -1652,6 +1730,21 @@ impl HostDecisions for BrokerHost {
             let _ = Self::call(mvm_core::protocol::host_tool::RELEASE_VERB, payload);
         }
     }
+}
+
+#[test]
+fn connection_slots_enforce_the_concurrency_bound() {
+    let slots = std::sync::Arc::new(ConnectionSlots::default());
+    let mut guards: Vec<ConnectionGuard> = (0..MAX_CONCURRENT_CONNECTIONS)
+        .map(|_| slots.try_acquire().expect("slot under the bound"))
+        .collect();
+    assert_eq!(guards.len(), MAX_CONCURRENT_CONNECTIONS);
+    assert!(
+        slots.try_acquire().is_none(),
+        "a connection beyond the bound is refused"
+    );
+    guards.pop().expect("one guard").slot_released_on_drop();
+    assert!(slots.try_acquire().is_some(), "a released slot is reusable");
 }
 
 #[cfg(all(test, target_os = "linux"))]

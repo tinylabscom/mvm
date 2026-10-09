@@ -467,6 +467,19 @@ fn chown(path: &str, uid: u32, gid: u32) -> Result<(), InstallError> {
     Ok(())
 }
 
+/// Mode for a staged stash file. The tool child executes the stash through
+/// `execveat(AT_EMPTY_PATH)` after `setgroups(0)` + `setresgid(TOOL_GID)` +
+/// `setresuid(TOOL_UID)`, so its credentials are uid 902 / gid 907 with no
+/// supplementary groups — while the stash is group 906 (the helper's). The
+/// exec therefore succeeds or fails on the OTHER bits: a read-only mode
+/// (0640) fails with EACCES, which the helper reports as the spawn-exit 127 —
+/// the exact failure a live `tool_live` run produced. Other-execute permits
+/// descriptor-based execution without granting reads through /proc/self/exe.
+/// The stash directory (0750 root:906) blocks workload/tool pathname traversal,
+/// and the file has no writable bits.
+#[cfg(any(target_os = "linux", test))]
+const STASH_MODE: u32 = 0o551;
+
 #[cfg(target_os = "linux")]
 pub(crate) fn write_stash(stash: &str, bytes: &[u8]) -> Result<(), InstallError> {
     use std::io::Write;
@@ -483,11 +496,7 @@ pub(crate) fn write_stash(stash: &str, bytes: &[u8]) -> Result<(), InstallError>
             path: stash.to_string(),
             reason: error.to_string(),
         })?;
-    // execveat checks execute permission after the helper drops to the tool
-    // identity. Other-execute permits that descriptor-based exec, but not
-    // reading/copying via /proc/self/exe. The root:helper 0750 directory still
-    // denies workload/tool pathname traversal; nobody gets writable bits.
-    file.set_permissions(std::fs::Permissions::from_mode(0o551))
+    file.set_permissions(std::fs::Permissions::from_mode(STASH_MODE))
         .map_err(|error| InstallError::SubstitutionFailed {
             path: stash.to_string(),
             reason: error.to_string(),
@@ -667,6 +676,22 @@ mod tests {
         assert!(!entry.substitutes("/etc/other"));
         // The map validates as written.
         ToolMap::load(&serde_json::to_vec(&map).unwrap()).expect("map validates");
+    }
+
+    #[test]
+    fn the_stash_mode_execs_for_the_tool_uid_and_stays_unreachable_by_path() {
+        // The tool child (uid 902, gid 907, no supplementary groups) matches
+        // neither the owner (root) nor the group (helper 906): the execveat
+        // succeeds only via the OTHER bits.
+        assert_eq!(
+            STASH_MODE & 0o007,
+            0o001,
+            "the tool identity needs execute permission but must not read/copy the stash"
+        );
+        assert_eq!(STASH_MODE & 0o222, 0, "stash must not be writable");
+        // The defense against the workload exec'ing the stash by path is the
+        // stash directory, not the file mode.
+        assert_eq!(STASH_MODE & 0o070, 0o050, "the helper group keeps r-x");
     }
 
     #[test]
