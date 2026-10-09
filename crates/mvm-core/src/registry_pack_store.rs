@@ -17,10 +17,10 @@ use thiserror::Error;
 use crate::packs::KeylessTrust;
 use crate::registry_pack::{
     InstalledRegistryPack, PackAdoption, PackLockfile, PackPin, PackReference, RegistryPackError,
-    RegistryPackInstallError, RegistryPackPublisherPolicy, RegistryPackSignatureChecker,
-    RegistryPackVerification, RegistryPackVerificationError, VerifiedRegistryPack,
-    adopt_registry_pack_with, default_signature_checker, install_registry_pack_at,
-    verify_registry_pack_contents, verify_registry_pack_with,
+    RegistryPackImage, RegistryPackInstallError, RegistryPackPublisherPolicy,
+    RegistryPackSignatureChecker, RegistryPackVerification, RegistryPackVerificationError,
+    VerifiedRegistryPack, adopt_registry_pack_with, default_signature_checker,
+    install_registry_pack_at, verify_registry_pack_contents, verify_registry_pack_with,
 };
 use crate::registry_pack_revocation::{
     RegistryPackRevocationCheckpoint, RegistryPackRevocationError, VerifiedRegistryPackRevocations,
@@ -70,8 +70,9 @@ struct RevocationTrustFile {
 }
 
 /// Check a signed pack against the operator's independently trusted cached
-/// revocation feed when one is configured. An enabled but missing or stale
-/// feed is an error. No built-in release identity is assumed here.
+/// revocation feed when one is configured. Built-image packs require this
+/// independent trust; policy-only and source-image packs retain optional
+/// revocation configuration. An enabled but missing or stale feed is an error.
 pub fn check_registry_pack_revocations_if_configured(
     verified: &VerifiedRegistryPack,
 ) -> Result<(), RegistryPackStoreError> {
@@ -140,8 +141,18 @@ where
         DateTime<Utc>,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
 {
-    let Some(trust) = load_revocation_trust(trust_path)? else {
-        return Ok(());
+    let trust = match load_revocation_trust(trust_path)? {
+        Some(trust) => trust,
+        None if matches!(
+            &verified.manifest().image,
+            Some(RegistryPackImage::Built(_))
+        ) =>
+        {
+            return Err(RegistryPackStoreError::MissingRevocationTrust {
+                path: trust_path.display().to_string(),
+            });
+        }
+        None => return Ok(()),
     };
     if trust
         .accepted_identities
@@ -843,6 +854,47 @@ mod tests {
             .expect("signed test pack")
     }
 
+    fn verified_built_image_for_revocation_test() -> VerifiedRegistryPack {
+        let requested = reference("runtime/python@1.2.3");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&manifest_bytes("runtime/python@1.2.3"))
+                .expect("test manifest JSON");
+        let lock = &crate::image_set::image_train_lock().image_set;
+        let asset = |name| {
+            serde_json::json!({
+                "name": name,
+                "sha256": "a".repeat(64),
+                "size": 1,
+            })
+        };
+        manifest["image"] = serde_json::json!({
+            "schema_version": 2,
+            "platform": "linux/x86_64",
+            "base_set": {
+                "repository": lock.repository.as_str(),
+                "release_tag": lock.release_tag.as_str(),
+                "manifest_sha256": lock.manifest_sha256.as_str(),
+            },
+            "release": {
+                "repository": "tinylabscom/mvm-packs",
+                "tag": "pack-runtime-python-v1.2.3",
+            },
+            "assets": {
+                "rootfs": asset("rootfs.ext4"),
+                "verity": asset("rootfs.verity"),
+                "roothash": asset("rootfs.roothash"),
+                "mvm_meta": asset("mvm-meta.json"),
+                "rootfs_signature_bundle": asset("rootfs.signature.json"),
+                "provenance_statement": asset("provenance.json"),
+                "provenance_signature_bundle": asset("provenance.signature.json"),
+            },
+        });
+        let manifest = serde_json::to_vec(&manifest).expect("built manifest JSON");
+        let policy = publisher_policy();
+        adopt_registry_pack_with(&adoption(&requested, &manifest, &policy), accept)
+            .expect("signed built-image test pack")
+    }
+
     #[cfg(unix)]
     fn write_trust(path: &Path, contents: &str) {
         crate::private_fs::set_mode(path.parent().expect("trust parent"), 0o700)
@@ -896,6 +948,51 @@ mod tests {
             Utc::now(),
         )
         .expect("legacy trust remains available");
+    }
+
+    #[test]
+    fn built_image_requires_independent_revocation_trust() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        let trust_path = home.path().join("missing.toml");
+        assert!(matches!(
+            check_registry_pack_revocations_at(
+                &verified_built_image_for_revocation_test(),
+                &trust_path,
+                &store,
+                Utc::now(),
+            ),
+            Err(RegistryPackStoreError::MissingRevocationTrust { path })
+                if path == trust_path.display().to_string()
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn built_image_accepts_fresh_independent_feed_and_refuses_revocation() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let trust_path = home.path().join("trust.toml");
+        write_trust(
+            &trust_path,
+            "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        );
+        let verified = verified_built_image_for_revocation_test();
+        check_signed_test_document(&verified, &trust_path, 7, vec![], vec![])
+            .expect("fresh independently signed feed permits built image");
+        assert!(matches!(
+            check_signed_test_document(
+                &verified,
+                &trust_path,
+                7,
+                vec![],
+                vec![verified.manifest_sha256().as_str().to_string()],
+            ),
+            Err(RegistryPackStoreError::Revoked(_))
+        ));
+        assert!(matches!(
+            check_signed_test_document(&verified, &trust_path, 9, vec![], vec![]),
+            Err(RegistryPackStoreError::Revoked(_))
+        ));
     }
 
     #[cfg(unix)]
