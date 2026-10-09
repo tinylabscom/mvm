@@ -190,6 +190,12 @@ impl StreamPlane {
     /// than getting a second broker that would split its output across two
     /// hash chains.
     pub fn attach(&self, capture: &ConsoleCapture<'_>) -> Result<()> {
+        // Ownership is admitted by the backend, not inferred from a socket's
+        // current availability. A delayed/failed supervisor must never create
+        // a competing launcher writer or re-enable plaintext capture.
+        if capture.supervisor_owned {
+            return Ok(());
+        }
         let vm = capture.vm_name;
         let mut registry = self.registry();
         if registry.contains_key(vm) {
@@ -527,6 +533,14 @@ fn build_broker(
 /// key wrapped under the host KEK, and the ring-retention policy every stream
 /// capture runs under.
 fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
+    build_writer_with_policy(vm, transcript_dir, None)
+}
+
+pub(super) fn build_writer_with_policy(
+    vm: &str,
+    transcript_dir: &Path,
+    at_rest: Option<transcript::AtRestRetention>,
+) -> Result<TranscriptWriter> {
     let keys_dir = config::mvm_keys_dir();
     let kek = transcript::load_or_init_kek(&keys_dir)
         .with_context(|| format!("open the transcript key in {}", keys_dir.display()))?;
@@ -535,15 +549,19 @@ fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
 
     // The writer's directory has to exist before it does. Creating it is not
     // destructive, so unlike the discard it can run before the socket claim.
-    std::fs::create_dir_all(transcript_dir)
+    config::create_private_dir(transcript_dir)
         .with_context(|| format!("create the capture dir {}", transcript_dir.display()))?;
 
     // Through `stream_capture_config` and nowhere else: it is the one door
     // that installs ring retention, and a config assembled by hand would
     // silently get the fail-closed default — a workload that stops being
     // observable because it talked too much.
-    let config = stream_capture_config(StreamCaptureIdentity {
-        capture_id: format!("stream-{vm}"),
+    let mut config = stream_capture_config(StreamCaptureIdentity {
+        capture_id: if at_rest.is_some() {
+            format!("stream-{vm}-{}", now_unix_nanos())
+        } else {
+            format!("stream-{vm}")
+        },
         binding: CaptureBinding {
             tenant_id: DEFAULT_TENANT.to_string(),
             vm_name: vm.to_string(),
@@ -553,6 +571,7 @@ fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
         recipient: TRANSCRIPT_KEK_RECIPIENT.to_string(),
         wrapped_data_key_b64,
     });
+    config.at_rest = at_rest;
     Ok(TranscriptWriter::new(transcript_dir, data_key, config))
 }
 
@@ -720,7 +739,7 @@ fn seal_capture(vm: &str, stream: VmStream) {
 /// **No signer is minted here.** Teardown loads the host signer that admitted
 /// the run; it never creates one. A host with no signer never admitted a plan
 /// under it, so there is no chain this transcript belongs in.
-fn anchor_sealed_transcript(vm: &str, manifest: &TranscriptManifest) {
+pub(super) fn anchor_sealed_transcript(vm: &str, manifest: &TranscriptManifest) {
     let plan = match plan_persist::read_plan(vm) {
         Ok(plan) => plan,
         Err(error) => {
@@ -869,10 +888,16 @@ fn drop_unaccounted_tail(path: &Path, declared: u64) {
 /// this way. The read side degrades on an unparseable manifest rather than
 /// hard-erroring; this is the other half of that pair, and the half that
 /// stops the case arising.
-fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
+pub(super) fn write_manifest(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
     let path = dir.join(MANIFEST_FILENAME);
     let body = serde_json::to_vec_pretty(manifest).context("serialize the capture manifest")?;
-    atomic_write(&path, &body).with_context(|| format!("write {}", path.display()))
+    atomic_write(&path, &body).with_context(|| format!("write {}", path.display()))?;
+    // A timed-out writer still owns its journal. Only terminalized protected
+    // captures or complete legacy seals license removing the recovery source.
+    if manifest.sealed_unix_secs.is_some() || (manifest.at_rest.is_none() && !manifest.adopted) {
+        journal::CaptureJournal::discard(&dir.join(journal::JOURNAL_FILENAME));
+    }
+    Ok(())
 }
 
 /// Publish the manifest only if nothing has published one yet, and report
@@ -973,6 +998,7 @@ mod tests {
     fn capture<'a>(vm: &'a str, console_log: &'a Path) -> ConsoleCapture<'a> {
         ConsoleCapture {
             vm_name: vm,
+            supervisor_owned: false,
             console_log,
             display_socket: None,
             redaction: &DEFAULT_REDACTION,
@@ -999,6 +1025,28 @@ mod tests {
         let state = config::vm_state_dir(vm);
         std::fs::create_dir_all(&state).expect("state dir");
         state.join("console.log")
+    }
+
+    #[test]
+    fn supervisor_owned_capture_never_starts_a_competing_launcher_writer() {
+        let (_env, _tmp) = isolated_home();
+        for retention in [StreamRetention::Persist, StreamRetention::Ephemeral] {
+            let console = console_log_for("supervisor-owned");
+            let plane = StreamPlane::new();
+            let capture = ConsoleCapture {
+                supervisor_owned: true,
+                retention,
+                ..capture("supervisor-owned", &console)
+            };
+            // No supervisor socket exists yet. Neither a delayed owner nor a
+            // failed one licenses a second writer or a plaintext follower.
+            plane.attach(&capture).unwrap();
+            plane.attach(&capture).unwrap();
+            assert!(!plane.is_attached("supervisor-owned"));
+            assert!(!config::vm_stream_transcript_dir("supervisor-owned").exists());
+            assert!(!config::vm_stream_socket("supervisor-owned").exists());
+            assert!(!console.exists());
+        }
     }
 
     /// A follower attached on its own thread.
@@ -1419,6 +1467,7 @@ mod tests {
         plane
             .attach(&ConsoleCapture {
                 vm_name: "plane-policy",
+                supervisor_owned: false,
                 console_log: &console,
                 display_socket: None,
                 redaction: &narrowed,

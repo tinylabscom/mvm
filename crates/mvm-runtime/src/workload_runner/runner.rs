@@ -189,6 +189,10 @@ pub trait ConsoleStreamer: Send + Sync {
 /// be honouring something nobody admitted.
 pub struct ConsoleCapture<'a> {
     pub vm_name: &'a str,
+    /// The backend supervisor exclusively owns capture for the VM lifetime.
+    /// A launcher must not start another writer, even if the owner is delayed
+    /// or unavailable. This is independent of Persist versus Ephemeral.
+    pub supervisor_owned: bool,
     /// The write-only capture file the backend is already writing.
     pub console_log: &'a Path,
     /// Signed-grant guest-to-host display socket; the streamer only reads it.
@@ -465,6 +469,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // than serializing its process setup after guest readiness.
         let capture = ConsoleCapture {
             vm_name: &inputs.config.name,
+            supervisor_owned: self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: inputs.redaction,
@@ -816,6 +821,7 @@ impl<D: VmmDriver, S: NetworkEndpointSpawner, B: BrokerRegistrar> WorkloadRunner
         // with nothing else to show why.
         self.console_streamer.start(&ConsoleCapture {
             vm_name: &child.0,
+            supervisor_owned: self.driver.kind() == mvm_core::vm_backend::BackendKind::Hvf,
             console_log: &socks.console_log,
             display_socket: socks.display.as_deref(),
             redaction: &redaction,

@@ -138,11 +138,6 @@ impl CaptureJournal {
         let _ = std::fs::remove_file(path);
     }
 
-    /// This journal's path, for the caller that removes it after sealing.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     fn append(&mut self, line: &JournalLine) -> std::io::Result<()> {
         if self.file.is_none() {
             self.open()?;

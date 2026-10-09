@@ -28,7 +28,6 @@
 use std::io::Write;
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -229,6 +228,7 @@ pub fn hvf_child_restore_config(
         .collect::<Result<Vec<_>>>()?;
 
     Ok(HvfSupervisorConfig {
+        console_capture: parent.console_capture,
         // Same tier as the parent it forked from.
         trusted_builder_egress: parent.trusted_builder_egress,
         // Never inherited. The request names the *parent's* VM, state dir and
@@ -412,12 +412,11 @@ impl SpawnSupervisor for InstalledSupervisor {
         inherited: &[RawFd],
     ) -> Result<std::process::Child> {
         let supervisor = resolve_supervisor_path_verified()?;
-        bounded_restore_command(&supervisor, req, cfg.memory_mib, inherited)?
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
-                req.state_dir,
-            ))
+        let mut command = bounded_restore_command(&supervisor, req, cfg.memory_mib, inherited)?;
+        command
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr())
             .spawn()
             .with_context(|| format!("spawning {}", supervisor.display()))
     }
@@ -475,10 +474,10 @@ fn restore_hvf_vm_with(
                 .context("piping HvfSupervisorConfig to the supervisor")
         });
     if let Err(error) = piped {
-        // A supervisor that died before reading its config says why on stderr.
+        // Report typed configuration failure, never untrusted stderr.
         let _ = child.kill();
         let _ = child.wait();
-        return Err(error.context(restore_failure(req, &cfg, "could not be configured")));
+        return Err(error.context(restore_failure(req, "could not be configured")));
     }
     let restored = await_restored(&mut child, req, &cfg, ready_timeout)?;
     let spawn_to_ready = spawned_at.elapsed();
@@ -524,7 +523,6 @@ fn await_restored(
         if let Some(status) = child.try_wait().context("polling the HVF supervisor")? {
             bail!(restore_failure(
                 req,
-                cfg,
                 &format!("exited before the restored machine was running ({status})")
             ));
         }
@@ -533,7 +531,6 @@ fn await_restored(
             let _ = child.wait();
             bail!(restore_failure(
                 req,
-                cfg,
                 &format!("did not report the restored machine running within {timeout:?}")
             ));
         }
@@ -541,13 +538,12 @@ fn await_restored(
     }
 }
 
-/// A failed restore, with the supervisor's own account of why.
-fn restore_failure(req: &HvfRestoreRequest<'_>, cfg: &HvfSupervisorConfig, what: &str) -> String {
+/// Report control-plane status without reflecting untrusted supervisor stderr.
+fn restore_failure(req: &HvfRestoreRequest<'_>, what: &str) -> String {
     format!(
-        "HVF restore of '{}': the supervisor {what}; see {}{}",
+        "HVF restore of '{}': the supervisor {what}; {}",
         req.vm_name,
-        cfg.console_log.display(),
-        mvm_vmm::host::console_capture::supervisor_stderr_detail(req.state_dir)
+        mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
     )
 }
 
@@ -557,6 +553,7 @@ mod tests {
 
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
+            console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
             trusted_builder_egress: false,
             builder_egress_endpoint: None,
             kernel: state.join("Image"),
@@ -1170,12 +1167,11 @@ mod tests {
                 .env(
                     "READY",
                     mvm_vmm::host::hvf_supervisor::restore_ready_path(req.state_dir),
-                )
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
-                    req.state_dir,
-                ));
+                );
+            command
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr());
             let child = command.spawn()?;
             self.child_pid.set(Some(child.id()));
             Ok(child)
@@ -1287,7 +1283,7 @@ mod tests {
 
     /// The supervisor publishes its pid before it adopts, maps or validates
     /// the saved state, so a refusal after that point must still fail the
-    /// restore — with the supervisor's own reason — instead of reporting a
+    /// restore — without exposing sensitive stderr — instead of reporting a
     /// VM that is already gone.
     #[test]
     fn a_supervisor_refusal_after_its_pid_is_published_fails_the_restore() {
@@ -1295,7 +1291,7 @@ mod tests {
         restorable(tmp.path());
         let spawner = ScriptedSupervisor::new(
             "cat >/dev/null; echo $$ > \"$PID_FILE\"; \
-             echo 'Error: inherited restore descriptor 7 is not an unlinked, read-only regular file' >&2; \
+             echo 'synthetic-sensitive-supervisor-marker' >&2; \
              exit 1",
         );
         let content = matching_content();
@@ -1313,9 +1309,12 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("not an unlinked, read-only regular file"),
-            "the supervisor's reason is carried: {rendered}"
+            rendered.contains("raw supervisor stderr is not retained"),
+            "{rendered}"
         );
+        assert!(!rendered.contains("synthetic-sensitive-supervisor-marker"));
+        assert!(!tmp.path().join("supervisor.stderr.log").exists());
+        assert!(!tmp.path().join("console.log").exists());
     }
 
     /// A supervisor that never reports the machine running is killed at the

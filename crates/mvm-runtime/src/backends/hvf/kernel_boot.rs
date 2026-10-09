@@ -708,6 +708,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 console_data_sockets: channels.console_data_sockets,
                 builder_control_sockets: channels.builder_control_sockets,
                 console_log: channels.console_log,
+                console_sink: channels.console_sink,
                 pause_state: channels.pause_state,
                 snapshot_request: channels.snapshot_request,
                 snapshot_ram: channels.snapshot_ram,
@@ -777,6 +778,7 @@ struct RunInputs {
     builder_control_sockets: Vec<(u32, PathBuf)>,
     /// Host console log the PL011 mirrors guest output into as it arrives.
     console_log: Option<PathBuf>,
+    console_sink: Option<Box<dyn std::io::Write + Send>>,
     pause_state: Option<PathBuf>,
     snapshot_request: Option<PathBuf>,
     snapshot_ram: Option<PathBuf>,
@@ -1435,6 +1437,7 @@ unsafe fn run(
         console_data_sockets,
         builder_control_sockets,
         console_log,
+        console_sink,
         pause_state,
         snapshot_request,
         snapshot_ram,
@@ -1609,11 +1612,7 @@ unsafe fn run(
         // Mirror guest output to the host log as it arrives. Write-only, and
         // best-effort: a console log that cannot be opened costs a diagnostic,
         // never the boot. The full transcript still comes back in the result.
-        if let Some(path) = console_log.as_deref()
-            && let Ok(file) = mvm_vmm::host::console_capture::open_console_capture(path)
-        {
-            uart.stream_to(Box::new(file));
-        }
+        super::host_channels::install_console_sink(&mut uart, console_log.as_deref(), console_sink);
         // One virtio-blk per disk image (`/dev/vda`, `/dev/vdb`, …) at its window.
         let mut virtio_disks: Vec<VirtioBlk> = disks
             .into_iter()

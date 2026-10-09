@@ -79,6 +79,12 @@ impl ConsoleStream {
     }
 }
 
+impl Drop for ConsoleStream {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
 impl Pl011 {
     /// Register offsets (PL011 TRM).
     const DR: u64 = 0x00; // data register
@@ -109,7 +115,7 @@ impl Pl011 {
     pub fn stream_to(&mut self, sink: Box<dyn Write + Send>) {
         self.stream = Some(ConsoleStream {
             sink,
-            pending: Vec::new(),
+            pending: Vec::with_capacity(ConsoleStream::MAX_PENDING),
             failed: false,
         });
     }

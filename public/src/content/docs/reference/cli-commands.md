@@ -870,7 +870,8 @@ than ambiguous. Nothing selects `ephemeral` today — every production caller
 takes the default — so treat the field as the place a future opt-out will live
 rather than one you can reach now.
 
-Three limits are worth knowing before you rely on this:
+The following limits apply to legacy file-backed console capture, not the
+native HVF protected path described below:
 
 - The recorded transcript is redacted; the **console fallback is not**, so a
   read that falls back to (or splices in) the console shows raw guest bytes.
@@ -880,6 +881,30 @@ Three limits are worth knowing before you rely on this:
 - A spliced read **repeats** the part the recording already showed, because
   console byte offsets and transcript sequence numbers share no coordinate.
   Duplicated, never lost.
+
+**Native HVF protected capture (draft integration).** New native HVF launches
+require a matching host helper and a supervisor-owned encrypted console
+capture before boot is announced. The supervisor continues consuming console
+output after the launcher exits. A bounded, nonblocking handoff drops and
+counts output under overload or consumer failure; it never slows the guest
+behind encryption or disk I/O and never falls back to a plaintext console
+file. `machine logs` refuses plaintext fallback for these runs, including when
+capture setup fails. Signed `ephemeral` policy remains non-persistent.
+
+Raw supervisor stderr is deliberately discarded on this path, including
+startup failures; it is not retained or exportable. Public errors retain exit
+status and sanitized guidance rather than raw helper output.
+`supervisor-status.json` in the VM state directory records fixed lifecycle
+states such as `capture_setup_failed`, `boot_failed`, and `capture_failed`.
+Encrypted supervisor-stderr collection is a separate follow-up.
+
+This integration is **not ready for production**: authenticated aggregate
+byte-budget enforcement, periodic retirement/recovery, versioned
+cross-generation history, and the pre-resume warm-handoff ownership fence
+remain merge gates. The current draft refuses unsafe protected warm handoffs.
+The seven-day lifetime after sealing and hourly generation schedule do not
+replace byte limits. Legacy captures are not automatically enrolled. This
+native-HVF sequencing does not cover other backends or telemetry.
 
 Full walkthrough: [Workload output
 streaming](/guides/workload-output-streaming/).

@@ -23,7 +23,6 @@
 //! transcript that lost records rather than handing back an artifact that
 //! verifies clean while being quietly incomplete.
 
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -140,11 +139,6 @@ pub(in crate::stream) struct DurableSink {
     jobs: Option<SyncSender<PersistJob>>,
     worker: Option<WriterHandle>,
     counters: Arc<PersistCounters>,
-    /// The journal the writer thread mirrors landed chunks into, so a process
-    /// that did not open this capture can still seal it. Held here only to
-    /// unlink it once a manifest supersedes it — the file itself belongs to
-    /// the writer thread.
-    journal_path: PathBuf,
 }
 
 impl DurableSink {
@@ -154,7 +148,6 @@ impl DurableSink {
         // that lock is never released. The journal mirrors the same seed.
         let seed = writer.sealed_manifest();
         let journal = CaptureJournal::new(writer.dir(), seed.clone());
-        let journal_path = journal.path().to_path_buf();
         let writer = Arc::new(Mutex::new(writer));
         let counters = Arc::new(PersistCounters::default());
         let (jobs, inbox) = sync_channel(DURABLE_QUEUE_DEPTH);
@@ -171,7 +164,6 @@ impl DurableSink {
             vm: vm.to_string(),
             writer,
             seed,
-            journal_path,
             // A thread that would not start must not cost the capture its
             // transcript by pulling the disk onto the producer's own thread:
             // without one, `push` sheds every record, same as a full queue.
@@ -187,12 +179,10 @@ impl DurableSink {
     #[cfg(test)]
     fn new_without_writer_thread(vm: &str, writer: TranscriptWriter) -> Self {
         let seed = writer.sealed_manifest();
-        let journal_path = writer.dir().join(crate::stream::journal::JOURNAL_FILENAME);
         Self {
             vm: vm.to_string(),
             writer: Arc::new(Mutex::new(writer)),
             seed,
-            journal_path,
             jobs: None,
             worker: None,
             counters: Arc::new(PersistCounters::default()),
@@ -252,6 +242,18 @@ impl DurableSink {
         }
     }
 
+    /// Account for loss before broker ingestion (for example, a UART handoff).
+    pub fn note_unwritten(&self, chunks: u64, bytes: u64) {
+        saturating_add(&self.counters.shed_chunks, chunks);
+        saturating_add(&self.counters.shed_bytes, bytes);
+        saturating_add(&self.counters.total, chunks);
+        saturating_add(&self.counters.total_bytes, bytes);
+    }
+
+    pub fn ready(&self) -> bool {
+        self.jobs.is_some()
+    }
+
     /// Stop taking work, wait — up to a bound — for what is queued to land,
     /// and seal.
     ///
@@ -270,13 +272,8 @@ impl DurableSink {
             Some(worker) => wait_for_writer(worker, SEAL_JOIN_TIMEOUT),
             None => true,
         };
-        // The journal exists so a *different* process can seal this capture.
-        // This one just did, and leaving the mirror behind would invite a
-        // later stop to adopt a capture that already has a manifest. Only on
-        // the joined path: a writer still running owns that file.
-        if joined {
-            CaptureJournal::discard(&self.journal_path);
-        }
+        // Keep the journal until the owner has published the manifest. Losing
+        // it here would make a failed manifest write unrecoverable on restart.
         if !joined {
             tracing::warn!(
                 vm = %self.vm,
@@ -295,7 +292,13 @@ impl DurableSink {
             self.counters.shed_chunks.load(Ordering::Relaxed),
             self.counters.shed_bytes.load(Ordering::Relaxed),
         );
-        writer.sealed_manifest()
+        match mvm_core::transcript::retention_now().and_then(|now| writer.finalize_at(now)) {
+            Ok(manifest) => manifest,
+            Err(_) => {
+                tracing::warn!("capture finalization failed; no terminal lifetime is claimed");
+                self.degraded_manifest()
+            }
+        }
     }
 
     /// The manifest for a writer this sink gave up waiting on: no chunks,
@@ -307,12 +310,19 @@ impl DurableSink {
     /// direction that never overclaims completeness.
     fn degraded_manifest(&self) -> TranscriptManifest {
         let mut manifest = self.seed.clone();
+        manifest.adopted = true;
         manifest.refused_chunks = self.counters.total.load(Ordering::Relaxed);
         manifest.refused_bytes = self.counters.total_bytes.load(Ordering::Relaxed);
         manifest.sealed_root_hex =
             sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
         manifest
     }
+}
+
+fn saturating_add(counter: &AtomicU64, value: u64) {
+    let _ = counter.try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(value))
+    });
 }
 
 /// A sink dropped without sealing still lets its writer finish, under the same

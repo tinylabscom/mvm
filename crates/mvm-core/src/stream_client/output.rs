@@ -491,7 +491,21 @@ pub fn open_vm_output_at(
     // Attach before reading history: see the module docs on the ordering and
     // on the residual window it does not close.
     let live = connect_broker(locator, request.opts)?;
-    let history = read_history(locator, request)?;
+    let run = super::protected::ProtectedRun::read(&locator.transcript_dir)?;
+    let protected = run.is_some()
+        || locator
+            .console_log
+            .parent()
+            .map(super::protected::required)
+            .transpose()?
+            .unwrap_or(false);
+    let history = if let Some(run) = run {
+        read_protected_history(locator, request, &run)?
+    } else if protected {
+        None
+    } else {
+        read_history(locator, request)?
+    };
 
     // Presence, never the surviving record count. A capture that verifies
     // clean and matched nothing is still a capture: counting it absent would
@@ -508,7 +522,7 @@ pub fn open_vm_output_at(
         || (VecDeque::new(), None, None),
         |history| (history.records, history.truncation, history.empty),
     );
-    let (tail, availability) = resolve_tail(locator, request, live, durable)?;
+    let (tail, availability) = resolve_tail(locator, request, live, durable, protected)?;
     Ok(VmOutputStream {
         history: records,
         tail,
@@ -538,6 +552,7 @@ fn resolve_tail(
     request: OutputRequest,
     live: Option<Box<dyn StreamReader>>,
     durable: DurableHalf,
+    protected: bool,
 ) -> Result<(Option<Tail>, StreamAvailability), StreamError> {
     Ok(match (live, durable) {
         (Some(live), DurableHalf::Absent) => {
@@ -545,6 +560,14 @@ fn resolve_tail(
         }
         (Some(live), _) => (Some(Tail::Broker(live)), StreamAvailability::LiveAndHistory),
         (None, DurableHalf::Owned) => (None, StreamAvailability::HistoryOnly),
+        (None, DurableHalf::Adopted) if protected => (None, StreamAvailability::HistoryOnly),
+        (None, DurableHalf::Absent) if protected => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "protected console capture unavailable; plaintext fallback refused",
+            )
+            .into());
+        }
         (None, DurableHalf::Adopted) => match open_console_behind_history(locator, request) {
             Some(console) => (
                 Some(Tail::Console(console)),
@@ -679,6 +702,95 @@ struct History {
     empty: Option<EmptyHistory>,
 }
 
+fn read_protected_history(
+    locator: &OutputLocator,
+    request: OutputRequest,
+    run: &super::protected::ProtectedRun,
+) -> Result<Option<History>, StreamError> {
+    if !run.persists {
+        return Ok(None);
+    }
+    let run_dir = run.directory(&locator.transcript_dir)?;
+    let entries = match std::fs::read_dir(run_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut generations = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_dir()
+            || name.as_encoded_bytes().len() != 20
+            || !name.as_encoded_bytes().iter().all(u8::is_ascii_digit)
+            || generations.len() >= 4096
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid protected generation directory",
+            )
+            .into());
+        }
+        generations.push(entry.path());
+    }
+    generations.sort();
+    let mut combined: Option<History> = None;
+    for dir in generations {
+        let generation = OutputLocator {
+            transcript_dir: dir,
+            ..locator.clone()
+        };
+        let untrimmed = OutputRequest {
+            history_tail: None,
+            ..request
+        };
+        let Some(mut history) = read_history_mode(&generation, untrimmed, true)? else {
+            continue;
+        };
+        let all = combined.get_or_insert_with(|| History {
+            records: VecDeque::new(),
+            truncation: None,
+            empty: None,
+        });
+        if let (Some(last), Some(first)) = (all.records.back(), history.records.front())
+            && first.seq <= last.seq
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "protected generation sequence overlap",
+            )
+            .into());
+        }
+        all.records.append(&mut history.records);
+        if let Some(loss) = history.truncation {
+            let total = all.truncation.get_or_insert(Truncation {
+                refused_chunks: 0,
+                refused_bytes: 0,
+                evicted_chunks: 0,
+                evicted_bytes: 0,
+                adopted: false,
+            });
+            total.refused_chunks = total.refused_chunks.saturating_add(loss.refused_chunks);
+            total.refused_bytes = total.refused_bytes.saturating_add(loss.refused_bytes);
+            total.evicted_chunks = total.evicted_chunks.saturating_add(loss.evicted_chunks);
+            total.evicted_bytes = total.evicted_bytes.saturating_add(loss.evicted_bytes);
+            total.adopted |= loss.adopted;
+        }
+        all.empty = history.empty;
+    }
+    if let Some(history) = &mut combined {
+        if !history.records.is_empty() {
+            history.empty = (request.history_tail == Some(0)).then_some(EmptyHistory::NotRequested);
+        }
+        if let Some(tail) = request.history_tail {
+            while history.records.len() > tail {
+                history.records.pop_front();
+            }
+        }
+    }
+    Ok(combined)
+}
+
 /// Read, verify, and decrypt the VM's transcript, or `Ok(None)` when it has
 /// none.
 ///
@@ -698,6 +810,14 @@ fn read_history(
     locator: &OutputLocator,
     request: OutputRequest,
 ) -> Result<Option<History>, StreamError> {
+    read_history_mode(locator, request, false)
+}
+
+fn read_history_mode(
+    locator: &OutputLocator,
+    request: OutputRequest,
+    protected: bool,
+) -> Result<Option<History>, StreamError> {
     let manifest_path = locator.transcript_dir.join(MANIFEST_FILENAME);
     let exists = manifest_path.try_exists().map_err(|e| {
         transcript_error(
@@ -711,7 +831,7 @@ fn read_history(
     if !exists {
         return Ok(None);
     }
-    let Some(manifest) = load_manifest(locator, &manifest_path)? else {
+    let Some(manifest) = load_manifest(locator, &manifest_path, protected)? else {
         return Ok(None);
     };
     let key = unwrap_capture_key(locator, &manifest)?;
@@ -790,6 +910,7 @@ fn classify_empty(
 fn load_manifest(
     locator: &OutputLocator,
     path: &Path,
+    protected: bool,
 ) -> Result<Option<TranscriptManifest>, StreamError> {
     let bytes = std::fs::read(path).map_err(|e| {
         transcript_error(
@@ -802,6 +923,11 @@ fn load_manifest(
     })?;
     match serde_json::from_slice(&bytes) {
         Ok(manifest) => Ok(Some(manifest)),
+        Err(_) if protected => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "protected capture manifest is invalid",
+        )
+        .into()),
         Err(error) => {
             tracing::warn!(
                 vm = %locator.vm,
@@ -1265,6 +1391,25 @@ mod tests {
         assert!(rendered.contains("ghost"), "{rendered}");
         assert!(rendered.contains("no-such-capture"), "{rendered}");
         assert!(rendered.contains("no-console.log"), "{rendered}");
+    }
+
+    #[test]
+    fn protected_owner_failure_never_falls_back_to_a_legacy_console() {
+        let root = tempfile::tempdir().unwrap();
+        let mut locator = empty_locator(root.path());
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(&locator.console_log, b"sensitive-legacy-marker").unwrap();
+        std::fs::write(
+            root.path().join("supervisor.json"),
+            br#"{"console_capture":"encrypted"}"#,
+        )
+        .unwrap();
+        let error = match open_vm_output_at(&locator, OutputRequest::default()) {
+            Ok(_) => panic!("missing protected owner must refuse"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("plaintext fallback refused"));
+        assert!(!error.to_string().contains("sensitive-legacy-marker"));
     }
 
     #[test]

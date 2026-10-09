@@ -8,7 +8,6 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -230,6 +229,7 @@ fn relay_supervisor_config_with_handoff(
     };
 
     Ok(HvfSupervisorConfig {
+        console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
         kernel,
         cmdline,
         memory_mib: spec.memory_mib,
@@ -341,7 +341,6 @@ fn boot_with_handoff(
     let state_dir = vm_state_dir(&spec.name);
     std::fs::create_dir_all(&state_dir)
         .map_err(|e| anyhow!("create state dir {}: {e}", state_dir.display()))?;
-    let _ = mvm_vmm::host::console_capture::open_console_capture(&state_dir.join("console.log"));
     let timeout_secs = std::env::var("MVM_HVF_TIMEOUT")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -361,12 +360,11 @@ fn boot_with_handoff(
         serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
     let supervisor = resolve_supervisor_path_verified()
         .map_err(|e| anyhow!("{}", supervisor_unavailable_message(&e)))?;
-    let mut child = bounded_supervisor_command(&supervisor, spec, &paths.state_dir)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(mvm_vmm::host::console_capture::supervisor_stderr(
-            &paths.state_dir,
-        ))
+    let mut command = bounded_supervisor_command(&supervisor, spec, &paths.state_dir);
+    let mut child = command
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(mvm_vmm::host::hvf_supervisor::protected_supervisor_stderr())
         .spawn()
         .map_err(|e| anyhow!("spawn {}: {e:#}", supervisor.display()))?;
     child
@@ -386,17 +384,15 @@ fn boot_with_handoff(
             .map_err(|e| anyhow!("poll supervisor: {e}"))?
         {
             bail!(
-                "hvf supervisor exited before writing its PID file (status: {status}); see {}{}",
-                paths.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+                "hvf supervisor exited before writing its PID file (status: {status}); {}",
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
             bail!(
-                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; see {}{}",
-                paths.console_log.display(),
-                mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+                "hvf supervisor did not confirm boot within {PID_FILE_TIMEOUT:?}; {}",
+                mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
             );
         }
         std::thread::sleep(mvm_core::poll_backoff::poll_delay(attempt));
@@ -412,9 +408,8 @@ fn boot_with_handoff(
     }) {
         let _ = child.kill();
         return Err(error).context(format!(
-            "HVF supervisor failed readiness; see {}{}",
-            paths.console_log.display(),
-            mvm_vmm::host::console_capture::supervisor_stderr_detail(&paths.state_dir)
+            "HVF supervisor failed readiness; {}",
+            mvm_vmm::host::hvf_supervisor::PROTECTED_DIAGNOSTICS_HINT
         ));
     }
 

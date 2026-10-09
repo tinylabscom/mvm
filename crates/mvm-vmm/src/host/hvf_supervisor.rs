@@ -111,10 +111,50 @@ pub fn restore_ready_path(state_dir: &std::path::Path) -> PathBuf {
     state_dir.join(RESTORE_READY_FILE)
 }
 
+/// The host requires an encrypted supervisor-owned console, never a file sink.
+/// A required wire field makes older strict helpers refuse instead of silently
+/// ignoring a security requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HvfConsoleCapture {
+    Encrypted,
+}
+
+/// Sanitized guidance; never append raw helper output to public errors.
+pub const PROTECTED_DIAGNOSTICS_HINT: &str = "inspect protected console history and supervisor status; raw supervisor stderr is not retained";
+
+/// The supervisor, not a launcher-owned pipe or file, owns capture. Raw helper
+/// stderr is deliberately discarded until an encrypted stderr collector exists.
+pub fn protected_supervisor_stderr() -> std::process::Stdio {
+    std::process::Stdio::null()
+}
+
+/// Payload-free supervisor evidence, usable when raw stderr is discarded.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProtectedSupervisorStatus {
+    Starting,
+    CaptureSetupFailed,
+    BootFailed,
+    Running,
+    Stopped,
+    CaptureFailed,
+    UnsafeHandoffRefused,
+}
+
+impl ProtectedSupervisorStatus {
+    pub fn publish(self, state: &std::path::Path) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(&self).map_err(std::io::Error::other)?;
+        mvm_core::util::atomic_io::atomic_write(&state.join("supervisor-status.json"), &bytes)
+            .map_err(std::io::Error::other)
+    }
+}
+
 /// Everything the supervisor needs to boot one guest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HvfSupervisorConfig {
+    pub console_capture: HvfConsoleCapture,
     /// arm64 `Image` to boot.
     pub kernel: PathBuf,
     /// Full kernel cmdline. `None` ⇒ the supervisor's built-in default (workload
@@ -370,6 +410,7 @@ mod tests {
     /// Every field populated, so the shape pin below sees the whole schema.
     fn full_config_fixture() -> HvfSupervisorConfig {
         HvfSupervisorConfig {
+            console_capture: HvfConsoleCapture::Encrypted,
             kernel: "/k/Image".into(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
             memory_mib: 8192,
@@ -431,6 +472,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn console_protection_is_required_and_cannot_request_plaintext() {
+        let mut value = serde_json::to_value(full_config_fixture()).unwrap();
+        value.as_object_mut().unwrap().remove("console_capture");
+        assert!(serde_json::from_value::<HvfSupervisorConfig>(value.clone()).is_err());
+        value["console_capture"] = serde_json::json!("plaintext");
+        assert!(serde_json::from_value::<HvfSupervisorConfig>(value).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protected_helper_stderr_never_reaches_launcher_output_or_a_file() {
+        let root = tempfile::tempdir().unwrap();
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .current_dir(root.path())
+            .args(["-c", "echo synthetic-sensitive-stderr-marker >&2; exit 17"]);
+        let output = command
+            .stderr(protected_supervisor_stderr())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(17));
+        assert!(output.stderr.is_empty());
+        assert!(output.stdout.is_empty());
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        assert!(!PROTECTED_DIAGNOSTICS_HINT.contains("synthetic-sensitive-stderr-marker"));
+    }
+
     /// The config contract is version-stamped (see `host::helper_contract`),
     /// and this pin forces the stamp to move with the schema: serializing
     /// the full fixture must hash to the pinned value, so adding, renaming,
@@ -452,7 +521,7 @@ mod tests {
     #[test]
     fn socket_fields_default_to_none() {
         // Older configs (and non-secret VMs) omit the socket fields → None.
-        let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
+        let json = r#"{"console_capture":"encrypted","kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.agent_socket, None);
         assert_eq!(cfg.substitution_socket, None);
@@ -469,7 +538,7 @@ mod tests {
 
     #[test]
     fn optional_fields_default() {
-        let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
+        let json = r#"{"console_capture":"encrypted","kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.cmdline, None);
         assert_eq!(cfg.initramfs, None);
@@ -481,7 +550,7 @@ mod tests {
     #[test]
     fn unknown_field_is_rejected() {
         // deny_unknown_fields: a typo'd / unexpected field fails closed.
-        let json = r#"{"kernel":"/k","console_log":"/c","pid_file":"/p","workload_exit":"/w","timeout_secs":1,"bogus":1}"#;
+        let json = r#"{"console_capture":"encrypted","kernel":"/k","console_log":"/c","pid_file":"/p","workload_exit":"/w","timeout_secs":1,"bogus":1}"#;
         assert!(serde_json::from_str::<HvfSupervisorConfig>(json).is_err());
     }
 
@@ -511,6 +580,7 @@ mod tests {
     #[test]
     fn hvf_supervisor_console_data_sockets_roundtrip() {
         let cfg = HvfSupervisorConfig {
+            console_capture: HvfConsoleCapture::Encrypted,
             kernel: "/k/Image".into(),
             cmdline: None,
             memory_mib: 0,
@@ -573,7 +643,7 @@ mod tests {
     fn hvf_supervisor_console_data_sockets_defaults_to_empty() {
         // Configs without console_data_sockets (prod or pre-Task-2 configs) parse
         // to an empty vec — the serde(default) guarantee.
-        let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
+        let json = r#"{"console_capture":"encrypted","kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert!(cfg.console_data_sockets.is_empty());
     }

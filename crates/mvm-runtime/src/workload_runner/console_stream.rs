@@ -76,6 +76,7 @@ mod tests {
     fn capture(vm: &str) -> ConsoleCapture<'_> {
         ConsoleCapture {
             vm_name: vm,
+            supervisor_owned: false,
             console_log: Path::new("/dev/null"),
             display_socket: None,
             redaction: &REDACTION,

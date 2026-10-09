@@ -426,6 +426,26 @@ impl StreamBroker {
         self.durable.map(DurableSink::seal)
     }
 
+    /// Rotate only storage, preserving the live sequence, chain and followers.
+    /// Called by the capture owner, never the vCPU producer.
+    pub(super) fn replace_writer(
+        &mut self,
+        writer: Option<TranscriptWriter>,
+    ) -> Option<TranscriptManifest> {
+        let next = writer.map(|writer| DurableSink::new(&self.vm, writer));
+        std::mem::replace(&mut self.durable, next).map(DurableSink::seal)
+    }
+
+    pub(super) fn note_unwritten(&self, chunks: u64, bytes: u64) {
+        if let Some(durable) = &self.durable {
+            durable.note_unwritten(chunks, bytes);
+        }
+    }
+
+    pub(super) fn durable_ready(&self) -> bool {
+        self.durable.as_ref().is_some_and(DurableSink::ready)
+    }
+
     /// Run the chunk through the seam and count what it decided.
     ///
     /// The decision itself lives in [`redact::clear_for_display`], shared with

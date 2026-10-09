@@ -61,6 +61,7 @@ pub mod input_gate;
 pub mod input_route;
 mod journal;
 pub mod plane;
+pub mod protected;
 pub mod redact;
 pub(crate) mod secret_scan;
 pub mod serve;
