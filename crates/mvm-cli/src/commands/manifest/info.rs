@@ -1,11 +1,10 @@
 //! `mvmctl manifest info` — show details for one slot.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use mvm_core::manifest::{canonical_key_for_path, resolve_manifest_config_path};
+use mvm_client::manifest::{self, InfoRequest};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::super::Cli;
 
@@ -20,54 +19,14 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let manifest_path = match args.path.as_deref() {
-        Some(p) => resolve_manifest_config_path(std::path::Path::new(p))?,
-        None => {
-            let cwd = std::env::current_dir().context("Failed to read cwd")?;
-            mvm_core::manifest::discover_manifest_from_dir(&cwd)?
-                .ok_or_else(|| anyhow::anyhow!(
-                    "No manifest found from cwd. Run `mvmctl init` to create one, or pass a path explicitly."
-                ))?
-        }
-    };
-
-    let canonical = std::fs::canonicalize(&manifest_path).with_context(|| {
-        format!(
-            "Failed to canonicalize manifest path {}",
-            manifest_path.display()
-        )
-    })?;
-    let slot_hash = canonical_key_for_path(&canonical)?;
-    let persisted = tmpl::template_load_slot(&slot_hash).with_context(|| {
-        format!(
-            "Manifest at {} has no built slot — run `mvmctl build {}` first",
-            canonical.display(),
-            canonical.display()
-        )
-    })?;
-
-    let revision = tmpl::template_snapshot_info_for_slot(&slot_hash)
-        .ok()
-        .flatten();
-
+    let report = manifest::info(&InfoRequest { path: args.path })?;
     if args.json {
-        #[derive(serde::Serialize)]
-        struct Out {
-            slot_hash: String,
-            persisted: mvm_core::manifest::PersistedManifest,
-            snapshot: Option<mvm_core::template::SnapshotInfo>,
-        }
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&Out {
-                slot_hash,
-                persisted,
-                snapshot: revision,
-            })?
-        );
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
     }
 
+    let persisted = report.persisted;
+    let revision = report.snapshot;
     let label = persisted.name.as_deref().unwrap_or("(unnamed)");
     println!("Manifest: {}", persisted.manifest_path);
     println!("  Slot:       {}", persisted.manifest_hash);
@@ -91,4 +50,27 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn info_parser_preserves_optional_path_and_json() {
+        let args = Command::try_parse_from(["info", "project/mvm.toml", "--json"])
+            .unwrap()
+            .args;
+        assert_eq!(args.path.as_deref(), Some("project/mvm.toml"));
+        assert!(args.json);
+        let defaults = Command::try_parse_from(["info"]).unwrap().args;
+        assert!(defaults.path.is_none() && !defaults.json);
+    }
 }

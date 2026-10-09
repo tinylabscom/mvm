@@ -206,6 +206,30 @@ removes the installed `mvmctl` and its host binaries too.
 
 ### Inspection / registry (`mvmctl manifest *`)
 
+`ls`, `info`, and `verify` share their operations with the
+`mvm_client::manifest` library facade. The host library exposes the same
+operations as `manifest.list`, `manifest.info`, and `manifest.verify` (ABI
+1.7), with generated request/reply types and method constants for the Python
+and TypeScript SDK bindings. These inspect the local registry without booting
+a machine. Listing supports repeated `--tag` filters: a slot must have every
+requested tag. `info` keeps snapshot lookup best-effort; a missing snapshot
+does not make the persisted manifest unavailable. `verify` checks artifact
+checksums, not publisher trust: `--check-signature` remains explicitly refused.
+Persisted names and revision metadata are validated before resolving paths:
+invalid template names contribute no tags, and invalid snapshot references
+produce no snapshot. Verification refuses artifact paths that escape the
+selected revision rather than checking unrelated host files.
+
+The SDK adapters call these host-library operations in-process:
+`mvm.manifest.list()`, `mvm.manifest.info(path)`, and
+`mvm.manifest.verify(path)` in Python; `manifest.list()`,
+`manifest.info(path)`, and `manifest.verify(path)` from `@runmvm/mvm` in
+TypeScript. Listing takes `orphans` and `tags` options in both languages.
+An omitted inspection or verification path uses the same cwd discovery as
+the CLI. Verification takes `revision` and `check_signature` keyword arguments
+in Python, or `revision` and `checkSignature` in the TypeScript options object.
+The signature option is forwarded to the shared refusal, never ignored.
+
 | Command                                             | Description                                                                           |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | `mvmctl manifest ls [--json]`                       | List built slots — manifest path, last-built timestamp, optional `name`               |
@@ -1557,8 +1581,8 @@ running microVM.
 | `mvmctl pack prune`                                       | Reclaim non-active pack versions beyond the newest N per key                                                                                                      |
 | `mvmctl pack download`                                    | Fetch a pack version into the cache without changing the active one                                                                                               |
 | `mvmctl pack update`                                      | Fetch the latest pack version and activate it                                                                                                                     |
-| `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its signed manifest, accepted publisher identities, policy text, image source declaration, and payload digests  |
-| `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; fail if any check cannot complete                                 |
+| `mvmctl pack info ns/name[@version] [--json]`             | Re-verify an installed workload pack, then show its manifest digest, actual signer and accepted publisher identities, policy text, image source declaration, and payload digests |
+| `mvmctl pack verify ns/name[@version] [--json]`           | Re-verify an installed workload pack's lock pin, publisher signature, and every payload file; report its actual signer and manifest digest or fail closed |
 | `mvmctl pack search [QUERY] [--json]`                     | Search the pack registry and mark installed packs; same behavior as `mvmctl search`                                                                               |
 | `mvmctl pack pull ns/name[@version] [--json]`             | Fetch, verify, install, and pin a workload pack; same trust policy and behavior as `mvmctl pull`                                                                  |
 | `mvmctl pack registry ls`                                 | List pinned signed registry packs and whether each is installed (`--json` for machine-readable rows)                                                              |
@@ -1581,6 +1605,14 @@ running microVM.
 | `mvmctl deps capture` / `install`                         | Capture or install application dependencies into a sealed volume                                                                                                  |
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
+
+Pack inspection reports `official_status: "not_established"`: verification under the
+current publisher policy does not by itself establish official MVM release
+status. Revocation checks cover an operator-configured signed feed when one is
+configured; a feed is not required by the current registry-pack model. The
+`revocation_scope: "operator_configured_only"` JSON field makes that limit
+explicit. A valid signature proves publisher identity and content integrity,
+not safety.
 
 ### Bundles in image registries
 

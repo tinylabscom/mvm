@@ -178,6 +178,9 @@ export {
 } from "./_helpers.js";
 export type { BrowserSandboxOptions } from "./_helpers.js";
 
+// Host-side built-manifest inspection; the host library loads only on use.
+export * as manifest from "./manifest.js";
+
 // In-guest host-services runtime surface (`mvm.audit.emit`, `mvm.host.time()`).
 // Namespaces, so `import * as mvm; mvm.audit.emit(...)` works inside a booted
 // workload. Importing them is cheap — the shared object is loaded lazily on
