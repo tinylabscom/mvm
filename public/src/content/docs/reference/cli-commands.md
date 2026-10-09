@@ -282,7 +282,7 @@ The signature option is forwarded to the shared refusal, never ignored.
 | --- | --- |
 | `mvmctl trust audit transcript arm <vm> [--tenant <t>]` | Create a new encrypted capture with seven-day payload retention after terminal sealing. Duration is at most 3600 seconds; byte/chunk limits remain independent. |
 | `mvmctl trust audit transcript disarm <capture-id> [--tenant <t>]` | Acquire the capture lease, finalize an inactive generation, and anchor its immutable root in the host audit chain. Refuses while a protected producer owns the lease. |
-| `mvmctl trust audit transcript reconcile <capture-id> [--tenant <t>]` | Reconcile one known capture: authenticate its original seal, durably sign expiry evidence, then remove only its authorized ciphertext segments. Safe to retry after interruption. |
+| `mvmctl trust audit transcript reconcile <capture-id> [--tenant <t>]` | Reconcile one known capture: authenticate its original seal and concrete VM identity without requiring the current VM plan, durably sign expiry evidence with the original attribution, then remove only its authorized ciphertext segments. Safe to retry after interruption. |
 | `mvmctl trust audit transcript export <capture-id> [--tenant <t>] [--out <path>]` | Verify and decrypt a readable capture. Expired or authentically retired payload is refused even if physical cleanup is delayed. |
 | `mvmctl trust audit transcript list [--tenant <t>] [--json]` | List captures without enrolling existing data in retention. |
 

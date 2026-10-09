@@ -1,5 +1,7 @@
 use super::*;
+use crate::supervisor::audit::for_plan;
 use anyhow::bail;
+use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::{
     AtRestRetention, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME, RetentionPolicy,
     TranscriptWriter, TranscriptWriterConfig,
@@ -14,13 +16,17 @@ struct Fixture {
 
 impl Fixture {
     fn new(anchor: bool) -> Self {
+        Self::for_vm(anchor, "service-instance-1")
+    }
+
+    fn for_vm(anchor: bool, vm: &str) -> Self {
         let root = tempfile::tempdir().unwrap();
         mvm_core::private_fs::ensure_private_dir(root.path()).unwrap();
         let dir = root.path().join("capture");
         mvm_core::private_fs::ensure_private_dir(&dir).unwrap();
         let plan = mvm_core::plan::test_support::PlanFixture::new()
             .tenant("local")
-            .workload("synthetic-vm")
+            .workload("service")
             .build();
         let emitter = AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&[17; 32]),
@@ -34,7 +40,7 @@ impl Fixture {
                 capture_id: "synthetic-capture".into(),
                 binding: CaptureBinding {
                     tenant_id: "local".into(),
-                    vm_name: "synthetic-vm".into(),
+                    vm_name: vm.into(),
                     session_id: None,
                 },
                 bounds: CaptureBounds {
@@ -86,7 +92,8 @@ impl Fixture {
             root: self.root.path(),
             relative_capture: Path::new("capture"),
             capture_id: &self.manifest.capture_id,
-            plan: &self.plan,
+            tenant: &self.plan.tenant.0,
+            vm: &self.manifest.binding.vm_name,
             emitter: &self.emitter,
         }
     }
@@ -135,6 +142,51 @@ fn authenticated_boundary_preserves_manifest_and_resumes_exactly() {
         )
         .unwrap()
     );
+}
+
+#[test]
+fn instances_of_one_workload_retire_independently() {
+    let first = Fixture::for_vm(true, "service-instance-1");
+    let second = Fixture::for_vm(true, "service-instance-2");
+    assert_eq!(first.plan.workload, second.plan.workload);
+    reconcile_capture(first.context(), 605_000).unwrap();
+    assert!(!first.payload().exists());
+    assert!(second.payload().exists());
+    reconcile_capture(second.context(), 605_000).unwrap();
+    assert!(!second.payload().exists());
+}
+
+#[test]
+fn requested_concrete_vm_is_authenticated_not_workload_name() {
+    let f = Fixture::new(true);
+    let mut wrong = f.context();
+    wrong.vm = "service-instance-2";
+    assert!(reconcile_capture(wrong, 605_000).is_err());
+    wrong.vm = "service";
+    assert!(reconcile_capture(wrong, 605_000).is_err());
+    assert!(f.payload().exists());
+    assert!(reconcile_capture(f.context(), 605_000).is_ok());
+}
+
+#[test]
+fn replacement_plan_cannot_change_original_retirement_attribution() {
+    let mut f = Fixture::new(true);
+    let original_plan_id = f.plan.plan_id.clone();
+    f.plan = mvm_core::plan::test_support::PlanFixture::new()
+        .tenant("local")
+        .workload("replacement")
+        .build();
+    reconcile_capture(f.context(), 605_000).unwrap();
+    let entries = crate::supervisor::verify_audit_chain_entries(
+        &f.emitter.audit_dir().join("local.jsonl"),
+        &f.emitter.verifying_key(),
+    )
+    .unwrap();
+    let retired = entries
+        .iter()
+        .find(|entry| entry.event == TRANSCRIPT_RETIRED_EVENT)
+        .unwrap();
+    assert_eq!(retired.plan_id, original_plan_id);
 }
 
 #[test]
@@ -299,9 +351,25 @@ fn aggregate_pressure_requires_signed_budget_and_checked_accounting() {
             false,
         )
         .unwrap();
-    let owner = BudgetOwner::acquire(f.root.path(), &f.plan, budget).unwrap();
-    assert!(BudgetOwner::acquire(f.root.path(), &f.plan, budget).is_err());
+    let owner = BudgetOwner::acquire(f.root.path(), "local", "service-instance-1", budget).unwrap();
+    assert!(BudgetOwner::acquire(f.root.path(), "local", "service-instance-1", budget).is_err());
     let candidates = [f.manifest.clone()];
+    let mut wrong_vm = f.context();
+    wrong_vm.vm = "service-instance-2";
+    assert!(
+        reconcile_pressure(
+            wrong_vm,
+            &owner,
+            &candidates,
+            GenerationReservation {
+                plaintext_bytes: 2,
+                chunks: 1
+            },
+            300,
+        )
+        .is_err()
+    );
+    assert!(f.payload().exists());
     assert!(
         reconcile_pressure(
             f.context(),
@@ -364,7 +432,13 @@ fn aggregate_pressure_requires_signed_budget_and_checked_accounting() {
 #[test]
 fn pressure_cannot_enroll_forensic_captures_or_trust_rehashed_totals() {
     let f = Fixture::new(true);
-    let owner = BudgetOwner::acquire(f.root.path(), &f.plan, Default::default()).unwrap();
+    let owner = BudgetOwner::acquire(
+        f.root.path(),
+        "local",
+        "service-instance-1",
+        Default::default(),
+    )
+    .unwrap();
     assert!(
         reconcile_pressure(
             f.context(),
