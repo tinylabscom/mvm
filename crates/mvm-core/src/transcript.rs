@@ -18,6 +18,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 
 use crate::crypto::aead;
 
+pub mod evidence;
+pub mod evidence_pressure;
 mod retention;
 mod ring;
 #[cfg(unix)]
