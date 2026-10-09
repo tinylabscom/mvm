@@ -36,6 +36,7 @@ entitlements="$(codesign -d --entitlements - --xml "$MVM_HVF_SUPERVISOR_PATH" 2>
 }
 
 # Source before overriding: dev-env otherwise reclaims external paths.
+# shellcheck source=/dev/null
 source "$ROOT/scripts/dev-env.sh"
 umask 077
 export MVM_PROTECTED_WITNESS_ROOT
