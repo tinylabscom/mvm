@@ -208,6 +208,7 @@ covered = [
     "mvmctl manifest verify --check-signature",
     "mvmctl manifest verify ./my-worker",
     "mvmctl pack info runtime/node",
+    "mvmctl pack ls",
     "mvmctl pack verify runtime/node",
     "mvmctl run",
     "mvmctl run -- uname -a",
