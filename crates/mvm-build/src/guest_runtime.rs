@@ -1,6 +1,10 @@
 //! One verified guest-bins tree shared by runtime-overlay, initramfs and SDK
-//! assembly. A source checkout builds the archive once, then all consumers
-//! read its digest-named extraction rather than starting separate guest builds.
+//! assembly. A source checkout builds the archive once. Installed clients use
+//! the complete, both-architecture guest-bins archive signed by their exact CLI
+//! release tag, preferring the triplet next to the real executable under
+//! `guest-runtime/`, then the system prefix's `lib/mvmctl/guest-runtime/`,
+//! over the release download. All consumers share its
+//! digest-named extraction. Verification errors never trigger source fallback.
 
 use std::collections::BTreeSet;
 use std::fs::{self, File};
@@ -29,6 +33,8 @@ pub struct GuestRuntime {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GuestRuntimeError {
+    #[error("guest runtime release: {0}")]
+    Release(#[from] crate::runtime_overlay::RuntimeOverlayError),
     #[error("guest runtime archive: {0}")]
     Archive(#[from] GuestBinsError),
     #[error("guest runtime source: {0}")]
@@ -63,6 +69,15 @@ pub fn validate_guest_runtime_manifest(
     version: &str,
     arch: GuestArch,
 ) -> Result<(), GuestRuntimeError> {
+    validate_runtime_manifest(manifest, version, arch, false)
+}
+
+fn validate_runtime_manifest(
+    manifest: &GuestBinsManifest,
+    version: &str,
+    arch: GuestArch,
+    release: bool,
+) -> Result<(), GuestRuntimeError> {
     if manifest.version != version {
         return Err(GuestRuntimeError::Version {
             expected: version.to_string(),
@@ -96,7 +111,7 @@ pub fn validate_guest_runtime_manifest(
             GuestBinsMember::Executable { arch: found, .. }
             | GuestBinsMember::InitramfsAgent { arch: found }
             | GuestBinsMember::SharedObject { arch: found, .. }
-                if found != arch =>
+                if found != arch && !release =>
             {
                 return Err(GuestRuntimeError::ForeignArchitecture(member.to_string()));
             }
@@ -104,6 +119,156 @@ pub fn validate_guest_runtime_manifest(
         }
     }
     Ok(())
+}
+
+/// Release payloads contain both architectures; source payloads remain strictly
+/// single-architecture. Never admit an overlay-only archive as a release runtime.
+pub fn validate_release_guest_runtime_manifest(
+    manifest: &GuestBinsManifest,
+    version: &str,
+) -> Result<(), GuestRuntimeError> {
+    for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+        validate_runtime_manifest(manifest, version, arch, true)?;
+    }
+    Ok(())
+}
+
+/// Verify a packaged or downloaded complete guest-bins archive and install it
+/// into the shared digest cache. Signature verification is mandatory, including
+/// when legacy image download escape-hatch environment variables are set.
+pub fn install_signed_guest_runtime_archive(
+    cache_root: &Path,
+    archive: &Path,
+    checksum: &Path,
+    bundle: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    let asset = guest_bins::guest_bins_archive_name(version);
+    let bytes = fs::read(archive)?;
+    let expected = mvm_fs::overlay::parse_checksums_manifest(&fs::read_to_string(checksum)?);
+    let actual = hex::encode(Sha256::digest(&bytes));
+    if expected.get(&asset) != Some(&actual) {
+        return Err(GuestRuntimeError::Cache(format!(
+            "guest runtime checksum missing or mismatched for {asset}"
+        )));
+    }
+    crate::release_signature::verify_release_archive_bytes(
+        &bytes,
+        &fs::read(bundle)?,
+        &asset,
+        &mvm_core::release_trust::accepted_release_identities(version),
+        mvm_core::release_trust::RELEASE_OIDC_ISSUER,
+    )?;
+    // Install the exact bytes verified above, not a pathname another process
+    // could replace between verification and extraction.
+    let snapshot = tempfile::NamedTempFile::new()?;
+    fs::write(snapshot.path(), bytes)?;
+    let base = cache_root.join("guest-runtime").join("v1");
+    fs::create_dir_all(&base)?;
+    let _lock = guest_agent_build::acquire_guest_build_lock(&base, "guest runtime")?;
+    install_archive_with_layout(&base, snapshot.path(), version, arch, true)
+}
+
+/// Acquire the CLI-version-locked runtime. A packaged archive takes precedence;
+/// any verification failure is terminal, never a reason to try another source.
+/// Cached release triplets are reverified on every use, including offline use.
+pub fn resolve_or_download_guest_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    let executable = std::env::current_exe()?.canonicalize()?;
+    resolve_release_guest_runtime(
+        cache_root,
+        version,
+        arch,
+        &packaged_runtime_locations(&executable)?,
+        &format!("https://github.com/tinylabscom/mvm/releases/download/v{version}"),
+    )
+}
+
+fn packaged_runtime_locations(executable: &Path) -> Result<Vec<PathBuf>, GuestRuntimeError> {
+    let directory = executable.parent().ok_or_else(|| {
+        GuestRuntimeError::Cache("executable has no parent directory".to_string())
+    })?;
+    let mut locations = vec![directory.join("guest-runtime")];
+    // System packages keep public binaries in prefix/bin and private data in
+    // prefix/lib/mvmctl. Versioned and Nix installations resolve their public
+    // symlink first and use the runtime beside the real executable.
+    if directory.file_name().is_some_and(|name| name == "bin")
+        && let Some(prefix) = directory.parent()
+    {
+        locations.push(prefix.join("lib/mvmctl/guest-runtime"));
+    }
+    Ok(locations)
+}
+
+fn resolve_release_guest_runtime(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    packaged: &[PathBuf],
+    release_url: &str,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    if !version.starts_with(|c: char| c.is_ascii_digit())
+        || !version
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-+".contains(&b))
+    {
+        return Err(GuestRuntimeError::Cache(
+            "invalid release version".to_string(),
+        ));
+    }
+    let asset = guest_bins::guest_bins_archive_name(version);
+    let install = |dir: &Path| {
+        install_signed_guest_runtime_archive(
+            cache_root,
+            &dir.join(&asset),
+            &dir.join(format!("{asset}.sha256")),
+            &dir.join(format!("{asset}.bundle")),
+            version,
+            arch,
+        )
+    };
+    for directory in packaged {
+        for name in [
+            asset.clone(),
+            format!("{asset}.sha256"),
+            format!("{asset}.bundle"),
+        ] {
+            match fs::symlink_metadata(directory.join(name)) {
+                Ok(_) => return install(directory),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+    let releases = cache_root.join("guest-runtime").join("releases");
+    fs::create_dir_all(&releases)?;
+    let _lock = guest_agent_build::acquire_guest_build_lock(&releases, "guest runtime release")?;
+    let destination = releases.join(version);
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => return install(&destination),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let stage = tempfile::Builder::new()
+        .prefix(".download-")
+        .tempdir_in(&releases)?;
+    for name in [
+        asset.clone(),
+        format!("{asset}.sha256"),
+        format!("{asset}.bundle"),
+    ] {
+        crate::runtime_overlay::curl_download(
+            &format!("{release_url}/{name}"),
+            &stage.path().join(name),
+        )?;
+    }
+    let runtime = install(stage.path())?;
+    fs::rename(stage.path(), destination)?;
+    Ok(runtime)
 }
 
 /// Build guest-bins only on a source-fingerprint miss, and return a verified
@@ -255,6 +420,16 @@ fn install_archive(
     version: &str,
     arch: GuestArch,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
+    install_archive_with_layout(base, archive, version, arch, false)
+}
+
+fn install_archive_with_layout(
+    base: &Path,
+    archive: &Path,
+    version: &str,
+    arch: GuestArch,
+    release: bool,
+) -> Result<GuestRuntime, GuestRuntimeError> {
     let objects = base.join("objects");
     fs::create_dir_all(&objects)?;
     let stage = tempfile::Builder::new()
@@ -264,10 +439,10 @@ fn install_archive(
     fs::copy(archive, &snapshot)?;
     let digest = file_digest(&snapshot)?;
     let manifest = guest_bins::verify_guest_bins_archive(&snapshot)?;
-    validate_guest_runtime_manifest(&manifest, version, arch)?;
+    validate_archive_layout(&manifest, version, arch, release)?;
     let destination = objects.join(&digest);
     match fs::symlink_metadata(&destination) {
-        Ok(_) => return load_cached(base, &digest, version, arch),
+        Ok(_) => return load_cached_with_layout(base, &digest, version, arch, release),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
@@ -288,6 +463,29 @@ fn load_cached(
     digest: &str,
     version: &str,
     arch: GuestArch,
+) -> Result<GuestRuntime, GuestRuntimeError> {
+    load_cached_with_layout(base, digest, version, arch, false)
+}
+
+fn validate_archive_layout(
+    manifest: &GuestBinsManifest,
+    version: &str,
+    arch: GuestArch,
+    release: bool,
+) -> Result<(), GuestRuntimeError> {
+    if release {
+        validate_release_guest_runtime_manifest(manifest, version)
+    } else {
+        validate_guest_runtime_manifest(manifest, version, arch)
+    }
+}
+
+fn load_cached_with_layout(
+    base: &Path,
+    digest: &str,
+    version: &str,
+    arch: GuestArch,
+    release: bool,
 ) -> Result<GuestRuntime, GuestRuntimeError> {
     if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(GuestRuntimeError::Cache(
@@ -317,7 +515,7 @@ fn load_cached(
         )));
     }
     let manifest = guest_bins::verify_guest_bins_archive(&archive)?;
-    validate_guest_runtime_manifest(&manifest, version, arch)?;
+    validate_archive_layout(&manifest, version, arch, release)?;
     let tree = object.join("tree");
     verify_tree(&tree, &manifest)?;
     Ok(GuestRuntime {
@@ -579,6 +777,215 @@ mod tests {
         let second = install_archive(&base, &input, "1.2.3", GuestArch::X86_64).unwrap();
         assert_eq!(first.digest, second.digest);
         assert_eq!(first.root, second.root);
+    }
+
+    fn release_manifest() -> GuestBinsManifest {
+        let mut manifest = fixture_manifest(GuestArch::Aarch64);
+        manifest
+            .files
+            .extend(fixture_manifest(GuestArch::X86_64).files);
+        manifest
+    }
+
+    #[test]
+    fn release_requires_both_architectures_and_exact_version() {
+        let manifest = release_manifest();
+        validate_release_guest_runtime_manifest(&manifest, "1.2.3").unwrap();
+        assert!(matches!(
+            validate_release_guest_runtime_manifest(&manifest, "1.2.4"),
+            Err(GuestRuntimeError::Version { .. })
+        ));
+        for arch in [GuestArch::Aarch64, GuestArch::X86_64] {
+            assert!(matches!(
+                validate_release_guest_runtime_manifest(&fixture_manifest(arch), "1.2.3"),
+                Err(GuestRuntimeError::MissingRequired(_))
+            ));
+            assert!(matches!(
+                validate_guest_runtime_manifest(&manifest, "1.2.3", arch),
+                Err(GuestRuntimeError::ForeignArchitecture(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn both_architectures_share_one_digest_and_tampering_is_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let manifest = release_manifest();
+        let input = archive(temp.path(), &manifest);
+        let base = temp.path().join("cache");
+        let first =
+            install_archive_with_layout(&base, &input, "1.2.3", GuestArch::Aarch64, true).unwrap();
+        let second =
+            install_archive_with_layout(&base, &input, "1.2.3", GuestArch::X86_64, true).unwrap();
+        assert_eq!(first.root, second.root);
+        assert_eq!(first.digest, file_digest(&input).unwrap());
+        fs::write(first.root.join("x86_64/bin/mvm-setpriv"), b"tampered").unwrap();
+        assert!(matches!(
+            install_archive_with_layout(&base, &input, "1.2.3", GuestArch::Aarch64, true),
+            Err(GuestRuntimeError::TreeDigest { .. })
+        ));
+    }
+
+    fn unsigned_release(dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
+        fs::create_dir_all(dir).unwrap();
+        let input = archive(dir, &release_manifest());
+        let asset = guest_bins::guest_bins_archive_name("1.2.3");
+        let archive = dir.join(&asset);
+        fs::rename(input, &archive).unwrap();
+        let checksum = dir.join(format!("{asset}.sha256"));
+        fs::write(
+            &checksum,
+            format!("{}  {asset}\n", file_digest(&archive).unwrap()),
+        )
+        .unwrap();
+        let bundle = dir.join(format!("{asset}.bundle"));
+        fs::write(&bundle, b"invalid signature bundle").unwrap();
+        (archive, checksum, bundle)
+    }
+
+    #[test]
+    fn digest_mismatch_is_refused_before_signature_or_cache_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let (archive, checksum, bundle) = unsigned_release(&temp.path().join("payload"));
+        fs::write(&archive, b"tampered").unwrap();
+        fs::remove_file(&bundle).unwrap();
+        let cache = temp.path().join("cache");
+        let error = install_signed_guest_runtime_archive(
+            &cache,
+            &archive,
+            &checksum,
+            &bundle,
+            "1.2.3",
+            GuestArch::Aarch64,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("checksum"));
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn package_locations_follow_the_real_executable_and_standard_prefix() {
+        assert_eq!(
+            packaged_runtime_locations(Path::new("/usr/bin/mvmctl")).unwrap(),
+            [
+                PathBuf::from("/usr/bin/guest-runtime"),
+                PathBuf::from("/usr/lib/mvmctl/guest-runtime"),
+            ]
+        );
+        assert_eq!(
+            packaged_runtime_locations(Path::new("/nix/store/mvm/lib/mvmctl/mvmctl")).unwrap(),
+            [PathBuf::from("/nix/store/mvm/lib/mvmctl/guest-runtime")]
+        );
+    }
+
+    #[test]
+    fn a_system_package_is_verified_in_place_instead_of_downloaded() {
+        let temp = tempfile::tempdir().unwrap();
+        unsigned_release(&temp.path().join("lib/mvmctl/guest-runtime"));
+        let cache = temp.path().join("cache");
+        let error = resolve_release_guest_runtime(
+            &cache,
+            "1.2.3",
+            GuestArch::Aarch64,
+            &packaged_runtime_locations(&temp.path().join("bin/mvmctl")).unwrap(),
+            "file:///nonexistent/no-fallback",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GuestRuntimeError::Release(
+                crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+            )
+        ));
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn packaged_verification_failure_never_falls_back_to_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let packaged = temp.path().join("packaged");
+        unsigned_release(&packaged);
+        let cache = temp.path().join("cache");
+        let error = resolve_release_guest_runtime(
+            &cache,
+            "1.2.3",
+            GuestArch::Aarch64,
+            &[packaged, temp.path().join("other-package-location")],
+            "file:///nonexistent/no-fallback",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GuestRuntimeError::Release(
+                crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+            )
+        ));
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn incomplete_packaged_triplet_is_an_error_not_a_download_miss() {
+        let temp = tempfile::tempdir().unwrap();
+        let packaged = temp.path().join("packaged");
+        let (archive, _, _) = unsigned_release(&packaged);
+        fs::remove_file(archive).unwrap();
+        let cache = temp.path().join("cache");
+        let error = resolve_release_guest_runtime(
+            &cache,
+            "1.2.3",
+            GuestArch::Aarch64,
+            &[packaged],
+            "file:///nonexistent/no-fallback",
+        )
+        .unwrap_err();
+        assert!(matches!(error, GuestRuntimeError::Io(_)));
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn cached_release_is_reverified_instead_of_trusting_its_location() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache = temp.path().join("cache");
+        unsigned_release(&cache.join("guest-runtime/releases/1.2.3"));
+        let error = resolve_release_guest_runtime(
+            &cache,
+            "1.2.3",
+            GuestArch::X86_64,
+            &[temp.path().join("absent")],
+            "file:///nonexistent/no-fallback",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GuestRuntimeError::Release(
+                crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+            )
+        ));
+        assert!(!cache.join("guest-runtime/v1/objects").exists());
+    }
+
+    #[test]
+    fn unsigned_download_is_not_promoted_to_the_release_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let release = temp.path().join("release");
+        unsigned_release(&release);
+        let cache = temp.path().join("cache");
+        let error = resolve_release_guest_runtime(
+            &cache,
+            "1.2.3",
+            GuestArch::X86_64,
+            &[temp.path().join("absent")],
+            &format!("file://{}", release.display()),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            GuestRuntimeError::Release(
+                crate::runtime_overlay::RuntimeOverlayError::SignatureInvalid { .. }
+            )
+        ));
+        assert!(!cache.join("guest-runtime/releases/1.2.3").exists());
+        assert!(!cache.join("guest-runtime/v1/objects").exists());
     }
 
     #[test]

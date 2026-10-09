@@ -115,7 +115,7 @@ pub const KERNEL_BOOTING_HYPERVISORS: [&str; 5] =
     ["firecracker", "hvf", "qemu", "libkrun", "apple-container"];
 
 /// Attach the universal initramfs to a launch on `hypervisor`, resolving it
-/// from the cache, the locked image set, or a source-checkout build.
+/// from the signed CLI release archive or a source-checkout build.
 ///
 /// A rootfs boot cannot come up without it: the initramfs supplies `/init`
 /// and mounts the runtime overlay at `/mvm/runtime`, and once it is attached
@@ -142,7 +142,7 @@ pub fn attach_universal_initramfs_if_cached(
         tracing::debug!(hypervisor, "backend boots no kernel; skipping initramfs");
         return Ok(());
     }
-    attach_universal_initramfs_with_resolver(start_config, |env, cache_root, version, arch| {
+    attach_universal_initramfs_with_resolver(start_config, |_env, cache_root, version, arch| {
         if let Some(workspace_root) = mvm_build::image_source::guest_runtime_source_checkout() {
             #[cfg(any(test, feature = "test-support"))]
             if let Some(fixture) = seeded_test_initramfs(cache_root, version, arch) {
@@ -171,8 +171,31 @@ pub fn attach_universal_initramfs_if_cached(
                 cache_root, version, arch, &runtime,
             );
         }
-        mvm_build::initramfs::resolve_or_build_local_initramfs(env, cache_root, version, arch)
+        resolve_released_initramfs(cache_root, version, arch)
     })
+}
+
+fn resolve_released_initramfs(
+    cache_root: &std::path::Path,
+    version: &str,
+    arch: mvm_core::arch::GuestArch,
+) -> Result<mvm_fs::initramfs::InitramfsArtifact, mvm_build::initramfs::InitramfsBuildError> {
+    let shared_cache_root = cache_root.parent().ok_or_else(|| {
+        mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
+            reason: "initramfs cache root has no shared guest-runtime parent".to_string(),
+        }
+    })?;
+    let runtime = mvm_build::guest_runtime::resolve_or_download_guest_runtime(
+        shared_cache_root,
+        version,
+        arch,
+    )
+    .map_err(
+        |error| mvm_build::initramfs::InitramfsBuildError::CargoBuildFailed {
+            reason: error.to_string(),
+        },
+    )?;
+    mvm_build::initramfs::build_initramfs_from_guest_runtime(cache_root, version, arch, &runtime)
 }
 
 fn attach_universal_initramfs_with_resolver(
@@ -308,6 +331,48 @@ mod tests {
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::VmStartConfig;
+
+    #[test]
+    fn warm_initramfs_cannot_mask_a_rejected_release() {
+        for failure in ["corrupt", "unsigned", "wrong-version"] {
+            let home = tempfile::tempdir().unwrap();
+            let mut env = TestEnv::new();
+            env.isolate_mvm_home(home.path());
+            seed_warm_universal_initramfs(home.path());
+            let cache = home.path().join("cache");
+            let version = env!("CARGO_PKG_VERSION");
+            let release = cache.join("guest-runtime/releases").join(version);
+            std::fs::create_dir_all(&release).unwrap();
+            let asset_version = if failure == "wrong-version" {
+                "0.0.0-wrong"
+            } else {
+                version
+            };
+            let asset = format!("mvm-guest-bins-v{asset_version}.tar.gz");
+            let bytes = b"unsigned runtime";
+            std::fs::write(release.join(&asset), bytes).unwrap();
+            let digest = if failure == "corrupt" {
+                "0".repeat(64)
+            } else {
+                hex::encode(<sha2::Sha256 as sha2::Digest>::digest(bytes))
+            };
+            std::fs::write(
+                release.join(format!("{asset}.sha256")),
+                format!("{digest}  {asset}\n"),
+            )
+            .unwrap();
+            if failure != "unsigned" {
+                std::fs::write(release.join(format!("{asset}.bundle")), b"invalid bundle").unwrap();
+            }
+            assert!(
+                mvm_fs::initramfs::InitramfsResolver::new(cache.join("initramfs"), version)
+                    .resolve(&GuestArch::host().to_string())
+                    .is_ok()
+            );
+            resolve_released_initramfs(&cache.join("initramfs"), version, GuestArch::host())
+                .expect_err("a warm initramfs must not bypass released archive verification");
+        }
+    }
 
     /// The resolver failure a cold cache produces, as the real ladder now
     /// reports it (both acquisition arms having failed).

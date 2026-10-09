@@ -1275,13 +1275,24 @@ mod tests {
             .expect("sealed script mode");
 
         let mut policy = EntrypointPolicy::sealed_script_marker();
+        assert_eq!((policy.required_uid, policy.required_gid), (0, 0));
         policy.marker_path = marker.clone();
         policy.allowed_prefix = etc_mvm.clone();
         policy.same_fs_as = Some(etc_mvm);
-        policy.required_uid = nix_compat_geteuid();
-        policy.required_gid = nix_compat_getegid();
+        // The production policy requires root. This filesystem fixture runs
+        // unprivileged, so exercise its mode checks using the file's actual
+        // owner rather than the Linux-only compatibility helper's fallback.
+        let metadata = std::fs::metadata(&marker).expect("sealed script metadata");
+        policy.required_uid = metadata.uid();
+        policy.required_gid = metadata.gid();
         policy.validate().expect("immutable script is executable");
 
+        policy.required_uid = metadata.uid() ^ 1;
+        assert!(matches!(
+            policy.validate(),
+            Err(ValidationError::WrongOwnership { .. })
+        ));
+        policy.required_uid = metadata.uid();
         std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o755))
             .expect("writable script mode");
         assert!(matches!(

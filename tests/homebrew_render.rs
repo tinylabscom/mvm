@@ -14,9 +14,14 @@ fn render_formula_fills_all_placeholders() {
     std::fs::write(
         &checks,
         // No x86_64-apple-darwin (Intel mac) — that target is deferred.
-        "aaaa  mvmctl-aarch64-apple-darwin.tar.gz\n\
-         cccc  mvmctl-aarch64-unknown-linux-gnu.tar.gz\n\
-         dddd  mvmctl-x86_64-unknown-linux-gnu.tar.gz\n",
+        format!(
+            "{}  mvmctl-aarch64-apple-darwin.tar.gz\n\
+             {}  mvmctl-aarch64-unknown-linux-gnu.tar.gz\n\
+             {}  mvmctl-x86_64-unknown-linux-gnu.tar.gz\n",
+            "a".repeat(64),
+            "c".repeat(64),
+            "d".repeat(64)
+        ),
     )
     .unwrap();
     let out = tmp.path().join("mvmctl.rb");
@@ -33,6 +38,6 @@ fn render_formula_fills_all_placeholders() {
     let rendered = std::fs::read_to_string(&out).unwrap();
     assert!(!rendered.contains("@@"), "no placeholder should remain");
     assert!(rendered.contains("version \"0.15.2\""));
-    assert!(rendered.contains("sha256 \"aaaa\""));
-    assert!(rendered.contains("sha256 \"dddd\""));
+    assert!(rendered.contains(&format!("sha256 \"{}\"", "a".repeat(64))));
+    assert!(rendered.contains(&format!("sha256 \"{}\"", "d".repeat(64))));
 }

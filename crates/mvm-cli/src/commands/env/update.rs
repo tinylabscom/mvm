@@ -17,7 +17,7 @@ pub(in crate::commands) struct Args {
     /// Force re-install even if already up to date
     #[arg(long)]
     pub force: bool,
-    /// Skip release signature verification (the SHA-256 check still runs)
+    /// Legacy flag: rejected for installation; signed releases are required
     #[arg(long)]
     pub skip_verify: bool,
 }

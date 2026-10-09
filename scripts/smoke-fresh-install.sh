@@ -46,6 +46,8 @@
 #                                  URL; default: this checkout's install.sh
 #   MVM_SMOKE_ARCHIVE              release archive (mvmctl-<target>.tar.gz) to
 #                                  unpack instead of running an installer
+#   MVM_SMOKE_GUEST_RUNTIME_DIR    matching signed guest-bins archive, checksum
+#                                  and bundle to install beside an unpublished CLI
 #   MVM_SMOKE_OUT                  directory for the transcript and VM logs;
 #                                  default: a new directory under /tmp
 #   MVM_SMOKE_INSTALL_BUDGET_SECS  install + bootstrap budget; default 1200
@@ -274,6 +276,18 @@ install_from_archive() {
     unpacked="$candidate"
   done
   [ -n "$unpacked" ] || fail "$ARCHIVE holds no mvmctl-<target>/mvmctl"
+  if [ -n "${MVM_SMOKE_GUEST_RUNTIME_DIR:-}" ]; then
+    [ -n "$VERSION" ] || fail "an unpublished guest runtime requires an exact CLI version"
+    runtime_name="mvm-guest-bins-v${VERSION#v}.tar.gz"
+    runtime_dest="$(dirname "$unpacked")/guest-runtime"
+    mkdir -p "$runtime_dest"
+    for suffix in "" ".sha256" ".bundle"; do
+      runtime_file="$MVM_SMOKE_GUEST_RUNTIME_DIR/$runtime_name$suffix"
+      [ -s "$runtime_file" ] || fail "missing unpublished guest runtime file: $runtime_file"
+      cp "$runtime_file" "$runtime_dest/" || fail "could not stage $runtime_file"
+    done
+    log "guest runtime: $runtime_name (installed beside CLI; normal signature verification applies)"
+  fi
   ln -s "$unpacked" "$SMOKE_HOME/.local/bin/mvmctl"
   shipped=""
   for entry in "$(dirname "$unpacked")"/*; do

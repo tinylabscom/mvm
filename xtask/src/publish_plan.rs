@@ -652,6 +652,103 @@ mod tests {
         );
     }
 
+    fn run_publisher_fixture(status: &str, failure: &str) -> (bool, String) {
+        let workflow = include_str!("../../.github/workflows/publish-crates.yml");
+        let step = workflow
+            .split_once("      - name: Publish the plan in dependency order\n")
+            .expect("publisher step")
+            .1;
+        let script = step
+            .split_once("        run: |\n")
+            .expect("publisher script")
+            .1
+            .lines()
+            .take_while(|line| line.is_empty() || line.starts_with("          "))
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let tmp = tempfile::tempdir().expect("publisher fixture");
+        let log = tmp.path().join("uploads");
+        let mocks = r#"
+            cargo() {
+              case "$*" in
+                *check-publish-readiness) [[ "$FAILURE" != readiness ]];;
+                *publish-plan)
+                  [[ "$FAILURE" != empty ]] || return 0
+                  if [[ "$FAILURE" == internal ]]; then
+                    printf 'mvm-core\nmvm-client\n'
+                    return 0
+                  fi
+                  printf 'mvm-client\nmvmctl\n'
+                  [[ "$FAILURE" != plan ]]
+                  ;;
+                "publish --package "*)
+                  printf '%s\n' "$3" >> "$UPLOADS"
+                  [[ "$FAILURE" != upload ]]
+                  ;;
+                *) return 99;;
+              esac
+            }
+            curl() {
+              printf '%s' "$HTTP_STATUS"
+              [[ "$FAILURE" != transport ]]
+            }
+        "#;
+        let output = Command::new("bash")
+            .args(["-c", &format!("{mocks}\n{script}")])
+            .env("TAG_NAME", "v0.23.1")
+            .env("GITHUB_REPOSITORY", "tinylabscom/mvm")
+            .env("HTTP_STATUS", status)
+            .env("FAILURE", failure)
+            .env("UPLOADS", &log)
+            .output()
+            .expect("run mocked publisher");
+        (
+            output.status.success(),
+            std::fs::read_to_string(log).unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn publisher_uploads_in_plan_order_and_skips_existing_versions() {
+        assert_eq!(
+            run_publisher_fixture("404", ""),
+            (true, "mvm-client\nmvmctl\n".into())
+        );
+        assert_eq!(run_publisher_fixture("200", ""), (true, String::new()));
+    }
+
+    #[test]
+    fn publisher_fails_closed_on_registry_errors() {
+        for status in ["000", "301", "401", "403", "429", "500", "503", ""] {
+            assert_eq!(
+                run_publisher_fixture(status, ""),
+                (false, String::new()),
+                "HTTP {status} must not upload"
+            );
+        }
+        assert_eq!(
+            run_publisher_fixture("404", "transport"),
+            (false, String::new())
+        );
+    }
+
+    #[test]
+    fn publisher_never_uploads_a_partial_or_invalid_plan() {
+        for failure in ["readiness", "plan", "empty", "internal"] {
+            assert_eq!(
+                run_publisher_fixture("404", failure),
+                (false, String::new()),
+                "{failure} must not upload"
+            );
+        }
+        assert_eq!(
+            run_publisher_fixture("404", "upload"),
+            (false, "mvm-client\n".into()),
+            "a failed dependency upload must stop the plan"
+        );
+    }
+
     /// The checked-in manifests satisfy the gate, and the plan they produce
     /// starts at the bottom of the graph.
     #[test]
@@ -660,10 +757,23 @@ mod tests {
             .parent()
             .expect("xtask has a parent");
         run_check(root).expect("the workspace passes check-publish-readiness");
-        let plan = plan(&load(root).expect("load")).expect("plan");
+        let ws = load(root).expect("load");
+        let plan = plan(&ws).expect("plan");
         assert_eq!(
             plan.publish.first().map(String::as_str),
             Some("mvm-contract")
         );
+        assert!(ws.blocked.contains_key("libkrun-sys"));
+        assert!(plan.withheld.iter().any(|(name, _)| name == "mvm-client"));
+        assert!(plan.withheld.iter().any(|(name, _)| name == "mvmctl"));
+        for (position, name) in plan.publish.iter().enumerate() {
+            for dep in shipped_deps(&ws.packages[name]) {
+                assert!(
+                    plan.publish[..position].contains(&dep.name),
+                    "{name} must follow its dependency {}",
+                    dep.name
+                );
+            }
+        }
     }
 }

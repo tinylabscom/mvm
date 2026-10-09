@@ -22,12 +22,12 @@ case "${package}" in
   *.deb)
     format=deb
     apt-get update -qq >/dev/null
-    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${package}" >/dev/null
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${package}" python3 >/dev/null
     remove() { DEBIAN_FRONTEND=noninteractive apt-get remove -y -qq mvmctl >/dev/null; }
     ;;
   *.rpm)
     format=rpm
-    dnf install -y -q "${package}" >/dev/null
+    dnf install -y -q "${package}" python3 >/dev/null
     remove() { dnf remove -y -q mvmctl >/dev/null; }
     ;;
   *) fail "not a .deb or .rpm: ${package}" ;;
@@ -41,11 +41,18 @@ if [ -z "${found}" ] || [ "$(readlink -f "${found}")" != "$(readlink -f /usr/bin
 fi
 reported="$(mvmctl --version)"
 case "${reported}" in
-  *"${version}"*) ;;
+  "mvmctl ${version}"|"mvmctl v${version}") ;;
   *) fail "mvmctl reports '${reported}', not ${version}" ;;
 esac
 mvmctl --help >/dev/null
 sha256sum -c --quiet "${sums}" || fail "installed files differ from the release tarball"
+runtime="/usr/lib/mvmctl/guest-runtime/mvm-guest-bins-v${version}.tar.gz"
+for suffix in "" .sha256 .bundle .sha256.bundle; do
+  [ -s "${runtime}${suffix}" ] || fail "missing paired runtime ${runtime}${suffix}"
+done
+# Load the installed library, not a build-tree copy. Python is a disposable
+# test dependency, not a dependency added to the shipped CLI package.
+python3 "$(dirname "$0")/smoke-installed-release.py" /usr "${version}"
 # The marker `mvmctl env update` reads to refuse replacing package-owned files.
 marker=/usr/share/mvmctl/package-managed
 [ "$(cat "${marker}" 2>/dev/null)" = "${format}" ] \
@@ -54,7 +61,7 @@ echo "installed ${package}: ${reported}; $(wc -l < "${sums}") files match the ta
 
 remove
 while read -r _ path; do
-  [ ! -e "${path}" ] || fail "${path} is left behind after removal"
+  [ ! -e "${path}" ] && [ ! -L "${path}" ] || fail "${path} is left behind after removal"
 done < "${sums}"
 [ ! -e "${marker}" ] || fail "${marker} is left behind after removal"
 echo "removed cleanly"

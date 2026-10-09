@@ -6,14 +6,8 @@ use crate::http;
 use crate::ui;
 use mvm_build::published_image_set::github_download_base;
 use mvm_core::release_version::{ReleaseVersion, VersionSyntax};
-use mvm_runtime::shell::run_host;
 
 const GITHUB_REPO: &str = "tinylabscom/mvm";
-const RELEASE_HOST_BINS: &[&str] = &[
-    "mvm-hvf-supervisor",
-    "mvm-libkrun-supervisor",
-    "mvm-network-endpoint",
-];
 
 /// Current version compiled into the binary (from Cargo.toml).
 pub(crate) fn current_version() -> &'static str {
@@ -347,60 +341,6 @@ fn publish_downloaded_kernel(download: tempfile::TempPath, dest: &Path) -> Resul
     Ok(())
 }
 
-/// Check if a directory is writable by the current user.
-fn is_writable(path: &Path) -> bool {
-    tempfile::Builder::new()
-        .prefix(".mvm-write-test-")
-        .tempfile_in(path)
-        .is_ok()
-}
-
-/// Verify that a binary responds to `--version`, exits 0, and prints version-like output.
-///
-/// Called before and after swapping the binary to prevent a defective release from
-/// bricking an installation.
-fn smoke_test_binary(bin: &Path) -> Result<()> {
-    let output = mvm_core::env_hygiene::helper_command(bin)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("Failed to execute smoke test for {}", bin.display()))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "smoke test failed (exit {}): {}",
-            output.status.code().unwrap_or(-1),
-            stderr.trim()
-        );
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    if !stdout.chars().any(|c| c.is_ascii_digit()) {
-        anyhow::bail!(
-            "smoke test output does not look like a version: {:?}",
-            stdout.trim()
-        );
-    }
-
-    Ok(())
-}
-
-/// Refuse to update an install made by `install.sh`. That install is a set of
-/// versioned release directories switched as a whole; replacing files inside
-/// the active one in place would leave a release directory holding binaries
-/// from two versions under one version's name.
-fn refuse_versioned_install(current_exe: &Path) -> Result<()> {
-    if let Some(lib) = crate::install_layout::versioned_lib_dir_of(current_exe) {
-        anyhow::bail!(
-            "this mvmctl was installed by install.sh into {}, which upgrades mvmctl \
-             and its host binaries together and can roll back. Upgrade by re-running \
-             the installer: curl -fsSL https://runmvm.com/install.sh | sh",
-            lib.display()
-        );
-    }
-    Ok(())
-}
-
 /// Refuse to update a binary the system package manager owns. Replacing
 /// `/usr/bin/mvmctl` behind dpkg's or rpm's back leaves its database recording
 /// files and digests that are no longer on disk, and the next package upgrade
@@ -420,7 +360,6 @@ fn validate_install_target(check_only: bool, current_exe: &Path) -> Result<()> {
     if check_only {
         return Ok(());
     }
-    refuse_versioned_install(current_exe)?;
     refuse_package_install(current_exe)
 }
 
@@ -456,287 +395,98 @@ fn package_install_refusal(install: &crate::install_layout::PackageInstall) -> S
     )
 }
 
-/// Extract the archive and install the binary, adjacent helpers, and resources.
-fn extract_and_install(target: &str, tmp_dir: &Path, current_exe: &Path) -> Result<()> {
-    let archive_name = format!("mvmctl-{}.tar.gz", target);
-    let archive_path = tmp_dir.join(&archive_name);
-
-    let output = run_host(
-        "tar",
-        &[
-            "xzf",
-            archive_path
-                .to_str()
-                .expect("archive path must be valid UTF-8"),
-            "-C",
-            tmp_dir.to_str().expect("tmp dir path must be valid UTF-8"),
-        ],
-    )?;
-
-    if !output.status.success() {
-        anyhow::bail!("Failed to extract archive");
-    }
-
-    let extracted_dir = tmp_dir.join(format!("mvmctl-{}", target));
-    let new_binary = extracted_dir.join("mvmctl");
-    if !new_binary.exists() {
-        anyhow::bail!(
-            "Binary not found in archive at expected path: mvmctl-{}/mvmctl",
-            target
-        );
-    }
-
-    // Pre-swap smoke test: verify the new binary works before touching the current installation.
-    ui::info("Verifying new binary...");
-    smoke_test_binary(&new_binary).context("New binary failed pre-install smoke test")?;
-
-    let install_dir = current_exe
-        .parent()
-        .context("Cannot determine install directory")?;
-
-    let needs_sudo = !is_writable(install_dir);
-
-    ui::info(&format!("Installing to {}...", install_dir.display()));
-    if needs_sudo {
-        ui::warn("Requires elevated permissions.");
-    }
-
-    // --- Replace binary ---
-    let backup_path = current_exe.with_extension("old");
-
-    if needs_sudo {
-        run_sudo_mv(current_exe, &backup_path)?;
-        if let Err(e) = run_sudo_cp(&new_binary, current_exe) {
-            if let Err(e) = run_sudo_mv(&backup_path, current_exe) {
-                tracing::warn!("failed to rollback binary during update: {e}");
-            }
-            return Err(e);
-        }
-        if let Err(e) = run_host(
-            "sudo",
-            &[
-                "chmod",
-                "+x",
-                current_exe.to_str().expect("exe path must be valid UTF-8"),
-            ],
-        ) {
-            tracing::warn!("failed to chmod during update: {e}");
-        }
-        // Post-swap smoke test: verify installed binary before removing the backup.
-        if let Err(e) = smoke_test_binary(current_exe) {
-            if let Err(re) = run_sudo_mv(&backup_path, current_exe) {
-                tracing::warn!("failed to restore backup after smoke test failure: {re}");
-            }
-            anyhow::bail!("New binary failed smoke test; restored previous version. ({e})");
-        }
-        if let Err(e) = run_host(
-            "sudo",
-            &[
-                "rm",
-                "-f",
-                backup_path
-                    .to_str()
-                    .expect("backup path must be valid UTF-8"),
-            ],
-        ) {
-            tracing::warn!("failed to rm during update: {e}");
-        }
-    } else {
-        std::fs::rename(current_exe, &backup_path).context("Failed to back up current binary")?;
-        if let Err(e) = std::fs::copy(&new_binary, current_exe) {
-            if let Err(e) = std::fs::rename(&backup_path, current_exe) {
-                tracing::warn!("failed to rollback binary during update: {e}");
-            }
-            return Err(anyhow::anyhow!(e).context("Failed to install new binary"));
-        }
-        set_executable(current_exe)?;
-        // Post-swap smoke test: verify installed binary before removing the backup.
-        if let Err(e) = smoke_test_binary(current_exe) {
-            if let Err(re) = std::fs::rename(&backup_path, current_exe) {
-                tracing::warn!("failed to restore backup after smoke test failure: {re}");
-            }
-            anyhow::bail!("New binary failed smoke test; restored previous version. ({e})");
-        }
-        if let Err(e) = std::fs::remove_file(&backup_path) {
-            tracing::warn!("failed to remove backup file: {e}");
-        }
-    }
-
-    install_release_host_binaries(&extracted_dir, install_dir, needs_sudo)
-        .context("Failed to update adjacent host helper binaries")?;
-    sign_installed_binaries(cfg!(target_os = "macos"), || {
-        let targets = mvm_runtime::codesign::collect_sign_targets();
-        mvm_runtime::codesign::sign_targets(&targets)
-    })
-    .context("Failed to apply macOS VM entitlements")?;
-
-    // --- Replace resources ---
-    let new_resources = extracted_dir.join("resources");
-    if new_resources.exists() {
-        let dest_resources = install_dir.join("resources");
-        ui::info("Updating resources...");
-
-        if needs_sudo {
-            if let Err(e) = run_host(
-                "sudo",
-                &[
-                    "rm",
-                    "-rf",
-                    dest_resources
-                        .to_str()
-                        .expect("resources path must be valid UTF-8"),
-                ],
-            ) {
-                tracing::warn!("failed to remove old resources directory: {e}");
-            }
-            let output = run_host(
-                "sudo",
-                &[
-                    "cp",
-                    "-r",
-                    new_resources
-                        .to_str()
-                        .expect("new resources path must be valid UTF-8"),
-                    dest_resources
-                        .to_str()
-                        .expect("dest resources path must be valid UTF-8"),
-                ],
-            )?;
-            require_resource_copy_success(output.status.success())?;
-        } else {
-            if let Err(e) = std::fs::remove_dir_all(&dest_resources) {
-                tracing::warn!("failed to remove old resources: {e}");
-            }
-            copy_dir_recursive(&new_resources, &dest_resources)
-                .context("Failed to update resources directory")?;
-        }
-    }
-
-    Ok(())
-}
-
-fn require_resource_copy_success(success: bool) -> Result<()> {
-    if !success {
-        anyhow::bail!("sudo cp failed while updating resources directory");
-    }
-    Ok(())
-}
-
-fn install_release_host_binaries(
-    extracted_dir: &Path,
-    install_dir: &Path,
-    needs_sudo: bool,
-) -> Result<()> {
-    for hostbin in RELEASE_HOST_BINS {
-        let src = extracted_dir.join(hostbin);
-        if !src.is_file() {
+/// Extract only the authenticated installer, never archive-controlled paths.
+/// Validate every entry before executing anything, including entries after it.
+fn extract_release_installer(archive_path: &Path, target: &str) -> Result<tempfile::NamedTempFile> {
+    let file = std::fs::File::open(archive_path).context("Opening release archive")?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let expected = format!("mvmctl-{target}/install.sh");
+    let mut installer = None;
+    for entry in archive.entries().context("Reading release archive")? {
+        let mut entry = entry.context("Reading release archive entry")?;
+        let raw = entry.path_bytes();
+        let path = std::str::from_utf8(&raw).context("Non-UTF-8 release archive path")?;
+        // Release tarballs may use a single conventional leading ./.
+        let path = path.strip_prefix("./").unwrap_or(path);
+        if path.is_empty() && entry.header().entry_type().is_dir() {
             continue;
         }
-        let dest = install_dir.join(hostbin);
-        if needs_sudo {
-            run_sudo_cp(&src, &dest)?;
-            let output = run_host(
-                "sudo",
-                &[
-                    "chmod",
-                    "+x",
-                    dest.to_str().expect("helper path must be valid UTF-8"),
-                ],
-            )?;
-            if !output.status.success() {
-                anyhow::bail!("sudo chmod failed for {}", dest.display());
+        mvm_core::plan::bundle::ensure_safe_path(path)?;
+        let kind = entry.header().entry_type();
+        if !kind.is_file() && !kind.is_dir() {
+            bail!("Refusing non-regular release archive entry: {path}");
+        }
+        if path == expected {
+            if !kind.is_file() || installer.is_some() {
+                bail!("Release archive must contain exactly one regular {expected}");
             }
-        } else {
-            std::fs::copy(&src, &dest)
-                .with_context(|| format!("copying {} to {}", src.display(), dest.display()))?;
-            set_executable(&dest)?;
+            let mut script = tempfile::NamedTempFile::new().context("Staging release installer")?;
+            std::io::copy(&mut entry, &mut script).context("Extracting release installer")?;
+            installer = Some(script);
         }
     }
-    Ok(())
-}
-
-/// Apply the macOS entitlements immediately after replacing a release binary
-/// and its adjacent supervisors. A successful update must not leave the next
-/// invocation dependent on a lazy first-boot repair.
-fn sign_installed_binaries(
-    is_macos: bool,
-    signer: impl FnOnce() -> Vec<mvm_runtime::codesign::SignReport>,
-) -> Result<()> {
-    if !is_macos {
-        return Ok(());
-    }
-
-    let failed: Vec<String> = signer()
-        .iter()
-        .filter(|report| !report.entitlements_present)
-        .map(|report| report.path.display().to_string())
-        .collect();
-    if failed.is_empty() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "required VM entitlements are missing on: {}",
-            failed.join(", ")
+    installer.with_context(|| {
+        format!(
+            "Release archive is missing {expected}; refusing to change the existing installation"
         )
-    }
+    })
 }
 
-fn run_sudo_mv(from: &Path, to: &Path) -> Result<()> {
-    let output = run_host(
-        "sudo",
-        &[
-            "mv",
-            from.to_str().expect("source path must be valid UTF-8"),
-            to.to_str().expect("dest path must be valid UTF-8"),
-        ],
-    )?;
-    if !output.status.success() {
-        anyhow::bail!("sudo mv failed");
-    }
-    Ok(())
-}
-
-fn run_sudo_cp(from: &Path, to: &Path) -> Result<()> {
-    let output = run_host(
-        "sudo",
-        &[
-            "cp",
-            from.to_str().expect("source path must be valid UTF-8"),
-            to.to_str().expect("dest path must be valid UTF-8"),
-        ],
-    )?;
-    if !output.status.success() {
-        anyhow::bail!("sudo cp failed");
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_executable(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-/// Recursively copy a directory.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let dest_path = dst.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_recursive(&entry.path(), &dest_path)?;
-        } else {
-            std::fs::copy(entry.path(), &dest_path)?;
+/// Delegate the whole CLI/helper/guest-runtime transaction to the installer
+/// shipped inside the signed release, rather than duplicating its rollback.
+fn extract_and_install(
+    version: &str,
+    target: &str,
+    tmp_dir: &Path,
+    current_exe: &Path,
+) -> Result<()> {
+    let archive_path = tmp_dir.join(format!("mvmctl-{target}.tar.gz"));
+    let installer = extract_release_installer(&archive_path, target)?;
+    // Pin the installer's redownload to the bytes authenticated above.
+    let archive_digest = mvm_core::crypto::image_verify::sha256_file(&archive_path)
+        .context("Hashing authenticated release archive")?;
+    let lib_dir = crate::install_layout::versioned_lib_dir_of(current_exe);
+    let install_dir = if let Some(lib) = &lib_dir {
+        let marker = std::fs::read_to_string(lib.join(crate::install_layout::LIB_MARKER))
+            .context("Reading versioned installation marker")?;
+        let dirs: Vec<_> = marker
+            .lines()
+            .filter_map(|line| line.strip_prefix("install_dir="))
+            .collect();
+        if dirs.len() != 1 || !Path::new(dirs[0]).is_absolute() {
+            bail!(
+                "Versioned installation marker must record one absolute install_dir; re-run install.sh with the original installation paths"
+            );
         }
+        std::path::PathBuf::from(dirs[0])
+    } else {
+        current_exe
+            .parent()
+            .context("Cannot determine install directory")?
+            .to_path_buf()
+    };
+    let mut command = mvm_core::env_hygiene::helper_command("sh");
+    command
+        .arg(installer.path())
+        .env("MVM_VERSION", version)
+        .env("MVM_INSTALL_DIR", &install_dir)
+        .env("MVM_TRUSTED_ARCHIVE_SHA256", archive_digest)
+        .env("MVM_SKIP_BOOTSTRAP", "1")
+        .env_remove("MVM_INSTALL_LIB_DIR")
+        .env_remove("MVM_SKIP_VERIFY")
+        .env_remove("MVM_SKIP_COSIGN_VERIFY")
+        .env_remove("MVM_SKIP_HASH_VERIFY")
+        .env_remove("MVM_SKIP_CODESIGN")
+        .env_remove("MVM_TRUSTED_COSIGN_SHA256")
+        .env_remove("MVM_COSIGN_DOWNLOAD_URL");
+    if let Some(lib) = lib_dir {
+        command.env("MVM_INSTALL_LIB_DIR", lib);
+    }
+    let status = command
+        .status()
+        .context("Running authenticated release installer")?;
+    if !status.success() {
+        bail!("Release installer failed ({status}); update was not completed");
     }
     Ok(())
 }
@@ -750,7 +500,12 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 /// refuses the update; the SHA-256 checked before this comes from a manifest
 /// fetched over the same channel, so on its own it says nothing about who
 /// published the archive.
-fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> Result<()> {
+fn install_verified_release(
+    version: &str,
+    target: &str,
+    tmp_dir: &Path,
+    current_exe: &Path,
+) -> Result<()> {
     let release_base = format!(
         "{}/{}/releases/download/{}",
         github_download_base(),
@@ -758,16 +513,37 @@ fn verify_signature(version: &str, archive_name: &str, archive_path: &Path) -> R
         version
     );
     ui::info("Verifying release signature...");
-    verify_archive_signature_at(&release_base, version, archive_name, archive_path)?;
+    install_verified_release_at(&release_base, version, target, tmp_dir, current_exe)
+}
+
+fn install_verified_release_at(
+    release_base: &str,
+    version: &str,
+    target: &str,
+    tmp_dir: &Path,
+    current_exe: &Path,
+) -> Result<()> {
+    let archive_name = format!("mvmctl-{target}.tar.gz");
+    verify_archive_signature_at(
+        release_base,
+        version,
+        &archive_name,
+        &tmp_dir.join(&archive_name),
+    )?;
     ui::success("Signature verified.");
-    Ok(())
+    extract_and_install(version, target, tmp_dir, current_exe)
 }
 
 fn verify_signature_if_required(
     skip_verify: bool,
     verify: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
-    if skip_verify { Ok(()) } else { verify() }
+    if skip_verify {
+        bail!(
+            "--skip-verify is not supported for self-update: the release installer must be authenticated"
+        );
+    }
+    verify()
 }
 
 /// Verify `archive_name` against the bundle published under `release_base`,
@@ -778,6 +554,11 @@ fn verify_archive_signature_at(
     archive_name: &str,
     archive_path: &Path,
 ) -> Result<()> {
+    if std::env::var_os(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV).is_some() {
+        bail!(
+            "Unset MVM_SKIP_COSIGN_VERIFY before self-update; release authentication is mandatory"
+        );
+    }
     mvm_build::release_signature::verify_release_archive_signature(
         &mvm_build::release_signature::ReleaseSignatureRequest {
             base_url: release_base,
@@ -987,12 +768,11 @@ pub fn update(check_only: bool, force: bool, skip_verify: bool) -> Result<()> {
     let archive_path = tmp_dir.path().join(&archive_name);
     verify_checksum(&latest_tag, &archive_name, &archive_path)?;
     verify_signature_if_required(skip_verify, || {
-        verify_signature(&latest_tag, &archive_name, &archive_path)
+        install_verified_release(&latest_tag, target, tmp_dir.path(), &current_exe)
     })?;
-    extract_and_install(target, tmp_dir.path(), &current_exe)?;
 
     ui::success(&format!("\nSuccessfully updated to {}!", latest_tag));
-    ui::info("The binary has been replaced on disk.");
+    ui::info("The CLI and matching guest runtime have been installed together.");
     ui::info("To verify: Open a new shell and run 'mvmctl --version'");
     ui::info("Or run: hash -r  (to clear your shell's command cache)");
 
@@ -1123,7 +903,7 @@ mod tests {
     // --- install.sh layout ---
 
     #[test]
-    fn update_refuses_a_binary_in_an_install_sh_release_directory() {
+    fn update_accepts_a_binary_in_an_install_sh_release_directory() {
         use crate::install_layout::{LIB_MARKER, RELEASE_MARKER};
         let root = tempfile::tempdir().unwrap();
         let release = root.path().join("lib").join("2-v0.18.0");
@@ -1132,10 +912,7 @@ mod tests {
         std::fs::write(release.join(RELEASE_MARKER), "complete\n").unwrap();
         std::fs::write(release.join("mvmctl"), "").unwrap();
 
-        let error = refuse_versioned_install(&release.join("mvmctl"))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("install.sh"), "{error}");
+        validate_install_target(false, &release.join("mvmctl")).unwrap();
     }
 
     #[test]
@@ -1152,8 +929,8 @@ mod tests {
         validate_install_target(true, &executable)
             .expect("checking for updates never replaces the managed binary");
         assert!(
-            validate_install_target(false, &executable).is_err(),
-            "an actual update must preserve the atomic install.sh layout"
+            validate_install_target(false, &executable).is_ok(),
+            "an actual update delegates to the atomic installer"
         );
     }
 
@@ -1163,7 +940,7 @@ mod tests {
         let loose = root.path().join("bin").join("mvmctl");
         std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
         std::fs::write(&loose, "").unwrap();
-        assert!(refuse_versioned_install(&loose).is_ok());
+        assert!(validate_install_target(false, &loose).is_ok());
     }
 
     // --- distribution packages ---
@@ -1231,104 +1008,6 @@ mod tests {
         assert!(refuse_package_install(&exe).is_ok());
     }
 
-    // --- smoke test ---
-
-    #[cfg(unix)]
-    #[test]
-    fn test_smoke_test_binary_passes() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        // Write a tiny shell script that prints a version-like string and exits 0.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("mvm-smoke-test.sh");
-        {
-            let mut file = std::fs::File::create(&path).unwrap();
-            writeln!(file, "#!/bin/sh\necho 'mvmctl 1.0.0'").unwrap();
-            file.flush().unwrap();
-        }
-        let mut perms = std::fs::metadata(&path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).unwrap();
-
-        assert!(smoke_test_binary(&path).is_ok());
-    }
-
-    #[test]
-    fn test_smoke_test_binary_nonexistent_fails() {
-        let result = smoke_test_binary(std::path::Path::new("/nonexistent/binary/does-not-exist"));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_smoke_test_binary_rollback_error_message() {
-        // Verify the rollback bail! message matches the spec wording.
-        let err_msg = format!(
-            "New binary failed smoke test; restored previous version. ({})",
-            "smoke test failed (exit 1): "
-        );
-        assert!(err_msg.contains("New binary failed smoke test; restored previous version."));
-    }
-
-    #[test]
-    fn release_host_bins_include_hvf_and_network_endpoint() {
-        assert!(RELEASE_HOST_BINS.contains(&"mvm-hvf-supervisor"));
-        assert!(RELEASE_HOST_BINS.contains(&"mvm-network-endpoint"));
-    }
-
-    #[test]
-    fn install_release_host_binaries_copies_present_helpers() {
-        let tmp = tempfile::tempdir().unwrap();
-        let extracted = tmp.path().join("extracted");
-        let install_dir = tmp.path().join("bin");
-        std::fs::create_dir_all(&extracted).unwrap();
-        std::fs::create_dir_all(&install_dir).unwrap();
-        std::fs::write(extracted.join("mvm-hvf-supervisor"), b"hvf").unwrap();
-        std::fs::write(extracted.join("mvm-network-endpoint"), b"endpoint").unwrap();
-
-        install_release_host_binaries(&extracted, &install_dir, false).unwrap();
-
-        assert_eq!(
-            std::fs::read(install_dir.join("mvm-hvf-supervisor")).unwrap(),
-            b"hvf"
-        );
-        assert_eq!(
-            std::fs::read(install_dir.join("mvm-network-endpoint")).unwrap(),
-            b"endpoint"
-        );
-    }
-
-    #[test]
-    fn a_failed_privileged_resource_copy_refuses_the_update() {
-        require_resource_copy_success(true).expect("a successful copy is accepted");
-        let error = require_resource_copy_success(false)
-            .expect_err("a failed resource copy must refuse the update")
-            .to_string();
-        assert!(error.contains("sudo cp failed"), "{error}");
-    }
-
-    #[test]
-    fn signing_is_skipped_off_macos_and_requires_every_entitlement_on_macos() {
-        sign_installed_binaries(false, || panic!("non-macOS must not invoke the signer"))
-            .expect("signing is a no-op off macOS");
-
-        let report = |path: &str, entitlements_present| mvm_runtime::codesign::SignReport {
-            path: path.into(),
-            applied: true,
-            entitlements_present,
-        };
-        sign_installed_binaries(true, || vec![report("mvmctl", true)])
-            .expect("a signed macOS install is accepted");
-
-        let error = sign_installed_binaries(true, || {
-            vec![report("mvmctl", true), report("mvm-hvf-supervisor", false)]
-        })
-        .expect_err("every macOS release binary must retain its entitlement")
-        .to_string();
-        assert!(error.contains("mvm-hvf-supervisor"), "{error}");
-        assert!(!error.contains("mvmctl"), "{error}");
-    }
-
     // --- signature verification ---
 
     /// Stage a release directory holding `archive` and, optionally, a bundle.
@@ -1380,7 +1059,7 @@ mod tests {
     }
 
     #[test]
-    fn signature_verification_runs_unless_the_user_explicitly_skips_it() {
+    fn signature_verification_is_mandatory_even_with_the_legacy_skip_flag() {
         let mut called = false;
         let error = verify_signature_if_required(false, || {
             called = true;
@@ -1391,8 +1070,8 @@ mod tests {
         assert!(called);
         assert!(error.contains("signature refused"), "{error}");
 
-        verify_signature_if_required(true, || panic!("skip verification must not verify"))
-            .expect("the explicit skip bypasses signature verification");
+        verify_signature_if_required(true, || panic!("skip verification must not install"))
+            .expect_err("the explicit skip must refuse self-update");
     }
 
     /// The tag carries a `v`; the identity template adds its own. A real
@@ -1692,179 +1371,235 @@ mod tests {
         );
     }
 
-    #[test]
-    fn run_sudo_cp_and_mv_bail_when_sudo_cannot_run_them() {
-        let scratch = tempfile::tempdir().unwrap();
-        let fake_sudo = scratch.path().join("sudo");
-        std::fs::write(&fake_sudo, b"#!/bin/sh\nexit 1\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake_sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fn installer_archive(root: &Path, entries: &[(&str, tar::EntryType, &[u8])]) {
+        let file = std::fs::File::create(root.join("mvmctl-unit-test.tar.gz")).unwrap();
+        let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+        let mut archive = tar::Builder::new(gzip);
+        for (name, kind, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            // Raw names allow malicious traversal fixtures rejected by set_path.
+            header.as_mut_bytes()[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_entry_type(*kind);
+            header.set_mode(0o644);
+            header.set_size(bytes.len() as u64);
+            header.set_cksum();
+            archive.append(&header, *bytes).unwrap();
         }
+        archive.into_inner().unwrap().finish().unwrap();
+    }
+
+    fn old_install(root: &Path) -> std::path::PathBuf {
+        let exe = root.join("bin/mvmctl");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, b"old CLI").unwrap();
+        std::fs::write(root.join("bin/guest-runtime"), b"old runtime").unwrap();
+        exe
+    }
+
+    #[test]
+    fn unsigned_or_tampered_installer_is_never_invoked() {
         let mut env = TestEnv::new();
-        env.set("PATH", scratch.path());
-        let from = scratch.path().join("from");
-        std::fs::write(&from, b"bytes").unwrap();
-        let to = scratch.path().join("to");
+        env.remove(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV);
+        let root = tempfile::tempdir().unwrap();
+        let exe = old_install(root.path());
+        installer_archive(
+            root.path(),
+            &[(
+                "mvmctl-unit-test/install.sh",
+                tar::EntryType::Regular,
+                b"printf invoked > \"$MVM_INSTALL_DIR/invoked\"\n",
+            )],
+        );
+        let base = format!("file://{}", root.path().display());
+        assert!(
+            install_verified_release_at(&base, "v0.18.0-rc.1", "unit-test", root.path(), &exe)
+                .is_err()
+        );
+        assert!(!root.path().join("bin/invoked").exists());
 
-        let cp_error = run_sudo_cp(&from, &to)
-            .expect_err("sudo cp failed")
-            .to_string();
-        assert!(cp_error.contains("sudo cp failed"), "{cp_error}");
-        let mv_error = run_sudo_mv(&from, &to)
-            .expect_err("sudo mv failed")
-            .to_string();
-        assert!(mv_error.contains("sudo mv failed"), "{mv_error}");
+        // A genuine release signature cannot authenticate different archive bytes.
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvm-build/tests/fixtures/release-signature/v0.18.0-rc.1/builder-vm-aarch64-checksums-sha256.txt.bundle");
+        std::fs::copy(fixture, root.path().join("mvmctl-unit-test.tar.gz.bundle")).unwrap();
+        assert!(
+            install_verified_release_at(&base, "v0.18.0-rc.1", "unit-test", root.path(), &exe)
+                .is_err()
+        );
+        assert!(!root.path().join("bin/invoked").exists());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old CLI");
+
+        env.set(mvm_build::release_signature::SKIP_COSIGN_VERIFY_ENV, "1");
+        let error =
+            install_verified_release_at(&base, "v0.18.0-rc.1", "unit-test", root.path(), &exe)
+                .unwrap_err();
+        assert!(error.to_string().contains("authentication is mandatory"));
+        assert!(!root.path().join("bin/invoked").exists());
     }
 
-    /// Build a real release tarball the way the publish pipeline does: a
-    /// `mvmctl-<target>/` directory holding a smoke-testable `mvmctl` script
-    /// (plus optional helper and resources), archived with the same `tar`
-    /// `extract_and_install` shells out to.
-    #[cfg(target_os = "linux")]
-    fn build_release_archive(
-        root: &std::path::Path,
-        target: &str,
-        with_helper: bool,
-        with_resources: bool,
-    ) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let staged = root.join("staged");
-        let release = staged.join(format!("mvmctl-{target}"));
+    #[test]
+    fn missing_or_malformed_installer_leaves_old_install_untouched() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = old_install(root.path());
+        installer_archive(
+            root.path(),
+            &[("mvmctl-unit-test/mvmctl", tar::EntryType::Regular, b"new")],
+        );
+        let error = extract_and_install("v9.9.9", "unit-test", root.path(), &exe).unwrap_err();
+        assert!(error.to_string().contains("missing"), "{error}");
+        std::fs::write(root.path().join("mvmctl-unit-test.tar.gz"), b"invalid").unwrap();
+        assert!(extract_and_install("v9.9.9", "unit-test", root.path(), &exe).is_err());
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old CLI");
+        assert_eq!(
+            std::fs::read(root.path().join("bin/guest-runtime")).unwrap(),
+            b"old runtime"
+        );
+    }
+
+    #[test]
+    fn installer_extraction_refuses_traversal_links_and_duplicate_scripts() {
+        for (path, kind) in [
+            ("../install.sh", tar::EntryType::Regular),
+            ("/install.sh", tar::EntryType::Regular),
+            ("mvmctl-unit-test/../../install.sh", tar::EntryType::Regular),
+            ("mvmctl-unit-test\\install.sh", tar::EntryType::Regular),
+            ("mvmctl-unit-test/link", tar::EntryType::Symlink),
+            ("mvmctl-unit-test/link", tar::EntryType::Link),
+            ("mvmctl-unit-test/install.sh", tar::EntryType::Regular),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            installer_archive(
+                root.path(),
+                &[
+                    (
+                        "mvmctl-unit-test/install.sh",
+                        tar::EntryType::Regular,
+                        b"exit 0",
+                    ),
+                    (path, kind, b""),
+                ],
+            );
+            assert!(
+                extract_release_installer(
+                    &root.path().join("mvmctl-unit-test.tar.gz"),
+                    "unit-test"
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authenticated_installer_receives_exact_version_and_standalone_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = old_install(root.path());
+        installer_archive(
+            root.path(),
+            &[(
+                "./mvmctl-unit-test/install.sh",
+                tar::EntryType::Regular,
+                br#"set -eu
+[ "$MVM_VERSION" = v9.9.9-rc.2 ]
+[ "$MVM_SKIP_BOOTSTRAP" = 1 ]
+[ -z "${MVM_INSTALL_LIB_DIR+x}" ]
+[ -z "${MVM_SKIP_VERIFY+x}" ]
+[ -z "${MVM_SKIP_COSIGN_VERIFY+x}" ]
+[ -z "${MVM_SKIP_HASH_VERIFY+x}" ]
+[ -z "${MVM_SKIP_CODESIGN+x}" ]
+[ -z "${MVM_TRUSTED_COSIGN_SHA256+x}" ]
+[ -z "${MVM_COSIGN_DOWNLOAD_URL+x}" ]
+printf '%s' "$MVM_VERSION" > "$MVM_INSTALL_DIR/invoked"
+printf '%s' "$MVM_TRUSTED_ARCHIVE_SHA256" > "$MVM_INSTALL_DIR/digest"
+"#,
+            )],
+        );
+        let mut env = TestEnv::new();
+        env.set("MVM_VERSION", "wrong");
+        env.set("MVM_INSTALL_DIR", "/wrong");
+        env.set("MVM_INSTALL_LIB_DIR", "/wrong");
+        env.set("MVM_SKIP_VERIFY", "1");
+        env.set("MVM_SKIP_COSIGN_VERIFY", "1");
+        env.set("MVM_SKIP_HASH_VERIFY", "1");
+        env.set("MVM_SKIP_CODESIGN", "1");
+        env.set("MVM_SKIP_BOOTSTRAP", "0");
+        env.set("MVM_TRUSTED_ARCHIVE_SHA256", "wrong");
+        env.set("MVM_TRUSTED_COSIGN_SHA256", "wrong");
+        env.set("MVM_COSIGN_DOWNLOAD_URL", "file:///wrong");
+        extract_and_install("v9.9.9-rc.2", "unit-test", root.path(), &exe).unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("bin/invoked")).unwrap(),
+            b"v9.9.9-rc.2"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.path().join("bin/digest")).unwrap(),
+            sha256_of(&std::fs::read(root.path().join("mvmctl-unit-test.tar.gz")).unwrap())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installer_failure_preserves_old_cli_and_runtime() {
+        let root = tempfile::tempdir().unwrap();
+        let exe = old_install(root.path());
+        installer_archive(
+            root.path(),
+            &[(
+                "mvmctl-unit-test/install.sh",
+                tar::EntryType::Regular,
+                b"exit 23\n",
+            )],
+        );
+        let error = extract_and_install("v9.9.9", "unit-test", root.path(), &exe).unwrap_err();
+        assert!(error.to_string().contains("Release installer failed"));
+        assert_eq!(std::fs::read(&exe).unwrap(), b"old CLI");
+        assert_eq!(
+            std::fs::read(root.path().join("bin/guest-runtime")).unwrap(),
+            b"old runtime"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn versioned_update_uses_marker_paths_and_refuses_ambiguous_legacy_marker() {
+        use crate::install_layout::{LIB_MARKER, RELEASE_MARKER};
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("custom bin");
+        let lib = root.path().join("custom lib");
+        let release = lib.join("1-v0.1.0");
+        std::fs::create_dir_all(&bin).unwrap();
         std::fs::create_dir_all(&release).unwrap();
-        let write_script = |path: &std::path::Path, body: &str| {
-            std::fs::write(path, body).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        write_script(&release.join("mvmctl"), "#!/bin/sh\necho 'mvmctl 9.9.9'\n");
-        if with_helper {
-            write_script(&release.join("mvm-hvf-supervisor"), "#!/bin/sh\nexit 0\n");
+        std::fs::write(release.join(RELEASE_MARKER), "complete\n").unwrap();
+        let exe = release.join("mvmctl");
+        std::fs::write(&exe, b"old CLI").unwrap();
+        installer_archive(
+            root.path(),
+            &[(
+                "mvmctl-unit-test/install.sh",
+                tar::EntryType::Regular,
+                b"set -eu\nprintf '%s' \"$MVM_INSTALL_LIB_DIR\" > \"$MVM_INSTALL_DIR/invoked\"\n",
+            )],
+        );
+        for marker in [
+            "".to_string(),
+            "install_dir=relative\n".to_string(),
+            format!("install_dir={0}\ninstall_dir={0}\n", bin.display()),
+        ] {
+            std::fs::write(lib.join(LIB_MARKER), marker).unwrap();
+            assert!(extract_and_install("v9.9.9", "unit-test", root.path(), &exe).is_err());
+            assert!(!bin.join("invoked").exists());
         }
-        if with_resources {
-            std::fs::create_dir_all(release.join("resources")).unwrap();
-            std::fs::write(release.join("resources/config.toml"), b"x").unwrap();
-        }
-        let archive = root.join(format!("mvmctl-{target}.tar.gz"));
-        let status = std::process::Command::new("tar")
-            .arg("czf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&staged)
-            .arg(".")
-            .status()
-            .expect("run tar to build the fixture");
-        assert!(status.success(), "tar fixture: {status}");
-        archive
-    }
-
-    /// The swap is the claim: a complete, smoke-testable release replaces the
-    /// running binary and its adjacent helper. A mutant that bails when the
-    /// extracted binary *is* present (or that takes the sudo branch on a
-    /// writable install dir) fails this end to end.
-    ///
-    /// Linux-only because the macOS arm of the flow runs real codesigning
-    /// against the running test executable's install, which a unit test must
-    /// never touch.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn extract_and_install_swaps_in_the_release_binary_and_helpers() {
-        let tmp = tempfile::tempdir().unwrap();
-        let work = tmp.path().join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        let archive = build_release_archive(tmp.path(), "unit-test", true, true);
-        std::fs::copy(&archive, work.join("mvmctl-unit-test.tar.gz")).unwrap();
-
-        let install_dir = tmp.path().join("install");
-        std::fs::create_dir_all(&install_dir).unwrap();
-        let current_exe = install_dir.join("mvmctl");
-        std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
-
-        extract_and_install("unit-test", &work, &current_exe).expect("the update installs");
-
-        let updated = std::fs::read_to_string(&current_exe).unwrap();
-        assert!(
-            updated.contains("9.9.9"),
-            "the release binary must be the one installed"
-        );
-        assert!(
-            install_dir.join("mvm-hvf-supervisor").is_file(),
-            "an adjacent helper in the archive is installed beside the binary"
-        );
-        assert!(
-            install_dir.join("resources/config.toml").is_file(),
-            "the release resources ship with the binary"
-        );
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn extract_and_install_refuses_a_broken_archive() {
-        let tmp = tempfile::tempdir().unwrap();
-        let work = tmp.path().join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        std::fs::write(work.join("mvmctl-unit-test.tar.gz"), b"not a tarball").unwrap();
-        let install_dir = tmp.path().join("install");
-        std::fs::create_dir_all(&install_dir).unwrap();
-        let current_exe = install_dir.join("mvmctl");
-        std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
-
-        let error = extract_and_install("unit-test", &work, &current_exe)
-            .expect_err("a broken archive must not reach the install step")
-            .to_string();
-        assert!(error.contains("Failed to extract archive"), "{error}");
-        assert!(
-            !current_exe.with_extension("old").exists(),
-            "a failed extract must not have touched the installed binary"
-        );
-    }
-
-    /// An install dir the user does not own sends the flow down the sudo arm;
-    /// the non-sudo file operations would fail there, so a mutant that picks
-    /// the arm by writability the wrong way round dies on this case and the
-    /// previous one together.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn extract_and_install_uses_sudo_for_a_host_owned_install_dir() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let bin = tmp.path().join("bin");
-        std::fs::create_dir(&bin).unwrap();
-        let sudo = bin.join("sudo");
         std::fs::write(
-            &sudo,
-            b"#!/bin/sh\nprintf 'called\\n' >> \"$MVM_TEST_SUDO_MARKER\"\n/bin/chmod u+w \"$MVM_TEST_INSTALL_DIR\"\nexec \"$@\"\n",
+            lib.join(LIB_MARKER),
+            format!("install_dir={}\n", bin.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&sudo, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let work = tmp.path().join("work");
-        std::fs::create_dir_all(&work).unwrap();
-        let archive = build_release_archive(tmp.path(), "unit-test", true, true);
-        std::fs::copy(&archive, work.join("mvmctl-unit-test.tar.gz")).unwrap();
-
-        let install_dir = tmp.path().join("install");
-        std::fs::create_dir_all(&install_dir).unwrap();
-        let current_exe = install_dir.join("mvmctl");
-        std::fs::write(&current_exe, b"#!/bin/sh\necho 'mvmctl 0.1.0'\n").unwrap();
-        std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-
-        let marker = tmp.path().join("sudo-called");
-        let mut env = TestEnv::new();
-        env.set("PATH", format!("{}:/usr/bin:/bin", bin.display()));
-        env.set("MVM_TEST_SUDO_MARKER", &marker);
-        env.set("MVM_TEST_INSTALL_DIR", &install_dir);
-
-        let result = extract_and_install("unit-test", &work, &current_exe);
-
-        std::fs::set_permissions(&install_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        result.expect("the sudo arm installs into a host-owned directory");
-        assert!(marker.is_file(), "the sudo arm must be invoked");
-        assert!(
-            std::fs::read_to_string(&current_exe)
-                .unwrap()
-                .contains("9.9.9")
+        extract_and_install("v9.9.9", "unit-test", root.path(), &exe).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bin.join("invoked")).unwrap(),
+            lib.canonicalize().unwrap().to_str().unwrap()
         );
-        assert!(install_dir.join("resources/config.toml").is_file());
+        assert_eq!(std::fs::read(exe).unwrap(), b"old CLI");
     }
 
     #[test]

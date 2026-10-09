@@ -7,6 +7,19 @@ on:
         description: "Build + smoke only; skip the PyPI upload"
         required: true
         type: boolean
+    secrets:
+      APPLE_DEVELOPER_ID_P12_BASE64:
+        required: false
+      APPLE_DEVELOPER_ID_P12_PASSWORD:
+        required: false
+      APPLE_DEVELOPER_ID_IDENTITY:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
 
 jobs:
   build:
@@ -104,6 +117,32 @@ jobs:
           mkdir -p crates/mvm-sdk/sdks/python/mvm/_native
           cp "${HOSTLIB}" crates/mvm-sdk/sdks/python/mvm/_native/
           echo "embedded ${HOSTLIB}"
+
+      - name: Developer ID sign and notarize macOS native payload
+        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          python3 scripts/release/sign_macos.py \
+            --payload crates/mvm-sdk/sdks/python/mvm/_native \
+            --report "${RUNNER_TEMP}/pypi-notarization.json"
+
+      - name: Retain macOS notarization evidence
+        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: pypi-notarization-${{ matrix.platform }}
+          path: ${{ runner.temp }}/pypi-notarization.json
+          if-no-files-found: error
+
+      - name: Mark unsigned branch rehearsal
+        if: ${{ runner.os == 'macOS' && inputs.dry_run && github.ref_type != 'tag' }}
+        run: echo "::notice::Unsigned branch build only; NOT macOS release acceptance evidence."
 
       - name: Build sdist + wheel
         shell: bash
@@ -210,3 +249,4 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
+          skip-existing: true

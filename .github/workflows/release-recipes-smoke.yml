@@ -1,0 +1,101 @@
+name: Install published AUR and Nix recipes
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable CLI release to install
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - format: aur
+            runner: ubuntu-latest
+          - format: nix
+            runner: ubuntu-latest
+          - format: nix
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: sigstore/cosign-installer@v3
+      - name: Download and authenticate the published recipe
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag }}
+          FORMAT: ${{ matrix.format }}
+        run: |
+          set -euo pipefail
+          recipe=package.nix
+          if [ "${FORMAT}" = aur ]; then recipe=PKGBUILD; fi
+          mkdir recipes
+          gh release download "${TAG_NAME}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern "${recipe}" --pattern "${recipe}.bundle" --dir recipes
+          cosign verify-blob --bundle "recipes/${recipe}.bundle" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG_NAME}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "recipes/${recipe}"
+
+      - name: Install and remove on Arch Linux
+        if: matrix.format == 'aur'
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -e EXPECT_VERSION="${TAG_NAME#v}" \
+            -v "${GITHUB_WORKSPACE}/recipes:/recipes:ro" \
+            -v "${GITHUB_WORKSPACE}/scripts/smoke-installed-release.py:/smoke.py:ro" \
+            archlinux:base-devel bash -euc '
+              pacman -Syu --noconfirm --needed python
+              useradd --create-home builder
+              install -o builder -g builder /recipes/PKGBUILD /home/builder/PKGBUILD
+              su builder -c "cd /home/builder && makepkg --noconfirm"
+              pacman -U --noconfirm /home/builder/mvmctl-bin-*.pkg.tar.zst
+              python /smoke.py /usr "$EXPECT_VERSION"
+              pacman -R --noconfirm mvmctl-bin
+              test ! -e /usr/bin/mvmctl
+              test ! -e /usr/lib/mvmctl/guest-runtime
+            '
+
+      # Same pinned installer and native Linux boundary as the Nix CI lane.
+      - name: Install Nix
+        if: matrix.format == 'nix'
+        uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - name: Build, install and remove the standalone Nix package
+        if: matrix.format == 'nix'
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2016 # Interpolation belongs to Nix, not Bash.
+          package="$(nix-build --no-out-link --expr '
+            let
+              lock = (builtins.fromJSON (builtins.readFile ./flake.lock)).nodes.nixpkgs.locked;
+              pkgs = import (builtins.fetchTarball {
+                url = "https://github.com/${lock.owner}/${lock.repo}/archive/${lock.rev}.tar.gz";
+                sha256 = lock.narHash;
+              }) {};
+            in pkgs.callPackage ./recipes/package.nix {}
+          ')"
+          profile="${RUNNER_TEMP}/mvm-profile"
+          nix-env --profile "${profile}" --install "${package}"
+          python3 scripts/smoke-installed-release.py "${profile}" "${TAG_NAME#v}"
+          nix-env --profile "${profile}" --uninstall '*'
+          test ! -e "${profile}/bin/mvmctl"
+          test ! -e "${profile}/lib/mvmctl/guest-runtime"

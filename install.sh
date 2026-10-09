@@ -401,6 +401,7 @@ mark_complete() {
 release_entries() {
   for entry in "$1"/*; do
     name="${entry##*/}"
+    [ "$name" != "install.sh" ] || continue
     if [ -f "$entry" ] && [ -x "$entry" ]; then
       printf '%s\n' "$name"
     elif [ "$name" = "assets" ] && [ -d "$entry" ]; then
@@ -642,6 +643,15 @@ sign_release() {
   command -v codesign >/dev/null 2>&1 || die "codesign is required on macOS"
   for name in $(release_entries "$STAGE"); do
     [ -f "$STAGE/$name" ] || continue
+    if codesign --verify --strict "$STAGE/$name" >/dev/null 2>&1 \
+        && codesign -dvv "$STAGE/$name" 2>&1 | grep -q '^Authority=Developer ID Application:'; then
+      if entitlement_required "$name" \
+          && ! already_entitled "$STAGE/$name" "$(required_entitlement_key "$name")"; then
+        die "Developer ID signed $name is missing its required entitlement; refusing to replace its signature"
+      fi
+      say "Preserved Developer ID signature: $name"
+      continue
+    fi
     profile_name="$(entitlement_profile "$name")"
     profile="$(find_entitlement_profile "$STAGE" "$profile_name")"
     if [ -z "$profile" ]; then
@@ -835,6 +845,15 @@ else
   say "Checksum verified."
 fi
 
+# An explicit hash is an exact-byte handoff from an authenticated updater,
+# not merely a way to bootstrap a verifier. Enforce it even when a verifier
+# is already installed or the release-manifest checksum check was skipped.
+if [ -n "${MVM_TRUSTED_ARCHIVE_SHA256:-}" ]; then
+  trusted_hash="$(trusted_archive_sha256)"
+  [ "$got" = "$trusted_hash" ] \
+    || die "trusted archive SHA-256 mismatch for $ARCHIVE (want $trusted_hash, got $got)"
+fi
+
 # Signature. An installed mvmctl verifies offline against its embedded trust
 # root and is preferred to cosign. A fresh host authenticates the archive
 # against the installer-baked hash before trying its mvmctl as a temporary
@@ -890,6 +909,35 @@ fi
 tar xzf "$TMP/$ARCHIVE" -C "$TMP"
 SRC="$TMP/mvmctl-${TARGET}"
 [ -f "$SRC/mvmctl" ] || die "archive missing mvmctl-${TARGET}/mvmctl"
+
+# Keep the signed, complete two-architecture runtime beside the executable.
+# It joins the same release-directory transaction: no CLI switch can expose
+# a missing or differently versioned runtime. Never extract it in the installer.
+RUNTIME="mvm-guest-bins-${VERSION}.tar.gz"
+mkdir -p "$TMP/guest-runtime"
+for suffix in "" .sha256 .bundle .sha256.bundle; do
+  curl -fsSL "$REL/$RUNTIME$suffix" -o "$TMP/guest-runtime/$RUNTIME$suffix" \
+    || die "could not download $RUNTIME$suffix"
+done
+runtime_sum="$TMP/guest-runtime/$RUNTIME.sha256"
+want="$(awk -v name="$RUNTIME" 'NF == 2 && $2 == name { count++; digest=$1 } END { if (count == 1 && NR == 1) print digest }' "$runtime_sum")"
+[ -n "$want" ] && [ "$want" = "$(sha256_of "$TMP/guest-runtime/$RUNTIME")" ] \
+  || die "checksum mismatch or invalid release identity for $RUNTIME"
+for runtime_asset in "$RUNTIME" "$RUNTIME.sha256"; do
+  if [ -n "$VERIFIER" ]; then
+    "$VERIFIER" env verify-release "$TMP/guest-runtime/$runtime_asset" --tag "$VERSION" >/dev/null \
+      || die "signature verification failed for $runtime_asset"
+  else
+    "$COSIGN" verify-blob \
+      --bundle "$TMP/guest-runtime/$runtime_asset.bundle" \
+      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+      --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \
+      "$TMP/guest-runtime/$runtime_asset" >/dev/null 2>&1 \
+      || die "signature verification failed for $runtime_asset"
+  fi
+done
+rm -rf "$SRC/guest-runtime"
+mv "$TMP/guest-runtime" "$SRC/guest-runtime"
 
 prepare_dirs
 acquire_lock
