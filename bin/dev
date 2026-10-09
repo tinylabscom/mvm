@@ -63,21 +63,14 @@ sha256_hex() {
 
 mvm_root=$(canonical_dir "$(dirname -- "${BASH_SOURCE[0]}")/.." "mvm checkout")
 
-# Pair selection: explicit selector > discovered sibling > solo. A discovered
-# sibling that does not look like an mvm-images checkout (no flake.nix) is
-# ignored rather than failing — discovery is a convenience, not a gate.
+# Pair selection is explicit. Filesystem proximity must not turn a normal
+# contributor command into a local image build.
 images_root=""
 if [ -n "${MVM_IMAGES_DIR:-}" ]; then
   images_root=$(canonical_dir "$MVM_IMAGES_DIR" "MVM_IMAGES_DIR=")
   [ "$images_root" != "$mvm_root" ] || die "MVM_IMAGES_DIR names this mvm checkout"
 else
-  sibling="$mvm_root/../mvm-images"
-  if [ -f "$sibling/flake.nix" ] && [ -f "$sibling/flake.lock" ]; then
-    images_root=$(canonical_dir "$sibling" "sibling mvm-images checkout")
-    echo "bin/dev: paired with the sibling mvm-images checkout $images_root" >&2
-  else
-    echo "bin/dev: no mvm-images checkout selected; images resolve from the released set" >&2
-  fi
+  echo "bin/dev: no mvm-images checkout selected; images resolve from the released set" >&2
 fi
 
 if [ -n "$images_root" ]; then

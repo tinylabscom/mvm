@@ -3,6 +3,12 @@
 //! A sealed production guest must never have an interactive console input
 //! path. Backends open the host-side log file with write-only, truncate-on-open
 //! semantics so the host can read the log but cannot write to the guest console.
+//!
+//! Console and supervisor stderr are potentially sensitive, unstructured
+//! diagnostics, not public audit metadata. Their managed files are created at
+//! 0600 on a fresh inode each run; existing link targets are never truncated.
+//! This is access control, not encrypted transcript capture or a time-retention
+//! policy. State-directory creation remains the caller's responsibility.
 
 use std::io;
 use std::path::Path;
@@ -13,11 +19,7 @@ use std::process::Stdio;
 /// This is the shared primitive used by every concrete backend to capture
 /// guest console output without creating an interactive input channel.
 pub fn open_console_capture(path: &Path) -> io::Result<std::fs::File> {
-    std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)
+    mvm_core::util::atomic_io::open_private_truncated(path)
 }
 
 /// File name the per-VM supervisor's stderr is captured to inside a VM state
@@ -130,6 +132,93 @@ fn helper_rebuild_command(profile: Option<crate::host::aux_bin::BuildProfile>) -
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn console_capture_is_private_write_only_and_restarts_on_a_fresh_inode() {
+        use std::io::{Read, Write};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        let mut first = open_console_capture(&log).unwrap();
+        assert_eq!(
+            first.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(first.read(&mut [0]).is_err(), "capture must be write-only");
+        first.write_all(b"SYNTHETIC_PRIVATE_DIAGNOSTIC").unwrap();
+        let mut old_reader = std::fs::File::open(&log).unwrap();
+
+        let mut second = open_console_capture(&log).unwrap();
+        assert_eq!(
+            second.metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(std::fs::read(&log).unwrap().is_empty());
+        second.write_all(b"NEXT_RUN").unwrap();
+        assert_eq!(std::fs::read(&log).unwrap(), b"NEXT_RUN");
+        // A descriptor follows its inode, not the name. Path-following readers
+        // reopen after rotation; a reader of the previous run stays isolated.
+        let mut old_bytes = Vec::new();
+        old_reader.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, b"SYNTHETIC_PRIVATE_DIAGNOSTIC");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn console_capture_replaces_links_without_mutating_their_targets() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("unrelated");
+        std::fs::write(&target, b"SYNTHETIC_UNRELATED_DIAGNOSTIC").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        for hard_link in [false, true] {
+            let log = dir
+                .path()
+                .join(if hard_link { "hard.log" } else { "sym.log" });
+            if hard_link {
+                std::fs::hard_link(&target, &log).unwrap();
+            } else {
+                symlink(&target, &log).unwrap();
+            }
+            let capture = open_console_capture(&log).unwrap();
+            assert_eq!(
+                capture.metadata().unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(!std::fs::symlink_metadata(&log).unwrap().is_symlink());
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                b"SYNTHETIC_UNRELATED_DIAGNOSTIC"
+            );
+            assert_eq!(
+                std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+        }
+    }
+
+    #[test]
+    fn console_capture_failures_preserve_existing_state_and_leave_no_temporary() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("console.log");
+        std::fs::create_dir(&log).unwrap();
+        let marker = log.join("keep");
+        std::fs::write(&marker, b"SYNTHETIC_KEEP").unwrap();
+        assert!(open_console_capture(&log).is_err());
+        assert_eq!(std::fs::read(marker).unwrap(), b"SYNTHETIC_KEEP");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+        let missing = dir.path().join("missing");
+        assert!(open_console_capture(&missing.join("console.log")).is_err());
+        assert!(
+            !missing.exists(),
+            "the capture does not create state directories"
+        );
+    }
+
     #[test]
     fn supervisor_stderr_creates_the_log_inside_the_state_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -139,6 +228,11 @@ mod tests {
             log.is_file(),
             "supervisor stderr must land in a file, not the caller's fd: {} missing",
             log.display()
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            mvm_core::private_fs::mode_bits(&log, &std::fs::metadata(&log).unwrap()).unwrap(),
+            0o600
         );
     }
 

@@ -449,6 +449,11 @@ impl GuestBinarySource {
 /// a real cross-compile, which is how three `pull_core` unit tests came to
 /// spend fifty-five seconds each building the guest agent.
 pub fn guest_binary_source() -> Result<GuestBinarySource, GuestAgentBuildError> {
+    if !crate::artifact_acquisition::local_guest_runtime_build_requested() {
+        return Ok(GuestBinarySource::EmbeddedVersion {
+            cache_key: env!("CARGO_PKG_VERSION").to_string(),
+        });
+    }
     match detect_source_workspace() {
         Some(workspace_root) => {
             let cache_key = source_cache_key(&workspace_root)?;
@@ -1820,6 +1825,26 @@ rust = "1.91.1"
         let ws = detect_source_workspace().expect("this is a source checkout");
         assert!(ws.join("crates/mvm-agentd").is_dir());
         assert!(ws.join("Cargo.toml").is_file());
+    }
+
+    #[test]
+    #[cfg(not(feature = "release-channel"))]
+    fn checkout_presence_does_not_select_source_guest_binaries_without_opt_in() {
+        let mut env = TestEnv::new();
+        env.remove(crate::artifact_acquisition::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV);
+        assert!(matches!(
+            guest_binary_source().expect("default guest source"),
+            GuestBinarySource::EmbeddedVersion { .. }
+        ));
+
+        env.set(
+            crate::artifact_acquisition::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
+            "build",
+        );
+        assert!(matches!(
+            guest_binary_source().expect("explicit source guest runtime"),
+            GuestBinarySource::SourceCheckout { .. }
+        ));
     }
 
     #[cfg(feature = "release-channel")]

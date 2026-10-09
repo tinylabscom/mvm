@@ -367,7 +367,10 @@ fn run_command() -> Result<()> {
         mvm_build::image_source::configured_images_dir().as_deref(),
     )?;
     crate::host_binaries::source::allow_payload_from_source();
-    allow_helper_builds_from_source(mvm_build::artifact_acquisition::compiled_channel());
+    allow_helper_builds_from_source(
+        mvm_build::artifact_acquisition::compiled_channel(),
+        &cli.command,
+    );
     declare_embedded_host_binaries();
     register_inhouse_builder();
     register_builder_session_starter();
@@ -596,15 +599,21 @@ fn refuse_local_image_source_in_release_build(
     Ok(())
 }
 
-/// Let a contributor build compile the per-VM helpers it spawns — the
-/// supervisors and the network endpoint — from its checkout when they are
-/// missing or out of date. A root `cargo build` produces only `mvmctl`, and
-/// this is what keeps that build plus one `mvmctl` command sufficient. An
-/// official release ships its helpers beside it and never runs `cargo`.
-fn allow_helper_builds_from_source(channel: mvm_build::artifact_acquisition::DistributionChannel) {
-    if channel.permits_automatic_builds() {
+/// Let explicit preparation/build commands compile per-VM helpers from source.
+/// Launch commands never receive this process capability, even when an
+/// acquisition selector is present, so a missing helper fails instead of
+/// turning startup into an implicit Cargo build.
+fn allow_helper_builds_from_source(
+    channel: mvm_build::artifact_acquisition::DistributionChannel,
+    command: &Commands,
+) {
+    if channel.permits_automatic_builds() && command_allows_helper_source_builds(command) {
         mvm_vmm::host::aux_bin::allow_helper_builds_from_source();
     }
+}
+
+fn command_allows_helper_source_builds(command: &Commands) -> bool {
+    command_allows_builder_auto_bootstrap(command)
 }
 
 fn command_allows_builder_auto_bootstrap(command: &Commands) -> bool {
@@ -872,7 +881,7 @@ mod image_source_gate_tests {
 
 #[cfg(test)]
 mod builder_bootstrap_policy_tests {
-    use super::{Cli, command_allows_builder_auto_bootstrap};
+    use super::{Cli, command_allows_builder_auto_bootstrap, command_allows_helper_source_builds};
     use clap::Parser;
 
     fn command(args: &[&str]) -> super::Commands {
@@ -892,6 +901,17 @@ mod builder_bootstrap_policy_tests {
         ])));
         assert!(!command_allows_builder_auto_bootstrap(&command(&[
             "cache", "info",
+        ])));
+    }
+
+    #[test]
+    fn launches_never_receive_the_helper_build_capability() {
+        assert!(command_allows_helper_source_builds(&command(&[
+            "env",
+            "bootstrap",
+        ])));
+        assert!(!command_allows_helper_source_builds(&command(&[
+            "machine", "run", "--image", "alpine", "--", "true",
         ])));
     }
 }

@@ -626,6 +626,12 @@ jobs:
           cargo nextest run -p mvm-sdk --features schema
           cargo check -p mvm-sdk --features schema --bins
 
+      - name: compiler compatibility and deployment feature tests (mvm-sdk)
+        run: |
+          cargo nextest run -p mvm-compiler
+          cargo nextest run -p mvm-sdk --no-default-features
+          cargo nextest run -p mvm-sdk --features compiler,deploy-remote
+
       # The release signature verifier only exists under `manifest-verify`.
       # The workspace lane gets it through the root default, but that is
       # feature unification, not something these crates ask for, so this step

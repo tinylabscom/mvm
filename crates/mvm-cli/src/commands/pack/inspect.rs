@@ -15,6 +15,10 @@ struct VerifiedPackInfo {
     reference: String,
     description: String,
     manifest_sha256: String,
+    signer_identity: String,
+    signer_issuer: String,
+    official_status: &'static str,
+    revocation_scope: &'static str,
     publisher_issuer: String,
     accepted_signing_identities: Vec<String>,
     policy_files: Vec<String>,
@@ -85,6 +89,10 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         reference: manifest.reference.to_string(),
         description: manifest.description.clone(),
         manifest_sha256: verified.manifest_sha256().as_str().to_string(),
+        signer_identity: verified.signer().identity.clone(),
+        signer_issuer: verified.signer().issuer.clone(),
+        official_status: "not_established",
+        revocation_scope: "operator_configured_only",
         publisher_issuer: trust.issuer,
         accepted_signing_identities: trust.accepted_identities,
         policy_files: policy_documents
@@ -92,7 +100,12 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
             .map(|policy| policy.path.clone())
             .collect(),
         policy_documents,
-        image_manifest: manifest.image.as_ref().map(|image| image.manifest.clone()),
+        image_manifest: manifest.image.as_ref().and_then(|image| match image {
+            mvm_core::registry_pack::RegistryPackImage::Source(source) => {
+                Some(source.manifest.clone())
+            }
+            mvm_core::registry_pack::RegistryPackImage::Built(_) => None,
+        }),
         files: manifest
             .files
             .iter()
@@ -109,12 +122,20 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
     }
     if verify_only {
         println!("Verified {} ({})", info.reference, info.manifest_sha256);
+        println!("Signer identity: {}", info.signer_identity);
+        println!("Signer issuer: {}", info.signer_issuer);
+        println!("Official status: not established by this verification");
+        println!("Revocation scope: operator-configured signed feed only; no feed is required");
         println!("Signature proves publisher identity and integrity, not safety.");
         return Ok(());
     }
     println!("Pack: {}", info.reference);
     println!("Description: {}", info.description);
     println!("Manifest SHA-256: {}", info.manifest_sha256);
+    println!("Signer identity: {}", info.signer_identity);
+    println!("Signer issuer: {}", info.signer_issuer);
+    println!("Official status: not established by this verification");
+    println!("Revocation scope: operator-configured signed feed only; no feed is required");
     println!("Publisher issuer: {}", info.publisher_issuer);
     println!(
         "Accepted signing identities: {}",

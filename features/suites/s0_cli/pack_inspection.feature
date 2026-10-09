@@ -15,11 +15,24 @@ Feature: installed pack inspection
     Then the command exits with code 0
     And the output contains "mvmctl pack pull"
 
+  @pack_cli
+  Scenario: workload management is available under the pack command
+    When I run mvmctl with "pack ls --help"
+    Then the command exits with code 0
+    And the output contains "mvmctl pack ls"
+
+  @pack_cli
+  Scenario: the system pack cache has a separate command group
+    When I run mvmctl with "pack system --help"
+    Then the command exits with code 0
+    And the output contains "rollback"
+
   Scenario: an uninstalled pack cannot be reported as verified
     Given an isolated mvm home
     When I run mvmctl with "pack verify runtime/go@1.0.0"
     Then the command exits with code 1
     And the error output contains "not pinned"
+    And the output does not contain "Official status"
 
   Scenario: pack information does not claim an uninstalled artifact
     Given an isolated mvm home

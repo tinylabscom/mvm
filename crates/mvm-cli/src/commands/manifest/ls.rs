@@ -4,11 +4,9 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
-use serde::Serialize;
 
-use mvm_core::domain::template_tags::TemplateTags;
+use mvm_client::manifest::{self, ListRequest};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::super::Cli;
 
@@ -28,55 +26,13 @@ pub(in crate::commands) struct Args {
     pub tags: Vec<String>,
 }
 
-#[derive(Serialize)]
-struct SlotRow {
-    slot_hash: String,
-    manifest_path: String,
-    name: Option<String>,
-    updated_at: String,
-    orphan: bool,
-    /// Tags from the template's tag catalog. Empty when the slot
-    /// has no associated catalog or no tags set.
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    tags: BTreeSet<String>,
-}
-
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let entries = tmpl::template_list_slots()?;
-
-    // Convert the user-supplied filter once. Sorted so the
-    // intersection check below has a stable shape; we don't validate
-    // here because `add` is the canonical insertion site that does.
+    let rows = manifest::list(&ListRequest {
+        orphans: args.orphans,
+        tags: args.tags.clone(),
+    })?;
+    // Sorted and deduplicated only for the human empty-result message.
     let want_tags: BTreeSet<String> = args.tags.iter().cloned().collect();
-
-    let rows: Vec<SlotRow> = entries
-        .into_iter()
-        .map(|e| {
-            // The template's tag catalog is keyed by template name.
-            // For unnamed slots there's no catalog to load; the row
-            // ends up with an empty tag set. Forgiving load semantics
-            // (missing file → empty) means `template_tags::load`
-            // never returns an error here.
-            let tags = match e.name.as_deref() {
-                Some(n) => TemplateTags::load(n).map(|t| t.tags).unwrap_or_default(),
-                None => BTreeSet::new(),
-            };
-            SlotRow {
-                orphan: !std::path::Path::new(&e.manifest_path).exists(),
-                slot_hash: e.slot_hash,
-                manifest_path: e.manifest_path,
-                name: e.name,
-                updated_at: e.updated_at,
-                tags,
-            }
-        })
-        .filter(|r| !args.orphans || r.orphan)
-        .filter(|r| {
-            // Empty filter: keep everything. Non-empty: every
-            // requested tag must be present (intersection).
-            want_tags.iter().all(|t| r.tags.contains(t))
-        })
-        .collect();
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
@@ -121,4 +77,28 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[derive(Parser)]
+    struct Command {
+        #[command(flatten)]
+        args: Args,
+    }
+
+    #[test]
+    fn list_parser_keeps_json_orphans_and_repeatable_tags() {
+        let args =
+            Command::try_parse_from(["ls", "--json", "--orphans", "--tag", "b", "--tag", "a"])
+                .unwrap()
+                .args;
+        assert!(args.json && args.orphans);
+        assert_eq!(args.tags, ["b", "a"]);
+        let defaults = Command::try_parse_from(["ls"]).unwrap().args;
+        assert!(!defaults.json && !defaults.orphans && defaults.tags.is_empty());
+    }
 }

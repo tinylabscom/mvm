@@ -1462,6 +1462,37 @@ mod tests {
     }
 
     #[test]
+    fn no_kvm_smoke_restores_the_source_guest_runtime_before_booting() {
+        let workflow = ci_full_workflow();
+        let bootstrap = job_block(&workflow, "no-kvm-bootstrap");
+        let smoke = job_block(&workflow, "no-kvm-smoke");
+        let pack = "tar -C \"$MVM_HOME/cache\" -cf /tmp/no-kvm-guest-runtime.tar guest-runtime";
+        let unpack = "tar -C \"$MVM_HOME/cache\" -xf /tmp/no-kvm-guest-runtime.tar";
+        assert!(
+            bootstrap.contains(pack)
+                && bootstrap.contains("name: no-kvm-guest-runtime")
+                && bootstrap.contains("path: /tmp/no-kvm-guest-runtime.tar"),
+            "transfer the fingerprint-indexed runtime cache with its executable modes intact"
+        );
+        assert!(
+            smoke.contains("name: no-kvm-guest-runtime") && smoke.contains("path: /tmp"),
+            "download the runtime cache produced by this run, not a different source generation"
+        );
+        let restore = smoke.find(unpack).expect("restore the runtime cache");
+        let boot = smoke
+            .find("/tmp/mvmctl-source-under-test machine run")
+            .expect("boot the installed bundle");
+        assert!(
+            restore < boot,
+            "restore the runtime before source resolution"
+        );
+        assert!(
+            !smoke.contains("install-zigbuild"),
+            "the boot-only witness must reuse prepared artifacts, not cross-compile them"
+        );
+    }
+
+    #[test]
     fn dedicated_mcp_smoke_lane_stays_out_of_ci() {
         let workflow = ci_workflow();
         for removed in [
