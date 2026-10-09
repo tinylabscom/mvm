@@ -360,7 +360,7 @@ enum Terminal {
     Detached,
 }
 
-fn seed_live_guest_runtime(home: &Path) {
+pub(crate) fn seed_live_guest_runtime(home: &Path) -> mvm_build::guest_runtime::GuestRuntime {
     use mvm_build::guest_runtime::{
         resolve_or_build_source_guest_runtime, seed_source_guest_runtime,
     };
@@ -386,7 +386,7 @@ fn seed_live_guest_runtime(home: &Path) {
     });
     seed_source_guest_runtime(&home.join("cache"), seed, version, arch, &workspace)
         .expect("verify and copy the live guest runtime into the scenario home")
-        .expect("prewarmed guest runtime must match the current source");
+        .expect("prewarmed guest runtime must match the current source")
 }
 
 fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
@@ -410,6 +410,11 @@ fn run_live_home(world: &mut CliWorld, argv: Vec<String>, terminal: Terminal) {
         .current_dir(workspace_root())
         .args(&argv)
         .isolated_home(&home);
+    if argv.first().is_some_and(|arg| arg == "machine")
+        && argv.get(1).is_some_and(|arg| arg == "start")
+    {
+        command.env("MVM_COLD_BUILD", "refuse");
+    }
     apply_encrypted_volume_probe_path(world, &mut command);
     if world.warm_residency {
         command.env("MVM_RESIDENCY", "warm");
