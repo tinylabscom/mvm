@@ -44,7 +44,17 @@ use crate::tool_map::{Dispatch, EXIT_SPAWN, HelperReply, ShimRequest, ToolEntry,
 #[derive(Clone)]
 struct ActiveTool {
     session: u32,
+    start_ticks: u64,
     binding: ToolInvocationBinding,
+}
+
+#[cfg(target_os = "linux")]
+impl ActiveTool {
+    fn matches(&self, question: &crate::tool_map::ToolSocketQuestion) -> bool {
+        self.session == question.session
+            && self.start_ticks == question.start_ticks
+            && self.binding == question.binding
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -58,8 +68,20 @@ fn active_tools() -> MutexGuard<'static, Vec<ActiveTool>> {
 }
 
 #[cfg(target_os = "linux")]
-fn register_active(session: u32, binding: ToolInvocationBinding) {
-    active_tools().push(ActiveTool { session, binding });
+fn register_active(session: u32, binding: ToolInvocationBinding) -> io::Result<()> {
+    let (leader_session, start_ticks) = crate::tool_attribution::process_session_start(session)?;
+    if leader_session != session {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "tool child is not its session leader",
+        ));
+    }
+    active_tools().push(ActiveTool {
+        session,
+        start_ticks,
+        binding,
+    });
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -68,7 +90,12 @@ fn retire_active(session: u32) {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn register_active(_session: u32, _binding: ToolInvocationBinding) {}
+fn register_active(_session: u32, _binding: ToolInvocationBinding) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "tool attribution requires Linux",
+    ))
+}
 
 #[cfg(not(target_os = "linux"))]
 fn retire_active(_session: u32) {}
@@ -294,7 +321,14 @@ pub fn run_approved(
             release_helper_binding(run, host);
             return crate::tool_map::EXIT_UNAVAILABLE;
         }
-        register_active(child, binding);
+        if let Err(error) = register_active(child, binding) {
+            eprintln!("mvm-tool-helper: active session unavailable: {error}");
+            drop(spawned.gate);
+            kill_and_reap(spawned.pid);
+            agent.retire(child);
+            release_helper_binding(run, host);
+            return crate::tool_map::EXIT_UNAVAILABLE;
+        }
         true
     } else {
         false
@@ -1340,10 +1374,10 @@ fn owns_socket_in_live_tool(question: &crate::tool_map::ToolSocketQuestion) -> b
     if question.session == 0 || question.inode == 0 {
         return false;
     }
-    if !active_tools()
-        .iter()
-        .any(|active| active.session == question.session && active.binding == question.binding)
-    {
+    // Keep the single registry owner locked across the ownership query.
+    // Retirement must not race a positive reply for an expired binding.
+    let active = active_tools();
+    if !active.iter().any(|active| active.matches(question)) {
         return false;
     }
     with_filesystem_ids(
@@ -1461,9 +1495,9 @@ fn serve_attribution(listener: std::os::unix::net::UnixListener) {
         let Ok(stream) = stream else {
             continue;
         };
-        std::thread::spawn(move || {
-            let _ = handle_attribution(stream);
-        });
+        // A single authenticated agent queries this endpoint. Processing one
+        // bounded frame at a time avoids unbounded threads on connection floods.
+        let _ = handle_attribution(stream);
     }
 }
 
@@ -1811,6 +1845,36 @@ mod socket_tests {
         let mut answer = Vec::new();
         caller.read_to_end(&mut answer).expect("read closed socket");
         assert!(answer.is_empty());
+    }
+
+    #[test]
+    fn active_attribution_requires_exact_session_start_and_binding() {
+        let active = ActiveTool {
+            session: 42,
+            start_ticks: 123,
+            binding: ToolInvocationBinding::from_random([9; 16]),
+        };
+        let question = crate::tool_map::ToolSocketQuestion {
+            session: active.session,
+            start_ticks: active.start_ticks,
+            binding: active.binding.clone(),
+            inode: 777,
+        };
+        assert!(active.matches(&question));
+        let mut wrong = question.clone();
+        wrong.session += 1;
+        assert!(!active.matches(&wrong));
+        wrong = question.clone();
+        wrong.start_ticks += 1;
+        assert!(!active.matches(&wrong));
+        wrong = question;
+        wrong.binding = ToolInvocationBinding::from_random([8; 16]);
+        assert!(!active.matches(&wrong));
+    }
+
+    #[test]
+    fn registering_a_missing_leader_fails_closed() {
+        assert!(register_active(u32::MAX, ToolInvocationBinding::from_random([9; 16])).is_err());
     }
 
     #[test]
