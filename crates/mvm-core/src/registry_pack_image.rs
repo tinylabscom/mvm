@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::crypto::image_verify::{VerifiedSigner, verify_signed_payload};
+use crate::crypto::image_verify::{VerifiedSigner, verify_signed_payload, verify_signed_sha256};
 use crate::image_set::{ArtifactName, ImageLock, ReleaseTag, RepositorySlug};
 use crate::packs::Sha256Hex;
 use crate::registry_pack::PackReference;
@@ -178,6 +178,31 @@ fn invalid_provenance(reason: impl Into<String>) -> BuiltImageDescriptorError {
 }
 
 impl BuiltPackImageDescriptor {
+    /// Every externally published image and attestation asset.
+    pub fn assets(&self) -> [&BuiltImageAsset; 7] {
+        [
+            &self.assets.rootfs,
+            &self.assets.verity,
+            &self.assets.roothash,
+            &self.assets.mvm_meta,
+            &self.assets.rootfs_signature_bundle,
+            &self.assets.provenance_statement,
+            &self.assets.provenance_signature_bundle,
+        ]
+    }
+
+    /// Authenticate the measured root filesystem without loading it into memory.
+    /// The caller must hash the retained file against `assets.rootfs` first.
+    pub fn verify_rootfs_signature(&self, bundle: &[u8]) -> Result<(), BuiltImageDescriptorError> {
+        verify_signed_sha256(
+            self.assets.rootfs.sha256.as_str(),
+            bundle,
+            PUBLISHER_IDENTITY,
+            PUBLISHER_ISSUER,
+        )
+        .map_err(|error| invalid_provenance(format!("rootfs signature refused: {error}")))
+    }
+
     /// Validate the metadata before any external asset is fetched or trusted.
     /// This does not verify the asset bytes or their signatures.
     pub fn validate_pin(
@@ -416,6 +441,17 @@ mod tests {
                 provenance_signature_bundle: asset("provenance.signature.json"),
             },
         }
+    }
+
+    #[test]
+    fn built_rootfs_signature_refuses_an_invalid_bundle() {
+        let error = descriptor()
+            .verify_rootfs_signature(b"not a Sigstore bundle")
+            .expect_err("rootfs bytes are not authenticated by a bad bundle");
+        assert!(matches!(
+            error,
+            BuiltImageDescriptorError::InvalidProvenance { .. }
+        ));
     }
 
     fn reference() -> PackReference {
