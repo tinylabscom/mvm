@@ -49,6 +49,40 @@ use serde::{Deserialize, Serialize};
 use crate::supervisor::audit::{AuditError, AuditSigner, PlanAuditEntry, SignedEnvelope};
 use mvm_contract::verify::{hash_line, seal, signed_bytes_for};
 
+/// Test-only, thread-scoped syscall failures; never enabled by environment.
+#[cfg(test)]
+pub(crate) mod write_faults {
+    use std::cell::Cell;
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Boundary {
+        PartialAppend,
+        Sync,
+    }
+    thread_local! { static STATE: Cell<Option<(Boundary, bool)>> = const { Cell::new(None) }; }
+    pub struct Guard(Option<(Boundary, bool)>);
+    impl Guard {
+        pub fn arm(boundary: Boundary) -> Self {
+            Self(STATE.replace(Some((boundary, false))))
+        }
+        pub fn consumed(&self) -> bool {
+            STATE.get().is_some_and(|(_, consumed)| consumed)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            STATE.set(self.0);
+        }
+    }
+    pub fn take(boundary: Boundary) -> bool {
+        if STATE.get() == Some((boundary, false)) {
+            STATE.set(Some((boundary, true)));
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Chain-signed file signer. Holds an Ed25519 private key, a base
 /// directory, and an in-memory `tenant -> last_envelope_hash` cursor
 /// that is lazily restored from disk on first emit per tenant.
@@ -512,6 +546,14 @@ impl FileAuditSigner {
         // admission decision downstream is assuming.
         let mut record = line.into_bytes();
         record.push(b'\n');
+        #[cfg(test)]
+        if write_faults::take(write_faults::Boundary::PartialAppend) {
+            // Model a real short append followed by a storage failure, rather
+            // than failing before the signer touches the audit file.
+            file.write_all(&record[..record.len() / 2])
+                .map_err(|e| AuditError::Io(e.to_string()))?;
+            return Err(AuditError::Io("injected partial append failure".into()));
+        }
         file.write_all(&record)
             .map_err(|e| AuditError::Io(e.to_string()))?;
 
@@ -532,6 +574,10 @@ impl FileAuditSigner {
         };
         match sync {
             SyncPolicy::Barrier => {
+                #[cfg(test)]
+                if write_faults::take(write_faults::Boundary::Sync) {
+                    return Err(AuditError::Io("injected audit fsync failure".into()));
+                }
                 file.sync_data()
                     .map_err(|e| AuditError::Io(e.to_string()))?;
                 self.pending_sync

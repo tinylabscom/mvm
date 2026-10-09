@@ -305,6 +305,59 @@ fn conflict_or_unsigned_missing_payload_refuses() {
 }
 
 #[test]
+fn actual_audit_append_and_fsync_failure_never_authorize_unlink() {
+    use crate::supervisor::audit_file::write_faults::{Boundary, Guard};
+    // These synchronous tests have no entered Tokio runtime: the emitter runs
+    // its current-thread executor here. Consumption proves the seam was hit.
+    for boundary in [Boundary::PartialAppend, Boundary::Sync] {
+        let f = Fixture::new(true);
+        let path = f.emitter.audit_dir().join("local.jsonl");
+        let before = std::fs::read(&path).unwrap();
+        let manifest_before = std::fs::read(f.root.path().join("capture/manifest.json")).unwrap();
+        let fault = Guard::arm(boundary);
+        let error = reconcile_capture(f.context(), 605_000).unwrap_err();
+        assert!(
+            fault.consumed(),
+            "emitter did not execute the selected I/O boundary"
+        );
+        assert!(format!("{error:#}").contains("injected"));
+        drop(fault);
+        assert!(f.payload().exists());
+        assert_eq!(
+            std::fs::read(f.root.path().join("capture/manifest.json")).unwrap(),
+            manifest_before
+        );
+        let after = std::fs::read(&path).unwrap();
+        assert!(after.starts_with(&before));
+        assert!(
+            after.len() > before.len(),
+            "signer never appended actual bytes"
+        );
+        if boundary == Boundary::PartialAppend {
+            assert!(!after.ends_with(b"\n"));
+            assert!(reconcile_capture(f.context(), 605_000).is_err());
+            assert!(
+                f.payload().exists(),
+                "torn authority must remain fail-closed"
+            );
+        } else {
+            assert!(after.ends_with(b"\n"));
+            assert_eq!(
+                reconcile_capture(f.context(), 605_000).unwrap(),
+                RetirementOutcome::Retired {
+                    removed_segments: 1
+                }
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                after,
+                "retry appended duplicate evidence"
+            );
+        }
+    }
+}
+
+#[test]
 fn signing_refusal_leaves_every_payload_and_original_root_untouched() {
     let f = Fixture::new(true);
     assert!(
