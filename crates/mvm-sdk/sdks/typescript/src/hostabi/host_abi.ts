@@ -96,6 +96,7 @@ export type MachineListReply = MachineState2[]
  * Whether the machine outlives the caller's session.
  */
 export type RunMode = ("transient" | "persistent")
+export type ManifestListReply = SlotRow[]
 
 export interface HostAbi {
 backend_capabilities: BackendCapabilities
@@ -135,6 +136,9 @@ machine_run: MachineRun
 machine_set_ttl: MachineSetTtl
 machine_start: MachineStart
 machine_stop: MachineStop
+manifest_info: ManifestInfo
+manifest_list: ManifestList
+manifest_verify: ManifestVerify
 session_call: SessionCall
 session_info: SessionInfo
 session_start: SessionStart
@@ -1335,6 +1339,72 @@ export interface Empty11 {
  */
 export interface StopRequest {
 id: string
+}
+export interface ManifestInfo {
+reply: ManifestInfoReply
+request: InfoRequest
+}
+export interface ManifestInfoReply {
+/**
+ * PersistedManifest report owned by mvm-core.
+ */
+persisted: {
+
+}
+slot_hash: string
+/**
+ * Optional SnapshotInfo report owned by mvm-core.
+ */
+snapshot: ({
+
+} | null)
+}
+/**
+ * A manifest file or directory; absent paths discover a manifest from cwd.
+ */
+export interface InfoRequest {
+path?: (string | null)
+}
+export interface ManifestList {
+reply: ManifestListReply
+request: ListRequest
+}
+/**
+ * One built slot, preserving the manifest-list JSON representation.
+ */
+export interface SlotRow {
+manifest_path: string
+name?: (string | null)
+orphan: boolean
+slot_hash: string
+tags?: string[]
+updated_at: string
+}
+/**
+ * Filters for built slots. Tags have intersection semantics.
+ */
+export interface ListRequest {
+orphans?: boolean
+tags?: string[]
+}
+export interface ManifestVerify {
+reply: VerifiedSlot
+request: VerifyRequest
+}
+/**
+ * Identity of a slot whose runtime checksum verification succeeded.
+ */
+export interface VerifiedSlot {
+manifest_path: string
+slot_hash: string
+}
+/**
+ * Checksum verification of a built slot, optionally at a specific revision.
+ */
+export interface VerifyRequest {
+check_signature?: boolean
+path?: (string | null)
+revision?: (string | null)
 }
 export interface SessionCall {
 reply: EntrypointCallReply1

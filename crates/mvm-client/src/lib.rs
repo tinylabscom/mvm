@@ -64,6 +64,7 @@ pub mod instruction_trust;
 pub mod inventory;
 pub mod launch;
 pub mod local;
+pub mod manifest;
 pub mod notices;
 pub mod policy_profiles;
 pub mod profile;

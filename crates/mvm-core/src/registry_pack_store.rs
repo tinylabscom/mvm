@@ -561,21 +561,9 @@ pub(crate) fn open_installed_registry_pack_with(
                 reference: requested.to_string(),
             },
         ))?;
-    if let Some(requested_version) = requested.version() {
-        let pinned = pin
-            .reference()
-            .version()
-            .expect("PackPin construction requires a version");
-        if requested_version != pinned {
-            return Err(RegistryPackStoreError::Verification(
-                RegistryPackVerificationError::Lock(RegistryPackError::RequestedVersionMismatch {
-                    coordinate: format!("{}/{}", requested.namespace(), requested.name()),
-                    requested: requested_version.to_string(),
-                    pinned: pinned.to_string(),
-                }),
-            ));
-        }
-    }
+    verify_requested_version_matches_pin(requested, pin).map_err(|error| {
+        RegistryPackStoreError::Verification(RegistryPackVerificationError::Lock(error))
+    })?;
     let root = cache_root.join(pin.manifest_sha256().as_str());
     let installed = InstalledRegistryPack::from_root(root);
     let manifest_path = installed.manifest_path();
@@ -595,10 +583,30 @@ pub(crate) fn open_installed_registry_pack_with(
     Ok((installed, verified))
 }
 
+fn verify_requested_version_matches_pin(
+    requested: &PackReference,
+    pin: &PackPin,
+) -> Result<(), RegistryPackError> {
+    if let Some(requested_version) = requested.version() {
+        let pinned = pin
+            .reference()
+            .version()
+            .expect("PackPin construction requires a version");
+        if requested_version != pinned {
+            return Err(RegistryPackError::RequestedVersionMismatch {
+                coordinate: format!("{}/{}", requested.namespace(), requested.name()),
+                requested: requested_version.to_string(),
+                pinned: pinned.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Remove the installed cache entry and lock pin for a pack.
 ///
-/// Returns whether anything was recorded. A missing cache entry is not an
-/// error once the pin is gone.
+/// Returns whether anything was recorded. A requested version must match the
+/// lock pin. A missing cache entry is not an error once the pin is gone.
 pub fn remove_installed_registry_pack(
     cache_root: &Path,
     lock_path: &Path,
@@ -612,6 +620,7 @@ pub fn remove_installed_registry_pack(
     let Some(pin) = pin else {
         return Ok(false);
     };
+    verify_requested_version_matches_pin(requested, pin)?;
     let pin_reference = pin.reference().to_string();
     let pin_digest = pin.manifest_sha256().as_str().to_string();
     let entry = cache_root.join(&pin_digest);
@@ -1441,6 +1450,22 @@ mod tests {
             accept,
         )
         .expect("adopt and install");
+
+        let wrong_version = reference("runtime/python@9.9.9");
+        let error = remove_installed_registry_pack(&cache, &lock_path, &wrong_version)
+            .expect_err("a different version must not remove the pinned pack");
+        assert!(matches!(
+            error,
+            RegistryPackStoreError::Lock(RegistryPackError::RequestedVersionMismatch { .. })
+        ));
+        assert!(installed.root().exists());
+        assert_eq!(
+            load_pack_lockfile(&lock_path)
+                .expect("load unchanged lock")
+                .pins()
+                .len(),
+            1
+        );
 
         assert!(
             remove_installed_registry_pack(&cache, &lock_path, &requested)
