@@ -31,6 +31,11 @@ use crate::registry_pack_revocation_store::{
 
 const REVOCATION_TRUST_SCHEMA_VERSION: u32 = 1;
 
+/// The independently controlled release identity for the official namespace.
+pub const OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY: &str = "https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main";
+pub const OFFICIAL_REGISTRY_PACK_REVOCATION_ISSUER: &str =
+    "https://token.actions.githubusercontent.com";
+
 #[derive(Debug, Error)]
 pub enum RegistryPackStoreError {
     #[error("registry-pack state i/o error at {path}: {source}")]
@@ -69,16 +74,97 @@ struct RevocationTrustFile {
     accepted_identities: Vec<String>,
 }
 
-/// Check a signed pack against the operator's independently trusted cached
-/// revocation feed when one is configured. Built-image packs require this
-/// independent trust; policy-only and source-image packs retain optional
-/// revocation configuration. An enabled but missing or stale feed is an error.
+/// Recheck an official pack against the built-in release root, or another
+/// pack against the operator's independently trusted feed when configured.
+/// Missing or stale official data always refuses the pack. Built-image packs
+/// outside `mvm/` also require an operator feed.
 pub fn check_registry_pack_revocations_if_configured(
     verified: &VerifiedRegistryPack,
 ) -> Result<(), RegistryPackStoreError> {
     let trust_path = crate::config::registry_pack_revocation_trust_path();
-    let store = RegistryPackRevocationStore::in_mvm_home();
-    check_registry_pack_revocations_at(verified, &trust_path, &store, Utc::now())
+    let operator_store = RegistryPackRevocationStore::in_mvm_home();
+    let official_store = official_registry_pack_revocation_store();
+    check_revocations_for_pack_at(
+        verified,
+        &trust_path,
+        &operator_store,
+        &official_store,
+        Utc::now(),
+    )
+}
+
+fn official_registry_pack_revocation_trust() -> KeylessTrust {
+    KeylessTrust {
+        accepted_identities: vec![OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY.to_string()],
+        issuer: OFFICIAL_REGISTRY_PACK_REVOCATION_ISSUER.to_string(),
+    }
+}
+
+fn official_registry_pack_revocation_store() -> RegistryPackRevocationStore {
+    RegistryPackRevocationStore::new(
+        crate::config::registry_pack_revocation_store_dir().join("official"),
+    )
+}
+
+fn check_revocations_for_pack_at(
+    verified: &VerifiedRegistryPack,
+    operator_trust_path: &Path,
+    operator_store: &RegistryPackRevocationStore,
+    official_store: &RegistryPackRevocationStore,
+    now: DateTime<Utc>,
+) -> Result<(), RegistryPackStoreError> {
+    if verified.manifest().reference.namespace() == "mvm" {
+        check_official_registry_pack_revocations_with(verified, now, |trust, at| {
+            official_store
+                .load(trust, at)
+                .map_err(RegistryPackStoreError::from)
+        })
+    } else {
+        check_registry_pack_revocations_at(verified, operator_trust_path, operator_store, now)
+    }
+}
+
+fn check_official_registry_pack_revocations_with<F>(
+    verified: &VerifiedRegistryPack,
+    now: DateTime<Utc>,
+    load: F,
+) -> Result<(), RegistryPackStoreError>
+where
+    F: FnOnce(
+        &KeylessTrust,
+        DateTime<Utc>,
+    ) -> Result<VerifiedRegistryPackRevocations, RegistryPackStoreError>,
+{
+    if verified.signer().identity == OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY {
+        return Err(RegistryPackStoreError::RevocationTrust {
+            path: "built-in MVM release identity".to_string(),
+            reason: "release identity must differ from the pack signer".to_string(),
+        });
+    }
+    let feed = load(&official_registry_pack_revocation_trust(), now)?;
+    feed.check_verified_pack_at(verified, now)?;
+    Ok(())
+}
+
+/// Verify and cache the MVM-controlled feed independently of operator feeds.
+pub fn update_official_registry_pack_revocations(
+    document: &[u8],
+    bundle: &[u8],
+) -> Result<RegistryPackRevocationCheckpoint, RegistryPackStoreError> {
+    let checkpoint = official_registry_pack_revocation_store().update(
+        document,
+        bundle,
+        &official_registry_pack_revocation_trust(),
+        Utc::now(),
+    )?;
+    crate::policy::audit::event(crate::policy::audit::LocalAuditKind::RegistryPackRevocationUpdate)
+        .detail(format!(
+            "scope=official sequence={} sha256={}",
+            checkpoint.sequence,
+            checkpoint.sha256.as_str()
+        ))
+        .emit();
+    Ok(checkpoint)
 }
 
 /// Verify a locally supplied signed feed under an explicit operator release
@@ -443,7 +529,8 @@ impl LoadedPublisherPolicy {
 }
 
 /// Load the operator publisher policy, falling back to the official
-/// registry's built-in trust when no policy file exists.
+/// registry's built-in trust when no policy file exists. An operator policy
+/// may exclude `mvm`, but cannot assign a different identity to it.
 ///
 /// A missing file means the operator has not made a trust decision yet, so
 /// the official policy applies. A malformed file fails closed: a broken
@@ -767,7 +854,11 @@ mod tests {
                     || identity == crate::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
             }));
         }
-        assert!(loaded.policy.trust_for_namespace("mvm").is_err());
+        let mvm = loaded.policy.trust_for_namespace("mvm").unwrap();
+        assert_eq!(
+            mvm.accepted_identities,
+            [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY]
+        );
         assert!(loaded.policy.trust_for_namespace("community").is_err());
     }
 
@@ -852,6 +943,14 @@ mod tests {
         let policy = publisher_policy();
         adopt_registry_pack_with(&adoption(&requested, &manifest, &policy), accept)
             .expect("signed test pack")
+    }
+
+    fn verified_mvm_for_revocation_test() -> VerifiedRegistryPack {
+        let requested = reference("mvm/claude@1.2.3");
+        let manifest = manifest_bytes("mvm/claude@1.2.3");
+        let policy = crate::registry_pack::official_publisher_policy();
+        adopt_registry_pack_with(&adoption(&requested, &manifest, &policy), accept)
+            .expect("signed MVM test pack")
     }
 
     fn verified_built_image_for_revocation_test() -> VerifiedRegistryPack {
@@ -967,6 +1066,45 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn official_revocation_root_is_exact_and_distinct_from_pack_publisher() {
+        let trust = official_registry_pack_revocation_trust();
+        assert_eq!(trust.issuer, OFFICIAL_REGISTRY_PACK_REVOCATION_ISSUER);
+        assert_eq!(
+            trust.accepted_identities,
+            [OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY]
+        );
+        assert_ne!(
+            OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY,
+            crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mvm_namespace_refuses_missing_official_feed_even_with_operator_trust() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let operator_store = RegistryPackRevocationStore::new(home.path().join("operator"));
+        let official_store = RegistryPackRevocationStore::new(home.path().join("official"));
+        let trust_path = home.path().join("trust.toml");
+        write_trust(
+            &trust_path,
+            "schema_version = 1\nissuer = 'operator issuer'\naccepted_identities = ['operator release identity']\n",
+        );
+        assert!(matches!(
+            check_revocations_for_pack_at(
+                &verified_mvm_for_revocation_test(),
+                &trust_path,
+                &operator_store,
+                &official_store,
+                Utc::now(),
+            ),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Missing
+            ))
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn built_image_accepts_fresh_independent_feed_and_refuses_revocation() {
@@ -991,6 +1129,60 @@ mod tests {
         ));
         assert!(matches!(
             check_signed_test_document(&verified, &trust_path, 9, vec![], vec![]),
+            Err(RegistryPackStoreError::Revoked(_))
+        ));
+    }
+
+    fn check_signed_official_test_document(
+        verified: &VerifiedRegistryPack,
+        day: u32,
+        revoked_manifests: Vec<String>,
+    ) -> Result<(), RegistryPackStoreError> {
+        let now = Utc
+            .with_ymd_and_hms(2026, 10, day, 0, 0, 0)
+            .single()
+            .expect("valid test time");
+        let document = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "sequence": 1,
+            "issued_at": "2026-10-06T00:00:00Z",
+            "not_after": "2026-10-08T00:00:00Z",
+            "revoked_identities": [],
+            "revoked_manifests": revoked_manifests,
+        }))
+        .expect("test document");
+        check_official_registry_pack_revocations_with(verified, now, |trust, at| {
+            assert_eq!(
+                trust.accepted_identities,
+                [OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY]
+            );
+            crate::registry_pack_revocation::verify_registry_pack_revocations_with(
+                &document,
+                b"signed",
+                trust,
+                at,
+                None,
+                |_, _, _| Ok(()),
+            )
+            .map_err(RegistryPackStoreError::Revoked)
+        })
+    }
+
+    #[test]
+    fn mvm_namespace_requires_fresh_official_feed_and_refuses_revoked_manifest() {
+        let verified = verified_mvm_for_revocation_test();
+        check_signed_official_test_document(&verified, 7, vec![])
+            .expect("fresh official feed permits the pack");
+        assert!(matches!(
+            check_signed_official_test_document(
+                &verified,
+                7,
+                vec![verified.manifest_sha256().as_str().to_string()],
+            ),
+            Err(RegistryPackStoreError::Revoked(_))
+        ));
+        assert!(matches!(
+            check_signed_official_test_document(&verified, 9, vec![]),
             Err(RegistryPackStoreError::Revoked(_))
         ));
     }

@@ -2121,6 +2121,7 @@ fn pack_registry_verbs_parse_and_show_help() {
         vec!["pack", "registry", "ls", "--help"],
         vec!["pack", "registry", "rm", "--help"],
         vec!["pack", "registry", "update", "--help"],
+        vec!["pack", "registry", "revocations", "update", "--help"],
     ] {
         let out = mvmctl_isolated(std::path::Path::new("/tmp"))
             .args(&args)
@@ -2132,6 +2133,12 @@ fn pack_registry_verbs_parse_and_show_help() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+    let out = mvmctl_isolated(std::path::Path::new("/tmp"))
+        .args(["pack", "registry", "revocations", "update", "--help"])
+        .output()
+        .expect("revocation help");
+    let help = String::from_utf8(out.stdout).expect("UTF-8 help");
+    assert!(help.contains("--official"));
 }
 
 #[test]

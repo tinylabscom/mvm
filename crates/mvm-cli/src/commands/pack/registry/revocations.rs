@@ -21,6 +21,9 @@ enum Action {
 
 #[derive(ClapArgs, Debug, Clone)]
 struct UpdateArgs {
+    /// Verify against MVM's built-in official release identity
+    #[arg(long)]
+    official: bool,
     /// Revocation document in JSON format
     #[arg(long)]
     document: PathBuf,
@@ -38,8 +41,13 @@ pub(in crate::commands) fn run(args: Args) -> Result<()> {
 fn update(args: UpdateArgs) -> Result<()> {
     let document = read_limited(&args.document)?;
     let bundle = read_limited(&args.bundle)?;
-    let checkpoint =
-        mvm_core::registry_pack_store::update_registry_pack_revocations(&document, &bundle)?;
+    let checkpoint = if args.official {
+        mvm_core::registry_pack_store::update_official_registry_pack_revocations(
+            &document, &bundle,
+        )?
+    } else {
+        mvm_core::registry_pack_store::update_registry_pack_revocations(&document, &bundle)?
+    };
     println!(
         "verified registry-pack revocations at sequence {} (sha256 {})",
         checkpoint.sequence,

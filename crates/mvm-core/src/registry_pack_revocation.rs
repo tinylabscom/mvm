@@ -370,7 +370,7 @@ mod tests {
     }
 
     fn verified_pack(identity: &str) -> VerifiedRegistryPack {
-        let reference: PackReference = "mvm/example@1.0.0".parse().expect("valid reference");
+        let reference: PackReference = "runtime/example@1.0.0".parse().expect("valid reference");
         let manifest_bytes = serde_json::to_vec(&RegistryPackManifest {
             schema_version: 1,
             reference: reference.clone(),
@@ -385,7 +385,7 @@ mod tests {
         .expect("serialize manifest");
         let policy = RegistryPackPublisherPolicy::new(vec![
             RegistryPackPublisher::new(
-                "mvm",
+                "runtime",
                 "test issuer",
                 vec!["new identity".to_string(), "old identity".to_string()],
             )

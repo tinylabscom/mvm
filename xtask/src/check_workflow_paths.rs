@@ -78,7 +78,7 @@ fn action_version_conflicts(workflows: &[(String, String)]) -> Vec<String> {
         for (action, git_ref) in third_party_action_refs(src) {
             seen.entry(action.to_string())
                 .or_default()
-                .entry(git_ref.to_string())
+                .entry(action_version(action, git_ref).to_string())
                 .or_default()
                 .push(name.clone());
         }
@@ -98,6 +98,18 @@ fn action_version_conflicts(workflows: &[(String, String)]) -> Vec<String> {
             format!("{action} is pinned to more than one version: {detail}")
         })
         .collect()
+}
+
+/// Recognize exact reviewed commits as the corresponding release version.
+/// An unknown commit remains distinct so the cross-workflow drift check fails.
+fn action_version<'a>(action: &str, git_ref: &'a str) -> &'a str {
+    match (action, git_ref) {
+        ("actions/checkout", "d23441a48e516b6c34aea4fa41551a30e30af803") => "v6",
+        ("actions/download-artifact", "9000827ccba6bdab643e8b6fd33ac0654aef8333") => "v8",
+        ("actions/upload-artifact", "cf430e030ddbb5b0abf93d22962f4752f3646cd9") => "v7",
+        ("sigstore/cosign-installer", "398d4b0eeef1380460a10c8013a76f728fb906ac") => "v3",
+        _ => git_ref,
+    }
 }
 
 /// Third-party action refs allowed to float, and why.
@@ -1572,6 +1584,25 @@ mod tests {
             1,
             "the exception is per-action, not a blanket pass for the owner"
         );
+    }
+
+    #[test]
+    fn exact_commit_pins_share_their_release_version_but_unknown_commits_do_not() {
+        let tagged = (
+            "tagged.yml".to_string(),
+            "- uses: actions/checkout@v6\n- uses: actions/download-artifact@v8\n- uses: actions/upload-artifact@v7\n- uses: sigstore/cosign-installer@v3\n".to_string(),
+        );
+        let exact = (
+            "pinned.yml".to_string(),
+            "- uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803\n- uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333\n- uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9\n- uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac\n".to_string(),
+        );
+        assert!(action_version_conflicts(&[tagged.clone(), exact]).is_empty());
+
+        let unknown = (
+            "unknown.yml".to_string(),
+            "- uses: actions/checkout@0000000000000000000000000000000000000000\n".to_string(),
+        );
+        assert_eq!(action_version_conflicts(&[tagged, unknown]).len(), 1);
     }
 
     /// A workflow with no `pull_request` trigger may not cancel itself.

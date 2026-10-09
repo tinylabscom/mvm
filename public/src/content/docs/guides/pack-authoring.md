@@ -307,17 +307,40 @@ user (mode `0600` or stricter), and its directory must be private (mode `0700`
 or stricter). When this file exists, pull, installed-pack verification, and host
 admission require a fresh signed feed in the private revocation cache and
 reject a revoked signer or manifest digest. A missing, expired, corrupt, or
-rolled-back feed fails closed. Built-image packs require this independently
-anchored trust and a fresh feed at pull and every installed-pack reopen;
-removing the trust file refuses them. Policy-only and source-image packs retain
+rolled-back feed fails closed. Built-image packs outside `mvm/` require this independently
+anchored operator trust and a fresh feed at pull and every installed-pack reopen.
+Removing the operator trust file refuses those packs. Legacy policy-only and source-image packs retain
 the legacy publisher-only behavior when no trust file is configured. After
 obtaining the signed JSON document and its
 signature bundle through an operator-controlled channel, run
 `mvmctl pack registry revocations update --document ./revocations.json
 --bundle ./revocations.sigstore.json`. The command verifies the exact
 document bytes under `trust.toml` before advancing the durable checkpoint.
-There is no built-in revocation identity or automatic feed fetch yet. This
-operator path does not confer official status on a pack.
+This operator path does not confer official status on a pack.
+
+Every `mvm/` pack instead requires a fresh feed signed by the separate,
+built-in MVM release identity
+`https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
+under the GitHub OIDC issuer. Download
+`registry-pack-revocations.json` and
+`registry-pack-revocations.json.bundle` from the MVM repository's
+`registry-pack-revocations` release, then run
+`mvmctl pack registry revocations update --official --document ./registry-pack-revocations.json --bundle ./registry-pack-revocations.json.bundle`.
+The CLI verifies the exact document bytes against the built-in identity and
+advances a private, rollback-resistant checkpoint. It refuses a missing,
+expired, corrupt, revoked or rolled-back feed at pull and every subsequent
+installed-pack open, including execution. Feed retrieval is manual in this
+release; downloading the files does not establish trust until the update
+command succeeds. The producer schedules a new feed every 12 hours with a
+36-hour validity window. If publication or retrieval fails, official packs
+stop working when the cached feed expires. A release-identity change requires
+an explicit client trust update; an operator file cannot replace this root.
+The two current release assets are replaced separately. If publication stops
+between uploads, clients reject the mismatched pair. The next publication
+verifies the latest complete immutable sequence pair and replaces the current
+assets; an operator can rerun the workflow sooner to restore availability.
+If the first publication stops before any complete immutable pair exists,
+an operator must remove the incomplete release before retrying.
 
 `pull` downloads the manifest, the bundle and each declared file, verifies the
 signature against the publisher trust policy, checks every file against the
@@ -347,9 +370,15 @@ https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/head
 
 under the issuer `https://token.actions.githubusercontent.com`. The former
 `mvm-templates` workflow identity is also accepted until 2026-11-06 00:00
-UTC, after which its bundles fail under built-in trust. There is no default
-trust for `mvm/` or community namespaces. To make your own decision, write
-`$MVM_HOME/registry/publishers.toml`. It replaces the default wholesale. This
+UTC, after which its bundles fail under built-in trust. The `mvm/` namespace
+is reserved to the exact current workflow identity. An operator policy may
+exclude `mvm`, but its wildcard or explicit `mvm` entry cannot assign a
+different identity. Official status requires both full pack verification and
+the independently signed fresh MVM revocation feed. A signature proves
+identity and integrity, not safety. There is no
+default trust for community namespaces. To configure other namespaces, write
+`$MVM_HOME/registry/publishers.toml`. It replaces the default for those
+namespaces. This
 one keeps the former workflow for `runtime` packs only:
 
 ```toml
