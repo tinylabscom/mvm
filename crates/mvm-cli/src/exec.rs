@@ -36,7 +36,9 @@ pub(crate) use mounts::admitted_instruction_mounts;
 use mounts::refuse_unloadable_sidecar;
 mod session;
 mod sidecar_selection;
+mod startup_slo;
 mod transient;
+pub(super) use startup_slo::enforce_startup_slo;
 
 pub use launch_plan::load_launch_plan;
 
@@ -856,23 +858,6 @@ fn run_inner(
     result
 }
 
-pub(super) fn enforce_startup_slo(
-    started: std::time::Instant,
-    ready: std::time::Instant,
-    launch_mode: crate::commands::vm::phase_timing::LaunchMode,
-) -> Result<()> {
-    if launch_mode == crate::commands::vm::phase_timing::LaunchMode::Cold {
-        return Ok(());
-    }
-    let elapsed_ms = ready.saturating_duration_since(started).as_secs_f64() * 1000.0;
-    anyhow::ensure!(
-        crate::commands::vm::phase_timing::within_warm_start_slo_ms(elapsed_ms),
-        "startup took {elapsed_ms:.1}ms; successful launches must be strictly below {}ms",
-        crate::commands::vm::phase_timing::WARM_START_MAX_MS
-    );
-    Ok(())
-}
-
 /// Everything one finished launch knows about itself that a sample records.
 struct LaunchSampleInputs<'a> {
     backend: &'a str,
@@ -1505,35 +1490,6 @@ mod tests {
     use super::*;
 
     use mvm_core::util::test_env::TestEnv;
-
-    #[test]
-    fn startup_contract_accepts_only_a_sub_300ms_warm_launch() {
-        let started = std::time::Instant::now();
-        assert!(
-            enforce_startup_slo(
-                started,
-                started + std::time::Duration::from_millis(299),
-                crate::commands::vm::phase_timing::LaunchMode::Warm,
-            )
-            .is_ok()
-        );
-        assert!(
-            enforce_startup_slo(
-                started,
-                started + std::time::Duration::from_millis(300),
-                crate::commands::vm::phase_timing::LaunchMode::Warm,
-            )
-            .is_err()
-        );
-        assert!(
-            enforce_startup_slo(
-                started,
-                started + std::time::Duration::from_millis(1),
-                crate::commands::vm::phase_timing::LaunchMode::Cold,
-            )
-            .is_ok()
-        );
-    }
 
     fn baked_entrypoint_request() -> ExecRequest {
         ExecRequest {
