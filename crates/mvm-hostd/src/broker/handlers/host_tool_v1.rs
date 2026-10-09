@@ -291,8 +291,11 @@ mod tests {
                 .get("origin")
                 .and_then(|value| serde_json::from_value::<ToolOrigin>(value.clone()).ok());
             assert_eq!(origin, expect_origin);
+            // Count before replying: the caller returns as soon as it reads
+            // the reply, so a count taken after the write can race its
+            // assertion.
+            seen.fetch_add(1, Ordering::SeqCst);
             write_json_frame(&mut stream, &reply, MAX_TOOL_FRAME_BYTES).expect("write reply");
-            seen.fetch_add(1, Ordering::Relaxed);
         });
         socket
     }
@@ -316,7 +319,7 @@ mod tests {
         )
         .expect("decision decodes");
         assert_eq!(decision, ToolDecisionReply::Allow);
-        assert_eq!(seen.load(Ordering::Relaxed), 1);
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
