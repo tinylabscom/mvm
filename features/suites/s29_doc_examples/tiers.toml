@@ -635,6 +635,11 @@ tier = "parse"
 reason = "re-pulls from a remote registry and must verify a publisher signature; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
 
 [[command]]
+path = "pack registry revocations update"
+tier = "parse"
+reason = "requires an externally published, signed revocation document and bundle; core tests exercise accepted and rejected feeds"
+
+[[command]]
 path = "pack search"
 tier = "parse"
 reason = "queries a remote registry index over the network, so the outcome tracks the registry rather than mvm; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
