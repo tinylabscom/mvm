@@ -675,6 +675,7 @@ mod tests {
                 wrapped_data_key_b64: String::new(),
             },
         )
+        .unwrap()
     }
 
     const PAYLOAD: &[u8] = b"payload";
@@ -698,7 +699,7 @@ mod tests {
         );
         config.at_rest = Some(mvm_core::transcript::AtRestRetention::default());
         let mut writer =
-            TranscriptWriter::try_new(root.path(), aead::Key::random(), config).unwrap();
+            TranscriptWriter::new(root.path(), aead::Key::random(), config).unwrap();
         assert!(finalize_joined_writer(&mut writer, 99).is_err());
         let manifest = finalize_joined_writer(&mut writer, 3701).unwrap();
         assert_eq!(manifest.created_unix_secs, 100);

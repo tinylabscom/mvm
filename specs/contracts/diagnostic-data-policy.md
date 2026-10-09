@@ -159,6 +159,16 @@ as a substitute for chain continuity. Audit pruning pins or chain-linked
 preservation are a remaining lifecycle dependency, so this surface does not
 guarantee unattended cleanup across audit pruning.
 
+Recovered-seal publication uses the original authenticated opening and a staged,
+terminal incomplete manifest. A dedicated primary-chain emitter holds the tenant
+audit lock across verification, exact-seal lookup and conditional append, then
+verifies and syncs the result. Retrying an identical published seal does not
+append another one. Read-only seal lookup reports absence only in authenticated
+unpruned history; it is not a substitute for atomic publication. The lifecycle
+caller must still hold the capture lease and establish producer quiescence or
+death. Replicated emitters are refused by this atomic recovery operation rather
+than being given an unsupported cross-destination atomicity guarantee.
+
 Cleanup pins a private host-owned capture directory beneath a trusted configured
 root, opens descendant components without following links, takes a nonblocking
 exclusive lease, and removes only verified single-link ciphertext segments named

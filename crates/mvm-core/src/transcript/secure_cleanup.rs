@@ -139,9 +139,20 @@ impl CaptureDirectory {
             {
                 return Err(invalid("ciphertext segment replaced after preflight"));
             }
+            #[cfg(test)]
+            faults::hit(faults::Boundary::Unlink)?;
             rustix::fs::unlinkat(&self.dir, name.as_str(), AtFlags::empty())?;
+            #[cfg(test)]
+            faults::hit(faults::Boundary::DirectorySync)?;
             self.dir.sync_all()?;
             removed += 1;
+        }
+        // A previous attempt may have unlinked the last segment but failed its
+        // directory sync. An empty retry must finish that durability boundary.
+        if removed == 0 {
+            #[cfg(test)]
+            faults::hit(faults::Boundary::DirectorySync)?;
+            self.dir.sync_all()?;
         }
         Ok(removed)
     }
@@ -185,6 +196,56 @@ fn open_at(dir: &File, name: &std::ffi::OsStr, flags: OFlags) -> io::Result<File
 }
 
 #[cfg(test)]
+mod faults {
+    use std::{cell::Cell, io};
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Boundary {
+        Unlink,
+        DirectorySync,
+    }
+    #[derive(Clone, Copy)]
+    struct State {
+        boundary: Boundary,
+        remaining: usize,
+        consumed: bool,
+    }
+    thread_local! { static STATE: Cell<Option<State>> = const { Cell::new(None) }; }
+    pub struct Guard(Option<State>);
+    impl Guard {
+        pub fn arm(boundary: Boundary, occurrence: usize) -> Self {
+            assert!(occurrence > 0);
+            Self(STATE.replace(Some(State {
+                boundary,
+                remaining: occurrence,
+                consumed: false,
+            })))
+        }
+        pub fn consumed(&self) -> bool {
+            STATE.get().is_some_and(|state| state.consumed)
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            STATE.set(self.0);
+        }
+    }
+    pub fn hit(boundary: Boundary) -> io::Result<()> {
+        if let Some(mut state) = STATE.get()
+            && state.boundary == boundary
+            && !state.consumed
+        {
+            state.remaining -= 1;
+            state.consumed = state.remaining == 0;
+            STATE.set(Some(state));
+            if state.consumed {
+                return Err(io::Error::other("injected cleanup syscall failure"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::transcript::{
@@ -195,7 +256,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, TranscriptManifest) {
         let dir = tempfile::tempdir().unwrap();
         crate::private_fs::ensure_private_dir(dir.path()).unwrap();
-        let mut writer = TranscriptWriter::try_new(
+        let mut writer = TranscriptWriter::new(
             dir.path(),
             crate::crypto::aead::Key::random(),
             TranscriptWriterConfig {
@@ -243,6 +304,76 @@ mod tests {
             b"synthetic foreign"
         );
         assert!(capture.prepare_payload(&manifest, false).is_err());
+        assert_eq!(
+            capture
+                .unlink_payload(capture.prepare_payload(&manifest, true).unwrap())
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn actual_partial_unlink_and_directory_sync_failures_resume() {
+        for boundary in [faults::Boundary::Unlink, faults::Boundary::DirectorySync] {
+            let (dir, mut manifest) = fixture();
+            let mut second = manifest.chunks[0].clone();
+            second.file = "1.seg".into();
+            second.seq = 1;
+            second.prev_hash = second.sha256_hex.clone();
+            std::fs::copy(
+                dir.path().join(&manifest.chunks[0].file),
+                dir.path().join(&second.file),
+            )
+            .unwrap();
+            manifest.chunks.push(second);
+            manifest.sealed_root_hex = crate::transcript::sealed_root_hex(&manifest).unwrap();
+            std::fs::write(
+                dir.path().join(MANIFEST_FILENAME),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let capture = CaptureDirectory::for_writer(dir.path()).unwrap();
+            let payload = capture.prepare_payload(&manifest, false).unwrap();
+            let occurrence = if boundary == faults::Boundary::Unlink {
+                2
+            } else {
+                1
+            };
+            let fault = faults::Guard::arm(boundary, occurrence);
+            assert!(capture.unlink_payload(payload).is_err());
+            assert!(fault.consumed());
+            drop(fault);
+            assert!(!dir.path().join("0.seg").exists());
+            assert!(dir.path().join("1.seg").exists());
+            assert_eq!(capture.read_manifest().unwrap(), manifest);
+            assert_eq!(
+                capture
+                    .unlink_payload(capture.prepare_payload(&manifest, true).unwrap())
+                    .unwrap(),
+                1
+            );
+            assert_eq!(
+                capture
+                    .unlink_payload(capture.prepare_payload(&manifest, true).unwrap())
+                    .unwrap(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn retry_after_last_unlink_must_sync_even_when_no_payload_remains() {
+        let (dir, manifest) = fixture();
+        let capture = CaptureDirectory::for_writer(dir.path()).unwrap();
+        for attempt in 0..2 {
+            let payload = capture.prepare_payload(&manifest, attempt > 0).unwrap();
+            let fault = faults::Guard::arm(faults::Boundary::DirectorySync, 1);
+            assert!(capture.unlink_payload(payload).is_err());
+            assert!(fault.consumed(), "empty retry skipped directory durability");
+            drop(fault);
+            assert!(!dir.path().join(&manifest.chunks[0].file).exists());
+            assert_eq!(capture.read_manifest().unwrap(), manifest);
+        }
         assert_eq!(
             capture
                 .unlink_payload(capture.prepare_payload(&manifest, true).unwrap())

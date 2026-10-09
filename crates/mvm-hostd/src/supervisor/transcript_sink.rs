@@ -76,7 +76,7 @@ impl TranscriptCaptureSink {
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             };
             return Ok(Some(Self {
-                writer: TranscriptWriter::new(&dir, data_key, cfg),
+                writer: TranscriptWriter::new(&dir, data_key, cfg)?,
                 capture_id: manifest.capture_id,
                 dir,
             }));
@@ -166,7 +166,7 @@ mod tests {
             recipient: "transcript-kek".into(),
             wrapped_data_key_b64: transcript::wrap_data_key(&kek, &data_key),
         };
-        let manifest = TranscriptWriter::new(&dir, data_key, cfg).seal();
+        let manifest = TranscriptWriter::new(&dir, data_key, cfg).unwrap().seal();
         std::fs::write(
             dir.join(MANIFEST_FILENAME),
             serde_json::to_vec_pretty(&manifest).unwrap(),

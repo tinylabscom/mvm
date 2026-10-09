@@ -183,8 +183,33 @@ pub fn authenticated_retirement_at(
     manifest: &TranscriptManifest,
     now: Option<u64>,
 ) -> Result<(PlanAuditEntry, bool)> {
+    let (seal, retired) = scan_seal_and_retirement(audit_dir, trusted_key, manifest, now)?;
+    Ok((
+        seal.context("expected exactly one original host-signed transcript seal")?,
+        retired,
+    ))
+}
+
+/// Look up an exact seal without conflating genuine absence and invalid proof.
+/// `None` is possible only in an authenticated, unpruned history. This read-only
+/// operation does not serialize a subsequent append; publishers must hold the
+/// tenant audit-chain lock across lookup and conditional publication.
+pub fn authenticated_seal(
+    audit_dir: &Path,
+    trusted_key: &VerifyingKey,
+    manifest: &TranscriptManifest,
+) -> Result<Option<PlanAuditEntry>> {
+    scan_seal_and_retirement(audit_dir, trusted_key, manifest, None).map(|proof| proof.0)
+}
+
+fn scan_seal_and_retirement(
+    audit_dir: &Path,
+    trusted_key: &VerifyingKey,
+    manifest: &TranscriptManifest,
+    now: Option<u64>,
+) -> Result<(Option<PlanAuditEntry>, bool)> {
     verify_sealed_root(manifest)?;
-    let segments = crate::audit_verify::set::read_verified_set(
+    let history = crate::audit_verify::set::read_verified_history(
         audit_dir,
         &manifest.binding.tenant_id,
         trusted_key,
@@ -193,7 +218,7 @@ pub fn authenticated_retirement_at(
     let mut seal = None;
     let mut retired = 0;
     let expected_chunks = manifest.chunks.len().to_string();
-    for segment in segments {
+    for segment in history.segments {
         let mut matched = false;
         for entry in segment.entries.unwrap_or_default() {
             if entry.labels.get(LABEL_CAPTURE_ID) != Some(&manifest.capture_id)
@@ -245,7 +270,10 @@ pub fn authenticated_retirement_at(
             std::fs::File::open(&segment.path)?.sync_all()?;
         }
     }
-    let seal = seal.context("expected exactly one original host-signed transcript seal")?;
+    ensure!(
+        seal.is_some() || history.pruned.is_none(),
+        "cannot establish seal absence in pruned history"
+    );
     ensure!(retired <= 1, "duplicate transcript retirement evidence");
     std::fs::File::open(audit_dir)?.sync_all()?;
     Ok((seal, retired == 1))

@@ -583,7 +583,7 @@ pub(super) fn build_writer_with_policy(
         config.generation_budget = Some(transcript::GenerationBudget::default());
         config.payload_encoding = transcript::PayloadEncoding::StreamRecordV1;
     }
-    let writer = TranscriptWriter::try_new(transcript_dir, data_key, config)?;
+    let writer = TranscriptWriter::new(transcript_dir, data_key, config)?;
     if at_rest.is_some() {
         journal::publish_seed(transcript_dir, &writer.sealed_manifest())?;
     }
@@ -1875,6 +1875,7 @@ mod tests {
                 wrapped_data_key_b64: String::new(),
             }),
         )
+        .unwrap()
         .sealed_manifest();
         manifest.adopted = true;
 

@@ -33,7 +33,7 @@ impl Fixture {
             &root.path().join("audit"),
         )
         .unwrap();
-        let mut writer = TranscriptWriter::try_new(
+        let mut writer = TranscriptWriter::new(
             &dir,
             mvm_core::crypto::aead::Key::random(),
             TranscriptWriterConfig {
@@ -196,6 +196,224 @@ fn authenticated_opening_is_exact_and_preserves_historical_recovery_attribution(
 }
 
 #[test]
+fn atomic_recovery_publication_serializes_independent_signers() {
+    use mvm_core::transcript::evidence::authenticated_seal;
+    let (f, seed, recovered) = recovery_fixture();
+    let _capture_lease = CaptureDirectory::for_writer(&f.root.path().join("capture")).unwrap();
+    assert!(
+        authenticated_seal(
+            f.emitter.audit_dir(),
+            &f.emitter.verifying_key(),
+            &recovered
+        )
+        .unwrap()
+        .is_none()
+    );
+    let barrier = std::sync::Barrier::new(8);
+    let appended = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                scope.spawn(|| {
+                    let emitter = AuditEmitter::with_dir(
+                        ed25519_dalek::SigningKey::from_bytes(&[17; 32]),
+                        f.emitter.audit_dir(),
+                    )
+                    .unwrap();
+                    barrier.wait();
+                    emitter
+                        .emit_recovered_transcript_sealed(&seed, &recovered)
+                        .unwrap()
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| usize::from(handle.join().unwrap()))
+            .sum::<usize>()
+    });
+    assert_eq!(appended, 1);
+    assert!(
+        !f.emitter
+            .emit_recovered_transcript_sealed(&seed, &recovered)
+            .unwrap()
+    );
+    let entry = authenticated_seal(
+        f.emitter.audit_dir(),
+        &f.emitter.verifying_key(),
+        &recovered,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(entry.plan_id, f.plan.plan_id);
+    assert_eq!(entry.labels["adopted"], "true");
+}
+
+fn recovery_fixture() -> (Fixture, TranscriptManifest, TranscriptManifest) {
+    use mvm_core::transcript::evidence::{TRANSCRIPT_OPENED_EVENT, opening_labels};
+    let f = Fixture::new(false);
+    let mut seed = f.manifest.clone();
+    seed.chunks.clear();
+    seed.sealed_unix_secs = None;
+    seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
+    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_OPENED_EVENT, []);
+    entry.labels = opening_labels(&seed).unwrap();
+    f.emitter
+        .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
+        .unwrap();
+    let mut recovered = f.manifest.clone();
+    recovered.adopted = true;
+    recovered.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&recovered).unwrap();
+    // Represents the already durable terminal candidate: retry must not
+    // re-finalize it with a different recovery timestamp/root.
+    mvm_core::util::atomic_io::write_private(
+        &f.root.path().join("capture/manifest.json"),
+        &serde_json::to_vec(&recovered).unwrap(),
+    )
+    .unwrap();
+    (f, seed, recovered)
+}
+
+#[test]
+fn staged_recovery_retries_after_seal_append_fsync_failure_without_duplicate() {
+    use crate::supervisor::audit_file::write_faults::{Boundary, Guard};
+    let (f, seed, recovered) = recovery_fixture();
+    let _capture_lease = CaptureDirectory::for_writer(&f.root.path().join("capture")).unwrap();
+    let fault = Guard::arm(Boundary::Sync);
+    assert!(
+        f.emitter
+            .emit_recovered_transcript_sealed(&seed, &recovered)
+            .is_err()
+    );
+    assert!(fault.consumed());
+    drop(fault);
+    let path = f.emitter.audit_dir().join("local.jsonl");
+    let after_append = std::fs::read(&path).unwrap();
+    assert!(
+        !f.emitter
+            .emit_recovered_transcript_sealed(&seed, &recovered)
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(path).unwrap(), after_append);
+    assert!(f.payload().exists());
+    assert_eq!(
+        serde_json::from_slice::<TranscriptManifest>(
+            &std::fs::read(f.root.path().join("capture/manifest.json")).unwrap(),
+        )
+        .unwrap(),
+        recovered
+    );
+}
+
+#[test]
+fn seal_lookup_does_not_turn_conflicting_evidence_into_absence() {
+    use mvm_core::transcript::evidence::authenticated_seal;
+    for kind in ["conflict", "duplicate", "retired-first", "broken"] {
+        let (f, seed, recovered) = recovery_fixture();
+        let key = f.emitter.verifying_key();
+        match kind {
+            "retired-first" => {
+                let mut entry = for_plan(&f.plan, None, TRANSCRIPT_RETIRED_EVENT, []);
+                entry.labels = labels(&recovered).unwrap();
+                f.emitter
+                    .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
+                    .unwrap();
+            }
+            "broken" => {
+                use std::io::Write;
+                std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(f.emitter.audit_dir().join("local.jsonl"))
+                    .unwrap()
+                    .write_all(b"broken\n")
+                    .unwrap();
+            }
+            _ => {
+                f.emitter
+                    .emit_recovered_transcript_sealed(&seed, &recovered)
+                    .unwrap();
+                let mut entry = authenticated_seal(f.emitter.audit_dir(), &key, &recovered)
+                    .unwrap()
+                    .unwrap();
+                if kind == "conflict" {
+                    entry
+                        .labels
+                        .insert("transcript_root".into(), "0".repeat(64));
+                }
+                f.emitter
+                    .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
+                    .unwrap();
+            }
+        }
+        assert!(
+            authenticated_seal(f.emitter.audit_dir(), &key, &recovered).is_err(),
+            "{kind}"
+        );
+        let before = std::fs::read(f.emitter.audit_dir().join("local.jsonl")).unwrap();
+        assert!(
+            f.emitter
+                .emit_recovered_transcript_sealed(&seed, &recovered)
+                .is_err(),
+            "{kind}"
+        );
+        assert_eq!(
+            std::fs::read(f.emitter.audit_dir().join("local.jsonl")).unwrap(),
+            before
+        );
+        assert!(f.payload().exists());
+    }
+}
+
+#[test]
+fn legitimate_pruning_does_not_prove_that_a_seal_never_existed() {
+    use crate::supervisor::audit_file::{FileAuditSigner, RotationPolicy};
+    use mvm_core::transcript::evidence::authenticated_seal;
+    let (f, seed, recovered) = recovery_fixture();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
+    let signer = std::sync::Arc::new(
+        FileAuditSigner::open(key.clone(), f.emitter.audit_dir())
+            .unwrap()
+            .with_rotation(RotationPolicy::at_bytes(1)),
+    );
+    let emitter =
+        AuditEmitter::with_primary_signer(key, f.emitter.audit_dir(), signer.clone()).unwrap();
+    emitter
+        .emit_recovered_transcript_sealed(&seed, &recovered)
+        .unwrap();
+    emitter
+        .emit_entry_for_evidence(
+            &for_plan(&f.plan, None, "test.after-seal", []),
+            EvidenceReceipt::Omitted,
+        )
+        .unwrap();
+    signer.prune_through(&f.plan.tenant, 2).unwrap();
+    let verified = mvm_core::audit_verify::set::read_verified_history(
+        f.emitter.audit_dir(),
+        "local",
+        &f.emitter.verifying_key(),
+    )
+    .unwrap();
+    assert!(verified.pruned.is_some());
+    assert!(
+        authenticated_seal(
+            f.emitter.audit_dir(),
+            &f.emitter.verifying_key(),
+            &recovered
+        )
+        .is_err()
+    );
+    let before = std::fs::read(f.emitter.audit_dir().join("local.jsonl")).unwrap();
+    assert!(
+        emitter
+            .emit_recovered_transcript_sealed(&seed, &recovered)
+            .is_err()
+    );
+    assert_eq!(
+        std::fs::read(f.emitter.audit_dir().join("local.jsonl")).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn instances_of_one_workload_retire_independently() {
     let first = Fixture::for_vm(true, "service-instance-1");
     let second = Fixture::for_vm(true, "service-instance-2");
@@ -302,6 +520,59 @@ fn conflict_or_unsigned_missing_payload_refuses() {
         .unwrap();
     assert!(reconcile_capture(f.context(), 605_000).is_err());
     assert!(f.payload().exists());
+}
+
+#[test]
+fn actual_audit_append_and_fsync_failure_never_authorize_unlink() {
+    use crate::supervisor::audit_file::write_faults::{Boundary, Guard};
+    // These synchronous tests have no entered Tokio runtime: the emitter runs
+    // its current-thread executor here. Consumption proves the seam was hit.
+    for boundary in [Boundary::PartialAppend, Boundary::Sync] {
+        let f = Fixture::new(true);
+        let path = f.emitter.audit_dir().join("local.jsonl");
+        let before = std::fs::read(&path).unwrap();
+        let manifest_before = std::fs::read(f.root.path().join("capture/manifest.json")).unwrap();
+        let fault = Guard::arm(boundary);
+        let error = reconcile_capture(f.context(), 605_000).unwrap_err();
+        assert!(
+            fault.consumed(),
+            "emitter did not execute the selected I/O boundary"
+        );
+        assert!(format!("{error:#}").contains("injected"));
+        drop(fault);
+        assert!(f.payload().exists());
+        assert_eq!(
+            std::fs::read(f.root.path().join("capture/manifest.json")).unwrap(),
+            manifest_before
+        );
+        let after = std::fs::read(&path).unwrap();
+        assert!(after.starts_with(&before));
+        assert!(
+            after.len() > before.len(),
+            "signer never appended actual bytes"
+        );
+        if boundary == Boundary::PartialAppend {
+            assert!(!after.ends_with(b"\n"));
+            assert!(reconcile_capture(f.context(), 605_000).is_err());
+            assert!(
+                f.payload().exists(),
+                "torn authority must remain fail-closed"
+            );
+        } else {
+            assert!(after.ends_with(b"\n"));
+            assert_eq!(
+                reconcile_capture(f.context(), 605_000).unwrap(),
+                RetirementOutcome::Retired {
+                    removed_segments: 1
+                }
+            );
+            assert_eq!(
+                std::fs::read(&path).unwrap(),
+                after,
+                "retry appended duplicate evidence"
+            );
+        }
+    }
 }
 
 #[test]

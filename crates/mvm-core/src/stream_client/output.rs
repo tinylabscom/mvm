@@ -1167,7 +1167,8 @@ mod tests {
                 recipient: "transcript-kek".to_string(),
                 wrapped_data_key_b64: wrapped,
             },
-        );
+        )
+        .unwrap();
         for (direction, bytes) in chunks {
             // Under `FailClosed` a refusal is the point of the fixture, so a
             // failed push is recorded in the manifest rather than asserted on.

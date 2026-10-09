@@ -411,8 +411,27 @@ fn validate_format(manifest: &TranscriptManifest) -> Result<(), TranscriptError>
     if manifest.at_rest.is_none() && manifest.sealed_unix_secs.is_some() {
         return Err(TranscriptError::RetentionClock);
     }
-    if let Some(budget) = manifest.generation_budget
-        && (manifest.at_rest.is_none() || budget.max_plaintext_bytes == 0 || budget.max_chunks == 0)
+    validate_protection(
+        manifest.at_rest,
+        manifest.generation_budget,
+        manifest.payload_encoding,
+        manifest.created_unix_secs,
+    )
+}
+
+fn validate_protection(
+    policy: Option<AtRestRetention>,
+    budget: Option<GenerationBudget>,
+    encoding: PayloadEncoding,
+    opened: u64,
+) -> Result<(), TranscriptError> {
+    if let Some(policy) = policy {
+        policy.generation_deadline(opened)?;
+    } else if budget.is_some() || encoding != PayloadEncoding::Raw {
+        return Err(TranscriptError::RetentionClock);
+    }
+    if let Some(budget) = budget
+        && (budget.max_plaintext_bytes == 0 || budget.max_chunks == 0)
     {
         return Err(TranscriptError::RetentionClock);
     }
@@ -487,7 +506,7 @@ pub fn verify_chunks(manifest: &TranscriptManifest, dir: &Path) -> Result<(), Tr
 pub struct TranscriptWriter {
     key: aead::Key,
     #[cfg(unix)]
-    capture_lease: Option<Result<secure_cleanup::CaptureDirectory, String>>,
+    _capture_lease: Option<secure_cleanup::CaptureDirectory>,
     store: segment::SegmentStore,
     budget: CaptureBudget,
     retention: RetentionPolicy,
@@ -541,36 +560,41 @@ pub struct TranscriptWriterConfig {
 impl TranscriptWriter {
     /// Construct a writer and fail before producer startup if protection or its
     /// exclusive directory lease cannot be established.
-    pub fn try_new(
+    pub fn new(
         dir: impl Into<PathBuf>,
         key: aead::Key,
         config: TranscriptWriterConfig,
     ) -> Result<Self, TranscriptError> {
-        if let Some(policy) = config.at_rest {
-            policy.generation_deadline(config.created_unix_secs)?;
+        validate_protection(
+            config.at_rest,
+            config.generation_budget,
+            config.payload_encoding,
+            config.created_unix_secs,
+        )?;
+        #[cfg(not(unix))]
+        if config.at_rest.is_some() {
+            return Err(TranscriptError::Io {
+                file: MANIFEST_FILENAME.to_string(),
+                msg: "protected capture requires Unix directory leases".to_string(),
+            });
         }
-        if config.at_rest.is_none()
-            && (config.generation_budget.is_some()
-                || config.payload_encoding != PayloadEncoding::Raw)
-        {
-            return Err(TranscriptError::RetentionClock);
-        }
-        let writer = Self::new(dir, key, config);
-        writer.check_capture_lease()?;
-        Ok(writer)
-    }
-
-    /// `dir` must already exist. `key` encrypts chunks at rest.
-    pub fn new(dir: impl Into<PathBuf>, key: aead::Key, config: TranscriptWriterConfig) -> Self {
         let dir = dir.into();
         #[cfg(unix)]
-        let capture_lease = config.at_rest.map(|_| {
-            secure_cleanup::CaptureDirectory::for_writer(&dir).map_err(|error| error.to_string())
-        });
-        Self {
+        let capture_lease = config
+            .at_rest
+            .map(|_| {
+                secure_cleanup::CaptureDirectory::for_writer(&dir).map_err(|error| {
+                    TranscriptError::Io {
+                        file: MANIFEST_FILENAME.to_string(),
+                        msg: error.to_string(),
+                    }
+                })
+            })
+            .transpose()?;
+        Ok(Self {
             key,
             #[cfg(unix)]
-            capture_lease,
+            _capture_lease: capture_lease,
             store: segment::SegmentStore::new(dir, SegmentBounds::default()),
             budget: CaptureBudget::new(config.bounds),
             retention: config.retention,
@@ -592,7 +616,7 @@ impl TranscriptWriter {
             refused_bytes: 0,
             evicted_chunks: 0,
             evicted_bytes: 0,
-        }
+        })
     }
 
     /// Chunks offered to [`push`](Self::push)/[`push_dropped`](Self::push_dropped)
@@ -689,7 +713,6 @@ impl TranscriptWriter {
         dropped: bool,
         plaintext: &[u8],
     ) -> Result<(), TranscriptError> {
-        self.check_capture_lease()?;
         if self.finalized {
             return Err(TranscriptError::WriterFinalized);
         }
@@ -771,7 +794,6 @@ impl TranscriptWriter {
     /// End a protected generation after its producer has joined. This freezes
     /// the writer; computing an integrity snapshot never performs this step.
     pub fn finalize_at(&mut self, now: u64) -> Result<TranscriptManifest, TranscriptError> {
-        self.check_capture_lease()?;
         let Some(policy) = self.at_rest else {
             if now < self.created_unix_secs {
                 return Err(TranscriptError::RetentionClock);
@@ -794,24 +816,6 @@ impl TranscriptWriter {
         }
         self.finalized = true;
         Ok(self.sealed_manifest())
-    }
-
-    fn check_capture_lease(&self) -> Result<(), TranscriptError> {
-        #[cfg(unix)]
-        if let Some(Err(message)) = &self.capture_lease {
-            return Err(TranscriptError::Io {
-                file: MANIFEST_FILENAME.to_string(),
-                msg: message.clone(),
-            });
-        }
-        #[cfg(not(unix))]
-        if self.at_rest.is_some() {
-            return Err(TranscriptError::Io {
-                file: MANIFEST_FILENAME.to_string(),
-                msg: "protected capture requires Unix directory leases".to_string(),
-            });
-        }
-        Ok(())
     }
 
     /// The manifest [`seal`](Self::seal) produces, for a caller that cannot
@@ -1325,7 +1329,7 @@ mod tests {
         let mut cfg = writer_config();
         cfg.at_rest = Some(AtRestRetention::default());
         cfg.created_unix_secs = retention_now().unwrap();
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(4), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(4), cfg).unwrap();
         w.push(Direction::Stdout, b"hello ").unwrap();
         w.push(Direction::Stderr, b"world").unwrap();
         let manifest = w.seal();
@@ -1462,7 +1466,7 @@ mod tests {
             max_bytes: 1 << 20,
             max_chunks: 64,
         };
-        TranscriptWriter::new(dir, fixed_key(1), cfg)
+        TranscriptWriter::new(dir, fixed_key(1), cfg).unwrap()
     }
 
     #[test]
@@ -1472,7 +1476,7 @@ mod tests {
         let mut cfg = writer_config();
         cfg.created_unix_secs = 100;
         cfg.at_rest = Some(AtRestRetention::default());
-        let mut writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg);
+        let mut writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg).unwrap();
         writer.push(Direction::Stdout, b"synthetic").unwrap();
         let snapshot = writer.sealed_manifest();
         assert_eq!(snapshot.format_version, 7);
@@ -1522,7 +1526,7 @@ mod tests {
         let mut cfg = writer_config();
         cfg.created_unix_secs = 100;
         cfg.at_rest = Some(AtRestRetention::default());
-        let writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg);
+        let writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg).unwrap();
         let mut manifest = writer.sealed_manifest();
         let snapshot = manifest.clone();
         assert!(recover_abandoned_at(&mut manifest, 99).is_err());
@@ -1603,13 +1607,56 @@ mod tests {
     }
 
     #[test]
+    fn invalid_protection_config_refuses_before_storage_or_lease() {
+        let root = tempfile::tempdir().unwrap();
+        for case in 0..8 {
+            let mut cfg = writer_config();
+            cfg.created_unix_secs = 100;
+            cfg.at_rest = Some(AtRestRetention::default());
+            cfg.generation_budget = Some(GenerationBudget::default());
+            match case {
+                0 => cfg.generation_budget.as_mut().unwrap().max_plaintext_bytes = 0,
+                1 => cfg.generation_budget.as_mut().unwrap().max_chunks = 0,
+                2 => cfg.at_rest.as_mut().unwrap().payload_after_seal_secs = 0,
+                3 => cfg.at_rest.as_mut().unwrap().max_generation_secs = 3601,
+                4 => cfg.created_unix_secs = u64::MAX,
+                5 => cfg.created_unix_secs = 0,
+                6 => cfg.at_rest = None,
+                _ => {
+                    cfg.at_rest = None;
+                    cfg.generation_budget = None;
+                    cfg.payload_encoding = PayloadEncoding::StreamRecordV1;
+                }
+            }
+            let absent = root.path().join(format!("invalid-{case}"));
+            assert!(matches!(
+                TranscriptWriter::new(&absent, fixed_key(1), cfg.clone()),
+                Err(TranscriptError::RetentionClock)
+            ));
+            assert!(!absent.exists(), "invalid config created storage");
+            #[cfg(unix)]
+            {
+                crate::private_fs::ensure_private_dir(root.path()).unwrap();
+                let lease = secure_cleanup::CaptureDirectory::for_writer(root.path()).unwrap();
+                // Even a busy lease must not be consulted for invalid schema.
+                assert!(matches!(
+                    TranscriptWriter::new(root.path(), fixed_key(1), cfg),
+                    Err(TranscriptError::RetentionClock)
+                ));
+                assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+                drop(lease);
+            }
+        }
+    }
+
+    #[test]
     fn late_normal_finalization_cannot_extend_generation_lifetime() {
         let dir = tempfile::tempdir().unwrap();
         crate::private_fs::ensure_private_dir(dir.path()).unwrap();
         let mut cfg = writer_config();
         cfg.at_rest = Some(AtRestRetention::default());
         cfg.created_unix_secs = 100;
-        let mut writer = TranscriptWriter::try_new(dir.path(), fixed_key(1), cfg).unwrap();
+        let mut writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg).unwrap();
         let snapshot = writer.sealed_manifest();
         assert_eq!(
             writer.finalize_at(3701),
@@ -1637,7 +1684,7 @@ mod tests {
     fn sealed_root_binds_capture_metadata_and_ordered_ciphertext_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let key = aead::Key::from_bytes([6u8; 32]);
-        let mut writer = TranscriptWriter::new(dir.path(), key, writer_config());
+        let mut writer = TranscriptWriter::new(dir.path(), key, writer_config()).unwrap();
         writer.push(Direction::Egress, b"request").unwrap();
         writer
             .push_dropped(Direction::Ingress, b"response")
@@ -1706,7 +1753,7 @@ mod tests {
     #[test]
     fn capture_then_export_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config()).unwrap();
         w.push(Direction::Egress, b"GET / HTTP/1.1\r\n").unwrap();
         w.push(Direction::Ingress, b"HTTP/1.1 200 OK\r\n").unwrap();
         let manifest = w.seal();
@@ -1720,7 +1767,7 @@ mod tests {
     #[test]
     fn push_dropped_marks_the_chunk_and_still_exports() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config()).unwrap();
         w.push(Direction::Egress, b"allowed").unwrap();
         w.push_dropped(Direction::Egress, b"denied").unwrap();
         let manifest = w.seal();
@@ -1758,7 +1805,7 @@ mod tests {
             max_bytes: 1 << 20,
             max_chunks: 1,
         };
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg).unwrap();
         w.push(Direction::Stdout, b"first").expect("first fits");
         assert!(w.push(Direction::Stdout, b"second").is_err());
         assert!(w.push_dropped(Direction::Stderr, b"third!").is_err());
@@ -1784,7 +1831,7 @@ mod tests {
         // manifest that only counted the writer's own refusals would call that
         // capture complete.
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), writer_config());
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), writer_config()).unwrap();
         w.push(Direction::Stdout, b"landed").expect("push");
         assert!(!w.sealed_manifest().is_truncated());
 
@@ -1810,7 +1857,7 @@ mod tests {
             max_bytes: 1 << 20,
             max_chunks: 1,
         };
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg).unwrap();
         w.push(Direction::Stdout, b"first").expect("first fits");
         assert!(w.push(Direction::Stdout, b"second").is_err());
         w.note_unwritten(2, 10);
@@ -1830,7 +1877,7 @@ mod tests {
             max_bytes: 1 << 20,
             max_chunks: 1,
         };
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(3), cfg).unwrap();
         w.push(Direction::Stdout, b"first").expect("first fits");
         assert!(w.push(Direction::Stdout, b"second").is_err());
         let mut manifest = w.seal();
@@ -1846,7 +1893,7 @@ mod tests {
     #[test]
     fn export_fails_closed_on_a_tampered_chunk() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config()).unwrap();
         w.push(Direction::Egress, b"secret").unwrap();
         let manifest = w.seal();
         // Flip a byte in place (same length) so the hash check — not the size
@@ -1861,7 +1908,7 @@ mod tests {
     #[test]
     fn export_fails_closed_on_the_wrong_key() {
         let dir = tempfile::tempdir().unwrap();
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config());
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(7), writer_config()).unwrap();
         w.push(Direction::Egress, b"secret").unwrap();
         let manifest = w.seal();
         // Integrity passes (ciphertext untouched) but the wrong key can't decrypt.
@@ -1957,7 +2004,8 @@ mod tests {
         let data = aead::Key::from_bytes([8u8; 32]);
         let mut cfg = writer_config();
         cfg.wrapped_data_key_b64 = wrap_data_key(&kek, &data);
-        let mut w = TranscriptWriter::new(dir.path(), aead::Key::from_bytes([8u8; 32]), cfg);
+        let mut w =
+            TranscriptWriter::new(dir.path(), aead::Key::from_bytes([8u8; 32]), cfg).unwrap();
         w.push(Direction::Egress, b"forensic payload").unwrap();
         let manifest = w.seal();
         // Operator-side: unwrap the data key from the manifest using the KEK,
@@ -1979,7 +2027,7 @@ mod tests {
             max_bytes: 4,
             max_chunks: 10,
         };
-        let mut w = TranscriptWriter::new(dir.path(), key, cfg);
+        let mut w = TranscriptWriter::new(dir.path(), key, cfg).unwrap();
         assert!(matches!(
             w.push(Direction::Egress, b"too-long").unwrap_err(),
             TranscriptError::BoundExceeded(_)
@@ -2002,7 +2050,7 @@ mod tests {
             max_chunks: u64::MAX,
         };
         cfg.retention = retention;
-        TranscriptWriter::new(dir, fixed_key(11), cfg)
+        TranscriptWriter::new(dir, fixed_key(11), cfg).unwrap()
     }
 
     fn files_in(dir: &Path) -> usize {
@@ -2196,7 +2244,7 @@ mod tests {
             max_bytes: u64::MAX,
             max_chunks: 2 * SEGMENT_MAX_CHUNKS,
         };
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(12), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(12), cfg).unwrap();
         let total = SEGMENT_MAX_CHUNKS * 5;
         for i in 0..total {
             w.push(Direction::Stdout, format!("{i}\n").as_bytes())
@@ -2235,7 +2283,7 @@ mod tests {
             max_bytes: u64::MAX,
             max_chunks: SEGMENT_MAX_CHUNKS,
         };
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(13), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(13), cfg).unwrap();
         for i in 0..(SEGMENT_MAX_CHUNKS * 3) {
             w.push(Direction::Stdout, format!("{i}").as_bytes())
                 .expect("push");
@@ -2260,7 +2308,7 @@ mod tests {
             max_bytes: u64::MAX,
             max_chunks: SEGMENT_MAX_CHUNKS,
         };
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(14), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(14), cfg).unwrap();
         for _ in 0..(SEGMENT_MAX_CHUNKS * 3) {
             w.push(Direction::Stdout, b"x").expect("push");
         }
@@ -2282,7 +2330,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cfg = writer_config();
         cfg.retention = RetentionPolicy::Ring;
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(15), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(15), cfg).unwrap();
         w.push(Direction::Stdout, b"out").expect("push");
         let mut manifest = w.seal();
         manifest.retention = RetentionPolicy::FailClosed;
@@ -2302,7 +2350,7 @@ mod tests {
             max_bytes: u64::MAX,
             max_chunks: 4 * SEGMENT_MAX_CHUNKS,
         };
-        let mut w = TranscriptWriter::new(dir.path(), fixed_key(16), cfg);
+        let mut w = TranscriptWriter::new(dir.path(), fixed_key(16), cfg).unwrap();
         for _ in 0..(SEGMENT_MAX_CHUNKS * 20) {
             w.push(Direction::Stdout, b"x").expect("push");
         }

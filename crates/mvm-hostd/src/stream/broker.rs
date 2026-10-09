@@ -690,7 +690,7 @@ mod tests {
     fn writer_at(dir: &Path, vm: &str, bounds: CaptureBounds) -> TranscriptWriter {
         let mut config = stream_capture_config(identity(vm));
         config.bounds = bounds;
-        TranscriptWriter::new(dir, test_key(), config)
+        TranscriptWriter::new(dir, test_key(), config).unwrap()
     }
 
     /// A writer that refuses at its bound — the forensic-capture policy, kept
@@ -699,7 +699,7 @@ mod tests {
         let mut config = stream_capture_config(identity(vm));
         config.bounds = bounds;
         config.retention = RetentionPolicy::FailClosed;
-        TranscriptWriter::new(dir, test_key(), config)
+        TranscriptWriter::new(dir, test_key(), config).unwrap()
     }
 
     /// A broker configured the way production configures one: the shipped

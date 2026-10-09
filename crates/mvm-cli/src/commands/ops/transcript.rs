@@ -258,7 +258,7 @@ impl TranscriptCtx {
             wrapped_data_key_b64: wrapped,
         };
         // No chunks yet — the live bridge sink fills them out of band.
-        let manifest = TranscriptWriter::try_new(&dir, data_key, cfg)?.seal();
+        let manifest = TranscriptWriter::new(&dir, data_key, cfg)?.seal();
         write_manifest(&dir, &manifest)?;
 
         self.audit(LocalAuditKind::TranscriptArmed, vm)
@@ -650,6 +650,76 @@ mod tests {
     }
 
     #[test]
+    fn signed_partial_retirement_survives_removal_of_current_plan() {
+        use mvm_core::transcript::evidence::{
+            TRANSCRIPT_RETIRED_EVENT, authenticated_retirement_at, labels,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let c = ctx(root.path());
+        persist_plan(&c, "local", "vm1");
+        let id = c.arm("local", "vm1", None, bounds()).unwrap();
+        let (dir, opened) = c.load_manifest("local", &id).unwrap();
+        let kek = transcript::load_kek(&c.keys_dir).unwrap().unwrap();
+        let key = transcript::unwrap_data_key(&kek, &opened.wrapped_data_key_b64).unwrap();
+        let mut writer = TranscriptWriter::new(
+            &dir,
+            key,
+            TranscriptWriterConfig {
+                capture_id: id.clone(),
+                binding: opened.binding,
+                bounds: CaptureBounds {
+                    max_bytes: 4 * transcript::SEGMENT_MAX_CIPHERTEXT_BYTES,
+                    ..opened.bounds
+                },
+                retention: opened.retention,
+                at_rest: opened.at_rest,
+                generation_budget: None,
+                payload_encoding: Default::default(),
+                created_unix_secs: 100,
+                recipient: opened.recipient,
+                wrapped_data_key_b64: opened.wrapped_data_key_b64,
+            },
+        )
+        .unwrap();
+        let payload = vec![b'x'; transcript::SEGMENT_MAX_CIPHERTEXT_BYTES as usize / 2];
+        writer.push(Direction::Stdout, &payload).unwrap();
+        writer.push(Direction::Stdout, &payload).unwrap();
+        let terminal = writer.finalize_at(200).unwrap();
+        assert_ne!(terminal.chunks[0].file, terminal.chunks[1].file);
+        write_manifest(&dir, &terminal).unwrap();
+        drop(writer);
+        c.disarm("local", &id).unwrap();
+        let trusted = super::super::audit::load_verifying_key(&c.verifying_key_path).unwrap();
+        let (mut entry, _) =
+            authenticated_retirement_at(&c.audit_dir, &trusted, &terminal, Some(605_000)).unwrap();
+        entry.event = TRANSCRIPT_RETIRED_EVENT.into();
+        entry.labels = labels(&terminal).unwrap();
+        let (signing, _) = mvm_core::crypto::ed25519_keypair::load_existing(
+            &c.keys_dir
+                .join(mvm_hostd::audit::host_keypair::SECRET_FILENAME),
+            &c.verifying_key_path,
+        )
+        .unwrap();
+        AuditEmitter::with_dir(signing, &c.audit_dir)
+            .unwrap()
+            .emit_entry_for_evidence(&entry, mvm_hostd::audit::evidence::EvidenceReceipt::Omitted)
+            .unwrap();
+        // This fixture isolates historical authority from current plan state.
+        // Actual partial-unlink fault boundaries are exercised in core cleanup.
+        std::fs::remove_file(dir.join(&terminal.chunks[0].file)).unwrap();
+        std::fs::remove_file(c.vms_dir.join("vm1").join(PLAN_FILENAME)).unwrap();
+        let evidence = std::fs::read(c.audit_dir.join("local.jsonl")).unwrap();
+        c.reconcile("local", &id).unwrap();
+        c.reconcile("local", &id).unwrap();
+        assert!(!dir.join(&terminal.chunks[1].file).exists());
+        assert_eq!(
+            std::fs::read(c.audit_dir.join("local.jsonl")).unwrap(),
+            evidence
+        );
+        assert_eq!(c.load_manifest("local", &id).unwrap().1, terminal);
+    }
+
+    #[test]
     fn operator_reconcile_expires_only_authorized_payload_and_preserves_evidence() {
         let root = tempfile::tempdir().unwrap();
         let c = ctx(root.path());
@@ -659,7 +729,7 @@ mod tests {
         assert_eq!(opened.at_rest, Some(transcript::AtRestRetention::default()));
         let kek = transcript::load_kek(&c.keys_dir).unwrap().unwrap();
         let key = transcript::unwrap_data_key(&kek, &opened.wrapped_data_key_b64).unwrap();
-        let mut writer = TranscriptWriter::try_new(
+        let mut writer = TranscriptWriter::new(
             &dir,
             key,
             TranscriptWriterConfig {
@@ -840,7 +910,8 @@ mod tests {
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             },
-        );
+        )
+        .unwrap();
         w.push(Direction::Egress, b"GET / HTTP/1.1\r\n").unwrap();
         w.push(Direction::Ingress, b"HTTP/1.1 200 OK\r\n").unwrap();
         let sealed = w.seal();
@@ -900,7 +971,8 @@ mod tests {
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             },
-        );
+        )
+        .unwrap();
         w.push(Direction::Egress, b"secret").unwrap();
         let sealed = w.seal();
         write_manifest(&dir, &sealed).unwrap();

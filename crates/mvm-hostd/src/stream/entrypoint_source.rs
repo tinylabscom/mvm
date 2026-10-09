@@ -218,7 +218,8 @@ mod tests {
             recipient: "host:test".to_string(),
             wrapped_data_key_b64: String::new(),
         });
-        let writer = TranscriptWriter::new(dir.path(), aead::Key::from_bytes([0x5a; 32]), config);
+        let writer =
+            TranscriptWriter::new(dir.path(), aead::Key::from_bytes([0x5a; 32]), config).unwrap();
         Fixture {
             broker: Arc::new(Mutex::new(StreamBroker::new(vm, writer, seam))),
             _dir: dir,
