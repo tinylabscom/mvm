@@ -56,8 +56,9 @@ pub const BUNDLE_TAG: &str = "bundle";
 
 /// Cucumber tag for a scenario that boots a guest from a prebuilt *workload*
 /// kernel rather than building one. The kernel is taken from
-/// `MVM_BDD_WORKLOAD_KERNEL`, or from the host's own builder-VM cache when that
-/// is unset; the scenario is skipped cleanly when neither yields a file.
+/// `MVM_BDD_WORKLOAD_KERNEL`, or from the isolated cache then the host's
+/// default cache when that is unset; the scenario is skipped cleanly when
+/// neither yields a verified file.
 ///
 /// Before this tag existed the step read the variable with `.expect(...)`, so on
 /// a host with KVM the scenario *failed* — "MVM_BDD_WORKLOAD_KERNEL must name

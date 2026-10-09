@@ -44,6 +44,7 @@ pub use local::{
     verify_local_image_set,
 };
 pub use lock::{IMAGE_LOCK_SCHEMA_VERSION, ImageLock, SigningIdentity};
+pub(crate) use train_lock::image_train_lock_sha256;
 pub use train_lock::{
     BootImagePin, IMAGE_TRAIN_LOCK_SCHEMA_VERSION, ImageTrainLock, ImageTrainLockError,
     LegacyImageTrain, PinnedArtifact, Stage0KernelPin, image_train_lock,

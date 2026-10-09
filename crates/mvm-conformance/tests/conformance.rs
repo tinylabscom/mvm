@@ -405,34 +405,32 @@ pub(crate) fn bundle_pubkey_path() -> Option<std::path::PathBuf> {
 
 /// A prebuilt workload kernel for the block-volume scenarios.
 ///
-/// `MVM_BDD_WORKLOAD_KERNEL` names one explicitly. When it is unset the host's
-/// own builder-VM cache is used — the same file the step would otherwise ask an
-/// operator to point at by hand, at the path `mvmctl` already writes it to. That
-/// default is what makes the lane runnable: the variable appears in no Justfile
-/// recipe, no CI lane and no document, so requiring it meant the scenarios ran
-/// nowhere.
+/// `MVM_BDD_WORKLOAD_KERNEL` names one explicitly. Otherwise use the current
+/// isolated home first, then the default host cache, verifying the digest
+/// sidecar in either location before accepting a kernel.
 pub(crate) fn workload_kernel_path() -> Option<std::path::PathBuf> {
     if let Some(explicit) = std::env::var_os("MVM_BDD_WORKLOAD_KERNEL") {
         let path = std::path::PathBuf::from(explicit);
         return path.is_file().then_some(path);
     }
-    // Through the verifying seam, not an `is_file()` check. The kernel this
-    // returns is what `@workload_kernel` scenarios boot, so a present-but-
-    // unvouched-for file here surfaces as a mysterious guest failure rather
-    // than a cache fault. This site used to build the cache path by hand,
-    // which is why the gate could not see it.
-    match mvm_build::kernel_fetch::resolve_kernel(
-        std::path::Path::new(&mvm_core::config::default_mvm_cache_dir()),
-        std::env::consts::ARCH,
-        "workload",
-        true,
-    ) {
-        mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
-            Some(verified.path().to_path_buf())
+    for cache_dir in [
+        mvm_core::config::mvm_cache_dir(),
+        mvm_core::config::default_mvm_cache_dir(),
+    ] {
+        match mvm_build::kernel_fetch::resolve_kernel(
+            std::path::Path::new(&cache_dir),
+            std::env::consts::ARCH,
+            "workload",
+            true,
+        ) {
+            mvm_build::kernel_fetch::KernelResolution::Cached(verified) => {
+                return Some(verified.path().to_path_buf());
+            }
+            mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
+            | mvm_build::kernel_fetch::KernelResolution::NeedsFetch(_) => {}
         }
-        mvm_build::kernel_fetch::KernelResolution::NeedsBuild(_)
-        | mvm_build::kernel_fetch::KernelResolution::NeedsFetch(_) => None,
     }
+    None
 }
 
 /// `/dev/kvm` exists and this process can open it read-write — the mode a real
