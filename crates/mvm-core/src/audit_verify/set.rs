@@ -565,9 +565,27 @@ pub fn read_verified_set(
     base: &str,
     vk: &VerifyingKey,
 ) -> Result<Vec<SegmentContent>, SegmentSetError> {
+    Ok(read_verified_history(dir, base, vk)?.segments)
+}
+
+/// Authenticated contents and prefix-pruning status from the same chain walk.
+/// Absence queries must not confuse deliberately removed history with genesis.
+pub struct VerifiedHistory {
+    pub segments: Vec<SegmentContent>,
+    pub pruned: Option<Pruned>,
+}
+
+pub fn read_verified_history(
+    dir: &Path,
+    base: &str,
+    vk: &VerifyingKey,
+) -> Result<VerifiedHistory, SegmentSetError> {
     let walked = walk(dir, base, vk, true)?;
-    adjudicate(&walked, vk)?;
-    Ok(walked.contents)
+    let pruned = adjudicate(&walked, vk)?;
+    Ok(VerifiedHistory {
+        segments: walked.contents,
+        pruned,
+    })
 }
 
 /// The segment set's shape: which segments exist and where, read from the

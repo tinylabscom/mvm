@@ -503,6 +503,9 @@ impl FileAuditSigner {
 
     /// Append one signed entry to `path`, assuming the chain lock is held.
     /// Returns the new chain tip.
+    ///
+    /// Recovery publication below deliberately calls this non-reentrant helper
+    /// instead of `sign_and_emit`, which acquires the same chain lock.
     fn append_locked(&self, path: &Path, entry: &PlanAuditEntry) -> Result<[u8; 32], AuditError> {
         // Refresh the cursor under the lock — another process may have appended
         // between our last in-memory snapshot and this call. The in-memory
@@ -510,6 +513,59 @@ impl FileAuditSigner {
         // of truth.
         let prev_hash = self.restore_cursor(path)?;
         self.write_signed(path, entry, prev_hash, sync_policy_for(&entry.event))
+    }
+
+    /// Atomic primary-chain recovery publication. The lifecycle caller must
+    /// retain its exclusive capture lease and establish producer quiescence.
+    pub(crate) fn emit_recovered_transcript_sealed(
+        &self,
+        seed: &mvm_core::transcript::TranscriptManifest,
+        recovered: &mvm_core::transcript::TranscriptManifest,
+    ) -> anyhow::Result<bool> {
+        use anyhow::{Context, ensure};
+        use mvm_core::transcript::evidence::{authenticated_seal, recovered_seal_entry};
+        ensure!(
+            self.fixed_file.is_none(),
+            "recovery requires the primary tenant audit chain"
+        );
+        mvm_core::transcript::check_safe_name(&seed.binding.tenant_id)?;
+        ensure!(
+            seed.binding == recovered.binding,
+            "recovery scope differs from original seed"
+        );
+        let path = self.tenant_path(&seed.binding.tenant_id);
+        let _lock = Self::acquire_lock(&path)?;
+        self.recover_active(
+            &path,
+            &mvm_core::plan::TenantId(seed.binding.tenant_id.clone()),
+        )?;
+        let key = self.verifying_key();
+        let expected = recovered_seal_entry(&self.audit_dir, &key, seed, recovered)?;
+        if let Some(existing) = authenticated_seal(&self.audit_dir, &key, recovered)? {
+            let mut same = expected;
+            same.timestamp = existing.timestamp;
+            ensure!(
+                existing == same,
+                "existing recovered seal conflicts with opening attribution"
+            );
+            return Ok(false);
+        }
+        let len = std::fs::metadata(&path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        if self.rotation.should_rotate(len) {
+            self.rotate(&path, &expected.tenant)?;
+        }
+        self.append_locked(&path, &expected)?;
+        // Verification also syncs the matching segment and directory. This
+        // remains a durability barrier even when ordinary emits are batched.
+        let published = authenticated_seal(&self.audit_dir, &key, recovered)?
+            .context("recovered seal absent after append")?;
+        ensure!(
+            published == expected,
+            "recovered seal changed during publication"
+        );
+        Ok(true)
     }
 
     /// Sign `entry` against `prev_hash` and append it to `path`.
