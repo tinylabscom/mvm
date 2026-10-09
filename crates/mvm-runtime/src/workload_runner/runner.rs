@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use mvm_core::checkpoint::{CheckpointId, CheckpointMeta};
 use mvm_core::config::{vm_network_endpoint_socket, vm_state_dir, vms_dir};
 use mvm_core::crypto::vmgenid::fresh_generation_token;
-use mvm_core::plan::{ExecutionPlan, SecretBinding, StreamRetention};
+use mvm_core::plan::{ExecutionPlan, SecretBinding};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::protocol::broker::ServiceId;
@@ -139,78 +139,7 @@ impl BrokerGuard {
     }
 }
 
-/// Republishes a workload's console capture (`<state_dir>/console.log`,
-/// write-only, written by every backend before the guest agent can say
-/// anything) into the per-VM output-stream broker — so a guest that panics
-/// on boot, fails dm-verity, or OOMs its agent still leaves a stream instead
-/// of an empty one.
-///
-/// A hook, not a direct call: the broker this republishes into is owned by
-/// the resident per-tenant daemon, which sits *above* this crate in the
-/// dependency graph (the daemon depends on the runtime, never the other way
-/// around), so this crate cannot name that broker's type. Same shape as
-/// [`NetworkEndpointSpawner`] and [`BrokerRegistrar`] just above — both exist to
-/// solve exactly this "the runtime needs the resident daemon to do
-/// something" problem — and, like the ordinary `VmBackend` methods this
-/// trait's two calls sit beside, `start`/`stop` are independent entry points
-/// keyed by `vm_name` rather than a value threaded between them: a `start`
-/// during `machine run -d` and the matching `machine stop` commonly run in different process
-/// invocations against the same disk-backed VM state, so nothing here can
-/// rely on an in-process object outliving the call that created it.
-///
-/// **Unconditional.** Unlike [`BrokerRegistrar`] (an unrelated, same-named
-/// host-services broker for admitted typed services), this is never
-/// gated on tenant admission. An unadmitted local run is exactly the case
-/// with the fewest other ways to see a boot failure, so it must not lose
-/// console capture either.
-pub trait ConsoleStreamer: Send + Sync {
-    /// Start capturing one workload's output. Best-effort: a real
-    /// implementation logs and continues on failure rather than failing a
-    /// workload boot over an observability feature.
-    fn start(&self, capture: &ConsoleCapture<'_>);
-
-    /// Stop following `vm_name`'s console, if anything started one.
-    /// Idempotent — a no-op for a VM whose console was never followed,
-    /// matching every other per-VM reaper `WorkloadRunner::stop` already
-    /// calls unconditionally.
-    fn stop(&self, vm_name: &str);
-}
-
-/// One workload's console capture: which VM, which file, the redaction policy
-/// its recorded output is cleared under, and whether that output is kept.
-///
-/// The policy rides along rather than being resolved on the far side because
-/// it is the *launch's* policy — the same value this call's caller already
-/// handed the substitution endpoint. A capture that picked its own would give
-/// one answer on egress and a different one in the transcript.
-///
-/// The retention mode rides along for the same reason and one more: it comes
-/// off the *signed plan*, so a streamer that read it from anywhere else would
-/// be honouring something nobody admitted.
-pub struct ConsoleCapture<'a> {
-    pub vm_name: &'a str,
-    /// The backend supervisor exclusively owns capture for the VM lifetime.
-    /// A launcher must not start another writer, even if the owner is delayed
-    /// or unavailable. This is independent of Persist versus Ephemeral.
-    pub supervisor_owned: bool,
-    /// The write-only capture file the backend is already writing.
-    pub console_log: &'a Path,
-    /// Signed-grant guest-to-host display socket; the streamer only reads it.
-    pub display_socket: Option<&'a Path>,
-    pub redaction: &'a RedactionPolicy,
-    /// Whether the admitted plan asked for a durable transcript. Capture and
-    /// live fan-out happen either way; this decides only what outlives the run.
-    pub retention: StreamRetention,
-}
-/// The hook a process that registered no real streamer gets: console bytes
-/// keep going to the write-only capture file on disk and nothing republishes
-/// them. An embedder driving this crate as a library, and every unit test
-/// that does not care about output capture, land here.
-pub struct NoopConsoleStreamer;
-impl ConsoleStreamer for NoopConsoleStreamer {
-    fn start(&self, _capture: &ConsoleCapture<'_>) {}
-    fn stop(&self, _vm_name: &str) {}
-}
+pub use super::console_stream::{ConsoleCapture, ConsoleStreamer, NoopConsoleStreamer};
 /// Everything the runner needs to start a workload: the admitted launch config,
 /// its tenant/secrets/redaction/policy, and the kernel cmdline the role above
 /// assembled.

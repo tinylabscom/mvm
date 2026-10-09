@@ -45,49 +45,9 @@ pub trait IrqLine: Send + Sync {
     fn signal(&self, spi: u32);
 }
 
-/// Fresh host-owned paths supplied when a restored child reconnects its vsock
-/// channels. These bindings are deliberately external to snapshot bytes.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct VsockHostBindings {
-    /// Host agent RPC listener path.
-    pub agent_socket: Option<PathBuf>,
-    /// Host egress endpoint path.
-    pub network_endpoint: Option<PathBuf>,
-    /// Host broker endpoint path.
-    pub broker_endpoint: Option<PathBuf>,
-    /// Host view-only display frame sink path.
-    pub display_endpoint: Option<PathBuf>,
-    /// Host GPU endpoint path (the per-VM `mvm-gpu-endpoint` socket).
-    pub gpu_endpoint: Option<PathBuf>,
-    /// Additional host-dial listeners (telemetry and admitted console ports).
-    pub console_sockets: Vec<(u32, PathBuf)>,
-}
-
-#[derive(Clone, Default)]
-struct VsockHostRuntimeConfig {
-    bindings: VsockHostBindings,
-    agent_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    substitution_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    broker_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    display_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    host_dial_activity: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    workload_exit_stop: Option<&'static AtomicBool>,
-    trusted_builder_egress: bool,
-}
-
-impl VsockHostBindings {
-    fn paths(&self) -> Vec<&Path> {
-        self.agent_socket
-            .iter()
-            .map(PathBuf::as_path)
-            .chain(self.network_endpoint.iter().map(PathBuf::as_path))
-            .chain(self.broker_endpoint.iter().map(PathBuf::as_path))
-            .chain(self.display_endpoint.iter().map(PathBuf::as_path))
-            .chain(self.gpu_endpoint.iter().map(PathBuf::as_path))
-            .chain(self.console_sockets.iter().map(|(_, path)| path.as_path()))
-            .collect()
-    }
-}
+mod bindings;
+pub use bindings::VsockHostBindings;
+use bindings::VsockHostRuntimeConfig;
 
 const HANDOFF_AGENT: u8 = 1 << 0;
 const HANDOFF_EGRESS: u8 = 1 << 1;
