@@ -923,6 +923,21 @@ jobs:
           retention-days: 1
           compression-level: 0
 
+      # Source resolution checks the guest-runtime fingerprint before reusing
+      # any derived overlay. Keep the verified archive and extracted tree
+      # together; a tar preserves executable modes across artifact upload.
+      - name: Package source guest runtime cache
+        run: tar -C "$MVM_HOME/cache" -cf /tmp/no-kvm-guest-runtime.tar guest-runtime
+
+      - name: Publish source guest runtime cache
+        uses: actions/upload-artifact@v7
+        with:
+          name: no-kvm-guest-runtime
+          path: /tmp/no-kvm-guest-runtime.tar
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
   no-kvm-build:
     name: Prepare bounded signed bundle for hosted no-KVM boot
     needs: no-kvm-bootstrap
@@ -1137,6 +1152,17 @@ jobs:
         with:
           name: no-kvm-bundle
           path: /tmp/no-kvm-bundle
+
+      - name: Download source guest runtime cache
+        uses: actions/download-artifact@v8
+        with:
+          name: no-kvm-guest-runtime
+          path: /tmp
+
+      # Only the cache produced by this workflow run is downloaded above.
+      # The resolver still verifies its source fingerprint, archive, and tree.
+      - name: Restore source guest runtime cache
+        run: tar -C "$MVM_HOME/cache" -xf /tmp/no-kvm-guest-runtime.tar
 
       - name: Grant QEMU access to vhost-vsock
         run: |
