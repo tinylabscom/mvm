@@ -68,6 +68,9 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
         let Some(image) = &verified.manifest().image else {
             continue;
         };
+        let mvm_core::registry_pack::RegistryPackImage::Source(image) = image else {
+            anyhow::bail!("built pack image release assets are not yet installed or admitted");
+        };
         anyhow::ensure!(
             selected.is_none(),
             "more than one --policy pack declares an image; select an explicit boot source"

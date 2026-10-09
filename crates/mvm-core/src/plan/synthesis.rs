@@ -154,7 +154,7 @@ pub struct SynthesisInput<'a> {
     /// backend dispatch. Boots resolved from an installed bundle set it.
     pub bundle_pin: Option<crate::plan::bundle::PlanArtifact>,
     /// Optional pin to an application-dependencies volume sealed by
-    /// `mvm_sdk::compile::deps_audit::seal_volume`. No boot path sets it
+    /// `mvm_compiler::deps_audit::seal_volume`. No boot path sets it
     /// today. When it is set, the supervisor's admit path re-runs
     /// `verify_sealed_volume` against the pinned `volume_hash` +
     /// `manifest_sha256` before backend dispatch (security claim 9).

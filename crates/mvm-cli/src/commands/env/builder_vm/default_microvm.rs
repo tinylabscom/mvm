@@ -25,6 +25,43 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
 
     let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let arch = builder_vm_host_arch();
+    if let Some(kernel) = dev_tier_kernel_override(&cache, arch, workload_kernel_label()) {
+        let path = kernel.display().to_string();
+        assert_workload_kernel_supports_verity(&path)?;
+        return Ok(path);
+    }
+    let source_checkout = super::images_built_from_source();
+    if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
+        let expected = super::local_pair::pair_workload_kernel_fingerprint(
+            &checkout,
+            WorkloadImageProfile::DefaultTenant,
+        )?;
+        let kernel = mvm_build::kernel_fetch::cached_kernel_path(&cache, arch, "workload");
+        let recorded = std::fs::read_to_string(kernel.with_file_name("local-pair-fingerprint"))
+            .unwrap_or_default();
+        anyhow::ensure!(
+            recorded.trim() == expected,
+            "the selected local image checkout's workload kernel is not prepared; run \
+             `mvmctl bootstrap` first"
+        );
+    }
+    match resolve_kernel(&cache, arch, "workload", source_checkout) {
+        KernelResolution::Cached(verified) => {
+            let path = verified.path().display().to_string();
+            assert_workload_kernel_supports_verity(&path)?;
+            Ok(path)
+        }
+        KernelResolution::NeedsBuild(_) | KernelResolution::NeedsFetch(_) => {
+            anyhow::bail!("workload kernel is not prepared; run `mvmctl bootstrap` first")
+        }
+    }
+}
+
+pub(crate) fn prepare_workload_kernel() -> Result<String> {
+    use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel, workload_kernel_label};
+
+    let cache = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let arch = builder_vm_host_arch();
 
     // The dev-tier kernel-label override answers before either acquisition
     // branch, so a machine run boots the same kernel family the launch
@@ -42,13 +79,9 @@ pub(crate) fn ensure_workload_kernel() -> Result<String> {
     // `default-tenant` set carries the workload kernel, built from the
     // checkout it names. An unusable configured path is an error here,
     // never a quiet fall-through to a download.
-    if let Some(checkout) = super::bootstrap::selected_local_checkout()? {
-        let path = super::local_pair::ensure_pair_workload_kernel(
-            &checkout,
-            WorkloadImageProfile::DefaultTenant,
-        )?;
-        let path = path.display().to_string();
-        assert_workload_kernel_supports_verity(&path)?;
+    if super::bootstrap::selected_local_checkout()?.is_some() {
+        super::local_pair::seed_pair_workload_kernel_cache()?;
+        let path = ensure_workload_kernel()?;
         ui::info(&format!("Workload kernel: pair-built at {path}"));
         return Ok(path);
     }
@@ -550,6 +583,17 @@ mod pair_default_image_tests {
     use mvm_build::image_source::ImageBuildRole;
     use mvm_core::util::test_env::TestEnv;
 
+    #[test]
+    fn launch_kernel_resolution_refuses_an_unprepared_cache() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        env.remove(mvm_build::image_source::MVM_IMAGES_DIR_ENV);
+
+        let error = ensure_workload_kernel().expect_err("launch must not acquire a kernel");
+        assert!(error.to_string().contains("mvmctl bootstrap"), "{error}");
+    }
+
     /// The five default-tenant artifacts, with the sizes and ext4 magic the
     /// artifact validator requires, and a producer-shaped sidecar.
     #[test]
@@ -690,7 +734,7 @@ mod pair_default_image_tests {
     }
 
     #[test]
-    fn ensure_workload_kernel_answers_from_the_pair_under_a_selector() {
+    fn pair_bootstrap_prepares_the_kernel_launch_resolution_requires() {
         let mut env = TestEnv::new();
         let pair = Pair::new();
         env.set("MVM_HOME", pair.tmp.path().join("home"));
@@ -700,7 +744,10 @@ mod pair_default_image_tests {
             pair.images.root(),
         );
         pair.publish_default_tenant();
-        let path = ensure_workload_kernel().expect("the kernel resolves from the pair");
+        let path = prepare_workload_kernel().expect("prepare the pair kernel");
+        let launch_path =
+            ensure_workload_kernel().expect("launch resolves the prepared pair kernel");
+        assert_eq!(path, launch_path);
         assert!(
             path.ends_with("vmlinux"),
             "the pair kernel path names the kernel artifact: {path}"

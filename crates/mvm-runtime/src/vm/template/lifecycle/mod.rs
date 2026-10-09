@@ -13,6 +13,9 @@ mod registry_sync;
 mod slots;
 mod snapshot;
 
+#[cfg(test)]
+mod path_security_tests;
+
 pub use artifacts::*;
 pub use build::*;
 pub use build_image::*;

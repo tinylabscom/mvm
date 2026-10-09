@@ -1,0 +1,43 @@
+# mvm-compiler
+
+Shared workload compilation from `mvm_contract::ir::Workload` to deterministic
+build artifacts. The compiler stages source, generates `flake.nix`,
+`launch.json`, and `workload.json`, and can emit a gzipped tar archive.
+
+## Boundaries
+
+- `mvm-contract` owns the workload IR and its schema-level validation.
+- This crate owns source copying, reachability, function/signature checks,
+  framework stripping, lockfile checks, dependency-volume audit data, hook
+  merging, launch/flake rendering, secret-reference stripping, and compilation
+  orchestration.
+- `mvm_sdk::compile` re-exports the same modules, functions, and error types
+  when the SDK's opt-in `compiler` feature is enabled. SDK builders and
+  language bridges remain in the base `mvm-sdk`.
+- Concrete builds run through `mvm-build` in the builder VM. Runnable package
+  assembly belongs to `mvm-bundler`; signing stays outside the compiler.
+  Compiler tar archives are build inputs, not runnable `.mvmpkg` packages.
+
+`compile` expects an already validated workload. `validate_lockfiles` is an
+explicit on-disk check; it is not implicitly invoked by `compile`. Its existing
+format-specific checks are heuristics, not full lockfile resolution or
+cryptographic verification.
+
+Use `compile_pinned` or `compile_archive_pinned` with `PinnedMvmRevision` for
+an explicit immutable mvm flake input. Callers must still generate and verify
+`flake.lock` inside the builder before publishing. Unpinned entrypoints retain
+the existing `MVM_FLAKE_URL` override behavior.
+
+## Validation
+
+```sh
+cargo test -p mvm-compiler
+cargo test -p mvm-sdk --no-default-features
+cargo test -p mvm-sdk --features compiler,deploy-remote
+cargo clippy -p mvm-compiler -p mvm-sdk --features mvm-sdk/compiler,mvm-sdk/deploy-remote --all-targets -- -D warnings
+```
+
+The compiler dependency-boundary test rejects SDK, execution, and packaging
+dependencies, including development dependencies. SDK compatibility tests
+exercise both API paths, compare generated files and archives for Python and
+TypeScript workloads, and verify error-type compatibility.

@@ -146,6 +146,15 @@ fn run_controller<H: VcpuHandle, C: ThreadCpuClock>(
 
     hold.store(false, Ordering::SeqCst);
     let measured_wall = start.elapsed();
+    final_achievement(&policy, measured_wall, measured_cpu, periods)
+}
+
+fn final_achievement(
+    policy: &QuotaPolicy,
+    measured_wall: Duration,
+    measured_cpu: Duration,
+    periods: u32,
+) -> QuotaAchievement {
     let target_millicores = policy.config().millicores();
     let achieved_millicores = if measured_wall.as_micros() == 0 {
         0
@@ -487,19 +496,18 @@ mod tests {
     fn the_achievement_is_computed_from_measurement_not_from_the_target() {
         let period = Duration::from_millis(10);
         let policy = QuotaPolicy::new(crate::quota::QuotaConfig::new(500, period).unwrap());
-        // The vCPU burns 8 ms per 10 ms period: 800 millicores measured.
-        let readings: Vec<Duration> = (1..=20)
-            .map(|i| Duration::from_millis(8 * i as u64))
-            .collect();
-        let clock = ScriptedClock::new(readings);
-        let handle = MockHandle::new();
-        let flag = Arc::new(AtomicBool::new(false));
-        handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
+        // CPU and wall measurements must describe the same window, without
+        // tying scripted CPU progress to the host scheduler's read count.
+        let measured_cpu = Duration::from_millis(80);
+        let measured_wall = Duration::from_millis(100);
+        let achievement = final_achievement(&policy, measured_wall, measured_cpu, 10);
 
-        std::thread::sleep(Duration::from_millis(85));
-        let achievement = quota.stop();
-
+        assert_eq!(achievement.target_millicores, 500);
+        assert_eq!(achievement.achieved_millicores, 800);
+        assert_eq!(achievement.period, period);
+        assert_eq!(achievement.measured_wall, measured_wall);
+        assert_eq!(achievement.measured_cpu, measured_cpu);
+        assert_eq!(achievement.periods, 10);
         assert!(
             achievement.achieved_millicores > achievement.target_millicores,
             "measured achievement {}/{} must reflect overshoot, not the target",
@@ -573,15 +581,18 @@ mod tests {
     #[test]
     fn an_achievement_over_a_zero_wall_window_is_not_a_division_by_zero() {
         let policy = share_policy(500);
-        let clock = ScriptedClock::new(vec![Duration::ZERO; 100]);
-        let handle = MockHandle::new();
-        let flag = Arc::new(AtomicBool::new(false));
-        handle.bind_flag(Arc::clone(&flag));
-        let quota = VcpuQuota::start(vec![handle], clock, policy, Arc::clone(&flag));
-
-        let achievement = quota.stop();
+        let achievement = final_achievement(&policy, Duration::ZERO, Duration::from_millis(80), 0);
 
         assert_eq!(achievement.periods, 0);
         assert_eq!(achievement.achieved_millicores, 0);
+    }
+
+    #[test]
+    fn an_achievement_saturates_at_the_representable_millicores() {
+        let policy = share_policy(500);
+        let achievement =
+            final_achievement(&policy, Duration::from_micros(1), Duration::from_secs(5), 1);
+
+        assert_eq!(achievement.achieved_millicores, u32::MAX);
     }
 }

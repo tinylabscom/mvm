@@ -2708,6 +2708,149 @@
       "title": "StopRequest",
       "type": "object"
     },
+    "ManifestInfoReply": {
+      "additionalProperties": false,
+      "properties": {
+        "persisted": {
+          "description": "PersistedManifest report owned by mvm-core.",
+          "type": "object"
+        },
+        "slot_hash": {
+          "type": "string"
+        },
+        "snapshot": {
+          "description": "Optional SnapshotInfo report owned by mvm-core.",
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "slot_hash",
+        "persisted",
+        "snapshot"
+      ],
+      "type": "object"
+    },
+    "ManifestInfoRequest": {
+      "additionalProperties": false,
+      "description": "A manifest file or directory; absent paths discover a manifest from cwd.",
+      "properties": {
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "InfoRequest",
+      "type": "object"
+    },
+    "ManifestListReply": {
+      "items": {
+        "description": "One built slot, preserving the manifest-list JSON representation.",
+        "properties": {
+          "manifest_path": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "orphan": {
+            "type": "boolean"
+          },
+          "slot_hash": {
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "manifest_path",
+          "orphan",
+          "slot_hash",
+          "updated_at"
+        ],
+        "title": "SlotRow",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "ManifestListRequest": {
+      "additionalProperties": false,
+      "description": "Filters for built slots. Tags have intersection semantics.",
+      "properties": {
+        "orphans": {
+          "default": false,
+          "type": "boolean"
+        },
+        "tags": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "title": "ListRequest",
+      "type": "object"
+    },
+    "ManifestVerifyReply": {
+      "description": "Identity of a slot whose runtime checksum verification succeeded.",
+      "properties": {
+        "manifest_path": {
+          "type": "string"
+        },
+        "slot_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_path",
+        "slot_hash"
+      ],
+      "title": "VerifiedSlot",
+      "type": "object"
+    },
+    "ManifestVerifyRequest": {
+      "additionalProperties": false,
+      "description": "Checksum verification of a built slot, optionally at a specific revision.",
+      "properties": {
+        "check_signature": {
+          "default": false,
+          "type": "boolean"
+        },
+        "path": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "title": "VerifyRequest",
+      "type": "object"
+    },
     "PortMapping": {
       "additionalProperties": false,
       "description": "A host:guest port forwarding on a machine — plain listing data that mirrors a backend's port mapping so a machine record can carry its forwards without exposing a runtime type.",
@@ -3917,6 +4060,57 @@
       "title": "MachineStop",
       "type": "object"
     },
+    "manifest_info": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestInfoReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestInfoRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestInfo",
+      "type": "object"
+    },
+    "manifest_list": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestListReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestListRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestList",
+      "type": "object"
+    },
+    "manifest_verify": {
+      "additionalProperties": false,
+      "properties": {
+        "reply": {
+          "$ref": "#/definitions/ManifestVerifyReply"
+        },
+        "request": {
+          "$ref": "#/definitions/ManifestVerifyRequest"
+        }
+      },
+      "required": [
+        "request",
+        "reply"
+      ],
+      "title": "ManifestVerify",
+      "type": "object"
+    },
     "session_call": {
       "additionalProperties": false,
       "properties": {
@@ -4021,6 +4215,9 @@
     }
   },
   "required": [
+    "manifest_info",
+    "manifest_list",
+    "manifest_verify",
     "backend_capabilities",
     "entrypoint_call",
     "machine_create",

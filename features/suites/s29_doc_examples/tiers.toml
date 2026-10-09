@@ -145,6 +145,10 @@ tier = "parse"
 reason = "needs an OCI image already pulled into the cache"
 
 [[command]]
+path = "image pull"
+tier = "live"
+
+[[command]]
 path = "image build-layer"
 tier = "exec"
 fixture = "app-layer"
@@ -180,6 +184,10 @@ tier = "live"
 path = "machine check-artifact"
 tier = "parse"
 reason = "names a signed .mvmpkg bundle that only a real build produces"
+
+[[command]]
+path = "pool warm"
+tier = "live"
 
 [[command]]
 path = "machine checkpoint create"
@@ -612,6 +620,10 @@ path = "pack list"
 tier = "exec"
 
 [[command]]
+path = "pack ls"
+tier = "exec"
+
+[[command]]
 path = "pack info"
 tier = "parse"
 reason = "requires an installed signed pack; isolated CLI scenarios exercise refusal and installed-cache tests exercise successful reopen"
@@ -629,6 +641,11 @@ tier = "exec"
 path = "pack registry update"
 tier = "parse"
 reason = "re-pulls from a remote registry and must verify a publisher signature; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
+
+[[command]]
+path = "pack search"
+tier = "parse"
+reason = "queries a remote registry index over the network, so the outcome tracks the registry rather than mvm; the fail-closed path is exercised by tests/cli.rs against a file:// registry"
 
 [[command]]
 path = "pack prune"

@@ -32,6 +32,19 @@ const IMAGE_SET_IDENTITY_TEMPLATES: &[&str] = &[
     "https://github.com/tinylabscom/mvm-images/.github/workflows/release.yml@refs/tags/image-set/v{version}",
 ];
 
+/// Identity for the rolling, commit-addressed source-helper producer.
+const SOURCE_HELPER_IDENTITY_TEMPLATES: &[&str] = &[
+    "https://github.com/tinylabscom/mvm/.github/workflows/source-host-helpers.yml@refs/heads/main",
+];
+
+/// Accepted workflow identities for commit-addressed source helper bundles.
+pub fn accepted_source_helper_identities() -> Vec<String> {
+    SOURCE_HELPER_IDENTITY_TEMPLATES
+        .iter()
+        .map(|identity| (*identity).to_string())
+        .collect()
+}
+
 /// Interpolate an image-set version into the canonical producer identity.
 pub fn accepted_image_set_identities(version: &str) -> Vec<String> {
     IMAGE_SET_IDENTITY_TEMPLATES
@@ -168,6 +181,17 @@ mod tests {
             t.accepted_identities
                 .iter()
                 .all(|i| !i.contains("{version}"))
+        );
+    }
+
+    #[test]
+    fn source_helpers_trust_only_the_main_branch_producer() {
+        assert_eq!(
+            accepted_source_helper_identities(),
+            vec![
+                "https://github.com/tinylabscom/mvm/.github/workflows/source-host-helpers.yml@refs/heads/main"
+                    .to_string()
+            ]
         );
     }
 }
