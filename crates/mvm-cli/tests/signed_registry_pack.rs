@@ -384,7 +384,12 @@ fn a_real_signed_image_pack_pulls_with_its_image_and_reopens_under_the_pin() {
     )
     .expect("reopen signed pack");
     assert_eq!(
-        verified.manifest().image.as_ref().expect("image").manifest,
+        match verified.manifest().image.as_ref().expect("image") {
+            mvm_core::registry_pack::RegistryPackImage::Template(template) => &template.manifest,
+            mvm_core::registry_pack::RegistryPackImage::Built(_) => {
+                panic!("template pack carries a built image")
+            }
+        },
         "pack/image/mvm.toml"
     );
     assert_eq!(verified.manifest_sha256().as_str(), summary.manifest_sha256);

@@ -72,7 +72,16 @@ pub(in crate::commands) fn select_pack_image(args: &mut RunArgs) -> Result<()> {
             selected.is_none(),
             "more than one --policy pack declares an image; select an explicit boot source"
         );
-        let manifest_path = installed.payload_root().join(&image.manifest);
+        // Built pack images are verified and pinned at pull and admission, but
+        // booting a pre-built rootfs is not implemented on this client; fail
+        // closed with the reason rather than silently building nothing.
+        let mvm_core::registry_pack::RegistryPackImage::Template(template) = image else {
+            anyhow::bail!(
+                "pack {} carries a pre-built image; this client cannot boot built pack images yet",
+                verified.manifest().reference
+            );
+        };
+        let manifest_path = installed.payload_root().join(&template.manifest);
         let manifest = mvm_core::domain::manifest::Manifest::read_file(&manifest_path)
             .context("reading verified pack image manifest")?;
         let flake_dir = manifest_path

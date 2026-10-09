@@ -69,6 +69,21 @@ pub struct BuiltPackImageDescriptor {
     pub assets: BuiltImageAssets,
 }
 
+impl BuiltPackImageDescriptor {
+    /// Every image and attestation asset, in declaration order.
+    pub fn assets(&self) -> [&BuiltImageAsset; 7] {
+        [
+            &self.assets.rootfs,
+            &self.assets.verity,
+            &self.assets.roothash,
+            &self.assets.mvm_meta,
+            &self.assets.rootfs_signature_bundle,
+            &self.assets.provenance_statement,
+            &self.assets.provenance_signature_bundle,
+        ]
+    }
+}
+
 /// A descriptor is not eligible for asset fetch unless all immutable names
 /// and the compiled base-set pin agree.
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -382,12 +397,19 @@ impl BuiltPackImageDescriptor {
     }
 }
 
+/// A descriptor pinned to the compiled image-set lock, for wiring tests in
+/// other modules of this crate.
+#[cfg(test)]
+pub(crate) fn test_descriptor() -> BuiltPackImageDescriptor {
+    tests::descriptor()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::image_set::image_train_lock;
 
-    fn descriptor() -> BuiltPackImageDescriptor {
+    pub(crate) fn descriptor() -> BuiltPackImageDescriptor {
         let lock = &image_train_lock().image_set;
         let digest = Sha256Hex::from_bytes(b"test asset");
         let asset = |name: &str| BuiltImageAsset {

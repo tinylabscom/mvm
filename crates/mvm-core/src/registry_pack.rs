@@ -364,15 +364,36 @@ pub struct RegistryPackFile {
     pub size: u64,
 }
 
-/// Source files for the microVM image a pack can build and boot.
+/// Source files for a build-from-source pack image.
 ///
-/// The manifest and neighboring flake files are ordinary signed payload
-/// files; their exact digests are carried by `RegistryPackManifest::files`.
+/// The deny-unknown-fields serde attribute is load-bearing: a tampered
+/// manifest that adds a host-touching key to the image block must refuse to
+/// parse, not be read as a template that ignores the extra key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RegistryPackImage {
+pub struct RegistryPackTemplateImage {
     /// In-pack path to `mvm.toml` beside `flake.nix` and `flake.lock`.
     pub manifest: String,
+}
+
+/// The microVM image a pack boots.
+///
+/// Two shapes ride the manifest `image` field: a [`Template`] pack builds
+/// from in-pack source files, while a [`Built`] pack pins a pre-built
+/// rootfs whose schema-v2 descriptor binds every image and attestation
+/// asset, the exact compiled image-set base pin, and a signed provenance
+/// statement. A built descriptor is pin-verified against the compiled
+/// `images.lock` before the pack is adopted, re-verified at payload
+/// verification, and re-checked at host admission like every other pack
+/// identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RegistryPackImage {
+    /// Build-from-source template (`mvm.toml` beside `flake.nix`/`flake.lock`).
+    Template(RegistryPackTemplateImage),
+    /// Schema-v2 built-image descriptor with fixed assets and base pin.
+    /// Boxed: the descriptor is ~600 bytes against the template's path string.
+    Built(Box<crate::registry_pack_image::BuiltPackImageDescriptor>),
 }
 
 /// Strict metadata signed by a registry-pack publisher.
@@ -935,29 +956,65 @@ fn validate_registry_pack_manifest(
         }
     }
     if let Some(image) = &manifest.image {
-        let path = &image.manifest;
-        let manifest_path = Path::new(path);
-        if !pack_path_is_safe(path)
-            || !path.starts_with("pack/")
-            || manifest_path
-                .file_name()
-                .is_none_or(|name| name != "mvm.toml")
-        {
-            return Err(RegistryPackVerificationError::InvalidImageDeclaration {
-                reason: format!("manifest path {path:?} must be a safe in-pack mvm.toml"),
-            });
-        }
-        let parent = manifest_path
-            .parent()
-            .expect("a safe in-pack mvm.toml has a parent");
-        for name in ["mvm.toml", "flake.nix", "flake.lock"] {
-            let required = parent.join(name);
-            let required = required.to_string_lossy();
-            if !paths.contains(required.as_ref()) {
-                return Err(RegistryPackVerificationError::InvalidImageDeclaration {
-                    reason: format!("image source file {required:?} is not declared"),
-                });
+        match image {
+            RegistryPackImage::Template(template) => {
+                let path = &template.manifest;
+                let manifest_path = Path::new(path);
+                if !pack_path_is_safe(path)
+                    || !path.starts_with("pack/")
+                    || manifest_path
+                        .file_name()
+                        .is_none_or(|name| name != "mvm.toml")
+                {
+                    return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+                        reason: format!("manifest path {path:?} must be a safe in-pack mvm.toml"),
+                    });
+                }
+                let parent = manifest_path
+                    .parent()
+                    .expect("a safe in-pack mvm.toml has a parent");
+                for name in ["mvm.toml", "flake.nix", "flake.lock"] {
+                    let required = parent.join(name);
+                    let required = required.to_string_lossy();
+                    if !paths.contains(required.as_ref()) {
+                        return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+                            reason: format!("image source file {required:?} is not declared"),
+                        });
+                    }
+                }
             }
+            RegistryPackImage::Built(descriptor) => {
+                validate_built_image_against_lock(descriptor, &manifest.reference, &paths)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Pin-check a built-image descriptor against the compiled image-set lock and
+/// require every image and attestation asset to be a declared payload file.
+/// Runs at adoption, on every lock-first re-verification, and again at host
+/// admission, so a pack built against a different base set refuses everywhere
+/// the manifest itself is verified.
+fn validate_built_image_against_lock(
+    descriptor: &crate::registry_pack_image::BuiltPackImageDescriptor,
+    reference: &PackReference,
+    declared: &std::collections::BTreeSet<&str>,
+) -> Result<(), RegistryPackVerificationError> {
+    use crate::image_set::image_train_lock;
+    descriptor
+        .validate_pin(reference, &image_train_lock().image_set)
+        .map_err(
+            |error| RegistryPackVerificationError::InvalidImageDeclaration {
+                reason: format!("built image descriptor is not pinned to this client: {error}"),
+            },
+        )?;
+    for asset in descriptor.assets() {
+        let path = asset.name.as_str();
+        if !declared.contains(path) {
+            return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+                reason: format!("built image asset {path:?} is not a declared payload file"),
+            });
         }
     }
     Ok(())
@@ -1025,8 +1082,8 @@ pub fn verify_registry_pack_contents(
         }
     }
     refuse_undeclared_payload_paths(root, root, &declared)?;
-    if let Some(image) = &verified.manifest().image {
-        validate_registry_pack_image_manifest(verified, root, image)?;
+    if let Some(RegistryPackImage::Template(template)) = &verified.manifest().image {
+        validate_registry_pack_image_manifest(verified, root, &template.manifest)?;
     }
     Ok(())
 }
@@ -1034,14 +1091,14 @@ pub fn verify_registry_pack_contents(
 fn validate_registry_pack_image_manifest(
     verified: &VerifiedRegistryPack,
     root: &Path,
-    image: &RegistryPackImage,
+    manifest_path: &str,
 ) -> Result<(), RegistryPackVerificationError> {
     const MAX_IMAGE_MANIFEST_BYTES: u64 = 64 * 1024;
     let file = verified
         .manifest()
         .files
         .iter()
-        .find(|file| file.path == image.manifest)
+        .find(|file| file.path == manifest_path)
         .ok_or_else(|| RegistryPackVerificationError::InvalidImageDeclaration {
             reason: "the image mvm.toml is not a signed payload file".to_string(),
         })?;
@@ -1050,16 +1107,16 @@ fn validate_registry_pack_image_manifest(
             reason: "mvm.toml exceeds the 64 KiB limit".to_string(),
         });
     }
-    let bytes = std::fs::read(root.join(&image.manifest)).map_err(|error| {
+    let bytes = std::fs::read(root.join(manifest_path)).map_err(|error| {
         RegistryPackVerificationError::PayloadFileRead {
-            path: image.manifest.clone(),
+            path: manifest_path.to_string(),
             reason: error.to_string(),
         }
     })?;
     let digest = Sha256Hex::from_bytes(&bytes);
     if digest != file.sha256 {
         return Err(RegistryPackVerificationError::PayloadHashMismatch {
-            path: image.manifest.clone(),
+            path: manifest_path.to_string(),
             declared: file.sha256.clone(),
             actual: digest,
         });
@@ -1735,6 +1792,96 @@ mod tests {
     }
 
     #[test]
+    fn a_built_image_descriptor_verifies_against_the_compiled_base_lock() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&signed_manifest_bytes("runtime/python@1.0.0")).unwrap();
+        manifest["image"] =
+            serde_json::to_value(crate::registry_pack_image::test_descriptor()).unwrap();
+        for role in crate::registry_pack_image::test_descriptor().assets() {
+            manifest["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "path": role.name.as_str(),
+                    "sha256": role.sha256.as_str(),
+                    "size": role.size,
+                }));
+        }
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let lock = PackLockfile::new(vec![pin("runtime/python@1.0.0", &bytes)]).unwrap();
+        let requested = reference("runtime/python@1.0.0");
+        let policy = publisher_policy();
+        let request = RegistryPackVerification::new(&requested, &bytes, b"bundle", &lock, &policy);
+        let verified = verify_registry_pack_with(&request, accept_signature)
+            .expect("a descriptor pinned to the compiled base set verifies");
+        assert!(matches!(
+            verified.manifest().image,
+            Some(RegistryPackImage::Built(_))
+        ));
+    }
+
+    #[test]
+    fn a_built_image_descriptor_with_a_moved_base_lock_refuses() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&signed_manifest_bytes("runtime/python@1.0.0")).unwrap();
+        let mut descriptor = crate::registry_pack_image::test_descriptor();
+        descriptor.base_set.manifest_sha256 = Sha256Hex::from_bytes(b"another base");
+        manifest["image"] = serde_json::to_value(&descriptor).unwrap();
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let lock = PackLockfile::new(vec![pin("runtime/python@1.0.0", &bytes)]).unwrap();
+        let requested = reference("runtime/python@1.0.0");
+        let policy = publisher_policy();
+        let request = RegistryPackVerification::new(&requested, &bytes, b"bundle", &lock, &policy);
+        assert!(matches!(
+            verify_registry_pack_with(&request, accept_signature),
+            Err(RegistryPackVerificationError::InvalidImageDeclaration { .. })
+        ));
+    }
+
+    #[test]
+    fn a_built_image_descriptor_with_an_undeclared_asset_refuses() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&signed_manifest_bytes("runtime/python@1.0.0")).unwrap();
+        let descriptor = crate::registry_pack_image::test_descriptor();
+        manifest["image"] = serde_json::to_value(&descriptor).unwrap();
+        // Declare every asset except the rootfs so the declaration check, not
+        // the generic payload check, is what refuses.
+        for role in descriptor.assets().iter().skip(1) {
+            manifest["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "path": role.name.as_str(),
+                    "sha256": role.sha256.as_str(),
+                    "size": role.size,
+                }));
+        }
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let lock = PackLockfile::new(vec![pin("runtime/python@1.0.0", &bytes)]).unwrap();
+        let requested = reference("runtime/python@1.0.0");
+        let policy = publisher_policy();
+        let request = RegistryPackVerification::new(&requested, &bytes, b"bundle", &lock, &policy);
+        assert!(matches!(
+            verify_registry_pack_with(&request, accept_signature),
+            Err(RegistryPackVerificationError::InvalidImageDeclaration { .. })
+        ));
+    }
+
+    #[test]
+    fn a_template_image_keeps_its_wire_shape() {
+        let image = RegistryPackImage::Template(RegistryPackTemplateImage {
+            manifest: "pack/image/mvm.toml".to_string(),
+        });
+        let value = serde_json::to_value(&image).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"manifest": "pack/image/mvm.toml"})
+        );
+        let round: RegistryPackImage = serde_json::from_value(value).unwrap();
+        assert_eq!(round, image);
+    }
+
+    #[test]
     fn a_signed_image_descriptor_names_only_declared_in_pack_source_files() {
         let mut manifest: serde_json::Value =
             serde_json::from_slice(&signed_manifest_bytes("runtime/python@1.2.3")).unwrap();
@@ -1765,7 +1912,10 @@ mod tests {
 
         let verified = verify(&manifest).expect("declared image files verify");
         assert_eq!(
-            verified.manifest().image.as_ref().unwrap().manifest,
+            match verified.manifest().image.as_ref().unwrap() {
+                RegistryPackImage::Template(template) => &template.manifest,
+                RegistryPackImage::Built(_) => panic!("template pack carries a built image"),
+            },
             "pack/image/mvm.toml"
         );
         let mut unknown = manifest.clone();
@@ -1986,9 +2136,9 @@ mod tests {
             schema_version: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
             reference: reference("runtime/python@1.2.3"),
             description: "Python image".to_string(),
-            image: Some(RegistryPackImage {
+            image: Some(RegistryPackImage::Template(RegistryPackTemplateImage {
                 manifest: "pack/image/mvm.toml".to_string(),
-            }),
+            })),
             files: declared,
         };
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
