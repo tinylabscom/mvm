@@ -209,8 +209,29 @@ impl ConsoleTail {
     ///
     /// The file is reopened whenever it is not yet held, so a reader that
     /// attached before the backend created it picks it up rather than
-    /// reporting an empty capture forever.
+    /// reporting an empty capture forever. On Unix, follow the name across
+    /// fresh-inode capture replacement, restarting at byte zero without
+    /// resetting the output sequence.
     fn read_tick(&mut self) -> io::Result<Option<Vec<u8>>> {
+        #[cfg(unix)]
+        if let Some(file) = &self.file {
+            use std::os::unix::fs::MetadataExt as _;
+
+            let held = file.metadata()?;
+            let current = match std::fs::metadata(&self.path) {
+                Ok(meta) => meta,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    self.file = None;
+                    self.offset = 0;
+                    return Ok(None);
+                }
+                Err(err) => return Err(err),
+            };
+            if (held.dev(), held.ino()) != (current.dev(), current.ino()) {
+                self.file = None;
+                self.offset = 0;
+            }
+        }
         if self.file.is_none() {
             match File::open(&self.path) {
                 Ok(file) => self.file = Some(file),
@@ -313,6 +334,65 @@ mod tests {
 
         write(&path, b"late boot");
         assert_eq!(drain(&mut tail), b"late boot");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_following_reader_reopens_private_capture_replacement_without_replay() {
+        use crate::util::atomic_io::open_private_truncated;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console.log");
+        let mut old = open_private_truncated(&path).unwrap();
+        old.write_all(b"SYNTHETIC_FIRST_RUN").unwrap();
+        let mut tail = ConsoleTail::open(&path, true);
+        assert_eq!(tail.read_tick().unwrap().unwrap(), b"SYNTHETIC_FIRST_RUN");
+        assert!(tail.read_tick().unwrap().is_none());
+
+        let mut current = open_private_truncated(&path).unwrap();
+        old.write_all(b"STALE_INODE_BYTES").unwrap();
+        current.write_all(b"NEW_RUN").unwrap();
+        assert_eq!(tail.read_tick().unwrap().unwrap(), b"NEW_RUN");
+        assert!(tail.read_tick().unwrap().is_none());
+        current.write_all(b"_APPENDED").unwrap();
+        assert_eq!(tail.read_tick().unwrap().unwrap(), b"_APPENDED");
+        assert!(tail.read_tick().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_disappeared_capture_waits_for_recreation_from_byte_zero() {
+        use crate::util::atomic_io::open_private_truncated;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console.log");
+        let mut old = open_private_truncated(&path).unwrap();
+        old.write_all(b"LONG_PREVIOUS_RUN").unwrap();
+        let mut tail = ConsoleTail::open(&path, true);
+        assert_eq!(tail.read_tick().unwrap().unwrap(), b"LONG_PREVIOUS_RUN");
+        std::fs::remove_file(&path).unwrap();
+        old.write_all(b"UNLINKED").unwrap();
+        assert!(tail.read_tick().unwrap().is_none());
+        assert!(tail.read_tick().unwrap().is_none());
+        open_private_truncated(&path)
+            .unwrap()
+            .write_all(b"NEW")
+            .unwrap();
+        assert_eq!(tail.read_tick().unwrap().unwrap(), b"NEW");
+        assert!(tail.read_tick().unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_capture_replaced_by_a_directory_returns_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("console.log");
+        write(&path, b"previous");
+        let mut tail = ConsoleTail::open(&path, true);
+        assert_eq!(tail.read_tick().unwrap().unwrap(), b"previous");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(tail.read_tick().is_err());
     }
 
     #[test]
