@@ -55,8 +55,8 @@ pub struct HostChannels {
     /// Read-only live host-directory shares as `(virtio-fs tag, host path)`.
     /// Host console log to mirror guest output into as the guest emits it.
     ///
-    /// The whole-run transcript comes back in [`KernelBootResult::console`]
-    /// either way; this is what makes it readable *before* the run loop
+    /// For legacy file capture the whole-run transcript also comes back in
+    /// [`KernelBootResult::console`]; this makes it readable *before* the run loop
     /// returns, so a guest that never finishes booting can be diagnosed while
     /// it is still hung instead of only once it has been stopped. Opened
     /// write-only: the console carries guest output to the host and never the
@@ -64,6 +64,7 @@ pub struct HostChannels {
     pub console_log: Option<PathBuf>,
     /// Owner-provided capture handoff. Takes precedence over `console_log`,
     /// including on failure: a protected sink must never downgrade to a file.
+    /// Disables the in-memory whole-run replay buffer and result console.
     /// Writes execute on the vCPU path, so this must be a nonblocking adapter.
     pub console_sink: Option<Box<dyn std::io::Write + Send>>,
     /// Optional host-visible marker acknowledged after the run loop enters its
@@ -92,6 +93,8 @@ pub struct HostChannels {
     /// Where an accepted handoff is published, for a supervisor that has to
     /// arm the claimed child's bounds.
     pub handoff_accepted: Option<mvm_vmm::hvf_handoff::HandoffAcceptedSender>,
+    /// Pre-ACK capture owner. Required for protected resident reassignment.
+    pub capture_control: Option<mvm_vmm::hvf_handoff::CaptureControlSender>,
 }
 
 /// An injected owner is authoritative even if its consumer has failed.
@@ -101,7 +104,7 @@ pub(super) fn install_console_sink(
     sink: Option<Box<dyn std::io::Write + Send>>,
 ) {
     if let Some(sink) = sink {
-        uart.stream_to(sink);
+        uart.protected_stream_to(sink);
     } else if let Some(path) = legacy_path
         && let Ok(file) = mvm_vmm::host::console_capture::open_console_capture(path)
     {
