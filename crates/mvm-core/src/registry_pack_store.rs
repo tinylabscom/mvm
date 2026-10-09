@@ -70,9 +70,10 @@ struct RevocationTrustFile {
 }
 
 /// Check a signed pack against the operator's independently trusted cached
-/// revocation feed when one is configured. Built-image packs require this
-/// independent trust; policy-only and source-image packs retain optional
-/// revocation configuration. An enabled but missing or stale feed is an error.
+/// revocation feed when one is configured. Packs in the reserved `mvm`
+/// namespace and built-image packs require this independent trust;
+/// legacy policy-only and source-image packs retain optional configuration.
+/// An enabled but missing or stale feed is an error.
 pub fn check_registry_pack_revocations_if_configured(
     verified: &VerifiedRegistryPack,
 ) -> Result<(), RegistryPackStoreError> {
@@ -143,10 +144,11 @@ where
 {
     let trust = match load_revocation_trust(trust_path)? {
         Some(trust) => trust,
-        None if matches!(
-            &verified.manifest().image,
-            Some(RegistryPackImage::Built(_))
-        ) =>
+        None if verified.manifest().reference.namespace() == "mvm"
+            || matches!(
+                &verified.manifest().image,
+                Some(RegistryPackImage::Built(_))
+            ) =>
         {
             return Err(RegistryPackStoreError::MissingRevocationTrust {
                 path: trust_path.display().to_string(),
@@ -443,7 +445,8 @@ impl LoadedPublisherPolicy {
 }
 
 /// Load the operator publisher policy, falling back to the official
-/// registry's built-in trust when no policy file exists.
+/// registry's built-in trust when no policy file exists. An operator policy
+/// may exclude `mvm`, but cannot assign a different identity to it.
 ///
 /// A missing file means the operator has not made a trust decision yet, so
 /// the official policy applies. A malformed file fails closed: a broken
@@ -767,7 +770,11 @@ mod tests {
                     || identity == crate::registry_pack::LEGACY_PACK_SIGNING_IDENTITY
             }));
         }
-        assert!(loaded.policy.trust_for_namespace("mvm").is_err());
+        let mvm = loaded.policy.trust_for_namespace("mvm").unwrap();
+        assert_eq!(
+            mvm.accepted_identities,
+            [crate::registry_pack::OFFICIAL_PACK_SIGNING_IDENTITY]
+        );
         assert!(loaded.policy.trust_for_namespace("community").is_err());
     }
 
@@ -852,6 +859,14 @@ mod tests {
         let policy = publisher_policy();
         adopt_registry_pack_with(&adoption(&requested, &manifest, &policy), accept)
             .expect("signed test pack")
+    }
+
+    fn verified_mvm_for_revocation_test() -> VerifiedRegistryPack {
+        let requested = reference("mvm/claude@1.2.3");
+        let manifest = manifest_bytes("mvm/claude@1.2.3");
+        let policy = crate::registry_pack::official_publisher_policy();
+        adopt_registry_pack_with(&adoption(&requested, &manifest, &policy), accept)
+            .expect("signed MVM test pack")
     }
 
     fn verified_built_image_for_revocation_test() -> VerifiedRegistryPack {
@@ -967,6 +982,23 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn mvm_namespace_requires_independent_revocation_trust_without_a_built_image() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        let trust_path = home.path().join("missing.toml");
+        assert!(matches!(
+            check_registry_pack_revocations_at(
+                &verified_mvm_for_revocation_test(),
+                &trust_path,
+                &store,
+                Utc::now(),
+            ),
+            Err(RegistryPackStoreError::MissingRevocationTrust { path })
+                if path == trust_path.display().to_string()
+        ));
+    }
+
     #[cfg(unix)]
     #[test]
     fn built_image_accepts_fresh_independent_feed_and_refuses_revocation() {
@@ -979,6 +1011,41 @@ mod tests {
         let verified = verified_built_image_for_revocation_test();
         check_signed_test_document(&verified, &trust_path, 7, vec![], vec![])
             .expect("fresh independently signed feed permits built image");
+        assert!(matches!(
+            check_signed_test_document(
+                &verified,
+                &trust_path,
+                7,
+                vec![],
+                vec![verified.manifest_sha256().as_str().to_string()],
+            ),
+            Err(RegistryPackStoreError::Revoked(_))
+        ));
+        assert!(matches!(
+            check_signed_test_document(&verified, &trust_path, 9, vec![], vec![]),
+            Err(RegistryPackStoreError::Revoked(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mvm_namespace_requires_fresh_feed_and_refuses_revoked_manifest() {
+        let home = tempfile::tempdir().expect("tempdir");
+        let trust_path = home.path().join("trust.toml");
+        write_trust(
+            &trust_path,
+            "schema_version = 1\nissuer = 'test issuer'\naccepted_identities = ['independent release identity']\n",
+        );
+        let store = RegistryPackRevocationStore::new(home.path().join("cache"));
+        let verified = verified_mvm_for_revocation_test();
+        assert!(matches!(
+            check_registry_pack_revocations_at(&verified, &trust_path, &store, Utc::now()),
+            Err(RegistryPackStoreError::RevocationStore(
+                RegistryPackRevocationStoreError::Missing
+            ))
+        ));
+        check_signed_test_document(&verified, &trust_path, 7, vec![], vec![])
+            .expect("fresh independent feed permits the pack");
         assert!(matches!(
             check_signed_test_document(
                 &verified,

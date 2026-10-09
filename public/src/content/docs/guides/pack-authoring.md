@@ -307,9 +307,9 @@ user (mode `0600` or stricter), and its directory must be private (mode `0700`
 or stricter). When this file exists, pull, installed-pack verification, and host
 admission require a fresh signed feed in the private revocation cache and
 reject a revoked signer or manifest digest. A missing, expired, corrupt, or
-rolled-back feed fails closed. Built-image packs require this independently
+rolled-back feed fails closed. Built-image packs and every `mvm/` pack require this independently
 anchored trust and a fresh feed at pull and every installed-pack reopen;
-removing the trust file refuses them. Policy-only and source-image packs retain
+removing the trust file refuses them. Legacy policy-only and source-image packs retain
 the legacy publisher-only behavior when no trust file is configured. After
 obtaining the signed JSON document and its
 signature bundle through an operator-controlled channel, run
@@ -347,9 +347,15 @@ https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/head
 
 under the issuer `https://token.actions.githubusercontent.com`. The former
 `mvm-templates` workflow identity is also accepted until 2026-11-06 00:00
-UTC, after which its bundles fail under built-in trust. There is no default
-trust for `mvm/` or community namespaces. To make your own decision, write
-`$MVM_HOME/registry/publishers.toml`. It replaces the default wholesale. This
+UTC, after which its bundles fail under built-in trust. The `mvm/` namespace
+is reserved to the exact current workflow identity. An operator policy may
+exclude `mvm`, but its wildcard or explicit `mvm` entry cannot assign a
+different identity. This does
+not establish official status; an independent revocation root and fresh feed
+are still required, and no official pack is currently published. There is no
+default trust for community namespaces. To configure other namespaces, write
+`$MVM_HOME/registry/publishers.toml`. It replaces the default for those
+namespaces. This
 one keeps the former workflow for `runtime` packs only:
 
 ```toml

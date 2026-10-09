@@ -510,8 +510,8 @@ impl RegistryPackPublisherPolicy {
         &self.publishers
     }
 
-    /// The trust for `namespace`: the exact publisher entry when one exists,
-    /// otherwise the `"*"` wildcard publisher when the policy declares one.
+    /// The trust for `namespace`: the reserved `mvm` release identity when
+    /// explicitly present, then the exact publisher or wildcard entry.
     pub fn trust_for_namespace(
         &self,
         namespace: &str,
@@ -524,6 +524,20 @@ impl RegistryPackPublisherPolicy {
         namespace: &str,
         now: DateTime<Utc>,
     ) -> Result<KeylessTrust, RegistryPackVerificationError> {
+        if namespace == "mvm" {
+            return self
+                .publishers
+                .iter()
+                .find(|publisher| publisher.namespace == "mvm")
+                .filter(|publisher| {
+                    publisher.issuer == OFFICIAL_PACK_SIGNING_ISSUER
+                        && publisher.accepted_identities == [OFFICIAL_PACK_SIGNING_IDENTITY]
+                })
+                .map(RegistryPackPublisher::keyless_trust)
+                .ok_or_else(|| RegistryPackVerificationError::UntrustedNamespace {
+                    namespace: namespace.to_string(),
+                });
+        }
         let mut trust = self
             .publishers
             .iter()
@@ -570,11 +584,12 @@ pub const LEGACY_PACK_SIGNING_CUTOFF: &str = "2026-11-06T00:00:00Z";
 pub const OFFICIAL_PACK_SIGNING_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 /// The publisher trust policy that applies when the operator has made no
-/// trust decision of their own. It accepts only the existing `agent` and
-/// `runtime` namespaces under the current identity, and temporarily under
-/// the previous identity. An operator policy file replaces it wholesale.
+/// trust decision of their own. The `mvm` namespace is reserved to the exact
+/// current release identity. An operator policy may exclude it but cannot
+/// assign a different signer.
+/// Legacy `agent` and `runtime` identities expire at the stated cutoff.
 pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
-    let publishers = ["agent", "runtime"]
+    let mut publishers: Vec<_> = ["agent", "runtime"]
         .into_iter()
         .map(|namespace| {
             RegistryPackPublisher::new(
@@ -588,6 +603,14 @@ pub fn official_publisher_policy() -> RegistryPackPublisherPolicy {
             .expect("the built-in publisher policy is built from valid constants")
         })
         .collect();
+    publishers.push(
+        RegistryPackPublisher::new(
+            "mvm",
+            OFFICIAL_PACK_SIGNING_ISSUER,
+            vec![OFFICIAL_PACK_SIGNING_IDENTITY.to_string()],
+        )
+        .expect("the built-in MVM publisher has a valid identity"),
+    );
     let mut policy = RegistryPackPublisherPolicy::new(publishers)
         .expect("the built-in publisher policy has unique namespaces");
     policy.legacy_identity_expires_at = Some(
@@ -1504,12 +1527,33 @@ mod tests {
             let trust = policy.trust_for_namespace_at(namespace, at_cutoff).unwrap();
             assert_eq!(trust.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
         }
-        assert!(policy.trust_for_namespace("mvm").is_err());
+        let mvm = policy.trust_for_namespace("mvm").unwrap();
+        assert_eq!(mvm.issuer, OFFICIAL_PACK_SIGNING_ISSUER);
+        assert_eq!(mvm.accepted_identities, [OFFICIAL_PACK_SIGNING_IDENTITY]);
         assert!(policy.trust_for_namespace("community").is_err());
         assert_eq!(
             OFFICIAL_PACK_SIGNING_IDENTITY,
             "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main"
         );
+    }
+
+    #[test]
+    fn operator_wildcard_and_exact_entries_cannot_spoof_mvm_namespace() {
+        let policy = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new("*", "operator", vec!["wildcard".to_string()]).unwrap(),
+            RegistryPackPublisher::new("mvm", "operator", vec!["spoof".to_string()]).unwrap(),
+        ])
+        .unwrap();
+        assert!(policy.trust_for_namespace("mvm").is_err());
+        assert_eq!(
+            policy.trust_for_namespace("community").unwrap().issuer,
+            "operator"
+        );
+        let explicit_spoof = RegistryPackPublisherPolicy::new(vec![
+            RegistryPackPublisher::new("mvm", "operator", vec!["spoof".to_string()]).unwrap(),
+        ])
+        .unwrap();
+        assert!(explicit_spoof.trust_for_namespace("mvm").is_err());
     }
 
     #[test]

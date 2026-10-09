@@ -1593,7 +1593,7 @@ running microVM.
 | `mvmctl pack registry update ns/name[@version]`           | Compatibility spelling of `pack update ns/name[@version]`                                                                                                         |
 | `mvmctl pack registry revocations update --help` | Show the required `--document` signed-feed path and `--bundle` signature-bundle path. Updating verifies the supplied bytes under the operator's configured release identity before advancing the durable cache checkpoint. |
 | `mvmctl search [QUERY]`                                   | Search the signed pack registry, marking installed packs (`--json`)                                                                                               |
-| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. A written policy replaces it wholesale; `mvm/` has no built-in trust. |
+| `mvmctl pull ns/name[@version]`                           | Fetch, verify against the publisher trust policy, install, and pin a signed registry pack and every pack its signed profile references. Without `$MVM_HOME/registry/publishers.toml`, the built-in policy accepts the exact renamed `mvm-packs` workflow identity for `agent/` and `runtime/`, plus the former identity until 2026-11-06 00:00 UTC. The reserved `mvm/` namespace accepts only the current exact workflow identity; operator policy may deny but never replace it. Independent revocation trust and a fresh signed feed are required before installation or execution. |
 | `mvmctl bundle export`                                    | Seal a built template into a signed `.mvmpkg`, signed by the host signer at `~/.mvm/keys/host-signer.ed25519` — the same key that signs `ExecutionPlan` envelopes |
 | `mvmctl bundle export <t> --cmdline <file>`               | Record the kernel command line the workload was built with (printable ASCII, at most 2048 bytes). Advisory: the launcher still derives the command line it boots with |
 | `mvmctl bundle export <t> --posture <profile>`            | Declare a security posture (`sealed-prod`, `dev`, `builder`) that every launch of the bundle may only narrow. It starts closed: no egress, no volumes, authentication required. `sealed-prod` needs a dm-verity rootfs |
@@ -1611,8 +1611,9 @@ running microVM.
 
 Pack inspection reports `official_status: "not_established"`: verification under the
 current publisher policy does not by itself establish official MVM release
-status. Revocation checks cover an operator-configured signed feed when one is
-configured; a feed is not required by the current registry-pack model. The
+status. Revocation checks cover an operator-configured signed feed; for `mvm/`
+and built-image packs, independent revocation trust and a fresh feed are required.
+No official release root has been established. The
 `revocation_scope: "operator_configured_only"` JSON field makes that limit
 explicit. A valid signature proves publisher identity and content integrity,
 not safety.
