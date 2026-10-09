@@ -255,6 +255,16 @@ pub fn is_dangerous_loader_var(key: &str) -> bool {
                 | "LOCPATH"
                 | "MALLOC_TRACE"
                 | "MALLOC_CHECK_"
+                // Shell startup injection: a mediated shell-class tool that
+                // runs a script reads BASH_ENV (bash, non-interactive) or ENV
+                // (posix mode), and BASHOPTS/SHELLOPTS reshape what the
+                // running script may do. All four name a workload-writable
+                // file the tool would execute as its own identity inside the
+                // attributed session — an attribution/scope bypass vector.
+                | "BASH_ENV"
+                | "ENV"
+                | "BASHOPTS"
+                | "SHELLOPTS"
         )
 }
 
@@ -498,13 +508,24 @@ mod tests {
         assert!(is_dangerous_loader_var("LD_LIBRARY_PATH"));
         assert!(is_dangerous_loader_var("LD_AUDIT"));
         assert!(is_dangerous_loader_var("HOSTALIASES"));
+        // Shell startup injection vectors: a mediated shell-class tool would
+        // execute a workload-writable file named here as its own identity.
+        assert!(is_dangerous_loader_var("BASH_ENV"));
+        assert!(is_dangerous_loader_var("ENV"));
+        assert!(is_dangerous_loader_var("BASHOPTS"));
+        assert!(is_dangerous_loader_var("SHELLOPTS"));
         assert!(!is_dangerous_loader_var("PATH"));
         assert!(!is_dangerous_loader_var("OPENAI_BASE_URL"));
+        assert!(!is_dangerous_loader_var("ENVIRONMENT"));
 
         let cleaned = sanitized_tool_env(&[
             ("PATH".into(), "/bin".into()),
             ("LD_PRELOAD".into(), "/tmp/evil.so".into()),
             ("LD_AUDIT".into(), "/tmp/audit.so".into()),
+            ("BASH_ENV".into(), "/home/mvm-worker/.bash_env".into()),
+            ("ENV".into(), "/home/mvm-worker/.env".into()),
+            ("BASHOPTS".into(), "xtrace".into()),
+            ("SHELLOPTS".into(), "nounset".into()),
             ("TOKEN".into(), "placeholder".into()),
         ]);
         assert_eq!(
