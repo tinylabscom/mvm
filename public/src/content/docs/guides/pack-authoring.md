@@ -320,27 +320,43 @@ This operator path does not confer official status on a pack.
 
 Every `mvm/` pack instead requires a fresh feed signed by the separate,
 built-in MVM release identity
-`https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
+`https://github.com/tinylabscom/mvm-packs/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
 under the GitHub OIDC issuer. Download
-`registry-pack-revocations.json` and
-`registry-pack-revocations.json.bundle` from the MVM repository's
+`revocations.json` and
+`revocations.sigstore.json` from the `tinylabscom/mvm-packs` repository's
 `registry-pack-revocations` release, then run
-`mvmctl pack registry revocations update --official --document ./registry-pack-revocations.json --bundle ./registry-pack-revocations.json.bundle`.
+`mvmctl pack registry revocations update --official --document ./revocations.json --bundle ./revocations.sigstore.json`.
 The CLI verifies the exact document bytes against the built-in identity and
 advances a private, rollback-resistant checkpoint. It refuses a missing,
 expired, corrupt, revoked or rolled-back feed at pull and every subsequent
 installed-pack open, including execution. Feed retrieval is manual in this
 release; downloading the files does not establish trust until the update
-command succeeds. The producer schedules a new feed every 12 hours with a
-36-hour validity window. If publication or retrieval fails, official packs
-stop working when the cached feed expires. A release-identity change requires
-an explicit client trust update; an operator file cannot replace this root.
+command succeeds. The verifier permits an official feed validity
+interval of at most 30 days, but always rejects it at its signed `not_after`;
+the operator-configured feed maximum remains 48 hours. If publication or
+retrieval fails, official packs stop working when that cached feed expires. A
+release-identity change requires an explicit client trust update; an operator
+file cannot replace this root. The rotation contract requires a client that
+trusts both exact identities and at least 14 days of overlapping publication
+of the same feed document and sequence with a separately verifiable bundle
+from each identity, annually and on compromise. This dual-signed publication
+is not yet available; do not
+retire the current identity on the assumption that clients can verify a new
+one.
 The two current release assets are replaced separately. If publication stops
-between uploads, clients reject the mismatched pair. The next publication
-verifies the latest complete immutable sequence pair and replaces the current
-assets; an operator can rerun the workflow sooner to restore availability.
-If the first publication stops before any complete immutable pair exists,
-an operator must remove the incomplete release before retrying.
+between uploads, clients reject the mismatched pair. Recovery must authenticate
+the immutable sequence history before restoring the current assets.
+
+The dedicated feed starts at sequence 1 rather than inheriting the
+publisher-signed `packs/` feed. Complete the cutover in this order: merge the
+dedicated producer, explicitly bootstrap and verify its first signed feed,
+release a client that trusts the new identity, then retire the legacy producer
+in a separate reviewed change. Until the matching client release is available,
+keep the legacy producer running for existing clients, which reject the new
+identity and fail closed when their cached legacy feed expires. If the two
+producers cannot overlap through the client rollout, treat the resulting
+fail-closed outage as an explicit release decision; never disable revocation
+checks or import one feed in place of the other.
 
 `pull` downloads the manifest, the bundle and each declared file, verifies the
 signature against the publisher trust policy, checks every file against the

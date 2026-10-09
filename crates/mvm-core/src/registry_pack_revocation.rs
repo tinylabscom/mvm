@@ -22,6 +22,24 @@ const MAX_REVOCATION_DOCUMENT_BYTES: usize = 1024 * 1024;
 #[cfg(any(feature = "manifest-verify", test))]
 const MAX_REVOCATION_BUNDLE_BYTES: usize = 1024 * 1024;
 
+/// The official feed has a longer signed validity window than operator feeds.
+/// Both kinds still expire at their authenticated `not_after` time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegistryPackRevocationValidity {
+    Operator,
+    Official,
+}
+
+impl RegistryPackRevocationValidity {
+    #[cfg(any(feature = "manifest-verify", test))]
+    fn maximum(self) -> chrono::Duration {
+        match self {
+            Self::Operator => chrono::Duration::hours(48),
+            Self::Official => chrono::Duration::days(30),
+        }
+    }
+}
+
 /// An authenticated, monotonically increasing position in the revocation feed.
 ///
 /// Store this outside the fetched document and pass it to the next verification.
@@ -120,7 +138,7 @@ pub enum RegistryPackRevocationError {
     InvalidSequence,
     #[error("registry-pack revocation document has an invalid validity window")]
     InvalidValidityWindow,
-    #[error("registry-pack revocation document validity exceeds 48 hours")]
+    #[error("registry-pack revocation document validity exceeds the allowed maximum")]
     ValidityTooLong,
     #[error("registry-pack revocation document was issued in the future")]
     IssuedInFuture,
@@ -155,12 +173,32 @@ pub fn verify_registry_pack_revocations(
     now: DateTime<Utc>,
     previous: Option<&RegistryPackRevocationCheckpoint>,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
-    verify_registry_pack_revocations_with(
+    verify_registry_pack_revocations_for_validity(
         document_bytes,
         signature_bundle,
         release_trust,
         now,
         previous,
+        RegistryPackRevocationValidity::Operator,
+    )
+}
+
+#[cfg(feature = "manifest-verify")]
+pub(crate) fn verify_registry_pack_revocations_for_validity(
+    document_bytes: &[u8],
+    signature_bundle: &[u8],
+    release_trust: &KeylessTrust,
+    now: DateTime<Utc>,
+    previous: Option<&RegistryPackRevocationCheckpoint>,
+    validity: RegistryPackRevocationValidity,
+) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
+    verify_registry_pack_revocations_with_validity(
+        document_bytes,
+        signature_bundle,
+        release_trust,
+        now,
+        previous,
+        validity,
         |document, bundle, trust| {
             let identities: Vec<&str> = trust
                 .accepted_identities
@@ -192,13 +230,55 @@ pub fn verify_registry_pack_revocations(
     ))
 }
 
-#[cfg(any(feature = "manifest-verify", test))]
+#[cfg(not(feature = "manifest-verify"))]
+pub(crate) fn verify_registry_pack_revocations_for_validity(
+    document_bytes: &[u8],
+    signature_bundle: &[u8],
+    release_trust: &KeylessTrust,
+    now: DateTime<Utc>,
+    previous: Option<&RegistryPackRevocationCheckpoint>,
+    _validity: RegistryPackRevocationValidity,
+) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError> {
+    verify_registry_pack_revocations(
+        document_bytes,
+        signature_bundle,
+        release_trust,
+        now,
+        previous,
+    )
+}
+
+#[cfg(test)]
 pub(crate) fn verify_registry_pack_revocations_with<F>(
     document_bytes: &[u8],
     signature_bundle: &[u8],
     release_trust: &KeylessTrust,
     now: DateTime<Utc>,
     previous: Option<&RegistryPackRevocationCheckpoint>,
+    verify_signature: F,
+) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError>
+where
+    F: FnOnce(&[u8], &[u8], &KeylessTrust) -> Result<(), String>,
+{
+    verify_registry_pack_revocations_with_validity(
+        document_bytes,
+        signature_bundle,
+        release_trust,
+        now,
+        previous,
+        RegistryPackRevocationValidity::Operator,
+        verify_signature,
+    )
+}
+
+#[cfg(any(feature = "manifest-verify", test))]
+pub(crate) fn verify_registry_pack_revocations_with_validity<F>(
+    document_bytes: &[u8],
+    signature_bundle: &[u8],
+    release_trust: &KeylessTrust,
+    now: DateTime<Utc>,
+    previous: Option<&RegistryPackRevocationCheckpoint>,
+    validity: RegistryPackRevocationValidity,
     verify_signature: F,
 ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationError>
 where
@@ -213,7 +293,7 @@ where
         .map_err(RegistryPackRevocationError::SignatureInvalid)?;
     let document: RegistryPackRevocationDocument = serde_json::from_slice(document_bytes)
         .map_err(|error| RegistryPackRevocationError::Parse(error.to_string()))?;
-    validate_document(&document, now)?;
+    validate_document(&document, now, validity)?;
     let checkpoint = RegistryPackRevocationCheckpoint {
         sequence: document.sequence,
         sha256: Sha256Hex::from_bytes(document_bytes),
@@ -241,6 +321,7 @@ where
 fn validate_document(
     document: &RegistryPackRevocationDocument,
     now: DateTime<Utc>,
+    validity: RegistryPackRevocationValidity,
 ) -> Result<(), RegistryPackRevocationError> {
     if document.schema_version != REGISTRY_PACK_REVOCATION_SCHEMA_VERSION {
         return Err(RegistryPackRevocationError::UnsupportedSchema {
@@ -254,7 +335,7 @@ fn validate_document(
     if document.issued_at >= document.not_after {
         return Err(RegistryPackRevocationError::InvalidValidityWindow);
     }
-    if document.not_after - document.issued_at > chrono::Duration::hours(48) {
+    if document.not_after - document.issued_at > validity.maximum() {
         return Err(RegistryPackRevocationError::ValidityTooLong);
     }
     validate_time(document, now)?;
@@ -538,6 +619,64 @@ mod tests {
         assert_eq!(
             signed(&too_long, None).expect_err("overlong window"),
             RegistryPackRevocationError::ValidityTooLong
+        );
+    }
+
+    #[test]
+    fn official_validity_accepts_thirty_days_but_not_longer() {
+        let mut feed = document(1);
+        feed.not_after = feed.issued_at + chrono::Duration::days(30);
+        let bytes = serde_json::to_vec(&feed).expect("serialize");
+        let verify = |policy| {
+            verify_registry_pack_revocations_with_validity(
+                &bytes,
+                b"signature",
+                &trust(),
+                at(7),
+                None,
+                policy,
+                |_, _, _| Ok(()),
+            )
+        };
+        assert!(verify(RegistryPackRevocationValidity::Official).is_ok());
+        assert_eq!(
+            verify(RegistryPackRevocationValidity::Operator).expect_err("operator limit"),
+            RegistryPackRevocationError::ValidityTooLong
+        );
+        feed.not_after += chrono::Duration::seconds(1);
+        let overlong = serde_json::to_vec(&feed).expect("serialize");
+        assert_eq!(
+            verify_registry_pack_revocations_with_validity(
+                &overlong,
+                b"signature",
+                &trust(),
+                at(7),
+                None,
+                RegistryPackRevocationValidity::Official,
+                |_, _, _| Ok(()),
+            )
+            .expect_err("official maximum"),
+            RegistryPackRevocationError::ValidityTooLong
+        );
+    }
+
+    #[test]
+    fn official_validity_still_expires_at_not_after() {
+        let mut feed = document(1);
+        feed.not_after = feed.issued_at + chrono::Duration::days(30);
+        let bytes = serde_json::to_vec(&feed).expect("serialize");
+        assert_eq!(
+            verify_registry_pack_revocations_with_validity(
+                &bytes,
+                b"signature",
+                &trust(),
+                feed.not_after,
+                None,
+                RegistryPackRevocationValidity::Official,
+                |_, _, _| Ok(()),
+            )
+            .expect_err("expired at bound"),
+            RegistryPackRevocationError::Expired
         );
     }
 

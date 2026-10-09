@@ -26,13 +26,31 @@ environment, policy, and declared applications. Reserve `mvm/` for packs
 verified under an MVM-controlled release identity and a current signed
 revocation document. The built-in check uses the distinct MVM release workflow
 identity
-`https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
+`https://github.com/tinylabscom/mvm-packs/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
 under the GitHub OIDC issuer. It has a separate private cache and checkpoint
 from operator-configured feeds. A fresh signed document is required at
 installation and every execution; absence, expiry, invalid signature,
 revocation, and rollback fail closed. The first release imports the signed
 document explicitly rather than silently fetching it. Rotation of this
-identity requires a deliberate client trust update. No wildcard may
+identity requires a deliberate client trust update. The official feed's signed
+validity interval may be at most 30 days; the authenticated `not_after` remains
+the exact expiration boundary. Operator-configured feeds retain their 48-hour
+maximum. Publication should refresh the official feed before expiry rather
+than rely on the full validity interval for routine availability. A release
+identity rotation requires a client version that trusts both exact identities
+and at least 14 days of overlapping publication: the same feed document and
+sequence are signed by both identities, with independently verifiable bundles.
+The overlap ends only after the new identity is accepted by supported clients;
+compromise may require earlier revocation and fail-closed interruption. This
+rotation protocol is a producer requirement, not a claim that a dual-signed
+feed is published today. Rotate annually and on compromise. The dedicated
+producer uses release tag `registry-pack-revocations` in `tinylabscom/mvm-packs`
+and assets `revocations.json` and
+`revocations.sigstore.json`. Its first sequence is 1; it does not inherit the
+publisher-signed `packs/` feed as a revocation checkpoint. The earlier draft
+`tinylabscom/mvm` revocation workflow is retired, not a second trusted root.
+This client trust change does not establish a live feed: the dedicated producer
+and matching client must still be released. No wildcard may
 convey official status. Community namespaces require their own explicit
 publisher trust. A valid signature authenticates publisher identity and
 artifact integrity; it says nothing about safety.

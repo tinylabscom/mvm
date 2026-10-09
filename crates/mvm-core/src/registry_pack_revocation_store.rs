@@ -16,8 +16,8 @@ use thiserror::Error;
 
 use crate::packs::{KeylessTrust, Sha256Hex};
 use crate::registry_pack_revocation::{
-    RegistryPackRevocationCheckpoint, RegistryPackRevocationError, VerifiedRegistryPackRevocations,
-    verify_registry_pack_revocations,
+    RegistryPackRevocationCheckpoint, RegistryPackRevocationError, RegistryPackRevocationValidity,
+    VerifiedRegistryPackRevocations, verify_registry_pack_revocations_for_validity,
 };
 use crate::util::atomic_io::{FileLock, write_private};
 
@@ -61,6 +61,7 @@ struct FeedBytes {
 #[derive(Debug, Clone)]
 pub struct RegistryPackRevocationStore {
     root: PathBuf,
+    validity: RegistryPackRevocationValidity,
 }
 
 impl RegistryPackRevocationStore {
@@ -71,7 +72,18 @@ impl RegistryPackRevocationStore {
 
     /// Use an explicit directory, primarily for isolated test homes.
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            validity: RegistryPackRevocationValidity::Operator,
+        }
+    }
+
+    /// Use the built-in official feed's signed 30-day maximum.
+    pub(crate) fn official(root: PathBuf) -> Self {
+        Self {
+            root,
+            validity: RegistryPackRevocationValidity::Official,
+        }
     }
 
     /// Authenticate and durably cache a fetched feed before it can be used.
@@ -86,8 +98,15 @@ impl RegistryPackRevocationStore {
         now: DateTime<Utc>,
     ) -> Result<RegistryPackRevocationCheckpoint, RegistryPackRevocationStoreError> {
         self.update_with(document, bundle, now, |bytes, signature, at, previous| {
-            verify_registry_pack_revocations(bytes, signature, release_trust, at, previous)
-                .map(|verified| verified.checkpoint().clone())
+            verify_registry_pack_revocations_for_validity(
+                bytes,
+                signature,
+                release_trust,
+                at,
+                previous,
+                self.validity,
+            )
+            .map(|verified| verified.checkpoint().clone())
         })
     }
 
@@ -99,8 +118,14 @@ impl RegistryPackRevocationStore {
         now: DateTime<Utc>,
     ) -> Result<VerifiedRegistryPackRevocations, RegistryPackRevocationStoreError> {
         self.load_with(now, |bytes, signature, at, checkpoint| {
-            let verified =
-                verify_registry_pack_revocations(bytes, signature, release_trust, at, None)?;
+            let verified = verify_registry_pack_revocations_for_validity(
+                bytes,
+                signature,
+                release_trust,
+                at,
+                None,
+                self.validity,
+            )?;
             if verified.checkpoint() != checkpoint {
                 return Err(RegistryPackRevocationStoreError::Corrupt);
             }
@@ -406,6 +431,19 @@ mod tests {
             }
             Ok(verified)
         })
+    }
+
+    #[test]
+    fn extended_validity_is_only_selected_by_official_constructor() {
+        let root = PathBuf::from("revocations");
+        assert_eq!(
+            RegistryPackRevocationStore::new(root.clone()).validity,
+            RegistryPackRevocationValidity::Operator
+        );
+        assert_eq!(
+            RegistryPackRevocationStore::official(root).validity,
+            RegistryPackRevocationValidity::Official
+        );
     }
 
     #[test]

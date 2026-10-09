@@ -32,7 +32,7 @@ use crate::registry_pack_revocation_store::{
 const REVOCATION_TRUST_SCHEMA_VERSION: u32 = 1;
 
 /// The independently controlled release identity for the official namespace.
-pub const OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY: &str = "https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main";
+pub const OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY: &str = "https://github.com/tinylabscom/mvm-packs/.github/workflows/registry-pack-revocations.yml@refs/heads/main";
 pub const OFFICIAL_REGISTRY_PACK_REVOCATION_ISSUER: &str =
     "https://token.actions.githubusercontent.com";
 
@@ -101,7 +101,7 @@ fn official_registry_pack_revocation_trust() -> KeylessTrust {
 }
 
 fn official_registry_pack_revocation_store() -> RegistryPackRevocationStore {
-    RegistryPackRevocationStore::new(
+    RegistryPackRevocationStore::official(
         crate::config::registry_pack_revocation_store_dir().join("official"),
     )
 }
@@ -1069,10 +1069,12 @@ mod tests {
     #[test]
     fn official_revocation_root_is_exact_and_distinct_from_pack_publisher() {
         let trust = official_registry_pack_revocation_trust();
-        assert_eq!(trust.issuer, OFFICIAL_REGISTRY_PACK_REVOCATION_ISSUER);
+        assert_eq!(trust.issuer, "https://token.actions.githubusercontent.com");
         assert_eq!(
             trust.accepted_identities,
-            [OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY]
+            [
+                "https://github.com/tinylabscom/mvm-packs/.github/workflows/registry-pack-revocations.yml@refs/heads/main"
+            ]
         );
         assert_ne!(
             OFFICIAL_REGISTRY_PACK_REVOCATION_IDENTITY,
