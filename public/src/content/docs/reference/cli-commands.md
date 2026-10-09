@@ -1709,6 +1709,23 @@ running microVM.
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
+On Linux and other non-HVF hosts, the default residency remains `parked`
+(`warm_pool_size=0`). `pool warm` prepares capacity but does not change that
+policy. For a prepared, unnamed launch without extra volumes or allowed egress,
+enable claims explicitly:
+
+```bash
+export MVM_RESIDENCY=warm
+mvmctl pool warm --image alpine
+mvmctl machine run --image alpine -- /bin/true
+```
+
+Remove any explicit `warm_pool_size=0` configuration override: an explicit
+size takes precedence over `MVM_RESIDENCY`. Eligible launches require prepared
+capacity and fail rather than silently cold-booting. Named launches and shapes
+with extra volumes (including directory mounts) or allowed egress retain their
+cold path, including when the pool size is zero.
+
 Pack inspection reports `official_status: "not_established"`: verification under the
 current publisher policy does not by itself establish official MVM release
 status. Revocation checks cover an operator-configured signed feed when one is

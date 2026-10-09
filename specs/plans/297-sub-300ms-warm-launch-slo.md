@@ -4,28 +4,34 @@
 
 ## Decision
 
-The sub-300ms requirement applies to a warm claim, not to a cold VM boot.
-The measured interval starts when the workload plan is admitted and ends when
-the claimed child has a reachable guest agent and is ready for the first
-command. The interval includes pool claim, child materialization, identity
-reseeding, backend restore/start work, and the vsock readiness handshake.
+The sub-300ms requirement applies to every successful warm-eligible transient
+machine launch. The measured interval starts when launch resolution begins and
+ends when the claimed child has a reachable guest agent and is ready for the
+first command. It includes cache validation, admission, pool claim, child
+materialization, identity reseeding, backend restore/start work, and the vsock
+readiness handshake.
 
-It excludes image resolution, artifact downloads, host-directory inspection,
-command execution, and teardown. Those remain visible in phase timing, but
-cannot be allowed to hide a slow warm claim or make a cold boot appear to meet
-the warm SLO.
+The launch path is prepared-only: it never downloads, compiles, pulls,
+materializes, or repairs. Missing or stale artifacts fail within the same
+budget and name the explicit `bootstrap` or `image pull` command. A
+warm-eligible launch never silently falls back when its compatible standby is
+missing; it names `pool warm`. Shapes the current pool cannot serve—such as
+named machines and materialized directory volumes—retain their separately
+reported cold path until the backend capability work below makes them
+warm-eligible. Command execution and teardown remain outside the startup
+interval.
 
-The hard requirement is strict: every successful warm claim must complete in
-less than 300ms. Exactly 300ms is a miss.
+The hard requirement is strict: every successful launch must complete startup
+in less than 300ms. Exactly 300ms is a miss.
 
 The aggregate targets are stronger than the hard ceiling:
 
 | Metric | Requirement | Meaning |
 | --- | ---: | --- |
-| Per-claim maximum | `< 300ms` | No successful warm claim may exceed the hard ceiling |
+| Per-launch maximum | `< 300ms` | No successful warm-eligible transient launch may exceed the hard ceiling |
 | Warm p50 | `≤ 30ms` | Normal local hot-path target |
 | Warm p99 | `≤ 50ms` | Scheduler and filesystem variance budget |
-| Cold boot | separately reported | Diagnostic baseline; not a warm-SLO failure |
+| Cold boot | separately reported | Only for currently ineligible launch shapes |
 
 The CLI timing record reports `launch_mode` and `warm_slo`. A cold run reports
 its actual phases and is never labeled as a warm success. A warm run that
@@ -51,9 +57,9 @@ admit plan
 ```
 
 No network, object-store fetch, image build, ext4 materialization, host
-directory copy, or synchronous cleanup belongs in this interval. A cache miss
-must refuse the warm claim or take the explicitly measured cold path; it must
-not silently expand the warm interval.
+directory copy, cache repair, or synchronous cleanup belongs in this interval.
+A cache or standby miss refuses the launch and names the explicit preparation
+command; it never silently expands the interval or cold-boots.
 
 ## Compatibility and live mounts
 
@@ -106,6 +112,12 @@ and no claim silently falls back after being labeled warm.
       record.
 - [x] Keep phase timing JSON-safe by embedding it in `--json` output and render
       it as a table for non-JSON runs.
+- [x] Make published artifacts the default for source and release binaries;
+      local guest-runtime compilation requires an explicit build-mode bootstrap.
+- [x] Make transient launch artifact resolution cache-only and move pulling,
+      materialization, and cache repair to explicit preparation commands.
+- [x] Refuse cold fallback and enforce the strict startup ceiling on successful
+      transient launches.
 - [x] Preload paused Firecracker child VMMs during pool refill, run the
       no-NIC device-model guard before publication, and resume only after the
       claim wires fresh host channels and completes the child identity gates.
@@ -143,7 +155,9 @@ UDS-channel tests now use explicit isolated roots, and the complete
 
 ## Non-goals
 
-- This plan does not promise a cold boot below 300ms on every backend.
+- This plan does not promise cold boot below 300ms for launch shapes the
+  standby pool cannot yet serve; those remain visibly cold and separately
+  measured.
 - This plan does not make read-write host shares safe or part of the warm
   contract; transient live shares remain read-only.
 - This plan does not put remote artifact storage on the synchronous launch
