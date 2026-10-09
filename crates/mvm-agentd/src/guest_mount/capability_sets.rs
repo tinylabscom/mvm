@@ -2,23 +2,30 @@
 //! the effective, permitted and inheritable sets, and `PR_CAP_AMBIENT` for the
 //! ambient set that lets a non-root process keep a capability across exec.
 
+#[cfg(target_os = "linux")]
 const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+#[cfg(target_os = "linux")]
 const PR_CAP_AMBIENT: libc::c_int = 47;
+#[cfg(target_os = "linux")]
 const PR_CAP_AMBIENT_RAISE: libc::c_ulong = 2;
 
-pub(super) fn set_capabilities(capabilities: u32) -> std::io::Result<()> {
+/// Linux v3 stores each set as two 32-bit words, low word first.
+fn capability_data(capabilities: u64) -> [CapData; 2] {
+    [capabilities as u32, (capabilities >> 32) as u32].map(|word| CapData {
+        effective: word,
+        permitted: word,
+        inheritable: word,
+    })
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn set_capabilities(capabilities: u64) -> std::io::Result<()> {
     let header = CapHeader {
         version: LINUX_CAPABILITY_VERSION_3,
         pid: 0,
     };
-    let data = [
-        CapData {
-            effective: capabilities,
-            permitted: capabilities,
-            inheritable: capabilities,
-        },
-        CapData::default(),
-    ];
+    let data = capability_data(capabilities);
+    // SAFETY: the v3 header and both data words have the Linux ABI layout.
     let rc = unsafe { libc::syscall(libc::SYS_capset, &header as *const CapHeader, data.as_ptr()) };
     if rc != 0 {
         Err(std::io::Error::last_os_error())
@@ -27,9 +34,10 @@ pub(super) fn set_capabilities(capabilities: u32) -> std::io::Result<()> {
     }
 }
 
-pub(super) fn raise_ambient_capabilities(capabilities: u32) -> std::io::Result<()> {
-    for capability in 0..u32::BITS {
-        if capabilities & (1u32 << capability) == 0 {
+#[cfg(target_os = "linux")]
+pub(super) fn raise_ambient_capabilities(capabilities: u64) -> std::io::Result<()> {
+    for capability in 0..u64::BITS {
+        if !super::bounding_set_retains(capabilities, capability) {
             continue;
         }
         let rc = unsafe {
@@ -83,3 +91,27 @@ const _: () = {
     assert!(offset_of!(CapData, permitted) == 4);
     assert!(offset_of!(CapData, inheritable) == 8);
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v3_data_preserves_both_words_in_every_set() {
+        for mask in [
+            0,
+            1u64 << 10,
+            (1u64 << 10) | (1u64 << 38) | (1u64 << 39),
+            u64::MAX,
+        ] {
+            let data = capability_data(mask);
+            for (low, high) in [
+                (data[0].effective, data[1].effective),
+                (data[0].permitted, data[1].permitted),
+                (data[0].inheritable, data[1].inheritable),
+            ] {
+                assert_eq!(u64::from(low) | (u64::from(high) << 32), mask);
+            }
+        }
+    }
+}

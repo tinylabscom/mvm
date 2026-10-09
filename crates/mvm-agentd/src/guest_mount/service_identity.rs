@@ -12,13 +12,13 @@
 pub struct ServiceIdentity {
     uid: u32,
     gid: u32,
-    capabilities: u32,
+    capabilities: u64,
 }
 
 impl ServiceIdentity {
     /// Refuses uid 0 and gid 0. Every identity is a `const` item, so a root
     /// identity is a compile error rather than a guest that boots one.
-    pub(super) const fn new(uid: u32, gid: u32, capabilities: u32) -> Self {
+    pub(super) const fn new(uid: u32, gid: u32, capabilities: u64) -> Self {
         assert!(uid != 0, "a service identity cannot be uid 0");
         assert!(gid != 0, "a service identity cannot be gid 0");
         Self {
@@ -42,7 +42,7 @@ impl ServiceIdentity {
 
     /// The capability mask the helper keeps.
     #[must_use]
-    pub const fn capabilities(&self) -> u32 {
+    pub const fn capabilities(&self) -> u64 {
         self.capabilities
     }
 
@@ -64,7 +64,7 @@ impl ServiceIdentity {
 /// mediator ports are above 1024 and vsock needs no capability. mkGuest images
 /// reserve the same number.
 pub const EGRESS_CLIENT_IDENTITY: ServiceIdentity =
-    ServiceIdentity::new(989, 989, 1u32 << super::CAP_NET_BIND_SERVICE);
+    ServiceIdentity::new(989, 989, 1u64 << super::CAP_NET_BIND_SERVICE);
 
 /// Identity of the declared-command tool helper.
 ///
@@ -83,7 +83,7 @@ pub const EGRESS_CLIENT_IDENTITY: ServiceIdentity =
 pub const TOOL_HELPER_IDENTITY: ServiceIdentity = ServiceIdentity::new(
     906,
     906,
-    (1u32 << super::CAP_SETUID) | (1u32 << super::CAP_SETGID),
+    (1u64 << super::CAP_SETUID) | (1u64 << super::CAP_SETGID),
 );
 
 #[cfg(test)]
@@ -97,9 +97,15 @@ mod tests {
         assert_eq!(identity.gid(), 906);
         assert_eq!(
             identity.capabilities(),
-            (1u32 << super::super::CAP_SETUID) | (1u32 << super::super::CAP_SETGID)
+            (1u64 << super::super::CAP_SETUID) | (1u64 << super::super::CAP_SETGID)
         );
         assert_ne!(identity.uid(), super::super::WORKLOAD_UID);
         assert_ne!(identity.uid(), super::EGRESS_CLIENT_IDENTITY.uid());
+    }
+
+    #[test]
+    fn identity_preserves_low_and_high_capability_bits() {
+        let mask = (1u64 << super::super::CAP_NET_BIND_SERVICE) | (1u64 << 38) | (1u64 << 39);
+        assert_eq!(ServiceIdentity::new(989, 989, mask).capabilities(), mask);
     }
 }

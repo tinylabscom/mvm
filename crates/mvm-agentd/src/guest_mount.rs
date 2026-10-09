@@ -77,9 +77,9 @@ pub const CAP_SETPCAP: u32 = 8;
 /// helper, never by the agent.
 pub const CAP_SYS_ADMIN: u32 = mvm_setpriv::CAP_SYS_ADMIN;
 /// Capabilities explicitly retained by the guest agent after boot setup.
-pub const RESTORE_AGENT_CAPABILITIES: u32 = (1u32 << CAP_KILL) | (1u32 << CAP_SYS_TIME);
+pub const RESTORE_AGENT_CAPABILITIES: u64 = (1u64 << CAP_KILL) | (1u64 << CAP_SYS_TIME);
 /// Capabilities retained by the CRNG reseed helper, and nothing else.
-pub const CRNG_RESEED_HELPER_CAPABILITIES: u32 = 1u32 << CAP_SYS_ADMIN;
+pub const CRNG_RESEED_HELPER_CAPABILITIES: u64 = 1u64 << CAP_SYS_ADMIN;
 /// Identity of the CRNG reseed helper. Distinct from [`WORKLOAD_UID`], which
 /// the agent and workload share, so neither can signal it, change its limits,
 /// or pose as it on the helper socket. mkGuest images reserve the same number.
@@ -87,8 +87,10 @@ pub const CRNG_RESEED_HELPER_UID: u32 = 988;
 /// Group of the CRNG reseed helper on the universal initramfs path.
 pub const CRNG_RESEED_HELPER_GID: u32 = 988;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 mod capability_sets;
+#[cfg(all(target_os = "linux", test))]
+mod high_capability_tests;
 #[cfg(target_os = "linux")]
 use capability_sets::{raise_ambient_capabilities, set_capabilities};
 mod cgroup2;
@@ -852,7 +854,7 @@ pub fn drop_guest_agent_privilege_raw(uid: u32, gid: u32) -> std::io::Result<()>
 /// Become `uid`/`gid` from root, keeping exactly `keep`. Async-signal-safe, so
 /// usable from `pre_exec`.
 #[cfg(target_os = "linux")]
-pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u32) -> std::io::Result<()> {
+pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u64) -> std::io::Result<()> {
     assume_identity_with_saved_gid(uid, gid, gid, keep)
 }
 
@@ -861,7 +863,7 @@ fn assume_identity_with_saved_gid(
     uid: u32,
     gid: u32,
     saved_gid: u32,
-    keep: u32,
+    keep: u64,
 ) -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) } != 0 {
         return Err(std::io::Error::last_os_error());
@@ -910,15 +912,14 @@ const CAPABILITY_SLOTS: std::ops::RangeInclusive<u32> = 0..=63;
 /// Whether `keep` retains capability slot `cap`.
 ///
 /// Split out from the syscall loop so the mask arithmetic is testable off
-/// Linux and without root. The widening to `u64` is load-bearing rather than
-/// cosmetic: `1u32 << 32` panics in debug and is UB-adjacent in release, so a
-/// `u32` shift silently mis-answers every slot above 31.
+/// Linux and without root. Both the mask and shift use `u64`, so every slot
+/// in the Linux v3 capability representation can be retained.
 ///
 /// Gated on its two real consumers: the Linux syscall loop, and the tests
 /// that pin the mask arithmetic on every host.
 #[cfg(any(target_os = "linux", test))]
-fn bounding_set_retains(keep: u32, cap: u32) -> bool {
-    u64::from(keep) & (1u64 << cap) != 0
+fn bounding_set_retains(keep: u64, cap: u32) -> bool {
+    keep & (1u64 << cap) != 0
 }
 
 /// Drop every capability from the bounding set except `keep`.
@@ -928,7 +929,7 @@ fn bounding_set_retains(keep: u32, cap: u32) -> bool {
 /// parent on behalf of every descendant. Slots the running kernel does not
 /// implement report `EINVAL` and are skipped.
 #[cfg(target_os = "linux")]
-fn drop_capability_bounding_set_to(keep: u32) -> std::io::Result<()> {
+fn drop_capability_bounding_set_to(keep: u64) -> std::io::Result<()> {
     for cap in CAPABILITY_SLOTS {
         if bounding_set_retains(keep, cap) {
             continue;
@@ -991,7 +992,7 @@ pub fn drop_workload_capability_bounding_set() -> std::io::Result<()> {
 /// different masks. See [`bounding_drop_is_unenforceable`] for why `EPERM`
 /// alone is a skip.
 #[cfg(target_os = "linux")]
-fn narrow_bounding_set_where_enforceable(keep: u32) -> std::io::Result<()> {
+fn narrow_bounding_set_where_enforceable(keep: u64) -> std::io::Result<()> {
     match drop_capability_bounding_set_to(keep) {
         Err(err) if bounding_drop_is_unenforceable(&err) => Ok(()),
         result => result,
@@ -2374,7 +2375,7 @@ mod privilege_tests {
 
     /// Gate for the live privilege witnesses; panics on a request without root.
     #[cfg(target_os = "linux")]
-    fn privileged() -> bool {
+    pub(super) fn privileged() -> bool {
         let requested = std::env::var("MVM_GUEST_PRIVILEGED_TESTS").ok();
         // SAFETY: geteuid has no preconditions.
         let euid = unsafe { libc::geteuid() };
@@ -2403,11 +2404,22 @@ mod privilege_tests {
             );
             // An all-ones u32 mask retains exactly the slots a u32 can name.
             assert_eq!(
-                bounding_set_retains(u32::MAX, cap),
+                bounding_set_retains(u64::from(u32::MAX), cap),
                 cap < 32,
                 "u32::MAX must retain slots 0..32 and no others; slot {cap} disagreed"
             );
+            assert!(bounding_set_retains(u64::MAX, cap));
+            assert!(bounding_set_retains(1u64 << cap, cap));
         }
+    }
+
+    #[test]
+    fn bounding_set_preserves_mixed_low_and_high_bits() {
+        let mask = (1u64 << CAP_NET_BIND_SERVICE) | (1u64 << 38) | (1u64 << 39);
+        let retained: Vec<_> = CAPABILITY_SLOTS_FOR_TEST
+            .filter(|cap| bounding_set_retains(mask, *cap))
+            .collect();
+        assert_eq!(retained, vec![CAP_NET_BIND_SERVICE, 38, 39]);
     }
 
     #[test]
@@ -2568,7 +2580,7 @@ mod privilege_tests {
     /// agent's retained set ever changes.
     #[test]
     fn workload_keep_mask_is_empty_and_narrower_than_the_agent_mask() {
-        const WORKLOAD_KEEP: u32 = 0;
+        const WORKLOAD_KEEP: u64 = 0;
         assert_eq!(WORKLOAD_KEEP, 0, "the workload retains no capability");
         assert_eq!(
             WORKLOAD_KEEP & RESTORE_AGENT_CAPABILITIES,
