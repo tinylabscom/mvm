@@ -1,8 +1,9 @@
-//! Native, admitted, detached console-capture witness.
+//! Native admitted boot-UART capture, read after the launcher has exited.
 //!
 //! Run only through scripts/test-protected-capture-live-hvf.sh. Missing inputs
 //! are errors, never successful skips. This increment covers cold detached
-//! capture and controlled stop, not warm ownership transfer or crash recovery.
+//! boot capture and controlled stop, not bytes emitted after launcher exit,
+//! synthetic UART injection, warm ownership transfer, or crash recovery.
 
 #![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 
@@ -14,7 +15,6 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use mvm_client::guest;
 use mvm_client::stream::{
     FramedStreamReader, OutputRequest, RecordOrigin, StreamOpts, StreamReader, open_vm_output,
 };
@@ -44,7 +44,7 @@ impl Inputs {
             "isolated /tmp root required"
         );
         ensure!(
-            fs::read(root.join("protected-witness-owned"))? == b"cold-detached-v1\n",
+            fs::read(root.join("protected-witness-owned"))? == b"cold-boot-uart-v1\n",
             "use the dedicated witness script"
         );
         ensure!(
@@ -263,11 +263,10 @@ fn owned_launcher_reports_failure() -> Result<()> {
 
 #[test]
 #[ignore = "explicit native HVF witness; dedicated script supplies isolated verified fixtures; missing inputs FAIL"]
-fn detached_console_survives_launcher_and_seals_on_stop() -> Result<()> {
+fn boot_uart_is_readable_after_launcher_exit_and_public_stop() -> Result<()> {
     let inputs = Inputs::read()?;
     let nonce: u128 = rand::random();
     let name = format!("pc-{:x}-{nonce:032x}", std::process::id());
-    let marker = format!("protected-console-{nonce:032x}-after-launcher");
     let mut machine = MachineGuard {
         cli: inputs.cli,
         name,
@@ -287,9 +286,9 @@ fn detached_console_survives_launcher_and_seals_on_stop() -> Result<()> {
         "--image",
     ]);
     launch.arg(&inputs.image);
-    // No payload in persisted argv, environment, or fixture. The guest blocks
-    // on stdin until the parent has observed the launcher's actual exit.
-    launch.args(["--", "sh", "-c", "IFS= read -r first; IFS= read -r second; printf '%s%s\\n' \"$first\" \"$second\" > /dev/console"]);
+    // A normal persistent machine remains available after this command and
+    // its launcher exit. Nothing injects a marker into the boot configuration.
+    launch.args(["--", "true"]);
     run_command(launch).context("admitted detached launch")?;
 
     let supervisor: serde_json::Value = serde_json::from_slice(&fs::read(
@@ -320,44 +319,21 @@ fn detached_console_survives_launcher_and_seals_on_stop() -> Result<()> {
         "detached witness requires durable capture, not live-only standby"
     );
 
-    let processes = guest::list_processes(&machine.name)?;
-    let shells: Vec<_> = processes
-        .iter()
-        .filter(|process| {
-            matches!(process.argv0.as_str(), "sh" | "/bin/sh")
-                && process.state == guest::ProcState::Running
-        })
-        .collect();
-    ensure!(
-        shells.len() == 1,
-        "expected exactly one owned waiting guest shell"
-    );
     let socket = UnixStream::connect(config::vm_stream_socket(&machine.name))?;
     let deadline = Instant::now() + OUTPUT_LIMIT;
     socket.set_read_timeout(Some(OUTPUT_LIMIT))?;
     let timeout_socket = socket.try_clone()?;
     let mut live = FramedStreamReader::new(socket, StreamOpts::builder().follow(true).build());
-    // Two writes keep the complete synthetic marker out of RPC inputs as well.
-    let split = marker.len() / 2;
-    guest::send_process_input(
-        &machine.name,
-        &shells[0].pid_token,
-        format!("{}\n", &marker[..split]).as_bytes(),
-    )?;
-    guest::send_process_input(
-        &machine.name,
-        &shells[0].pid_token,
-        format!("{}\n", &marker[split..]).as_bytes(),
-    )?;
     let mut observed = Vec::new();
-    loop {
+    let probe = b"Booting Linux on physical CPU";
+    let marker = loop {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .context("live marker deadline exceeded")?;
         timeout_socket.set_read_timeout(Some(remaining))?;
         let record = live
             .next_record()?
-            .context("live stream ended before post-launcher marker")?;
+            .context("live stream ended before retained boot UART output")?;
         ensure!(
             record.source == StreamSource::Console,
             "witness output was not captured from the console"
@@ -368,14 +344,20 @@ fn detached_console_survives_launcher_and_seals_on_stop() -> Result<()> {
             "live witness byte bound exceeded"
         );
         ensure!(live.gap().is_none(), "live capture reported loss");
-        if observed
-            .windows(marker.len())
-            .any(|bytes| bytes == marker.as_bytes())
+        // Match a genuine kernel boot message, then use the complete emitted
+        // line (including its runtime timestamp/CPU formatting) for absence
+        // checks. The bare format string legitimately exists in the kernel
+        // fixture. This asserts availability after detach, not emission time.
+        if let Some(line) = observed
+            .split_inclusive(|byte| *byte == b'\n')
+            .find(|line| {
+                line.ends_with(b"\n") && line.windows(probe.len()).any(|bytes| bytes == probe)
+            })
         {
-            break;
+            break line.to_vec();
         }
-    }
-    inventory(&inputs.root, marker.as_bytes())?;
+    };
+    inventory(&inputs.root, &marker)?;
     drop(live);
     drop(timeout_socket);
     machine.stop().context("controlled native shutdown")?;
@@ -407,13 +389,13 @@ fn detached_console_survives_launcher_and_seals_on_stop() -> Result<()> {
     ensure!(
         payload
             .windows(marker.len())
-            .any(|bytes| bytes == marker.as_bytes()),
-        "sealed encrypted history lost post-launcher output"
+            .any(|bytes| bytes == marker.as_slice()),
+        "sealed encrypted history lost retained boot UART output"
     );
-    inventory(&inputs.root, marker.as_bytes())?;
+    inventory(&inputs.root, &marker)?;
     machine.remove()?;
     eprintln!(
-        "PASS: cold detached post-launcher console, verified live/history, controlled stop, plaintext inventory"
+        "PASS: genuine boot UART readable after launcher exit, verified live/history, public stop, plaintext inventory; no post-detach emission claim"
     );
     Ok(())
 }

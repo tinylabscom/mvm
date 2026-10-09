@@ -27,7 +27,7 @@ for fixture in "$MVM_E2E_KERNEL" "$MVM_E2E_ROOTFS"; do
     }
 done
 tests="$("$MVM_PROTECTED_WITNESS_TEST_BIN" --list --ignored)"
-grep -qx 'detached_console_survives_launcher_and_seals_on_stop: test' <<< "$tests" || {
+grep -qx 'boot_uart_is_readable_after_launcher_exit_and_public_stop: test' <<< "$tests" || {
     echo "test executable does not contain the native witness; refusing a zero-test pass" >&2; exit 65;
 }
 entitlements="$(codesign -d --entitlements - --xml "$MVM_HVF_SUPERVISOR_PATH" 2>&1)"
@@ -46,7 +46,7 @@ export MVM_E2E_HOME="$MVM_HOME"
 export HOME="$MVM_PROTECTED_WITNESS_ROOT/home"
 export TMPDIR="$MVM_PROTECTED_WITNESS_ROOT/tmp"
 mkdir -p "$MVM_HOME" "$HOME" "$TMPDIR"
-printf 'cold-detached-v1\n' > "$MVM_PROTECTED_WITNESS_ROOT/protected-witness-owned"
+printf 'cold-boot-uart-v1\n' > "$MVM_PROTECTED_WITNESS_ROOT/protected-witness-owned"
 # APFS copy-on-write clones avoid a shared writable cache. No default-home
 # import is possible: HOME itself is empty and isolated for the test process.
 cp -cR "$MVM_E2E_FIXTURE_HOME/cache" "$MVM_HOME/cache"
@@ -58,4 +58,4 @@ export MVM_LIBKRUN_SUPERVISOR_PATH="$MVM_PROTECTED_WITNESS_ROOT/absent-libkrun"
 unset MVM_SKIP_HASH_VERIFY MVM_SKIP_COSIGN_VERIFY
 echo "isolated evidence retained at $MVM_PROTECTED_WITNESS_ROOT"
 exec "$MVM_PROTECTED_WITNESS_TEST_BIN" \
-    --ignored --exact detached_console_survives_launcher_and_seals_on_stop --nocapture --test-threads=1
+    --ignored --exact boot_uart_is_readable_after_launcher_exit_and_public_stop --nocapture --test-threads=1

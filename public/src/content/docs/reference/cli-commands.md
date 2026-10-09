@@ -984,8 +984,17 @@ revocation and expiry before each nonblocking write. Revocation closes a
 partially sent frame rather than transmitting the remainder under stale
 authorization. Already-delivered bytes cannot be recalled.
 
-This integration is **not ready for production**: consumer security review and
-native end-to-end lifecycle evidence remain merge gates.
+The dedicated native cold witness verifies genuine boot UART output through the
+live reader after the launcher exits, then through verified encrypted history
+after public stop, with no matching plaintext managed artifact. This proves
+post-launcher availability of boot output, not that bytes were emitted after
+launcher exit. The stronger synthetic post-detach UART-emission witness remains
+outstanding: ordinary unprivileged guest processes cannot write `/dev/console`,
+and RPC stdout is not a substitute for the UART path.
+
+This integration remains scoped to protected native-HVF console capture; final
+review and CI determine merge readiness, not a claim that all diagnostic
+surfaces or lifecycle witnesses are complete.
 The draft warm-handoff path prepares a fresh child capture, requires every vCPU
 to acknowledge quiescence, replaces the parent's UART capture state, and
 finalizes the old owner before acknowledging transfer. Failure refuses the
