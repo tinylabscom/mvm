@@ -1,10 +1,10 @@
 # Key custody and opaque encrypted artifacts
 
-Status: **Proposed for review; not approved or implemented by this document.**
+Status: **Accepted design direction; implementation and hardware qualification remain gated.**
 
 Intent: [#4185](https://github.com/tinylabscom/mvm/issues/4185), within
 [#4178](https://github.com/tinylabscom/mvm/issues/4178).
-This proposal does not activate policy, migrate keys, promise a confidential
+This decision does not activate policy, migrate keys, promise a confidential
 backend, or block the initial trusted-host persistence hardening.
 
 ## 1. Guarantees and trust boundaries
@@ -49,7 +49,7 @@ establish this guarantee. A compromised authorized guest can still disclose data
    engineering and operational cost, but the guarantee follows the actual
    plaintext boundary instead of a provider's marketing label.
 
-**Recommend option 3 as the architectural direction**, with option 1 as the
+**Adopt option 3 as the architectural direction**, with option 1 as the
 first independently useful delivery. Evaluate a whole confidential guest
 before a narrow enclave for general workloads: the workload, decryptor and
 protected I/O endpoints must all fit inside the attested boundary. A narrow
@@ -64,7 +64,7 @@ selection require a separate reviewed implementation design.
 
 ## 3. Local OS custody and no-silent-fallback policy
 
-This is a proposed policy, not a description of all current provider selection.
+This is the required direction, not a description of all current provider selection.
 Provisioning records one explicit provider, key identity/version, owner and
 protection profile. Admission probes that provider's actual capabilities,
 identity and accessibility in the service's execution context.
@@ -78,7 +78,7 @@ identity and accessibility in the service's execution context.
 | External KMS/HSM | Central custody, access policy and audit; introduces network, credentials, service and disaster-recovery dependencies. Ordinary release is still trusted-host. | Explicit fleet option, not an automatic escape route when local custody fails. |
 | Restricted file or environment delivery | Compatibility/test transport, not equivalent OS or hardware custody; keys enter host memory. | Only an explicitly enrolled trusted-host compatibility profile, scoped to a deployment and visibly reported. No production discovery-by-fallback. |
 
-Required behavior after approval:
+Required behavior for future implementations:
 
 - Missing key, locked store, permission denial, unavailable service, invalid
   attestation, unsupported provider or unsupported platform is a typed failure.
@@ -274,7 +274,7 @@ their implementations; this document does not change their formats or policies.
 
 ## 8. Staged acceptance gates
 
-These are proposed tests and approval evidence, **not tests run by this PR**.
+These are implementation acceptance gates, **not tests run by this PR**.
 Passing a local mock suite cannot certify confidential hardware.
 
 | Gate | Required evidence and decision rule |
@@ -291,26 +291,30 @@ live migration. If the selected guest/device stack cannot keep all plaintext
 inside the boundary, stop that backend evaluation or narrow the product
 profile explicitly; do not weaken the release policy to obtain compatibility.
 
-## 9. Decisions requiring approval
+## 9. Approved direction and remaining gates
 
-1. **Profile and threat model:** approve two named protection profiles and the
-   residual metadata/side-channel exclusions, or keep all operation
-   trusted-host. A host-blind profile requires an explicit ADR-001 amendment.
-2. **Custody defaults and exceptions:** approve macOS Keychain and explicitly
-   enrolled Linux custody choices, the no-silent-fallback rule and who can
-   authorize expiring compatibility exceptions. No default changes in this PR.
-3. **Authority ownership and recovery:** name the customer-controlled verifier,
-   KMS policy and recovery administrators; decide whether availability warrants
-   any bounded offline release. Recommendation: no offline release initially.
-4. **Compatibility envelope:** approve versioned authenticated context and the
-   minimum public metadata; require migration/restore evidence before any old
-   artifact or key is retired. This does not allocate a wire version.
-5. **First confidential candidate and funding:** choose one whole-guest
-   SNP/TDX evaluation or a deliberately narrow Nitro Enclave workload after
-   comparing current SKU/image availability. Recommendation: CPU-only
-   whole-guest evaluation first, with snapshots/live migration disabled until
-   separately qualified. Hardware testing needs separate resource authorization.
+The maintainer approved the following bundled design direction:
 
-Review acceptance of this proposal authorizes only the agreed design direction.
-Implementation, resource use, production policy activation and any advertised
-confidentiality guarantee each require their own evidence and approval.
+1. **Profile and threat model:** two explicit protection profiles share key-free
+   storage. The residual metadata and side-channel exclusions remain explicit.
+   Activating a host-blind profile still requires an ADR-001 amendment and the
+   qualification evidence above.
+2. **Custody defaults and exceptions:** deliver trusted-host custody first, with
+   macOS Keychain preferred and Linux custody explicitly enrolled. No automatic
+   fallback is allowed. File/environment compatibility requires a scoped,
+   expiring customer-authorized exception and cannot satisfy a host-blind request.
+   This document does not change current runtime defaults.
+3. **Authority ownership and recovery:** release and recovery are controlled by
+   the customer, with no offline release initially. Each deployment must name its
+   verifier, KMS-policy and recovery administrators before enrollment.
+4. **Compatibility envelope:** require versioned authenticated context and minimal
+   public metadata. Migration and restore evidence precede retirement of an old
+   artifact or key. Wire-version allocation remains an implementation decision.
+5. **First confidential evaluation:** prefer a CPU-only whole-guest SNP/TDX
+   evaluation. Snapshots, live migration and full-memory fork remain disabled
+   until separately qualified. Provider/SKU selection, spending and hardware
+   execution each require separate explicit resource authorization.
+
+Approval covers the design direction only. Implementation, resource use,
+production policy activation and any advertised confidentiality guarantee each
+require their own evidence and approval.
