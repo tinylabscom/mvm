@@ -346,11 +346,10 @@ impl BuiltPackImageDescriptor {
                     }
                 }
                 "mvm/images.lock" => {
-                    let Some(digest) = dependency.digest.get("sha256") else {
-                        return Err(invalid_provenance("images lock digest type"));
-                    };
-                    if Sha256Hex::new(digest.clone()).is_err() {
-                        return Err(invalid_provenance("images lock digest syntax"));
+                    if dependency.digest.get("sha256").map(String::as_str)
+                        != Some(crate::image_set::image_train_lock_sha256().as_str())
+                    {
+                        return Err(invalid_provenance("compiled images lock digest"));
                     }
                     images_lock = true;
                 }
@@ -448,7 +447,8 @@ mod tests {
                         {"uri": "candidate.json", "digest": {"sha256": "b".repeat(64)}},
                         {"uri": "application-layer/rootfs.ext4", "digest": {"sha256": "c".repeat(64)}},
                         {"uri": "image-set.json", "digest": {"sha256": base.manifest_sha256.as_str()}},
-                        {"uri": "mvm/images.lock", "digest": {"sha256": "e".repeat(64)}},
+                        {"uri": "mvm/images.lock", "digest": {"sha256":
+                            crate::image_set::image_train_lock_sha256().as_str()}},
                         {"uri": format!("git+https://github.com/tinylabscom/mvm-packs@{}", "d".repeat(40)),
                          "digest": {"gitCommit": "d".repeat(40)}}
                     ]
@@ -477,7 +477,14 @@ mod tests {
     #[test]
     fn producer_provenance_refuses_changed_subject_base_signer_or_materials() {
         let identity = "https://github.com/tinylabscom/mvm-packs/.github/workflows/publish.yml@refs/heads/main";
-        for field in ["subject", "base", "signer", "material", "lock"] {
+        for field in [
+            "subject",
+            "base",
+            "signer",
+            "material",
+            "lock",
+            "lock-other-valid",
+        ] {
             let mut statement = provenance();
             match field {
                 "subject" => {
@@ -499,6 +506,10 @@ mod tests {
                 "lock" => {
                     statement["predicate"]["buildDefinition"]["resolvedDependencies"][3]["digest"]
                         ["sha256"] = serde_json::Value::String("not-a-digest".to_string())
+                }
+                "lock-other-valid" => {
+                    statement["predicate"]["buildDefinition"]["resolvedDependencies"][3]["digest"]
+                        ["sha256"] = serde_json::Value::String("e".repeat(64))
                 }
                 _ => unreachable!("test enumerates each tamper target"),
             }
