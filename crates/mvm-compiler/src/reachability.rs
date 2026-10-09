@@ -24,7 +24,7 @@
 //!
 //! No Python / Node interpreter is required at host-build time.
 
-use crate::compile::data::parse_lines;
+use crate::data::parse_lines;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -36,9 +36,9 @@ use tree_sitter::{Language as TsLanguage, Parser, Query, QueryCursor, StreamingI
 /// files, etc.) are passed through unchanged. Curated lists live in
 /// `data/python_extensions.txt` and `data/node_extensions.txt`.
 pub static PYTHON_EXTS: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| parse_lines(include_str!("../../data/python_extensions.txt")));
+    LazyLock::new(|| parse_lines(include_str!("../data/python_extensions.txt")));
 pub static NODE_EXTS: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| parse_lines(include_str!("../../data/node_extensions.txt")));
+    LazyLock::new(|| parse_lines(include_str!("../data/node_extensions.txt")));
 
 /// Which language's scoping to apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

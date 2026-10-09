@@ -50,11 +50,11 @@ use crate::install_spec::{GateLevel, InstallSpec, Language};
 
 /// Subdir under `<job_dir>` that holds the installed payload. Same
 /// name as the canonical sealed-volume layout
-/// (`mvm_sdk::compile::deps_audit::FILE_CONTENT_DIR`) so the host
+/// (`mvm_compiler::deps_audit::FILE_CONTENT_DIR`) so the host
 /// can rename `<job_dir>` straight into a sealed volume without
 /// shuffling files. Mirrors that constant explicitly rather than
 /// re-exporting because `mvm-host-vm-init` doesn't depend on
-/// `mvm-sdk` (kept tiny to stay within the init binary's size budget).
+/// `mvm-compiler` (kept tiny to stay within the init binary's size budget).
 pub const CONTENT_SUBDIR: &str = "content";
 pub const SBOM_FILENAME: &str = "sbom.cdx.json";
 pub const FETCH_LOG_FILENAME: &str = "fetch.log";

@@ -16,9 +16,9 @@
 //! `mvm` flake URL, the IR schema version, and toolchain version. No HashMap,
 //! no time, no environment beyond the explicit `MVM_FLAKE_URL` lookup.
 
-use crate::compile::launch::{ARTIFACT_FORMAT_VERSION, TOOLCHAIN_VERSION};
-use crate::compile::mvm_pin::resolved_mvm_flake_url;
-use crate::ir::{Workload, ir_hash};
+use crate::launch::{ARTIFACT_FORMAT_VERSION, TOOLCHAIN_VERSION};
+use crate::mvm_pin::resolved_mvm_flake_url;
+use mvm_contract::ir::{Workload, ir_hash};
 
 pub fn build_flake_nix(workload: &Workload) -> Result<String, serde_json::Error> {
     render_flake_nix_at_url(workload, &resolved_mvm_flake_url())
@@ -211,8 +211,8 @@ pub(crate) fn render_flake_nix_at_url(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{App, Entrypoint, Image, Resources, Source};
-    use mvm_core::util::test_env::TestEnv;
+    use crate::mvm_pin::default_mvm_flake_url;
+    use mvm_contract::ir::{App, Entrypoint, Image, Resources, Source};
 
     fn sample() -> Workload {
         Workload {
@@ -255,11 +255,9 @@ mod tests {
 
     #[test]
     fn flake_is_deterministic_under_default_pin() {
-        // Defensive: clear any test-set override.
-        let mut env = TestEnv::new();
-        env.remove("MVM_FLAKE_URL");
-        let a = build_flake_nix(&sample()).unwrap();
-        let b = build_flake_nix(&sample()).unwrap();
+        let url = default_mvm_flake_url();
+        let a = render_flake_nix_at_url(&sample(), &url).unwrap();
+        let b = render_flake_nix_at_url(&sample(), &url).unwrap();
         assert_eq!(a, b);
     }
 
@@ -304,7 +302,7 @@ mod tests {
             language: "python".into(),
             module: "app".into(),
             function: "greet".into(),
-            format: crate::ir::Format::Json,
+            format: mvm_contract::ir::Format::Json,
             working_dir: "/app".into(),
             env: Default::default(),
             args_schema: None,

@@ -25,7 +25,7 @@ sha2.workspace = true
 hex.workspace = true
 
 [dev-dependencies]
-mvm-sdk.workspace = true
+mvm-compiler.workspace = true
 
 [lints]
 workspace = true

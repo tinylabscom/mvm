@@ -70,12 +70,11 @@ mvm-agentd.workspace = true
 mvm-net = { workspace = true, optional = true }
 mvm-vmm = { workspace = true }
 # `install_app_deps` reuses
-# `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
-# for cache-hit verification. The orchestrator owns the cache
-# probe + miss-path placeholder; the audit primitives stay in
-# `mvm-sdk` so the supervisor and the builder VM go through the
-# same types.
-mvm-sdk.workspace = true
+# `mvm_compiler::deps_audit::{verify_sealed_volume, VolumeError}`
+# for cache-hit verification. The orchestrator owns cache probes and
+# installation dispatch; compiler audit primitives keep the supervisor
+# and builder VM on the same types.
+mvm-compiler.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 hex.workspace = true
