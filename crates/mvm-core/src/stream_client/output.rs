@@ -419,12 +419,12 @@ impl VmOutputStream {
     /// halves are measured against each other: if it does not follow the last
     /// history record, [`Self::splice_gap`] records the hole.
     pub fn next_output(&mut self) -> Result<Option<OutputRecord>, StreamError> {
-        self.next_output_with_clock(transcript::retention_now().ok())
+        self.next_output_with_clock(|| transcript::retention_now().ok())
     }
 
     fn next_output_with_clock(
         &mut self,
-        now: Option<u64>,
+        mut clock: impl FnMut() -> Option<u64>,
     ) -> Result<Option<OutputRecord>, StreamError> {
         if self.protected
             && let Some(record) = self.history.front()
@@ -433,7 +433,18 @@ impl VmOutputStream {
                 .history_authorities
                 .iter()
                 .find(|authority| authority.first <= record.seq && record.seq <= authority.last)
-                .is_some_and(|authority| authority.authorized(now));
+                .is_some_and(|authority| {
+                    let Some(before) = clock() else { return false };
+                    if !authority.authorized(Some(before)) {
+                        return false;
+                    }
+                    // Key loading, audit verification and fsync can cross a
+                    // deadline. Re-sample only after that work, immediately
+                    // before delivery, with no further I/O before the pop.
+                    clock().is_some_and(|after| {
+                        after >= before && authority.manifest.check_readable_at(after).is_ok()
+                    })
+                });
             if !authorized {
                 self.history.clear();
                 self.history_authorities.clear();
@@ -1448,18 +1459,42 @@ mod tests {
         let deadline = manifest.retention_deadline().unwrap().unwrap();
         assert!(
             output
-                .next_output_with_clock(Some(deadline - 1))
+                .next_output_with_clock(|| Some(deadline - 1))
                 .unwrap()
                 .is_some()
         );
-        assert!(output.next_output_with_clock(Some(deadline)).is_err());
+        assert!(output.next_output_with_clock(|| Some(deadline)).is_err());
         assert_eq!(output.history_len(), 0);
         assert!(
             output
-                .next_output_with_clock(Some(deadline))
+                .next_output_with_clock(|| Some(deadline))
                 .unwrap()
                 .is_none()
         );
+        // The clock changes inside one next_output call, after successful
+        // verification of the real signed capture, not between calls.
+        for after in [Some(deadline), None, Some(deadline - 2)] {
+            let mut output = open_vm_output_at(&locator, OutputRequest::default()).unwrap();
+            output.tail = Some(Tail::Broker(Box::new(
+                super::super::FramedStreamReader::new(
+                    std::io::Cursor::new(Vec::<u8>::new()),
+                    StreamOpts::default(),
+                ),
+            )));
+            let mut samples = VecDeque::from([Some(deadline - 1), after]);
+            assert!(
+                output
+                    .next_output_with_clock(|| samples.pop_front().expect("two clock samples"))
+                    .is_err()
+            );
+            assert!(
+                samples.is_empty(),
+                "verification must succeed before the second sample"
+            );
+            assert_eq!(output.history_len(), 0);
+            assert!(output.tail.is_none());
+            assert!(output.next_output().unwrap().is_none());
+        }
     }
 
     fn drain(stream: &mut VmOutputStream) -> Vec<OutputRecord> {
