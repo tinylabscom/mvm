@@ -256,14 +256,11 @@ mod tests {
         verify(&base, archive).expect("the escape hatch must admit without a bundle");
     }
 
-    /// A bundle that is present but not a Sigstore bundle must be refused, not
-    /// treated as absent. Only meaningful when the verifier is actually
-    /// compiled in — without `manifest-verify` every bundle fails identically,
-    /// so the assertion could not tell a bad signature from a disabled
-    /// verifier and would not be a witness.
-    #[cfg(feature = "manifest-verify")]
+    /// A malformed bundle must be refused, with the reason reflecting the
+    /// verifier actually compiled into mvm-core. Cargo can enable that verifier
+    /// through another dependency without enabling mvm-build's forwarding feature.
     #[test]
-    fn a_malformed_bundle_is_refused() {
+    fn a_malformed_bundle_is_refused_with_the_actual_verifier_capability() {
         let mut env = TestEnv::new();
         env.remove("MVM_SKIP_COSIGN_VERIFY");
         let archive = b"archive-bytes";
@@ -272,28 +269,28 @@ mod tests {
         let err = verify(&base, archive).expect_err("a malformed bundle must be refused");
 
         assert!(err.contains(ASSET), "{err}");
-    }
-
-    /// A build that cannot verify must refuse rather than silently downgrade to
-    /// the sha256-only posture this rung exists to replace.
-    #[cfg(not(feature = "manifest-verify"))]
-    #[test]
-    fn a_build_that_cannot_verify_refuses_and_names_both_remedies() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_SKIP_COSIGN_VERIFY");
-        let archive = b"archive-bytes";
-        let (_root, base) = stage(archive, Some(b"{\"not\":\"a sigstore bundle\"}"));
-
-        let err = verify(&base, archive).expect_err("a non-verifying build must refuse");
-
-        assert!(
-            err.contains("manifest-verify"),
-            "the refusal must name the feature that would fix it: {err}"
-        );
-        assert!(
-            err.contains(SKIP_COSIGN_VERIFY_ENV),
-            "the refusal must name the documented escape: {err}"
-        );
+        let verifier_available = mvm_core::crypto::image_verify::keyless_verifier_available();
+        eprintln!("mvm-core keyless verifier available: {verifier_available}; refusal: {err}");
+        if verifier_available {
+            assert!(
+                err.contains("verificationMaterial"),
+                "the enabled verifier must reject the malformed bundle: {err}"
+            );
+            assert!(
+                !err.contains("manifest-verify feature is disabled"),
+                "an enabled verifier must not report itself disabled: {err}"
+            );
+        } else {
+            // A build that cannot verify must refuse, never downgrade to sha256.
+            assert!(
+                err.contains("manifest-verify"),
+                "the refusal must name the feature that would fix it: {err}"
+            );
+            assert!(
+                err.contains(SKIP_COSIGN_VERIFY_ENV),
+                "the refusal must name the documented escape: {err}"
+            );
+        }
     }
 
     #[test]

@@ -212,6 +212,16 @@ publish() {
   tar czf "$out/mvmctl-$target.tar.gz" -C "$work/stage/$tag" "mvmctl-$target"
   printf 'synthetic signature bundle\n' > "$out/mvmctl-$target.tar.gz.bundle"
   printf '%s  %s\n' "$(sha256 "$out/mvmctl-$target.tar.gz")" "mvmctl-$target.tar.gz" > "$out/checksums-sha256.txt"
+
+  # The installer retains the runtime without extracting it. Publish its full
+  # quartet with a real digest and bundles for the fake cosign verifier below.
+  local runtime="mvm-guest-bins-$tag.tar.gz" runtime_stage="$work/runtime-stage/$tag"
+  mkdir -p "$runtime_stage"
+  printf 'synthetic guest runtime for %s\n' "$tag" > "$runtime_stage/README.md"
+  tar czf "$out/$runtime" -C "$runtime_stage" README.md
+  printf '%s  %s\n' "$(sha256 "$out/$runtime")" "$runtime" > "$out/$runtime.sha256"
+  printf 'synthetic signature bundle\n' > "$out/$runtime.bundle"
+  printf 'synthetic signature bundle\n' > "$out/$runtime.sha256.bundle"
 }
 
 publish v0.9.0 missing 0.9.0 no
