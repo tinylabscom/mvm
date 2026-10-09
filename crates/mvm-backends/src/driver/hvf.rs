@@ -1311,10 +1311,7 @@ mod tests {
 
     fn scripted_parent(replies: Vec<Vec<u8>>) -> Option<ScriptedParent> {
         use std::io::BufRead;
-        let dir = tempfile::Builder::new()
-            .prefix("hvf")
-            .tempdir_in("/tmp")
-            .expect("tempdir");
+        let dir = crate::driver::socket_tempdir();
         let socket = dir.path().join("hvf-handoff.sock");
         let listener = mvm_vmm::test_support::bind_unix_listener(&socket)?;
         let served = std::thread::spawn(move || {
@@ -1643,7 +1640,7 @@ mod tests {
     fn agent_socket_readiness_accepts_only_a_bound_unix_socket() {
         use mvm_vmm::test_support::bind_unix_listener;
 
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::driver::socket_tempdir();
         let socket = dir.path().join("hvf-agent.sock");
         std::fs::write(&socket, b"not a socket").expect("write decoy");
         let error =
@@ -1661,7 +1658,7 @@ mod tests {
 
     #[test]
     fn agent_socket_readiness_reports_an_early_supervisor_exit() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::driver::socket_tempdir();
         let socket = dir.path().join("hvf-agent.sock");
         let error = wait_for_agent_socket(&socket, std::time::Duration::from_secs(1), || Ok(false))
             .expect_err("a stopped supervisor cannot become ready");
@@ -1672,7 +1669,7 @@ mod tests {
 
     #[test]
     fn agent_socket_readiness_observes_a_socket_bound_after_the_first_probe() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = crate::driver::socket_tempdir();
         let socket = dir.path().join("hvf-agent.sock");
         let mut listener = None;
 
@@ -2005,7 +2002,7 @@ mod tests {
         use std::io::{Read, Write};
 
         for port in [GUEST_AGENT_PORT, GuestService::Telemetry.port()] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::driver::socket_tempdir();
             let agent_socket = dir.path().join("hvf-agent.sock");
             let sock = if port == GUEST_AGENT_PORT {
                 agent_socket.clone()
@@ -2091,7 +2088,7 @@ mod tests {
         use mvm_vmm::test_support::bind_unix_listener;
         use std::io::{Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = crate::driver::socket_tempdir();
         let vsock_dir = dir.path().join("vsock");
         std::fs::create_dir_all(&vsock_dir).unwrap();
         let sock = vsock_dir.join("vsock-20001.sock");
