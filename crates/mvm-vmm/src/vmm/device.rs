@@ -36,6 +36,17 @@ pub struct Pl011 {
     base: u64,
     pub output: Vec<u8>,
     stream: Option<ConsoleStream>,
+    retain_output: bool,
+    handoff: Option<std::sync::mpsc::Receiver<ConsoleHandoff>>,
+}
+
+/// One ownership transition, serviced only after every vCPU is held.
+pub struct ConsoleHandoff {
+    pub fence: std::sync::Arc<crate::hvf_handoff::HandoffFence>,
+    pub sink: Box<dyn Write + Send>,
+    /// Success means the old producer has been dropped, not that its owner
+    /// has finished sealing. The supervisor must still wait for that owner.
+    pub detached: std::sync::mpsc::SyncSender<bool>,
 }
 
 /// Write-through tail for [`Pl011`], flushed a line at a time.
@@ -104,6 +115,8 @@ impl Pl011 {
             base,
             output: Vec::new(),
             stream: None,
+            retain_output: true,
+            handoff: None,
         }
     }
 
@@ -118,6 +131,42 @@ impl Pl011 {
             pending: Vec::with_capacity(ConsoleStream::MAX_PENDING),
             failed: false,
         });
+    }
+
+    pub fn handoffs_from(&mut self, receiver: std::sync::mpsc::Receiver<ConsoleHandoff>) {
+        self.handoff = Some(receiver);
+    }
+
+    /// Protected capture has one bounded producer, never a second unbounded
+    /// plaintext replay buffer. Legacy smoke/transcript callers keep `output`.
+    pub fn protected_stream_to(&mut self, sink: Box<dyn Write + Send>) {
+        self.output.clear();
+        self.retain_output = false;
+        self.stream_to(sink);
+    }
+
+    /// Control-plane poll under the device bus lock; never waits for a worker.
+    pub fn poll_handoff(&mut self) {
+        let Some(request) = self.handoff.as_ref().and_then(|rx| rx.try_recv().ok()) else {
+            return;
+        };
+        let success = request.fence.all_parked() && self.replace_capture_sink(request.sink);
+        let _ = request.detached.try_send(success);
+    }
+
+    fn replace_capture_sink(&mut self, sink: Box<dyn Write + Send>) -> bool {
+        let Some(mut old) = self.stream.take() else {
+            return false;
+        };
+        // Parent partial lines belong to the parent even without a newline.
+        old.flush();
+        let success = !old.failed;
+        drop(old);
+        self.output.clear();
+        if success {
+            self.protected_stream_to(sink);
+        }
+        success
     }
 
     /// PL011 occupies a 4 KiB MMIO page.
@@ -135,7 +184,9 @@ impl MmioDevice for Pl011 {
     fn write(&mut self, offset: u64, value: u64, _size: u8) {
         if offset == Self::DR {
             let byte = (value & 0xff) as u8;
-            self.output.push(byte);
+            if self.retain_output {
+                self.output.push(byte);
+            }
             if let Some(stream) = self.stream.as_mut() {
                 stream.push(byte);
             }
@@ -200,6 +251,80 @@ mod tests {
             uart.write(Pl011::DR, u64::from(*b), 4);
         }
         assert_eq!(uart.output, b"OK\n");
+    }
+
+    #[test]
+    fn handoff_flushes_parent_partial_bytes_and_isolates_readers() {
+        use crate::host::console_capture::bounded;
+        let (parent, old_reader) = bounded::channel();
+        let (child, new_reader) = bounded::channel();
+        let mut uart = Pl011::new(0);
+        uart.stream_to(Box::new(parent));
+        emit(&mut uart, b"parent-partial");
+        assert!(old_reader.receiver.try_recv().is_err());
+        let fence = std::sync::Arc::new(crate::hvf_handoff::HandoffFence::new(2));
+        fence.begin().unwrap();
+        fence.acknowledge(0);
+        fence.acknowledge(1);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (done, result) = std::sync::mpsc::sync_channel(1);
+        uart.handoffs_from(rx);
+        tx.try_send(ConsoleHandoff {
+            fence,
+            sink: Box::new(child),
+            detached: done,
+        })
+        .ok()
+        .unwrap();
+        uart.poll_handoff();
+        assert!(result.try_recv().unwrap());
+        assert_eq!(
+            old_reader.receiver.recv().unwrap().as_bytes(),
+            b"parent-partial"
+        );
+        assert!(old_reader.receiver.recv().is_err(), "old producer is gone");
+        assert!(uart.output.is_empty(), "no parent replay into child");
+        emit(&mut uart, b"child-marker\n");
+        assert_eq!(
+            new_reader.receiver.recv().unwrap().as_bytes(),
+            b"child-marker\n"
+        );
+        assert!(
+            uart.output.is_empty(),
+            "protected capture never builds a replay buffer"
+        );
+    }
+
+    #[test]
+    fn protected_emission_remains_bounded_when_the_consumer_stalls() {
+        let (producer, consumer) = crate::host::console_capture::bounded::channel();
+        let mut uart = Pl011::new(0);
+        uart.protected_stream_to(Box::new(producer));
+        for _ in 0..4096 {
+            emit(&mut uart, &[b'x'; ConsoleStream::MAX_PENDING]);
+        }
+        assert!(uart.output.is_empty());
+        assert!(uart.stream.as_ref().unwrap().pending.len() < ConsoleStream::MAX_PENDING);
+        assert!(consumer.counters.snapshot().dropped_bytes > 0);
+    }
+
+    #[test]
+    fn handoff_cannot_install_a_child_after_parent_flush_failure() {
+        struct Failed;
+        impl Write for Failed {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("failed parent producer"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let mut uart = Pl011::new(0);
+        uart.protected_stream_to(Box::new(Failed));
+        emit(&mut uart, b"partial-parent");
+        assert!(!uart.replace_capture_sink(Box::new(Vec::<u8>::new())));
+        assert!(uart.stream.is_none());
+        assert!(uart.output.is_empty());
     }
 
     #[test]
@@ -340,5 +465,23 @@ mod tests {
         emit(&mut uart, b"child line\n");
 
         assert_eq!(std::fs::read(&path).unwrap(), b"child line\n");
+    }
+
+    #[test]
+    fn protected_restore_never_replays_parent_pending_or_history_bytes() {
+        let (producer, consumer) = crate::host::console_capture::bounded::channel();
+        let mut uart = Pl011::new(0);
+        uart.protected_stream_to(Box::new(producer));
+        emit(&mut uart, b"parent partial");
+        let state = uart.snapshot_state().unwrap();
+        uart.restore_state(&state).unwrap();
+        emit(&mut uart, b"child line\n");
+        assert_eq!(
+            consumer.receiver.recv().unwrap().as_bytes(),
+            b"child line\n"
+        );
+        assert!(consumer.receiver.try_recv().is_err());
+        assert!(uart.output.is_empty());
+        assert_eq!(uart.output.capacity(), 0);
     }
 }

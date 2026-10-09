@@ -8,7 +8,7 @@
 //! in the guest's `QueueNotify` MMIO exit and completed by the backend raising
 //! the device's SPI line.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -235,6 +235,8 @@ fn validate_child_endpoints(
 /// How long the parent waits for the request line on a handoff connection it
 /// has accepted.
 const HANDOFF_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const HANDOFF_REQUEST_MAX_BYTES: usize = 1024 * 1024;
+const HANDOFF_READ_PER_POLL: usize = 4096;
 
 /// Read the host's one-line handoff request off a connection the handoff
 /// listener has just accepted.
@@ -481,6 +483,31 @@ pub struct VirtioVsock {
     /// so this is what makes the transition happen once per pause rather than
     /// once per vCPU.
     snapshot_parked: bool,
+    protected_handoff: Option<ProtectedHandoff>,
+    pending_handoff: Option<PendingHandoff>,
+    incoming_handoff: Option<IncomingHandoff>,
+}
+
+struct IncomingHandoff {
+    stream: UnixStream,
+    bytes: Vec<u8>,
+    deadline: std::time::Instant,
+}
+
+struct ProtectedHandoff {
+    fence: Arc<crate::hvf_handoff::HandoffFence>,
+    owner: crate::hvf_handoff::CaptureControlSender,
+    uart: std::sync::mpsc::SyncSender<super::device::ConsoleHandoff>,
+}
+
+struct PendingHandoff {
+    stream: UnixStream,
+    bindings: VsockHostBindings,
+    deadline: std::time::Instant,
+    prepared: std::sync::mpsc::Receiver<Result<Box<dyn Write + Send>, String>>,
+    sink: Option<Box<dyn Write + Send>>,
+    detached: Option<std::sync::mpsc::SyncSender<bool>>,
+    sealed: std::sync::mpsc::Receiver<bool>,
 }
 
 impl VirtioVsock {
@@ -504,6 +531,9 @@ impl VirtioVsock {
             handoff_used: false,
             handoff_accepted: None,
             snapshot_parked: false,
+            protected_handoff: None,
+            pending_handoff: None,
+            incoming_handoff: None,
         }
     }
 
@@ -837,6 +867,21 @@ impl VirtioVsock {
     /// logged a peer that hung up mid-handshake, and only on machines with more
     /// than one vCPU, and only when the second vCPU lost the race.
     pub fn resume_after_snapshot(&mut self) {
+        if self
+            .protected_handoff
+            .as_ref()
+            .is_some_and(|control| control.fence.held())
+        {
+            // A pause-exit decision may predate fence.begin(). Merely skipping
+            // I/O restoration would still let that vCPU enter the guest. Abort:
+            // the run loop checks should_stop after this hook and before entry.
+            self.handoff_used = true;
+            self.fail_handoff(
+                None,
+                std::io::Error::other("resume raced protected handoff"),
+            );
+            return;
+        }
         if !std::mem::take(&mut self.snapshot_parked) {
             return;
         }
@@ -890,7 +935,14 @@ impl VirtioVsock {
     }
 
     fn poll_handoff(&mut self) -> bool {
+        if self.pending_handoff.is_some() {
+            return self.advance_protected_handoff();
+        }
         if self.handoff_used {
+            return false;
+        }
+        if self.protected_handoff.is_some() {
+            self.poll_protected_request(std::time::Instant::now());
             return false;
         }
         let Some(listener) = &self.handoff_listener else {
@@ -939,6 +991,21 @@ impl VirtioVsock {
         &mut self,
         line: &[u8],
     ) -> std::io::Result<crate::hvf_handoff::AcceptedHandoff> {
+        let (accepted, bindings) = self.validate_handoff(line)?;
+        let irq_line = self.irq_line.clone().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "handoff IRQ line unavailable",
+            )
+        })?;
+        self.rebind_host_channels(&bindings, irq_line)?;
+        Ok(accepted)
+    }
+
+    fn validate_handoff(
+        &self,
+        line: &[u8],
+    ) -> std::io::Result<(crate::hvf_handoff::AcceptedHandoff, VsockHostBindings)> {
         let request: HvfHandoffRequest = serde_json::from_slice(line).map_err(|_| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid handoff request")
         })?;
@@ -988,17 +1055,210 @@ impl VirtioVsock {
         let bindings =
             canonical_child_bindings(&request.child_vm_name, &child_dir, request.channel_mask)?;
         validate_child_endpoints(&child_dir, &bindings, root)?;
-        let irq_line = self.irq_line.clone().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "handoff IRQ line unavailable",
-            )
-        })?;
-        self.rebind_host_channels(&bindings, irq_line)?;
-        Ok(crate::hvf_handoff::AcceptedHandoff {
-            child_vm_name: request.child_vm_name,
-            admitted_plan: request.admitted_plan,
-        })
+        Ok((
+            crate::hvf_handoff::AcceptedHandoff {
+                child_vm_name: request.child_vm_name,
+                admitted_plan: request.admitted_plan,
+            },
+            bindings,
+        ))
+    }
+
+    pub fn protect_handoffs(
+        &mut self,
+        fence: Arc<crate::hvf_handoff::HandoffFence>,
+        owner: crate::hvf_handoff::CaptureControlSender,
+        uart: std::sync::mpsc::SyncSender<super::device::ConsoleHandoff>,
+    ) {
+        self.protected_handoff = Some(ProtectedHandoff { fence, owner, uart });
+    }
+
+    fn poll_protected_request(&mut self, now: std::time::Instant) {
+        let result = (|| -> std::io::Result<()> {
+            if self.incoming_handoff.is_none() {
+                let Some(listener) = &self.handoff_listener else {
+                    return Ok(());
+                };
+                let stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+                stream.set_nonblocking(true)?;
+                self.incoming_handoff = Some(IncomingHandoff {
+                    stream,
+                    bytes: Vec::new(),
+                    deadline: now + HANDOFF_REQUEST_TIMEOUT,
+                });
+            }
+            let mut incoming = self.incoming_handoff.take().expect("incoming handoff");
+            if now >= incoming.deadline {
+                let _ = incoming
+                    .stream
+                    .write_all(&crate::hvf_handoff::retry_line("request timed out"));
+                return Ok(());
+            }
+            // One bounded read per poll, even for a peer that continuously writes.
+            let mut buffer = [0_u8; HANDOFF_READ_PER_POLL];
+            match incoming.stream.read(&mut buffer) {
+                Ok(0) => {
+                    let _ = incoming
+                        .stream
+                        .write_all(&crate::hvf_handoff::retry_line("incomplete request"));
+                    return Ok(());
+                }
+                Ok(count) => incoming.bytes.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error),
+            }
+            if incoming.bytes.len() > HANDOFF_REQUEST_MAX_BYTES {
+                return Err(std::io::Error::other("handoff request too large"));
+            }
+            if incoming.bytes.contains(&b'\n') {
+                self.begin_protected_handoff(incoming.stream, &incoming.bytes)?;
+            } else {
+                self.incoming_handoff = Some(incoming);
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.handoff_used = true;
+            self.fail_handoff(None, error);
+        }
+    }
+
+    fn begin_protected_handoff(&mut self, stream: UnixStream, line: &[u8]) -> std::io::Result<()> {
+        use crate::hvf_handoff::{CaptureControl, CapturePreparation};
+        let (child, bindings) = self.validate_handoff(line)?;
+        if child.admitted_plan.is_none() {
+            return Err(std::io::Error::other(
+                "child capture requires an admitted plan",
+            ));
+        }
+        // The launch protocol parks the resident before requesting transfer.
+        // Do not initiate the ordinary pause/host-I/O join from this control
+        // path. This is only a prerequisite; fresh per-CPU acks are still
+        // required before touching capture ownership.
+        if !self.snapshot_parked || self.io.is_some() {
+            return Err(std::io::Error::other("handoff requires parked host I/O"));
+        }
+        stream.set_nonblocking(true)?;
+        let control = self.protected_handoff.as_ref().expect("protected handoff");
+        control.fence.begin()?;
+        let (prepared, receiver) = std::sync::mpsc::sync_channel(1);
+        let (detached, retired) = std::sync::mpsc::sync_channel(1);
+        let (sealed, ready) = std::sync::mpsc::sync_channel(1);
+        control
+            .owner
+            .try_send(CaptureControl::Prepare(CapturePreparation {
+                child,
+                prepared,
+                detached: retired,
+                sealed,
+            }))
+            .map_err(|_| std::io::Error::other("capture owner unavailable"))?;
+        self.pending_handoff = Some(PendingHandoff {
+            stream,
+            bindings,
+            deadline: std::time::Instant::now() + crate::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT,
+            prepared: receiver,
+            sink: None,
+            detached: Some(detached),
+            sealed: ready,
+        });
+        Ok(())
+    }
+
+    fn advance_protected_handoff(&mut self) -> bool {
+        use std::sync::mpsc::TryRecvError;
+        let mut pending = self.pending_handoff.take().expect("pending handoff");
+        let result = (|| -> std::io::Result<bool> {
+            if std::time::Instant::now() >= pending.deadline
+                || self
+                    .handoff_stop
+                    .is_some_and(|stop| stop.load(Ordering::Relaxed))
+            {
+                return Err(std::io::Error::other(
+                    "protected handoff canceled or timed out",
+                ));
+            }
+            let control = self.protected_handoff.as_ref().expect("protected handoff");
+            if pending.detached.is_some() {
+                if pending.sink.is_none() {
+                    match pending.prepared.try_recv() {
+                        Ok(Ok(sink)) => pending.sink = Some(sink),
+                        Ok(Err(_)) | Err(TryRecvError::Disconnected) => {
+                            return Err(std::io::Error::other("capture preparation failed"));
+                        }
+                        Err(TryRecvError::Empty) => return Ok(false),
+                    }
+                }
+                if !control.fence.all_parked() {
+                    return Ok(false);
+                }
+                control
+                    .uart
+                    .try_send(super::device::ConsoleHandoff {
+                        fence: Arc::clone(&control.fence),
+                        sink: pending.sink.take().expect("prepared producer"),
+                        detached: pending.detached.take().expect("detach acknowledgement"),
+                    })
+                    .map_err(|_| std::io::Error::other("UART handoff unavailable"))?;
+                return Ok(false);
+            }
+            match pending.sealed.try_recv() {
+                Err(TryRecvError::Empty) => return Ok(false),
+                Ok(true) => {}
+                _ => return Err(std::io::Error::other("parent capture finalization failed")),
+            }
+            let fence = Arc::clone(&control.fence);
+            // Every CPU prepared its pause before acknowledging. Thus rebind
+            // cannot join an old I/O owner while holding the device bus.
+            if !fence.all_parked() || !self.snapshot_parked || self.io.is_some() {
+                return Err(std::io::Error::other("host channels are not quiesced"));
+            }
+            let irq = self
+                .irq_line
+                .clone()
+                .ok_or_else(|| std::io::Error::other("handoff IRQ unavailable"))?;
+            // Omitted child endpoints and activity counters must not survive
+            // in the configuration a later ordinary pause would restore.
+            self.host_runtime = VsockHostRuntimeConfig::default();
+            self.rebind_host_channels(&pending.bindings, irq)?;
+            if let Some(stop) = self.handoff_stop {
+                self.capture_workload_exit(stop);
+            }
+            // Prevent the ordinary pause-exit hook from restoring old bindings
+            // or tearing down the newly installed child's channels.
+            self.snapshot_parked = false;
+            if std::time::Instant::now() >= pending.deadline
+                || self
+                    .handoff_stop
+                    .is_some_and(|stop| stop.load(Ordering::Acquire))
+            {
+                return Err(std::io::Error::other("handoff canceled before ACK"));
+            }
+            pending
+                .stream
+                .write_all(crate::hvf_handoff::HANDOFF_ACCEPTED)?;
+            fence.release_after_ack()?;
+            Ok(true)
+        })();
+        match result {
+            Ok(false) => {
+                self.pending_handoff = Some(pending);
+                false
+            }
+            Ok(true) => {
+                self.handoff_used = true;
+                true
+            }
+            Err(error) => {
+                self.handoff_used = true;
+                self.fail_handoff(Some(&mut pending.stream), error);
+                false
+            }
+        }
     }
 
     fn fail_handoff(&self, _stream: Option<&mut UnixStream>, error: std::io::Error) {
@@ -2750,6 +3010,338 @@ mod tests {
             stop,
             device,
         })
+    }
+
+    struct ProtectedProbe {
+        device: VirtioVsock,
+        fence: Arc<crate::hvf_handoff::HandoffFence>,
+        peer: UnixStream,
+        prepared: std::sync::mpsc::SyncSender<Result<Box<dyn Write + Send>, String>>,
+        sealed: std::sync::mpsc::SyncSender<bool>,
+        detached: std::sync::mpsc::Receiver<bool>,
+        uart: Option<std::sync::mpsc::Receiver<super::super::device::ConsoleHandoff>>,
+        stop: &'static AtomicBool,
+    }
+
+    fn protected_probe() -> ProtectedProbe {
+        let mut device = virtio_dev();
+        let fence = Arc::new(crate::hvf_handoff::HandoffFence::new(2));
+        fence.begin().unwrap();
+        let (owner, _requests) = std::sync::mpsc::sync_channel(1);
+        let (uart, commands) = std::sync::mpsc::sync_channel(1);
+        let (prepared, producer) = std::sync::mpsc::sync_channel(1);
+        let (detached, retired) = std::sync::mpsc::sync_channel(1);
+        let (sealed, ready) = std::sync::mpsc::sync_channel(1);
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let stop = Box::leak(Box::new(AtomicBool::new(false)));
+        device.handoff_stop = Some(stop);
+        device.irq_line = Some(Arc::new(TestIrqLine));
+        device.snapshot_parked = true;
+        device.protect_handoffs(Arc::clone(&fence), owner, uart);
+        device.pending_handoff = Some(PendingHandoff {
+            stream,
+            bindings: VsockHostBindings::default(),
+            deadline: std::time::Instant::now() + crate::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT,
+            prepared: producer,
+            sink: None,
+            detached: Some(detached),
+            sealed: ready,
+        });
+        ProtectedProbe {
+            device,
+            fence,
+            peer,
+            prepared,
+            sealed,
+            detached: retired,
+            uart: Some(commands),
+            stop,
+        }
+    }
+
+    fn no_protected_ack(probe: &mut ProtectedProbe) {
+        let mut bytes = [0_u8; 3];
+        match probe.peer.read(&mut bytes) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            result => panic!("unexpected pre-commit reply: {result:?} {bytes:?}"),
+        }
+    }
+
+    #[test]
+    fn protected_handoff_moves_real_producers_before_ack_and_never_replays_parent_bytes() {
+        use super::super::device::{MmioDevice, Pl011};
+        use crate::host::console_capture::bounded;
+        let mut probe = protected_probe();
+        probe.device.host_runtime.bindings.network_endpoint = Some("parent-egress.sock".into());
+        probe.device.host_runtime.trusted_builder_egress = true;
+        let (parent, old_reader) = bounded::channel();
+        let (child, new_reader) = bounded::channel();
+        let mut uart = Pl011::new(0);
+        uart.stream_to(Box::new(parent));
+        uart.handoffs_from(probe.uart.take().unwrap());
+        for byte in b"parent-partial" {
+            uart.write(0, u64::from(*byte), 1);
+        }
+        probe.prepared.try_send(Ok(Box::new(child))).ok().unwrap();
+        assert!(!probe.device.advance_protected_handoff());
+        probe.fence.acknowledge(0);
+        assert!(!probe.device.advance_protected_handoff());
+        uart.poll_handoff();
+        assert!(
+            probe.detached.try_recv().is_err(),
+            "one vCPU is still running"
+        );
+        no_protected_ack(&mut probe);
+        probe.fence.acknowledge(1);
+        assert!(!probe.device.advance_protected_handoff());
+        uart.poll_handoff();
+        assert!(probe.detached.try_recv().unwrap());
+        assert_eq!(
+            old_reader.receiver.recv().unwrap().as_bytes(),
+            b"parent-partial"
+        );
+        assert!(old_reader.receiver.recv().is_err());
+        assert!(uart.output.is_empty());
+        assert!(
+            !probe.device.advance_protected_handoff(),
+            "owner has not sealed yet"
+        );
+        assert!(
+            probe.fence.held(),
+            "clearing the caller pause cannot release this fence"
+        );
+        no_protected_ack(&mut probe);
+        probe.sealed.try_send(true).unwrap();
+        assert!(probe.device.advance_protected_handoff());
+        let mut ack = [0_u8; 3];
+        probe.peer.read_exact(&mut ack).unwrap();
+        assert_eq!(&ack, crate::hvf_handoff::HANDOFF_ACCEPTED);
+        assert!(!probe.fence.held());
+        assert!(!probe.device.snapshot_parked);
+        assert_eq!(
+            probe.device.host_runtime.bindings,
+            VsockHostBindings::default()
+        );
+        assert!(!probe.device.host_runtime.trusted_builder_egress);
+        probe.device.prepare_snapshot();
+        probe.device.resume_after_snapshot();
+        assert_eq!(
+            probe.device.host_runtime.bindings,
+            VsockHostBindings::default()
+        );
+        for byte in b"child-marker\n" {
+            uart.write(0, u64::from(*byte), 1);
+        }
+        assert_eq!(
+            new_reader.receiver.recv().unwrap().as_bytes(),
+            b"child-marker\n"
+        );
+        assert!(old_reader.receiver.recv().is_err());
+    }
+
+    #[test]
+    fn protected_handoff_pause_exit_race_stops_before_guest_reentry() {
+        use super::super::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuExit, VcpuHandle};
+        use super::super::run::{self, RunControl, RunHooks, RunOutcome};
+        use std::cell::Cell;
+        #[derive(Clone, Copy)]
+        struct Handle;
+        impl VcpuHandle for Handle {
+            fn force_exit(_: &[Self]) {}
+        }
+        struct Cpu(Cell<usize>);
+        impl HypervisorVcpu for Cpu {
+            type Error = ();
+            type Handle = Handle;
+            fn exit_token(&self) -> Handle {
+                Handle
+            }
+            fn get_core(&self, _: CoreReg) -> Result<u64, ()> {
+                Err(())
+            }
+            fn set_core(&self, _: CoreReg, _: u64) -> Result<(), ()> {
+                Err(())
+            }
+            fn get_sys(&self, _: SysReg) -> Result<u64, ()> {
+                Err(())
+            }
+            fn set_sys(&self, _: SysReg, _: u64) -> Result<(), ()> {
+                Err(())
+            }
+            fn complete_read(&self, _: u64) -> Result<(), ()> {
+                Ok(())
+            }
+            fn step(&self) -> Result<VcpuExit, ()> {
+                self.0.set(self.0.get() + 1);
+                assert_eq!(self.0.get(), 1, "guest re-entered before ACK");
+                Ok(VcpuExit::Canceled)
+            }
+        }
+        let mut probe = protected_probe();
+        probe.fence = Arc::new(crate::hvf_handoff::HandoffFence::new(2));
+        probe.device.protected_handoff.as_mut().unwrap().fence = Arc::clone(&probe.fence);
+        let pause_checks = Cell::new(0);
+        let cpu = Cpu(Cell::new(0));
+        let outcome = run::run(
+            &cpu,
+            |_, _| Ok(()),
+            &mut [&mut probe.device],
+            RunHooks::new(
+                |_, _, _| Ok(RunControl::Continue),
+                || probe.stop.load(Ordering::Acquire),
+                || {
+                    pause_checks.set(pause_checks.get() + 1);
+                    if pause_checks.get() == 1 {
+                        true
+                    } else {
+                        // Model a cached "resume" decision racing admission.
+                        probe.fence.begin().unwrap();
+                        false
+                    }
+                },
+            ),
+        )
+        .unwrap();
+        assert_eq!(outcome, RunOutcome::Canceled);
+        assert_eq!(cpu.0.get(), 1);
+        assert!(probe.fence.held());
+        assert!(!probe.fence.all_parked());
+        assert!(probe.device.snapshot_parked);
+        assert!(probe.device.io.is_none());
+        assert!(probe.device.handoff_used);
+        no_protected_ack(&mut probe);
+    }
+
+    #[test]
+    fn protected_handoff_failures_never_ack_or_release_or_reuse() {
+        for failure in ["prepare", "timeout", "stop", "seal", "install", "ack"] {
+            let mut probe = protected_probe();
+            match failure {
+                "prepare" => probe.prepared.try_send(Err("failed".into())).ok().unwrap(),
+                "timeout" => {
+                    // A stalled worker and a missing CPU cannot block a poll.
+                    for _ in 0..20 {
+                        assert!(!probe.device.advance_protected_handoff());
+                    }
+                    probe.device.pending_handoff.as_mut().unwrap().deadline =
+                        std::time::Instant::now();
+                }
+                "stop" => probe.stop.store(true, Ordering::Relaxed),
+                _ => {
+                    probe.fence.acknowledge(0);
+                    probe.fence.acknowledge(1);
+                    let pending = probe.device.pending_handoff.as_mut().unwrap();
+                    pending.detached = None;
+                    if failure == "install" {
+                        pending.bindings.agent_socket = Some(PathBuf::from("x".repeat(256)));
+                    }
+                    if failure == "ack" {
+                        // Close the peer rather than just shutting down its
+                        // read side (Darwin may still accept a final write).
+                        probe.peer = UnixStream::pair().unwrap().0;
+                    }
+                    probe.sealed.try_send(failure != "seal").unwrap();
+                }
+            }
+            assert!(!probe.device.advance_protected_handoff(), "{failure}");
+            assert!(probe.stop.load(Ordering::Relaxed), "{failure}");
+            assert!(probe.fence.held(), "{failure}");
+            assert!(probe.device.handoff_used, "{failure}");
+            assert!(probe.device.pending_handoff.is_none(), "{failure}");
+            no_protected_ack(&mut probe);
+            assert!(probe.fence.begin().is_err(), "{failure}");
+        }
+    }
+
+    #[test]
+    fn largest_protected_request_progresses_at_paused_poll_cadence() {
+        use ed25519_dalek::Signer;
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let child = mvm_core::config::vm_state_dir("large-child");
+        std::fs::create_dir_all(&child).unwrap();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[11; 32]);
+        let plan = mvm_core::plan::test_support::PlanFixture::new().build();
+        let mut request = HvfHandoffRequest {
+            child_vm_name: "large-child".into(),
+            parent_pid: std::process::id(),
+            channel_mask: 0,
+            admitted_plan: Some(serde_json::to_string(&plan).unwrap()),
+            signature: String::new(),
+        };
+        request.signature = hex::encode(key.sign(&request.message()).to_bytes());
+        let mut wire = serde_json::to_vec(&request).unwrap();
+        wire.resize(HANDOFF_REQUEST_MAX_BYTES - 1, b' ');
+        wire.push(b'\n');
+        let (stream, mut peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let start = std::time::Instant::now();
+        let mut device = virtio_dev();
+        device.handoff_root = Some(std::fs::canonicalize(home.path()).unwrap());
+        device.handoff_verify_key = Some(key.verifying_key());
+        device.snapshot_parked = true;
+        let fence = Arc::new(crate::hvf_handoff::HandoffFence::new(2));
+        let (owner, requests) = std::sync::mpsc::sync_channel(1);
+        let (uart, _commands) = std::sync::mpsc::sync_channel(1);
+        device.protect_handoffs(Arc::clone(&fence), owner, uart);
+        device.incoming_handoff = Some(IncomingHandoff {
+            stream,
+            bytes: Vec::new(),
+            deadline: start + HANDOFF_REQUEST_TIMEOUT,
+        });
+        for (poll, chunk) in wire.chunks(HANDOFF_READ_PER_POLL).enumerate() {
+            peer.write_all(chunk).unwrap();
+            // The actual paused run loop sleeps 1ms between polls. Advance a
+            // deterministic clock rather than relying on scheduler timing.
+            let now = start + std::time::Duration::from_millis(poll as u64);
+            assert!(now < start + HANDOFF_REQUEST_TIMEOUT);
+            device.poll_protected_request(now);
+        }
+        assert!(device.incoming_handoff.is_none());
+        assert!(device.pending_handoff.is_some());
+        assert!(fence.held());
+        let crate::hvf_handoff::CaptureControl::Prepare(prepared) = requests.try_recv().unwrap()
+        else {
+            panic!("expected capture preparation");
+        };
+        assert_eq!(prepared.child.child_vm_name, "large-child");
+        assert_eq!(prepared.child.admitted_plan, request.admitted_plan);
+        assert!(!fence.all_parked(), "parsing a request is not quiescence");
+    }
+
+    #[test]
+    fn signed_handoff_cannot_be_reassigned_to_another_instance() {
+        use ed25519_dalek::Signer;
+        let key = ed25519_dalek::SigningKey::from_bytes(&[9; 32]);
+        let mut request = HvfHandoffRequest {
+            child_vm_name: "original-instance".into(),
+            parent_pid: std::process::id(),
+            channel_mask: 0,
+            admitted_plan: Some("{}".into()),
+            signature: String::new(),
+        };
+        request.signature = hex::encode(key.sign(&request.message()).to_bytes());
+        request.child_vm_name = "different-instance".into();
+        let mut device = virtio_dev();
+        device.handoff_verify_key = Some(key.verifying_key());
+        let error = device
+            .validate_handoff(&serde_json::to_vec(&request).unwrap())
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        request.parent_pid = std::process::id().wrapping_add(1);
+        request.signature = hex::encode(key.sign(&request.message()).to_bytes());
+        let error = device
+            .validate_handoff(&serde_json::to_vec(&request).unwrap())
+            .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "stale parent"
+        );
     }
 
     fn read_reply(stream: UnixStream) -> String {

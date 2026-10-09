@@ -269,11 +269,11 @@ fn main() -> anyhow::Result<()> {
         .parent()
         .context("supervisor state directory missing")?;
     CaptureStatus::Starting.publish(state_dir)?;
-    // A post-accept notification cannot fence capture ownership before child
-    // bytes arrive. Refuse this transfer rather than recording in the parent.
-    if cfg.handoff_socket.is_some() {
+    // Only a planless resident standby may be reassigned. An admitted
+    // workload already has bounds tied to its original owner.
+    if cfg.handoff_socket.is_some() && (cfg.plan.is_some() || !cfg.vsock) {
         CaptureStatus::UnsafeHandoffRefused.publish(state_dir)?;
-        anyhow::bail!("protected capture requires a pre-resume ownership fence for warm handoff");
+        anyhow::bail!("protected handoff requires a planless vsock standby");
     }
     if let Some(path) = &cfg.pause_state {
         let _ = std::fs::remove_file(path);
@@ -403,15 +403,6 @@ fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    // A resident standby parent boots with no plan, so nothing above armed
-    // anything. If a claim hands it to a child, that child's plan arrives with
-    // the handoff and its bounds are armed then, exactly as at a cold boot.
-    let handoff_accepted = (cfg.plan.is_none() && cfg.handoff_socket.is_some()).then(|| {
-        let (sender, accepted) = std::sync::mpsc::channel();
-        mvm_hostd::supervisor::claimed_child::arm_on_handoff(accepted, cfg.pid_file.clone());
-        sender
-    });
-
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
@@ -450,6 +441,12 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("required protected console owner could not be provisioned");
             }
         };
+    let capture_owner = mvm_hostd::supervisor::protected_handoff::CaptureRoute::start(
+        capture_owner,
+        cfg.pid_file.clone(),
+        &STOP,
+    )?;
+    let capture_control = cfg.handoff_socket.as_ref().map(|_| capture_owner.control());
     // Only a provisioned capture owner may announce this boot.
     CaptureStatus::Running.publish(state_dir)?;
     std::fs::write(&cfg.pid_file, std::process::id().to_string())
@@ -495,7 +492,8 @@ fn main() -> anyhow::Result<()> {
                 handoff_socket: cfg.handoff_socket.clone(),
                 handoff_root: cfg.handoff_root.clone(),
                 handoff_verify_key: cfg.handoff_verify_key.clone(),
-                handoff_accepted,
+                handoff_accepted: None,
+                capture_control,
             })
             .build(),
     );
