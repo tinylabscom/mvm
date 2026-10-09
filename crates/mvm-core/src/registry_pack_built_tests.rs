@@ -49,6 +49,18 @@ fn fixture() -> (tempfile::TempDir, VerifiedRegistryPack) {
     (root, verified)
 }
 
+#[test]
+fn provenance_verifier_must_match_the_approved_released_binary() {
+    let trusted = Sha256Hex::new(TRUSTED_IMAGE_VERIFIER_SHA256.to_string()).unwrap();
+    verify_trusted_image_verifier(&trusted).expect("approved release verifier");
+
+    let untrusted = Sha256Hex::from_bytes(b"another verifier");
+    assert!(
+        verify_trusted_image_verifier(&untrusted).is_err(),
+        "a publisher-signed but unapproved verifier digest must be refused"
+    );
+}
+
 fn structural_only(
     verified: &VerifiedRegistryPack,
     root: &Path,

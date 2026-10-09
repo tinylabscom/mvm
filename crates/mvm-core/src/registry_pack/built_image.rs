@@ -4,6 +4,13 @@ use super::*;
 use crate::registry_pack_image::{BuiltImageAsset, MAX_BUILT_IMAGE_METADATA_BYTES};
 use std::io::Read;
 
+// SHA-256 of `mvmctl` from the official v0.22.0 Linux x86_64 release. The
+// release checksum file and archive were verified against the release workflow
+// identity. Advance this pin only with a released verifier that accepts the
+// current compiled image lock.
+const TRUSTED_IMAGE_VERIFIER_SHA256: &str =
+    "c92c89ef61724388875ce8e17cbce4bf614019fcc7ad7139b5d660c0dba81bd8";
+
 /// Authenticate a built image's statement against its verified pack publisher.
 pub fn verify_built_image_provenance(
     verified: &VerifiedRegistryPack,
@@ -66,7 +73,8 @@ pub(super) fn verify_built_image_authenticity(
     verified: &VerifiedRegistryPack,
     root: &Path,
 ) -> Result<(), RegistryPackVerificationError> {
-    verify_built_image_provenance(verified, root)?;
+    let verifier_sha256 = verify_built_image_provenance(verified, root)?;
+    verify_trusted_image_verifier(&verifier_sha256)?;
     let Some(RegistryPackImage::Built(image)) = &verified.manifest().image else {
         return Err(RegistryPackVerificationError::InvalidImageDeclaration {
             reason: "pack has no built image signature to verify".to_string(),
@@ -84,6 +92,17 @@ pub(super) fn verify_built_image_authenticity(
             reason: format!("built image signature refused: {error}"),
         },
     )
+}
+
+fn verify_trusted_image_verifier(
+    verifier_sha256: &Sha256Hex,
+) -> Result<(), RegistryPackVerificationError> {
+    if verifier_sha256.as_str() == TRUSTED_IMAGE_VERIFIER_SHA256 {
+        return Ok(());
+    }
+    Err(RegistryPackVerificationError::InvalidImageDeclaration {
+        reason: "built image provenance names an untrusted verifier binary".to_string(),
+    })
 }
 
 #[cfg(test)]
