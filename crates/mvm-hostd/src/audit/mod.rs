@@ -29,6 +29,8 @@ pub mod receipt_store;
 /// Per-session seals, the session ledger derived from them, and the
 /// per-session verdict.
 pub mod session;
+#[cfg(unix)]
+pub mod transcript_retirement;
 pub mod unsealed;
 pub mod witness;
 

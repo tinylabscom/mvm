@@ -7,6 +7,7 @@
 
 pub mod action;
 pub mod arch;
+pub mod audit_verify;
 pub mod build_env;
 pub mod catalog;
 pub mod checkpoint;

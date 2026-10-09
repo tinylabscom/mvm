@@ -36,6 +36,114 @@ pub struct AcceptedHandoff {
 /// owns it. Sent at most once: a parent becomes one child.
 pub type HandoffAcceptedSender = std::sync::mpsc::Sender<AcceptedHandoff>;
 
+/// Bounded owner-control requests; no payload bytes travel over this channel.
+pub enum CaptureControl {
+    Prepare(CapturePreparation),
+    Finish(std::sync::mpsc::SyncSender<bool>),
+}
+
+pub type CaptureControlSender = std::sync::mpsc::SyncSender<CaptureControl>;
+
+/// Sent only after transport authentication and child-path validation.
+pub struct CapturePreparation {
+    pub child: AcceptedHandoff,
+    pub prepared: std::sync::mpsc::SyncSender<Result<Box<dyn std::io::Write + Send>, String>>,
+    pub detached: std::sync::mpsc::Receiver<bool>,
+    pub sealed: std::sync::mpsc::SyncSender<bool>,
+}
+
+/// End-to-end bound on the pre-ACK transfer, including owner retirement.
+pub const CAPTURE_HANDOFF_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A one-shot pre-ACK hold, independent of the caller's pause signal.
+///
+/// Each CPU acknowledges from its pause hook, after leaving guest execution
+/// and preparing devices. A requested pause alone is never evidence of this.
+/// Failure deliberately leaves the hold engaged until the machine is stopped.
+pub struct HandoffFence {
+    state: std::sync::Mutex<FenceState>,
+}
+
+struct FenceState {
+    used: bool,
+    held: bool,
+    parked: Vec<bool>,
+    offline: Vec<bool>,
+}
+
+impl HandoffFence {
+    pub fn new(vcpus: usize) -> Self {
+        assert!(vcpus > 0);
+        Self {
+            state: std::sync::Mutex::new(FenceState {
+                used: false,
+                held: false,
+                parked: vec![false; vcpus],
+                offline: vec![false; vcpus],
+            }),
+        }
+    }
+
+    /// Start only after request authentication. This fence cannot be reused.
+    pub fn begin(&self) -> std::io::Result<()> {
+        let mut state = self.state.lock().expect("handoff fence poisoned");
+        if state.used {
+            return Err(std::io::Error::other("handoff fence already consumed"));
+        }
+        state.used = true;
+        state.held = true;
+        state.parked = state.offline.clone();
+        Ok(())
+    }
+
+    /// A secondary that has never entered the guest is already quiescent.
+    /// Its owning thread must call `leave_offline` before its first entry.
+    pub fn enter_offline(&self, cpu: usize) {
+        let mut state = self.state.lock().expect("handoff fence poisoned");
+        state.offline[cpu] = true;
+        if state.held {
+            state.parked[cpu] = true;
+        }
+    }
+
+    /// Atomically exclude first guest entry while a transfer holds this CPU.
+    pub fn leave_offline(&self, cpu: usize) -> bool {
+        let mut state = self.state.lock().expect("handoff fence poisoned");
+        if state.held {
+            return false;
+        }
+        state.offline[cpu] = false;
+        true
+    }
+
+    pub fn held(&self) -> bool {
+        self.state.lock().expect("handoff fence poisoned").held
+    }
+
+    /// Called only on the owning vCPU thread, inside its prepared pause hold.
+    pub fn acknowledge(&self, cpu: usize) {
+        let mut state = self.state.lock().expect("handoff fence poisoned");
+        if state.held {
+            state.parked[cpu] = true;
+        }
+    }
+
+    pub fn all_parked(&self) -> bool {
+        let state = self.state.lock().expect("handoff fence poisoned");
+        state.held && state.parked.iter().all(|parked| *parked)
+    }
+
+    /// Release only after channel ownership, capture sealing and ACK succeeded.
+    pub fn release_after_ack(&self) -> std::io::Result<()> {
+        let mut state = self.state.lock().expect("handoff fence poisoned");
+        if !state.held || !state.parked.iter().all(|parked| *parked) {
+            return Err(std::io::Error::other("handoff CPUs not quiesced"));
+        }
+        state.held = false;
+        Ok(())
+    }
+}
+
 /// Domain separator for the host-authorized live handoff signature.
 pub const HVF_HANDOFF_PROTOCOL_DOMAIN: &[u8] = b"mvm-hvf-live-handoff-v1";
 
@@ -164,6 +272,46 @@ impl HvfHandoffRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_requires_fresh_acknowledgement_from_every_cpu() {
+        let fence = HandoffFence::new(4);
+        for cpu in 0..4 {
+            fence.acknowledge(cpu);
+        }
+        fence.begin().unwrap();
+        assert!(
+            !fence.all_parked(),
+            "pre-request acknowledgements are stale"
+        );
+        for cpu in 0..3 {
+            fence.acknowledge(cpu);
+            assert!(!fence.all_parked());
+            assert!(fence.release_after_ack().is_err());
+            assert!(fence.held(), "failure must not release guest execution");
+        }
+        fence.acknowledge(3);
+        assert!(fence.all_parked());
+        fence.release_after_ack().unwrap();
+        assert!(!fence.held());
+        assert!(
+            fence.begin().is_err(),
+            "a transferred standby is never reused"
+        );
+    }
+
+    #[test]
+    fn handoff_holds_an_offline_cpu_before_its_first_guest_entry() {
+        let fence = HandoffFence::new(2);
+        fence.enter_offline(1);
+        fence.begin().unwrap();
+        assert!(!fence.leave_offline(1));
+        assert!(!fence.all_parked());
+        fence.acknowledge(0);
+        assert!(fence.all_parked());
+        fence.release_after_ack().unwrap();
+        assert!(fence.leave_offline(1));
+    }
 
     #[test]
     fn the_signature_binds_the_admitted_plan_and_a_planless_request_is_unchanged() {

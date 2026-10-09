@@ -205,6 +205,8 @@ impl SpliceGap {
 /// silent about a capture it threw away or nags about one it was told to skip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyHistory {
+    /// Authenticated retention policy no longer permits replaying the payload.
+    Retired,
     /// The transcript sealed with no chunks in it.
     CaptureEmpty,
     /// The transcript holds records and the request's filter matched none.
@@ -294,6 +296,9 @@ pub struct OutputLocator {
     pub socket: PathBuf,
     /// The durable capture directory.
     pub transcript_dir: PathBuf,
+    /// Independently retained protected family. Never removed with VM runtime.
+    /// Explicit locators may omit this to address a legacy capture directly.
+    pub protected_transcript_dir: Option<PathBuf>,
     /// The backend's write-only console capture, the fallback source.
     pub console_log: PathBuf,
     /// Where the host KEK that unwraps the capture's data key lives.
@@ -308,6 +313,7 @@ impl OutputLocator {
             vm: vm.to_string(),
             socket: config::vm_stream_socket(vm),
             transcript_dir: config::vm_stream_transcript_dir(vm),
+            protected_transcript_dir: Some(config::vm_protected_stream_dir(vm)),
             console_log: config::vm_console_log(vm),
             keys_dir: config::mvm_keys_dir(),
         }
@@ -330,6 +336,8 @@ enum Tail {
 /// A VM's output: durable history spliced ahead of whatever is still coming.
 pub struct VmOutputStream {
     history: VecDeque<OutputRecord>,
+    history_authorities: Vec<HistoryAuthority>,
+    protected: bool,
     tail: Option<Tail>,
     availability: StreamAvailability,
     truncation: Option<Truncation>,
@@ -415,6 +423,43 @@ impl VmOutputStream {
     /// halves are measured against each other: if it does not follow the last
     /// history record, [`Self::splice_gap`] records the hole.
     pub fn next_output(&mut self) -> Result<Option<OutputRecord>, StreamError> {
+        self.next_output_with_clock(|| transcript::retention_now().ok())
+    }
+
+    fn next_output_with_clock(
+        &mut self,
+        mut clock: impl FnMut() -> Option<u64>,
+    ) -> Result<Option<OutputRecord>, StreamError> {
+        if self.protected
+            && let Some(record) = self.history.front()
+        {
+            let authorized = self
+                .history_authorities
+                .iter()
+                .find(|authority| authority.first <= record.seq && record.seq <= authority.last)
+                .is_some_and(|authority| {
+                    let Some(before) = clock() else { return false };
+                    if !authority.authorized(Some(before)) {
+                        return false;
+                    }
+                    // Key loading, audit verification and fsync can cross a
+                    // deadline. Re-sample only after that work, immediately
+                    // before delivery, with no further I/O before the pop.
+                    clock().is_some_and(|after| {
+                        after >= before && authority.manifest.check_readable_at(after).is_ok()
+                    })
+                });
+            if !authorized {
+                self.history.clear();
+                self.history_authorities.clear();
+                self.tail = None;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "protected history authorization expired, retired, or unavailable",
+                )
+                .into());
+            }
+        }
         if let Some(record) = self.history.pop_front() {
             self.history_high_water = Some(record.seq);
             return Ok(Some(record));
@@ -488,10 +533,42 @@ pub fn open_vm_output_at(
     locator: &OutputLocator,
     request: OutputRequest,
 ) -> Result<VmOutputStream, StreamError> {
+    let durable_locator = locator
+        .protected_transcript_dir
+        .as_ref()
+        .map(|root| root.try_exists().map(|exists| (root, exists)))
+        .transpose()?;
+    let persistent_protected = durable_locator.is_some_and(|(_, exists)| exists);
+    let protected_locator;
+    let locator = if let Some((root, true)) = durable_locator {
+        protected_locator = OutputLocator {
+            transcript_dir: root.clone(),
+            protected_transcript_dir: None,
+            ..locator.clone()
+        };
+        &protected_locator
+    } else {
+        locator
+    };
     // Attach before reading history: see the module docs on the ordering and
     // on the residual window it does not close.
     let live = connect_broker(locator, request.opts)?;
-    let history = read_history(locator, request)?;
+    let run = super::protected::ProtectedRun::read(&locator.transcript_dir)?;
+    let protected = persistent_protected
+        || run.is_some()
+        || locator
+            .console_log
+            .parent()
+            .map(super::protected::required)
+            .transpose()?
+            .unwrap_or(false);
+    let history = if let Some(run) = run {
+        read_protected_history(locator, request, &run)?
+    } else if protected {
+        None
+    } else {
+        read_history(locator, request)?
+    };
 
     // Presence, never the surviving record count. A capture that verifies
     // clean and matched nothing is still a capture: counting it absent would
@@ -504,13 +581,22 @@ pub fn open_vm_output_at(
             DurableHalf::Owned
         }
     });
-    let (records, truncation, empty_history) = history.map_or_else(
-        || (VecDeque::new(), None, None),
-        |history| (history.records, history.truncation, history.empty),
+    let (records, truncation, empty_history, history_authorities) = history.map_or_else(
+        || (VecDeque::new(), None, None, Vec::new()),
+        |history| {
+            (
+                history.records,
+                history.truncation,
+                history.empty,
+                history.authorities,
+            )
+        },
     );
-    let (tail, availability) = resolve_tail(locator, request, live, durable)?;
+    let (tail, availability) = resolve_tail(locator, request, live, durable, protected)?;
     Ok(VmOutputStream {
         history: records,
+        history_authorities,
+        protected,
         tail,
         availability,
         truncation,
@@ -538,6 +624,7 @@ fn resolve_tail(
     request: OutputRequest,
     live: Option<Box<dyn StreamReader>>,
     durable: DurableHalf,
+    protected: bool,
 ) -> Result<(Option<Tail>, StreamAvailability), StreamError> {
     Ok(match (live, durable) {
         (Some(live), DurableHalf::Absent) => {
@@ -545,6 +632,14 @@ fn resolve_tail(
         }
         (Some(live), _) => (Some(Tail::Broker(live)), StreamAvailability::LiveAndHistory),
         (None, DurableHalf::Owned) => (None, StreamAvailability::HistoryOnly),
+        (None, DurableHalf::Adopted) if protected => (None, StreamAvailability::HistoryOnly),
+        (None, DurableHalf::Absent) if protected => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "protected console capture unavailable; plaintext fallback refused",
+            )
+            .into());
+        }
         (None, DurableHalf::Adopted) => match open_console_behind_history(locator, request) {
             Some(console) => (
                 Some(Tail::Console(console)),
@@ -672,11 +767,195 @@ fn open_console(
 }
 
 /// The durable half, decoded and filtered.
+/// Buffered plaintext retains its generation's authorization until delivery.
+struct HistoryAuthority {
+    first: u64,
+    last: u64,
+    manifest: TranscriptManifest,
+    audit_dir: PathBuf,
+    keys_dir: PathBuf,
+}
+
+impl HistoryAuthority {
+    fn authorized(&self, now: Option<u64>) -> bool {
+        let Some(now) = now else { return false };
+        if self.manifest.check_readable_at(now).is_err() {
+            return false;
+        }
+        let Ok(mut file) = std::fs::File::open(self.keys_dir.join("host-signer.pub")) else {
+            return false;
+        };
+        if !file.metadata().is_ok_and(|metadata| metadata.len() == 32) {
+            return false;
+        }
+        let mut public = [0; 32];
+        if std::io::Read::read_exact(&mut file, &mut public).is_err() {
+            return false;
+        }
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&public) else {
+            return false;
+        };
+        matches!(
+            transcript::evidence::authenticated_retirement(&self.audit_dir, &key, &self.manifest,),
+            Ok(false)
+        )
+    }
+}
+
 struct History {
+    authorities: Vec<HistoryAuthority>,
     records: VecDeque<OutputRecord>,
     truncation: Option<Truncation>,
     /// Why `records` is empty, when it is.
     empty: Option<EmptyHistory>,
+    range: Option<VerifiedRange>,
+    missing_links: u64,
+}
+
+#[derive(Clone, Copy)]
+struct VerifiedRange {
+    first_seq: u64,
+    first_anchor: [u8; 32],
+    last_seq: u64,
+    last_hash: [u8; 32],
+}
+
+impl VerifiedRange {
+    fn gap_to(&self, seq: u64, anchor: [u8; 32]) -> Result<u64, StreamError> {
+        let gap = seq
+            .checked_sub(self.last_seq)
+            .and_then(|difference| difference.checked_sub(1))
+            .ok_or_else(invalid_history)?;
+        if gap == 0 && anchor != self.last_hash {
+            return Err(invalid_history());
+        }
+        Ok(gap)
+    }
+}
+
+fn invalid_history() -> StreamError {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "protected history chain or loss accounting mismatch",
+    )
+    .into()
+}
+
+fn read_protected_history(
+    locator: &OutputLocator,
+    request: OutputRequest,
+    run: &super::protected::ProtectedRun,
+) -> Result<Option<History>, StreamError> {
+    if !run.persists {
+        return Ok(None);
+    }
+    let run_dir = run.directory(&locator.transcript_dir)?;
+    let entries = match std::fs::read_dir(run_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let mut generations = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        if !entry.file_type()?.is_dir()
+            || name.as_encoded_bytes().len() != 20
+            || !name.as_encoded_bytes().iter().all(u8::is_ascii_digit)
+            || generations.len() >= 4096
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid protected generation directory",
+            )
+            .into());
+        }
+        generations.push(entry.path());
+    }
+    generations.sort();
+    let mut combined: Option<History> = None;
+    for dir in generations {
+        let generation = OutputLocator {
+            transcript_dir: dir,
+            ..locator.clone()
+        };
+        let untrimmed = OutputRequest {
+            history_tail: None,
+            ..request
+        };
+        let Some(mut history) = read_history_mode(&generation, untrimmed, true)? else {
+            continue;
+        };
+        let all = combined.get_or_insert_with(|| History {
+            authorities: Vec::new(),
+            records: VecDeque::new(),
+            truncation: None,
+            empty: None,
+            range: None,
+            missing_links: 0,
+        });
+        if let (Some(last), Some(first)) = (all.records.back(), history.records.front())
+            && first.seq <= last.seq
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "protected generation sequence overlap",
+            )
+            .into());
+        }
+        all.records.append(&mut history.records);
+        all.authorities.append(&mut history.authorities);
+        if let Some(loss) = history.truncation {
+            let total = all.truncation.get_or_insert(Truncation {
+                refused_chunks: 0,
+                refused_bytes: 0,
+                evicted_chunks: 0,
+                evicted_bytes: 0,
+                adopted: false,
+            });
+            total.refused_chunks = total.refused_chunks.saturating_add(loss.refused_chunks);
+            total.refused_bytes = total.refused_bytes.saturating_add(loss.refused_bytes);
+            total.evicted_chunks = total.evicted_chunks.saturating_add(loss.evicted_chunks);
+            total.evicted_bytes = total.evicted_bytes.saturating_add(loss.evicted_bytes);
+            total.adopted |= loss.adopted;
+        }
+        let mut missing = history.missing_links;
+        if let Some(next) = history.range {
+            if let Some(previous) = all.range {
+                let gap = previous.gap_to(next.first_seq, next.first_anchor)?;
+                missing = missing.checked_add(gap).ok_or_else(invalid_history)?;
+                all.range = Some(VerifiedRange {
+                    last_seq: next.last_seq,
+                    last_hash: next.last_hash,
+                    ..previous
+                });
+            } else {
+                all.range = Some(next);
+            }
+        }
+        all.missing_links = all
+            .missing_links
+            .checked_add(missing)
+            .ok_or_else(invalid_history)?;
+        let allowed = all.truncation.map_or(0, |loss| {
+            loss.refused_chunks.saturating_add(loss.evicted_chunks)
+        });
+        if all.missing_links > allowed && !all.truncation.is_some_and(|loss| loss.adopted) {
+            return Err(invalid_history());
+        }
+        all.empty = history.empty;
+    }
+    if let Some(history) = &mut combined {
+        if !history.records.is_empty() {
+            history.empty = (request.history_tail == Some(0)).then_some(EmptyHistory::NotRequested);
+        }
+        if let Some(tail) = request.history_tail {
+            while history.records.len() > tail {
+                history.records.pop_front();
+            }
+        }
+    }
+    Ok(combined)
 }
 
 /// Read, verify, and decrypt the VM's transcript, or `Ok(None)` when it has
@@ -698,6 +977,14 @@ fn read_history(
     locator: &OutputLocator,
     request: OutputRequest,
 ) -> Result<Option<History>, StreamError> {
+    read_history_mode(locator, request, false)
+}
+
+fn read_history_mode(
+    locator: &OutputLocator,
+    request: OutputRequest,
+    protected: bool,
+) -> Result<Option<History>, StreamError> {
     let manifest_path = locator.transcript_dir.join(MANIFEST_FILENAME);
     let exists = manifest_path.try_exists().map_err(|e| {
         transcript_error(
@@ -711,15 +998,78 @@ fn read_history(
     if !exists {
         return Ok(None);
     }
-    let Some(manifest) = load_manifest(locator, &manifest_path)? else {
+    let Some(manifest) = load_manifest(locator, &manifest_path, protected)? else {
         return Ok(None);
     };
+    if protected
+        && (manifest.binding.vm_name != locator.vm
+            || manifest.at_rest.is_none()
+            || manifest.payload_encoding != transcript::PayloadEncoding::StreamRecordV1)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "protected capture identity or encoding mismatch",
+        )
+        .into());
+    }
+    if protected {
+        // Authority comes from the locally trusted public key, never a key
+        // supplied by the manifest. This path does not mint keys or load a
+        // signing secret merely to read history.
+        let mut public_file = std::fs::File::open(locator.keys_dir.join("host-signer.pub"))?;
+        if public_file.metadata()?.len() != 32 {
+            return Err(invalid_history());
+        }
+        let mut public = [0u8; 32];
+        std::io::Read::read_exact(&mut public_file, &mut public)?;
+        let trusted =
+            ed25519_dalek::VerifyingKey::from_bytes(&public).map_err(|_| invalid_history())?;
+        let retired = transcript::evidence::authenticated_retirement(
+            &config::mvm_audit_dir(),
+            &trusted,
+            &manifest,
+        )
+        .map_err(|_| invalid_history())?;
+        let now =
+            transcript::retention_now().map_err(|source| transcript_error(locator, source))?;
+        manifest
+            .check_retention_clock_at(now)
+            .map_err(|source| transcript_error(locator, source))?;
+        let expired = manifest
+            .retention_deadline()
+            .map_err(|source| transcript_error(locator, source))?
+            .is_some_and(|deadline| now >= deadline);
+        if retired || expired {
+            return Ok(Some(History {
+                authorities: Vec::new(),
+                records: VecDeque::new(),
+                truncation: Some(Truncation {
+                    refused_chunks: manifest.refused_chunks,
+                    refused_bytes: manifest.refused_bytes,
+                    evicted_chunks: manifest
+                        .evicted_chunks
+                        .saturating_add(manifest.chunks.len() as u64),
+                    evicted_bytes: manifest.evicted_bytes.saturating_add(
+                        manifest
+                            .retained_plaintext_bytes()
+                            .map_err(|source| transcript_error(locator, source))?,
+                    ),
+                    adopted: manifest.adopted,
+                }),
+                empty: Some(EmptyHistory::Retired),
+                range: None,
+                missing_links: 0,
+            }));
+        }
+    }
     let key = unwrap_capture_key(locator, &manifest)?;
     let chunks = transcript::export_chunks(&manifest, &locator.transcript_dir, &key)
         .map_err(|source| transcript_error(locator, source))?;
 
     let total_chunks = chunks.len();
     let mut records = VecDeque::new();
+    let mut range: Option<VerifiedRange> = None;
+    let mut missing_links = 0u64;
     for chunk in chunks {
         let kind =
             output_kind(chunk.direction).ok_or_else(|| StreamError::NotOutputTranscript {
@@ -727,14 +1077,55 @@ fn read_history(
                 seq: chunk.seq,
                 direction: chunk.direction,
             })?;
-        if !qualifies(&request.opts, chunk.seq, kind) {
+        let (seq, payload) = match manifest.payload_encoding {
+            transcript::PayloadEncoding::Raw => (chunk.seq, chunk.plaintext),
+            transcript::PayloadEncoding::StreamRecordV1 => {
+                let record: StreamRecord =
+                    serde_json::from_slice(&chunk.plaintext).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid encrypted stream record",
+                        )
+                    })?;
+                if record.kind != kind || (record.seq == 0 && record.prev_hash != [0; 32]) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "encrypted stream record chain or channel mismatch",
+                    )
+                    .into());
+                }
+                if let Some(previous) = &range {
+                    let gap = previous.gap_to(record.seq, record.prev_hash)?;
+                    missing_links = missing_links.checked_add(gap).ok_or_else(invalid_history)?;
+                    if !manifest.adopted
+                        && missing_links
+                            > manifest
+                                .refused_chunks
+                                .saturating_add(manifest.evicted_chunks)
+                    {
+                        return Err(invalid_history());
+                    }
+                }
+                let hash = record.hash();
+                let verified = range.get_or_insert(VerifiedRange {
+                    first_seq: record.seq,
+                    first_anchor: record.prev_hash,
+                    last_seq: record.seq,
+                    last_hash: hash,
+                });
+                verified.last_seq = record.seq;
+                verified.last_hash = hash;
+                (record.seq, record.payload)
+            }
+        };
+        if !qualifies(&request.opts, seq, kind) {
             continue;
         }
         records.push_back(OutputRecord {
-            seq: chunk.seq,
+            seq,
             kind,
             origin: RecordOrigin::Durable,
-            payload: chunk.plaintext,
+            payload,
         });
     }
     let empty = classify_empty(total_chunks, records.len(), request.history_tail);
@@ -747,8 +1138,26 @@ fn read_history(
     }
     Ok(Some(History {
         truncation: Truncation::of(&manifest),
+        authorities: if protected {
+            records
+                .front()
+                .zip(records.back())
+                .map(|(first, last)| HistoryAuthority {
+                    first: first.seq,
+                    last: last.seq,
+                    manifest: manifest.clone(),
+                    audit_dir: config::mvm_audit_dir(),
+                    keys_dir: locator.keys_dir.clone(),
+                })
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        },
         records,
         empty,
+        range,
+        missing_links,
     }))
 }
 
@@ -790,6 +1199,7 @@ fn classify_empty(
 fn load_manifest(
     locator: &OutputLocator,
     path: &Path,
+    protected: bool,
 ) -> Result<Option<TranscriptManifest>, StreamError> {
     let bytes = std::fs::read(path).map_err(|e| {
         transcript_error(
@@ -802,6 +1212,11 @@ fn load_manifest(
     })?;
     match serde_json::from_slice(&bytes) {
         Ok(manifest) => Ok(Some(manifest)),
+        Err(_) if protected => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "protected capture manifest is invalid",
+        )
+        .into()),
         Err(error) => {
             tracing::warn!(
                 vm = %locator.vm,
@@ -921,11 +1336,15 @@ mod tests {
                 },
                 bounds: capture_bounds,
                 retention,
+                at_rest: None,
+                generation_budget: None,
+                payload_encoding: Default::default(),
                 created_unix_secs: 0,
                 recipient: "transcript-kek".to_string(),
                 wrapped_data_key_b64: wrapped,
             },
-        );
+        )
+        .unwrap();
         for (direction, bytes) in chunks {
             // Under `FailClosed` a refusal is the point of the fixture, so a
             // failed push is recorded in the manifest rather than asserted on.
@@ -942,6 +1361,7 @@ mod tests {
             vm: "vm".to_string(),
             socket: root.join("absent.sock"),
             transcript_dir: dir,
+            protected_transcript_dir: None,
             console_log: root.join("absent-console.log"),
             keys_dir,
         }
@@ -953,6 +1373,152 @@ mod tests {
             .map(|l| (Direction::Stdout, l.as_bytes()))
             .collect();
         seal_capture(root, &owned, RetentionPolicy::Ring, bounds())
+    }
+
+    #[test]
+    fn already_open_protected_history_rechecks_its_deadline_per_record() {
+        let mut env = crate::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(root.path());
+        let locator = OutputLocator::for_vm("expiry-reader");
+        let run = super::super::protected::ProtectedRun {
+            version: 1,
+            run: "1-1".into(),
+            persists: true,
+        };
+        let dir = run
+            .directory(locator.protected_transcript_dir.as_ref().unwrap())
+            .unwrap()
+            .join("00000000000000000000");
+        config::create_private_dir(&dir).unwrap();
+        config::create_private_dir(&locator.keys_dir).unwrap();
+        config::create_private_dir(config::mvm_audit_dir()).unwrap();
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
+        std::fs::write(
+            locator.keys_dir.join("host-signer.pub"),
+            signing.verifying_key().as_bytes(),
+        )
+        .unwrap();
+        let kek = transcript::load_or_init_kek(&locator.keys_dir).unwrap();
+        let key = aead::Key::random();
+        let wrapped = transcript::wrap_data_key(&kek, &key);
+        let opened = transcript::retention_now().unwrap();
+        let mut writer = TranscriptWriter::new(
+            &dir,
+            key,
+            TranscriptWriterConfig {
+                capture_id: "delivery-expiry".into(),
+                binding: CaptureBinding {
+                    tenant_id: "local".into(),
+                    vm_name: locator.vm.clone(),
+                    session_id: None,
+                },
+                bounds: bounds(),
+                retention: RetentionPolicy::FailClosed,
+                at_rest: Some(transcript::AtRestRetention::default()),
+                generation_budget: None,
+                payload_encoding: transcript::PayloadEncoding::StreamRecordV1,
+                created_unix_secs: opened,
+                recipient: "test".into(),
+                wrapped_data_key_b64: wrapped,
+            },
+        )
+        .unwrap();
+        let mut previous = [0; 32];
+        for seq in 0..2 {
+            let record = mvm_contract::stream::StreamRecord {
+                seq,
+                source: mvm_contract::stream::StreamSource::Console,
+                kind: StreamKind::Stdout,
+                host_unix_nanos: opened * 1_000_000_000,
+                prev_hash: previous,
+                payload: b"buffered-expiry-marker".to_vec(),
+            };
+            previous = record.hash();
+            writer
+                .push(Direction::Stdout, &serde_json::to_vec(&record).unwrap())
+                .unwrap();
+        }
+        let manifest = writer.finalize_at(opened).unwrap();
+        drop(writer);
+        std::fs::write(
+            dir.join(MANIFEST_FILENAME),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let entry: crate::audit_verify::PlanAuditEntry = crate::audit_verify::PlanAuditEntry {
+            timestamp: chrono::Utc::now(),
+            tenant: crate::plan::TenantId("local".into()),
+            plan_id: crate::plan::PlanId("expiry-plan".into()),
+            plan_version: 1,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: "test-image".into(),
+            image_sha256: "00".repeat(32),
+            event: transcript::evidence::TRANSCRIPT_SEALED_EVENT.into(),
+            caller_commitment: None,
+            labels: [
+                ("capture_id".into(), manifest.capture_id.clone()),
+                ("vm_name".into(), locator.vm.clone()),
+                ("transcript_root".into(), manifest.sealed_root_hex.clone()),
+                ("chunk_count".into(), "2".into()),
+            ]
+            .into(),
+        };
+        let signed = mvm_contract::verify::seal(entry, [0; 32], &signing).unwrap();
+        let mut line = serde_json::to_vec(&signed).unwrap();
+        line.push(b'\n');
+        std::fs::write(config::mvm_audit_dir().join("local.jsonl"), line).unwrap();
+        assert!(
+            !transcript::evidence::authenticated_retirement(
+                &config::mvm_audit_dir(),
+                &signing.verifying_key(),
+                &manifest,
+            )
+            .unwrap()
+        );
+        run.publish(locator.protected_transcript_dir.as_ref().unwrap())
+            .unwrap();
+        let mut output = open_vm_output_at(&locator, OutputRequest::default()).unwrap();
+        let deadline = manifest.retention_deadline().unwrap().unwrap();
+        assert!(
+            output
+                .next_output_with_clock(|| Some(deadline - 1))
+                .unwrap()
+                .is_some()
+        );
+        assert!(output.next_output_with_clock(|| Some(deadline)).is_err());
+        assert_eq!(output.history_len(), 0);
+        assert!(
+            output
+                .next_output_with_clock(|| Some(deadline))
+                .unwrap()
+                .is_none()
+        );
+        // The clock changes inside one next_output call, after successful
+        // verification of the real signed capture, not between calls.
+        for after in [Some(deadline), None, Some(deadline - 2)] {
+            let mut output = open_vm_output_at(&locator, OutputRequest::default()).unwrap();
+            output.tail = Some(Tail::Broker(Box::new(
+                super::super::FramedStreamReader::new(
+                    std::io::Cursor::new(Vec::<u8>::new()),
+                    StreamOpts::default(),
+                ),
+            )));
+            let mut samples = VecDeque::from([Some(deadline - 1), after]);
+            assert!(
+                output
+                    .next_output_with_clock(|| samples.pop_front().expect("two clock samples"))
+                    .is_err()
+            );
+            assert!(
+                samples.is_empty(),
+                "verification must succeed before the second sample"
+            );
+            assert_eq!(output.history_len(), 0);
+            assert!(output.tail.is_none());
+            assert!(output.next_output().unwrap().is_none());
+        }
     }
 
     fn drain(stream: &mut VmOutputStream) -> Vec<OutputRecord> {
@@ -1130,6 +1696,7 @@ mod tests {
             vm: "vm".to_string(),
             socket: root.path().join("s.sock"),
             transcript_dir: root.path().join("no-capture"),
+            protected_transcript_dir: None,
             console_log: root.path().join("no-console.log"),
             keys_dir: root.path().join("keys"),
         };
@@ -1247,6 +1814,7 @@ mod tests {
             vm: "ghost".to_string(),
             socket: root.join("absent.sock"),
             transcript_dir: root.join("no-such-capture"),
+            protected_transcript_dir: None,
             console_log: root.join("no-console.log"),
             keys_dir: root.join("keys"),
         }
@@ -1264,6 +1832,45 @@ mod tests {
         assert!(rendered.contains("ghost"), "{rendered}");
         assert!(rendered.contains("no-such-capture"), "{rendered}");
         assert!(rendered.contains("no-console.log"), "{rendered}");
+    }
+
+    #[test]
+    fn protected_generation_links_refuse_replays_and_wrong_anchors() {
+        let range = VerifiedRange {
+            first_seq: 7,
+            first_anchor: [0; 32],
+            last_seq: 9,
+            last_hash: [4; 32],
+        };
+        assert_eq!(range.gap_to(10, [4; 32]).unwrap(), 0);
+        assert!(range.gap_to(10, [5; 32]).is_err());
+        assert!(range.gap_to(9, [4; 32]).is_err());
+        assert!(range.gap_to(8, [4; 32]).is_err());
+        assert_eq!(range.gap_to(12, [5; 32]).unwrap(), 2);
+        let exhausted = VerifiedRange {
+            last_seq: u64::MAX,
+            ..range
+        };
+        assert!(exhausted.gap_to(u64::MAX, [4; 32]).is_err());
+    }
+
+    #[test]
+    fn protected_owner_failure_never_falls_back_to_a_legacy_console() {
+        let root = tempfile::tempdir().unwrap();
+        let mut locator = empty_locator(root.path());
+        locator.console_log = root.path().join("console.log");
+        std::fs::write(&locator.console_log, b"sensitive-legacy-marker").unwrap();
+        std::fs::write(
+            root.path().join("supervisor.json"),
+            br#"{"console_capture":"encrypted"}"#,
+        )
+        .unwrap();
+        let error = match open_vm_output_at(&locator, OutputRequest::default()) {
+            Ok(_) => panic!("missing protected owner must refuse"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("plaintext fallback refused"));
+        assert!(!error.to_string().contains("sensitive-legacy-marker"));
     }
 
     #[test]
