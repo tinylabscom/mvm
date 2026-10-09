@@ -205,6 +205,8 @@ impl SpliceGap {
 /// silent about a capture it threw away or nags about one it was told to skip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmptyHistory {
+    /// Authenticated retention policy no longer permits replaying the payload.
+    Retired,
     /// The transcript sealed with no chunks in it.
     CaptureEmpty,
     /// The transcript holds records and the request's filter matched none.
@@ -901,6 +903,55 @@ fn read_history_mode(
             "protected capture identity or encoding mismatch",
         )
         .into());
+    }
+    if protected {
+        // Authority comes from the locally trusted public key, never a key
+        // supplied by the manifest. This path does not mint keys or load a
+        // signing secret merely to read history.
+        let mut public_file = std::fs::File::open(locator.keys_dir.join("host-signer.pub"))?;
+        if public_file.metadata()?.len() != 32 {
+            return Err(invalid_history());
+        }
+        let mut public = [0u8; 32];
+        std::io::Read::read_exact(&mut public_file, &mut public)?;
+        let trusted =
+            ed25519_dalek::VerifyingKey::from_bytes(&public).map_err(|_| invalid_history())?;
+        let retired = transcript::evidence::authenticated_retirement(
+            &config::mvm_audit_dir(),
+            &trusted,
+            &manifest,
+        )
+        .map_err(|_| invalid_history())?;
+        let now =
+            transcript::retention_now().map_err(|source| transcript_error(locator, source))?;
+        manifest
+            .check_retention_clock_at(now)
+            .map_err(|source| transcript_error(locator, source))?;
+        let expired = manifest
+            .retention_deadline()
+            .map_err(|source| transcript_error(locator, source))?
+            .is_some_and(|deadline| now >= deadline);
+        if retired || expired {
+            return Ok(Some(History {
+                records: VecDeque::new(),
+                truncation: Some(Truncation {
+                    refused_chunks: manifest.refused_chunks,
+                    refused_bytes: manifest.refused_bytes,
+                    evicted_chunks: manifest
+                        .evicted_chunks
+                        .saturating_add(manifest.chunks.len() as u64),
+                    evicted_bytes: manifest.evicted_bytes.saturating_add(
+                        manifest
+                            .retained_plaintext_bytes()
+                            .map_err(|source| transcript_error(locator, source))?,
+                    ),
+                    adopted: manifest.adopted,
+                }),
+                empty: Some(EmptyHistory::Retired),
+                range: None,
+                missing_links: 0,
+            }));
+        }
     }
     let key = unwrap_capture_key(locator, &manifest)?;
     let chunks = transcript::export_chunks(&manifest, &locator.transcript_dir, &key)

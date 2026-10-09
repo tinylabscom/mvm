@@ -18,7 +18,7 @@ use mvm_core::transcript::{AtRestRetention, TranscriptManifest};
 use mvm_vmm::host::console_capture::bounded::{self, Consumer, Producer};
 
 use super::console_source::SharedBroker;
-use super::plane::{build_writer_with_policy, write_manifest};
+use super::plane::build_writer_with_policy;
 use super::protected_retention::ManagedRetention;
 use super::{StreamBroker, StreamRedaction, StreamServerHandle, serve_stream};
 use crate::audit::evidence::EvidenceReceipt;
@@ -78,7 +78,7 @@ impl CaptureOwner {
                 &keys.join(host_keypair::PUBLIC_FILENAME),
             )
             .context("load existing capture audit authority")?;
-            Some(AuditEmitter::new(signing)?)
+            Some(AuditEmitter::with_dir(signing, &config::mvm_audit_dir())?)
         } else {
             None
         };
@@ -232,7 +232,7 @@ struct Worker {
     rotation: mpsc::SyncSender<()>,
 }
 
-fn record_opening(
+pub(super) fn record_opening(
     plan: &ExecutionPlan,
     emitter: &AuditEmitter,
     seed: &TranscriptManifest,
@@ -431,7 +431,7 @@ impl Worker {
         if manifest.is_truncated() {
             self.mark_failed();
         }
-        write_manifest(&self.active, &manifest)?;
+        super::protected_recovery::stage(&self.active, &manifest)?;
         if let (Some(plan), Some(emitter)) = (&self.plan, &self.emitter) {
             emitter.emit_transcript_sealed(
                 plan,
@@ -441,6 +441,15 @@ impl Worker {
                 manifest.chunks.len(),
                 manifest.adopted,
             )?;
+            anyhow::ensure!(
+                mvm_core::transcript::evidence::authenticated_seal(
+                    emitter.audit_dir(),
+                    &emitter.verifying_key(),
+                    &manifest,
+                )?
+                .is_some(),
+                "capture terminal evidence unavailable"
+            );
         } else {
             anyhow::bail!("capture audit authority missing");
         }
@@ -448,6 +457,9 @@ impl Worker {
             .as_mut()
             .context("managed capture owner missing")?
             .record_sealed(&self.active, manifest)?;
+        super::journal::CaptureJournal::discard(
+            &self.active.join(super::journal::JOURNAL_FILENAME),
+        );
         Ok(())
     }
 }
@@ -634,6 +646,80 @@ mod tests {
         assert_eq!(second.payload, b"after-rotation");
         assert_eq!(second.seq, first.seq + 1);
         assert!(output.next_output().unwrap().is_none());
+    }
+
+    #[test]
+    fn cross_generation_pressure_is_authenticated_and_reader_refuses_unlinked_late_payload() {
+        use crate::audit::transcript_retirement::GenerationReservation;
+        use mvm_core::transcript::GenerationBudget;
+        use std::io::Write;
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let keys = config::mvm_keys_dir();
+        host_keypair::load_or_init_at(&keys).unwrap();
+        let plan = PlanFixture::new().tenant("pressure-tenant").build();
+        let vm = "pressure-owner";
+        let (owner, mut producer) = CaptureOwner::start(CaptureParams {
+            vm,
+            authority: CaptureAuthority::Admitted(&plan),
+            redaction: &plan.redaction,
+        })
+        .unwrap();
+        producer.write_all(b"private-retired-output").unwrap();
+        drop(producer);
+        assert!(owner.finish());
+        let root = config::vm_stream_transcript_dir(vm);
+        let run = ProtectedRun::read(&root).unwrap().unwrap();
+        let dir = run.directory(&root).unwrap().join("00000000000000000000");
+        let manifest: TranscriptManifest =
+            serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap()).unwrap();
+        let segment = dir.join(&manifest.chunks[0].file);
+        let ciphertext = std::fs::read(&segment).unwrap();
+        let (signing, _) = mvm_core::crypto::ed25519_keypair::load_existing(
+            &keys.join(host_keypair::SECRET_FILENAME),
+            &keys.join(host_keypair::PUBLIC_FILENAME),
+        )
+        .unwrap();
+        let emitter = AuditEmitter::with_dir(signing, &config::mvm_audit_dir()).unwrap();
+        let mut managed = ManagedRetention::new(&root, vm, &plan.tenant.0, &emitter).unwrap();
+        let limit = GenerationBudget::default().max_plaintext_bytes;
+        assert!(
+            !managed.reservations.lock().unwrap().reserve(limit),
+            "old sealed generation must count against the new producer"
+        );
+        let broker = Arc::new(Mutex::new(StreamBroker::live_only(
+            vm,
+            StreamRedaction::curated(&plan.redaction),
+        )));
+        managed
+            .reclaim(
+                &emitter,
+                &broker,
+                GenerationReservation {
+                    plaintext_bytes: limit,
+                    chunks: 1,
+                },
+            )
+            .unwrap();
+        assert!(!segment.exists());
+        assert!(manifest.chunks[0].size_bytes > 28);
+        assert!(managed.reservations.lock().unwrap().reserve(limit));
+        assert!(!managed.reservations.lock().unwrap().reserve(1));
+        // Simulate an interrupted unlink: the signed retirement, not path
+        // absence, must prevent readers from exposing retained ciphertext.
+        mvm_core::util::atomic_io::atomic_write(&segment, &ciphertext).unwrap();
+        let mut output = mvm_core::stream_client::open_vm_output(
+            vm,
+            mvm_core::stream_client::OutputRequest::default(),
+        )
+        .unwrap();
+        assert!(output.next_output().unwrap().is_none());
+        assert_eq!(
+            output.empty_history(),
+            Some(mvm_core::stream_client::EmptyHistory::Retired)
+        );
+        assert!(!config::vm_console_log(vm).exists());
     }
 
     #[test]

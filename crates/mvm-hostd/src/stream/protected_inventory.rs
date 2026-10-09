@@ -42,9 +42,9 @@ impl Inventory {
                 let relative = generation.strip_prefix(root)?.to_path_buf();
                 let capture = CaptureDirectory::open(root, &relative)
                     .context("managed generation is active or untrusted")?;
-                let manifest = capture
-                    .read_manifest()
-                    .context("managed generation needs recovery before admission")?;
+                let manifest =
+                    super::protected_recovery::recover(&generation, &capture, emitter, tenant, vm)
+                        .context("managed generation recovery refused")?;
                 verify_sealed_root(&manifest)?;
                 // Time policy alone does not enroll a legacy/forensic capture
                 // into the independently authenticated workload-output budget.

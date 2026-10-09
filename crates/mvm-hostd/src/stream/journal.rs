@@ -180,11 +180,22 @@ impl CaptureJournal {
     /// capture before the first chunk of the new one, so anything found here
     /// belongs to a run whose segments are already gone.
     fn open(&mut self) -> std::io::Result<()> {
-        let mut file = OpenOptions::new()
+        let protected = self
+            .header
+            .as_ref()
+            .is_some_and(|seed| seed.at_rest.is_some());
+        let mut options = OpenOptions::new();
+        options
             .write(true)
             .create(true)
             .truncate(true)
-            .open(&self.path)?;
+            .create_new(protected);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options.open(&self.path)?;
         // Errors rather than asserts: the header is taken exactly once by
         // construction, and a journal that somehow lost it is worth one broken
         // mirror, never a killed teardown.

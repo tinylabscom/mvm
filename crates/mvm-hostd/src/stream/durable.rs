@@ -698,8 +698,7 @@ mod tests {
             },
         );
         config.at_rest = Some(mvm_core::transcript::AtRestRetention::default());
-        let mut writer =
-            TranscriptWriter::new(root.path(), aead::Key::random(), config).unwrap();
+        let mut writer = TranscriptWriter::new(root.path(), aead::Key::random(), config).unwrap();
         assert!(finalize_joined_writer(&mut writer, 99).is_err());
         let manifest = finalize_joined_writer(&mut writer, 3701).unwrap();
         assert_eq!(manifest.created_unix_secs, 100);
@@ -874,6 +873,66 @@ mod tests {
             manifest.is_truncated(),
             "a transcript that dropped every record must say so"
         );
+    }
+
+    #[test]
+    fn timed_out_protected_writer_keeps_its_real_generation_lease_until_drain() {
+        use crate::audit::transcript_retirement::GenerationReservation;
+        use crate::stream::protected_budget::Reservations;
+        use mvm_core::transcript::secure_cleanup::CaptureDirectory;
+        use mvm_core::transcript::{AtRestRetention, GenerationBudget};
+        let root = tempfile::tempdir().unwrap();
+        mvm_core::private_fs::ensure_private_dir(root.path()).unwrap();
+        let dir = root.path().join("generation");
+        let writer = crate::stream::plane::build_writer_with_policy(
+            "vm-durable",
+            &dir,
+            Some(AtRestRetention::default()),
+            "tenant",
+            &root.path().join("keys"),
+        )
+        .unwrap();
+        assert!(CaptureDirectory::open(root.path(), Path::new("generation")).is_err());
+        let reservations = Arc::new(Mutex::new(Reservations::new(
+            GenerationBudget::default(),
+            GenerationReservation {
+                plaintext_bytes: 0,
+                chunks: 0,
+            },
+        )));
+        let mut sink = DurableSink::new("vm-durable", writer).with_reservations(Some(reservations));
+        // Observe actual worker exit independently, without polling after its
+        // timed-out join detaches. The wrapper does not own the writer/lease.
+        let worker = sink.worker.take().unwrap();
+        let (actual_exit, exited) = std::sync::mpsc::channel();
+        let (proxy_exit, proxy_exited) = std::sync::mpsc::channel();
+        sink.worker = Some(WriterHandle {
+            join: std::thread::spawn(move || {
+                worker.join.join().unwrap();
+                drop(proxy_exit);
+                actual_exit.send(()).unwrap();
+            }),
+            exited: proxy_exited,
+        });
+        let held = sink.writer_lock();
+        let wedged = held.lock().unwrap();
+        sink.push(&record(0));
+        let (finished, sealing) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            finished.send(sink.seal()).unwrap();
+        });
+        let snapshot = sealing
+            .recv_timeout(SEAL_JOIN_TIMEOUT + Duration::from_secs(5))
+            .unwrap();
+        assert!(snapshot.sealed_unix_secs.is_none());
+        assert!(
+            CaptureDirectory::open(root.path(), Path::new("generation")).is_err(),
+            "finish timeout is not producer-death evidence"
+        );
+        drop(wedged);
+        drop(held);
+        exited.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(CaptureDirectory::open(root.path(), Path::new("generation")).is_ok());
     }
 
     #[test]

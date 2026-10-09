@@ -947,9 +947,27 @@ status and sanitized guidance rather than raw helper output.
 states such as `capture_setup_failed`, `boot_failed`, and `capture_failed`.
 Encrypted supervisor-stderr collection is a separate follow-up.
 
-This integration is **not ready for production**: authenticated aggregate
-byte-budget enforcement, periodic retirement/recovery, versioned
-cross-generation history, and end-to-end lifecycle evidence remain merge gates.
+Durable generations rotate hourly and expire seven days after sealing. The
+existing 8 MiB / 65,536-chunk budget covers the concrete VM's entire managed
+generation set, including the active generation; encrypted record-envelope
+bytes count against that budget. Pressure seals the active generation before
+authenticated oldest-generation retirement. Unreclaimable capacity sheds
+durable output and reports capture failure, rather than enlarging the limit.
+Startup and bounded periodic maintenance use the signed original capture
+authority. Recovery requires exclusive producer leases and a durable signed
+opening; recovered output is explicitly incomplete and retry preserves the
+original staged terminal timestamp. Missing or pruned audit authority refuses
+recovery/retirement; uninterrupted unattended cleanup across audit pruning is
+not guaranteed. Unaccounted interrupted ciphertext tails are preserved for
+offline recovery rather than automatically discarded.
+
+Verified history checks signed retirement before decrypting any payload, even
+when deletion was interrupted. Retired/expired history reports an explicit
+retention gap. Live attachment has a bounded RAM replay window, not a promise
+that every active byte is already terminally verified history.
+
+This integration is **not ready for production**: consumer security review and
+native end-to-end lifecycle evidence remain merge gates.
 The draft warm-handoff path prepares a fresh child capture, requires every vCPU
 to acknowledge quiescence, replaces the parent's UART capture state, and
 finalizes the old owner before acknowledging transfer. Failure refuses the

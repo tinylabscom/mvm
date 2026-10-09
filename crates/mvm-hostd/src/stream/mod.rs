@@ -64,6 +64,7 @@ pub mod plane;
 pub mod protected;
 mod protected_budget;
 mod protected_inventory;
+mod protected_recovery;
 mod protected_retention;
 pub mod redact;
 pub(crate) mod secret_scan;

@@ -419,6 +419,10 @@ fn announce(args: &Args, stream: &VmOutputStream, sinks: &mut Sinks<'_>) {
 /// is right there.
 fn describe_empty(empty: EmptyHistory, args: &Args) -> Option<String> {
     match empty {
+        EmptyHistory::Retired => Some(format!(
+            "note: microVM {:?} output payload is unavailable under authenticated retention policy",
+            args.name
+        )),
         EmptyHistory::CaptureEmpty => Some(format!(
             "note: microVM {:?} has an output capture and it is empty",
             args.name
@@ -1091,6 +1095,7 @@ mod tests {
                 display_socket: None,
                 redaction: &redaction,
                 retention: mvm_core::plan::StreamRetention::Persist,
+                supervisor_owned: false,
             })
             .expect("attach a plane");
 
