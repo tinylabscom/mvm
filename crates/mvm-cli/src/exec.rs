@@ -38,7 +38,7 @@ mod session;
 mod sidecar_selection;
 mod startup_slo;
 mod transient;
-pub(super) use startup_slo::enforce_startup_slo;
+use startup_slo::enforce_startup_slo;
 
 pub use launch_plan::load_launch_plan;
 
