@@ -32,12 +32,12 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 
-use mvm_contract::ir::{Entrypoint, Workload};
-use mvm_core::user_config::MvmConfig;
-use mvm_sdk::compile::{
+use mvm_compiler::{
     PinnedMvmRevision, compile, compile_archive, compile_archive_pinned, compile_pinned,
     is_archive_output,
 };
+use mvm_contract::ir::{Entrypoint, Workload};
+use mvm_core::user_config::MvmConfig;
 use mvm_sdk::decorator::{ParseError, parse_python, parse_typescript};
 
 use super::Cli;

@@ -36,9 +36,8 @@
 //! The *builder-VM-side* install pipeline (running pip / pnpm
 //! behind an egress allowlist, generating the SBOM via
 //! `cyclonedx-py` / `pnpm sbom`, capturing the fetch log,
-//! running `pip-audit` / `pnpm audit`) lives in `mvm-build` and
-//! lands once the builder VM actually boots. The
-//! audit gate stays *here* in the SDK so the same types are
+//! running `pip-audit` / `pnpm audit`) lives in `mvm-build`.
+//! The audit primitives live in the compiler so the same types are
 //! consumed by the CLI (`mvmctl deps audit`, `mvmctl deps inspect`)
 //! and the supervisor's admission path with no schema drift.
 

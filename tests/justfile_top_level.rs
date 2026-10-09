@@ -18,7 +18,7 @@ const RECIPE_DOCS: &[&str] = &[
     "crates/mvm-agentd/tests/runner_end_to_end.rs",
     "crates/mvm-conformance/README.md",
     "crates/mvm-sdk/src/bin/emit_schema.rs",
-    "crates/mvm-sdk/src/compile/orchestrator.rs",
+    "crates/mvm-compiler/src/orchestrator.rs",
     "nix/wrappers/README.md",
     "public/src/content/docs/contributing/ai-coding-workflow.md",
     "public/src/content/docs/contributing/development.md",

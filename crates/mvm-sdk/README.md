@@ -18,11 +18,12 @@ package docs.
 
 ## Role in the workspace
 
-`mvm-sdk` is used by `mvm-build` to compile workload declarations and sidecar
-metadata, by `mvm-cli` for generated/project workflows, and by `mvm-hostd` when
-it validates SDK-originated execution data. `mvm-capture` and
-`mvm-conformance` use it in tests. The crate re-exports the canonical IR from
-`mvm-contract`; it does not maintain a second workload schema.
+`mvm-sdk` provides workload authoring, decorator parsing, and runtime-recording
+lowering. Host compilation and dependency-volume auditing live in
+`mvm-compiler`; first-party host tools depend on it directly. `mvm-capture`
+and `mvm-conformance` use the SDK authoring surface in tests. The crate
+re-exports the canonical IR from `mvm-contract`; it does not maintain a second
+workload schema.
 
 ## How it works: the Rust layer
 
@@ -35,8 +36,17 @@ crate re-exports this one as `mvm_client::authoring`, so a Rust program needs
 only the one dependency.
 
 Optional features keep secondary surfaces out of the base closure:
-`schema` enables schema emission and `deploy-remote` enables the HTTP
-deployment path.
+
+- `schema` enables schema emission.
+- `compiler` enables the `mvm_sdk::compile` compatibility facade over
+  `mvm-compiler`. Existing Rust callers using that module must enable this
+  feature; new host tools should depend on `mvm-compiler` directly.
+- `deploy` enables local deployment assembly, records, and verification.
+  It also enables `compiler`, but does not enable HTTP transport.
+- `deploy-remote` enables `deploy` and its HTTP shipping transport.
+
+All are off by default. The base SDK retains Tree-sitter for Python/TypeScript
+decorator parsing, but does not link `mvm-compiler`, `globset`, or `mvm-http`.
 
 ## Machine lifecycle
 
