@@ -50,7 +50,7 @@ tempfile.workspace = true
 [features]
 # Derives JsonSchema on the ABI request/reply types so the emitters can write
 # the SDK-codegen input. Never enabled for the library artifact itself.
-schema = ["dep:schemars", "mvm-agentd/schema", "mvm-core/schema"]
+schema = ["dep:schemars", "mvm-agentd/schema", "mvm-core/schema", "mvm-client/schema"]
 
 [lints]
 workspace = true

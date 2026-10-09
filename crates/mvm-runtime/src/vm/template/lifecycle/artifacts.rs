@@ -225,14 +225,7 @@ fn template_artifacts_for_slot_revision_with_manifest(
     revision_hash: &str,
     persisted: PersistedManifest,
 ) -> Result<(PersistedManifest, String, Option<String>, String, String)> {
-    if revision_hash.is_empty()
-        || revision_hash.contains('/')
-        || revision_hash.contains('\\')
-        || revision_hash == "."
-        || revision_hash == ".."
-    {
-        anyhow::bail!("invalid slot revision hash {revision_hash:?}");
-    }
+    validate_slot_revision(revision_hash)?;
     let rev_dir = slot_revision_dir(slot_hash, revision_hash);
 
     let vmlinux = format!("{rev_dir}/vmlinux");
@@ -353,6 +346,70 @@ pub(super) fn bundle_artifacts_for_sha(
     Ok((spec, kernel, initrd, rootfs, bundle_sha256.to_string()))
 }
 
+/// Validate a stored slot revision label as a single path component.
+///
+/// Revision labels need not be hexadecimal hashes.
+pub fn validate_slot_revision(revision: &str) -> Result<()> {
+    if revision.is_empty()
+        || revision.contains('/')
+        || revision.contains('\\')
+        || revision == "."
+        || revision == ".."
+    {
+        anyhow::bail!("invalid slot revision hash {revision:?}");
+    }
+    Ok(())
+}
+
+/// Resolve a revision within its slot, including intermediate symlink targets.
+/// These checks assume the tree is not concurrently modified by an attacker.
+pub(super) fn checked_slot_revision_dir(
+    slot_hash: &str,
+    revision: &str,
+) -> Result<std::path::PathBuf> {
+    validate_slot_revision(revision)?;
+    let slot = std::fs::canonicalize(mvm_core::manifest::slot_dir(slot_hash))?;
+    let revisions = std::fs::canonicalize(slot.join("artifacts/revisions"))?;
+    anyhow::ensure!(
+        revisions.starts_with(&slot),
+        "slot revisions directory escapes slot"
+    );
+    let path = std::fs::canonicalize(revisions.join(revision))?;
+    anyhow::ensure!(
+        path.starts_with(&revisions) && path.is_dir(),
+        "slot revision escapes revisions directory or is not a directory"
+    );
+    Ok(path)
+}
+
+/// Resolve a regular file within a revision. Internal symlinks are allowed;
+/// escaping symlinks and non-regular files are rejected before opening.
+pub(super) fn checked_revision_file(
+    revision_dir: &std::path::Path,
+    name: &str,
+) -> Result<std::path::PathBuf> {
+    use std::path::{Component, Path};
+
+    anyhow::ensure!(
+        !name.is_empty()
+            && !name.contains('\\')
+            && Path::new(name)
+                .components()
+                .all(|part| matches!(part, Component::Normal(_))),
+        "invalid revision artifact path {name:?}"
+    );
+    let path = std::fs::canonicalize(revision_dir.join(name))?;
+    anyhow::ensure!(
+        path.starts_with(revision_dir),
+        "revision artifact {name:?} escapes revision directory"
+    );
+    anyhow::ensure!(
+        std::fs::metadata(&path)?.is_file(),
+        "revision artifact {name:?} is not a regular file"
+    );
+    Ok(path)
+}
+
 /// Verify a slot's artifacts against its `checksums.json`. Returns
 /// `Ok(())` if every recorded file matches; an error otherwise listing
 /// which file mismatched. The checksums file is written by
@@ -368,24 +425,43 @@ pub fn template_verify_slot(slot_hash: &str, revision: Option<&str>) -> Result<(
         Some(r) => r.to_string(),
         None => current_revision_id_for_slot(slot_hash)?,
     };
-    let rev_dir = std::path::PathBuf::from(slot_revision_dir(slot_hash, &rev));
-    let sums_path = rev_dir.join("checksums.json");
-    let sums_bytes = std::fs::read(&sums_path).with_context(|| {
-        format!(
-            "Missing {} — checksums are written by `mvmctl manifest push` (slice 8b not yet shipped). Run `mvmctl build --force` to repopulate the slot, then verify will work after push lands.",
-            sums_path.display()
+    let rev_dir = checked_slot_revision_dir(slot_hash, &rev).with_context(|| {
+        missing_checksums_message(
+            &std::path::Path::new(&slot_revision_dir(slot_hash, &rev)).join("checksums.json"),
         )
     })?;
+    verify_slot_revision_dir(slot_hash, &rev, &rev_dir)
+}
+
+fn missing_checksums_message(path: &std::path::Path) -> String {
+    format!(
+        "Missing {} — checksums are written by `mvmctl manifest push` (slice 8b not yet shipped). Run `mvmctl build --force` to repopulate the slot, then verify will work after push lands.",
+        path.display()
+    )
+}
+
+fn verify_slot_revision_dir(slot_hash: &str, rev: &str, rev_dir: &std::path::Path) -> Result<()> {
+    let sums_path = rev_dir.join("checksums.json");
+    let sums_bytes = checked_revision_file(rev_dir, "checksums.json")
+        .and_then(|path| Ok(std::fs::read(path)?))
+        .with_context(|| missing_checksums_message(&sums_path))?;
     let checksums: Checksums = serde_json::from_slice(&sums_bytes)
         .with_context(|| format!("Corrupt {}", sums_path.display()))?;
 
     let mut mismatches = Vec::new();
     for (name, expected_hex) in &checksums.files {
-        let path = rev_dir.join(name);
-        if !path.exists() {
-            mismatches.push(format!("{}: missing", name));
-            continue;
-        }
+        let path = match checked_revision_file(rev_dir, name) {
+            Ok(path) => path,
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                mismatches.push(format!("{}: missing", name));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let actual = sha256_hex(&path)?;
         if &actual != expected_hex {
             mismatches.push(format!(
