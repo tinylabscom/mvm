@@ -147,6 +147,11 @@ original capture, root, policy, deadline and reason. Exact existing evidence
 permits interrupted cleanup to resume; conflicts, duplicate evidence, invalid
 chains and missing payload without retirement authority refuse.
 
+Reconciliation binds the requested tenant and concrete VM instance against the
+original host-signed seal, not the workload name or a current `plan.json`.
+Retirement attribution is copied from that authenticated historical entry;
+deleting or replacing the current VM plan does not change it.
+
 Cleanup pins a private host-owned capture directory beneath a trusted configured
 root, opens descendant components without following links, takes a nonblocking
 exclusive lease, and removes only verified single-link ciphertext segments named

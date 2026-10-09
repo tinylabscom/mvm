@@ -344,12 +344,6 @@ impl TranscriptCtx {
         use mvm_hostd::audit::transcript_retirement::{RetirementContext, reconcile_capture};
         let (_, manifest) = self.load_manifest(tenant, capture_id)?;
         self.validate_manifest_binding(tenant, capture_id, &manifest)?;
-        let plan = read_plan_at(
-            &self
-                .vms_dir
-                .join(&manifest.binding.vm_name)
-                .join(PLAN_FILENAME),
-        )?;
         let trusted = super::audit::load_verifying_key(&self.verifying_key_path)?;
         if manifest.at_rest.is_some() && manifest.sealed_unix_secs.is_some() {
             mvm_hostd::audit::transcript_retirement::authenticated_retirement(
@@ -375,7 +369,8 @@ impl TranscriptCtx {
                 root: &self.transcripts_dir,
                 relative_capture: &relative,
                 capture_id,
-                plan: &plan,
+                tenant,
+                vm: &manifest.binding.vm_name,
                 emitter: &emitter,
             },
             transcript::retention_now()?,
@@ -641,6 +636,20 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_before_expiry_does_not_need_current_plan() {
+        let root = tempfile::tempdir().unwrap();
+        let c = ctx(root.path());
+        persist_plan(&c, "local", "vm1");
+        let id = c.arm("local", "vm1", None, bounds()).unwrap();
+        c.disarm("local", &id).unwrap();
+        std::fs::remove_file(c.vms_dir.join("vm1").join(PLAN_FILENAME)).unwrap();
+        c.reconcile("local", &id).unwrap();
+        // A different tenant's replacement plan must not supply authority.
+        persist_plan(&c, "replacement-tenant", "vm1");
+        c.reconcile("local", &id).unwrap();
+    }
+
+    #[test]
     fn operator_reconcile_expires_only_authorized_payload_and_preserves_evidence() {
         let root = tempfile::tempdir().unwrap();
         let c = ctx(root.path());
@@ -678,6 +687,8 @@ mod tests {
         );
         drop(writer);
         c.disarm("local", &id).unwrap();
+        // Historical cleanup cannot depend on mutable or deleted VM state.
+        std::fs::remove_file(c.vms_dir.join("vm1").join(PLAN_FILENAME)).unwrap();
         let original = std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap();
         assert!(
             c.export("local", &id).is_err(),

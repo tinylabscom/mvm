@@ -4,15 +4,14 @@ use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
 use ed25519_dalek::VerifyingKey;
-use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::secure_cleanup::CaptureDirectory;
 use mvm_core::transcript::{TranscriptManifest, verify_sealed_root};
 
 use super::emitter::AuditEmitter;
 use super::evidence::EvidenceReceipt;
 use crate::supervisor::audit::{
-    LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME,
-    TRANSCRIPT_SEALED_EVENT, for_plan,
+    LABEL_CAPTURE_ID, LABEL_CHUNK_COUNT, LABEL_TRANSCRIPT_ROOT, LABEL_VM_NAME, PlanAuditEntry,
+    TRANSCRIPT_SEALED_EVENT,
 };
 
 pub const TRANSCRIPT_RETIRED_EVENT: &str = "transcript.retired";
@@ -30,7 +29,9 @@ pub struct RetirementContext<'a> {
     pub root: &'a Path,
     pub relative_capture: &'a Path,
     pub capture_id: &'a str,
-    pub plan: &'a ExecutionPlan,
+    /// Requested scope, authenticated against the original signed seal.
+    pub tenant: &'a str,
+    pub vm: &'a str,
     pub emitter: &'a AuditEmitter,
 }
 
@@ -93,7 +94,7 @@ pub fn authenticated_retirement(
     trusted_key: &VerifyingKey,
     manifest: &TranscriptManifest,
 ) -> Result<bool> {
-    authenticated_retirement_at(audit_dir, trusted_key, manifest, None)
+    authenticated_retirement_at(audit_dir, trusted_key, manifest, None).map(|proof| proof.1)
 }
 
 fn authenticated_retirement_at(
@@ -101,7 +102,7 @@ fn authenticated_retirement_at(
     trusted_key: &VerifyingKey,
     manifest: &TranscriptManifest,
     now: Option<u64>,
-) -> Result<bool> {
+) -> Result<(PlanAuditEntry, bool)> {
     verify_sealed_root(manifest)?;
     let segments = crate::supervisor::audit_set::read_verified_set(
         audit_dir,
@@ -109,7 +110,7 @@ fn authenticated_retirement_at(
         trusted_key,
     )
     .context("verifying transcript audit chain")?;
-    let mut seals = 0;
+    let mut seal = None;
     let mut retired = 0;
     let expected_chunks = manifest.chunks.len().to_string();
     for segment in segments {
@@ -134,11 +135,18 @@ fn authenticated_retirement_at(
                         && entry.labels.get(LABEL_CHUNK_COUNT) == Some(&expected_chunks),
                     "conflicting original transcript seal"
                 );
-                seals += 1;
+                ensure!(seal.is_none(), "duplicate original transcript seal");
+                seal = Some(entry.clone());
             } else {
+                let mut expected = seal
+                    .clone()
+                    .context("retirement must follow exactly one original seal")?;
+                expected.timestamp = entry.timestamp;
+                expected.event = entry.event.clone();
+                expected.labels = entry.labels.clone();
                 ensure!(
-                    seals == 1,
-                    "retirement must follow exactly one original seal"
+                    entry == expected,
+                    "retirement attribution differs from original seal"
                 );
                 pressure::verify_labels(manifest, &entry.labels)?;
                 if entry.labels.get("retention.reason").map(String::as_str) == Some(REASON)
@@ -157,13 +165,10 @@ fn authenticated_retirement_at(
             std::fs::File::open(&segment.path)?.sync_all()?;
         }
     }
-    ensure!(
-        seals == 1,
-        "expected exactly one original host-signed transcript seal"
-    );
+    let seal = seal.context("expected exactly one original host-signed transcript seal")?;
     ensure!(retired <= 1, "duplicate transcript retirement evidence");
     std::fs::File::open(audit_dir)?.sync_all()?;
-    Ok(retired == 1)
+    Ok((seal, retired == 1))
 }
 
 /// Synchronous maintenance door for explicit operator recovery and supervisor
@@ -198,8 +203,8 @@ fn reconcile_with(
     verify_sealed_root(&manifest)?;
     ensure!(
         manifest.capture_id == context.capture_id
-            && manifest.binding.tenant_id == context.plan.tenant.0
-            && manifest.binding.vm_name == context.plan.workload.0,
+            && manifest.binding.tenant_id == context.tenant
+            && manifest.binding.vm_name == context.vm,
         "managed capture does not match its admitted identity"
     );
     if manifest.at_rest.is_none() {
@@ -209,7 +214,7 @@ fn reconcile_with(
         return Ok(RetirementOutcome::NotSealed);
     };
     manifest.check_retention_clock_at(now)?;
-    let already_retired = authenticated_retirement_at(
+    let (original_seal, already_retired) = authenticated_retirement_at(
         context.emitter.audit_dir(),
         &context.emitter.verifying_key(),
         &manifest,
@@ -222,7 +227,10 @@ fn reconcile_with(
         .prepare_payload(&manifest, already_retired)
         .context("preflighting authenticated ciphertext payload")?;
     if !already_retired {
-        let mut entry = for_plan(context.plan, None, TRANSCRIPT_RETIRED_EVENT, []);
+        // Preserve historical attribution without consulting mutable VM state.
+        let mut entry = original_seal;
+        entry.timestamp = chrono::Utc::now();
+        entry.event = TRANSCRIPT_RETIRED_EVENT.into();
         // Free-form plan labels are not retirement metadata.
         entry.labels = pressure::event_labels(&manifest, pressure)?;
         sign(&entry).context("durably signing transcript retirement before unlink")?;

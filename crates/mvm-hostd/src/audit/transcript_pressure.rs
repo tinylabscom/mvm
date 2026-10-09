@@ -19,7 +19,7 @@ pub struct BudgetOwner {
 }
 
 impl BudgetOwner {
-    pub fn acquire(root: &Path, plan: &ExecutionPlan, budget: GenerationBudget) -> Result<Self> {
+    pub fn acquire(root: &Path, tenant: &str, vm: &str, budget: GenerationBudget) -> Result<Self> {
         ensure!(
             budget.max_plaintext_bytes > 0 && budget.max_chunks > 0,
             "empty generation budget"
@@ -28,8 +28,8 @@ impl BudgetOwner {
             _lease: CaptureDirectory::for_writer(root)
                 .context("managed family budget is busy or untrusted")?,
             root: root.to_owned(),
-            tenant: plan.tenant.0.clone(),
-            vm: plan.workload.0.clone(),
+            tenant: tenant.to_owned(),
+            vm: vm.to_owned(),
             budget,
         })
     }
@@ -137,9 +137,7 @@ pub fn reconcile_pressure(
     now: u64,
 ) -> Result<RetirementOutcome> {
     ensure!(
-        context.root == owner.root
-            && context.plan.tenant.0 == owner.tenant
-            && context.plan.workload.0 == owner.vm,
+        context.root == owner.root && context.tenant == owner.tenant && context.vm == owner.vm,
         "budget owner scope mismatch"
     );
     ensure!(candidates.len() <= 4096, "too many pressure candidates");
