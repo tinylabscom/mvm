@@ -54,6 +54,9 @@ pub const MAX_ENCODED_DISPLAY_INPUT_FRAME_BYTES: usize = 512 * 1024;
 /// How long one delivery may wait on a bridge that is not reading.
 const WRITE_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Bound live-input latency independently of the FIFO startup retry interval.
+const INPUT_IDLE_BACKOFF: Duration = Duration::from_millis(5);
+
 const FIFO_MODE: u32 = 0o604;
 
 /// Encode one frame as the line the bridge reads.
@@ -290,26 +293,45 @@ pub fn open_reader(path: &Path, poll: Duration) -> io::Result<File> {
     }
 }
 
-/// The bridge's read side of the FIFO, reopened every time a writer closes.
+/// The bridge's read side of the FIFO, held open between deliveries.
 ///
 /// The agent opens the FIFO for each delivery and closes it after, which the
-/// reader sees as end of input. Reopening hides that from the frame reader, so
-/// one long-lived [`read_frame`] loop serves every delivery for the life of
-/// the bridge.
+/// reader sees as end of input. Keep the reader alive across that EOF: closing
+/// it could break a writer that opened just after the EOF was observed.
 pub struct FifoInput {
     path: std::path::PathBuf,
-    poll: Duration,
+    startup_poll: Duration,
     file: Option<File>,
 }
 
 impl FifoInput {
     #[must_use]
-    pub fn new(path: impl Into<std::path::PathBuf>, poll: Duration) -> Self {
+    pub fn new(path: impl Into<std::path::PathBuf>, startup_poll: Duration) -> Self {
         Self {
             path: path.into(),
-            poll,
+            startup_poll,
             file: None,
         }
+    }
+
+    fn wait_after_eof(&mut self) -> io::Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        // Reconcile externally owned path replacement, but never close a live
+        // reader merely because the per-delivery writer disconnected.
+        let current = self.file.as_ref().expect("EOF requires an open FIFO");
+        let held = current.metadata()?;
+        match std::fs::symlink_metadata(&self.path) {
+            Ok(path) if path.dev() == held.dev() && path.ino() == held.ino() => {}
+            Ok(_) => self.file = None,
+            Err(error) if error.kind() == ErrorKind::NotFound => self.file = None,
+            Err(error) => return Err(error),
+        }
+        // EOF stays readable to poll/select while no writer exists. A short
+        // backoff avoids spinning without imposing startup retry latency on
+        // keyboard/pointer input. At idle this costs at most 200 wakes/second.
+        std::thread::sleep(INPUT_IDLE_BACKOFF);
+        Ok(())
     }
 }
 
@@ -318,10 +340,12 @@ impl Read for FifoInput {
         loop {
             let file = match self.file.as_mut() {
                 Some(file) => file,
-                None => self.file.insert(open_reader(&self.path, self.poll)?),
+                None => self
+                    .file
+                    .insert(open_reader(&self.path, self.startup_poll)?),
             };
             match file.read(buf) {
-                Ok(0) => self.file = None,
+                Ok(0) => self.wait_after_eof()?,
                 Err(error) if error.kind() == ErrorKind::Interrupted => {}
                 result => return result,
             }
@@ -412,6 +436,90 @@ mod tests {
         assert_eq!(std::fs::read(&fifo).unwrap(), b"keep me");
     }
 
+    fn input_at_eof(path: &Path) -> FifoInput {
+        ensure_fifo(path).unwrap();
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+            .open(path)
+            .unwrap();
+        assert_eq!(file.read(&mut [0]).unwrap(), 0);
+        let mut input = FifoInput::new(path, Duration::from_millis(1));
+        input.file = Some(file);
+        input
+    }
+
+    #[test]
+    fn eof_does_not_disconnect_a_writer_that_already_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("display-input");
+        let mut input = input_at_eof(&fifo);
+
+        // Force the failing interleaving without relying on thread scheduling:
+        // observe EOF, open the next writer, then handle the previous EOF.
+        let mut writer = open_writer(&fifo).unwrap();
+        input.wait_after_eof().unwrap();
+        let line = encode_frame(&frame(2)).unwrap();
+        write_with_deadline(&mut writer, &line, WRITE_DEADLINE).unwrap();
+        drop(writer);
+        assert_eq!(
+            read_frame(&mut BufReader::new(&mut input)).unwrap(),
+            Some(frame(2))
+        );
+
+        drop(input);
+        assert_eq!(
+            open_writer(&fifo).unwrap_err().raw_os_error(),
+            Some(libc::ENXIO)
+        );
+    }
+
+    #[test]
+    fn eof_releases_an_unlinked_or_replaced_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("display-input");
+        let mut input = input_at_eof(&fifo);
+        std::fs::remove_file(&fifo).unwrap();
+        input.wait_after_eof().unwrap();
+        assert!(input.file.is_none(), "an unlinked FIFO must be released");
+
+        let mut input = input_at_eof(&fifo);
+        std::fs::rename(&fifo, dir.path().join("old-input")).unwrap();
+        ensure_fifo(&fifo).unwrap();
+        input.wait_after_eof().unwrap();
+        assert!(input.file.is_none(), "a replaced FIFO must be reopened");
+    }
+
+    #[test]
+    fn live_input_does_not_wait_for_the_startup_poll_interval() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("display-input");
+        let mut input = FifoInput::new(&fifo, Duration::from_millis(250));
+        input.file = input_at_eof(&fifo).file;
+
+        // Queue the next delivery just after observing EOF, so handling that
+        // EOF must not impose the bridge's much slower startup interval.
+        let mut writer = open_writer(&fifo).unwrap();
+        let started = Instant::now();
+        write_with_deadline(
+            &mut writer,
+            &encode_frame(&frame(2)).unwrap(),
+            WRITE_DEADLINE,
+        )
+        .unwrap();
+        drop(writer);
+        input.wait_after_eof().unwrap();
+        assert_eq!(
+            read_frame(&mut BufReader::new(&mut input)).unwrap(),
+            Some(frame(2))
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "live delivery inherited the startup interval: {:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn a_reading_bridge_receives_frames_in_order_and_repeats_are_not_replayed() {
         let _desk = DESK.lock().unwrap_or_else(PoisonError::into_inner);
@@ -425,16 +533,12 @@ mod tests {
 
         let (sent, received) = mpsc::channel();
         let reader_path = fifo.clone();
-        std::thread::spawn(move || {
-            loop {
-                let Ok(file) = open_reader(&reader_path, Duration::from_millis(5)) else {
+        let reader = std::thread::spawn(move || {
+            let mut reader = BufReader::new(FifoInput::new(reader_path, Duration::from_millis(5)));
+            while let Some(frame) = read_frame(&mut reader).unwrap() {
+                sent.send(frame.seq).unwrap();
+                if frame.seq == 3 {
                     return;
-                };
-                let mut reader = BufReader::new(file);
-                while let Ok(Some(frame)) = read_frame(&mut reader) {
-                    if sent.send(frame.seq).is_err() {
-                        return;
-                    }
                 }
             }
         });
@@ -468,8 +572,14 @@ mod tests {
         let second = received.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!((first, second), (1, 2));
         assert!(
-            received.recv_timeout(Duration::from_millis(200)).is_err(),
+            matches!(
+                received.recv_timeout(Duration::from_millis(200)),
+                Err(mpsc::RecvTimeoutError::Timeout)
+            ),
             "a repeated seq must not be written twice"
         );
+        deliver(3);
+        assert_eq!(received.recv_timeout(Duration::from_secs(5)).unwrap(), 3);
+        reader.join().unwrap();
     }
 }
