@@ -96,11 +96,36 @@ deadline unless a lifecycle owner actually performs or reconciles expiration.
 Expiry uses checked time arithmetic and must not delete payload on an invalid
 clock reading or arithmetic overflow.
 
-The numerical age policy must be explicitly selected and recorded before
-automatic deletion is enabled. This contract does not enable a default TTL or
-retroactively authorize deletion of existing captures. Operator-selected exports
-are outside managed retention; capture cleanup must not traverse arbitrary
-export paths, backups or unrelated files.
+New protected transcripts record the approved default of 604800 seconds after
+terminal sealing, with active generation intervals no longer than 3600 seconds.
+A computed integrity root is not terminal sealing. Finalization freezes the
+writer; recovery after exclusive ownership is established preserves the original
+generation deadline and marks the recovered record incomplete. It must not grant
+a fresh retention period at restart.
+
+Supported legacy v6 captures remain retention-ineligible and keep their original
+root bytes. Formats v1–v5 are not supported. Reading or restarting never enrolls
+existing captures. Operator-selected exports are outside managed retention;
+capture cleanup must not traverse arbitrary export paths, backups or unrelated
+files.
+
+New workload-output generations can separately bind an aggregate
+tenant/VM/workload-output-family budget, measured in retained plaintext envelope
+bytes and chunks. The current defaults are 8 MiB and 65536 chunks across active
+and retained enrolled generations, not per hourly generation. Unrelated forensic
+captures and legacy captures do not join that pool. Early byte-pressure retirement
+requires the original signed budget policy and checked accounting from signed
+terminal manifests, with a bounded incoming reservation. Its signed reason is
+distinct from age expiry. The family owner holds an exclusive lease through
+accounting, reservation and durable enqueue; failure to reclaim requires explicit
+loss rather than quota overshoot. Metadata and filesystem allocation are not
+included in the plaintext payload budget.
+
+The transcript control surface provides explicit one-capture reconciliation and
+a callable supervisor maintenance API. Live producer rotation, startup and tick
+invocation, reservation ownership, and typed stream-record reading are separate
+capture-owner integration responsibilities. This boundary alone does not claim
+unattended expiry or activate production capture.
 
 ## Audit preservation during cleanup
 
@@ -114,6 +139,21 @@ Audit-segment cleanup preserves the existing seal, continuation and deliberate
 prune records and their chain linkage. If the required evidence cannot be
 recorded, cleanup must not silently advance the deletion boundary. An expired
 payload is not exportable merely because its audit metadata still verifies.
+
+Transcript reconciliation verifies the original seal against the trusted host
+audit chain, including rotated audit segments. Before any unlink it durably
+records and re-verifies a signed, payload-free retirement event binding the
+original capture, root, policy, deadline and reason. Exact existing evidence
+permits interrupted cleanup to resume; conflicts, duplicate evidence, invalid
+chains and missing payload without retirement authority refuse.
+
+Cleanup pins a private host-owned capture directory beneath a trusted configured
+root, opens descendant components without following links, takes a nonblocking
+exclusive lease, and removes only verified single-link ciphertext segments named
+by the authenticated manifest. The manifest, original root and key envelope are
+unchanged. Cooperating writers hold the same lease. This is not an adversarial
+same-user namespace guarantee: hostile host-user processes that ignore the lease,
+storage snapshots and open descriptors remain outside this trusted-host boundary.
 
 ## Required witnesses
 

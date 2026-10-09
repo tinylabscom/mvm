@@ -252,6 +252,31 @@ removes the installed `mvmctl` and its host binaries too.
 | `mvmctl trust audit receipts export --archive <path> [--tenant <t>] [--plan-id <id>] [--full-chain]`     | Write a signed `.mvmev` evidence archive: the receipts, one RFC 6962 inclusion proof per leaf against the host-signed audit root, the raw chain lines, and a citation for every in-scope entry with no receipt mapping. `--full-chain` covers the whole tenant so a verifier can derive coverage; without it, scope completeness is host-attested and cannot be checked |
 | `mvmctl trust audit receipts verify <archive> [--json]`                                                  | Verify a [`.mvmev` evidence archive](/reference/mvmev-format/) offline. Reports integrity, inclusion, and scope completeness separately; exit code is a bitmask (1 integrity, 2 inclusion, 4 completeness). Completeness reports `attested` rather than a pass when the archive is plan-scoped                                                                          |
 
+### Protected forensic transcripts
+
+| Command | Description |
+| --- | --- |
+| `mvmctl trust audit transcript arm <vm> [--tenant <t>]` | Create a new encrypted capture with seven-day payload retention after terminal sealing. Duration is at most 3600 seconds; byte/chunk limits remain independent. |
+| `mvmctl trust audit transcript disarm <capture-id> [--tenant <t>]` | Acquire the capture lease, finalize an inactive generation, and anchor its immutable root in the host audit chain. Refuses while a protected producer owns the lease. |
+| `mvmctl trust audit transcript reconcile <capture-id> [--tenant <t>]` | Reconcile one known capture: authenticate its original seal, durably sign expiry evidence, then remove only its authorized ciphertext segments. Safe to retry after interruption. |
+| `mvmctl trust audit transcript export <capture-id> [--tenant <t>] [--out <path>]` | Verify and decrypt a readable capture. Expired or authentically retired payload is refused even if physical cleanup is delayed. |
+| `mvmctl trust audit transcript list [--tenant <t>] [--json]` | List captures without enrolling existing data in retention. |
+
+Existing v6 captures remain readable and retention-ineligible; formats v1–v5
+are not supported. Reconciliation retains the original manifest, wrapped key,
+root, and signed audit proof. It never cleans export destinations or recursively
+sweeps arbitrary paths. Symlinks, hard-linked payloads, invalid clocks, missing
+authority, and conflicting evidence refuse cleanup. Unaccounted missing payload
+remains corruption, not successful expiry.
+
+Unattended producer startup/tick maintenance and hourly generation rotation need
+the protected capture lifecycle owner; the explicit command alone does not
+enable them. Workload-output generations may additionally opt into a separately
+authenticated aggregate family budget; unrelated forensic captures are not
+pooled into that budget. Removing names is not secure erasure of backups or open
+descriptors. The directory lease coordinates trusted host processes, not hostile
+same-user processes that ignore locks.
+
 ## Instruction-file provenance
 
 Sign and verify agent instruction files (`CLAUDE.md`, `AGENTS.md`, `SKILL.md`,

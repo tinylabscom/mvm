@@ -922,6 +922,8 @@ mod tests {
                 bounds: capture_bounds,
                 retention,
                 at_rest: None,
+                generation_budget: None,
+                payload_encoding: Default::default(),
                 created_unix_secs: 0,
                 recipient: "transcript-kek".to_string(),
                 wrapped_data_key_b64: wrapped,

@@ -2,6 +2,48 @@
 use super::{TranscriptError, TranscriptManifest, sealed_root_hex, verify_sealed_root};
 use serde::{Deserialize, Serialize};
 
+/// Authenticated plaintext representation inside each AEAD chunk.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadEncoding {
+    #[default]
+    Raw,
+    StreamRecordV1,
+}
+
+impl PayloadEncoding {
+    pub(super) fn is_raw(&self) -> bool {
+        *self == Self::Raw
+    }
+}
+
+/// A managed family is deliberately not a user-selected free-form label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationFamily {
+    WorkloadOutput,
+}
+
+/// Aggregate retained plaintext (including encoded envelopes) and chunk budget
+/// for this tenant, VM, and family across all newly enrolled generations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GenerationBudget {
+    pub family: GenerationFamily,
+    pub max_plaintext_bytes: u64,
+    pub max_chunks: u64,
+}
+
+impl Default for GenerationBudget {
+    fn default() -> Self {
+        Self {
+            family: GenerationFamily::WorkloadOutput,
+            max_plaintext_bytes: 8 << 20,
+            max_chunks: 64 << 10,
+        }
+    }
+}
+
 /// Explicit enrollment for a newly opened protected capture. Absence means
 /// legacy retention-ineligible data, never implicit enrollment on read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,17 +89,31 @@ pub fn retention_now() -> Result<u64, TranscriptError> {
 }
 
 impl TranscriptManifest {
+    /// AES-GCM frame widths are authenticated by the original manifest root.
+    /// This counts plaintext envelope bytes, not ciphertext or disk allocation.
+    pub fn retained_plaintext_bytes(&self) -> Result<u64, TranscriptError> {
+        let overhead = (crate::crypto::aead::NONCE_SIZE + crate::crypto::aead::TAG_SIZE) as u64;
+        self.chunks.iter().try_fold(0u64, |total, chunk| {
+            chunk
+                .size_bytes
+                .checked_sub(overhead)
+                .and_then(|bytes| total.checked_add(bytes))
+                .ok_or(TranscriptError::RetentionClock)
+        })
+    }
+
     /// A terminal seal is required for destructive retirement. Integrity
     /// snapshots have roots too, but do not attest that the producer stopped.
     pub fn retention_deadline(&self) -> Result<Option<u64>, TranscriptError> {
+        super::validate_format(self)?;
         let Some(policy) = self.at_rest else {
             return Ok(None);
         };
-        policy.generation_deadline(self.created_unix_secs)?;
+        let generation_end = policy.generation_deadline(self.created_unix_secs)?;
         let Some(sealed) = self.sealed_unix_secs else {
             return Ok(None);
         };
-        if sealed < self.created_unix_secs {
+        if sealed < self.created_unix_secs || sealed > generation_end {
             return Err(TranscriptError::RetentionClock);
         }
         sealed
@@ -69,6 +125,7 @@ impl TranscriptManifest {
     /// Refuse managed payload reads at the exact deadline, even if maintenance
     /// has not run. Unfinalized recovery snapshots cannot extend readable age.
     pub fn check_readable_at(&self, now: u64) -> Result<(), TranscriptError> {
+        super::validate_format(self)?;
         let Some(policy) = self.at_rest else {
             return Ok(());
         };

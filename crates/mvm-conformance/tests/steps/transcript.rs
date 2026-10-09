@@ -62,6 +62,8 @@ async fn sealed_transcript_with_chain_anchor(world: &mut CliWorld) {
                 // must refuse at its bound rather than quietly drop its head.
                 retention: RetentionPolicy::FailClosed,
                 at_rest: None,
+                generation_budget: None,
+                payload_encoding: Default::default(),
                 created_unix_secs: 1_700_000_000,
                 recipient: "transcript-kek".to_string(),
                 wrapped_data_key_b64,

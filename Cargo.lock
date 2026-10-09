@@ -3134,6 +3134,7 @@ dependencies = [
  "rand 0.10.2",
  "rcgen",
  "regex",
+ "rustix",
  "rustls",
  "schemars",
  "secrecy",
