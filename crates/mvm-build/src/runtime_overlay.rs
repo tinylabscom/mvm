@@ -589,35 +589,18 @@ pub fn resolve_or_build_local_runtime_overlay(
     .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
         reason: format!("acquire guest runtime for overlay: {e}"),
     })?;
-    match resolve_or_seed_from_default_cache(&resolver, arch) {
-        Ok(artifact)
-            if local_source_cache_is_fresh(
-                &resolver.layout(&arch.to_string()),
-                &runtime.digest,
-            )? && verify_guest_runtime_overlay_verity(&artifact).is_ok() =>
-        {
-            Ok(artifact)
-        }
-        Ok(_) => {
-            tracing::info!(
-                cache_root = %cache_root.display(),
-                version,
-                arch = %arch,
-                "runtime overlay source-built cache is stale; rebuilding from source checkout"
-            );
-            build_runtime_overlay_from_guest_runtime(cache_root, version, arch, &runtime)
-        }
-        Err(initial_error) => {
-            tracing::info!(
-                cache_root = %cache_root.display(),
-                version,
-                arch = %arch,
-                error = %initial_error,
-                "runtime overlay cache miss or invalid payload; rebuilding from source checkout"
-            );
-            build_runtime_overlay_from_guest_runtime(cache_root, version, arch, &runtime)
-        }
+    // Seeding is best-effort; the assembler owns the single cache-admission
+    // decision, including source freshness and verification of the verity tree.
+    if let Err(error) = resolve_or_seed_from_default_cache(&resolver, arch) {
+        tracing::info!(
+            cache_root = %cache_root.display(),
+            version,
+            arch = %arch,
+            %error,
+            "runtime overlay cache miss or invalid payload; rebuilding from source checkout"
+        );
     }
+    build_runtime_overlay_from_guest_runtime(cache_root, version, arch, &runtime)
 }
 
 fn write_local_source_fingerprint(
@@ -1440,6 +1423,85 @@ mod tests {
             .trim(),
             runtime.digest,
         );
+    }
+
+    #[test]
+    fn guest_runtime_overlay_requires_sdk_initializer_not_just_other_sdk_files() {
+        let (_source, mut runtime) = guest_runtime_fixture();
+        runtime.manifest.files.remove("sdk-py/mvm/__init__.py");
+        let staging = TempDir::new().unwrap();
+        let error = stage_guest_runtime_overlay_tree(&runtime, GuestArch::X86_64, staging.path())
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no Python SDK package initializer"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn guest_runtime_overlay_reuses_only_fresh_verified_cache() {
+        for stale in [false, true] {
+            for tampered in [false, true] {
+                let (_source, runtime) = guest_runtime_fixture();
+                let cache = TempDir::new().unwrap();
+                let build = || {
+                    build_runtime_overlay_from_guest_runtime(
+                        cache.path(),
+                        "1.2.3",
+                        GuestArch::X86_64,
+                        &runtime,
+                    )
+                };
+                let artifact = build().unwrap();
+                if stale {
+                    write_local_source_fingerprint(
+                        cache.path(),
+                        "1.2.3",
+                        GuestArch::X86_64,
+                        "old-runtime",
+                    )
+                    .unwrap();
+                }
+                if tampered {
+                    let mut tree = std::fs::read(&artifact.sidecar).unwrap();
+                    tree[0] ^= 1;
+                    std::fs::write(&artifact.sidecar, tree).unwrap();
+                    // The local checksum manifest is not a verity proof:
+                    // even internally consistent file hashes must not admit
+                    // a tree that disagrees with the image and root hash.
+                    write_checksum_manifest(artifact.sidecar.parent().unwrap()).unwrap();
+                    RuntimeOverlayResolver::new(cache.path().to_path_buf(), "1.2.3".into())
+                        .resolve("x86_64")
+                        .expect("tampering must reach verity verification, not fail resolution");
+                }
+                // A cache hit must not stage again. A stale or corrupt entry
+                // must try to rebuild and detect the changed source member.
+                let member = runtime.root.join("sdk-py/mvm/__init__.py");
+                std::fs::write(&member, b"changed").unwrap();
+                if stale || tampered {
+                    let error = build().unwrap_err();
+                    assert!(
+                        error.to_string().contains("changed while staging"),
+                        "{error}"
+                    );
+                    std::fs::write(&member, b"").unwrap();
+                    let repaired = build().unwrap();
+                    verify_guest_runtime_overlay_verity(&repaired).unwrap();
+                    assert!(
+                        local_source_cache_is_fresh(
+                            &RuntimeOverlayLayout::under(cache.path(), "1.2.3", "x86_64"),
+                            &runtime.digest,
+                        )
+                        .unwrap()
+                    );
+                } else {
+                    let reused = build().expect("fresh verified cache must not restage");
+                    assert_eq!(reused.roothash, artifact.roothash);
+                }
+            }
+        }
     }
 
     #[test]
