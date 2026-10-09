@@ -700,6 +700,37 @@ struct History {
     truncation: Option<Truncation>,
     /// Why `records` is empty, when it is.
     empty: Option<EmptyHistory>,
+    range: Option<VerifiedRange>,
+    missing_links: u64,
+}
+
+#[derive(Clone, Copy)]
+struct VerifiedRange {
+    first_seq: u64,
+    first_anchor: [u8; 32],
+    last_seq: u64,
+    last_hash: [u8; 32],
+}
+
+impl VerifiedRange {
+    fn gap_to(&self, seq: u64, anchor: [u8; 32]) -> Result<u64, StreamError> {
+        let gap = seq
+            .checked_sub(self.last_seq)
+            .and_then(|difference| difference.checked_sub(1))
+            .ok_or_else(invalid_history)?;
+        if gap == 0 && anchor != self.last_hash {
+            return Err(invalid_history());
+        }
+        Ok(gap)
+    }
+}
+
+fn invalid_history() -> StreamError {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "protected history chain or loss accounting mismatch",
+    )
+    .into()
 }
 
 fn read_protected_history(
@@ -751,6 +782,8 @@ fn read_protected_history(
             records: VecDeque::new(),
             truncation: None,
             empty: None,
+            range: None,
+            missing_links: 0,
         });
         if let (Some(last), Some(first)) = (all.records.back(), history.records.front())
             && first.seq <= last.seq
@@ -775,6 +808,30 @@ fn read_protected_history(
             total.evicted_chunks = total.evicted_chunks.saturating_add(loss.evicted_chunks);
             total.evicted_bytes = total.evicted_bytes.saturating_add(loss.evicted_bytes);
             total.adopted |= loss.adopted;
+        }
+        let mut missing = history.missing_links;
+        if let Some(next) = history.range {
+            if let Some(previous) = all.range {
+                let gap = previous.gap_to(next.first_seq, next.first_anchor)?;
+                missing = missing.checked_add(gap).ok_or_else(invalid_history)?;
+                all.range = Some(VerifiedRange {
+                    last_seq: next.last_seq,
+                    last_hash: next.last_hash,
+                    ..previous
+                });
+            } else {
+                all.range = Some(next);
+            }
+        }
+        all.missing_links = all
+            .missing_links
+            .checked_add(missing)
+            .ok_or_else(invalid_history)?;
+        let allowed = all.truncation.map_or(0, |loss| {
+            loss.refused_chunks.saturating_add(loss.evicted_chunks)
+        });
+        if all.missing_links > allowed && !all.truncation.is_some_and(|loss| loss.adopted) {
+            return Err(invalid_history());
         }
         all.empty = history.empty;
     }
@@ -851,7 +908,8 @@ fn read_history_mode(
 
     let total_chunks = chunks.len();
     let mut records = VecDeque::new();
-    let mut previous: Option<StreamRecord> = None;
+    let mut range: Option<VerifiedRange> = None;
+    let mut missing_links = 0u64;
     for chunk in chunks {
         let kind =
             output_kind(chunk.direction).ok_or_else(|| StreamError::NotOutputTranscript {
@@ -869,25 +927,35 @@ fn read_history_mode(
                             "invalid encrypted stream record",
                         )
                     })?;
-                let chain_valid = previous.as_ref().is_none_or(|previous| {
-                    record.seq > previous.seq
-                        && (record.seq != previous.seq.saturating_add(1)
-                            || record.prev_hash == previous.hash())
-                });
-                if record.kind != kind
-                    || !chain_valid
-                    || (record.seq == 0 && record.prev_hash != [0; 32])
-                {
+                if record.kind != kind || (record.seq == 0 && record.prev_hash != [0; 32]) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "encrypted stream record chain or channel mismatch",
                     )
                     .into());
                 }
-                let seq = record.seq;
-                let payload = record.payload.clone();
-                previous = Some(record);
-                (seq, payload)
+                if let Some(previous) = &range {
+                    let gap = previous.gap_to(record.seq, record.prev_hash)?;
+                    missing_links = missing_links.checked_add(gap).ok_or_else(invalid_history)?;
+                    if !manifest.adopted
+                        && missing_links
+                            > manifest
+                                .refused_chunks
+                                .saturating_add(manifest.evicted_chunks)
+                    {
+                        return Err(invalid_history());
+                    }
+                }
+                let hash = record.hash();
+                let verified = range.get_or_insert(VerifiedRange {
+                    first_seq: record.seq,
+                    first_anchor: record.prev_hash,
+                    last_seq: record.seq,
+                    last_hash: hash,
+                });
+                verified.last_seq = record.seq;
+                verified.last_hash = hash;
+                (record.seq, record.payload)
             }
         };
         if !qualifies(&request.opts, seq, kind) {
@@ -912,6 +980,8 @@ fn read_history_mode(
         truncation: Truncation::of(&manifest),
         records,
         empty,
+        range,
+        missing_links,
     }))
 }
 
@@ -1436,6 +1506,26 @@ mod tests {
         assert!(rendered.contains("ghost"), "{rendered}");
         assert!(rendered.contains("no-such-capture"), "{rendered}");
         assert!(rendered.contains("no-console.log"), "{rendered}");
+    }
+
+    #[test]
+    fn protected_generation_links_refuse_replays_and_wrong_anchors() {
+        let range = VerifiedRange {
+            first_seq: 7,
+            first_anchor: [0; 32],
+            last_seq: 9,
+            last_hash: [4; 32],
+        };
+        assert_eq!(range.gap_to(10, [4; 32]).unwrap(), 0);
+        assert!(range.gap_to(10, [5; 32]).is_err());
+        assert!(range.gap_to(9, [4; 32]).is_err());
+        assert!(range.gap_to(8, [4; 32]).is_err());
+        assert_eq!(range.gap_to(12, [5; 32]).unwrap(), 2);
+        let exhausted = VerifiedRange {
+            last_seq: u64::MAX,
+            ..range
+        };
+        assert!(exhausted.gap_to(u64::MAX, [4; 32]).is_err());
     }
 
     #[test]

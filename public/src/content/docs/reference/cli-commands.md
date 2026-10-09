@@ -949,8 +949,13 @@ Encrypted supervisor-stderr collection is a separate follow-up.
 
 This integration is **not ready for production**: authenticated aggregate
 byte-budget enforcement, periodic retirement/recovery, versioned
-cross-generation history, and the pre-resume warm-handoff ownership fence
-remain merge gates. The current draft refuses unsafe protected warm handoffs.
+cross-generation history, and end-to-end lifecycle evidence remain merge gates.
+The draft warm-handoff path prepares a fresh child capture, requires every vCPU
+to acknowledge quiescence, replaces the parent's UART capture state, and
+finalizes the old owner before acknowledging transfer. Failure refuses the
+transfer rather than using the parent's capture or plaintext output. This path
+has unit/mock evidence only; native-HVF lifecycle and prepared-launch performance
+have not been validated.
 The seven-day lifetime after sealing and hourly generation schedule do not
 replace byte limits. Legacy captures are not automatically enrolled. This
 native-HVF sequencing does not cover other backends or telemetry.

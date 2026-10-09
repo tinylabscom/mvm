@@ -583,7 +583,11 @@ pub(super) fn build_writer_with_policy(
         config.generation_budget = Some(transcript::GenerationBudget::default());
         config.payload_encoding = transcript::PayloadEncoding::StreamRecordV1;
     }
-    Ok(TranscriptWriter::try_new(transcript_dir, data_key, config)?)
+    let writer = TranscriptWriter::try_new(transcript_dir, data_key, config)?;
+    if at_rest.is_some() {
+        journal::publish_seed(transcript_dir, &writer.sealed_manifest())?;
+    }
+    Ok(writer)
 }
 
 /// Throw away whatever a previous boot left in the capture directory, keeping
@@ -591,6 +595,11 @@ pub(super) fn build_writer_with_policy(
 /// the module docs on why a boot starts from an empty one, and why this runs
 /// only after the socket claim.
 fn discard_previous_capture(dir: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !dir.join(mvm_core::stream_client::protected::RUN_FILENAME)
+            .try_exists()?,
+        "legacy capture cannot discard protected generation history"
+    );
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         // No directory is the same state as an empty one, and it is the
@@ -830,6 +839,17 @@ pub(super) fn anchor_sealed_transcript(vm: &str, manifest: &TranscriptManifest) 
 /// seal still overwrites an adopted one as it should.
 fn adopt_capture(vm: &str) {
     let dir = config::vm_stream_transcript_dir(vm);
+    match dir
+        .join(mvm_core::stream_client::protected::RUN_FILENAME)
+        .try_exists()
+    {
+        Ok(false) => {}
+        Ok(true) => return,
+        Err(_) => {
+            tracing::warn!("capture ownership unavailable; refusing legacy journal adoption");
+            return;
+        }
+    }
     if dir.join(MANIFEST_FILENAME).exists() {
         return;
     }
@@ -1036,6 +1056,26 @@ mod tests {
         let state = config::vm_state_dir(vm);
         std::fs::create_dir_all(&state).expect("state dir");
         state.join("console.log")
+    }
+
+    #[test]
+    fn a_legacy_plane_cannot_delete_protected_generation_history() {
+        let (_env, _tmp) = isolated_home();
+        let vm = "protected-legacy-transition";
+        let console = console_log_for(vm);
+        let dir = config::vm_stream_transcript_dir(vm);
+        config::create_private_dir(&dir).unwrap();
+        let marker = dir.join(mvm_core::stream_client::protected::RUN_FILENAME);
+        std::fs::write(&marker, b"protected-routing-evidence").unwrap();
+        let ciphertext = dir.join("retained.seg");
+        std::fs::write(&ciphertext, b"synthetic-ciphertext").unwrap();
+        let plane = StreamPlane::new();
+        assert!(plane.attach(&capture(vm, &console)).is_err());
+        assert_eq!(
+            std::fs::read(marker).unwrap(),
+            b"protected-routing-evidence"
+        );
+        assert_eq!(std::fs::read(ciphertext).unwrap(), b"synthetic-ciphertext");
     }
 
     #[test]

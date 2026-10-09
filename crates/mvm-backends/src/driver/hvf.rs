@@ -760,7 +760,9 @@ fn send_live_handoff(socket: &Path, payload: &[u8]) -> Result<HandoffReply, Stan
 /// with no account of what the parent had refused.
 fn read_handoff_response(stream: &mut std::os::unix::net::UnixStream) -> std::io::Result<Vec<u8>> {
     stream.set_nonblocking(true)?;
-    let deadline = Instant::now() + std::time::Duration::from_secs(2);
+    let deadline = Instant::now()
+        + mvm_vmm::hvf_handoff::CAPTURE_HANDOFF_TIMEOUT
+        + std::time::Duration::from_secs(2);
     let mut response = Vec::new();
     let mut byte = [0_u8; 1];
     while response.len() < HANDOFF_RESPONSE_MAX_BYTES && response.last() != Some(&b'\n') {
@@ -1206,6 +1208,25 @@ mod tests {
         assert!(msg.contains("just payload::supervisors"), "{msg}");
         assert!(msg.contains("mvmctl env bootstrap"), "{msg}");
         assert!(msg.contains("mvm-hvf-supervisor not found"), "{msg}");
+    }
+
+    #[test]
+    fn a_valid_capture_handoff_ack_may_arrive_after_the_old_deadline() {
+        use std::io::Write;
+        let (mut client, mut peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            // Model bounded capture preparation, not a readiness polling loop.
+            let (_timer, elapsed) = std::sync::mpsc::channel::<()>();
+            assert!(matches!(
+                elapsed.recv_timeout(std::time::Duration::from_millis(2100)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ));
+            peer.write_all(mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED)
+                .unwrap();
+        });
+        let response = read_handoff_response(&mut client).unwrap();
+        assert_eq!(response, mvm_vmm::hvf_handoff::HANDOFF_ACCEPTED);
+        writer.join().unwrap();
     }
 
     #[test]

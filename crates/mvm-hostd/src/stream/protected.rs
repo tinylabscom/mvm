@@ -44,12 +44,17 @@ pub struct CaptureOwner {
     worker: Option<JoinHandle<()>>,
     exited: mpsc::Receiver<()>,
     failed: Arc<AtomicBool>,
+    #[cfg(test)]
+    rotations: mpsc::Receiver<()>,
 }
 
 impl CaptureOwner {
     /// Provision keys, writer and live server before the caller announces boot.
     pub fn start(params: CaptureParams<'_>) -> Result<(Self, Producer)> {
-        Self::start_with_period(params, Duration::from_secs(3600))
+        Self::start_with_period(
+            params,
+            Duration::from_secs(AtRestRetention::default().max_generation_secs),
+        )
     }
 
     fn start_with_period(params: CaptureParams<'_>, period: Duration) -> Result<(Self, Producer)> {
@@ -121,6 +126,8 @@ impl CaptureOwner {
         let (producer, consumer) = bounded::channel();
         let failed = Arc::new(AtomicBool::new(false));
         let (exit, exited) = mpsc::channel();
+        #[cfg(test)]
+        let (rotation, rotations) = mpsc::sync_channel(1);
         let state = Worker {
             vm: vm.to_string(),
             state_dir,
@@ -137,6 +144,8 @@ impl CaptureOwner {
             failed: Arc::clone(&failed),
             period,
             last_loss: (0, 0),
+            #[cfg(test)]
+            rotation,
         };
         let worker = std::thread::Builder::new()
             .name("mvm-protected-console".into())
@@ -150,6 +159,8 @@ impl CaptureOwner {
                 worker: Some(worker),
                 exited,
                 failed,
+                #[cfg(test)]
+                rotations,
             },
             producer,
         ))
@@ -198,6 +209,8 @@ struct Worker {
     failed: Arc<AtomicBool>,
     period: Duration,
     last_loss: (u64, u64),
+    #[cfg(test)]
+    rotation: mpsc::SyncSender<()>,
 }
 
 impl Worker {
@@ -300,6 +313,8 @@ impl Worker {
         self.publish(sealed);
         self.generation = next;
         self.active = dir;
+        #[cfg(test)]
+        let _ = self.rotation.try_send(());
         Ok(())
     }
 
@@ -481,6 +496,57 @@ mod tests {
             );
         }
         assert_ne!(wrapped_keys[0], wrapped_keys[1]);
+    }
+
+    #[test]
+    fn rotation_seals_fresh_keys_and_history_splices_without_sequence_reset() {
+        use std::io::Write;
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        host_keypair::load_or_init_at(&config::mvm_keys_dir()).unwrap();
+        let plan = PlanFixture::new().build();
+        let vm = "rotation-owner";
+        let (owner, mut producer) = CaptureOwner::start_with_period(
+            CaptureParams {
+                vm,
+                authority: CaptureAuthority::Admitted(&plan),
+                redaction: &plan.redaction,
+            },
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        producer.write_all(b"before-rotation").unwrap();
+        owner
+            .rotations
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        producer.write_all(b"after-rotation").unwrap();
+        drop(producer);
+        assert!(owner.finish());
+        let root = config::vm_stream_transcript_dir(vm);
+        let run = ProtectedRun::read(&root).unwrap().unwrap();
+        let mut keys = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(run.directory(&root).unwrap()).unwrap() {
+            let manifest: TranscriptManifest = serde_json::from_slice(
+                &std::fs::read(entry.unwrap().path().join(MANIFEST_FILENAME)).unwrap(),
+            )
+            .unwrap();
+            assert!(manifest.sealed_unix_secs.is_some());
+            assert!(keys.insert(manifest.wrapped_data_key_b64));
+        }
+        assert!(keys.len() >= 2);
+        let mut output = mvm_core::stream_client::open_vm_output(
+            vm,
+            mvm_core::stream_client::OutputRequest::default(),
+        )
+        .unwrap();
+        let first = output.next_output().unwrap().unwrap();
+        let second = output.next_output().unwrap().unwrap();
+        assert_eq!(first.payload, b"before-rotation");
+        assert_eq!(second.payload, b"after-rotation");
+        assert_eq!(second.seq, first.seq + 1);
+        assert!(output.next_output().unwrap().is_none());
     }
 
     #[test]
