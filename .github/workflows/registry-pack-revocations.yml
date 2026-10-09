@@ -1,0 +1,208 @@
+name: Publish registry-pack revocations
+
+on:
+  schedule:
+    - cron: "17 */12 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: registry-pack-revocations
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  sign:
+    if: github.ref == 'refs/heads/main' && github.repository == 'tinylabscom/mvm' && github.run_attempt == 1
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v3.1.1
+
+      - name: Validate source and authenticate previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IDENTITY: https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          source=nix/packaging/release/registry-pack-revocations.source.json
+          jq -e '
+            type == "object" and
+            ((keys | sort) == ["revoked_identities", "revoked_manifests", "schema_version"]) and
+            .schema_version == 1 and
+            (.revoked_identities | type == "array" and
+              all(.[]; type == "string" and length > 0 and (test("[[:cntrl:]]") | not)) and
+              length == (unique | length)) and
+            (.revoked_manifests | type == "array" and
+              all(.[]; type == "string" and test("^[0-9a-f]{64}$")) and
+              length == (unique | length))
+          ' "$source" >/dev/null
+
+          response="$(gh api -i repos/tinylabscom/mvm/releases/tags/registry-pack-revocations 2>/dev/null)" || status=$?
+          case "$(printf '%s\n' "$response" | sed -n '1s/.* \([0-9][0-9][0-9]\).*/\1/p')" in
+            200)
+              test "${status:-0}" -eq 0
+              gh release download registry-pack-revocations --repo tinylabscom/mvm \
+                --pattern registry-pack-revocations.json --dir previous
+              gh release download registry-pack-revocations --repo tinylabscom/mvm \
+                --pattern registry-pack-revocations.json.bundle --dir previous
+              cosign verify-blob --bundle previous/registry-pack-revocations.json.bundle \
+                --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+                previous/registry-pack-revocations.json
+              prior="$(jq -er '.sequence | select(type == "number" and . > 0)' previous/registry-pack-revocations.json)"
+              test "$GITHUB_RUN_NUMBER" -gt "$prior"
+              jq -e --slurpfile prior previous/registry-pack-revocations.json '
+                ($prior[0].revoked_identities - .revoked_identities | length) == 0 and
+                ($prior[0].revoked_manifests - .revoked_manifests | length) == 0
+              ' "$source" >/dev/null
+              ;;
+            404)
+              test "${status:-0}" -ne 0
+              ;;
+            *)
+              echo 'Cannot establish the previous revocation release state' >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Sign fresh revocation document
+        run: |
+          set -euo pipefail
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          not_after="$(date -u -d '+36 hours' +%Y-%m-%dT%H:%M:%SZ)"
+          jq --arg now "$now" --arg not_after "$not_after" \
+            --argjson sequence "$GITHUB_RUN_NUMBER" \
+            '. + {sequence: $sequence, issued_at: $now, not_after: $not_after}' \
+            nix/packaging/release/registry-pack-revocations.source.json \
+            > registry-pack-revocations.json
+          cosign sign-blob --yes --new-bundle-format \
+            --bundle registry-pack-revocations.json.bundle registry-pack-revocations.json
+
+      - name: Independently verify signed document
+        env:
+          IDENTITY: https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          cosign verify-blob --bundle registry-pack-revocations.json.bundle \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+            registry-pack-revocations.json
+          jq -e --argjson sequence "$GITHUB_RUN_NUMBER" \
+            '.schema_version == 1 and .sequence == $sequence and
+             (.not_after | fromdateiso8601) > now and
+             ((.not_after | fromdateiso8601) - (.issued_at | fromdateiso8601)) <= 172800' \
+            registry-pack-revocations.json >/dev/null
+          test "$(wc -c < registry-pack-revocations.json)" -le 1048576
+          test "$(wc -c < registry-pack-revocations.json.bundle)" -le 1048576
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: signed-registry-pack-revocations
+          path: |
+            registry-pack-revocations.json
+            registry-pack-revocations.json.bundle
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: sign
+    if: github.ref == 'refs/heads/main' && github.repository == 'tinylabscom/mvm'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: signed-registry-pack-revocations
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3
+        with:
+          cosign-release: v3.1.1
+
+      - name: Verify before upload and prevent rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IDENTITY: https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          cosign verify-blob --bundle registry-pack-revocations.json.bundle \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+            registry-pack-revocations.json
+          sequence="$(jq -er '.sequence | select(type == "number" and . > 0)' registry-pack-revocations.json)"
+          test "$sequence" -eq "$GITHUB_RUN_NUMBER"
+          response="$(gh api -i repos/tinylabscom/mvm/releases/tags/registry-pack-revocations 2>/dev/null)" || status=$?
+          case "$(printf '%s\n' "$response" | sed -n '1s/.* \([0-9][0-9][0-9]\).*/\1/p')" in
+            200)
+              test "${status:-0}" -eq 0
+              gh release download registry-pack-revocations --repo tinylabscom/mvm \
+                --pattern registry-pack-revocations.json --dir previous
+              gh release download registry-pack-revocations --repo tinylabscom/mvm \
+                --pattern registry-pack-revocations.json.bundle --dir previous
+              cosign verify-blob --bundle previous/registry-pack-revocations.json.bundle \
+                --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+                previous/registry-pack-revocations.json
+              prior="$(jq -er '.sequence | select(type == "number" and . > 0)' previous/registry-pack-revocations.json)"
+              test "$sequence" -gt "$prior"
+              jq -e --slurpfile prior previous/registry-pack-revocations.json '
+                ($prior[0].revoked_identities - .revoked_identities | length) == 0 and
+                ($prior[0].revoked_manifests - .revoked_manifests | length) == 0
+              ' registry-pack-revocations.json >/dev/null
+              ;;
+            404)
+              test "${status:-0}" -ne 0
+              ;;
+            *)
+              echo 'Cannot establish the previous revocation release state' >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Publish signed feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if ! gh release view registry-pack-revocations --repo tinylabscom/mvm >/dev/null 2>&1; then
+            gh release create registry-pack-revocations --repo tinylabscom/mvm \
+              --target main --latest=false --title 'Registry-pack revocations' \
+              --notes 'The current signed registry-pack revocation document and its Sigstore bundle. The sequence-numbered assets preserve earlier publications.'
+          fi
+          sequence="$(jq -er .sequence registry-pack-revocations.json)"
+          gh release view registry-pack-revocations --repo tinylabscom/mvm --json assets \
+            --jq '.assets[].name' | grep -Fxq "registry-pack-revocations-${sequence}.json" && {
+              echo 'Sequence-numbered revocation asset already exists' >&2
+              exit 1
+            }
+          cp registry-pack-revocations.json "registry-pack-revocations-${sequence}.json"
+          cp registry-pack-revocations.json.bundle "registry-pack-revocations-${sequence}.json.bundle"
+          gh release upload registry-pack-revocations --repo tinylabscom/mvm \
+            "registry-pack-revocations-${sequence}.json" \
+            "registry-pack-revocations-${sequence}.json.bundle"
+          gh release upload registry-pack-revocations --repo tinylabscom/mvm \
+            registry-pack-revocations.json registry-pack-revocations.json.bundle --clobber
+
+      - name: Read back published feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IDENTITY: https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main
+          ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          set -euo pipefail
+          gh release download registry-pack-revocations --repo tinylabscom/mvm \
+            --pattern registry-pack-revocations.json --dir published
+          gh release download registry-pack-revocations --repo tinylabscom/mvm \
+            --pattern registry-pack-revocations.json.bundle --dir published
+          cmp registry-pack-revocations.json published/registry-pack-revocations.json
+          cmp registry-pack-revocations.json.bundle published/registry-pack-revocations.json.bundle
+          cosign verify-blob --bundle published/registry-pack-revocations.json.bundle \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
+            published/registry-pack-revocations.json
