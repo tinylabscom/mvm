@@ -136,6 +136,7 @@ pub enum ImageSetMemberError {
 /// [`Self::fetch_artifact`] checks them against their declaration.
 pub struct PublishedImageSet {
     manifest: ImageSetManifest,
+    manifest_bytes: Vec<u8>,
     root: Sha256Hex,
     release_tag: ReleaseTag,
     base_url: String,
@@ -199,6 +200,7 @@ impl PublishedImageSet {
 
         Ok(Self {
             manifest,
+            manifest_bytes: bytes,
             root: actual,
             release_tag: lock.release_tag.clone(),
             base_url,
@@ -213,6 +215,14 @@ impl PublishedImageSet {
     /// rules (build mode, target) live in one place.
     pub fn manifest(&self) -> &ImageSetManifest {
         &self.manifest
+    }
+
+    /// Original authenticated manifest bytes, preserving the pinned digest.
+    ///
+    /// Portable bundles must embed these bytes rather than serialize the parsed
+    /// manifest again: even a whitespace change would create a different root.
+    pub fn manifest_bytes(&self) -> &[u8] {
+        &self.manifest_bytes
     }
 
     pub fn member_cache(&self) -> SetMemberCache {

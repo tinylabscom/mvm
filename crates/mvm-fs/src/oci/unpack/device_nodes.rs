@@ -133,7 +133,7 @@ fn materialize_device_node<R: Read>(
     let allowed = classify_device_node(entry.header().entry_type(), raw_path, major, minor)?;
 
     if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|_| RefusalReason::MalformedHeader)?;
+        super::fs_ops::create_directory(parent)?;
     }
 
     create_allowed_device_node(target, allowed)

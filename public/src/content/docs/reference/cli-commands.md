@@ -1090,6 +1090,46 @@ The older `.mvm` format is gone; `bundle export` seals what `artifact pack` used
 to. Use `mvmctl machine run` for the manifest/flake path that already
 exposes named networks and policy bundles.
 
+#### Packaging an OCI image
+
+`bundle build` resolves an OCI image, materializes its filesystem, and signs a
+single architecture-specific `.mvmpkg` with the host signer:
+
+```sh
+mvmctl bundle build --image docker.io/library/alpine:3.20 \
+  --out alpine.mvmpkg --debug-out alpine.bundle.json
+mvmctl bundle fetch ./alpine.mvmpkg
+mvmctl machine run --manifest ./alpine.mvmpkg -- /bin/sh
+```
+
+The package carries the workload kernel, rootfs, resolved entrypoint and libc
+metadata, universal initramfs, and runtime overlay. Runtime members are acquired
+from the existing authenticated image-set pin; the original image-set manifest
+is carried unchanged. Materialization finishes before the CLI loads its host
+signing key. The builder never receives the publisher key.
+
+`--arch` accepts `aarch64`/`arm64` or `x86_64`/`amd64` and defaults to the host.
+Packaging currently requires the selected architecture to match the host;
+cross-architecture runtime injection is refused before acquisition. `--label`
+sets the package's display label. The command prints the resolved OCI manifest
+digest, bundle SHA-256, signer key ID, architecture, and output path.
+
+`--production` requires a digest-qualified OCI input and produces an actually
+dm-verity-sealed rootfs with sealed-production posture. Missing entrypoint
+metadata, a platform mismatch, changed materialization bytes, or incomplete
+verity metadata is an error before signing. The default is a signed development
+package, not an unsigned archive. Production admission still applies its normal
+entrypoint, authentication, backend, and security-policy checks.
+
+`--debug-out` uses the shared bundler's JSON report. YAML and TOML reports are
+not currently supported by that shared exporter.
+
+Portable OCI packages use bundle schema 4's explicit boot-assets declaration.
+They retain the original image-set identity while carrying only the selected
+architecture's runtime archives, not the full builder/base-image release set.
+Older readers refuse these packages. Existing schema 3 packages and full
+embedded image sets retain their existing semantics.
+
 #### Booting a signed bundle
 
 A signed `.mvmpkg` boots through `--manifest`:

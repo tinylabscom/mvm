@@ -21,6 +21,7 @@ const KERNEL_NAME: &str = "vmlinux";
 const ROOTFS_NAME: &str = "rootfs.ext4";
 const INITRD_NAME: &str = "initrd";
 const VERITY_NAME: &str = "rootfs.verity";
+const BOOT_MANIFEST_NAME: &str = "boot-image-set.json";
 
 /// A bundle that was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,6 +64,9 @@ pub fn export_bundle_with_signer(
         ArtifactRole::Other,
         read_guest_sidecar(inputs.rootfs)?,
     )?;
+    if let Some(boot) = &inputs.boot_assets {
+        contents.push_boot_assets(boot, inputs.arch_label)?;
+    }
 
     let key_id = signer.key_id();
     let members = declarations_for(inputs, &contents.artifacts, verity.is_some());
@@ -130,6 +134,68 @@ struct BundleContents {
 }
 
 impl BundleContents {
+    fn push_boot_assets(&mut self, boot: &crate::BootAssetsInputs<'_>, arch: &str) -> Result<()> {
+        use mvm_core::arch::GuestArch;
+        use mvm_core::image_set::ImageSetManifest;
+        use mvm_core::plan::bundle::select_boot_asset_members;
+
+        anyhow::ensure!(
+            sha256_hex(boot.manifest_bytes) == boot.manifest_sha256.as_str(),
+            "boot image-set manifest does not match its authenticated pin"
+        );
+        anyhow::ensure!(
+            boot.manifest_bytes.len() as u64
+                <= mvm_core::plan::bundle::MAX_IMAGE_SET_MANIFEST_BYTES,
+            "boot image-set manifest exceeds size limit"
+        );
+        let arch = match arch {
+            "x86_64" => GuestArch::X86_64,
+            "aarch64" => GuestArch::Aarch64,
+            other => anyhow::bail!("unknown boot-assets architecture {other}"),
+        };
+        let manifest: ImageSetManifest = serde_json::from_slice(boot.manifest_bytes)?;
+        let members = select_boot_asset_members(&manifest, arch)?;
+        self.push(
+            BOOT_MANIFEST_NAME,
+            ArtifactRole::Other,
+            boot.manifest_bytes.to_vec(),
+        )?;
+        for (member, path) in members
+            .into_iter()
+            .zip([boot.runtime_overlay, boot.initramfs])
+        {
+            anyhow::ensure!(
+                member.artifacts.len() == 1,
+                "runtime role must declare one archive"
+            );
+            let artifact = &member.artifacts[0];
+            let name = artifact.name.as_str();
+            anyhow::ensure!(
+                !self.artifacts.iter().any(|item| item.name == name),
+                "duplicate boot artifact name {name}"
+            );
+            self.push_file(
+                name,
+                ArtifactRole::Other,
+                "boot asset",
+                path.to_str().context("boot asset path is not UTF-8")?,
+            )?;
+            let declared = self
+                .artifacts
+                .last()
+                .context("boot artifact was not declared")?;
+            anyhow::ensure!(
+                declared.sha256 == artifact.sha256.as_str(),
+                "boot asset {name} digest mismatch"
+            );
+            anyhow::ensure!(
+                declared.size_bytes == artifact.size,
+                "boot asset {name} size mismatch"
+            );
+        }
+        Ok(())
+    }
+
     /// Declare an input file, refusing it before it is read when it would put
     /// the bundle past a size cap. The file is hashed here, streaming, and
     /// read again only when the archive is written.
@@ -233,6 +299,11 @@ fn declarations_for(
     verity_protected: bool,
 ) -> Vec<BundleMember> {
     let mut members = Vec::new();
+    if inputs.boot_assets.is_some() {
+        members.push(BundleMember::EmbeddedBootAssets {
+            manifest_artifact: BOOT_MANIFEST_NAME.to_string(),
+        });
+    }
     if let Some(cmdline) = inputs.cmdline {
         members.push(BundleMember::KernelCmdline {
             cmdline: cmdline.trim_end().to_string(),
@@ -289,7 +360,11 @@ fn manifest_for(
     verity: Option<VerityInfo>,
 ) -> BundleManifest {
     BundleManifest {
-        schema_version: BUNDLE_SCHEMA_VERSION,
+        schema_version: if inputs.boot_assets.is_some() {
+            BUNDLE_SCHEMA_VERSION
+        } else {
+            3
+        },
         publisher: signer.publisher_id(),
         key_id: key_id.clone(),
         arch: inputs.arch_label.to_string(),

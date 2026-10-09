@@ -33,6 +33,11 @@ pub struct ImageSetFixture {
 }
 
 impl ImageSetFixture {
+    /// Consume the fixture as a manifest for offline bundle export tests.
+    pub fn into_manifest(self) -> ImageSetManifest {
+        self.manifest
+    }
+
     /// A complete release of the shipped lock's set whose members each declare
     /// one placeholder artifact that is never served.
     pub fn complete() -> Self {

@@ -14,6 +14,7 @@
 //! it to `mvm_hostd::run::admit_and_boot_local`. A workload never boots on a
 //! path that skipped admission.
 
+pub(crate) mod oci;
 mod state;
 
 pub(crate) use state::map_status;
@@ -937,8 +938,19 @@ pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Re
         RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, UnpackedLayers::default()),
         RootfsPlan::Pull(image_ref) => {
             let staging = tempfile::tempdir().map_err(backend_err)?;
-            let layers = pull_image_to_dir(&image_ref, staging.path()).await?;
-            materialize_from_dir(staging.path(), name, layers)
+            let pulled = pull_image_to_dir(&image_ref, staging.path()).await?;
+            let output = run_rootfs_output(name);
+            materialize_tree(
+                staging.path(),
+                &output,
+                name,
+                pulled.layers,
+                TreeMaterializeOptions {
+                    config: Some(&pulled.config),
+                    ..TreeMaterializeOptions::default()
+                },
+            )?;
+            Ok(output)
         }
     }
 }
@@ -967,26 +979,74 @@ struct UnpackedLayers {
 /// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
 fn materialize_from_dir(dir: &Path, name: &str, layers: UnpackedLayers) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
+    materialize_tree(
+        dir,
+        &output,
+        name,
+        layers,
+        TreeMaterializeOptions::default(),
+    )?;
+    Ok(output)
+}
+
+#[derive(Default)]
+struct TreeMaterializeOptions<'a> {
+    config: Option<&'a mvm_build::oci_runtime_inject::ImageRuntimeConfig>,
+    sealed: bool,
+    runtime_binaries: Option<&'a mvm_build::oci_runtime_inject::MvmRuntimeBinaries>,
+    policy: mvm_build::run_image::RootfsMaterializationPolicy,
+}
+
+fn materialize_tree(
+    dir: &Path,
+    output: &Path,
+    name: &str,
+    layers: UnpackedLayers,
+    options: TreeMaterializeOptions<'_>,
+) -> Result<()> {
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     // The library carries no guest binaries; remaining legacy injection needs
     // a source checkout or a complete compatibility cache.
     mvm_build::run_image::inject_and_materialize(
-        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
-            .sealed(false)
+        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, output, name)
+            .sealed(options.sealed)
+            .entrypoint(options.config)
+            .runtime_binaries(options.runtime_binaries)
+            .materialization_policy(options.policy)
+            .reuse_published(false)
             .deferred_nodes(layers.deferred_nodes)
             .owners(layers.owners)
             .build(),
     )
     .map_err(|e| backend_err(format!("{e:#}")))?;
-    Ok(output)
+    Ok(())
 }
+
+struct PulledImage {
+    layers: UnpackedLayers,
+    config: mvm_build::oci_runtime_inject::ImageRuntimeConfig,
+    digest: String,
+    canonical_reference: String,
+}
+
+// Config is small JSON metadata, not a filesystem layer. Match the manifest
+// reader's 4 MiB ceiling without granting it the layer fetcher's 2 GiB budget.
+const MAX_OCI_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Pull a public OCI registry reference and unpack every layer into `dest`,
 /// reusing mvm-oci's fetch + hardened unpacker (gzip is decoded here, at the
 /// crate boundary, keeping mvm-oci decompressor-free by design).
-async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<UnpackedLayers> {
-    let reference = image_ref.canonical();
+async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<PulledImage> {
     let manifest_fetcher = OciManifestFetcher::new();
+    pull_image_to_dir_with_fetcher(image_ref, dest, &manifest_fetcher).await
+}
+
+async fn pull_image_to_dir_with_fetcher(
+    image_ref: &ImageReference,
+    dest: &Path,
+    manifest_fetcher: &OciManifestFetcher,
+) -> Result<PulledImage> {
+    let reference = image_ref.canonical();
     let manifest = manifest_fetcher
         .fetch_linux_platform_manifest(image_ref, &current_linux_platform())
         .await
@@ -998,7 +1058,35 @@ async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<Un
         return Err(backend_err(format!("OCI image {reference} has no layers")));
     }
     let layer_fetcher =
-        OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
+        OciLayerFetcher::from_manifest_fetcher(manifest_fetcher, LayerFetchOptions::default());
+    let canonical_reference = oci::digest_reference(image_ref, &manifest)?;
+    let image: mvm_contract::oci::manifest_types::ImageManifest =
+        serde_json::from_slice(&manifest.bytes).map_err(backend_err)?;
+    let config_descriptor = LayerDescriptor {
+        digest: image.config.digest,
+        size: u64::try_from(image.config.size).map_err(backend_err)?,
+        media_type: image.config.media_type,
+    };
+    let config_fetcher = OciLayerFetcher::from_manifest_fetcher(
+        manifest_fetcher,
+        LayerFetchOptions::builder()
+            .max_size(MAX_OCI_CONFIG_BYTES)
+            .build(),
+    );
+    let mut config_bytes = Vec::new();
+    config_fetcher
+        .fetch_layer(image_ref, &config_descriptor, &mut config_bytes)
+        .await
+        .map_err(|e| backend_err(format!("fetch OCI config: {e}")))?;
+    let config = mvm_fs::oci::config::OciImageConfig::parse(&config_bytes).map_err(backend_err)?;
+    config
+        .validate_platform(&current_linux_platform())
+        .map_err(backend_err)?;
+    let config = mvm_build::oci_runtime_inject::ImageRuntimeConfig {
+        argv: config.argv,
+        env: config.env,
+        working_dir: config.working_dir,
+    };
     let mut prior_layer_paths = std::collections::HashSet::new();
     let mut unpacked = UnpackedLayers::default();
     for layer in &layers {
@@ -1012,7 +1100,12 @@ async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<Un
         prior_layer_paths.extend(report.paths_written);
         unpacked.deferred_nodes.extend(report.deferred_nodes);
     }
-    Ok(unpacked)
+    Ok(PulledImage {
+        layers: unpacked,
+        config,
+        digest: manifest.digest,
+        canonical_reference,
+    })
 }
 
 /// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
@@ -1480,6 +1573,117 @@ impl MvmClient for LocalBackend {
 
 #[cfg(test)]
 mod tests {
+    fn config_registry(
+        config: &[u8],
+        declared_size: u64,
+    ) -> (
+        mvm_fs::oci::test_registry::MemoryRegistry,
+        ImageReference,
+        OciManifestFetcher,
+        String,
+    ) {
+        use mvm_fs::oci::{ClientConfig, ClientProtocol, RegistryAuthConfig};
+        let registry = mvm_fs::oci::test_registry::MemoryRegistry::start();
+        let digest = registry.insert_blob(config);
+        let layer = tar::Builder::new(Vec::new()).into_inner().unwrap();
+        let layer_digest = registry.insert_blob(&layer);
+        let manifest = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": digest, "size": declared_size
+            },
+            "layers": [{
+                "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                "digest": layer_digest, "size": layer.len()
+            }]
+        });
+        registry.insert_manifest(
+            "test/image",
+            "latest",
+            "application/vnd.oci.image.manifest.v1+json",
+            &serde_json::to_vec(&manifest).unwrap(),
+        );
+        let reference = format!("{}/test/image:latest", registry.host())
+            .parse()
+            .unwrap();
+        let fetcher = OciManifestFetcher::with_config_and_auth(
+            ClientConfig {
+                protocol: ClientProtocol::Http,
+            },
+            RegistryAuthConfig::Anonymous,
+        );
+        (registry, reference, fetcher, digest)
+    }
+
+    #[tokio::test]
+    async fn oci_config_descriptor_over_cap_never_requests_body() {
+        let (registry, reference, fetcher, digest) =
+            config_registry(b"{}", MAX_OCI_CONFIG_BYTES + 1);
+        let dest = tempfile::tempdir().unwrap();
+        let error = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .err()
+            .expect("descriptor must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert!(
+            !registry
+                .requests()
+                .iter()
+                .any(|request| request.path.ends_with(&digest))
+        );
+    }
+
+    #[tokio::test]
+    async fn oci_config_lying_small_descriptor_cannot_exceed_stream_cap() {
+        let bytes = vec![b' '; MAX_OCI_CONFIG_BYTES as usize + 1];
+        let (registry, reference, fetcher, digest) = config_registry(&bytes, 1);
+        let dest = tempfile::tempdir().unwrap();
+        let error = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .err()
+            .expect("body must fail");
+        assert!(error.to_string().contains("exceeds"), "{error}");
+        assert!(
+            registry
+                .requests()
+                .iter()
+                .any(|request| request.path.ends_with(&digest))
+        );
+        assert_eq!(std::fs::read_dir(dest.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn oci_config_digest_platform_and_runtime_metadata_are_verified() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "os": "linux", "architecture": current_linux_platform().architecture,
+            "config": { "Entrypoint": ["/app"], "Cmd": ["serve"], "Env": ["A=B"], "WorkingDir": "/work" }
+        })).unwrap();
+        let (registry, reference, fetcher, digest) = config_registry(&bytes, bytes.len() as u64);
+        let dest = tempfile::tempdir().unwrap();
+        let image = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .unwrap();
+        assert_eq!(image.config.argv, ["/app", "serve"]);
+        assert_eq!(image.config.env, ["A=B"]);
+        assert_eq!(image.config.working_dir.as_deref(), Some("/work"));
+        registry.serve_blob_as(&digest, b"tampered");
+        assert!(
+            pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+                .await
+                .is_err()
+        );
+
+        let wrong = br#"{"os":"windows","architecture":"wrong"}"#;
+        let (_registry, reference, fetcher, _) = config_registry(wrong, wrong.len() as u64);
+        let error = pull_image_to_dir_with_fetcher(&reference, dest.path(), &fetcher)
+            .await
+            .err()
+            .expect("wrong platform must fail");
+        assert!(error.to_string().contains("platform"), "{error}");
+    }
+
     use super::*;
     #[cfg(feature = "test-support")]
     use mvm_core::util::test_env::TestEnv;

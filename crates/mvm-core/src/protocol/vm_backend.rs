@@ -57,6 +57,15 @@ pub use mvm_contract::protocol::vm_backend::{
 /// };
 /// backend.start(&config)?;
 /// ```
+/// Runtime identity admitted from a verified bundle, independent of the CLI lock.
+#[derive(Debug, Clone)]
+pub struct BundleBootAssetsPin {
+    pub manifest_sha256: crate::packs::Sha256Hex,
+    pub arch: crate::arch::GuestArch,
+    /// Digest of the signed, extracted initrd, not a mutable cache marker.
+    pub initrd_sha256: crate::packs::Sha256Hex,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct VmStartConfig {
     /// VM name (user-provided or auto-generated).
@@ -74,6 +83,8 @@ pub struct VmStartConfig {
     pub kernel_path: Option<String>,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
     pub initrd_path: Option<String>,
+    /// Verified bundle runtime selection. Never inferred from a cache version.
+    pub bundle_boot_assets: Option<BundleBootAssetsPin>,
     /// Absolute path to the dm-verity Merkle hash sidecar.
     /// Present when the flake was built with `verifiedBoot = true`
     /// (the production default). Must be paired with `roothash`.

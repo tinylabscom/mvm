@@ -19,6 +19,7 @@ use thiserror::Error;
 use crate::published_image_set::{
     ImageSetMemberError, MemberVersion, PublishedImageSet, SetMemberCache, SetMemberCacheError,
 };
+use crate::runtime_overlay::ExpandedArchiveLimits as InitramfsArchiveLimits;
 use mvm_core::image_set::{ImageSetRole, MemberTarget};
 
 /// Failure modes for universal initramfs resolution/build.
@@ -786,9 +787,46 @@ pub fn download_initramfs_from(
         &names.archive,
         &archive_local,
     )?;
-    extract_initramfs_archive(&archive_local, stage)?;
+    install_image_set_initramfs_archive(&archive_local, &image_set.member_cache(), arch, cache_root)
+}
 
-    let set = image_set.member_cache();
+/// Install an already-authenticated initramfs member without registry access.
+///
+/// The caller must verify the archive against the image set's digest and size
+/// before calling. Extraction and inner artifact verification are shared with
+/// the download path; the installed member retains the original set identity.
+pub fn install_image_set_initramfs_archive(
+    archive: &Path,
+    set: &SetMemberCache,
+    arch: GuestArch,
+    cache_root: &Path,
+) -> Result<InitramfsArtifact, InitramfsBuildError> {
+    install_image_set_initramfs_archive_with_limits(
+        archive,
+        set,
+        arch,
+        cache_root,
+        INITRAMFS_ARCHIVE_LIMITS,
+    )
+}
+
+// The runtime image is about 1.26 MiB today. Allow substantial growth, but
+// never expand a signed outer archive into unbounded temporary storage.
+const INITRAMFS_ARCHIVE_LIMITS: InitramfsArchiveLimits = InitramfsArchiveLimits {
+    file_bytes: 64 * 1024 * 1024,
+    total_bytes: 128 * 1024 * 1024,
+};
+
+fn install_image_set_initramfs_archive_with_limits(
+    archive: &Path,
+    set: &SetMemberCache,
+    arch: GuestArch,
+    cache_root: &Path,
+    limits: InitramfsArchiveLimits,
+) -> Result<InitramfsArtifact, InitramfsBuildError> {
+    let tmp = tempfile::tempdir()?;
+    let stage = tmp.path();
+    extract_initramfs_archive(archive, stage, limits)?;
     let version = MemberVersion::read(&stage.join(mvm_fs::initramfs::VERSION_FILE))?;
     let artifact =
         install_initramfs_into_cache(stage, &set.cache_root(cache_root), version.as_str(), arch)?;
@@ -801,11 +839,16 @@ pub fn download_initramfs_from(
     Ok(artifact)
 }
 
-fn extract_initramfs_archive(archive_path: &Path, stage: &Path) -> Result<(), InitramfsBuildError> {
+fn extract_initramfs_archive(
+    archive_path: &Path,
+    stage: &Path,
+    limits: InitramfsArchiveLimits,
+) -> Result<(), InitramfsBuildError> {
     let file = std::fs::File::open(archive_path)?;
     let decoder = flate2::read::GzDecoder::new(file);
     let mut archive = tar::Archive::new(decoder);
     let mut seen = std::collections::BTreeSet::new();
+    let mut remaining = limits.total_bytes;
 
     for entry in archive
         .entries()
@@ -832,11 +875,21 @@ fn extract_initramfs_archive(archive_path: &Path, stage: &Path) -> Result<(), In
         };
         match entry.header().entry_type() {
             tar::EntryType::Regular => {
+                if !seen.insert(name.to_string()) {
+                    return Err(InitramfsBuildError::InvalidArchive {
+                        archive_path: archive_path.to_path_buf(),
+                        reason: format!("duplicate archive member {name}"),
+                    });
+                }
                 let dest = stage.join(name);
                 let mut out = std::fs::File::create(&dest)?;
-                std::io::copy(&mut entry, &mut out)?;
+                limits
+                    .copy_entry(&mut entry, &mut out, &mut remaining)
+                    .map_err(|e| InitramfsBuildError::InvalidArchive {
+                        archive_path: archive_path.to_path_buf(),
+                        reason: format!("extract {name}: {e}"),
+                    })?;
                 set_cache_perms(&dest)?;
-                seen.insert(name.to_string());
             }
             tar::EntryType::Directory => {}
             other => {
@@ -858,7 +911,7 @@ fn extract_initramfs_archive(archive_path: &Path, stage: &Path) -> Result<(), In
         mvm_fs::initramfs::VERSION_FILE,
         mvm_fs::initramfs::CHECKSUM_MANIFEST_FILE,
     ] {
-        if !seen.contains(required) && !stage.join(required).is_file() {
+        if !seen.contains(required) {
             return Err(InitramfsBuildError::InvalidArchive {
                 archive_path: archive_path.to_path_buf(),
                 reason: format!("missing required archive member {required}"),
@@ -1452,6 +1505,194 @@ mod tests {
     /// A member cut from a workspace at another version than this CLI's.
     const MEMBER_VERSION: &str = "0.0.1-member";
 
+    fn archive_with_entries(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut tar = tar::Builder::new(gzip);
+        for (name, bytes) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, name, *bytes).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn expanded_initramfs_budgets_bound_writes_and_never_publish() {
+        let large = vec![0; 1024 * 1024];
+        for (entries, limits, expected_written) in [
+            (
+                vec![("initramfs.cpio.gz", large.as_slice())],
+                InitramfsArchiveLimits {
+                    file_bytes: 1024,
+                    total_bytes: 4096,
+                },
+                1024,
+            ),
+            (
+                vec![
+                    ("initramfs.cpio.gz", &large[..700]),
+                    ("initramfs.hash", large.as_slice()),
+                ],
+                InitramfsArchiveLimits {
+                    file_bytes: 1024,
+                    total_bytes: 1024,
+                },
+                1024,
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let archive = tmp.path().join("archive.tar.gz");
+            let bytes = archive_with_entries(&entries);
+            assert!(bytes.len() < 4096, "highly compressed fixture");
+            std::fs::write(&archive, bytes).unwrap();
+            let stage = tmp.path().join("stage");
+            std::fs::create_dir(&stage).unwrap();
+            let error = extract_initramfs_archive(&archive, &stage, limits).unwrap_err();
+            assert!(error.to_string().contains("budget"), "{error}");
+            let written: u64 = std::fs::read_dir(stage)
+                .unwrap()
+                .map(|file| file.unwrap().metadata().unwrap().len())
+                .sum();
+            assert_eq!(written, expected_written);
+            let set =
+                SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"budget-set"));
+            let cache = tmp.path().join("cache");
+            assert!(
+                install_image_set_initramfs_archive_with_limits(
+                    &archive,
+                    &set,
+                    GuestArch::Aarch64,
+                    &cache,
+                    limits,
+                )
+                .is_err()
+            );
+            assert!(!cache.exists());
+            assert!(
+                set.installed_version(
+                    &cache,
+                    ImageSetRole::Initramfs,
+                    MemberTarget::Arch(GuestArch::Aarch64)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_initramfs_members_are_rejected_before_overwrite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("archive.tar.gz");
+        std::fs::write(
+            &archive,
+            archive_with_entries(&[("VERSION", b"first"), ("VERSION", b"second")]),
+        )
+        .unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let error =
+            extract_initramfs_archive(&archive, &stage, INITRAMFS_ARCHIVE_LIMITS).unwrap_err();
+        assert!(error.to_string().contains("duplicate"), "{error}");
+        assert_eq!(std::fs::read(stage.join("VERSION")).unwrap(), b"first");
+        let set =
+            SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"duplicate-set"));
+        let cache = tmp.path().join("cache");
+        assert!(
+            install_image_set_initramfs_archive(&archive, &set, GuestArch::Aarch64, &cache)
+                .is_err()
+        );
+        assert!(!cache.exists());
+        assert!(
+            set.installed_version(
+                &cache,
+                ImageSetRole::Initramfs,
+                MemberTarget::Arch(GuestArch::Aarch64)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn valid_initramfs_archive_installs_with_small_expansion_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("archive.tar.gz");
+        std::fs::write(&archive, served_initramfs_archive(MEMBER_VERSION)).unwrap();
+        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"small-set"));
+        let cache = tmp.path().join("cache");
+        let installed = install_image_set_initramfs_archive_with_limits(
+            &archive,
+            &set,
+            GuestArch::Aarch64,
+            &cache,
+            InitramfsArchiveLimits {
+                file_bytes: 1024,
+                total_bytes: 4096,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_image_set_initramfs(&cache, &set, GuestArch::Aarch64).unwrap(),
+            installed
+        );
+    }
+
+    #[test]
+    fn initramfs_requires_all_five_regular_members_even_in_populated_stage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("archive.tar.gz");
+        std::fs::write(&archive, archive_with_entries(&[("VERSION", b"1")])).unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("initramfs.cpio.gz"), b"existing").unwrap();
+        let error =
+            extract_initramfs_archive(&archive, &stage, INITRAMFS_ARCHIVE_LIMITS).unwrap_err();
+        assert!(error.to_string().contains("missing required"), "{error}");
+    }
+
+    #[test]
+    fn an_authenticated_local_initramfs_installs_without_a_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("initramfs.tar.gz");
+        std::fs::write(&archive, served_initramfs_archive(MEMBER_VERSION)).unwrap();
+        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"bundle-set"));
+        let cache = tmp.path().join("cache");
+
+        let installed =
+            install_image_set_initramfs_archive(&archive, &set, GuestArch::Aarch64, &cache)
+                .expect("install authenticated archive");
+        std::fs::remove_file(archive).unwrap();
+
+        assert_eq!(installed.version, MEMBER_VERSION);
+        assert_eq!(
+            resolve_image_set_initramfs(&cache, &set, GuestArch::Aarch64).unwrap(),
+            installed
+        );
+    }
+
+    #[test]
+    fn an_invalid_local_initramfs_does_not_record_an_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("initramfs.tar.gz");
+        std::fs::write(&archive, b"not an initramfs archive").unwrap();
+        let set = SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"bundle-set"));
+        let cache = tmp.path().join("cache");
+
+        assert!(
+            install_image_set_initramfs_archive(&archive, &set, GuestArch::Aarch64, &cache)
+                .is_err()
+        );
+        assert!(
+            set.installed_version(
+                &cache,
+                ImageSetRole::Initramfs,
+                MemberTarget::Arch(GuestArch::Aarch64)
+            )
+            .is_err()
+        );
+    }
+
     /// The set's identity is its signed root, so an initramfs whose `VERSION`
     /// is not this CLI's installs, lands beneath the initramfs cache root every
     /// boot path recognises, and resolves from the cache on the next boot
@@ -1569,26 +1810,12 @@ mod tests {
         size_bytes: &[u8],
         version_bytes: &[u8],
     ) -> Vec<u8> {
-        let checksums = format!(
-            "{}  initramfs.cpio.gz
-{}  initramfs.hash
-{}  initramfs.size
-{}  VERSION
-",
-            sha256_hex(image_bytes),
-            sha256_hex(hash_bytes),
-            sha256_hex(size_bytes),
-            sha256_hex(version_bytes),
-        );
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut tar = tar::Builder::new(encoder);
-        append_archive_file(&mut tar, "initramfs.cpio.gz", image_bytes);
-        append_archive_file(&mut tar, "initramfs.hash", hash_bytes);
-        append_archive_file(&mut tar, "initramfs.size", size_bytes);
-        append_archive_file(&mut tar, "VERSION", version_bytes);
-        append_archive_file(&mut tar, "checksums-sha256.txt", checksums.as_bytes());
-        let encoder = tar.into_inner().unwrap();
-        encoder.finish().unwrap()
+        crate::boot_asset_fixture::initramfs_archive_bytes(
+            image_bytes,
+            hash_bytes,
+            size_bytes,
+            version_bytes,
+        )
     }
 
     fn sha256_hex(bytes: &[u8]) -> String {
@@ -1601,13 +1828,7 @@ mod tests {
     /// of the *compressed* file. Fixtures have to match that shape or they
     /// cannot exercise the install-time hash check.
     fn initramfs_fixture(payload: &[u8]) -> (Vec<u8>, String, String) {
-        use std::io::Write as _;
-        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        encoder.write_all(payload).unwrap();
-        let image = encoder.finish().unwrap();
-        let hash = sha256_hex(payload);
-        let size = image.len().to_string();
-        (image, hash, size)
+        crate::boot_asset_fixture::initramfs_fixture(payload)
     }
 
     /// Write a complete, self-consistent artifact directory.
@@ -1618,14 +1839,6 @@ mod tests {
         std::fs::write(dir.join("initramfs.hash"), format!("{hash}\n")).unwrap();
         std::fs::write(dir.join("initramfs.size"), format!("{size}\n")).unwrap();
         std::fs::write(dir.join("VERSION"), format!("{version}\n")).unwrap();
-    }
-
-    fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
-        let mut header = tar::Header::new_gnu();
-        header.set_mode(0o644);
-        header.set_size(u64::try_from(bytes.len()).unwrap());
-        header.set_cksum();
-        tar.append_data(&mut header, path, bytes).unwrap();
     }
 
     // --- deterministic cargo artifact assembly ---

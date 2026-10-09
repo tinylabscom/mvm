@@ -10,9 +10,9 @@ use anyhow::{Context, Result, bail};
 
 use mvm_build::oci_runtime_inject::ImageRuntimeConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
+use mvm_fs::oci::config::OciImageConfig;
 
 use super::cache::safe_cache_path;
-use super::oci_types::OciImageConfig;
 
 /// How much of a runtime identity goes into the cache tag. Long enough that
 /// two distinct guest runtimes cannot collide in practice, short enough to keep
@@ -94,13 +94,11 @@ pub(super) fn prepared_virtiofs_root(
 /// command is what left `rust:latest` without `/usr/local/cargo/bin` on
 /// `PATH`.
 pub(super) fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<ImageRuntimeConfig>> {
-    let config: OciImageConfig = serde_json::from_slice(bytes).context("parse OCI image config")?;
-    let mut argv = config.config.entrypoint.unwrap_or_default();
-    argv.extend(config.config.cmd.unwrap_or_default());
+    let config = OciImageConfig::parse(bytes).context("parse OCI image config")?;
     let resolved = ImageRuntimeConfig {
-        argv,
-        env: config.config.env,
-        working_dir: config.config.working_dir,
+        argv: config.argv,
+        env: config.env,
+        working_dir: config.working_dir,
     };
     Ok((!resolved.is_empty()).then_some(resolved))
 }

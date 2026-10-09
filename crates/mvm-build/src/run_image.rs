@@ -18,12 +18,23 @@ use mvm_fs::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
 };
 
+/// Whether ext4 materialization may leave the host process for the builder VM.
+/// This controls the ext4 writer, not an explicitly requested sealing step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RootfsMaterializationPolicy {
+    #[default]
+    AllowBuilderVm,
+    InProcessOnly,
+}
+
 pub struct InjectAndMaterializeRequest<'a> {
     cache_root: &'a Path,
     unpacked_root: &'a Path,
     output: &'a Path,
     label: &'a str,
     entrypoint: Option<&'a ImageRuntimeConfig>,
+    runtime_binaries: Option<&'a MvmRuntimeBinaries>,
+    materialization_policy: RootfsMaterializationPolicy,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
     owners: mvm_fs::ownership::OwnerTable,
@@ -44,6 +55,8 @@ impl<'a> InjectAndMaterializeRequest<'a> {
             output,
             label,
             entrypoint: None,
+            runtime_binaries: None,
+            materialization_policy: RootfsMaterializationPolicy::default(),
             sealed: false,
             deferred_nodes: Vec::new(),
             owners: mvm_fs::ownership::OwnerTable::new(),
@@ -59,6 +72,8 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
     output: &'a Path,
     label: &'a str,
     entrypoint: Option<&'a ImageRuntimeConfig>,
+    runtime_binaries: Option<&'a MvmRuntimeBinaries>,
+    materialization_policy: RootfsMaterializationPolicy,
     sealed: bool,
     deferred_nodes: Vec<mvm_fs::ext4::Node>,
     owners: mvm_fs::ownership::OwnerTable,
@@ -67,6 +82,18 @@ pub struct InjectAndMaterializeRequestBuilder<'a> {
 }
 
 impl<'a> InjectAndMaterializeRequestBuilder<'a> {
+    pub fn materialization_policy(mut self, policy: RootfsMaterializationPolicy) -> Self {
+        self.materialization_policy = policy;
+        self
+    }
+
+    /// Use binaries acquired from an explicitly pinned runtime instead of
+    /// resolving the current source checkout or CLI compatibility cache.
+    pub fn runtime_binaries(mut self, binaries: Option<&'a MvmRuntimeBinaries>) -> Self {
+        self.runtime_binaries = binaries;
+        self
+    }
+
     pub fn entrypoint(mut self, entrypoint: Option<&'a ImageRuntimeConfig>) -> Self {
         self.entrypoint = entrypoint;
         self
@@ -120,6 +147,8 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
             output: self.output,
             label: self.label,
             entrypoint: self.entrypoint,
+            runtime_binaries: self.runtime_binaries,
+            materialization_policy: self.materialization_policy,
             sealed: self.sealed,
             deferred_nodes: self.deferred_nodes,
             owners: self.owners,
@@ -304,6 +333,16 @@ pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Resul
     inject_and_materialize_holding(request, &held)
 }
 
+fn select_runtime_binaries(
+    supplied: Option<&MvmRuntimeBinaries>,
+    resolve: impl FnOnce() -> Result<MvmRuntimeBinaries>,
+) -> Result<std::borrow::Cow<'_, MvmRuntimeBinaries>> {
+    match supplied {
+        Some(bins) => Ok(std::borrow::Cow::Borrowed(bins)),
+        None => resolve().map(std::borrow::Cow::Owned),
+    }
+}
+
 fn inject_and_materialize_holding(
     request: InjectAndMaterializeRequest<'_>,
     _held: &HeldTreeLocks,
@@ -314,6 +353,8 @@ fn inject_and_materialize_holding(
         output,
         label,
         entrypoint,
+        runtime_binaries,
+        materialization_policy,
         sealed,
         deferred_nodes,
         owners,
@@ -335,7 +376,7 @@ fn inject_and_materialize_holding(
     remove_stale_builds(rootfs_dir)?;
     crate::oci_runtime_inject::refuse_layer_nodes_at_injected_paths(&deferred_nodes)
         .context("admit the image's deferred layer nodes")?;
-    let bins = resolve_guest_binaries(cache_root)?;
+    let bins = select_runtime_binaries(runtime_binaries, || resolve_guest_binaries(cache_root))?;
     crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
         .context("inject mvm runtime into OCI rootfs")?;
     ensure_volume_mount_roots(unpacked_root)?;
@@ -364,7 +405,7 @@ fn inject_and_materialize_holding(
     // Measure AFTER injection so the ext4 sizing covers everything injected.
     let tree_size = unpacked_tree_size(unpacked_root)
         .with_context(|| format!("measure unpacked root {}", unpacked_root.display()))?;
-    materialize_run_rootfs(
+    materialize_run_rootfs_with_policy(
         &MaterializeExt4Input::new(
             unpacked_root.to_path_buf(),
             staged_output.clone(),
@@ -372,6 +413,7 @@ fn inject_and_materialize_holding(
         )
         .with_deferred_nodes(deferred_nodes)
         .with_owners(owners),
+        materialization_policy,
     )?;
 
     // `--prod`: seal the rootfs before the sidecar is written. If this fails we
@@ -791,10 +833,41 @@ pub fn resolve_guest_binaries(cache_root: &Path) -> Result<MvmRuntimeBinaries> {
 /// debugging. Both paths emit `rootfs.verity` + `rootfs.roothash` beside the
 /// image so block-backed OCI runs are sealed uniformly across backends.
 pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
+    materialize_run_rootfs_with_policy(input, RootfsMaterializationPolicy::AllowBuilderVm)
+}
+
+fn materialize_run_rootfs_with_policy(
+    input: &MaterializeExt4Input,
+    policy: RootfsMaterializationPolicy,
+) -> Result<()> {
     let input = input.clone().with_verity();
-    match run_in_process_materializer(&input)? {
+    finish_materialization(run_in_process_materializer(&input)?, policy, |route| {
+        materialize_run_rootfs_builder_vm(&input, route)
+    })
+}
+
+fn finish_materialization(
+    outcome: InProcessOutcome,
+    policy: RootfsMaterializationPolicy,
+    builder: impl FnOnce(&crate::rootfs::BuilderVmRoute) -> Result<()>,
+) -> Result<()> {
+    match outcome {
         InProcessOutcome::Materialized => Ok(()),
-        InProcessOutcome::UseBuilderVm(route) => materialize_run_rootfs_builder_vm(&input, &route),
+        InProcessOutcome::UseBuilderVm(route) => match policy {
+            RootfsMaterializationPolicy::AllowBuilderVm => builder(&route),
+            RootfsMaterializationPolicy::InProcessOnly => {
+                let reason = match route {
+                    crate::rootfs::BuilderVmRoute::Selected => {
+                        "MVM_MATERIALIZE_BUILDER_VM is set; unset it to use the in-process writer"
+                            .to_string()
+                    }
+                    crate::rootfs::BuilderVmRoute::PureFallback { because } => {
+                        format!("the image exceeds the in-process writer's capabilities: {because}")
+                    }
+                };
+                anyhow::bail!("in-process-only materialization refuses the builder VM: {reason}")
+            }
+        },
     }
 }
 
@@ -828,7 +901,7 @@ fn run_in_process_materializer(input: &MaterializeExt4Input) -> Result<InProcess
         Err(e) if e.pure_should_fall_back() => {
             tracing::warn!(
                 error = %e,
-                "in-process rootfs materialize needs the builder VM; falling back"
+                "in-process rootfs materialize needs the builder VM; checking materialization policy"
             );
             Ok(InProcessOutcome::UseBuilderVm(
                 crate::rootfs::BuilderVmRoute::PureFallback {
@@ -983,6 +1056,94 @@ pub fn resolve_guest_runtime_identity(cache_root: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn materialization_policy_refuses_forced_builder_and_structural_fallback() {
+        use crate::rootfs::BuilderVmRoute;
+        for (route, reason) in [
+            (BuilderVmRoute::Selected, "MVM_MATERIALIZE_BUILDER_VM"),
+            (
+                BuilderVmRoute::PureFallback {
+                    because: "directory exceeds one block".into(),
+                },
+                "directory exceeds one block",
+            ),
+        ] {
+            let error = finish_materialization(
+                InProcessOutcome::UseBuilderVm(route),
+                RootfsMaterializationPolicy::InProcessOnly,
+                |_| panic!("in-process-only must not invoke the builder"),
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains(reason), "{error}");
+            assert!(error.to_string().contains("in-process-only"));
+        }
+    }
+
+    #[test]
+    fn materialization_policy_allows_completed_images_and_legacy_fallback() {
+        finish_materialization(
+            InProcessOutcome::Materialized,
+            RootfsMaterializationPolicy::InProcessOnly,
+            |_| panic!("a completed image must not invoke the builder"),
+        )
+        .unwrap();
+        let invoked = std::cell::Cell::new(false);
+        finish_materialization(
+            InProcessOutcome::UseBuilderVm(crate::rootfs::BuilderVmRoute::Selected),
+            RootfsMaterializationPolicy::AllowBuilderVm,
+            |_| {
+                invoked.set(true);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(invoked.get());
+    }
+
+    #[test]
+    fn materialization_policy_request_defaults_to_legacy_and_preserves_override() {
+        let path = Path::new("/unused");
+        let legacy = InjectAndMaterializeRequest::builder(path, path, path, "test").build();
+        assert_eq!(
+            legacy.materialization_policy,
+            RootfsMaterializationPolicy::AllowBuilderVm
+        );
+        let host_only = InjectAndMaterializeRequest::builder(path, path, path, "test")
+            .materialization_policy(RootfsMaterializationPolicy::InProcessOnly)
+            .build();
+        assert_eq!(
+            host_only.materialization_policy,
+            RootfsMaterializationPolicy::InProcessOnly
+        );
+    }
+
+    #[test]
+    fn explicit_runtime_binaries_bypass_resolution() {
+        let bins = MvmRuntimeBinaries {
+            agent: "/pinned/agent".into(),
+            netinit: "/pinned/netinit".into(),
+            egress_client: "/pinned/egress".into(),
+            entrypoint_runner: "/pinned/entrypoint".into(),
+        };
+        let path = Path::new("/unused");
+        let request = InjectAndMaterializeRequest::builder(path, path, path, "test")
+            .runtime_binaries(Some(&bins))
+            .build();
+        let selected = select_runtime_binaries(request.runtime_binaries, || {
+            panic!("an explicit pinned runtime must never resolve the current runtime")
+        })
+        .unwrap();
+        assert!(matches!(selected, std::borrow::Cow::Borrowed(_)));
+        assert_eq!(*selected, bins);
+
+        let legacy = InjectAndMaterializeRequest::builder(path, path, path, "test").build();
+        let selected =
+            select_runtime_binaries(legacy.runtime_binaries, || Ok(bins.clone())).unwrap();
+        assert!(matches!(selected, std::borrow::Cow::Owned(_)));
+        assert_eq!(*selected, bins);
+        assert!(select_runtime_binaries(None, || anyhow::bail!("unavailable")).is_err());
+    }
 
     /// Seed `cache_root` with stand-in guest binaries, so a test that reaches
     /// binary resolution by mistake fails in milliseconds instead of

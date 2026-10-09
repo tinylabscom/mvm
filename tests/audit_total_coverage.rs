@@ -490,6 +490,8 @@ const ARTIFACT_SUB: &[(&str, AuditPosture)] = &[
 // audit entries (publisher trust is host-trust-boundary state);
 // list is `ReadOnly`.
 const BUNDLE_SUB: &[(&str, AuditPosture)] = &[
+    // Like export, build produces a caller-owned archive, not a registry install.
+    ("build", AuditPosture::InteractiveOrControl),
     ("export", AuditPosture::InteractiveOrControl),
     ("fetch", AuditPosture::ReadOnly),
     // `bundle install` mutates the local bundle registry under

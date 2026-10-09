@@ -89,14 +89,16 @@ pub fn build_runtime_overlay_cmdline_args(
 }
 
 /// Whether this boot attached the universal initramfs (as opposed to a
-/// legacy per-rootfs verity initramfs or no initramfs at all).  The CLI
-/// resolves the artifact out of the shared initramfs cache, so the path
-/// itself is the discriminant — a cold-cache legacy boot keeps its
-/// `rootfs.initrd` sibling and is never sent `ActivateEnvironment`.
+/// legacy per-rootfs verity initramfs or no initramfs at all). Bundles carry
+/// an admitted boot-assets pin; other launches resolve the shared initramfs
+/// cache. A legacy `rootfs.initrd` sibling is never sent `ActivateEnvironment`.
 pub fn booted_with_universal_initramfs(config: &mvm_core::vm_backend::VmStartConfig) -> bool {
     let Some(initrd) = &config.initrd_path else {
         return false;
     };
+    if config.bundle_boot_assets.is_some() {
+        return true;
+    }
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("initramfs");
     std::path::Path::new(initrd).starts_with(&cache_root)
 }
@@ -223,6 +225,25 @@ pub fn balloon_body(amount_mib: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pinned_bundle_initrd_uses_universal_activation_outside_the_cli_cache() {
+        let mut config = mvm_core::vm_backend::VmStartConfig {
+            initrd_path: Some("/bundle-runtime/initramfs.cpio.gz".into()),
+            bundle_boot_assets: Some(mvm_core::vm_backend::BundleBootAssetsPin {
+                manifest_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"set"),
+                arch: mvm_core::arch::GuestArch::host(),
+                initrd_sha256: mvm_core::packs::Sha256Hex::from_bytes(b"initrd"),
+            }),
+            ..Default::default()
+        };
+        assert!(booted_with_universal_initramfs(&config));
+        config.initrd_path = None;
+        assert!(!booted_with_universal_initramfs(&config));
+        config.initrd_path = Some("/bundle-runtime/initramfs.cpio.gz".into());
+        config.bundle_boot_assets = None;
+        assert!(!booted_with_universal_initramfs(&config));
+    }
 
     // ------------------------------------------------------------------
     // Firecracker API body builders — byte-identical pins
