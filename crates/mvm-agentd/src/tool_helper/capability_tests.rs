@@ -94,6 +94,8 @@ fn installed_stash_executes_only_through_helper_descriptor() {
                 .args(["--exact", PROBE, "--nocapture"])
                 .env(STAGE, stage)
                 .env(STASH, stash)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
                 .output()
                 .expect("exec helper over installed stash");
         assert!(output.status.success(), "{output:?}");
