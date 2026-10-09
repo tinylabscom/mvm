@@ -73,7 +73,6 @@ const ALLOWLIST: &[(&str, &[Below])] = &[
     ("build/trace_secret_scan.rs", HOSTD),
     ("build/validate.rs", RUNTIME),
     ("bundle/export.rs", RUNTIME),
-    ("env/bootstrap.rs", RUNTIME),
     ("env/builder_vm/default_microvm.rs", RUNTIME),
     ("env/builder_vm/kernel.rs", RUNTIME),
     ("env/builder_vm/local_pair.rs", RUNTIME),

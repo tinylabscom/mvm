@@ -309,6 +309,15 @@ fn image_declared_path() -> Option<String> {
         .and_then(|(_, v)| v.to_str().map(str::to_string))
 }
 
+/// Resolve a workload command through the image's declared search path.
+///
+/// Console and RPC execution share this entry point so a bare command has the
+/// same meaning on both transports, while relative paths remain refused.
+pub(crate) fn resolve_image_argv0(argv0: &str) -> Result<String, String> {
+    let search_dirs = program_search_dirs(image_declared_path().as_deref());
+    resolve_argv0(argv0, &search_dirs, &OsProgramProbe).map_err(|(_, message)| message)
+}
+
 /// Whether a candidate path is something the guest can actually execute.
 ///
 /// A trait so the resolution rules are unit-testable without laying down real
@@ -403,8 +412,8 @@ fn build_command(
     if argv0.is_empty() {
         return Err((ProcErrorKind::InvalidArgv, "argv[0] is empty".to_string()));
     }
-    let search_dirs = program_search_dirs(image_declared_path().as_deref());
-    let argv0 = resolve_argv0(argv0, &search_dirs, &OsProgramProbe)?;
+    let argv0 =
+        resolve_image_argv0(argv0).map_err(|message| (ProcErrorKind::InvalidArgv, message))?;
 
     for (k, v) in env {
         if k.is_empty() || k.contains('=') || k.as_bytes().contains(&0) {
