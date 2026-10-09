@@ -618,6 +618,12 @@ fn distro_packages_are_built_from_the_tarballs_and_signed_like_them() {
     let packages = fs::read_to_string(".github/workflows/distro-packages.yml")
         .expect("distro-packages.yml must exist");
     assert!(
+        packages.contains(
+            "uses: sigstore/cosign-installer@v3\n        with:\n          cosign-release: v2.5.2"
+        ),
+        "packaging must use installer v3's verified bootstrap: cosign v3 binaries lack the detached .sig it requires"
+    );
+    assert!(
         packages.contains("bash scripts/build-distro-packages.sh")
             && !packages.contains("cargo build")
             && !packages.contains("cargo zigbuild"),

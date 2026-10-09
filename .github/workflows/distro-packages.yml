@@ -79,13 +79,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Pinned in Cargo.toml's [workspace.metadata.mvm.toolchain]: the
-      # packages are signed release assets, so the tools that write them do
-      # not float.
+      # Match installer v3's SHA256-verified bootstrap and the release signer's
+      # cosign version. It verifies --new-bundle-format bundles; cosign v3
+      # binaries no longer publish the detached .sig that installer v3 needs.
       - uses: sigstore/cosign-installer@v3
         with:
-          cosign-release: v3.0.5
+          cosign-release: v2.5.2
 
+      # Packaging tools are pinned in Cargo.toml's [workspace.metadata.mvm.toolchain].
       - name: Install cargo-deb and cargo-generate-rpm
         if: ${{ !inputs.published_packages }}
         run: |
