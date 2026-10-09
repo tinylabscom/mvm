@@ -145,6 +145,57 @@ fn authenticated_boundary_preserves_manifest_and_resumes_exactly() {
 }
 
 #[test]
+fn authenticated_opening_is_exact_and_preserves_historical_recovery_attribution() {
+    use mvm_core::transcript::evidence::{
+        TRANSCRIPT_OPENED_EVENT, authenticate_opening, opening_labels, recovered_seal_entry,
+    };
+    let f = Fixture::new(false);
+    let mut seed = f.manifest.clone();
+    seed.chunks.clear();
+    seed.sealed_unix_secs = None;
+    seed.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&seed).unwrap();
+    let key = f.emitter.verifying_key();
+    assert!(authenticate_opening(f.emitter.audit_dir(), &key, &seed).is_err());
+    let mut entry = for_plan(&f.plan, None, TRANSCRIPT_OPENED_EVENT, []);
+    entry.labels = opening_labels(&seed).unwrap();
+    f.emitter
+        .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
+        .unwrap();
+    assert_eq!(
+        authenticate_opening(f.emitter.audit_dir(), &key, &seed).unwrap(),
+        entry
+    );
+    for mutation in ["vm", "tenant", "root"] {
+        let mut wrong = seed.clone();
+        match mutation {
+            "vm" => wrong.binding.vm_name = "service-instance-2".into(),
+            "tenant" => wrong.binding.tenant_id = "other".into(),
+            _ => wrong.wrapped_data_key_b64 = "other-envelope".into(),
+        }
+        wrong.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&wrong).unwrap();
+        assert!(authenticate_opening(f.emitter.audit_dir(), &key, &wrong).is_err());
+    }
+    let wrong_key = ed25519_dalek::SigningKey::from_bytes(&[18; 32]).verifying_key();
+    assert!(authenticate_opening(f.emitter.audit_dir(), &wrong_key, &seed).is_err());
+    assert!(authenticated_retirement(f.emitter.audit_dir(), &key, &f.manifest).is_err());
+    let mut recovered = f.manifest.clone();
+    recovered.adopted = true;
+    recovered.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&recovered).unwrap();
+    let sealed = recovered_seal_entry(f.emitter.audit_dir(), &key, &seed, &recovered).unwrap();
+    assert_eq!(sealed.plan_id, entry.plan_id);
+    assert_eq!(sealed.tenant, entry.tenant);
+    assert_eq!(sealed.labels["vm_name"], "service-instance-1");
+    f.emitter
+        .emit_entry_for_evidence(&sealed, EvidenceReceipt::Omitted)
+        .unwrap();
+    assert!(!authenticated_retirement(f.emitter.audit_dir(), &key, &recovered).unwrap());
+    f.emitter
+        .emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)
+        .unwrap();
+    assert!(authenticate_opening(f.emitter.audit_dir(), &key, &seed).is_err());
+}
+
+#[test]
 fn instances_of_one_workload_retire_independently() {
     let first = Fixture::for_vm(true, "service-instance-1");
     let second = Fixture::for_vm(true, "service-instance-2");

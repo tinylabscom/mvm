@@ -45,7 +45,6 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ed25519_dalek::{Signature, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 
 use crate::supervisor::audit::{AuditError, AuditSigner, PlanAuditEntry, SignedEnvelope};
 use mvm_contract::verify::{hash_line, seal, signed_bytes_for};
@@ -897,27 +896,7 @@ pub(crate) fn flock_exclusive(file: &std::fs::File) -> std::io::Result<()> {
     flock(file.as_fd(), FlockOperation::LockExclusive).map_err(std::io::Error::from)
 }
 
-#[derive(Debug, Error)]
-pub enum VerifyError {
-    #[error("io error: {0}")]
-    Io(String),
-    #[error("malformed envelope at line {line}: {reason}")]
-    Malformed { line: usize, reason: String },
-    #[error("prev_hash mismatch at line {line}: chain broken")]
-    PrevHashMismatch { line: usize },
-    #[error("signature invalid at line {line}")]
-    SignatureInvalid { line: usize },
-    #[error("line {line}: the readable entry disagrees with the bytes that were signed")]
-    EntryCanonicalMismatch { line: usize },
-    /// The file ends mid-record: a writer died between the record and its
-    /// terminating newline. Distinct from [`Self::Malformed`] on purpose — an
-    /// operator triaging a broken chain needs to know whether they are looking
-    /// at a crash or at an edit, and the two are otherwise identical on disk.
-    /// Entries before the truncation point are still verified and returned by
-    /// the count; only the incomplete tail is refused.
-    #[error("audit stream ends mid-record at line {line}: last append did not complete")]
-    TruncatedTail { line: usize },
-}
+pub use mvm_core::audit_verify::file::VerifyError;
 
 /// Walk a chain-signed audit file, verifying each envelope's
 /// `prev_hash` against the running chain hash and each signature

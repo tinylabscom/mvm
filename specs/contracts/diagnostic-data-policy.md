@@ -152,6 +152,13 @@ original host-signed seal, not the workload name or a current `plan.json`.
 Retirement attribution is copied from that authenticated historical entry;
 deleting or replacing the current VM plan does not change it.
 
+The current verifier still requires original opening/sealing entries in the
+verified audit segment set. Legitimate pruning of those entries therefore
+refuses recovery and retirement; a standalone signed envelope is not accepted
+as a substitute for chain continuity. Audit pruning pins or chain-linked
+preservation are a remaining lifecycle dependency, so this surface does not
+guarantee unattended cleanup across audit pruning.
+
 Cleanup pins a private host-owned capture directory beneath a trusted configured
 root, opens descendant components without following links, takes a nonblocking
 exclusive lease, and removes only verified single-link ciphertext segments named
