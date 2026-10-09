@@ -44,7 +44,7 @@
 //! launch methods in [`launch::METHODS`], the entrypoint and session methods
 //! in [`entrypoint::METHODS`], the guest methods in
 //! [`guest::METHODS`], and the stream methods in [`stream::METHODS`] and
-//! [`stream::LOG_METHODS`].
+//! [`stream::LOG_METHODS`], plus local registry inspection in [`manifest::METHODS`].
 //! Each call builds a single-threaded runtime and drops it before returning.
 //! The one thing that outlives a call is a process stream's reader, which
 //! lives until the process ends or its wait times out; see [`stream`].
@@ -70,6 +70,7 @@ mod embedder;
 pub mod entrypoint;
 pub mod guest;
 pub mod launch;
+pub mod manifest;
 #[cfg(feature = "schema")]
 pub mod registry;
 pub mod status;
@@ -90,8 +91,9 @@ pub const MVM_HOSTLIB_ABI_MAJOR: u16 = 1;
 /// machines launched or started through the host library. 5 added
 /// `machine.pause`, `machine.resume`, `machine.reconfigure`, and
 /// `machine.set_ttl`. 6 added `telemetry.status` and `telemetry.records`, the
-/// per-machine collector read seam.
-pub const MVM_HOSTLIB_ABI_MINOR: u16 = 6;
+/// per-machine collector read seam. 7 added built-manifest inspection through
+/// `manifest.list`, `manifest.info`, and `manifest.verify`.
+pub const MVM_HOSTLIB_ABI_MINOR: u16 = 7;
 
 pub use approval::mvm_hostlib_set_approval_callback;
 
@@ -293,6 +295,9 @@ fn handle(negotiated: bool, method: &[u8], request: &[u8], services: &dyn Servic
     let Ok(method) = std::str::from_utf8(method) else {
         return Outcome::invalid_input("method is not valid UTF-8");
     };
+    if manifest::is_known(method) {
+        return manifest::dispatch(method, request);
+    }
     if guest::is_known(method) {
         return match services.guest() {
             Ok(ops) => guest::dispatch(ops.as_ref(), method, request),
@@ -516,6 +521,43 @@ mod tests {
     fn a_call_before_negotiation_is_refused_without_building_a_client() {
         let outcome = handle(false, b"machine.list", b"", &Untouched);
         assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
+    }
+
+    #[test]
+    fn manifest_inspection_requires_negotiation_but_not_machine_services() {
+        for method in manifest::METHODS {
+            let outcome = handle(false, method.as_bytes(), b"{}", &Untouched);
+            assert_eq!(outcome.status, MVM_HOSTLIB_ABI_NOT_NEGOTIATED);
+            let outcome = handle(true, method.as_bytes(), b"invalid json", &Untouched);
+            assert_eq!(outcome.status, MVM_HOSTLIB_INVALID_INPUT);
+        }
+        let outcome = handle(
+            true,
+            manifest::VERIFY.as_bytes(),
+            br#"{"check_signature":true}"#,
+            &Untouched,
+        );
+        assert_eq!(outcome.status, status::MVM_HOSTLIB_BACKEND);
+        let body: serde_json::Value = serde_json::from_slice(&outcome.body).unwrap();
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap()
+                .contains("--check-signature")
+        );
+    }
+
+    #[test]
+    fn manifest_listing_reads_the_local_registry_without_machine_services() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let outcome = handle(true, manifest::LIST.as_bytes(), b"{}", &Untouched);
+        assert_eq!(outcome.status, status::MVM_HOSTLIB_OK);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&outcome.body).unwrap(),
+            serde_json::json!([])
+        );
     }
 
     #[test]
