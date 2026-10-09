@@ -282,12 +282,25 @@ mod tests {
         use std::os::unix::fs::symlink;
         let (dir, _) = fixture();
         let parent = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(parent.path()).unwrap();
         symlink(dir.path(), parent.path().join("alias")).unwrap();
         assert!(CaptureDirectory::open(parent.path(), Path::new("alias")).is_err());
         assert!(CaptureDirectory::open(parent.path(), Path::new("../outside")).is_err());
         let lease = CaptureDirectory::for_writer(dir.path()).unwrap();
         assert!(CaptureDirectory::for_writer(dir.path()).is_err());
         drop(lease);
+        assert!(CaptureDirectory::for_writer(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn untrusted_directory_permissions_refuse_before_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        for mode in [0o755, 0o770, 0o777] {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(mode)).unwrap();
+            assert!(CaptureDirectory::for_writer(dir.path()).is_err());
+        }
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
         assert!(CaptureDirectory::for_writer(dir.path()).is_ok());
     }
 }

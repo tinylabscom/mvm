@@ -1,4 +1,5 @@
 use super::*;
+use anyhow::bail;
 use mvm_core::transcript::{
     AtRestRetention, CaptureBinding, CaptureBounds, Direction, MANIFEST_FILENAME, RetentionPolicy,
     TranscriptWriter, TranscriptWriterConfig,
@@ -143,6 +144,7 @@ fn missing_authority_bad_clock_and_live_owner_never_unlink() {
     assert!(f.payload().exists());
     let f = Fixture::new(true);
     assert!(reconcile_capture(f.context(), 199).is_err());
+    assert!(reconcile_capture(f.context(), u64::MAX).is_err());
     let lease = CaptureDirectory::for_writer(&f.root.path().join("capture")).unwrap();
     assert!(reconcile_capture(f.context(), 605_000).is_err());
     assert!(f.payload().exists());

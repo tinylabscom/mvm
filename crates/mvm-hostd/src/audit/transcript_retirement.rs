@@ -2,7 +2,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use ed25519_dalek::VerifyingKey;
 use mvm_core::plan::ExecutionPlan;
 use mvm_core::transcript::secure_cleanup::CaptureDirectory;
@@ -208,10 +208,7 @@ fn reconcile_with(
     let Some(deadline) = manifest.retention_deadline()? else {
         return Ok(RetirementOutcome::NotSealed);
     };
-    if now < manifest.created_unix_secs || manifest.sealed_unix_secs.is_some_and(|seal| now < seal)
-    {
-        bail!("invalid or backward retention clock");
-    }
+    manifest.check_retention_clock_at(now)?;
     let already_retired = authenticated_retirement_at(
         context.emitter.audit_dir(),
         &context.emitter.verifying_key(),

@@ -89,6 +89,22 @@ pub fn retention_now() -> Result<u64, TranscriptError> {
 }
 
 impl TranscriptManifest {
+    /// Shared checked-clock gate for managed reads and destructive maintenance.
+    pub fn check_retention_clock_at(&self, now: u64) -> Result<(), TranscriptError> {
+        super::validate_format(self)?;
+        let Some(policy) = self.at_rest else {
+            return Ok(());
+        };
+        policy.generation_deadline(self.created_unix_secs)?;
+        if now < self.created_unix_secs || self.sealed_unix_secs.is_some_and(|sealed| now < sealed)
+        {
+            return Err(TranscriptError::RetentionClock);
+        }
+        now.checked_add(policy.payload_after_seal_secs)
+            .ok_or(TranscriptError::RetentionClock)?;
+        Ok(())
+    }
+
     /// AES-GCM frame widths are authenticated by the original manifest root.
     /// This counts plaintext envelope bytes, not ciphertext or disk allocation.
     pub fn retained_plaintext_bytes(&self) -> Result<u64, TranscriptError> {
@@ -125,13 +141,10 @@ impl TranscriptManifest {
     /// Refuse managed payload reads at the exact deadline, even if maintenance
     /// has not run. Unfinalized recovery snapshots cannot extend readable age.
     pub fn check_readable_at(&self, now: u64) -> Result<(), TranscriptError> {
-        super::validate_format(self)?;
+        self.check_retention_clock_at(now)?;
         let Some(policy) = self.at_rest else {
             return Ok(());
         };
-        if now < self.created_unix_secs {
-            return Err(TranscriptError::RetentionClock);
-        }
         let deadline = match self.retention_deadline()? {
             Some(deadline) => deadline,
             None => policy
@@ -139,9 +152,6 @@ impl TranscriptManifest {
                 .checked_add(policy.payload_after_seal_secs)
                 .ok_or(TranscriptError::RetentionClock)?,
         };
-        if self.sealed_unix_secs.is_some_and(|sealed| now < sealed) {
-            return Err(TranscriptError::RetentionClock);
-        }
         if now >= deadline {
             return Err(TranscriptError::PayloadExpired);
         }
