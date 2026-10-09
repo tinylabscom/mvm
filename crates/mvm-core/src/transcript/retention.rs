@@ -167,16 +167,11 @@ pub fn recover_abandoned_at(
     now: u64,
 ) -> Result<(), TranscriptError> {
     verify_sealed_root(manifest)?;
+    manifest.check_retention_clock_at(now)?;
     let Some(policy) = manifest.at_rest else {
         return Ok(());
     };
-    if now < manifest.created_unix_secs {
-        return Err(TranscriptError::RetentionClock);
-    }
-    if let Some(sealed) = manifest.sealed_unix_secs {
-        if now < sealed {
-            return Err(TranscriptError::RetentionClock);
-        }
+    if manifest.sealed_unix_secs.is_some() {
         return Ok(());
     }
     let generation_end = policy.generation_deadline(manifest.created_unix_secs)?;

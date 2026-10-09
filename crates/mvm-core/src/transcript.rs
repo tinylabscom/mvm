@@ -1522,11 +1522,19 @@ mod tests {
         cfg.at_rest = Some(AtRestRetention::default());
         let writer = TranscriptWriter::new(dir.path(), fixed_key(1), cfg);
         let mut manifest = writer.sealed_manifest();
+        let snapshot = manifest.clone();
         assert!(recover_abandoned_at(&mut manifest, 99).is_err());
+        assert_eq!(manifest, snapshot);
+        assert!(recover_abandoned_at(&mut manifest, u64::MAX).is_err());
+        assert_eq!(manifest, snapshot);
         recover_abandoned_at(&mut manifest, 900_000).unwrap();
         assert_eq!(manifest.sealed_unix_secs, Some(3_700));
         assert!(manifest.adopted);
         let original = manifest.clone();
+        assert!(recover_abandoned_at(&mut manifest, 3_699).is_err());
+        assert_eq!(manifest, original);
+        assert!(recover_abandoned_at(&mut manifest, u64::MAX).is_err());
+        assert_eq!(manifest, original);
         recover_abandoned_at(&mut manifest, 1_000_000).unwrap();
         assert_eq!(manifest, original);
         assert_eq!(
