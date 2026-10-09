@@ -457,6 +457,20 @@ fn pull_one(
         })?
     };
     check_registry_pack_revocations_if_configured(&verified)?;
+    if matches!(
+        verified.manifest().image,
+        Some(mvm_core::registry_pack::RegistryPackImage::Built(_))
+    ) {
+        let verifier = mvm_core::registry_pack::verify_built_image_provenance(
+            &verified,
+            fetched.staged_path(),
+        )?;
+        crate::ui::info(&format!(
+            "built image provenance verified for {} (verifier {})",
+            verified.manifest().reference,
+            verifier.as_str()
+        ));
+    }
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.

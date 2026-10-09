@@ -1020,6 +1020,49 @@ fn validate_built_image_against_lock(
     Ok(())
 }
 
+/// Read and verify a built-image pack's provenance statement and signature
+/// bundle from an unpacked payload root.
+///
+/// The bytes are checked against the descriptor's recorded digests and sizes,
+/// the bundle is authenticated against the pack signer, the statement's
+/// subject and build inputs are bound to the descriptor and the pack
+/// reference, and the publisher must be the pinned image publisher workflow.
+/// Fails closed for template packs and for any mismatch. Returns the pinned
+/// verifier digest recorded by the producer for the released-client check.
+pub fn verify_built_image_provenance(
+    verified: &VerifiedRegistryPack,
+    root: &Path,
+) -> Result<crate::packs::Sha256Hex, RegistryPackVerificationError> {
+    let Some(RegistryPackImage::Built(descriptor)) = &verified.manifest().image else {
+        return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+            reason: "pack has no built image provenance to verify".to_string(),
+        });
+    };
+    let read = |name: &str| -> Result<Vec<u8>, RegistryPackVerificationError> {
+        std::fs::read(root.join(name)).map_err(|error| {
+            RegistryPackVerificationError::PayloadFileRead {
+                path: name.to_string(),
+                reason: error.to_string(),
+            }
+        })
+    };
+    let statement = read("provenance.json")?;
+    let bundle = read("provenance.signature.json")?;
+    descriptor
+        .verify_signed_provenance(
+            &verified.manifest().reference,
+            &crate::image_set::image_train_lock().image_set,
+            verified.signer(),
+            &statement,
+            &bundle,
+        )
+        .map_err(
+            |error| RegistryPackVerificationError::InvalidImageDeclaration {
+                reason: format!("built image provenance refused: {error}"),
+            },
+        )
+}
+
 /// Verify the unpacked payload against an already authenticated manifest.
 ///
 /// Every declared file must be a regular file with the exact signed length and
@@ -1864,6 +1907,60 @@ mod tests {
         assert!(matches!(
             verify_registry_pack_with(&request, accept_signature),
             Err(RegistryPackVerificationError::InvalidImageDeclaration { .. })
+        ));
+    }
+
+    #[test]
+    fn built_image_provenance_refuses_a_template_pack() {
+        let dir = tempfile::tempdir().unwrap();
+        let verified = verify_registry_pack_with(
+            &RegistryPackVerification::new(
+                &reference("runtime/python@1.2.3"),
+                &signed_manifest_bytes("runtime/python@1.2.3"),
+                b"bundle",
+                &PackLockfile::new(vec![pin(
+                    "runtime/python@1.2.3",
+                    &signed_manifest_bytes("runtime/python@1.2.3"),
+                )])
+                .unwrap(),
+                &publisher_policy(),
+            ),
+            accept_signature,
+        )
+        .unwrap();
+        assert!(matches!(
+            verify_built_image_provenance(&verified, dir.path()),
+            Err(RegistryPackVerificationError::InvalidImageDeclaration { .. })
+        ));
+    }
+
+    #[test]
+    fn built_image_provenance_refuses_missing_statement_files() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&signed_manifest_bytes("runtime/python@1.0.0")).unwrap();
+        let descriptor = crate::registry_pack_image::test_descriptor();
+        manifest["image"] = serde_json::to_value(&descriptor).unwrap();
+        for role in descriptor.assets() {
+            manifest["files"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "path": role.name.as_str(),
+                    "sha256": role.sha256.as_str(),
+                    "size": role.size,
+                }));
+        }
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let lock = PackLockfile::new(vec![pin("runtime/python@1.0.0", &bytes)]).unwrap();
+        let requested = reference("runtime/python@1.0.0");
+        let policy = publisher_policy();
+        let request = RegistryPackVerification::new(&requested, &bytes, b"bundle", &lock, &policy);
+        let verified = verify_registry_pack_with(&request, accept_signature).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // No provenance files on disk at all: the read itself must refuse.
+        assert!(matches!(
+            verify_built_image_provenance(&verified, dir.path()),
+            Err(RegistryPackVerificationError::PayloadFileRead { .. })
         ));
     }
 

@@ -33,7 +33,7 @@ pub(super) fn verify_registry_pack_assets(plan: &ExecutionPlan) -> Result<()> {
             reference.version().is_some(),
             "registry pack identity in signed plan must name an exact version"
         );
-        let (_, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
+        let (installed, verified) = mvm_core::registry_pack_store::open_installed_registry_pack(
             &cache, &lock, &publisher, &reference,
         )
         .with_context(|| format!("verifying registry pack {reference} at admission"))?;
@@ -41,6 +41,18 @@ pub(super) fn verify_registry_pack_assets(plan: &ExecutionPlan) -> Result<()> {
             verified.manifest_sha256().as_str() == identity.digest,
             "registry pack {reference} does not match its signed-plan digest"
         );
+        if matches!(
+            verified.manifest().image,
+            Some(mvm_core::registry_pack::RegistryPackImage::Built(_))
+        ) {
+            mvm_core::registry_pack::verify_built_image_provenance(
+                &verified,
+                &installed.payload_root(),
+            )
+            .with_context(|| {
+                format!("verifying built image provenance for registry pack {reference}")
+            })?;
+        }
     }
     Ok(())
 }
