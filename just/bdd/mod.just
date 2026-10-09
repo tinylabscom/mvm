@@ -56,6 +56,7 @@ live-ci TAG="ci_live":
     # mvmctl refuses at bootstrap. The hermetic `just bdd::run` lane skips those
     # scenarios and so deliberately does not pay the cross-compile.
     cargo build --bin mvmctl --features user,embed-host-bins
+    "${CARGO_TARGET_DIR:-target}/debug/mvmctl" kernel build --which workload --source download
     CARGO_BIN_EXE_mvmctl="${CARGO_TARGET_DIR:-target}/debug/mvmctl" MVM_BDD_LIVE=1 MVM_BDD_ONLY_TAG={{ TAG }} MVM_BDD_STRICT_SKIPS=1 MVM_BDD_ALLOWED_SKIPS=outside-selected-tag cargo test -p mvm-conformance --test conformance --features bdd
 
 # Nightly KVM witness for the one scenario that runs a warm claim end to end:

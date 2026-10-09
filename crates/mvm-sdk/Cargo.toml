@@ -24,6 +24,7 @@ mvm-host-services.workspace = true
 # enabling it here would switch schemars on inside `mvm-contract` for every
 # consumer and defeat the gating in `mvm-core`/`mvm-contract`/`mvm-agentd`.
 mvm-contract.workspace = true
+mvm-compiler = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Only the remote deploy transport (`MvmdClient::ship`) speaks HTTPS, and it is
@@ -38,7 +39,7 @@ thiserror.workspace = true
 # as base64 in the recording JSON so the lowering can re-emit them
 # as a `before_start` shell hook.
 base64 = { workspace = true }
-blake3 = { workspace = true }
+blake3 = { workspace = true, optional = true }
 
 # Addon module deps.
 flate2 = { workspace = true }
@@ -52,19 +53,21 @@ toml = { workspace = true }
 tree-sitter = { workspace = true }
 tree-sitter-nix = { workspace = true }
 
-# Compile pipeline deps.
-globset = { workspace = true }
+# Deployment staging and SDK language bridges.
 tempfile = { workspace = true }
 tree-sitter-python = { workspace = true }
-tree-sitter-javascript = { workspace = true }
 tree-sitter-typescript = { workspace = true }
 
 [features]
 default = []
+# Opt-in compatibility facade. Host tools should use mvm-compiler directly.
+compiler = ["dep:mvm-compiler"]
+# Deployment assembly and records stay outside the language-neutral compiler.
+deploy = ["compiler", "dep:blake3"]
 # The remote half of `deploy`: `MvmdClient` and the HTTPS upload. Off by
 # default; `mvm-cli` turns it on. Everything else in `deploy` — the record
-# types and boot-artifact digests the CLI verifies with — stays unconditional.
-deploy-remote = ["dep:mvm-http"]
+# types and boot-artifact digests — requires only the local `deploy` feature.
+deploy-remote = ["deploy", "dep:mvm-http"]
 # Derive `schemars::JsonSchema` on the addon-manifest and runtime-record types
 # and forward to the IR's own derives, for the three schema-emitter bins below.
 # Off by default: nothing on the `mvmctl` runtime path reads a JSON Schema, and
@@ -107,14 +110,13 @@ path = "src/bin/emit_sdk_errors.rs"
 name = "emit_sdk_ctors"
 path = "src/bin/emit_sdk_ctors.rs"
 
-[dev-dependencies]
-# `TestEnv` lives behind mvm-core's `test-support`, and the compile
-# pipeline's tests use it. Without this line the feature only arrives via
-# workspace-wide feature unification, so `cargo test -p mvm-sdk` on its
-# own does not compile — which is how mutation testing, always
-# package-scoped, measured nothing here and reported it as clean.
-# Matches mvm-build and mvm-runtime.
-mvm-core = { workspace = true, features = ["test-support"] }
+[[test]]
+name = "compiler_facade"
+required-features = ["compiler"]
+
+[[test]]
+name = "runtime_compile_e2e"
+required-features = ["compiler"]
 
 [lints]
 workspace = true

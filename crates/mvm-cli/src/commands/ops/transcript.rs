@@ -342,8 +342,11 @@ impl TranscriptCtx {
 
         let recover = || -> Result<Vec<u8>> {
             self.verify_chain_anchor(tenant, capture_id, &manifest)?;
-            let kek = transcript::load_or_init_kek(&self.keys_dir)
-                .context("loading the host transcript KEK")?;
+            let kek = transcript::load_kek(&self.keys_dir)
+                .context("loading the host transcript KEK")?
+                .context(
+                    "host transcript KEK is missing; existing captures require their original key",
+                )?;
             let data_key = transcript::unwrap_data_key(&kek, &manifest.wrapped_data_key_b64)
                 .context("unwrapping the per-capture key")?;
             transcript::export(&manifest, &dir, &data_key).context("verifying + decrypting")
@@ -670,6 +673,31 @@ mod tests {
         let out = c.export("t1", &id).unwrap();
         assert_eq!(out, b"GET / HTTP/1.1\r\nHTTP/1.1 200 OK\r\n");
         assert!(audit_contains(&c, "transcript_exported"));
+    }
+
+    #[test]
+    fn export_refuses_a_missing_key_without_replacing_it() {
+        let d = tempfile::tempdir().unwrap();
+        let c = ctx(d.path());
+        let id = c.arm("t1", "vm1", None, bounds()).unwrap();
+        let (_dir, manifest) = c.load_manifest("t1", &id).unwrap();
+        anchor_manifest(&c, &manifest);
+        let key_path = c.keys_dir.join(transcript::TRANSCRIPT_KEK_FILENAME);
+        let original_key = std::fs::read(&key_path).unwrap();
+        std::fs::remove_file(&key_path).unwrap();
+
+        let err = c
+            .export("t1", &id)
+            .expect_err("missing key must refuse export");
+        assert!(format!("{err:#}").contains("host transcript KEK is missing"));
+        assert!(!key_path.exists(), "export must not mint a replacement key");
+        assert!(audit_contains(&c, "transcript_refused"));
+        assert!(!audit_contains(&c, "transcript_exported"));
+
+        // Recovery requires the original key, not a newly generated one.
+        mvm_core::util::atomic_io::write_private(&key_path, &original_key).unwrap();
+        assert!(c.export("t1", &id).unwrap().is_empty());
+        assert_eq!(std::fs::read(&key_path).unwrap(), original_key);
     }
 
     #[test]

@@ -52,8 +52,8 @@ pub struct VerifiedSigner {
 /// network or async runtime is involved. The trust root refreshes by bumping
 /// the crate. Identity/issuer mismatches fail closed inside `verify`.
 #[cfg(feature = "manifest-verify")]
-fn verify_cosign_bundle(
-    artifact: &[u8],
+fn verify_cosign_bundle<'a>(
+    artifact: impl Into<sigstore_types::Artifact<'a>>,
     cosign_bundle: &[u8],
     expected_identity: Option<&str>,
     expected_issuer: &str,
@@ -126,6 +126,44 @@ pub fn verify_signed_payload(
         expected_issuer,
     )
     .map(|_| ())
+}
+
+/// Verify a signed large blob from its independently computed SHA-256 digest.
+///
+/// The caller must stream and hash the exact file bytes it intends to admit,
+/// then retain those bytes against replacement until use. Sigstore checks the
+/// bundle against the 32-byte digest without allocating the whole artifact.
+#[cfg(feature = "manifest-verify")]
+pub fn verify_signed_sha256(
+    sha256_hex: &str,
+    cosign_bundle: &[u8],
+    expected_identity: &str,
+    expected_issuer: &str,
+) -> VerifyResult<()> {
+    let digest = sigstore_types::Sha256Hash::from_hex(sha256_hex).map_err(|error| {
+        VerifyError::SignatureInvalid {
+            reason: format!("artifact SHA-256 is invalid: {error}"),
+        }
+    })?;
+    verify_cosign_bundle(
+        digest,
+        cosign_bundle,
+        Some(expected_identity),
+        expected_issuer,
+    )
+    .map(|_| ())
+}
+
+#[cfg(not(feature = "manifest-verify"))]
+pub fn verify_signed_sha256(
+    _sha256_hex: &str,
+    _cosign_bundle: &[u8],
+    _expected_identity: &str,
+    _expected_issuer: &str,
+) -> VerifyResult<()> {
+    Err(VerifyError::SignatureInvalid {
+        reason: VERIFIER_DISABLED_REASON.to_string(),
+    })
 }
 
 #[cfg(not(feature = "manifest-verify"))]
@@ -545,6 +583,50 @@ mod tests {
         .expect_err("a payload that is not the signed one must be refused");
         verify_signed_payload_signer(&payload, &bundle, "https://accounts.example.test")
             .expect_err("a signature is never accepted under a different issuer");
+    }
+
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn a_real_bundle_verifies_the_streamed_file_digest_without_loading_the_payload() {
+        use sha2::{Digest, Sha256};
+
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mvm-build/tests/fixtures/release-signature/v0.18.0-rc.1");
+        let payload = std::fs::read(dir.join("builder-vm-aarch64-checksums-sha256.txt"))
+            .expect("fixture payload");
+        let bundle = std::fs::read(dir.join("builder-vm-aarch64-checksums-sha256.txt.bundle"))
+            .expect("fixture bundle");
+        let digest = hex::encode(Sha256::digest(&payload));
+        let identity = &crate::release_trust::accepted_release_identities("0.18.0-rc.1")[0];
+        verify_signed_sha256(
+            &digest,
+            &bundle,
+            identity,
+            crate::release_trust::RELEASE_OIDC_ISSUER,
+        )
+        .expect("real signed digest verifies");
+
+        let wrong = hex::encode(Sha256::digest(b"changed payload"));
+        verify_signed_sha256(
+            &wrong,
+            &bundle,
+            identity,
+            crate::release_trust::RELEASE_OIDC_ISSUER,
+        )
+        .expect_err("a different digest is refused");
+        verify_signed_sha256(
+            &digest,
+            &bundle,
+            "https://github.com/other/workflow@refs/heads/main",
+            crate::release_trust::RELEASE_OIDC_ISSUER,
+        )
+        .expect_err("a different signer is refused");
+    }
+
+    #[test]
+    fn malformed_digest_cannot_be_verified() {
+        verify_signed_sha256("not-a-digest", b"bundle", "identity", "issuer")
+            .expect_err("invalid SHA-256 syntax is refused");
     }
 
     #[cfg(not(feature = "manifest-verify"))]

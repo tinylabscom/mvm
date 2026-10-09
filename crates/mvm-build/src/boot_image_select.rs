@@ -190,14 +190,14 @@ mod tests {
 
         let cases = [
             // (env, is_source_checkout, choice, source)
-            (None, true, Build, AutoDetect),
+            (None, true, Fetch, AutoDetect),
             (None, false, Fetch, AutoDetect),
             (Some("build"), true, Build, Env),
             (Some("build"), false, Build, Env),
             (Some("fetch"), true, Fetch, Env),
             (Some("fetch"), false, Fetch, Env),
             // Unrecognised falls through to auto-detect rather than erroring.
-            (Some("nonsense"), true, Build, AutoDetect),
+            (Some("nonsense"), true, Fetch, AutoDetect),
             (Some("nonsense"), false, Fetch, AutoDetect),
         ];
 
@@ -229,15 +229,15 @@ mod tests {
         assert_eq!(got.source, BootImageSource::Flag);
     }
 
-    /// Contributor builds continue to compile artifacts available in the checkout.
+    /// Contributor builds fetch by default; compilation is an explicit choice.
     #[test]
-    fn an_unset_knob_leaves_a_source_checkout_building() {
+    fn an_unset_knob_keeps_a_source_checkout_on_published_artifacts() {
         assert_eq!(
             auto_detect(
                 crate::artifact_acquisition::DistributionChannel::Source,
                 true,
             ),
-            BootImageAcquisition::Build
+            BootImageAcquisition::Fetch
         );
     }
 

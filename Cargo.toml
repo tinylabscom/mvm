@@ -18,6 +18,9 @@ members = [
     # Depends on mvm-core alone, so the CLI and a library caller share one
     # export without either linking a backend to get it.
     "crates/mvm-bundler",
+    # Shared workload compilation primitives. `mvm-sdk` is the
+    # author-facing compatibility facade over this crate.
+    "crates/mvm-compiler",
     "crates/mvm-agentd",
     # The guest's static privilege-drop helper. A leaf over `libc` alone: the
     # builder image compiles it from source, so its closure is part of that
@@ -371,8 +374,7 @@ ext4-view = { version = "0.9", features = ["std"] }
 tree-sitter = { version = "0.26.8", default-features = false, features = ["std"] }
 tree-sitter-nix = "0.0.2"
 
-# Compile pipeline (mvm-sdk compile module, SDK port Phase 2 — ported
-# from mvmforge). globset drives source-bundling include/exclude
+# Shared compiler pipeline. globset drives source-bundling include/exclude
 # patterns; the three tree-sitter language grammars feed the static
 # AST walker that scopes function-entrypoint workloads to reachable
 # code. Pinned at mvmforge's versions to inherit its CVE story.
@@ -390,6 +392,7 @@ tree-sitter-typescript = "0.23.2"
 mvm-contract = { path = "crates/mvm-contract", version = "0.23.1", default-features = false, features = ["protocol"] }
 mvm-core = { path = "crates/mvm-core", version = "0.23.1" }
 mvm-bundler = { path = "crates/mvm-bundler", version = "0.23.1" }
+mvm-compiler = { path = "crates/mvm-compiler", version = "0.23.1" }
 mvm-client ={ path = "crates/mvm-client", version = "0.23.1" }
 mvm-mcp = { path = "crates/mvm-mcp", version = "0.23.1" }
 mvm-agentd = { path = "crates/mvm-agentd", version = "0.23.1" }

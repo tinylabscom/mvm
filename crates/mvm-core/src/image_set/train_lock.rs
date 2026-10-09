@@ -189,6 +189,11 @@ pub fn image_train_lock() -> &'static ImageTrainLock {
     &LOCK
 }
 
+/// Digest of the exact lock bytes compiled into this client.
+pub(crate) fn image_train_lock_sha256() -> Sha256Hex {
+    Sha256Hex::from_bytes(IMAGE_TRAIN_LOCK_TOML.as_bytes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

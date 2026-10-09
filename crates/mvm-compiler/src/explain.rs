@@ -9,14 +9,14 @@
 //!   - `--json` (either form) — machine-readable for CI / IDEs
 //!
 //! Single source of truth: `schema/error-codes.json`, embedded at compile
-//! time. The `mvmforge-ir` crate's `ErrorCode` enum has a registry
+//! time. The `mvm-contract` crate's `ErrorCode` enum has a registry
 //! conformance test, so any code emitted by validation is guaranteed to
 //! be explainable here.
 
 use serde::Serialize;
 use serde_json::Value;
 
-const ERROR_CODES_JSON: &str = include_str!("../../schema/error-codes.json");
+const ERROR_CODES_JSON: &str = include_str!("../schema/error-codes.json");
 const DOCS_URL: &str = "https://mvm.dev/reference/error-codes/";
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,7 +64,10 @@ pub fn run(code: Option<&str>, list: bool, json: bool) -> i32 {
     match entries.iter().find(|e| e.code == normalized) {
         Some(entry) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(entry).unwrap());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(entry).expect("error code entry serializes")
+                );
             } else {
                 print_entry(entry);
             }
@@ -135,7 +138,10 @@ fn print_entry(entry: &CodeEntry) {
 fn print_list(entries: &[CodeEntry], json: bool) -> i32 {
     if json {
         let payload = ListPayload { codes: entries };
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("error code list serializes")
+        );
         return 0;
     }
     println!("mvmforge error codes ({} total)\n", entries.len());
@@ -161,7 +167,10 @@ fn print_unknown_code(code: &str, entries: &[CodeEntry], json: bool) {
             suggestions: suggestions.clone(),
             docs_url: DOCS_URL,
         };
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("unknown error code payload serializes")
+        );
         return;
     }
     eprintln!("mvmforge explain: unknown error code `{code}`.");
@@ -247,7 +256,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::ErrorCode;
+    use mvm_contract::ir::ErrorCode;
 
     #[test]
     fn loads_every_entry_from_registry() {

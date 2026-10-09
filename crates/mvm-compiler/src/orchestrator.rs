@@ -11,17 +11,17 @@
 //! `mvmctl machine run --from-workload-ir` lowers into `plan.secrets` to spawn that
 //! endpoint.
 
-use crate::compile::archive::{ArchiveError, archive_dir};
-use crate::compile::flake::render_flake_nix_at_url;
-use crate::compile::func_describe::{FuncDescribeError, describe_function, resolve_module_path};
-use crate::compile::launch::build_launch_json;
-use crate::compile::mvm_pin::{PinnedMvmRevision, resolved_mvm_flake_url};
-use crate::compile::reachability::{
+use crate::archive::{ArchiveError, archive_dir};
+use crate::flake::render_flake_nix_at_url;
+use crate::func_describe::{FuncDescribeError, describe_function, resolve_module_path};
+use crate::launch::build_launch_json;
+use crate::mvm_pin::{PinnedMvmRevision, resolved_mvm_flake_url};
+use crate::reachability::{
     Language, ReachabilityError, detect_language, discover_node_reachable,
     discover_python_reachable,
 };
-use crate::compile::source::{SourceError, copy_source, rehash};
-use crate::ir::{Entrypoint, EnvValue, Source, Workload};
+use crate::source::{SourceError, copy_source, rehash};
+use mvm_contract::ir::{Entrypoint, EnvValue, Source, Workload};
 use std::collections::HashSet;
 use std::fs;
 use std::io;
@@ -289,9 +289,9 @@ fn compile_with_mvm_url(
             // ship the SDK. Python deletes `import mvm` + `@mvm.*` lines; Node
             // additionally unwraps `const NAME = mvm.app({...})(FN)` → `FN`.
             match lang {
-                Language::Python => crate::compile::strip_framework::strip_python(&bundle_dir)
+                Language::Python => crate::strip_framework::strip_python(&bundle_dir)
                     .map_err(CompileError::StripFramework)?,
-                Language::Node => crate::compile::strip_framework::strip_typescript(&bundle_dir)
+                Language::Node => crate::strip_framework::strip_typescript(&bundle_dir)
                     .map_err(CompileError::StripFramework)?,
             }
             source_plan = rehash(&bundle_dir).map_err(CompileError::Source)?;
@@ -440,8 +440,8 @@ fn check_function_presence(
 /// isn't an object schema with a `required` array, returns empty
 /// (we only enforce the strict-required case).
 fn schema_required_not_in_signature(
-    schema: &crate::ir::JsonSchemaShape,
-    sig: &crate::compile::func_describe::FunctionSignature,
+    schema: &mvm_contract::ir::JsonSchemaShape,
+    sig: &crate::func_describe::FunctionSignature,
 ) -> Vec<String> {
     if sig.accepts_kwargs {
         return Vec::new();
@@ -552,7 +552,9 @@ fn write_lf(path: &Path, contents: &str) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{App, Entrypoint, Format, Image, Resources, SecretMount, SecretRef, Source};
+    use mvm_contract::ir::{
+        App, Entrypoint, Format, Image, Resources, SecretMount, SecretRef, Source,
+    };
     use tempfile::TempDir;
 
     fn sample() -> Workload {
@@ -717,7 +719,7 @@ mod tests {
                     mount: SecretMount::Env {
                         var: "API_KEY".into(),
                     },
-                    auth_type: crate::ir::AuthType::Bearer,
+                    auth_type: mvm_contract::ir::AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     inject: Default::default(),
@@ -771,7 +773,7 @@ mod tests {
                     mount: SecretMount::Env {
                         var: "API_KEY".into(),
                     },
-                    auth_type: crate::ir::AuthType::Bearer,
+                    auth_type: mvm_contract::ir::AuthType::Bearer,
                     allowed_hosts: vec!["api.openai.com".into()],
                     sigv4: None,
                     inject: Default::default(),
@@ -811,7 +813,7 @@ mod tests {
                         mount: SecretMount::Env {
                             var: "API_KEY".into(),
                         },
-                        auth_type: crate::ir::AuthType::Bearer,
+                        auth_type: mvm_contract::ir::AuthType::Bearer,
                         allowed_hosts: vec!["api.openai.com".into()],
                         sigv4: None,
                         inject: Default::default(),
@@ -944,7 +946,7 @@ mod tests {
             unreachable!()
         };
         if let Entrypoint::Function { args_schema, .. } = &mut w.apps[0].entrypoints[0] {
-            *args_schema = Some(crate::ir::JsonSchemaShape(map));
+            *args_schema = Some(mvm_contract::ir::JsonSchemaShape(map));
         }
         w
     }
