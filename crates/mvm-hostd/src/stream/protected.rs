@@ -19,7 +19,9 @@ use mvm_vmm::host::console_capture::bounded::{self, Consumer, Producer};
 
 use super::console_source::SharedBroker;
 use super::plane::{build_writer_with_policy, write_manifest};
+use super::protected_retention::ManagedRetention;
 use super::{StreamBroker, StreamRedaction, StreamServerHandle, serve_stream};
+use crate::audit::evidence::EvidenceReceipt;
 use crate::audit::{emitter::AuditEmitter, host_keypair};
 
 /// Shutdown is bounded even if the storage worker cannot leave a host syscall.
@@ -99,12 +101,18 @@ impl CaptureOwner {
         };
         let run_dir = run.directory(&root)?;
         let active = run_dir.join("00000000000000000000");
+        let mut managed = None;
         if run.persists {
             let tenant = &plan
                 .as_ref()
                 .context("durable capture needs admitted authority")?
                 .tenant
                 .0;
+            let authority = emitter
+                .as_ref()
+                .context("durable capture needs audit authority")?;
+            let mut retention = ManagedRetention::new(&root, vm, tenant, authority)?;
+            retention.maintain(authority, &broker)?;
             let writer = build_writer_with_policy(
                 vm,
                 &active,
@@ -112,14 +120,23 @@ impl CaptureOwner {
                 tenant,
                 &keys,
             )?;
+            record_opening(
+                plan.as_ref()
+                    .context("durable capture needs admitted authority")?,
+                emitter
+                    .as_ref()
+                    .context("durable capture needs audit authority")?,
+                &writer.sealed_manifest(),
+            )?;
             let mut broker = broker
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            broker.replace_writer(Some(writer));
+            broker.replace_writer(Some(writer), Some(Arc::clone(&retention.reservations)));
             anyhow::ensure!(
                 broker.durable_ready(),
                 "protected capture storage worker unavailable"
             );
+            managed = Some(retention);
         }
         run.publish(&root)
             .context("publish protected console routing")?;
@@ -138,6 +155,7 @@ impl CaptureOwner {
             persists: run.persists,
             plan,
             emitter,
+            managed,
             broker,
             server,
             consumer,
@@ -203,6 +221,7 @@ struct Worker {
     persists: bool,
     plan: Option<ExecutionPlan>,
     emitter: Option<AuditEmitter>,
+    managed: Option<ManagedRetention>,
     broker: SharedBroker,
     server: StreamServerHandle,
     consumer: Consumer,
@@ -211,6 +230,22 @@ struct Worker {
     last_loss: (u64, u64),
     #[cfg(test)]
     rotation: mpsc::SyncSender<()>,
+}
+
+fn record_opening(
+    plan: &ExecutionPlan,
+    emitter: &AuditEmitter,
+    seed: &TranscriptManifest,
+) -> Result<()> {
+    use mvm_core::transcript::evidence;
+    let mut entry =
+        crate::supervisor::audit::for_plan(plan, None, evidence::TRANSCRIPT_OPENED_EVENT, []);
+    entry.labels = evidence::opening_labels(seed)?;
+    emitter.emit_entry_for_evidence(&entry, EvidenceReceipt::Omitted)?;
+    // Verification also syncs the matching segment and directory. Visibility
+    // alone must not expose a producer whose opening is lost after a crash.
+    evidence::authenticate_opening(emitter.audit_dir(), &emitter.verifying_key(), seed)?;
+    Ok(())
 }
 
 impl Worker {
@@ -234,6 +269,11 @@ impl Worker {
             }
             if Instant::now() >= maintenance {
                 self.account_loss();
+                if let (Some(managed), Some(emitter)) = (&mut self.managed, &self.emitter)
+                    && managed.maintain(emitter, &self.broker).is_err()
+                {
+                    self.mark_failed();
+                }
                 let failures = self
                     .broker
                     .lock()
@@ -245,7 +285,13 @@ impl Worker {
                 }
                 maintenance = Instant::now() + MAINTENANCE_INTERVAL;
             }
-            if Instant::now() >= deadline {
+            if Instant::now() >= deadline
+                || (self.persists
+                    && self
+                        .managed
+                        .as_ref()
+                        .is_some_and(|m| m.pressure().is_some()))
+            {
                 self.account_loss();
                 if self.rotate().is_err() {
                     self.mark_failed();
@@ -291,6 +337,25 @@ impl Worker {
             .generation
             .checked_add(1)
             .context("capture generation exhausted")?;
+        let pressure = self.managed.as_ref().and_then(ManagedRetention::pressure);
+        let sealed = self
+            .broker
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace_writer(None, None);
+        self.publish(sealed)?;
+        if let Some(incoming) = pressure {
+            self.managed
+                .as_mut()
+                .context("managed capture owner missing")?
+                .reclaim(
+                    self.emitter
+                        .as_ref()
+                        .context("capture audit authority missing")?,
+                    &self.broker,
+                    incoming,
+                )?;
+        }
         let dir = self.run_dir.join(format!("{next:020}"));
         let tenant = &self
             .plan
@@ -305,12 +370,22 @@ impl Worker {
             tenant,
             &self.keys,
         )?;
-        let sealed = self
-            .broker
+        record_opening(
+            self.plan
+                .as_ref()
+                .context("durable capture needs admitted authority")?,
+            self.emitter
+                .as_ref()
+                .context("durable capture needs audit authority")?,
+            &writer.sealed_manifest(),
+        )?;
+        self.broker
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace_writer(Some(writer));
-        self.publish(sealed);
+            .replace_writer(
+                Some(writer),
+                self.managed.as_ref().map(|m| Arc::clone(&m.reservations)),
+            );
         self.generation = next;
         self.active = dir;
         #[cfg(test)]
@@ -323,12 +398,27 @@ impl Worker {
             .broker
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace_writer(None);
-        self.publish(sealed);
+            .replace_writer(None, None);
+        if self.publish(sealed).is_err() {
+            self.mark_failed();
+        }
     }
 
-    fn publish(&self, manifest: Option<TranscriptManifest>) {
-        let Some(manifest) = manifest else { return };
+    fn publish(&mut self, manifest: Option<TranscriptManifest>) -> Result<()> {
+        let Some(mut manifest) = manifest else {
+            return Ok(());
+        };
+        // A timed-out writer can still hold the generation lease and append.
+        // Its integrity snapshot is not terminal evidence: leave the seed and
+        // journal for a later owner that can positively establish quiescence.
+        if manifest.sealed_unix_secs.is_none() {
+            self.mark_failed();
+            anyhow::bail!("capture writer did not terminate");
+        }
+        if self.failed.load(Ordering::Relaxed) {
+            manifest.adopted = true;
+            manifest.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&manifest)?;
+        }
         if mvm_core::transcript::retention_now()
             .and_then(|now| manifest.check_readable_at(now))
             .is_err()
@@ -338,30 +428,27 @@ impl Worker {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .purge_replay();
         }
-        if manifest.is_truncated() || manifest.sealed_unix_secs.is_none() {
+        if manifest.is_truncated() {
             self.mark_failed();
         }
-        if write_manifest(&self.active, &manifest).is_err() {
-            self.mark_failed();
-            return;
-        }
+        write_manifest(&self.active, &manifest)?;
         if let (Some(plan), Some(emitter)) = (&self.plan, &self.emitter) {
-            if emitter
-                .emit_transcript_sealed(
-                    plan,
-                    &manifest.capture_id,
-                    &self.vm,
-                    &manifest.sealed_root_hex,
-                    manifest.chunks.len(),
-                    manifest.adopted,
-                )
-                .is_err()
-            {
-                self.mark_failed();
-            }
+            emitter.emit_transcript_sealed(
+                plan,
+                &manifest.capture_id,
+                &self.vm,
+                &manifest.sealed_root_hex,
+                manifest.chunks.len(),
+                manifest.adopted,
+            )?;
         } else {
-            self.mark_failed();
+            anyhow::bail!("capture audit authority missing");
         }
+        self.managed
+            .as_mut()
+            .context("managed capture owner missing")?
+            .record_sealed(&self.active, manifest)?;
+        Ok(())
     }
 }
 

@@ -32,6 +32,7 @@ use std::time::Duration;
 use mvm_contract::stream::{StreamKind, StreamRecord};
 use mvm_core::transcript::{Direction, TranscriptManifest, TranscriptWriter, sealed_root_hex};
 
+use super::protected_budget::SharedReservations;
 use crate::stream::journal::{CaptureJournal, JournalShortfall};
 
 /// Records the writer thread may fall behind before the hand-off starts
@@ -150,6 +151,7 @@ pub(in crate::stream) struct DurableSink {
     jobs: Option<SyncSender<PersistJob>>,
     worker: Option<WriterHandle>,
     counters: Arc<PersistCounters>,
+    reservations: Option<SharedReservations>,
 }
 
 impl DurableSink {
@@ -181,6 +183,7 @@ impl DurableSink {
             jobs: worker.as_ref().map(|_| jobs),
             worker,
             counters,
+            reservations: None,
         }
     }
 
@@ -197,6 +200,7 @@ impl DurableSink {
             jobs: None,
             worker: None,
             counters: Arc::new(PersistCounters::default()),
+            reservations: None,
         }
     }
 
@@ -231,14 +235,34 @@ impl DurableSink {
         let Some(jobs) = self.jobs.as_ref() else {
             return note_shed(&self.vm, &self.counters, record, bytes);
         };
+        if let Some(reservations) = &self.reservations {
+            if !reservations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .reserve(bytes)
+            {
+                return note_shed(&self.vm, &self.counters, record, bytes);
+            }
+        } else if self.seed.generation_budget.is_some() {
+            return note_shed(&self.vm, &self.counters, record, bytes);
+        }
         match jobs.try_send(PersistJob::Chunk(chunk)) {
             Ok(()) => note_handed_over(&self.vm, &self.counters),
-            Err(TrySendError::Full(_)) => note_shed(&self.vm, &self.counters, record, bytes),
-            // The writer thread is gone; the shed path applies here too.
-            Err(TrySendError::Disconnected(_)) => {
-                note_shed(&self.vm, &self.counters, record, bytes)
+            Err(TrySendError::Full(_) | TrySendError::Disconnected(_)) => {
+                if let Some(reservations) = &self.reservations {
+                    reservations
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .release_rejected(bytes);
+                }
+                note_shed(&self.vm, &self.counters, record, bytes);
             }
         }
+    }
+
+    pub fn with_reservations(mut self, reservations: Option<SharedReservations>) -> Self {
+        self.reservations = reservations;
+        self
     }
 
     /// Block until every record pushed so far has reached the writer.
@@ -280,6 +304,7 @@ impl DurableSink {
 
     pub fn ready(&self) -> bool {
         self.jobs.is_some()
+            && (self.seed.generation_budget.is_none() || self.reservations.is_some())
     }
 
     /// Stop taking work, wait — up to a bound — for what is queued to land,

@@ -466,8 +466,10 @@ impl StreamBroker {
     pub(super) fn replace_writer(
         &mut self,
         writer: Option<TranscriptWriter>,
+        reservations: Option<super::protected_budget::SharedReservations>,
     ) -> Option<TranscriptManifest> {
-        let next = writer.map(|writer| DurableSink::new(&self.vm, writer));
+        let next =
+            writer.map(|writer| DurableSink::new(&self.vm, writer).with_reservations(reservations));
         std::mem::replace(&mut self.durable, next).map(DurableSink::seal)
     }
 
