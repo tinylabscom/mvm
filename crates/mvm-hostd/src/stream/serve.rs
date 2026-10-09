@@ -272,13 +272,10 @@ fn serve_follower(
     mut reader: ReaderHandle,
     stop: &AtomicBool,
 ) -> io::Result<()> {
-    // `accept` does not normalise the listener's non-blocking flag the same
-    // way on every platform: inherited, every write past a full send buffer
-    // fails on the spot and truncates a follower that was merely reading
-    // slowly. So state both — blocking, with a timeout that is what actually
-    // bounds a write and lets the loop below notice a stop request.
-    socket.set_nonblocking(false)?;
-    socket.set_write_timeout(Some(WRITE_TIMEOUT))?;
+    // Only a nonblocking write may hold a window's authorization lock.
+    // Readiness waiting happens outside it, so retirement can revoke a
+    // stalled follower before any subsequent write attempt.
+    socket.set_nonblocking(true)?;
 
     let mut announced = false;
     let mut last_gap = None;
@@ -298,7 +295,14 @@ fn serve_follower(
         for batch in split_window(&window, caught_up) {
             frame.clear();
             write_batch(&mut frame, &batch)?;
-            if !send_frame(&mut socket, &frame, stop)? {
+            if !send_frame(
+                &mut socket,
+                &frame,
+                stop,
+                window.authorization.as_ref(),
+                || mvm_core::transcript::retention_now().ok(),
+                wait_writable,
+            )? {
                 return Ok(());
             }
         }
@@ -316,21 +320,50 @@ fn serve_follower(
 /// closing cannot hold shutdown open. Abandoning mid-frame leaves that
 /// consumer a short read — which it was not reading anyway, and which is
 /// what the alternative of waiting on it costs the whole host.
-fn send_frame<W: Write>(socket: &mut W, frame: &[u8], stop: &AtomicBool) -> io::Result<bool> {
+fn send_frame<W: Write>(
+    socket: &mut W,
+    frame: &[u8],
+    stop: &AtomicBool,
+    authorization: Option<&super::fanout::DeliveryPermit>,
+    mut clock: impl FnMut() -> Option<u64>,
+    mut wait: impl FnMut(&mut W) -> io::Result<()>,
+) -> io::Result<bool> {
     let mut sent = 0usize;
     while sent < frame.len() {
         if stop.load(Ordering::SeqCst) {
             return Ok(false);
         }
-        match socket.write(&frame[sent..]) {
+        // Production calls this only with the explicitly nonblocking
+        // UnixStream above: no buffered writer/TLS wrapper. Bound each copy
+        // under the queue's permit lock, and never acquire the broker there.
+        let end = sent.saturating_add(8 * 1024).min(frame.len());
+        let mut write = || socket.write(&frame[sent..end]);
+        let result = match authorization {
+            Some(permit) => permit.write(&mut clock, write),
+            None => Some(write()),
+        };
+        let Some(result) = result else {
+            return Ok(false);
+        };
+        match result {
             Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
             Ok(n) => sent += n,
-            Err(error) if retryable(&error) => {}
+            Err(error) if retryable(&error) => wait(socket)?,
             Err(error) => return Err(error),
         }
     }
-    socket.flush()?;
+    // UnixStream is unbuffered. In particular, do not hide another write or
+    // a blocking flush behind the authorization critical section.
     Ok(true)
+}
+
+fn wait_writable(socket: &mut UnixStream) -> io::Result<()> {
+    use rustix::event::{PollFd, PollFlags, Timespec, poll};
+    let timeout = Timespec::try_from(WRITE_TIMEOUT).map_err(io::Error::other)?;
+    match poll(&mut [PollFd::new(socket, PollFlags::OUT)], Some(&timeout)) {
+        Ok(_) | Err(rustix::io::Errno::INTR) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// A write that made no progress but left the connection usable: the send
@@ -726,6 +759,7 @@ mod tests {
         let records = chained(5, MAX_BATCH_PAYLOAD_BYTES / 2 + 1);
         let batches = split_window(
             &DrainedWindow {
+                authorization: None,
                 records,
                 anchor: [0u8; 32],
                 gap: None,
@@ -761,6 +795,7 @@ mod tests {
         let records = chained(9, MAX_BATCH_PAYLOAD_BYTES / 3 + 1);
         let batches = split_window(
             &DrainedWindow {
+                authorization: None,
                 records,
                 anchor: [0u8; 32],
                 gap: None,
@@ -786,6 +821,7 @@ mod tests {
         records.extend(oversized);
         let batches = split_window(
             &DrainedWindow {
+                authorization: None,
                 records,
                 anchor: [0u8; 32],
                 gap: None,
@@ -808,6 +844,7 @@ mod tests {
         let records = chained(MAX_BATCH_RECORDS as u64 + 10, 1);
         let batches = split_window(
             &DrainedWindow {
+                authorization: None,
                 records,
                 anchor: [0u8; 32],
                 gap: None,
@@ -829,6 +866,7 @@ mod tests {
         };
         let batches = split_window(
             &DrainedWindow {
+                authorization: None,
                 records,
                 anchor: [1u8; 32],
                 gap: Some(gap),
@@ -958,10 +996,159 @@ mod tests {
             stop_after: 3,
             stop: &stop,
         };
-        let served =
-            send_frame(&mut writer, b"a frame", &stop).expect("a timeout is not a transport error");
+        let served = send_frame(&mut writer, b"a frame", &stop, None, || None, |_| Ok(()))
+            .expect("a timeout is not a transport error");
         assert!(!served, "the frame was abandoned, not delivered");
         assert!(writer.attempts >= 3, "the write must retry, not give up");
+    }
+
+    #[test]
+    fn stalled_protected_frames_recheck_revocation_and_deadline_before_retry() {
+        use super::super::fanout::{ReaderStart, lock_queue};
+        use std::cell::Cell;
+        struct GatedWriter {
+            prefix: usize,
+            written: Vec<u8>,
+            blocked: bool,
+        }
+        impl Write for GatedWriter {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if self.prefix > 0 {
+                    let count = self.prefix.min(bytes.len());
+                    self.prefix = 0;
+                    self.written.extend_from_slice(&bytes[..count]);
+                    return Ok(count);
+                }
+                if !self.blocked {
+                    self.blocked = true;
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                self.written.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        for expire in [false, true] {
+            for prefix in [0, 4] {
+                let now = mvm_core::transcript::retention_now().unwrap();
+                let clock = Cell::new(now);
+                let mut reader = ReaderHandle::new(
+                    ReaderStart {
+                        id: 1,
+                        from_seq: 0,
+                        anchor: [0; 32],
+                    },
+                    CaptureBounds {
+                        max_bytes: 1 << 20,
+                        max_chunks: 100,
+                        max_duration_secs: u64::MAX,
+                    },
+                )
+                .with_max_age(10);
+                let queue = reader.weak_queue().upgrade().unwrap();
+                let mut record = chained(1, 32).remove(0);
+                record.host_unix_nanos = now * 1_000_000_000;
+                lock_queue(&queue).push(Arc::new(record));
+                let window = reader.drain_verified();
+                let mut frame = Vec::new();
+                write_batch(&mut frame, &split_window(&window, true)[0]).unwrap();
+                let mut writer = GatedWriter {
+                    prefix,
+                    written: Vec::new(),
+                    blocked: false,
+                };
+                let sent = send_frame(
+                    &mut writer,
+                    &frame,
+                    &AtomicBool::new(false),
+                    window.authorization.as_ref(),
+                    || Some(clock.get()),
+                    |_| {
+                        if expire {
+                            clock.set(now + 10);
+                        } else {
+                            lock_queue(&queue).discard_all();
+                        }
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert!(
+                    !sent,
+                    "revocation must close the connection, not resume this frame"
+                );
+                assert_eq!(writer.written, frame[..prefix]);
+                if prefix != 0 {
+                    let mut decoder =
+                        FramedStreamReader::new(writer.written.as_slice(), StreamOpts::default());
+                    assert!(
+                        decoder.next_record().is_err(),
+                        "partial framing must not become a valid record"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retirement_revokes_later_batches_of_an_already_drained_window() {
+        use super::super::fanout::{ReaderStart, lock_queue};
+        let now = mvm_core::transcript::retention_now().unwrap();
+        let mut reader = ReaderHandle::new(
+            ReaderStart {
+                id: 2,
+                from_seq: 0,
+                anchor: [0; 32],
+            },
+            CaptureBounds {
+                max_bytes: 4 << 20,
+                max_chunks: 100,
+                max_duration_secs: u64::MAX,
+            },
+        )
+        .with_max_age(10);
+        let queue = reader.weak_queue().upgrade().unwrap();
+        for mut record in chained(3, MAX_BATCH_PAYLOAD_BYTES) {
+            record.host_unix_nanos = now * 1_000_000_000;
+            lock_queue(&queue).push(Arc::new(record));
+        }
+        let window = reader.drain_verified();
+        let batches = split_window(&window, true);
+        assert!(batches.len() > 1);
+        let mut sent = Vec::new();
+        let mut frame = Vec::new();
+        write_batch(&mut frame, &batches[0]).unwrap();
+        assert!(
+            send_frame(
+                &mut sent,
+                &frame,
+                &AtomicBool::new(false),
+                window.authorization.as_ref(),
+                || Some(now),
+                |_| Ok(())
+            )
+            .unwrap()
+        );
+        let delivered = sent.len();
+        lock_queue(&queue).discard_all();
+        for batch in &batches[1..] {
+            frame.clear();
+            write_batch(&mut frame, batch).unwrap();
+            assert!(
+                !send_frame(
+                    &mut sent,
+                    &frame,
+                    &AtomicBool::new(false),
+                    window.authorization.as_ref(),
+                    || Some(now),
+                    |_| Ok(())
+                )
+                .unwrap()
+            );
+        }
+        assert_eq!(sent.len(), delivered);
     }
 
     #[test]
@@ -971,7 +1158,7 @@ mod tests {
         let stop = AtomicBool::new(false);
         let frame = b"length-prefixed-body-bytes".to_vec();
         let mut writer = DribbleWriter::default();
-        assert!(send_frame(&mut writer, &frame, &stop).expect("write"));
+        assert!(send_frame(&mut writer, &frame, &stop, None, || None, |_| Ok(())).expect("write"));
         assert_eq!(writer.written, frame);
     }
 

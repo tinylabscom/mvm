@@ -965,6 +965,11 @@ Verified history checks signed retirement before decrypting any payload, even
 when deletion was interrupted. Retired/expired history reports an explicit
 retention gap. Live attachment has a bounded RAM replay window, not a promise
 that every active byte is already terminally verified history.
+An already-open reader has no lifetime exemption: buffered history rechecks its
+generation's authority before each record, and stalled live frames recheck
+revocation and expiry before each nonblocking write. Revocation closes a
+partially sent frame rather than transmitting the remainder under stale
+authorization. Already-delivered bytes cannot be recalled.
 
 This integration is **not ready for production**: consumer security review and
 native end-to-end lifecycle evidence remain merge gates.

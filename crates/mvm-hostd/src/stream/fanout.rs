@@ -51,6 +51,7 @@ pub(in crate::stream) struct ReaderQueue {
     resume_anchor: Option<[u8; 32]>,
     max_age_secs: Option<u64>,
     opened_unix_secs: Option<u64>,
+    revocation: u64,
 }
 
 impl ReaderQueue {
@@ -62,6 +63,7 @@ impl ReaderQueue {
             resume_anchor: None,
             max_age_secs: None,
             opened_unix_secs: None,
+            revocation: 0,
         }
     }
 
@@ -79,6 +81,7 @@ impl ReaderQueue {
     }
 
     pub(in crate::stream) fn discard_all(&mut self) {
+        self.revocation = self.revocation.saturating_add(1);
         let count = self.records.len();
         for _ in 0..count {
             self.ring.release_oldest();
@@ -198,6 +201,7 @@ pub struct ReaderStart {
 /// side from being able to re-anchor a live stream at all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DrainedWindow {
+    pub(crate) authorization: Option<DeliveryPermit>,
     /// Every record this reader had buffered, in sequence order.
     pub records: Vec<StreamRecord>,
     /// The hash the reader's *current* verification window chains from: its
@@ -214,6 +218,46 @@ pub struct DrainedWindow {
 pub struct ReaderHandle {
     start: ReaderStart,
     queue: Arc<Mutex<ReaderQueue>>,
+}
+
+/// A drained window stays revocable until every nonblocking transport write.
+#[derive(Debug, Clone)]
+pub(crate) struct DeliveryPermit {
+    queue: Weak<Mutex<ReaderQueue>>,
+    revocation: u64,
+    lifetime: Option<(u64, u64)>,
+}
+
+impl PartialEq for DeliveryPermit {
+    fn eq(&self, other: &Self) -> bool {
+        self.queue.ptr_eq(&other.queue)
+            && self.revocation == other.revocation
+            && self.lifetime == other.lifetime
+    }
+}
+impl Eq for DeliveryPermit {}
+
+impl DeliveryPermit {
+    pub(crate) fn write<T>(
+        &self,
+        clock: impl FnOnce() -> Option<u64>,
+        write: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let queue = self.queue.upgrade()?;
+        let queue = lock_queue(&queue);
+        if self.revocation == u64::MAX || queue.revocation != self.revocation {
+            return None;
+        }
+        if let Some((opened, age)) = self.lifetime {
+            let valid = clock()
+                .zip(opened.checked_add(age))
+                .is_some_and(|(now, deadline)| now >= opened && now < deadline);
+            if !valid {
+                return None;
+            }
+        }
+        Some(write())
+    }
 }
 
 impl ReaderHandle {
@@ -324,12 +368,18 @@ impl ReaderHandle {
         queue.expire_at(mvm_core::transcript::retention_now().ok());
         let anchor = queue.resume_anchor.unwrap_or(self.start.anchor);
         let gap = queue.gap;
+        let authorization = queue.max_age_secs.map(|age| DeliveryPermit {
+            queue: Arc::downgrade(&self.queue),
+            revocation: queue.revocation,
+            lifetime: queue.opened_unix_secs.map(|opened| (opened, age)),
+        });
         let mut records = Vec::with_capacity(queue.records.len());
         while let Some(record) = queue.pop() {
             // The last holder gets the record outright; earlier readers copy.
             records.push(Arc::try_unwrap(record).unwrap_or_else(|shared| (*shared).clone()));
         }
         DrainedWindow {
+            authorization,
             records,
             anchor,
             gap,

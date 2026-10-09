@@ -332,6 +332,8 @@ enum Tail {
 /// A VM's output: durable history spliced ahead of whatever is still coming.
 pub struct VmOutputStream {
     history: VecDeque<OutputRecord>,
+    history_authorities: Vec<HistoryAuthority>,
+    protected: bool,
     tail: Option<Tail>,
     availability: StreamAvailability,
     truncation: Option<Truncation>,
@@ -417,6 +419,32 @@ impl VmOutputStream {
     /// halves are measured against each other: if it does not follow the last
     /// history record, [`Self::splice_gap`] records the hole.
     pub fn next_output(&mut self) -> Result<Option<OutputRecord>, StreamError> {
+        self.next_output_with_clock(transcript::retention_now().ok())
+    }
+
+    fn next_output_with_clock(
+        &mut self,
+        now: Option<u64>,
+    ) -> Result<Option<OutputRecord>, StreamError> {
+        if self.protected
+            && let Some(record) = self.history.front()
+        {
+            let authorized = self
+                .history_authorities
+                .iter()
+                .find(|authority| authority.first <= record.seq && record.seq <= authority.last)
+                .is_some_and(|authority| authority.authorized(now));
+            if !authorized {
+                self.history.clear();
+                self.history_authorities.clear();
+                self.tail = None;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "protected history authorization expired, retired, or unavailable",
+                )
+                .into());
+            }
+        }
         if let Some(record) = self.history.pop_front() {
             self.history_high_water = Some(record.seq);
             return Ok(Some(record));
@@ -520,13 +548,22 @@ pub fn open_vm_output_at(
             DurableHalf::Owned
         }
     });
-    let (records, truncation, empty_history) = history.map_or_else(
-        || (VecDeque::new(), None, None),
-        |history| (history.records, history.truncation, history.empty),
+    let (records, truncation, empty_history, history_authorities) = history.map_or_else(
+        || (VecDeque::new(), None, None, Vec::new()),
+        |history| {
+            (
+                history.records,
+                history.truncation,
+                history.empty,
+                history.authorities,
+            )
+        },
     );
     let (tail, availability) = resolve_tail(locator, request, live, durable, protected)?;
     Ok(VmOutputStream {
         history: records,
+        history_authorities,
+        protected,
         tail,
         availability,
         truncation,
@@ -697,7 +734,43 @@ fn open_console(
 }
 
 /// The durable half, decoded and filtered.
+/// Buffered plaintext retains its generation's authorization until delivery.
+struct HistoryAuthority {
+    first: u64,
+    last: u64,
+    manifest: TranscriptManifest,
+    audit_dir: PathBuf,
+    keys_dir: PathBuf,
+}
+
+impl HistoryAuthority {
+    fn authorized(&self, now: Option<u64>) -> bool {
+        let Some(now) = now else { return false };
+        if self.manifest.check_readable_at(now).is_err() {
+            return false;
+        }
+        let Ok(mut file) = std::fs::File::open(self.keys_dir.join("host-signer.pub")) else {
+            return false;
+        };
+        if !file.metadata().is_ok_and(|metadata| metadata.len() == 32) {
+            return false;
+        }
+        let mut public = [0; 32];
+        if std::io::Read::read_exact(&mut file, &mut public).is_err() {
+            return false;
+        }
+        let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&public) else {
+            return false;
+        };
+        matches!(
+            transcript::evidence::authenticated_retirement(&self.audit_dir, &key, &self.manifest,),
+            Ok(false)
+        )
+    }
+}
+
 struct History {
+    authorities: Vec<HistoryAuthority>,
     records: VecDeque<OutputRecord>,
     truncation: Option<Truncation>,
     /// Why `records` is empty, when it is.
@@ -781,6 +854,7 @@ fn read_protected_history(
             continue;
         };
         let all = combined.get_or_insert_with(|| History {
+            authorities: Vec::new(),
             records: VecDeque::new(),
             truncation: None,
             empty: None,
@@ -797,6 +871,7 @@ fn read_protected_history(
             .into());
         }
         all.records.append(&mut history.records);
+        all.authorities.append(&mut history.authorities);
         if let Some(loss) = history.truncation {
             let total = all.truncation.get_or_insert(Truncation {
                 refused_chunks: 0,
@@ -933,6 +1008,7 @@ fn read_history_mode(
             .is_some_and(|deadline| now >= deadline);
         if retired || expired {
             return Ok(Some(History {
+                authorities: Vec::new(),
                 records: VecDeque::new(),
                 truncation: Some(Truncation {
                     refused_chunks: manifest.refused_chunks,
@@ -1029,6 +1105,22 @@ fn read_history_mode(
     }
     Ok(Some(History {
         truncation: Truncation::of(&manifest),
+        authorities: if protected {
+            records
+                .front()
+                .zip(records.back())
+                .map(|(first, last)| HistoryAuthority {
+                    first: first.seq,
+                    last: last.seq,
+                    manifest: manifest.clone(),
+                    audit_dir: config::mvm_audit_dir(),
+                    keys_dir: locator.keys_dir.clone(),
+                })
+                .into_iter()
+                .collect()
+        } else {
+            Vec::new()
+        },
         records,
         empty,
         range,
@@ -1247,6 +1339,127 @@ mod tests {
             .map(|l| (Direction::Stdout, l.as_bytes()))
             .collect();
         seal_capture(root, &owned, RetentionPolicy::Ring, bounds())
+    }
+
+    #[test]
+    fn already_open_protected_history_rechecks_its_deadline_per_record() {
+        let mut env = crate::util::test_env::TestEnv::new();
+        let root = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(root.path());
+        let locator = OutputLocator::for_vm("expiry-reader");
+        let run = super::super::protected::ProtectedRun {
+            version: 1,
+            run: "1-1".into(),
+            persists: true,
+        };
+        let dir = run
+            .directory(&locator.transcript_dir)
+            .unwrap()
+            .join("00000000000000000000");
+        config::create_private_dir(&dir).unwrap();
+        config::create_private_dir(&locator.keys_dir).unwrap();
+        config::create_private_dir(config::mvm_audit_dir()).unwrap();
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
+        std::fs::write(
+            locator.keys_dir.join("host-signer.pub"),
+            signing.verifying_key().as_bytes(),
+        )
+        .unwrap();
+        let kek = transcript::load_or_init_kek(&locator.keys_dir).unwrap();
+        let key = aead::Key::random();
+        let wrapped = transcript::wrap_data_key(&kek, &key);
+        let opened = transcript::retention_now().unwrap();
+        let mut writer = TranscriptWriter::new(
+            &dir,
+            key,
+            TranscriptWriterConfig {
+                capture_id: "delivery-expiry".into(),
+                binding: CaptureBinding {
+                    tenant_id: "local".into(),
+                    vm_name: locator.vm.clone(),
+                    session_id: None,
+                },
+                bounds: bounds(),
+                retention: RetentionPolicy::FailClosed,
+                at_rest: Some(transcript::AtRestRetention::default()),
+                generation_budget: None,
+                payload_encoding: transcript::PayloadEncoding::StreamRecordV1,
+                created_unix_secs: opened,
+                recipient: "test".into(),
+                wrapped_data_key_b64: wrapped,
+            },
+        )
+        .unwrap();
+        let mut previous = [0; 32];
+        for seq in 0..2 {
+            let record = mvm_contract::stream::StreamRecord {
+                seq,
+                source: mvm_contract::stream::StreamSource::Console,
+                kind: StreamKind::Stdout,
+                host_unix_nanos: opened * 1_000_000_000,
+                prev_hash: previous,
+                payload: b"buffered-expiry-marker".to_vec(),
+            };
+            previous = record.hash();
+            writer
+                .push(Direction::Stdout, &serde_json::to_vec(&record).unwrap())
+                .unwrap();
+        }
+        let manifest = writer.finalize_at(opened).unwrap();
+        drop(writer);
+        std::fs::write(
+            dir.join(MANIFEST_FILENAME),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let entry: crate::audit_verify::PlanAuditEntry = crate::audit_verify::PlanAuditEntry {
+            timestamp: chrono::Utc::now(),
+            tenant: crate::plan::TenantId("local".into()),
+            plan_id: crate::plan::PlanId("expiry-plan".into()),
+            plan_version: 1,
+            bundle_id: None,
+            bundle_version: None,
+            image_name: "test-image".into(),
+            image_sha256: "00".repeat(32),
+            event: transcript::evidence::TRANSCRIPT_SEALED_EVENT.into(),
+            caller_commitment: None,
+            labels: [
+                ("capture_id".into(), manifest.capture_id.clone()),
+                ("vm_name".into(), locator.vm.clone()),
+                ("transcript_root".into(), manifest.sealed_root_hex.clone()),
+                ("chunk_count".into(), "2".into()),
+            ]
+            .into(),
+        };
+        let signed = mvm_contract::verify::seal(entry, [0; 32], &signing).unwrap();
+        let mut line = serde_json::to_vec(&signed).unwrap();
+        line.push(b'\n');
+        std::fs::write(config::mvm_audit_dir().join("local.jsonl"), line).unwrap();
+        assert!(
+            !transcript::evidence::authenticated_retirement(
+                &config::mvm_audit_dir(),
+                &signing.verifying_key(),
+                &manifest,
+            )
+            .unwrap()
+        );
+        run.publish(&locator.transcript_dir).unwrap();
+        let mut output = open_vm_output_at(&locator, OutputRequest::default()).unwrap();
+        let deadline = manifest.retention_deadline().unwrap().unwrap();
+        assert!(
+            output
+                .next_output_with_clock(Some(deadline - 1))
+                .unwrap()
+                .is_some()
+        );
+        assert!(output.next_output_with_clock(Some(deadline)).is_err());
+        assert_eq!(output.history_len(), 0);
+        assert!(
+            output
+                .next_output_with_clock(Some(deadline))
+                .unwrap()
+                .is_none()
+        );
     }
 
     fn drain(stream: &mut VmOutputStream) -> Vec<OutputRecord> {

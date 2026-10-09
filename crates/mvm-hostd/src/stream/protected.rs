@@ -419,9 +419,13 @@ impl Worker {
             manifest.adopted = true;
             manifest.sealed_root_hex = mvm_core::transcript::sealed_root_hex(&manifest)?;
         }
-        if mvm_core::transcript::retention_now()
-            .and_then(|now| manifest.check_readable_at(now))
-            .is_err()
+        // A late joined recovery can clamp sealing before the last record's
+        // wall timestamp. Revoke that live epoch rather than let its record-
+        // based deadline extend beyond the authenticated generation deadline.
+        if manifest.adopted
+            || mvm_core::transcript::retention_now()
+                .and_then(|now| manifest.check_readable_at(now))
+                .is_err()
         {
             self.broker
                 .lock()
@@ -683,6 +687,22 @@ mod tests {
         .unwrap();
         let emitter = AuditEmitter::with_dir(signing, &config::mvm_audit_dir()).unwrap();
         let mut managed = ManagedRetention::new(&root, vm, &plan.tenant.0, &emitter).unwrap();
+        let mut opened_before_retirement = mvm_core::stream_client::open_vm_output(
+            vm,
+            mvm_core::stream_client::OutputRequest::default(),
+        )
+        .unwrap();
+        assert_eq!(opened_before_retirement.history_len(), 1);
+        let mut opened_before_authority_loss = mvm_core::stream_client::open_vm_output(
+            vm,
+            mvm_core::stream_client::OutputRequest::default(),
+        )
+        .unwrap();
+        let unavailable_audit = home.path().join("temporarily-unavailable-audit");
+        std::fs::rename(emitter.audit_dir(), &unavailable_audit).unwrap();
+        assert!(opened_before_authority_loss.next_output().is_err());
+        assert_eq!(opened_before_authority_loss.history_len(), 0);
+        std::fs::rename(&unavailable_audit, emitter.audit_dir()).unwrap();
         let limit = GenerationBudget::default().max_plaintext_bytes;
         assert!(
             !managed.reservations.lock().unwrap().reserve(limit),
@@ -703,6 +723,9 @@ mod tests {
             )
             .unwrap();
         assert!(!segment.exists());
+        assert!(opened_before_retirement.next_output().is_err());
+        assert_eq!(opened_before_retirement.history_len(), 0);
+        assert!(opened_before_retirement.next_output().unwrap().is_none());
         assert!(manifest.chunks[0].size_bytes > 28);
         assert!(managed.reservations.lock().unwrap().reserve(limit));
         assert!(!managed.reservations.lock().unwrap().reserve(1));

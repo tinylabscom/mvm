@@ -97,12 +97,46 @@ pub(super) fn recover(
 
 /// Atomic file replacement plus directory sync precedes any signed seal.
 pub(super) fn stage(dir: &Path, manifest: &TranscriptManifest) -> Result<()> {
+    #[cfg(test)]
+    stage_fault(StageFault::Write)?;
     atomic_write(
         &dir.join(MANIFEST_FILENAME),
         &serde_json::to_vec_pretty(manifest)?,
     )?;
+    #[cfg(test)]
+    stage_fault(StageFault::DirectorySync)?;
     File::open(dir)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StageFault {
+    Write,
+    DirectorySync,
+}
+
+#[cfg(test)]
+thread_local! {
+    static STAGE_FAULT: std::cell::Cell<Option<StageFault>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn stage_fault(boundary: StageFault) -> std::io::Result<()> {
+    if STAGE_FAULT.with(|fault| {
+        if fault.get() == Some(boundary) {
+            fault.set(None);
+            true
+        } else {
+            false
+        }
+    }) {
+        Err(std::io::Error::other(
+            "injected protected staging I/O failure",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn read_private(path: &Path, limit: u64) -> Result<Vec<u8>> {
@@ -244,13 +278,25 @@ mod tests {
             &serde_json::to_vec(&seed).unwrap(),
         )
         .unwrap();
-        // A failed staged-file boundary must never publish a terminal event.
-        std::fs::create_dir(dir.join(MANIFEST_FILENAME)).unwrap();
+        STAGE_FAULT.with(|fault| fault.set(Some(StageFault::Write)));
         assert!(recover(&dir, &lease, &emitter, &plan.tenant.0, vm).is_err());
-        std::fs::remove_dir(dir.join(MANIFEST_FILENAME)).unwrap();
-        let mut staged = seed.clone();
-        transcript::recover_abandoned_at(&mut staged, seed.created_unix_secs).unwrap();
-        stage(&dir, &staged).unwrap();
+        assert!(!dir.join(MANIFEST_FILENAME).exists());
+        let mut candidate = seed.clone();
+        transcript::recover_abandoned_at(&mut candidate, seed.created_unix_secs).unwrap();
+        assert!(
+            authenticated_seal(emitter.audit_dir(), &emitter.verifying_key(), &candidate)
+                .unwrap()
+                .is_none()
+        );
+        STAGE_FAULT.with(|fault| fault.set(Some(StageFault::DirectorySync)));
+        assert!(recover(&dir, &lease, &emitter, &plan.tenant.0, vm).is_err());
+        let staged = capture_manifest(&dir);
+        assert!(
+            authenticated_seal(emitter.audit_dir(), &emitter.verifying_key(), &staged)
+                .unwrap()
+                .is_none(),
+            "atomic rename without durable directory sync cannot publish a terminal seal"
+        );
         let unavailable = home.path().join("unavailable-audit");
         std::fs::rename(emitter.audit_dir(), &unavailable).unwrap();
         assert!(
