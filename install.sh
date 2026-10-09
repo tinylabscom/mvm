@@ -830,6 +830,20 @@ case "$VERSION" in
   ''|*[!A-Za-z0-9._+-]*) die "release tag is not a safe directory name: $VERSION" ;;
 esac
 
+# Historical CLIs obtained their runtime from their signed image set. Keep
+# those authenticated releases installable, but never downgrade a new release
+# to that contract just because its required guest archive is missing.
+RUNTIME_REQUIRED="$(printf '%s\n' "$VERSION" | awk '
+  !/^v[0-9]+\.[0-9]+\.[0-9]+([-+][A-Za-z0-9.-]+)?$/ { exit 1 }
+  {
+    version = $0
+    sub(/^v/, "", version)
+    sub(/[-+].*$/, "", version)
+    split(version, part, ".")
+    print (part[1] > 0 || part[2] > 23 || (part[2] == 23 && part[3] >= 1)) ? 1 : 0
+  }
+')" || die "release tag must be a CLI semantic version: $VERSION"
+
 got="$(sha256_of "$TMP/$ARCHIVE")"
 if [ "${MVM_SKIP_HASH_VERIFY:-}" = "1" ]; then
   warn "MVM_SKIP_HASH_VERIFY=1 — skipping checksum verification"
@@ -914,30 +928,34 @@ SRC="$TMP/mvmctl-${TARGET}"
 # It joins the same release-directory transaction: no CLI switch can expose
 # a missing or differently versioned runtime. Never extract it in the installer.
 RUNTIME="mvm-guest-bins-${VERSION}.tar.gz"
-mkdir -p "$TMP/guest-runtime"
-for suffix in "" .sha256 .bundle .sha256.bundle; do
-  curl -fsSL "$REL/$RUNTIME$suffix" -o "$TMP/guest-runtime/$RUNTIME$suffix" \
-    || die "could not download $RUNTIME$suffix"
-done
-runtime_sum="$TMP/guest-runtime/$RUNTIME.sha256"
-want="$(awk -v name="$RUNTIME" 'NF == 2 && $2 == name { count++; digest=$1 } END { if (count == 1 && NR == 1) print digest }' "$runtime_sum")"
-[ -n "$want" ] && [ "$want" = "$(sha256_of "$TMP/guest-runtime/$RUNTIME")" ] \
-  || die "checksum mismatch or invalid release identity for $RUNTIME"
-for runtime_asset in "$RUNTIME" "$RUNTIME.sha256"; do
-  if [ -n "$VERIFIER" ]; then
-    "$VERIFIER" env verify-release "$TMP/guest-runtime/$runtime_asset" --tag "$VERSION" >/dev/null \
-      || die "signature verification failed for $runtime_asset"
-  else
-    "$COSIGN" verify-blob \
-      --bundle "$TMP/guest-runtime/$runtime_asset.bundle" \
-      --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-      --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \
-      "$TMP/guest-runtime/$runtime_asset" >/dev/null 2>&1 \
-      || die "signature verification failed for $runtime_asset"
-  fi
-done
-rm -rf "$SRC/guest-runtime"
-mv "$TMP/guest-runtime" "$SRC/guest-runtime"
+if [ "$RUNTIME_REQUIRED" = 1 ]; then
+  mkdir -p "$TMP/guest-runtime"
+  for suffix in "" .sha256 .bundle .sha256.bundle; do
+    curl -fsSL "$REL/$RUNTIME$suffix" -o "$TMP/guest-runtime/$RUNTIME$suffix" \
+      || die "could not download $RUNTIME$suffix"
+  done
+  runtime_sum="$TMP/guest-runtime/$RUNTIME.sha256"
+  want="$(awk -v name="$RUNTIME" 'NF == 2 && $2 == name { count++; digest=$1 } END { if (count == 1 && NR == 1) print digest }' "$runtime_sum")"
+  [ -n "$want" ] && [ "$want" = "$(sha256_of "$TMP/guest-runtime/$RUNTIME")" ] \
+    || die "checksum mismatch or invalid release identity for $RUNTIME"
+  for runtime_asset in "$RUNTIME" "$RUNTIME.sha256"; do
+    if [ -n "$VERIFIER" ]; then
+      "$VERIFIER" env verify-release "$TMP/guest-runtime/$runtime_asset" --tag "$VERSION" >/dev/null \
+        || die "signature verification failed for $runtime_asset"
+    else
+      "$COSIGN" verify-blob \
+        --bundle "$TMP/guest-runtime/$runtime_asset.bundle" \
+        --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+        --certificate-identity "https://github.com/$REPO/.github/workflows/release.yml@refs/tags/$VERSION" \
+        "$TMP/guest-runtime/$runtime_asset" >/dev/null 2>&1 \
+        || die "signature verification failed for $runtime_asset"
+    fi
+  done
+  rm -rf "$SRC/guest-runtime"
+  mv "$TMP/guest-runtime" "$SRC/guest-runtime"
+else
+  say "$VERSION predates the guest-runtime archive; its CLI uses its signed image-set runtime."
+fi
 
 prepare_dirs
 acquire_lock

@@ -82,7 +82,7 @@ jobs:
       # Pinned in Cargo.toml's [workspace.metadata.mvm.toolchain]: the
       # packages are signed release assets, so the tools that write them do
       # not float.
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v3
         with:
           cosign-release: v3.0.5
 

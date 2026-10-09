@@ -1123,6 +1123,45 @@ fn install_sh_rejects_tampered_checksum() {
 }
 
 #[test]
+fn install_sh_preserves_legacy_releases_without_a_guest_runtime_archive() {
+    for version in ["v0.18.0-rc.2", "v0.18.3", "v0.22.0", "v0.23.0"] {
+        let release = Release::new(version);
+        let mut routes = release.routes();
+        routes.retain(|(path, _)| !path.contains("mvm-guest-bins"));
+        let (base, _stop) = serve(routes);
+        let host = Host::new();
+        host.install_ok(&base, version);
+        assert!(host.bin().join("mvmctl").exists());
+        assert!(!host.lib().join("current/guest-runtime").exists());
+    }
+}
+
+#[test]
+fn install_sh_requires_runtime_from_the_cutover_including_prereleases() {
+    for version in ["v0.23.1-rc.1", "v0.23.1", "v0.24.0", "v1.0.0"] {
+        let previous = Release::new("v0.22.0");
+        let next = Release::new(version);
+        let mut routes = previous.routes();
+        routes.extend(next.routes());
+        routes.retain(|(path, _)| !path.contains("mvm-guest-bins"));
+        let (base, _stop) = serve(routes);
+        let host = Host::new();
+        host.install_ok(&base, "v0.22.0");
+        let before = host.snapshot();
+        let output = host.install(&base, version);
+        assert!(
+            !output.status.success(),
+            "{version} must not fall back to the legacy runtime contract"
+        );
+        assert_eq!(
+            host.snapshot(),
+            before,
+            "{version} changed the active release"
+        );
+    }
+}
+
+#[test]
 fn install_sh_pairs_runtime_bytes_with_the_cli_and_refuses_bad_runtime_inputs() {
     let v1 = Release::new("v1.0.0");
     let v2 = Release::new("v2.0.0");
