@@ -15,7 +15,6 @@ use std::path::{Path, PathBuf};
 
 use crate::vsock::{RootfsConfig, RuntimeOverlayConfig, VolumeConfig, VolumeConfigKind};
 
-/// Fixed identity used by the guest agent and workload command runner.
 pub const WORKLOAD_UID: u32 = 901;
 /// Fixed group used by the guest agent and workload command runner.
 pub const WORKLOAD_GID: u32 = 901;
@@ -58,7 +57,6 @@ pub const WORKLOAD_HOME_REL: &str = "home/mvm-worker";
 /// point — one mvm neither built nor materialized.
 pub const WORKLOAD_HOME_FALLBACK: &str = "/tmp";
 
-/// Linux capability used by the authenticated guest agent to signal PID 1.
 pub const CAP_KILL: u32 = mvm_setpriv::CAP_KILL;
 /// Linux capability the tool helper needs to start a mediated tool invocation
 /// under [`TOOL_UID`].
@@ -145,13 +143,10 @@ impl MountError {
     }
 }
 
-/// Result type for boot-time mount operations.
 pub type Result<T> = std::result::Result<T, MountError>;
 
-/// Fixed path where the rootfs is staged before pivot/switch_root.
 pub(crate) const ROOTFS_STAGING: &str = "/mnt/root";
 
-/// Validate a 64-character lowercase hex dm-verity roothash.
 pub fn validate_roothash(roothash: &str, name: &str) -> Result<()> {
     if roothash.len() != 64
         || !roothash
@@ -362,12 +357,10 @@ pub fn mount_sdk_sidecar(device: &str, root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Reserved mountpoints that volumes are not allowed to shadow.
 #[cfg(test)]
 pub(crate) const RESERVED_MOUNTS: &[&str] =
     &["/", "/mvm", "/mvm/runtime", "/dev", "/dev/vda", "/dev/vdc"];
 
-/// Validate that a volume mountpoint does not collide with reserved paths.
 pub fn validate_volume_mountpoint(mountpoint: &str) -> Result<()> {
     validated_relative_mountpoint(mountpoint).map(|_| ())
 }
@@ -526,7 +519,6 @@ fn writable_block_volume_owner(volume: &VolumeConfig) -> Option<(u32, u32)> {
         .then_some((WORKLOAD_UID, WORKLOAD_GID))
 }
 
-/// Mount custom virtio-fs and ext4 block volumes inside the new root tree.
 pub fn mount_volumes(volumes: &[VolumeConfig], root: &Path) -> Result<()> {
     let mut scaffolds = BTreeSet::new();
     for vol in volumes {
@@ -629,7 +621,6 @@ pub fn ensure_workload_home() -> Result<()> {
     Ok(())
 }
 
-/// Where the pseudo-terminal slave filesystem is mounted.
 pub const DEVPTS_MOUNT_POINT: &str = "/dev/pts";
 
 /// Standard tty-group layout for the slave nodes `devpts` hands out.
@@ -779,7 +770,6 @@ pub fn mount_workload_home() -> Result<()> {
     Ok(())
 }
 
-/// What [`mount_workload_home`] settled on, once it has run.
 static RESOLVED_HOME: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 /// Resolve the writable home directory for workload processes.
@@ -866,7 +856,6 @@ pub(crate) fn assume_identity_retaining(uid: u32, gid: u32, keep: u32) -> std::i
     assume_identity_with_saved_gid(uid, gid, gid, keep)
 }
 
-/// [`assume_identity_retaining`], leaving `saved_gid` as the saved group id.
 #[cfg(target_os = "linux")]
 fn assume_identity_with_saved_gid(
     uid: u32,
@@ -1023,7 +1012,6 @@ fn bounding_drop_is_unenforceable(err: &std::io::Error) -> bool {
     err.raw_os_error() == Some(libc::EPERM)
 }
 
-/// `prctl(PR_SET_NO_NEW_PRIVS, 1)`. One-way and inherited across fork/exec.
 #[cfg(target_os = "linux")]
 fn set_no_new_privileges() -> std::io::Result<()> {
     if unsafe { libc::prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0 {
