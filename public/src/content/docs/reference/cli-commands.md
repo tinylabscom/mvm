@@ -1609,6 +1609,15 @@ running microVM.
 | `mvmctl pool warm [COUNT]`                                | Pre-spawn standby microVMs so the next run claims a warm one                                                                                                      |
 | `mvmctl pool status [--json]`                             | Report standby pool occupancy                                                                                                                                     |
 
+For a built-image pack, `pull` authenticates its descriptor before fetching the
+exact public GitHub release assets, verifies their sizes, hashes, rootfs
+signature and provenance, then publishes the complete payload atomically.
+Installed-pack verification and admission repeat these checks. Registry mirrors
+do not redirect image release origins, and private image releases are unsupported.
+Built-image boot remains explicitly unsupported; successful installation does
+not enable it. See [pack authoring](/guides/pack-authoring/#built-image-release-assets)
+for resource limits and the split registry/release inventory.
+
 Pack inspection reports `official_status: "not_established"`: verification under the
 current publisher policy does not by itself establish official MVM release
 status. Revocation checks cover an operator-configured signed feed when one is
