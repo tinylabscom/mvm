@@ -1031,7 +1031,7 @@ impl Drop for ConnectionGuard {
     }
 }
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(test)]
 impl ConnectionGuard {
     /// Test-only: consume the guard so its slot frees, without naming Drop.
     fn slot_released_on_drop(self) {}
