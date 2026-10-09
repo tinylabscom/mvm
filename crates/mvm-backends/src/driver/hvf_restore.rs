@@ -229,6 +229,7 @@ pub fn hvf_child_restore_config(
 
     Ok(HvfSupervisorConfig {
         console_capture: parent.console_capture,
+        vm_name: req.vm_name.to_string(),
         // Same tier as the parent it forked from.
         trusted_builder_egress: parent.trusted_builder_egress,
         // Never inherited. The request names the *parent's* VM, state dir and
@@ -554,6 +555,7 @@ mod tests {
     fn parent_config(state: &Path, disks: Vec<HvfDisk>) -> HvfSupervisorConfig {
         HvfSupervisorConfig {
             console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
+            vm_name: "parent".into(),
             trusted_builder_egress: false,
             builder_egress_endpoint: None,
             kernel: state.join("Image"),

@@ -157,6 +157,7 @@ impl DurableSink {
                 writer: Arc::clone(&writer),
                 counters: Arc::clone(&counters),
                 journal,
+                encoding: seed.payload_encoding,
             },
             inbox,
         );
@@ -290,7 +291,9 @@ impl DurableSink {
             self.counters.shed_chunks.load(Ordering::Relaxed),
             self.counters.shed_bytes.load(Ordering::Relaxed),
         );
-        match mvm_core::transcript::retention_now().and_then(|now| writer.finalize_at(now)) {
+        match mvm_core::transcript::retention_now()
+            .and_then(|now| finalize_joined_writer(&mut writer, now))
+        {
             Ok(manifest) => manifest,
             Err(_) => {
                 tracing::warn!("capture finalization failed; no terminal lifetime is claimed");
@@ -314,6 +317,32 @@ impl DurableSink {
         manifest.sealed_root_hex =
             sealed_root_hex(&manifest).expect("fixed transcript root metadata serializes");
         manifest
+    }
+}
+
+/// Called only after closing admission and joining the sole writer thread.
+/// A late maintenance tick may conservatively recover that quiescent generation,
+/// but backward/overflowing clocks are not permission to reset its lifetime.
+fn finalize_joined_writer(
+    writer: &mut TranscriptWriter,
+    now: u64,
+) -> Result<TranscriptManifest, mvm_core::transcript::TranscriptError> {
+    match writer.finalize_at(now) {
+        Ok(manifest) => Ok(manifest),
+        Err(error @ mvm_core::transcript::TranscriptError::RetentionClock) => {
+            let mut manifest = writer.sealed_manifest();
+            let overdue = manifest
+                .at_rest
+                .map(|policy| policy.generation_deadline(manifest.created_unix_secs))
+                .transpose()?
+                .is_some_and(|deadline| now > deadline);
+            if !overdue {
+                return Err(error);
+            }
+            mvm_core::transcript::recover_abandoned_at(&mut manifest, now)?;
+            Ok(manifest)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -427,6 +456,7 @@ fn note_handed_over(vm: &str, counters: &PersistCounters) {
 /// Everything one capture's writer thread owns: the transcript it appends to,
 /// the counters it keeps, and the journal it mirrors each landed chunk into.
 struct WriterThread {
+    encoding: mvm_core::transcript::PayloadEncoding,
     writer: Arc<Mutex<TranscriptWriter>>,
     counters: Arc<PersistCounters>,
     journal: CaptureJournal,
@@ -485,7 +515,17 @@ fn run_writer(vm: &str, state: &mut WriterThread, inbox: &Receiver<PersistJob>) 
 /// manifest that does not describe the segments beside it.
 fn append(vm: &str, state: &mut WriterThread, record: &StreamRecord, degraded: bool) -> bool {
     let mut writer = lock_writer(&state.writer);
-    let outcome = writer.push(direction_for(record.kind), &record.payload);
+    let outcome = match state.encoding {
+        mvm_core::transcript::PayloadEncoding::Raw => {
+            writer.push(direction_for(record.kind), &record.payload)
+        }
+        mvm_core::transcript::PayloadEncoding::StreamRecordV1 => serde_json::to_vec(record)
+            .map_err(|_| mvm_core::transcript::TranscriptError::Io {
+                file: "stream-record".into(),
+                msg: "encoding failed".into(),
+            })
+            .and_then(|encoded| writer.push(direction_for(record.kind), &encoded)),
+    };
     if outcome.is_ok() {
         let shortfall = JournalShortfall {
             // The hand-off's own drops belong in the same total the writer's
@@ -589,6 +629,36 @@ mod tests {
     }
 
     const PAYLOAD: &[u8] = b"payload";
+
+    #[test]
+    fn late_joined_generation_keeps_its_original_age_and_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        mvm_core::private_fs::ensure_private_dir(root.path()).unwrap();
+        let mut config = crate::stream::broker::stream_capture_config(
+            crate::stream::broker::StreamCaptureIdentity {
+                capture_id: "late-generation".into(),
+                binding: CaptureBinding {
+                    tenant_id: "tenant".into(),
+                    vm_name: "instance".into(),
+                    session_id: None,
+                },
+                created_unix_secs: 100,
+                recipient: "test".into(),
+                wrapped_data_key_b64: String::new(),
+            },
+        );
+        config.at_rest = Some(mvm_core::transcript::AtRestRetention::default());
+        let mut writer =
+            TranscriptWriter::try_new(root.path(), aead::Key::random(), config).unwrap();
+        assert!(finalize_joined_writer(&mut writer, 99).is_err());
+        let manifest = finalize_joined_writer(&mut writer, 3701).unwrap();
+        assert_eq!(manifest.created_unix_secs, 100);
+        assert_eq!(manifest.sealed_unix_secs, Some(3700));
+        assert!(manifest.adopted);
+        assert_eq!(manifest.retention_deadline().unwrap(), Some(3700 + 604800));
+        let again = finalize_joined_writer(&mut writer, 4000).unwrap();
+        assert_eq!(again.sealed_unix_secs, manifest.sealed_unix_secs);
+    }
 
     #[test]
     fn upstream_loss_saturation_survives_later_durable_shedding() {

@@ -834,12 +834,24 @@ fn read_history_mode(
     let Some(manifest) = load_manifest(locator, &manifest_path, protected)? else {
         return Ok(None);
     };
+    if protected
+        && (manifest.binding.vm_name != locator.vm
+            || manifest.at_rest.is_none()
+            || manifest.payload_encoding != transcript::PayloadEncoding::StreamRecordV1)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "protected capture identity or encoding mismatch",
+        )
+        .into());
+    }
     let key = unwrap_capture_key(locator, &manifest)?;
     let chunks = transcript::export_chunks(&manifest, &locator.transcript_dir, &key)
         .map_err(|source| transcript_error(locator, source))?;
 
     let total_chunks = chunks.len();
     let mut records = VecDeque::new();
+    let mut previous: Option<StreamRecord> = None;
     for chunk in chunks {
         let kind =
             output_kind(chunk.direction).ok_or_else(|| StreamError::NotOutputTranscript {
@@ -847,14 +859,45 @@ fn read_history_mode(
                 seq: chunk.seq,
                 direction: chunk.direction,
             })?;
-        if !qualifies(&request.opts, chunk.seq, kind) {
+        let (seq, payload) = match manifest.payload_encoding {
+            transcript::PayloadEncoding::Raw => (chunk.seq, chunk.plaintext),
+            transcript::PayloadEncoding::StreamRecordV1 => {
+                let record: StreamRecord =
+                    serde_json::from_slice(&chunk.plaintext).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid encrypted stream record",
+                        )
+                    })?;
+                let chain_valid = previous.as_ref().is_none_or(|previous| {
+                    record.seq > previous.seq
+                        && (record.seq != previous.seq.saturating_add(1)
+                            || record.prev_hash == previous.hash())
+                });
+                if record.kind != kind
+                    || !chain_valid
+                    || (record.seq == 0 && record.prev_hash != [0; 32])
+                {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "encrypted stream record chain or channel mismatch",
+                    )
+                    .into());
+                }
+                let seq = record.seq;
+                let payload = record.payload.clone();
+                previous = Some(record);
+                (seq, payload)
+            }
+        };
+        if !qualifies(&request.opts, seq, kind) {
             continue;
         }
         records.push_back(OutputRecord {
-            seq: chunk.seq,
+            seq,
             kind,
             origin: RecordOrigin::Durable,
-            payload: chunk.plaintext,
+            payload,
         });
     }
     let empty = classify_empty(total_chunks, records.len(), request.history_tail);

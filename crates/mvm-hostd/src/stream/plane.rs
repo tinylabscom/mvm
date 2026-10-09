@@ -533,13 +533,14 @@ fn build_broker(
 /// key wrapped under the host KEK, and the ring-retention policy every stream
 /// capture runs under.
 fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
-    build_writer_with_policy(vm, transcript_dir, None)
+    build_writer_with_policy(vm, transcript_dir, None, DEFAULT_TENANT)
 }
 
 pub(super) fn build_writer_with_policy(
     vm: &str,
     transcript_dir: &Path,
     at_rest: Option<transcript::AtRestRetention>,
+    tenant: &str,
 ) -> Result<TranscriptWriter> {
     let keys_dir = config::mvm_keys_dir();
     let kek = transcript::load_or_init_kek(&keys_dir)
@@ -563,7 +564,7 @@ pub(super) fn build_writer_with_policy(
             format!("stream-{vm}")
         },
         binding: CaptureBinding {
-            tenant_id: DEFAULT_TENANT.to_string(),
+            tenant_id: tenant.to_string(),
             vm_name: vm.to_string(),
             session_id: None,
         },
@@ -572,7 +573,11 @@ pub(super) fn build_writer_with_policy(
         wrapped_data_key_b64,
     });
     config.at_rest = at_rest;
-    Ok(TranscriptWriter::new(transcript_dir, data_key, config))
+    if at_rest.is_some() {
+        config.generation_budget = Some(transcript::GenerationBudget::default());
+        config.payload_encoding = transcript::PayloadEncoding::StreamRecordV1;
+    }
+    Ok(TranscriptWriter::try_new(transcript_dir, data_key, config)?)
 }
 
 /// Throw away whatever a previous boot left in the capture directory, keeping

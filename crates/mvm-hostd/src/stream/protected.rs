@@ -11,18 +11,33 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use mvm_contract::stream::{StreamKind, StreamSource};
 use mvm_core::config;
-use mvm_core::plan::StreamRetention;
+use mvm_core::plan::{ExecutionPlan, StreamRetention};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::stream_client::protected::ProtectedRun;
 use mvm_core::transcript::{AtRestRetention, TranscriptManifest};
 use mvm_vmm::host::console_capture::bounded::{self, Consumer, Producer};
 
 use super::console_source::SharedBroker;
-use super::plane::{anchor_sealed_transcript, build_writer_with_policy, write_manifest};
+use super::plane::{build_writer_with_policy, write_manifest};
 use super::{StreamBroker, StreamRedaction, StreamServerHandle, serve_stream};
+use crate::audit::{emitter::AuditEmitter, host_keypair};
 
 /// Shutdown is bounded even if the storage worker cannot leave a host syscall.
 const OWNER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Concrete instance identity comes from the authenticated launch/handoff,
+/// independently of the logical workload named by an admitted plan.
+pub enum CaptureAuthority<'a> {
+    Admitted(&'a ExecutionPlan),
+    /// Only a validated builder/standby launch role may select this variant.
+    OperationalLiveOnly,
+}
+
+pub struct CaptureParams<'a> {
+    pub vm: &'a str,
+    pub authority: CaptureAuthority<'a>,
+    pub redaction: &'a RedactionPolicy,
+}
 
 pub struct CaptureOwner {
     worker: Option<JoinHandle<()>>,
@@ -32,26 +47,37 @@ pub struct CaptureOwner {
 
 impl CaptureOwner {
     /// Provision keys, writer and live server before the caller announces boot.
-    pub fn start(
-        vm: &str,
-        redaction: &RedactionPolicy,
-        retention: StreamRetention,
-    ) -> Result<(Self, Producer)> {
-        Self::start_with_period(vm, redaction, retention, Duration::from_secs(3600))
+    pub fn start(params: CaptureParams<'_>) -> Result<(Self, Producer)> {
+        Self::start_with_period(params, Duration::from_secs(3600))
     }
 
-    fn start_with_period(
-        vm: &str,
-        redaction: &RedactionPolicy,
-        retention: StreamRetention,
-        period: Duration,
-    ) -> Result<(Self, Producer)> {
+    fn start_with_period(params: CaptureParams<'_>, period: Duration) -> Result<(Self, Producer)> {
+        let CaptureParams {
+            vm,
+            authority,
+            redaction,
+        } = params;
+        let (plan, retention) = match authority {
+            CaptureAuthority::Admitted(plan) => (Some(plan.clone()), plan.stream_retention),
+            CaptureAuthority::OperationalLiveOnly => (None, StreamRetention::Ephemeral),
+        };
+        mvm_core::naming::validate_vm_name(vm)?;
+        let emitter = if retention.persists() {
+            let keys = config::mvm_keys_dir();
+            let (signing, _) = mvm_core::crypto::ed25519_keypair::load_existing(
+                &keys.join(host_keypair::SECRET_FILENAME),
+                &keys.join(host_keypair::PUBLIC_FILENAME),
+            )
+            .context("load existing capture audit authority")?;
+            Some(AuditEmitter::new(signing)?)
+        } else {
+            None
+        };
         let root = config::vm_stream_transcript_dir(vm);
         config::create_private_dir(&root).context("prepare protected capture directory")?;
-        let broker = Arc::new(Mutex::new(StreamBroker::live_only(
-            vm,
-            StreamRedaction::curated(redaction),
-        )));
+        let broker = Arc::new(Mutex::new(
+            StreamBroker::live_only(vm, StreamRedaction::curated(redaction)).with_replay(),
+        ));
         // Claim live ownership before installing storage or publishing routing.
         let server = serve_stream(&config::vm_stream_socket(vm), Arc::clone(&broker))
             .context("claim protected console owner")?;
@@ -67,7 +93,13 @@ impl CaptureOwner {
         let run_dir = run.directory(&root)?;
         let active = run_dir.join("00000000000000000000");
         if run.persists {
-            let writer = build_writer_with_policy(vm, &active, Some(AtRestRetention::default()))?;
+            let tenant = &plan
+                .as_ref()
+                .context("durable capture needs admitted authority")?
+                .tenant
+                .0;
+            let writer =
+                build_writer_with_policy(vm, &active, Some(AtRestRetention::default()), tenant)?;
             let mut broker = broker
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -88,6 +120,8 @@ impl CaptureOwner {
             active,
             generation: 0,
             persists: run.persists,
+            plan,
+            emitter,
             broker,
             server,
             consumer,
@@ -145,6 +179,8 @@ struct Worker {
     active: PathBuf,
     generation: u64,
     persists: bool,
+    plan: Option<ExecutionPlan>,
+    emitter: Option<AuditEmitter>,
     broker: SharedBroker,
     server: StreamServerHandle,
     consumer: Consumer,
@@ -211,7 +247,14 @@ impl Worker {
             .checked_add(1)
             .context("capture generation exhausted")?;
         let dir = self.run_dir.join(format!("{next:020}"));
-        let writer = build_writer_with_policy(&self.vm, &dir, Some(AtRestRetention::default()))?;
+        let tenant = &self
+            .plan
+            .as_ref()
+            .context("durable capture needs admitted authority")?
+            .tenant
+            .0;
+        let writer =
+            build_writer_with_policy(&self.vm, &dir, Some(AtRestRetention::default()), tenant)?;
         let sealed = self
             .broker
             .lock()
@@ -241,13 +284,30 @@ impl Worker {
             self.failed.store(true, Ordering::Relaxed);
             return;
         }
-        anchor_sealed_transcript(&self.vm, &manifest);
+        if let (Some(plan), Some(emitter)) = (&self.plan, &self.emitter) {
+            if emitter
+                .emit_transcript_sealed(
+                    plan,
+                    &manifest.capture_id,
+                    &self.vm,
+                    &manifest.sealed_root_hex,
+                    manifest.chunks.len(),
+                    manifest.adopted,
+                )
+                .is_err()
+            {
+                self.failed.store(true, Ordering::Relaxed);
+            }
+        } else {
+            self.failed.store(true, Ordering::Relaxed);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::plan::test_support::PlanFixture;
     use mvm_core::transcript::{self, MANIFEST_FILENAME};
     use mvm_core::util::test_env::TestEnv;
     use mvm_vmm::vmm::device::{MmioDevice, Pl011};
@@ -259,8 +319,14 @@ mod tests {
         env.isolate_mvm_home(home.path());
         let vm = "owner-lifetime";
         let launcher = super::super::StreamPlane::new();
-        let (owner, producer) =
-            CaptureOwner::start(vm, &RedactionPolicy::default(), StreamRetention::Persist).unwrap();
+        host_keypair::load_or_init_at(&config::mvm_keys_dir()).unwrap();
+        let plan = PlanFixture::new().tenant("capture-tenant").build();
+        let (owner, producer) = CaptureOwner::start(CaptureParams {
+            vm,
+            authority: CaptureAuthority::Admitted(&plan),
+            redaction: &plan.redaction,
+        })
+        .unwrap();
         drop(launcher);
         let marker = b"synthetic-after-launcher-exit";
         let mut uart = Pl011::new(0);
@@ -280,7 +346,11 @@ mod tests {
         let key = transcript::unwrap_data_key(&kek, &manifest.wrapped_data_key_b64).unwrap();
         let chunks = transcript::export_chunks(&manifest, &dir, &key).unwrap();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].plaintext, marker);
+        let record: mvm_contract::stream::StreamRecord =
+            serde_json::from_slice(&chunks[0].plaintext).unwrap();
+        assert_eq!(record.payload, marker);
+        assert_eq!(manifest.binding.tenant_id, "capture-tenant");
+        assert_eq!(manifest.binding.vm_name, vm);
         assert!(
             !manifest_bytes
                 .windows(marker.len())
@@ -305,9 +375,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         env.isolate_mvm_home(home.path());
         let vm = "owner-ephemeral";
-        let (owner, mut producer) =
-            CaptureOwner::start(vm, &RedactionPolicy::default(), StreamRetention::Ephemeral)
-                .unwrap();
+        let plan = PlanFixture::new()
+            .stream_retention(StreamRetention::Ephemeral)
+            .build();
+        let (owner, mut producer) = CaptureOwner::start(CaptureParams {
+            vm,
+            authority: CaptureAuthority::Admitted(&plan),
+            redaction: &plan.redaction,
+        })
+        .unwrap();
         producer.write_all(b"synthetic-ephemeral-marker").unwrap();
         drop(producer);
         assert!(owner.finish());
@@ -320,6 +396,68 @@ mod tests {
     }
 
     #[test]
+    fn two_instances_of_one_workload_have_distinct_authenticated_capture_bindings() {
+        use std::io::Write;
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        host_keypair::load_or_init_at(&config::mvm_keys_dir()).unwrap();
+        let plan = PlanFixture::new().tenant("shared-tenant").build();
+        let mut wrapped_keys = Vec::new();
+        for vm in ["instance-one", "instance-two"] {
+            let (owner, mut producer) = CaptureOwner::start(CaptureParams {
+                vm,
+                authority: CaptureAuthority::Admitted(&plan),
+                redaction: &plan.redaction,
+            })
+            .unwrap();
+            producer.write_all(b"synthetic-instance-output").unwrap();
+            drop(producer);
+            assert!(owner.finish());
+            let root = config::vm_stream_transcript_dir(vm);
+            let run = ProtectedRun::read(&root).unwrap().unwrap();
+            let dir = run.directory(&root).unwrap().join("00000000000000000000");
+            let manifest: TranscriptManifest =
+                serde_json::from_slice(&std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap())
+                    .unwrap();
+            assert_eq!(manifest.binding.vm_name, vm);
+            assert_eq!(manifest.binding.tenant_id, plan.tenant.0);
+            assert_ne!(plan.workload.0, vm);
+            wrapped_keys.push(manifest.wrapped_data_key_b64);
+            let mut reader = mvm_core::stream_client::open_vm_output(
+                vm,
+                mvm_core::stream_client::OutputRequest::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                reader.next_output().unwrap().unwrap().payload,
+                b"synthetic-instance-output"
+            );
+        }
+        assert_ne!(wrapped_keys[0], wrapped_keys[1]);
+    }
+
+    #[test]
+    fn operational_authority_is_live_only_without_an_admission_plan() {
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let (owner, producer) = CaptureOwner::start(CaptureParams {
+            vm: "operational",
+            authority: CaptureAuthority::OperationalLiveOnly,
+            redaction: &RedactionPolicy::default(),
+        })
+        .unwrap();
+        drop(producer);
+        assert!(owner.finish());
+        let root = config::vm_stream_transcript_dir("operational");
+        let run = ProtectedRun::read(&root).unwrap().unwrap();
+        assert!(!run.persists);
+        assert!(!run.directory(&root).unwrap().exists());
+        assert!(!config::mvm_keys_dir().exists());
+    }
+
+    #[test]
     fn required_key_setup_failure_returns_no_producer_and_no_plaintext() {
         let mut env = TestEnv::new();
         let home = tempfile::tempdir().unwrap();
@@ -327,12 +465,13 @@ mod tests {
         let keys = config::mvm_keys_dir();
         std::fs::create_dir_all(keys.parent().unwrap()).unwrap();
         std::fs::write(&keys, b"synthetic-key-setup-obstruction").unwrap();
+        let plan = PlanFixture::new().build();
         assert!(
-            CaptureOwner::start(
-                "owner-failed",
-                &RedactionPolicy::default(),
-                StreamRetention::Persist,
-            )
+            CaptureOwner::start(CaptureParams {
+                vm: "owner-failed",
+                authority: CaptureAuthority::Admitted(&plan),
+                redaction: &plan.redaction,
+            })
             .is_err()
         );
         assert!(!config::vm_console_log("owner-failed").exists());

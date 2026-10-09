@@ -196,6 +196,25 @@ impl ReaderHandle {
         }
     }
 
+    /// Copy a bounded live window into an independent follower queue. The
+    /// payloads remain shared Arcs; the follower cannot drain the replay source.
+    pub(in crate::stream) fn replay(&self, mut start: ReaderStart, bounds: CaptureBounds) -> Self {
+        let source = lock_queue(&self.queue);
+        if let Some(first) = source.records.front() {
+            start.from_seq = first.seq;
+            start.anchor = first.prev_hash;
+        }
+        let handle = Self::new(start, bounds);
+        {
+            let mut target = lock_queue(&handle.queue);
+            target.gap = source.gap;
+            for record in &source.records {
+                target.push(Arc::clone(record));
+            }
+        }
+        handle
+    }
+
     /// The broker's half of the shared queue. Weak so a dropped handle
     /// really does free its buffered records.
     pub(in crate::stream) fn weak_queue(&self) -> Weak<Mutex<ReaderQueue>> {

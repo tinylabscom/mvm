@@ -415,23 +415,35 @@ fn main() -> anyhow::Result<()> {
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
-    let vm_name = state_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("supervisor VM identity missing")?;
-    let plan_json = cfg.plan.as_ref().map(serde_json::to_string).transpose()?;
-    let redaction = match (&cfg.plan, plan_json.as_deref()) {
-        (Some(value), Some(json)) => {
-            serde_json::from_value::<mvm_core::plan::ExecutionPlan>(value.clone())
-                .map(|plan| plan.redaction)
-                .or_else(|_| mvm_core::plan::redaction_from_signed_json(json))
-                .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?
+    use mvm_hostd::stream::protected::{CaptureAuthority, CaptureParams};
+    mvm_core::naming::validate_vm_name(&cfg.vm_name)?;
+    anyhow::ensure!(
+        state_dir == mvm_core::config::vm_state_dir(&cfg.vm_name),
+        "supervisor instance does not match its managed state directory"
+    );
+    let admitted_plan = cfg
+        .plan
+        .as_ref()
+        .map(mvm_hostd::supervisor::wall_clock::decode_admitted_plan)
+        .transpose()
+        .map_err(|_| anyhow::anyhow!("invalid admitted capture policy"))?;
+    let redaction = admitted_plan
+        .as_ref()
+        .map(|plan| plan.redaction.clone())
+        .unwrap_or_default();
+    let authority = match admitted_plan.as_ref() {
+        Some(plan) => CaptureAuthority::Admitted(plan),
+        None if cfg.trusted_builder_egress || cfg.handoff_socket.is_some() => {
+            CaptureAuthority::OperationalLiveOnly
         }
-        _ => mvm_core::policy::RedactionPolicy::default(),
+        None => anyhow::bail!("workload protected capture requires an admitted plan"),
     };
-    let retention = mvm_vmm::host::egress_shared::plan_stream_retention(plan_json.as_deref());
     let (capture_owner, console_sink) =
-        match mvm_hostd::stream::protected::CaptureOwner::start(vm_name, &redaction, retention) {
+        match mvm_hostd::stream::protected::CaptureOwner::start(CaptureParams {
+            vm: &cfg.vm_name,
+            authority,
+            redaction: &redaction,
+        }) {
             Ok(capture) => capture,
             Err(_) => {
                 let _ = CaptureStatus::CaptureSetupFailed.publish(state_dir);

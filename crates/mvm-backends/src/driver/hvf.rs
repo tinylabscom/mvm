@@ -230,6 +230,7 @@ fn relay_supervisor_config_with_handoff(
 
     Ok(HvfSupervisorConfig {
         console_capture: mvm_vmm::host::hvf_supervisor::HvfConsoleCapture::Encrypted,
+        vm_name: spec.name.clone(),
         kernel,
         cmdline,
         memory_mib: spec.memory_mib,
