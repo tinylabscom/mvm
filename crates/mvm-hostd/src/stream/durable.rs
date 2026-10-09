@@ -198,10 +198,8 @@ impl DurableSink {
     /// whole module exists to remove, reached through the one door that
     /// used to bypass it.
     pub fn push(&self, record: &Arc<StreamRecord>) {
-        self.counters.total.fetch_add(1, Ordering::Relaxed);
-        self.counters
-            .total_bytes
-            .fetch_add(record.payload.len() as u64, Ordering::Relaxed);
+        saturating_add(&self.counters.total, 1);
+        saturating_add(&self.counters.total_bytes, record.payload.len() as u64);
         let Some(jobs) = self.jobs.as_ref() else {
             return note_shed(&self.vm, &self.counters, record);
         };
@@ -398,10 +396,8 @@ fn wait_for_writer(worker: WriterHandle, timeout: Duration) -> bool {
 /// being a lie: [`DurableSink::seal`] folds it into the manifest's refusal
 /// totals, so the artifact declares its own hole.
 fn note_shed(vm: &str, counters: &PersistCounters, record: &StreamRecord) {
-    counters.shed_chunks.fetch_add(1, Ordering::Relaxed);
-    counters
-        .shed_bytes
-        .fetch_add(record.payload.len() as u64, Ordering::Relaxed);
+    saturating_add(&counters.shed_chunks, 1);
+    saturating_add(&counters.shed_bytes, record.payload.len() as u64);
     if !counters.shedding.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             vm = %vm,
@@ -591,6 +587,19 @@ mod tests {
     }
 
     const PAYLOAD: &[u8] = b"payload";
+
+    #[test]
+    fn upstream_loss_saturation_survives_later_durable_shedding() {
+        let root = tempfile::tempdir().unwrap();
+        let sink = DurableSink::new_without_writer_thread("saturated", writer_at(root.path()));
+        sink.note_unwritten(u64::MAX, u64::MAX);
+        sink.push(&record(0));
+        assert_eq!(sink.counts().shed_chunks, u64::MAX);
+        let manifest = sink.seal();
+        assert_eq!(manifest.refused_chunks, u64::MAX);
+        assert_eq!(manifest.refused_bytes, u64::MAX);
+        assert!(manifest.is_truncated());
+    }
 
     fn record(seq: u64) -> Arc<StreamRecord> {
         Arc::new(StreamRecord {

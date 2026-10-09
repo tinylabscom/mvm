@@ -299,6 +299,27 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_owner_never_provisions_a_key_or_durable_payload() {
+        use std::io::Write;
+        let mut env = TestEnv::new();
+        let home = tempfile::tempdir().unwrap();
+        env.isolate_mvm_home(home.path());
+        let vm = "owner-ephemeral";
+        let (owner, mut producer) =
+            CaptureOwner::start(vm, &RedactionPolicy::default(), StreamRetention::Ephemeral)
+                .unwrap();
+        producer.write_all(b"synthetic-ephemeral-marker").unwrap();
+        drop(producer);
+        assert!(owner.finish());
+        let root = config::vm_stream_transcript_dir(vm);
+        let run = ProtectedRun::read(&root).unwrap().unwrap();
+        assert!(!run.persists);
+        assert!(!run.directory(&root).unwrap().exists());
+        assert!(!config::mvm_keys_dir().exists());
+        assert!(!config::vm_console_log(vm).exists());
+    }
+
+    #[test]
     fn required_key_setup_failure_returns_no_producer_and_no_plaintext() {
         let mut env = TestEnv::new();
         let home = tempfile::tempdir().unwrap();
