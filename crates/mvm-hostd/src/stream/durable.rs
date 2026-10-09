@@ -580,6 +580,7 @@ mod tests {
                 wrapped_data_key_b64: String::new(),
             },
         )
+        .unwrap()
     }
 
     const PAYLOAD: &[u8] = b"payload";

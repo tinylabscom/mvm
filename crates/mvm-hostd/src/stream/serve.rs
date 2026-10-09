@@ -465,7 +465,8 @@ mod tests {
             dir.join("transcript"),
             aead::Key::from_bytes([0x5a; 32]),
             stream_capture_config(identity),
-        );
+        )
+        .unwrap();
         Arc::new(Mutex::new(
             StreamBroker::new(
                 "vm",

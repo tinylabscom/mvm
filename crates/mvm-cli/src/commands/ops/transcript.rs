@@ -258,7 +258,7 @@ impl TranscriptCtx {
             wrapped_data_key_b64: wrapped,
         };
         // No chunks yet — the live bridge sink fills them out of band.
-        let manifest = TranscriptWriter::try_new(&dir, data_key, cfg)?.seal();
+        let manifest = TranscriptWriter::new(&dir, data_key, cfg)?.seal();
         write_manifest(&dir, &manifest)?;
 
         self.audit(LocalAuditKind::TranscriptArmed, vm)
@@ -659,7 +659,7 @@ mod tests {
         assert_eq!(opened.at_rest, Some(transcript::AtRestRetention::default()));
         let kek = transcript::load_kek(&c.keys_dir).unwrap().unwrap();
         let key = transcript::unwrap_data_key(&kek, &opened.wrapped_data_key_b64).unwrap();
-        let mut writer = TranscriptWriter::try_new(
+        let mut writer = TranscriptWriter::new(
             &dir,
             key,
             TranscriptWriterConfig {
@@ -840,7 +840,8 @@ mod tests {
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             },
-        );
+        )
+        .unwrap();
         w.push(Direction::Egress, b"GET / HTTP/1.1\r\n").unwrap();
         w.push(Direction::Ingress, b"HTTP/1.1 200 OK\r\n").unwrap();
         let sealed = w.seal();
@@ -900,7 +901,8 @@ mod tests {
                 recipient: manifest.recipient.clone(),
                 wrapped_data_key_b64: manifest.wrapped_data_key_b64.clone(),
             },
-        );
+        )
+        .unwrap();
         w.push(Direction::Egress, b"secret").unwrap();
         let sealed = w.seal();
         write_manifest(&dir, &sealed).unwrap();

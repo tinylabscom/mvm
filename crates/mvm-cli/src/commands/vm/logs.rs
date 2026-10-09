@@ -1193,7 +1193,8 @@ mod tests {
                     recipient: "transcript-kek".to_string(),
                     wrapped_data_key_b64: wrapped,
                 },
-            );
+            )
+            .unwrap();
             for line in lines {
                 writer
                     .push(Direction::Stdout, line.as_bytes())

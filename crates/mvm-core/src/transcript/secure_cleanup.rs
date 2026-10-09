@@ -195,7 +195,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, TranscriptManifest) {
         let dir = tempfile::tempdir().unwrap();
         crate::private_fs::ensure_private_dir(dir.path()).unwrap();
-        let mut writer = TranscriptWriter::try_new(
+        let mut writer = TranscriptWriter::new(
             dir.path(),
             crate::crypto::aead::Key::random(),
             TranscriptWriterConfig {

@@ -321,6 +321,7 @@ mod tests {
                 wrapped_data_key_b64: "wrapped".to_string(),
             },
         )
+        .unwrap()
     }
 
     /// Push `payloads` through a real writer while mirroring each landed
@@ -534,7 +535,8 @@ mod tests {
                 recipient: "host:test".to_string(),
                 wrapped_data_key_b64: "wrapped".to_string(),
             },
-        );
+        )
+        .unwrap();
         let mut journal = CaptureJournal::new(dir.path(), writer.sealed_manifest());
         let payload = vec![b'x'; 4096];
         for _ in 0..600u32 {

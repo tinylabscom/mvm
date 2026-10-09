@@ -553,7 +553,7 @@ fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
         recipient: TRANSCRIPT_KEK_RECIPIENT.to_string(),
         wrapped_data_key_b64,
     });
-    Ok(TranscriptWriter::new(transcript_dir, data_key, config))
+    Ok(TranscriptWriter::new(transcript_dir, data_key, config)?)
 }
 
 /// Throw away whatever a previous boot left in the capture directory, keeping
@@ -1775,6 +1775,7 @@ mod tests {
                 wrapped_data_key_b64: String::new(),
             }),
         )
+        .unwrap()
         .sealed_manifest();
         manifest.adopted = true;
 

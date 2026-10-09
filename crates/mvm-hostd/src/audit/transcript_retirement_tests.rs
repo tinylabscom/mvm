@@ -33,7 +33,7 @@ impl Fixture {
             &root.path().join("audit"),
         )
         .unwrap();
-        let mut writer = TranscriptWriter::try_new(
+        let mut writer = TranscriptWriter::new(
             &dir,
             mvm_core::crypto::aead::Key::random(),
             TranscriptWriterConfig {

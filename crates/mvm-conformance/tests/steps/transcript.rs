@@ -68,7 +68,8 @@ async fn sealed_transcript_with_chain_anchor(world: &mut CliWorld) {
                 recipient: "transcript-kek".to_string(),
                 wrapped_data_key_b64,
             },
-        );
+        )
+        .unwrap();
         writer
             .push(Direction::Egress, EVIDENCE)
             .expect("capture transcript fixture");
