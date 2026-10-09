@@ -941,6 +941,7 @@ fn verify_archive_signature_at(
             train: mvm_build::release_signature::ReleaseTrain::Cli,
         },
     )
+    .map(|_| ())
     .with_context(|| {
         format!(
             "refusing to install {archive_name}: it is not signed by the {tag} release workflow"

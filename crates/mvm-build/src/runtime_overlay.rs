@@ -933,6 +933,7 @@ pub fn fetch_cli_release_archive(
             train: crate::release_signature::ReleaseTrain::Cli,
         },
     )
+    .map(|_| ())
 }
 
 /// Install an authenticated runtime overlay archive published per CLI

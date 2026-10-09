@@ -26,6 +26,17 @@ fn with_overlay(bytes: &[u8]) -> ImageSetFixture {
 }
 
 #[test]
+fn development_signature_bypass_cannot_seed_an_authenticated_root_cache() {
+    let mut env = unsigned_env();
+    let home = tempfile::tempdir().unwrap();
+    env.set("MVM_HOME", home.path().to_str().unwrap());
+    let served = tempfile::tempdir().unwrap();
+    PublishedImageSet::acquire_from(with_overlay(b"overlay").serve_from(served.path()))
+        .expect("the explicit development bypass retains its acquisition behavior");
+    assert!(!mvm_core::image_set::image_set_root_proof_cache().exists());
+}
+
+#[test]
 fn a_member_named_by_the_signed_root_is_delivered_verbatim() {
     let _env = unsigned_env();
     let served = tempfile::tempdir().unwrap();

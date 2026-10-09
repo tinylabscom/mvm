@@ -172,7 +172,7 @@ impl PublishedImageSet {
             );
         }
 
-        crate::release_signature::verify_release_archive_signature(
+        let signature_bundle = crate::release_signature::verify_release_archive_signature(
             &crate::release_signature::ReleaseSignatureRequest {
                 base_url: &base_url,
                 asset: lock.manifest_asset.as_str(),
@@ -196,6 +196,17 @@ impl PublishedImageSet {
             bail!(
                 "images.lock compatibility does not match the signed image-set manifest; run the pin-update workflow"
             );
+        }
+
+        if let Some(bundle) = signature_bundle {
+            let requirement = ImageSetRequirement::current_train();
+            let proof_cache = mvm_core::image_set::image_set_root_proof_cache();
+            let request =
+                mvm_core::image_set::ImageSetVerification::new(&bytes, &bundle, lock, &proof_cache)
+                    .require(&requirement)
+                    .with_host_protocols(&host);
+            mvm_core::image_set::cache_image_set_root(&proof_cache, &request)
+                .context("retain authenticated image-set root for offline admission")?;
         }
 
         Ok(Self {
