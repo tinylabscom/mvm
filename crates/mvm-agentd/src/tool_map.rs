@@ -47,7 +47,9 @@ pub fn provenance_matches(requested: &str, actual: &str) -> bool {
 pub const TOOL_DIR: &str = "/run/mvm-tool";
 /// The helper's guest-local listening socket, inside [`TOOL_DIR`].
 pub const HELPER_SOCKET: &str = "/run/mvm-tool/helper.sock";
-/// Sticky root-owned directory only the saved tool group can traverse.
+/// Helper-owned directory the agent may traverse only under its saved tool
+/// group. Ownership lets the non-root helper create the socket while its
+/// filesystem gid makes that socket reachable by the agent, not the workload.
 pub const TOOL_ATTRIBUTION_DIR: &str = "/run/mvm-tool/attribution";
 /// Guest-local helper socket restricted to the agent's saved tool group.
 pub const TOOL_ATTRIBUTION_SOCKET: &str = "/run/mvm-tool/attribution/helper.sock";
