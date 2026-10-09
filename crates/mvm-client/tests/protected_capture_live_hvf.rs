@@ -33,7 +33,7 @@ fn required_path(key: &str) -> Result<PathBuf> {
 struct Inputs {
     root: PathBuf,
     cli: PathBuf,
-    rootfs: PathBuf,
+    image: String,
 }
 
 impl Inputs {
@@ -79,7 +79,42 @@ impl Inputs {
                     .starts_with(root.join("mvm/cache")),
             "fixtures must be in the isolated cache"
         );
-        Ok(Self { root, cli, rootfs })
+        let cache = root.join("mvm/cache/oci");
+        let index: serde_json::Value =
+            serde_json::from_slice(&fs::read(cache.join("index.json"))?)?;
+        let rootfs = rootfs.canonicalize()?;
+        let image = index["images"]
+            .as_array()
+            .context("fixture OCI index missing images")?
+            .iter()
+            .find(|image| {
+                image["rootfs_path"].as_str().is_some_and(|path| {
+                    cache
+                        .join(path)
+                        .canonicalize()
+                        .is_ok_and(|path| path == rootfs)
+                })
+            })
+            .context("fixture rootfs has no OCI provenance entry")?;
+        let digest = image["resolved_digest"]
+            .as_str()
+            .context("fixture digest missing")?;
+        ensure!(
+            digest.strip_prefix("sha256:").is_some_and(
+                |hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            ),
+            "invalid fixture OCI digest"
+        );
+        let image = format!(
+            "{}/{}@{digest}",
+            image["registry"]
+                .as_str()
+                .context("fixture registry missing")?,
+            image["repository"]
+                .as_str()
+                .context("fixture repository missing")?
+        );
+        Ok(Self { root, cli, image })
     }
 }
 
@@ -119,7 +154,7 @@ struct MachineGuard {
 impl MachineGuard {
     fn command(&self, verb: &str) -> Command {
         let mut command = Command::new(&self.cli);
-        command.args(["machine", verb, &self.name]);
+        command.args(["machine", verb, "--yes", &self.name]);
         command
     }
 
@@ -251,7 +286,7 @@ fn detached_console_survives_launcher_and_seals_on_stop() -> Result<()> {
         &machine.name,
         "--image",
     ]);
-    launch.arg(&inputs.rootfs);
+    launch.arg(&inputs.image);
     // No payload in persisted argv, environment, or fixture. The guest blocks
     // on stdin until the parent has observed the launcher's actual exit.
     launch.args(["--", "sh", "-c", "IFS= read -r first; IFS= read -r second; printf '%s%s\\n' \"$first\" \"$second\" > /dev/console"]);
