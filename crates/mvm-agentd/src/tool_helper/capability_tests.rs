@@ -41,6 +41,8 @@ fn helper_exec_retains_transition_caps_but_tool_exec_cannot_regain_privilege() {
     )
     .args(["--exact", PROBE, "--nocapture"])
     .env(STAGE, "helper")
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
     .output()
     .expect("exec helper identity");
     assert!(output.status.success(), "{output:?}");
