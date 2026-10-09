@@ -123,7 +123,9 @@ assert socket.if_nameindex() == [(1, "lo")], "unexpected network interface"
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
     flags = fcntl.ioctl(s, 0x8913, struct.pack("256s", b"lo"))
     assert not struct.unpack_from("H", flags, 16)[0] & 1, "loopback is UP"
-assert len(Path("/proc/net/route").read_text().splitlines()) == 1, "IPv4 route"
+ipv4_routes = Path("/proc/net/route").read_text()
+assert all(not line.strip() or line.split()[0] == "Iface"
+           for line in ipv4_routes.splitlines()), "IPv4 route: " + repr(ipv4_routes)
 for line in Path("/proc/net/ipv6_route").read_text().splitlines():
     fields = line.split()
     assert int(fields[8], 16) & 0x200, "non-reject IPv6 route"
@@ -558,7 +560,9 @@ class HelperTests(unittest.TestCase):
         import struct
         import types
 
-        def run_probe(*, flags=0, interfaces=None, route=False, connect_errno=errno.ENETUNREACH):
+        def run_probe(*, flags=0, interfaces=None, route=False,
+                      route_text="Iface\tDestination\tGateway\tFlags\n",
+                      connect_errno=errno.ENETUNREACH):
             fake_socket = mock.MagicMock()
             for name in ("AF_INET", "AF_INET6", "AF_UNIX", "SOCK_STREAM", "SOCK_DGRAM"):
                 setattr(fake_socket, name, getattr(socket, name))
@@ -571,7 +575,7 @@ class HelperTests(unittest.TestCase):
             a, b = mock.MagicMock(), mock.MagicMock()
             b.recv.return_value = b"x"
             fake_socket.socketpair.return_value = a, b
-            routes = {"/proc/net/route": "header\n" + ("external\n" if route else ""),
+            routes = {"/proc/net/route": route_text + ("external\n" if route else ""),
                       "/proc/net/ipv6_route": "0 00 0 00 0 0 0 0 00200200 lo\n"}
             fake_path = lambda path: types.SimpleNamespace(read_text=lambda: routes[path])
             modules = {
@@ -588,6 +592,9 @@ class HelperTests(unittest.TestCase):
 
         sockets = run_probe()
         self.assertEqual(sockets.socket.return_value.connect.call_count, 8)
+        for empty_table in ("", "\n", "Iface\tDestination\tGateway\tFlags\n\n"):
+            sockets = run_probe(route_text=empty_table)
+            self.assertEqual(sockets.socket.return_value.connect.call_count, 8)
         for values in ({"flags": 1}, {"interfaces": [(1, "lo"), (2, "eth0")]},
                        {"route": True}):
             with self.assertRaises(AssertionError):
