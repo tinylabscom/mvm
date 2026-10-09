@@ -24,8 +24,15 @@ rename is a trust rotation.
 Use “pack” for an immutable, signed workload distribution with a prepared
 environment, policy, and declared applications. Reserve `mvm/` for packs
 verified under an MVM-controlled release identity and a current signed
-revocation document. Until that revocation check exists, the built-in policy
-does not trust `mvm/` and no pack is labelled official. No wildcard may
+revocation document. The built-in check uses the distinct MVM release workflow
+identity
+`https://github.com/tinylabscom/mvm/.github/workflows/registry-pack-revocations.yml@refs/heads/main`
+under the GitHub OIDC issuer. It has a separate private cache and checkpoint
+from operator-configured feeds. A fresh signed document is required at
+installation and every execution; absence, expiry, invalid signature,
+revocation, and rollback fail closed. The first release imports the signed
+document explicitly rather than silently fetching it. Rotation of this
+identity requires a deliberate client trust update. No wildcard may
 convey official status. Community namespaces require their own explicit
 publisher trust. A valid signature authenticates publisher identity and
 artifact integrity; it says nothing about safety.
@@ -39,7 +46,7 @@ built-in trust in both exact workflow identities for legacy `agent/` and
 `runtime/` references. The former identity expires at 2026-11-06 00:00 UTC;
 verification after that instant accepts only the renamed workflow identity.
 An operator policy file still replaces built-in trust wholesale. This
-transition does not grant `mvm/` trust before revocation enforcement. A URL
+transition does not grant `mvm/` trust without revocation enforcement. A URL
 redirect is not signing authority.
 
 The workload pack CLI becomes `mvmctl pack info|verify|pull|run|ls|rm|update`.

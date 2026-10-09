@@ -50,16 +50,27 @@ jobs:
           case "$(printf '%s\n' "$response" | sed -n '1s/.* \([0-9][0-9][0-9]\).*/\1/p')" in
             200)
               test "${status:-0}" -eq 0
+              assets="$(gh release view registry-pack-revocations --repo tinylabscom/mvm --json assets --jq '[.assets[].name]')"
+              prior_sequence="$(printf '%s' "$assets" | jq -r '
+                . as $names |
+                [ .[] | select(test("^registry-pack-revocations-[0-9]+[.]json$"))
+                  | capture("registry-pack-revocations-(?<sequence>[0-9]+)[.]json").sequence
+                  | tonumber
+                  | select(. as $number | $names | index("registry-pack-revocations-\($number).json.bundle"))
+                ] | max // empty
+              ')"
+              test -n "$prior_sequence"
               gh release download registry-pack-revocations --repo tinylabscom/mvm \
-                --pattern registry-pack-revocations.json --dir previous
+                --pattern "registry-pack-revocations-${prior_sequence}.json" --dir previous
               gh release download registry-pack-revocations --repo tinylabscom/mvm \
-                --pattern registry-pack-revocations.json.bundle --dir previous
-              cosign verify-blob --bundle previous/registry-pack-revocations.json.bundle \
+                --pattern "registry-pack-revocations-${prior_sequence}.json.bundle" --dir previous
+              cosign verify-blob --bundle "previous/registry-pack-revocations-${prior_sequence}.json.bundle" \
                 --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
-                previous/registry-pack-revocations.json
-              prior="$(jq -er '.sequence | select(type == "number" and . > 0)' previous/registry-pack-revocations.json)"
+                "previous/registry-pack-revocations-${prior_sequence}.json"
+              prior="$(jq -er '.sequence | select(type == "number" and . > 0)' "previous/registry-pack-revocations-${prior_sequence}.json")"
+              test "$prior" -eq "$prior_sequence"
               test "$GITHUB_RUN_NUMBER" -gt "$prior"
-              jq -e --slurpfile prior previous/registry-pack-revocations.json '
+              jq -e --slurpfile prior "previous/registry-pack-revocations-${prior_sequence}.json" '
                 ($prior[0].revoked_identities - .revoked_identities | length) == 0 and
                 ($prior[0].revoked_manifests - .revoked_manifests | length) == 0
               ' "$source" >/dev/null
@@ -143,16 +154,27 @@ jobs:
           case "$(printf '%s\n' "$response" | sed -n '1s/.* \([0-9][0-9][0-9]\).*/\1/p')" in
             200)
               test "${status:-0}" -eq 0
+              assets="$(gh release view registry-pack-revocations --repo tinylabscom/mvm --json assets --jq '[.assets[].name]')"
+              prior_sequence="$(printf '%s' "$assets" | jq -r '
+                . as $names |
+                [ .[] | select(test("^registry-pack-revocations-[0-9]+[.]json$"))
+                  | capture("registry-pack-revocations-(?<sequence>[0-9]+)[.]json").sequence
+                  | tonumber
+                  | select(. as $number | $names | index("registry-pack-revocations-\($number).json.bundle"))
+                ] | max // empty
+              ')"
+              test -n "$prior_sequence"
               gh release download registry-pack-revocations --repo tinylabscom/mvm \
-                --pattern registry-pack-revocations.json --dir previous
+                --pattern "registry-pack-revocations-${prior_sequence}.json" --dir previous
               gh release download registry-pack-revocations --repo tinylabscom/mvm \
-                --pattern registry-pack-revocations.json.bundle --dir previous
-              cosign verify-blob --bundle previous/registry-pack-revocations.json.bundle \
+                --pattern "registry-pack-revocations-${prior_sequence}.json.bundle" --dir previous
+              cosign verify-blob --bundle "previous/registry-pack-revocations-${prior_sequence}.json.bundle" \
                 --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" \
-                previous/registry-pack-revocations.json
-              prior="$(jq -er '.sequence | select(type == "number" and . > 0)' previous/registry-pack-revocations.json)"
+                "previous/registry-pack-revocations-${prior_sequence}.json"
+              prior="$(jq -er '.sequence | select(type == "number" and . > 0)' "previous/registry-pack-revocations-${prior_sequence}.json")"
+              test "$prior" -eq "$prior_sequence"
               test "$sequence" -gt "$prior"
-              jq -e --slurpfile prior previous/registry-pack-revocations.json '
+              jq -e --slurpfile prior "previous/registry-pack-revocations-${prior_sequence}.json" '
                 ($prior[0].revoked_identities - .revoked_identities | length) == 0 and
                 ($prior[0].revoked_manifests - .revoked_manifests | length) == 0
               ' registry-pack-revocations.json >/dev/null

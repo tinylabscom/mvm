@@ -61,6 +61,7 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
             &manifest.image,
             Some(mvm_core::registry_pack::RegistryPackImage::Built(_))
         );
+    let official = manifest.reference.namespace() == "mvm";
     let trust = publisher
         .policy
         .trust_for_namespace(manifest.reference.namespace())?;
@@ -97,8 +98,16 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         manifest_sha256: verified.manifest_sha256().as_str().to_string(),
         signer_identity: verified.signer().identity.clone(),
         signer_issuer: verified.signer().issuer.clone(),
-        official_status: "not_established",
-        revocation_scope: "operator_configured_only",
+        official_status: if official {
+            "official"
+        } else {
+            "not_established"
+        },
+        revocation_scope: if official {
+            "mvm_release_identity"
+        } else {
+            "operator_configured_only"
+        },
         revocation_required,
         publisher_issuer: trust.issuer,
         accepted_signing_identities: trust.accepted_identities,
@@ -131,12 +140,17 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
         println!("Verified {} ({})", info.reference, info.manifest_sha256);
         println!("Signer identity: {}", info.signer_identity);
         println!("Signer issuer: {}", info.signer_issuer);
-        println!("Official status: not established by this verification");
-        if revocation_required {
+        if official {
+            println!("Official status: verified MVM release");
+            println!("Revocation scope: MVM-controlled signed release feed");
+        } else {
+            println!("Official status: not established by this verification");
+        }
+        if !official && revocation_required {
             println!(
                 "Revocation scope: independent operator trust and a fresh signed feed required"
             );
-        } else {
+        } else if !official {
             println!("Revocation scope: operator-configured signed feed only; no feed is required");
         }
         println!("Signature proves publisher identity and integrity, not safety.");
@@ -147,10 +161,15 @@ pub(super) fn run(reference_arg: &str, json: bool, verify_only: bool) -> Result<
     println!("Manifest SHA-256: {}", info.manifest_sha256);
     println!("Signer identity: {}", info.signer_identity);
     println!("Signer issuer: {}", info.signer_issuer);
-    println!("Official status: not established by this verification");
-    if revocation_required {
-        println!("Revocation scope: independent operator trust and a fresh signed feed required");
+    if official {
+        println!("Official status: verified MVM release");
+        println!("Revocation scope: MVM-controlled signed release feed");
     } else {
+        println!("Official status: not established by this verification");
+    }
+    if !official && revocation_required {
+        println!("Revocation scope: independent operator trust and a fresh signed feed required");
+    } else if !official {
         println!("Revocation scope: operator-configured signed feed only; no feed is required");
     }
     println!("Publisher issuer: {}", info.publisher_issuer);
