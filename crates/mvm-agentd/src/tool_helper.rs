@@ -1354,9 +1354,11 @@ fn peer_events(stream: std::os::unix::net::UnixStream) -> impl FnMut() -> ToolEv
     use std::collections::VecDeque;
     use std::os::fd::AsRawFd;
 
-    let fd = stream.as_raw_fd();
     let mut pending: VecDeque<u8> = VecDeque::new();
     move || loop {
+        // Capture the owned stream, not merely its descriptor number: otherwise
+        // it closes before the first poll and that number can be reused.
+        let fd = stream.as_raw_fd();
         if let Some(signal) = pending.pop_front() {
             return ToolEvent::Running(Some(signal));
         }
@@ -1369,6 +1371,9 @@ fn peer_events(stream: std::os::unix::net::UnixStream) -> impl FnMut() -> ToolEv
         let rc = unsafe { libc::poll(&mut pollfd, 1, 50) };
         if rc <= 0 {
             return ToolEvent::Running(None);
+        }
+        if pollfd.revents & libc::POLLNVAL != 0 {
+            return ToolEvent::Gone;
         }
         if pollfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR) != 0 {
             let mut buffer = [0u8; 64];
@@ -1616,6 +1621,22 @@ mod socket_tests {
     use std::os::unix::net::UnixStream;
 
     #[test]
+    fn event_source_owns_the_socket_until_it_is_dropped() {
+        use std::os::fd::AsRawFd;
+
+        let (mut shim, helper) = UnixStream::pair().expect("pair");
+        let fd = helper.as_raw_fd();
+        let mut events = peer_events(helper);
+        // SAFETY: F_GETFD only queries the descriptor; it does not mutate it.
+        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0);
+        shim.write_all(&[libc::SIGTERM as u8]).expect("signal");
+        assert_eq!(events(), ToolEvent::Running(Some(libc::SIGTERM as u8)));
+        assert_eq!(events(), ToolEvent::Running(None));
+        drop(shim);
+        assert_eq!(events(), ToolEvent::Gone);
+    }
+
+    #[test]
     fn helper_returns_a_typed_failure_for_a_malformed_request() {
         let (mut shim, helper) = UnixStream::pair().expect("pair");
         let server = std::thread::spawn(move || handle_connection(helper, &ToolMap::default()));
@@ -1627,7 +1648,9 @@ mod socket_tests {
             serde_json::from_str::<HelperReply>(answer.trim_end()).expect("reply"),
             HelperReply::Unavailable { .. }
         ));
-        assert!(server.join().expect("server join").is_err());
+        // Validation failed, but the transport successfully delivered its
+        // structured refusal; only a failure to send that reply is an I/O error.
+        server.join().expect("server join").expect("send refusal");
     }
 
     #[test]

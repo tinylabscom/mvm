@@ -9,7 +9,7 @@
 //! privilege and makes no policy decision: every refusal comes from the
 //! helper, which asks the host before any mediated spawn.
 
-use std::io::Read;
+use std::io::{BufRead, BufReader, Read};
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
@@ -298,13 +298,18 @@ fn forward_signals(_stream: &std::os::unix::net::UnixStream) {}
 
 /// Block until the helper's final reply and map it to an exit code.
 fn wait_reply(stream: &mut std::os::unix::net::UnixStream) -> Result<i32, String> {
-    let mut line = String::new();
-    stream
-        .take(MAX_SHIM_FRAME_BYTES)
-        .read_to_string(&mut line)
+    // The helper terminates the frame with a newline, not by closing every
+    // socket clone. Bound bytes, not elapsed time: the tool may run arbitrarily
+    // long before its final reply.
+    let mut line = Vec::new();
+    BufReader::new(stream.take(MAX_SHIM_FRAME_BYTES))
+        .read_until(b'\n', &mut line)
         .map_err(|error| format!("tool helper reply failed: {error}"))?;
-    let reply: HelperReply = serde_json::from_str(line.trim_end())
-        .map_err(|error| format!("tool helper reply: {error}"))?;
+    if line.last() != Some(&b'\n') {
+        return Err("tool helper reply is unterminated or exceeds its frame bound".into());
+    }
+    let reply: HelperReply =
+        serde_json::from_slice(&line).map_err(|error| format!("tool helper reply: {error}"))?;
     match reply {
         HelperReply::Exited { code } => Ok(code),
         HelperReply::Denied { reason } => {
@@ -314,6 +319,82 @@ fn wait_reply(stream: &mut std::os::unix::net::UnixStream) -> Result<i32, String
         HelperReply::Unavailable { reason } => {
             eprintln!("mvm-tool-shim: {reason}");
             Ok(EXIT_UNAVAILABLE)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::Shutdown;
+    use std::os::unix::net::UnixStream;
+    use std::time::Duration;
+
+    fn read_frame(frame: Vec<u8>) -> Result<i32, String> {
+        let (mut shim, mut peer) = UnixStream::pair().unwrap();
+        // Test watchdog only: production intentionally has no read deadline.
+        shim.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let writer = std::thread::spawn(move || {
+            peer.write_all(&frame).unwrap();
+            peer.shutdown(Shutdown::Write).unwrap();
+        });
+        let result = wait_reply(&mut shim);
+        writer.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn complete_reply_does_not_wait_for_peer_close() {
+        for (reply, expected) in [
+            (HelperReply::Exited { code: 42 }, 42),
+            (
+                HelperReply::Denied {
+                    reason: "denied".into(),
+                },
+                EXIT_DENIED,
+            ),
+            (
+                HelperReply::Unavailable {
+                    reason: "unavailable".into(),
+                },
+                EXIT_UNAVAILABLE,
+            ),
+        ] {
+            let (mut shim, mut peer) = UnixStream::pair().unwrap();
+            shim.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut frame = serde_json::to_vec(&reply).unwrap();
+            frame.push(b'\n');
+            peer.write_all(&frame).unwrap();
+            assert_eq!(wait_reply(&mut shim).unwrap(), expected);
+            // Keep the writing endpoint alive until after the read completes.
+            drop(peer);
+        }
+    }
+
+    #[test]
+    fn frame_bound_includes_newline() {
+        let mut frame = serde_json::to_vec(&HelperReply::Exited { code: 0 }).unwrap();
+        frame.resize(MAX_SHIM_FRAME_BYTES as usize - 1, b' ');
+        frame.push(b'\n');
+        assert_eq!(read_frame(frame.clone()).unwrap(), 0);
+
+        frame.insert(frame.len() - 1, b' ');
+        assert!(read_frame(frame).unwrap_err().contains("frame bound"));
+    }
+
+    #[test]
+    fn rejects_unterminated_and_malformed_frames() {
+        let reply = serde_json::to_vec(&HelperReply::Exited { code: 0 }).unwrap();
+        for frame in [
+            Vec::new(),
+            reply,
+            b"\n".to_vec(),
+            b"not json\n".to_vec(),
+            b"{\"exited\":\n".to_vec(),
+            vec![0xff, b'\n'],
+        ] {
+            assert!(read_frame(frame).is_err());
         }
     }
 }

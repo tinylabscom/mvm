@@ -309,6 +309,8 @@ jobs:
             "$test_binary" --list --exact "$test" | grep -Fx "$test: test"
             sudo env MVM_GUEST_PRIVILEGED_TESTS=1 "$test_binary" --exact "$test" --nocapture
           done
+          "$test_binary" tool_ --nocapture
+          cargo test -p mvm-agentd --bin mvm-tool-shim
 
       - name: Run the selected live witness
         run: just bdd::live-ci ${{ matrix.witness }}
