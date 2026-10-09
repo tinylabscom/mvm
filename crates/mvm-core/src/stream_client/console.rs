@@ -146,8 +146,10 @@ impl ConsoleTail {
     ///
     /// Byte-based because the console has no record boundaries to count.
     pub fn seek_to_last(&mut self, bytes: u64) -> io::Result<()> {
-        let len = std::fs::metadata(&self.path)?.len();
+        let file = File::open(&self.path)?;
+        let len = file.metadata()?.len();
         self.offset = len.saturating_sub(bytes);
+        self.file = Some(file);
         Ok(())
     }
 
@@ -159,7 +161,12 @@ impl ConsoleTail {
     /// exactly is safe: it is the unchained fallback, so moving the start to a
     /// line boundary re-frames nothing the chain covers.
     pub fn seek_to_last_lines(&mut self, lines: usize) -> io::Result<()> {
-        let contents = std::fs::read(&self.path)?;
+        let mut file = File::open(&self.path)?;
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)?;
+        // Keep the descriptor whose contents determined the offset. A follower
+        // can then detect replacement before applying that offset to a read.
+        self.file = Some(file);
         if lines == 0 {
             self.offset = contents.len() as u64;
             return Ok(());
@@ -209,12 +216,13 @@ impl ConsoleTail {
     ///
     /// The file is reopened whenever it is not yet held, so a reader that
     /// attached before the backend created it picks it up rather than
-    /// reporting an empty capture forever. On Unix, follow the name across
-    /// fresh-inode capture replacement, restarting at byte zero without
-    /// resetting the output sequence.
+    /// reporting an empty capture forever. On Unix, following readers check
+    /// the name for fresh-inode capture replacement, restarting at byte zero
+    /// without resetting the output sequence. Finite readers drain their held
+    /// descriptor even if the name disappears or is replaced.
     fn read_tick(&mut self) -> io::Result<Option<Vec<u8>>> {
         #[cfg(unix)]
-        if let Some(file) = &self.file {
+        if let (true, Some(file)) = (self.follow, &self.file) {
             use std::os::unix::fs::MetadataExt as _;
 
             let held = file.metadata()?;
@@ -403,6 +411,103 @@ mod tests {
         let mut tail = ConsoleTail::open(&path, false);
         assert_eq!(drain(&mut tail), b"done");
         assert_eq!(tail.next_record().expect("no error"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_finite_reader_drains_its_descriptor_after_replacement_or_unlink() {
+        for replace in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("console.log");
+            let original = vec![b'x'; READ_CHUNK_BYTES + 32];
+            write(&path, &original);
+            let mut tail = ConsoleTail::open(&path, false);
+            let first = tail.next_record().unwrap().unwrap();
+            assert_eq!(first.payload, original[..READ_CHUNK_BYTES]);
+            assert_eq!(first.seq, 0);
+
+            if replace {
+                let replacement = dir.path().join("replacement.log");
+                write(&replacement, b"NEXT_CAPTURE");
+                std::fs::rename(&replacement, &path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+
+            let remainder = tail.next_record().unwrap().unwrap();
+            assert_eq!(remainder.payload, original[READ_CHUNK_BYTES..]);
+            assert_eq!(remainder.seq, 1);
+            assert_eq!(tail.next_record().unwrap(), None);
+            if !replace {
+                write(&path, b"NEXT_CAPTURE");
+                assert_eq!(tail.next_record().unwrap(), None);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn seek_helpers_bind_offsets_to_the_capture_descriptor() {
+        for follow in [false, true] {
+            for by_lines in [false, true] {
+                for count in [0, 1] {
+                    let dir = tempfile::tempdir().unwrap();
+                    let path = dir.path().join("console.log");
+                    write(&path, b"previous boot\nlast\n");
+                    let mut tail = ConsoleTail::open(&path, follow);
+                    if by_lines {
+                        tail.seek_to_last_lines(count).unwrap();
+                    } else {
+                        tail.seek_to_last(count as u64).unwrap();
+                    }
+                    let replacement = dir.path().join("replacement.log");
+                    write(&replacement, b"NEW");
+                    std::fs::rename(&replacement, &path).unwrap();
+
+                    let expected: Option<&[u8]> = if follow {
+                        Some(b"NEW")
+                    } else if count == 0 {
+                        None
+                    } else if by_lines {
+                        Some(b"last\n")
+                    } else {
+                        Some(b"\n")
+                    };
+                    // A single tick makes a missed replacement fail rather
+                    // than waiting forever in a following next_record call.
+                    assert_eq!(
+                        tail.read_tick().unwrap().as_deref(),
+                        expected,
+                        "follow={follow}, by_lines={by_lines}, count={count}"
+                    );
+                    assert!(tail.read_tick().unwrap().is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seek_helpers_report_missing_captures_without_losing_the_held_file() {
+        for by_lines in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("console.log");
+            let mut tail = ConsoleTail::open(&path, false);
+            let seek = |tail: &mut ConsoleTail| {
+                if by_lines {
+                    tail.seek_to_last_lines(1)
+                } else {
+                    tail.seek_to_last(1)
+                }
+            };
+            assert_eq!(seek(&mut tail).unwrap_err().kind(), io::ErrorKind::NotFound);
+            write(&path, b"original");
+            assert_eq!(tail.next_record().unwrap().unwrap().seq, 0);
+            std::fs::rename(&path, dir.path().join("held.log")).unwrap();
+            assert_eq!(seek(&mut tail).unwrap_err().kind(), io::ErrorKind::NotFound);
+            assert!(tail.file.is_some());
+            assert_eq!(tail.offset, 8);
+            assert_eq!(tail.seq, 1);
+        }
     }
 
     #[test]
