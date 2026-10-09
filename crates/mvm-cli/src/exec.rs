@@ -36,7 +36,9 @@ pub(crate) use mounts::admitted_instruction_mounts;
 use mounts::refuse_unloadable_sidecar;
 mod session;
 mod sidecar_selection;
+mod startup_slo;
 mod transient;
+use startup_slo::enforce_startup_slo;
 
 pub use launch_plan::load_launch_plan;
 
@@ -510,8 +512,23 @@ pub fn run_captured(
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
 ) -> Result<ExecOutput> {
-    run_inner(req, /* capture = */ true, admit, posture)
-        .map(|either| either.right().expect("capture mode returns ExecOutput"))
+    run_captured_started(req, admit, posture, std::time::Instant::now())
+}
+
+pub(crate) fn run_captured_started(
+    req: ExecRequest,
+    admit: Option<&SessionAdmit<'_>>,
+    posture: Option<&PostureSink>,
+    startup_started: std::time::Instant,
+) -> Result<ExecOutput> {
+    run_inner(
+        req,
+        /* capture = */ true,
+        admit,
+        posture,
+        startup_started,
+    )
+    .map(|either| either.right().expect("capture mode returns ExecOutput"))
 }
 
 /// Run the request: boot, run, tear down.
@@ -526,8 +543,23 @@ pub fn run(
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
 ) -> Result<i32> {
-    run_inner(req, /* capture = */ false, admit, posture)
-        .map(|either| either.left().expect("streaming mode returns exit code"))
+    run_started(req, admit, posture, std::time::Instant::now())
+}
+
+pub(crate) fn run_started(
+    req: ExecRequest,
+    admit: Option<&SessionAdmit<'_>>,
+    posture: Option<&PostureSink>,
+    startup_started: std::time::Instant,
+) -> Result<i32> {
+    run_inner(
+        req,
+        /* capture = */ false,
+        admit,
+        posture,
+        startup_started,
+    )
+    .map(|either| either.left().expect("streaming mode returns exit code"))
 }
 
 fn reported_exit_code(
@@ -552,6 +584,7 @@ fn run_inner(
     capture: bool,
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
+    startup_started: std::time::Instant,
 ) -> Result<Either<i32, ExecOutput>> {
     // Phase timing (off unless `MVM_PHASE_TIMING` or a launch-sample path is
     // set): capture a host-monotonic mark at each run seam, then emit a
@@ -661,12 +694,20 @@ fn run_inner(
             Err(e) => Err(e),
         }
     } else if boots_baked_entrypoint(&req) {
-        let workload_started = timing.then(std::time::Instant::now);
-        dispatch_baked_entrypoint(&vm_name, &req, &mut sub_marks)
-            .and_then(|status| baked_entrypoint_result(status, capture, &vm_name))
-            .map(|result| (result, workload_started))
+        dispatch_baked_entrypoint(&vm_name, &req, startup_started, launch_mode, &mut sub_marks)
+            .and_then(|(status, ready)| {
+                baked_entrypoint_result(status, capture, &vm_name)
+                    .map(|result| (result, Some(ready)))
+            })
     } else {
-        run_in_guest(&vm_name, &req, capture, timing, &mut sub_marks)
+        run_in_guest(
+            &vm_name,
+            &req,
+            capture,
+            startup_started,
+            launch_mode,
+            &mut sub_marks,
+        )
     };
     let reported_exit_code = reported_exit_code(&run_outcome);
     let workload_completed = run_outcome.is_ok();

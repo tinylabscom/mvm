@@ -5,11 +5,6 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use cucumber::{given, then, when};
-use mvm_build::guest_agent_build::{
-    GuestBinarySource, GuestRuntimeBinaryPaths, RuntimeOverlayGuestLayout, guest_binary_source,
-    install_into_cache, runtime_overlay_source_checkout_fingerprint,
-};
-use mvm_core::arch::GuestArch;
 use mvm_core::plan::test_support::PlanFixture;
 use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
 use mvm_runtime::vm::volume_registry::LocalVolumeCatalog;
@@ -18,6 +13,9 @@ use crate::world::CliWorld;
 
 use super::cli::{install_encrypted_backing_probes, mvmctl_command, workspace_root};
 use mvm_conformance::IsolatedHome;
+
+#[path = "../support/live_runtime.rs"]
+mod live_runtime;
 
 fn isolated_home(world: &CliWorld) -> &Path {
     world
@@ -61,62 +59,103 @@ fn cached_live_workload_kernel(world: &mut CliWorld) {
     fs::copy(&source, &destination).unwrap_or_else(|error| {
         panic!("copy live workload kernel {source:?} to {destination:?}: {error}")
     });
-    cache_live_guest_binaries(world);
-}
-
-fn cache_live_guest_binaries(world: &CliWorld) {
-    let source_dir = PathBuf::from(
-        std::env::var_os("MVM_BDD_GUEST_BIN_DIR")
-            .expect("MVM_BDD_GUEST_BIN_DIR must name the prebuilt guest-runtime directory"),
-    );
+    mvm_build::kernel_fetch::record_kernel_digest(&destination)
+        .expect("record isolated workload kernel digest");
     assert!(
-        source_dir.is_dir(),
-        "MVM_BDD_GUEST_BIN_DIR does not name a directory: {source_dir:?}"
+        matches!(
+            mvm_build::kernel_fetch::resolve_kernel(
+                &isolated_home(world).join("cache"),
+                std::env::consts::ARCH,
+                "workload",
+                false,
+            ),
+            mvm_build::kernel_fetch::KernelResolution::Cached(ref kernel)
+                if kernel.path() == destination
+        ),
+        "isolated workload kernel must resolve from the verified cache"
     );
-    let source = guest_binary_source().expect("resolve guest-runtime cache generation");
-    install_into_cache(
-        GuestRuntimeBinaryPaths {
-            agent: &source_dir.join("mvm-guest-agent"),
-            netinit: &source_dir.join("mvm-guest-netinit"),
-            egress_client: &source_dir.join("mvm-egress-client"),
-            entrypoint_runner: &source_dir.join("mvm-oci-entrypoint"),
-        },
-        &isolated_home(world).join("cache").join("oci"),
-        source.cache_key(),
-        GuestArch::host(),
-    )
-    .expect("seed isolated guest-runtime cache from prebuilt binaries");
-    if let GuestBinarySource::SourceCheckout { workspace_root, .. } = source {
-        let fingerprint = runtime_overlay_source_checkout_fingerprint(&workspace_root)
-            .expect("fingerprint local runtime-overlay sources");
-        cache_live_runtime_overlay(world, &source_dir, &fingerprint);
-    }
+    prepare_live_runtime(world);
+    let output = mvmctl_command()
+        .args(["image", "pull", "alpine"])
+        .isolated_home(isolated_home(world))
+        .output()
+        .expect("prepare Alpine in the isolated live home");
+    assert!(
+        output.status.success(),
+        "prepare Alpine in the isolated live home\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
-fn cache_live_runtime_overlay(world: &CliWorld, source_dir: &Path, fingerprint: &str) {
-    let layout = RuntimeOverlayGuestLayout::under(
-        &isolated_home(world).join("cache"),
-        env!("CARGO_PKG_VERSION"),
-        GuestArch::host(),
-        fingerprint,
-    );
-    fs::create_dir_all(&layout.dir).expect("create isolated runtime-overlay cache");
-    for (source_name, destination) in [
-        ("mvm-guest-agent", &layout.agent),
-        ("mvm-guest-netinit", &layout.netinit),
-        ("mvm-seccomp-apply", &layout.seccomp_apply),
-        ("mvm-display-bridge", &layout.display_bridge),
-        ("mvm-runner", &layout.runner),
-        ("mvm-egress-client", &layout.egress_client),
-        ("mvm-addon-dns", &layout.addon_dns),
-        ("mvm-exit-report", &layout.exit_report),
-        ("mvm-ping", &layout.ping),
-    ] {
-        let source = source_dir.join(source_name);
-        fs::copy(&source, destination).unwrap_or_else(|error| {
-            panic!("copy runtime-overlay binary {source:?} to {destination:?}: {error}")
-        });
+fn prepare_live_runtime(world: &CliWorld) {
+    use mvm_vmm::host::aux_bin::{self, AuxBin, HostProcess};
+
+    let home = isolated_home(world);
+    let cache = home.join("cache");
+    let cli = super::cli::mvmctl_path();
+    let host = HostProcess::undeclared()
+        .with_binary_dir(cli.parent().expect("mvmctl has a binary directory"));
+    // These daemon binaries do not implement the endpoint's contract probe.
+    // Resolve them without granting permission to compile at launch.
+    for name in ["mvm-host-agent", "mvm-signer-helper"] {
+        assert!(
+            host.binary_named(name).is_some(),
+            "prebuild {name} beside the live mvmctl"
+        );
     }
+    aux_bin::resolve_verified_for(
+        &AuxBin::new(
+            "mvm-network-endpoint",
+            "MVM_SUBSTITUTION_ENDPOINT_PATH",
+            "mvm-hostd",
+        ),
+        &host,
+    )
+    .expect("prebuilt network endpoint must satisfy the launch contract");
+    // Admit one independently verified archive, not loose executables. Both
+    // assemblers record that archive's digest, including the distinct PID 1
+    // agent that the universal initramfs needs.
+    let runtime = super::cli::seed_live_guest_runtime(home);
+    let (overlay, initramfs) = live_runtime::prepare(&cache, &runtime)
+        .expect("prepare both isolated verified boot artifacts");
+
+    // Exercise the launch's cache-only boundaries before creating a machine.
+    // A missing artifact or stale source fingerprint is a fixture failure,
+    // rather than a request to acquire anything during machine start.
+    let mut env = mvm_core::util::test_env::TestEnv::new();
+    env.isolate_mvm_home(home);
+    env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "build");
+    mvm_client::launch::runtime_overlay::require_prepared_oci_guest_runtime(&cache.join("oci"))
+        .expect("isolated OCI guest runtime must already be prepared");
+    let mut config = mvm_core::vm_backend::VmStartConfig {
+        kernel_path: Some("prepared-workload-kernel".to_string()),
+        rootfs_path: "prepared-workload-rootfs".to_string(),
+        ..Default::default()
+    };
+    mvm_client::launch::runtime_source::attach_runtime_overlay_if_cached(
+        &mut config,
+        "firecracker",
+    )
+    .expect("isolated runtime overlay must attach without acquisition");
+    mvm_runtime::universal_initramfs::attach_universal_initramfs_if_cached(
+        &mut config,
+        "firecracker",
+    )
+    .expect("isolated universal initramfs must attach without acquisition");
+    assert_eq!(config.initrd_path.as_deref(), initramfs.image_path.to_str());
+    assert_eq!(
+        config.runtime_overlay_path.as_deref(),
+        overlay.overlay_ext4.to_str()
+    );
+    assert_eq!(
+        config.runtime_overlay_verity_path.as_deref(),
+        overlay.sidecar.to_str()
+    );
+    assert_eq!(
+        config.runtime_overlay_roothash.as_deref(),
+        Some(overlay.roothash.as_str())
+    );
 }
 
 #[when(expr = "I write byte {int} to the end of managed volume {string}")]

@@ -582,6 +582,7 @@ mod tests {
             rootfs_path: None,
             runtime_tag: None,
             claims_path: Some("claims/alpine.json".to_string()),
+            verification_receipt_path: None,
             layers: vec![CachedOciLayer {
                 digest: "sha256:layer".to_string(),
                 size_bytes: 4,
