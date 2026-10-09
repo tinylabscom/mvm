@@ -93,8 +93,10 @@ mvm-http.workspace = true
 # The EgressEnforcer seam this crate's SupervisorEgressEnforcer
 # implements. Acyclic HIGH->LOW: mvm-net deps only mvm-core + mvm-contract.
 mvm-net.workspace = true
-# `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
+# `mvm_compiler::deps_audit::verify_sealed_volume` — supervisor
 # admission gate (security claim 9).
+mvm-compiler.workspace = true
+# SDK authoring types used by the keyholder and secret resolver.
 mvm-sdk.workspace = true
 # The Workload IR (`SecretRef`, `AuthType`, `HealthCheck`, `host_matches`,
 # …) the keyholder + supervisor + healthcheck modules resolve against,

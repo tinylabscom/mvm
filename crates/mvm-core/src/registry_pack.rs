@@ -364,13 +364,19 @@ pub struct RegistryPackFile {
     pub size: u64,
 }
 
-/// Source files for the microVM image a pack can build and boot.
-///
-/// The manifest and neighboring flake files are ordinary signed payload
-/// files; their exact digests are carried by `RegistryPackManifest::files`.
+/// The signed manifest declares either a legacy source image or an immutable
+/// built workload image, never both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RegistryPackImage {
+    Source(RegistryPackSourceImage),
+    Built(Box<crate::registry_pack_image::BuiltPackImageDescriptor>),
+}
+
+/// Source files for a legacy microVM image a pack can build and boot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RegistryPackImage {
+pub struct RegistryPackSourceImage {
     /// In-pack path to `mvm.toml` beside `flake.nix` and `flake.lock`.
     pub manifest: String,
 }
@@ -934,7 +940,7 @@ fn validate_registry_pack_manifest(
             });
         }
     }
-    if let Some(image) = &manifest.image {
+    if let Some(RegistryPackImage::Source(image)) = &manifest.image {
         let path = &image.manifest;
         let manifest_path = Path::new(path);
         if !pack_path_is_safe(path)
@@ -959,6 +965,18 @@ fn validate_registry_pack_manifest(
                 });
             }
         }
+    }
+    if let Some(RegistryPackImage::Built(image)) = &manifest.image {
+        image
+            .validate_pin(
+                &manifest.reference,
+                &crate::image_set::image_train_lock().image_set,
+            )
+            .map_err(
+                |error| RegistryPackVerificationError::InvalidImageDeclaration {
+                    reason: error.to_string(),
+                },
+            )?;
     }
     Ok(())
 }
@@ -1026,7 +1044,17 @@ pub fn verify_registry_pack_contents(
     }
     refuse_undeclared_payload_paths(root, root, &declared)?;
     if let Some(image) = &verified.manifest().image {
-        validate_registry_pack_image_manifest(verified, root, image)?;
+        match image {
+            RegistryPackImage::Source(source) => {
+                validate_registry_pack_image_manifest(verified, root, source)?;
+            }
+            RegistryPackImage::Built(_) => {
+                return Err(RegistryPackVerificationError::InvalidImageDeclaration {
+                    reason: "built-image release assets have not been authenticated and installed"
+                        .to_string(),
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -1034,7 +1062,7 @@ pub fn verify_registry_pack_contents(
 fn validate_registry_pack_image_manifest(
     verified: &VerifiedRegistryPack,
     root: &Path,
-    image: &RegistryPackImage,
+    image: &RegistryPackSourceImage,
 ) -> Result<(), RegistryPackVerificationError> {
     const MAX_IMAGE_MANIFEST_BYTES: u64 = 64 * 1024;
     let file = verified
@@ -1765,8 +1793,10 @@ mod tests {
 
         let verified = verify(&manifest).expect("declared image files verify");
         assert_eq!(
-            verified.manifest().image.as_ref().unwrap().manifest,
-            "pack/image/mvm.toml"
+            verified.manifest().image,
+            Some(RegistryPackImage::Source(RegistryPackSourceImage {
+                manifest: "pack/image/mvm.toml".to_string(),
+            }))
         );
         let mut unknown = manifest.clone();
         unknown["image"]["host_path"] = serde_json::json!("/etc/mvm");
@@ -1796,6 +1826,73 @@ mod tests {
                 "unsafe image path {path} must fail"
             );
         }
+    }
+
+    #[test]
+    fn signed_built_image_declaration_requires_the_compiled_base_pin() {
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&signed_manifest_bytes("runtime/python@1.2.3")).unwrap();
+        let lock = &crate::image_set::image_train_lock().image_set;
+        let asset = |name: &str| {
+            serde_json::json!({
+                "name": name, "sha256": "0".repeat(64), "size": 1,
+            })
+        };
+        manifest["image"] = serde_json::json!({
+            "schema_version": 2,
+            "platform": "linux/x86_64",
+            "base_set": {
+                "repository": lock.repository,
+                "release_tag": lock.release_tag,
+                "manifest_sha256": lock.manifest_sha256,
+            },
+            "release": {
+                "repository": "tinylabscom/mvm-packs",
+                "tag": "pack-runtime-python-v1.2.3",
+            },
+            "assets": {
+                "rootfs": asset("rootfs.ext4"),
+                "verity": asset("rootfs.verity"),
+                "roothash": asset("rootfs.roothash"),
+                "mvm_meta": asset("mvm-meta.json"),
+                "rootfs_signature_bundle": asset("rootfs.signature.json"),
+                "provenance_statement": asset("provenance.json"),
+                "provenance_signature_bundle": asset("provenance.signature.json"),
+            },
+        });
+        let requested = reference("runtime/python@1.2.3");
+        let policy = publisher_policy();
+        let verify = |value: &serde_json::Value| {
+            let bytes = serde_json::to_vec(value).unwrap();
+            let pins = PackLockfile::new(vec![pin("runtime/python@1.2.3", &bytes)]).unwrap();
+            let request =
+                RegistryPackVerification::new(&requested, &bytes, b"bundle", &pins, &policy);
+            verify_registry_pack_with(&request, accept_signature)
+        };
+        let verified = verify(&manifest).expect("current pinned built-image declaration");
+        assert!(matches!(
+            verified.manifest().image,
+            Some(RegistryPackImage::Built(_))
+        ));
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("pack")).unwrap();
+        std::fs::write(root.path().join("pack/profile.toml"), b"profile").unwrap();
+        assert!(matches!(
+            verify_registry_pack_contents(&verified, root.path()),
+            Err(RegistryPackVerificationError::InvalidImageDeclaration { .. })
+        ));
+        let mut stale = manifest.clone();
+        stale["image"]["base_set"]["manifest_sha256"] = serde_json::json!("0".repeat(64));
+        assert!(matches!(
+            verify(&stale),
+            Err(RegistryPackVerificationError::InvalidImageDeclaration { .. })
+        ));
+        let mut mixed = manifest;
+        mixed["image"]["manifest"] = serde_json::json!("pack/image/mvm.toml");
+        assert!(matches!(
+            verify(&mixed),
+            Err(RegistryPackVerificationError::ManifestParse(_))
+        ));
     }
 
     #[test]
@@ -1986,9 +2083,9 @@ mod tests {
             schema_version: REGISTRY_PACK_MANIFEST_SCHEMA_VERSION,
             reference: reference("runtime/python@1.2.3"),
             description: "Python image".to_string(),
-            image: Some(RegistryPackImage {
+            image: Some(RegistryPackImage::Source(RegistryPackSourceImage {
                 manifest: "pack/image/mvm.toml".to_string(),
-            }),
+            })),
             files: declared,
         };
         let manifest_bytes = serde_json::to_vec(&manifest).unwrap();

@@ -1289,7 +1289,7 @@ pub struct InstallResultReport {
 /// `<artifact_out>/result.json`, fail closed on
 /// `installer_exit_code != 0`, and return
 /// [`BuilderArtifacts::InstallVolume`] pointing at the directory.
-/// Sealing the volume (via `mvm_sdk::compile::deps_audit::seal_volume`)
+/// Sealing the volume (via `mvm_compiler::deps_audit::seal_volume`)
 /// and renaming into the deps cache is the orchestrator's job
 /// (`mvm_build::app_deps::install_app_deps`) — keeping it out of the
 /// builder VM means the same code path covers fresh installs and

@@ -425,7 +425,7 @@ pub fn mvm_share_dir() -> String {
 }
 
 /// Root directory for application-dependency volumes sealed by
-/// `mvm_sdk::compile::deps_audit::seal_volume`: `<mvm_home>/volumes/deps`.
+/// `mvm_compiler::deps_audit::seal_volume`: `<mvm_home>/volumes/deps`.
 /// Each immediate child is a `<volume_hash>/` directory containing
 /// `content/`, `sbom.cdx.json`, `fetch.log`, `cve.json`, `meta.json`.
 ///
@@ -477,7 +477,7 @@ pub fn mvm_volumes_env() -> Vec<String> {
 /// Resolve `<deps_volumes_dir>/<volume_hash>` for a single deps
 /// volume. The caller is responsible for verifying the directory
 /// exists and matches its sealed manifest — see
-/// `mvm_sdk::compile::deps_audit::verify_sealed_volume`.
+/// `mvm_compiler::deps_audit::verify_sealed_volume`.
 pub fn deps_volume_dir(volume_hash: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(mvm_deps_volumes_dir()).join(volume_hash)
 }

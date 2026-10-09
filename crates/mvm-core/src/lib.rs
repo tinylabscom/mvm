@@ -93,6 +93,7 @@ pub mod release_version;
 pub use release_version::{ReleaseVersion, VersionSyntax};
 /// Named product-pack references and their fail-closed manifest lockfile.
 pub mod registry_pack;
+pub mod registry_pack_image;
 pub mod registry_pack_revocation;
 pub mod registry_pack_revocation_store;
 pub mod registry_pack_store;

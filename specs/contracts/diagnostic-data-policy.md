@@ -96,6 +96,8 @@ deadline unless a lifecycle owner actually performs or reconciles expiration.
 Expiry uses checked time arithmetic and must not delete payload on an invalid
 clock reading or arithmetic overflow.
 
+The numerical age policy must be recorded in the authenticated capture before
+automatic deletion is enabled; this never retroactively enrolls existing captures.
 New protected transcripts record the approved default of 604800 seconds after
 terminal sealing, with active generation intervals no longer than 3600 seconds.
 A computed integrity root is not terminal sealing. Finalization freezes the

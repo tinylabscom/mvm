@@ -30,8 +30,8 @@ mvm-hostd.workspace = true
 # the profile table the library launch paths read too.
 mvm-client = { workspace = true, features = ["clap"] }
 mvm-mcp.workspace = true
-# `mvmctl compile` reads the Workload IR (mvm_contract::ir, re-exported from
-# mvm_contract::ir) and routes it through the compile pipeline.
+# `mvmctl compile` routes the Workload IR through the canonical compiler.
+mvm-compiler.workspace = true
 # `deploy-remote` carries the HTTPS upload behind `mvmctl deploy`. It is off by
 # default in `mvm-sdk` so the in-guest cdylib built from that crate's lib target
 # links no rustls/ring/tokio; the CLI is the one consumer that needs it.

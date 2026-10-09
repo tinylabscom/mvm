@@ -22,7 +22,7 @@ use std::path::Path;
 
 use tree_sitter::{Language as TsLanguage, Parser, Query, QueryCursor, StreamingIterator};
 
-use crate::compile::reachability::Language;
+use crate::reachability::Language;
 
 /// What we know about a top-level function after parsing.
 #[derive(Debug, Clone, PartialEq, Eq)]

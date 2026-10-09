@@ -1,4 +1,4 @@
-//! Lifecycle-hook merger (SDK port Phase 10a).
+//! Lifecycle-hook merger.
 //!
 //! [`merge_hooks`] takes an `App`'s own `Hooks` plus the hooks each
 //! attached addon contributes, and returns the per-phase command list
@@ -8,14 +8,14 @@
 //! phase: empty vecs concatenate to empty, length-1 vecs to length-1,
 //! etc.
 //!
-//! Phase 10a (this module) handles the **compile-time** merge so the
+//! This module handles the **compile-time** merge so the
 //! launch.json that the Nix factory reads at flake-evaluation time
 //! contains the already-merged sequence. The factory's only job is
 //! to bake the resulting commands into the rootfs init at the right
 //! lifecycle point — no merging in Nix, where the language is too
 //! cumbersome for it.
 
-use crate::ir::Hooks;
+use mvm_contract::ir::Hooks;
 
 /// Merge the consuming `App`'s hooks with each attached addon's
 /// hooks. For every phase: `addons[0].phase ++ addons[1].phase ++ …
@@ -44,7 +44,7 @@ pub fn merge_hooks(app: &Hooks, addons: &[&Hooks]) -> Hooks {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::HookCmd;
+    use mvm_contract::ir::HookCmd;
 
     fn shell(line: &str) -> HookCmd {
         HookCmd::Shell {

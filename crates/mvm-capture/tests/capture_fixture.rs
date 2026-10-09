@@ -126,7 +126,7 @@ fn rendered_nix_contains_expected_flake_and_launch_json() {
     let result = mvm_capture::resolve::resolve_report(&report).expect("resolve succeeds");
 
     let out = tempfile::tempdir().expect("tempdir");
-    mvm_sdk::compile::compile(&result.workload, out.path(), &fixture_root())
+    mvm_compiler::compile(&result.workload, out.path(), &fixture_root())
         .expect("compile renders Nix artifacts");
 
     let flake = out.path().join("flake.nix");
