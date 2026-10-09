@@ -481,4 +481,37 @@ mod tests {
         assert_eq!(sc.network_policy, deny);
         assert!(!sc.network_policy.is_unrestricted());
     }
+
+    #[test]
+    fn runtime_volume_roundtrip_preserves_materialized_image_identity() {
+        let original = mvm_core::vm_backend::VmVolume {
+            host: "/host/source".into(),
+            guest: "/guest/source".into(),
+            materialized_image: Some("/state/source.ext4".into()),
+            ..Default::default()
+        };
+        let runtime = image::RuntimeVolume::from(&original);
+        let built = VmStartParams::builder()
+            .name("vm".into())
+            .rootfs_path("/rootfs.ext4".into())
+            .vmlinux_path("/vmlinux".into())
+            .revision_hash("rev".into())
+            .flake_ref(".".into())
+            .cpus(1)
+            .memory_mib(256)
+            .volumes(std::slice::from_ref(&runtime))
+            .config_files(&[])
+            .secret_files(&[])
+            .port_mappings(&[])
+            .warm_pool_size(0)
+            .network_policy(NetworkPolicy::deny_all())
+            .build()
+            .unwrap()
+            .into_start_config();
+
+        assert_eq!(
+            built.volumes[0].materialized_image,
+            original.materialized_image
+        );
+    }
 }

@@ -1940,7 +1940,7 @@ mod tests {
     fn workload_exit_capture_binds_and_persists_the_guest_exit_code() {
         use std::io::{Read, Write};
 
-        let state_dir = tempfile::tempdir().unwrap();
+        let state_dir = crate::driver::socket_tempdir();
         let runtime = state_dir.path().join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
 
@@ -1968,7 +1968,7 @@ mod tests {
         // value. Leaving the previous run's usage record here would let a run
         // stopped by a signal, which writes nothing of its own, sign the
         // previous run's CPU into its receipt as a measurement.
-        let state_dir = tempfile::tempdir().unwrap();
+        let state_dir = crate::driver::socket_tempdir();
         let runtime = state_dir.path().join("runtime");
         std::fs::create_dir_all(&runtime).unwrap();
         std::fs::write(
@@ -2585,7 +2585,7 @@ mod tests {
     /// alongside, so a claim cannot come to wire a different set.
     #[test]
     fn fork_standby_child_wires_the_childs_host_channels_before_it_attempts_the_restore() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::driver::socket_tempdir();
         let child_dir = tmp.path().join("child");
         std::fs::create_dir_all(&child_dir).unwrap();
         std::fs::write(child_dir.join("rootfs.ext4"), b"rootfs").unwrap();
@@ -2660,7 +2660,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Read, Write};
 
         for port in [GUEST_AGENT_PORT, GuestService::Telemetry.port()] {
-            let dir = tempfile::tempdir().unwrap();
+            let dir = crate::driver::socket_tempdir();
             let runtime = dir.path().join("runtime");
             std::fs::create_dir_all(&runtime).unwrap();
             let vsock = runtime.join("v.sock");

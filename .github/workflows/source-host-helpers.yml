@@ -1,0 +1,103 @@
+name: Source host helpers
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: source-host-helpers-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            build_target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            build_target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            build_target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.build_target }}
+      - uses: ./.github/actions/install-zigbuild
+      - name: Build launch helpers
+        env:
+          BUILD_TARGET: ${{ matrix.build_target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
+            cargo build --release --target "${BUILD_TARGET}" -p mvm-hostd \
+              --bin mvm-network-endpoint \
+              --bin mvm-hvf-supervisor
+          else
+            cargo zigbuild --release --target "${BUILD_TARGET}" -p mvm-hostd \
+              --bin mvm-network-endpoint
+          fi
+      - name: Package commit-addressed helpers
+        env:
+          TARGET: ${{ matrix.target }}
+          BUILD_TARGET: ${{ matrix.build_target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="mvm-host-helpers-${GITHUB_SHA}-${TARGET}"
+          mkdir -p "dist/${name}"
+          printf '%s\n' "${GITHUB_SHA}" > "dist/${name}/SOURCE_COMMIT"
+          cp "target/${BUILD_TARGET}/release/mvm-network-endpoint" "dist/${name}/"
+          if [[ "${BUILD_TARGET}" == *apple-darwin ]]; then
+            cp "target/${BUILD_TARGET}/release/mvm-hvf-supervisor" "dist/${name}/"
+          fi
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-host-helpers-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: source-host-helpers-*
+          path: dist
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign exact helper bundles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in dist/*.tar.gz; do
+            cosign sign-blob --yes --bundle "${archive}.bundle" "${archive}"
+          done
+      - name: Publish rolling source-build assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view source-builds >/dev/null 2>&1 ||
+            gh release create source-builds --prerelease \
+              --title "Commit-addressed source helpers" \
+              --notes "Signed host helper bundles keyed by the exact mvm source commit."
+          gh release upload source-builds dist/*.tar.gz dist/*.tar.gz.bundle --clobber

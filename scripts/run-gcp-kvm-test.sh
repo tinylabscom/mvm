@@ -245,15 +245,17 @@ rsync -a --from0 --files-from="$tracked_files" \
 # extended attributes; those look like feature files to the Linux BDD parser.
 COPYFILE_DISABLE=1 tar -C "$local_stage" -czf "$local_stage/mvm-source.tar.gz" tree
 printf '%s\0' "${remote_command[@]}" >"$local_stage/mvm-command.argv"
+git -C "$repo_root" rev-parse --verify 'HEAD^{commit}' >"$local_stage/mvm-source.sha"
 
 gcloud compute scp \
   "$local_stage/mvm-source.tar.gz" "$local_stage/mvm-command.argv" \
+  "$local_stage/mvm-source.sha" \
   "$instance:/tmp/" --project="$project" --zone="$zone" --quiet
 
 echo ">> preparing the host and running the requested test"
 set +e
 gcloud compute ssh "$instance" --project="$project" --zone="$zone" --quiet \
-  --command='sudo rm -rf /opt/mvm && sudo mkdir -p /opt/mvm && sudo tar -xzf /tmp/mvm-source.tar.gz -C /opt/mvm --strip-components=1 && sudo bash /opt/mvm/scripts/run-gcp-kvm-test-remote.sh /tmp/mvm-command.argv'
+  --command='sudo rm -rf /opt/mvm && sudo mkdir -p /opt/mvm && sudo tar -xzf /tmp/mvm-source.tar.gz -C /opt/mvm --strip-components=1 && sudo bash /opt/mvm/scripts/run-gcp-kvm-test-remote.sh /tmp/mvm-command.argv /tmp/mvm-source.sha'
 run_status=$?
 set -e
 

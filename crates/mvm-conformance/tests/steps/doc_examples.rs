@@ -1578,7 +1578,7 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 /// alternative is what happened before this existed: the count drifted up
 /// while everyone believed coverage was improving.
 // Workspace-apply forms need a live workspace fixture. Pack `pull`, `search`,
-// and `pack registry update` need a reachable registry; their fail-closed
+// `pack search`, and `pack registry update` need a reachable registry; their fail-closed
 // paths are exercised by tests/cli.rs against a file:// registry. Image
 // `dev ensure` likewise needs a signed release endpoint; its selection,
 // verification, and fetch-when-unchanged behavior have focused CLI tests.
@@ -1589,7 +1589,7 @@ fn docs_coverage_ratchet(_world: &mut CliWorld) {
 // Pack inspection needs an installed signed artifact, so its documented
 // examples are parse-tier while isolated CLI and installed-cache tests exercise
 // refusal and successful verification.
-const PARSE_TIER_PIN: usize = 82;
+const PARSE_TIER_PIN: usize = 83;
 
 #[then(expr = "no more command paths sit at the parse tier than the pinned count")]
 fn parse_tier_does_not_grow(_world: &mut CliWorld) {

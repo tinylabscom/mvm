@@ -6,11 +6,7 @@ pub(crate) fn admitted_instruction_mounts(
     volumes: &[VmVolume],
 ) -> Result<Vec<mvm_client::admission::instructions::MaterializedMount>> {
     let mounts = mvm_client::admission::instructions::materialized_mounts(volumes);
-    let images = mounts
-        .iter()
-        .map(|mount| mount.image_path.clone())
-        .collect::<Vec<_>>();
-    mvm_client::admission::instructions::refuse_wasm_host_snapshots(backend, &images)?;
+    mvm_client::admission::instructions::refuse_wasm_host_snapshots(backend, &mounts)?;
     Ok(mounts)
 }
 

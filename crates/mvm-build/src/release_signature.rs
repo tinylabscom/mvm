@@ -80,6 +80,9 @@ pub enum ReleaseTrain {
     /// `mvm-images/release.yml`, signing canonical image sets under
     /// `refs/tags/image-set/v<version>`.
     ImageSet,
+    /// `source-host-helpers.yml`, signing commit-addressed helper bundles from
+    /// the protected main branch.
+    SourceHelpers,
 }
 
 /// Verify `request`'s archive against the release workflow's keyless signing
@@ -137,6 +140,7 @@ fn verify_against_release_identities(
         ReleaseTrain::ImageSet => {
             mvm_core::release_trust::accepted_image_set_identities(request.version)
         }
+        ReleaseTrain::SourceHelpers => mvm_core::release_trust::accepted_source_helper_identities(),
     };
     verify_release_archive_bytes(
         archive,

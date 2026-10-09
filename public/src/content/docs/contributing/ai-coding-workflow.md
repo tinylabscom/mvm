@@ -103,13 +103,21 @@ scripts/run-gcp-kvm-test.sh --project mvm-dev-495501 -- just bdd::live-ci
 
 The controller creates an Intel C3 Spot VM with nested KVM and no Google
 service account or OAuth scopes, refuses project-wide SSH keys, waits for SSH
-readiness, transfers only git-tracked files from the current worktree, prepares the repository's
-pinned Rust/Zig/Firecracker test toolchain, runs the request, downloads results, and deletes
+readiness, transfers only git-tracked files from the current worktree, restores
+the exact public commit identity without transferring local Git history,
+prepares the pinned Rust/Zig/Firecracker test toolchain, runs the request,
+downloads results, and deletes
 the instance even when the test fails. This is only a test/dev-tier KVM
 provider: do not use it for Nix builds/evals, ordinary compilation, or work the
 builder VM can perform. Before each real run, obtain explicit operator
 authorization for both the billable VM and tracked-file checkout transfer unless
 that exact invocation was already authorized.
+
+The `bdd::live-ci` recipe downloads the published, digest-verified workload
+kernel into the isolated worktree cache before running its KVM scenarios; it
+does not compile a kernel on the disposable host. The remote source identity
+must be reachable from the public `mvm` repository, so push or merge the
+worktree commit before requesting a live run.
 
 ## CVE-2026-80521 preset
 

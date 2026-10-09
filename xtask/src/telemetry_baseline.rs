@@ -22,6 +22,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+#[path = "telemetry_overflow_evaluation.rs"]
+mod overflow_evaluation;
+
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
@@ -56,6 +59,7 @@ struct Report {
     flood_fairness: Fairness,
     memory: Memory,
     allocation_witness: &'static str,
+    experimental_overflow_models: overflow_evaluation::Evaluation,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -339,6 +343,7 @@ fn measure(samples: usize, fairness_rounds: usize) -> Report {
         },
         allocation_witness: "zero allocations/frees on admission, loss read and close: \
                              mvm-core telemetry outbox allocation regressions, native and Miri",
+        experimental_overflow_models: overflow_evaluation::measure(fairness_rounds),
     }
 }
 
