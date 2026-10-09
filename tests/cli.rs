@@ -569,7 +569,9 @@ fn pack_help_lists_all_subcommands() {
         String::from_utf8_lossy(&out.stderr)
     );
     let help = String::from_utf8_lossy(&out.stdout);
-    for verb in ["list", "rollback", "prune", "download", "update"] {
+    for verb in [
+        "ls", "rm", "system", "list", "rollback", "prune", "download", "update",
+    ] {
         assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
     }
 }
@@ -2384,34 +2386,92 @@ accepted_identities = ["https://github.com/tinylabscom/mvm-packs/.github/workflo
 #[test]
 fn pack_registry_ls_starts_empty_and_rm_unpinned_is_a_no_op() {
     let home = tempfile::tempdir().unwrap();
-    let out = mvmctl_isolated(home.path())
-        .args(["pack", "registry", "ls", "--json"])
-        .output()
-        .expect("run mvmctl pack registry ls --json");
-    assert!(
-        out.status.success(),
-        "ls must succeed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let rows: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("ls --json emits rows");
-    assert!(rows.as_array().expect("rows").is_empty());
+    for argv in [
+        ["pack", "ls", "--json"].as_slice(),
+        ["pack", "registry", "ls", "--json"].as_slice(),
+    ] {
+        let out = mvmctl_isolated(home.path())
+            .args(argv)
+            .output()
+            .expect("run pack ls --json");
+        assert!(
+            out.status.success(),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let rows: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("ls --json emits rows");
+        assert!(rows.as_array().expect("rows").is_empty());
+    }
 
-    let out = mvmctl_isolated(home.path())
-        .args(["pack", "registry", "rm", "runtime/python"])
-        .output()
-        .expect("run mvmctl pack registry rm");
+    for argv in [
+        ["pack", "rm", "runtime/python"].as_slice(),
+        ["pack", "registry", "rm", "runtime/python"].as_slice(),
+    ] {
+        let out = mvmctl_isolated(home.path())
+            .args(argv)
+            .output()
+            .expect("run pack rm");
+        assert!(
+            out.status.success(),
+            "{argv:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let shown = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(shown.contains("not pinned"), "{shown}");
+    }
+}
+
+#[test]
+fn system_pack_list_preserves_legacy_json_output() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |command: &[&str]| {
+        let output = mvmctl_isolated(home.path())
+            .args(command)
+            .output()
+            .expect("run system pack list");
+        assert!(
+            output.status.success(),
+            "{command:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("system list JSON")
+    };
+    assert_eq!(
+        run(&["pack", "system", "list", "--json"]),
+        run(&["pack", "list", "--json"])
+    );
+}
+
+#[test]
+fn pack_update_dispatches_by_exact_target_shape() {
+    let home = tempfile::tempdir().unwrap();
+    let missing_registry = format!("file://{}", home.path().join("missing-registry").display());
+    let run = |command: &[&str]| {
+        mvmctl_isolated(home.path())
+            .env("MVM_PACK_REGISTRY", &missing_registry)
+            .args(command)
+            .output()
+            .expect("run pack update")
+    };
+    let workload = run(&["pack", "update", "runtime/python"]);
+    let legacy = run(&["pack", "registry", "update", "runtime/python"]);
+    assert!(!workload.status.success());
+    assert!(!legacy.status.success());
+    assert_eq!(workload.stderr, legacy.stderr);
+
+    let system = run(&["pack", "update", "runtime"]);
+    assert!(!system.status.success());
     assert!(
-        out.status.success(),
-        "rm of an unpinned pack exits zero: {}",
-        String::from_utf8_lossy(&out.stderr)
+        String::from_utf8_lossy(&system.stderr).contains("not yet fetchable"),
+        "{}",
+        String::from_utf8_lossy(&system.stderr)
     );
-    let shown = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(shown.contains("not pinned"), "{shown}");
+    assert_ne!(system.stderr, workload.stderr);
 }
 
 /// `machine run --manifest <app.mvmpkg> -- <cmd>` parses as a bundle-archive

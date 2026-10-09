@@ -22,6 +22,22 @@
 # ── Transient machines ───────────────────────────────────────────────────────
 
 [[example]]
+command = "mvmctl image pull alpine"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
+
+[[example]]
+command = "mvmctl image pull python:3.12"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
+
+[[example]]
+command = "mvmctl pool warm 1 --image alpine"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
+
+[[example]]
+command = "mvmctl pool warm 1 --image python:3.12"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::the documented preparation commands populate images and standbys explicitly"
+
+[[example]]
 command = 'mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"'
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::a transient run boots an OCI image and runs one command"
 
@@ -38,8 +54,8 @@ command = "mvmctl machine run --image python:3.12 --allow-host pypi.org:443 --al
 witness = "suites/s31_launch_e2e/cli_launch_modes.feature::--allow-host and --mount together on one launch"
 
 [[example]]
-command = "mvmctl machine run --image alpine -it -- /bin/sh"
-witness = "suites/s31_launch_e2e/cli_launch_modes.feature::an interactive run gets a real pseudo-terminal in the guest"
+command = "mvmctl machine run --image alpine -it -- ls /"
+witness = "suites/s31_launch_e2e/cli_launch_modes.feature::an interactive run resolves a bare command from the image path"
 
 [[example]]
 command = "mvmctl machine run --image alpine --cpus 2 --memory 512M --allow-host api.example.com:443 -- ./fetch"

@@ -66,7 +66,7 @@ mvm-hostd = { workspace = true }
 # Boot admission reads the deploy record a build left beside the rootfs and
 # verifies the booting artifact against it. Already in this crate's closure
 # through mvm-hostd, so the direct edge adds no crates.
-mvm-sdk.workspace = true
+mvm-sdk = { workspace = true, features = ["deploy"] }
 # The guest-agent request type agent-verb grants are keyed on, and the wire
 # protocol the guest process and filesystem operations speak. Already in this
 # crate's closure through mvm-hostd.

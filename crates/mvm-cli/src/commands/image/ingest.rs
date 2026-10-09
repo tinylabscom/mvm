@@ -362,6 +362,13 @@ pub(super) fn ingest_rootfs_dir(
         tree_size,
     ))
     .context("materialize rootfs.ext4 from directory")?;
+    mvm_build::builder_vm::GuestSidecar::for_oci_run(supplied_reference, false, true)
+        .write_to_dir(
+            rootfs_abs
+                .parent()
+                .context("materialized local rootfs has no parent directory")?,
+        )
+        .context("publish local rootfs completion sidecar")?;
 
     let provenance = OciProvenance {
         schema_version: 1,

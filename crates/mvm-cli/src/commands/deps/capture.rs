@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use mvm_build::app_deps::{GateLevel, Language, derive_lockfile_hash};
-use mvm_sdk::compile::deps_audit::{
+use mvm_compiler::deps_audit::{
     FILE_CONTENT_DIR, FILE_CVE, FILE_FETCH_LOG, FILE_MANIFEST, FILE_SBOM, VolumeManifest,
     reseal_volume, verify_sealed_volume,
 };
@@ -552,7 +552,7 @@ fn require_file(path: &Path, label: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_sdk::compile::deps_audit::seal_volume;
+    use mvm_compiler::deps_audit::seal_volume;
     use std::collections::BTreeMap;
     use std::fs;
 

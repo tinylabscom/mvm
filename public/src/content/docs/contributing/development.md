@@ -129,25 +129,27 @@ Or run the bootstrap script on a fresh machine:
 # Build
 just build
 
-# Prebuild the guest runtime overlay once so later required-overlay boots
-# can reuse the cached artifact instead of rebuilding guest binaries.
-just check::overlay
+# Prepare published runtime/image artifacts and the signed host helpers built
+# for this exact clean source commit.
+just check::run -- bootstrap
+just check::run -- image pull alpine
+just check::run -- pool warm 1 --image alpine
 
 # Run CLI
 just check::run -- --help
 
-# Boot a throwaway workload — the (headless) builder VM auto-bootstraps
-# on first use, then the workload boots on the platform's default backend.
+# Boot a prepared throwaway workload without compiling or downloading.
 just check::run -- machine run --image alpine -- uname -a
 
 # Release build (stripped, LTO)
 just release-build
 ```
 
-The runtime-overlay command only builds the **guest-executed** runtime payload
-and stores the sealed shared artifact under
-`~/.mvm/cache/runtime-overlay/<version>/<arch>/`. Host-side binaries used for
-bootstrap or supervision stay outside that overlay.
+CI publishes signed host-helper bundles for each `main` commit. A clean checkout
+of one of those commits downloads the exact bundle during bootstrap. Dirty
+checkouts and commits not yet published from `main` have no remote artifact by
+construction; explicitly opt into local compilation with
+`MVM_RUNTIME_OVERLAY_ACQUIRE_MODE=build mvmctl bootstrap`.
 
 Source guest-runtime caches are keyed by the source fingerprint, version and
 guest architecture. On a miss in an isolated `MVM_HOME`, the resolver can copy

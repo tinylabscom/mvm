@@ -9,9 +9,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use blake3::Hasher;
 use clap::Args as ClapArgs;
+use mvm_compiler::compile;
 use mvm_contract::ir::{Source, Workload, ir_hash};
 use mvm_core::user_config::MvmConfig;
-use mvm_sdk::compile::compile;
 
 use super::Cli;
 use super::load_ir_json_workload;

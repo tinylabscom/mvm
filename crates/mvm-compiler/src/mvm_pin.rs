@@ -1,4 +1,4 @@
-//! `mvm` flake input for SDK-generated `flake.nix` files.
+//! `mvm` flake input for compiler-generated `flake.nix` files.
 //!
 //! Generated flakes set `inputs.mvm.url` to either the build-time
 //! default below or the `MVM_FLAKE_URL` env-var override (per-developer

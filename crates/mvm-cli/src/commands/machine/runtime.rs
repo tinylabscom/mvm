@@ -585,6 +585,7 @@ fn resolve_entrypoint_stdin_with(
 }
 
 pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    let startup_started = std::time::Instant::now();
     // Settle the cold-build policy before any launch phase runs: `machine
     // run` builds what a cold cache lacks and announces the first such build,
     // unless the caller opted into failing fast (`--no-build`,
@@ -596,6 +597,11 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
     crate::commands::vm::exec::detect::refuse_machine_run_flag_after_double_dash(&args.run.argv)?;
     args.refuse_unsupported_prod()?;
     args.refuse_unsupported_persistent_env()?;
+    // Syntax, policy, terminal, dry-run, and host-capability refusals must be
+    // decided before launch artifacts are consulted. The actual exec path
+    // resolves OCI artifacts and the workload kernel cache-only while carrying
+    // `startup_started`, so a real launch miss remains inside the same budget
+    // without masking an earlier, more specific refusal.
     // Settle the boot source before `resolve_mode` decides whether one is
     // missing — the same resolver `mvmctl run` uses, so the two verbs infer
     // identically or not at all.
@@ -675,7 +681,13 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure(cli, run_args, cfg, source)
+            crate::commands::vm::exec::run_secure_started(
+                cli,
+                run_args,
+                cfg,
+                source,
+                startup_started,
+            )
         }
         MachineRunMode::Persistent => {
             if !args.run.outputs.is_empty() {
@@ -709,7 +721,13 @@ pub(super) fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig)
                 .as_ref()
                 .map(super::local_deployment_image_source)
                 .transpose()?;
-            run_secure(cli, run_args, cfg, source)
+            crate::commands::vm::exec::run_secure_started(
+                cli,
+                run_args,
+                cfg,
+                source,
+                startup_started,
+            )
         }
     }
 }

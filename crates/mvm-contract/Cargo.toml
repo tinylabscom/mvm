@@ -80,3 +80,8 @@ workspace = true
 name = "emit_assurance_schema"
 path = "src/bin/emit_assurance_schema.rs"
 required-features = ["schema"]
+
+[[bin]]
+name = "emit_pack_spec_schema"
+path = "src/bin/emit_pack_spec_schema.rs"
+required-features = ["schema"]
