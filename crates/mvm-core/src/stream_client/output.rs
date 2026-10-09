@@ -296,6 +296,9 @@ pub struct OutputLocator {
     pub socket: PathBuf,
     /// The durable capture directory.
     pub transcript_dir: PathBuf,
+    /// Independently retained protected family. Never removed with VM runtime.
+    /// Explicit locators may omit this to address a legacy capture directly.
+    pub protected_transcript_dir: Option<PathBuf>,
     /// The backend's write-only console capture, the fallback source.
     pub console_log: PathBuf,
     /// Where the host KEK that unwraps the capture's data key lives.
@@ -310,6 +313,7 @@ impl OutputLocator {
             vm: vm.to_string(),
             socket: config::vm_stream_socket(vm),
             transcript_dir: config::vm_stream_transcript_dir(vm),
+            protected_transcript_dir: Some(config::vm_protected_stream_dir(vm)),
             console_log: config::vm_console_log(vm),
             keys_dir: config::mvm_keys_dir(),
         }
@@ -529,11 +533,29 @@ pub fn open_vm_output_at(
     locator: &OutputLocator,
     request: OutputRequest,
 ) -> Result<VmOutputStream, StreamError> {
+    let durable_locator = locator
+        .protected_transcript_dir
+        .as_ref()
+        .map(|root| root.try_exists().map(|exists| (root, exists)))
+        .transpose()?;
+    let persistent_protected = durable_locator.is_some_and(|(_, exists)| exists);
+    let protected_locator;
+    let locator = if let Some((root, true)) = durable_locator {
+        protected_locator = OutputLocator {
+            transcript_dir: root.clone(),
+            protected_transcript_dir: None,
+            ..locator.clone()
+        };
+        &protected_locator
+    } else {
+        locator
+    };
     // Attach before reading history: see the module docs on the ordering and
     // on the residual window it does not close.
     let live = connect_broker(locator, request.opts)?;
     let run = super::protected::ProtectedRun::read(&locator.transcript_dir)?;
-    let protected = run.is_some()
+    let protected = persistent_protected
+        || run.is_some()
         || locator
             .console_log
             .parent()
@@ -1339,6 +1361,7 @@ mod tests {
             vm: "vm".to_string(),
             socket: root.join("absent.sock"),
             transcript_dir: dir,
+            protected_transcript_dir: None,
             console_log: root.join("absent-console.log"),
             keys_dir,
         }
@@ -1364,7 +1387,7 @@ mod tests {
             persists: true,
         };
         let dir = run
-            .directory(&locator.transcript_dir)
+            .directory(locator.protected_transcript_dir.as_ref().unwrap())
             .unwrap()
             .join("00000000000000000000");
         config::create_private_dir(&dir).unwrap();
@@ -1454,7 +1477,8 @@ mod tests {
             )
             .unwrap()
         );
-        run.publish(&locator.transcript_dir).unwrap();
+        run.publish(locator.protected_transcript_dir.as_ref().unwrap())
+            .unwrap();
         let mut output = open_vm_output_at(&locator, OutputRequest::default()).unwrap();
         let deadline = manifest.retention_deadline().unwrap().unwrap();
         assert!(
@@ -1672,6 +1696,7 @@ mod tests {
             vm: "vm".to_string(),
             socket: root.path().join("s.sock"),
             transcript_dir: root.path().join("no-capture"),
+            protected_transcript_dir: None,
             console_log: root.path().join("no-console.log"),
             keys_dir: root.path().join("keys"),
         };
@@ -1789,6 +1814,7 @@ mod tests {
             vm: "ghost".to_string(),
             socket: root.join("absent.sock"),
             transcript_dir: root.join("no-such-capture"),
+            protected_transcript_dir: None,
             console_log: root.join("no-console.log"),
             keys_dir: root.join("keys"),
         }

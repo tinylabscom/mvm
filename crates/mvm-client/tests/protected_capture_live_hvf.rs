@@ -277,7 +277,7 @@ fn detached_console_survives_launcher_and_seals_on_stop() -> Result<()> {
         "launcher did not use the declared verified kernel fixture"
     );
     let run = mvm_core::stream_client::protected::ProtectedRun::read(
-        &config::vm_stream_transcript_dir(&machine.name),
+        &config::vm_protected_stream_dir(&machine.name),
     )?
     .context("supervisor did not publish protected capture")?;
     ensure!(

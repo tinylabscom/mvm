@@ -176,7 +176,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
         let plan = PlanFixture::new().tenant("recovery-tenant").build();
         let vm = "recovery-instance";
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         config::create_private_dir(&root).unwrap();
         let emitter = AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&[31; 32]),
@@ -238,7 +238,7 @@ mod tests {
         env.isolate_mvm_home(home.path());
         let plan = PlanFixture::new().tenant("staged-tenant").build();
         let vm = "staged-instance";
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         config::create_private_dir(&root).unwrap();
         let emitter = AuditEmitter::with_dir(
             ed25519_dalek::SigningKey::from_bytes(&[32; 32]),
@@ -298,13 +298,14 @@ mod tests {
             "atomic rename without durable directory sync cannot publish a terminal seal"
         );
         let unavailable = home.path().join("unavailable-audit");
-        std::fs::rename(emitter.audit_dir(), &unavailable).unwrap();
+        let original_chain = emitter.audit_dir().join(format!("{}.jsonl", plan.tenant.0));
+        std::fs::rename(&original_chain, &unavailable).unwrap();
         assert!(
             recover(&dir, &lease, &emitter, &plan.tenant.0, vm).is_err(),
             "an unavailable original authority must not be replaced with a standalone signature"
         );
         assert_eq!(capture_manifest(&dir), staged);
-        std::fs::rename(&unavailable, emitter.audit_dir()).unwrap();
+        std::fs::rename(&unavailable, &original_chain).unwrap();
         let recovered = recover(&dir, &lease, &emitter, &plan.tenant.0, vm).unwrap();
         assert_eq!(
             recovered, staged,

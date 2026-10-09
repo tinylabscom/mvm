@@ -139,7 +139,7 @@ mod tests {
     use std::sync::Arc;
 
     fn manifest(vm: &str) -> (ProtectedRun, PathBuf, TranscriptManifest) {
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         let run = ProtectedRun::read(&root).unwrap().unwrap();
         let dir = run.directory(&root).unwrap().join("00000000000000000000");
         let manifest =
@@ -227,7 +227,7 @@ mod tests {
         uart.poll_handoff();
         assert!(ready.recv_timeout(CAPTURE_HANDOFF_TIMEOUT).unwrap());
         let parent = if operational {
-            let root = config::vm_stream_transcript_dir("route-parent");
+            let root = config::vm_protected_stream_dir("route-parent");
             let run = ProtectedRun::read(&root).unwrap().unwrap();
             assert!(!run.persists);
             assert!(!run.directory(&root).unwrap().exists());

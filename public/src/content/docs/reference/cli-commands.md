@@ -940,6 +940,14 @@ behind encryption or disk I/O and never falls back to a plaintext console
 file. `machine logs` refuses plaintext fallback for these runs, including when
 capture setup fails. Signed `ephemeral` policy remains non-persistent.
 
+New protected capture families and their routing metadata live under
+`$MVM_HOME/audit/workload-output/<hex-encoded-concrete-vm-name>/`, outside
+disposable runtime and machine-instance directories. Public stop/removal and
+orphan reaping do not delete these captures. Live sockets and fixed supervisor
+status remain runtime-local. Legacy recordings are not moved or enrolled.
+Restart publishes a fresh run selection without merging earlier sequence
+spaces; a retained family belonging to another tenant refuses name reuse.
+
 Raw supervisor stderr is deliberately discarded on this path, including
 startup failures; it is not retained or exportable. Public errors retain exit
 status and sanitized guidance rather than raw helper output.
@@ -947,7 +955,7 @@ status and sanitized guidance rather than raw helper output.
 states such as `capture_setup_failed`, `boot_failed`, and `capture_failed`.
 Encrypted supervisor-stderr collection is a separate follow-up.
 
-Durable generations rotate hourly and expire seven days after sealing. The
+Durable generations rotate hourly and become unreadable seven days after sealing. The
 existing 8 MiB / 65,536-chunk budget covers the concrete VM's entire managed
 generation set, including the active generation; encrypted record-envelope
 bytes count against that budget. Pressure seals the active generation before
@@ -960,6 +968,11 @@ original staged terminal timestamp. Missing or pruned audit authority refuses
 recovery/retirement; uninterrupted unattended cleanup across audit pruning is
 not guaranteed. Unaccounted interrupted ciphertext tails are preserved for
 offline recovery rather than automatically discarded.
+Maintenance runs at supervisor startup and while it is alive. There is no
+always-on physical cleanup of stopped, never-restarted captures in this slice:
+read expiry remains enforced, but seven-day physical deletion is not
+guaranteed. Stopped-capture maintenance and audit-pruning continuity remain
+separate follow-ups.
 
 Verified history checks signed retirement before decrypting any payload, even
 when deletion was interrupted. Retired/expired history reports an explicit

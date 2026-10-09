@@ -517,6 +517,9 @@ const TRANSCRIPT_SUB: &[(&str, AuditPosture)] = &[
     ("disarm", AuditPosture::Emits("TranscriptSealed")),
     ("list", AuditPosture::ReadOnly),
     ("export", AuditPosture::Emits("TranscriptExported")),
+    // Authenticated cleanup appends transcript.retired before unlink; exact
+    // already-retired/no-op reconciliation does not append duplicate evidence.
+    ("reconcile", AuditPosture::Emits("transcript.retired")),
 ];
 
 // `trust audit <sub>` — the chain inspection/verification verbs are read-only;
@@ -928,6 +931,9 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "TranscriptArmed",
         "TranscriptExported",
         "TranscriptSealed",
+        // Managed payload retirement is a signed original-capture event,
+        // rather than a LocalAuditKind operator-log variant.
+        "transcript.retired",
         "TrustAdd",
         "TrustRemove",
         "TrustInstructionsInit",

@@ -82,7 +82,7 @@ impl CaptureOwner {
         } else {
             None
         };
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         config::create_private_dir(&root).context("prepare protected capture directory")?;
         let broker = Arc::new(Mutex::new(
             StreamBroker::live_only(vm, StreamRedaction::curated(redaction)).with_replay(),
@@ -500,7 +500,7 @@ mod tests {
         }
         drop(uart);
         assert!(owner.finish());
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         let run = ProtectedRun::read(&root).unwrap().unwrap();
         let dir = run.directory(&root).unwrap().join("00000000000000000000");
         let manifest_bytes = std::fs::read(dir.join(MANIFEST_FILENAME)).unwrap();
@@ -551,7 +551,7 @@ mod tests {
         producer.write_all(b"synthetic-ephemeral-marker").unwrap();
         drop(producer);
         assert!(owner.finish());
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         let run = ProtectedRun::read(&root).unwrap().unwrap();
         assert!(!run.persists);
         assert!(!run.directory(&root).unwrap().exists());
@@ -578,7 +578,7 @@ mod tests {
             producer.write_all(b"synthetic-instance-output").unwrap();
             drop(producer);
             assert!(owner.finish());
-            let root = config::vm_stream_transcript_dir(vm);
+            let root = config::vm_protected_stream_dir(vm);
             let run = ProtectedRun::read(&root).unwrap().unwrap();
             let dir = run.directory(&root).unwrap().join("00000000000000000000");
             let manifest: TranscriptManifest =
@@ -627,7 +627,7 @@ mod tests {
         producer.write_all(b"after-rotation").unwrap();
         drop(producer);
         assert!(owner.finish());
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         let run = ProtectedRun::read(&root).unwrap().unwrap();
         let mut keys = std::collections::BTreeSet::new();
         for entry in std::fs::read_dir(run.directory(&root).unwrap()).unwrap() {
@@ -673,7 +673,7 @@ mod tests {
         producer.write_all(b"private-retired-output").unwrap();
         drop(producer);
         assert!(owner.finish());
-        let root = config::vm_stream_transcript_dir(vm);
+        let root = config::vm_protected_stream_dir(vm);
         let run = ProtectedRun::read(&root).unwrap().unwrap();
         let dir = run.directory(&root).unwrap().join("00000000000000000000");
         let manifest: TranscriptManifest =
@@ -758,7 +758,7 @@ mod tests {
         .unwrap();
         drop(producer);
         assert!(owner.finish());
-        let root = config::vm_stream_transcript_dir("operational");
+        let root = config::vm_protected_stream_dir("operational");
         let run = ProtectedRun::read(&root).unwrap().unwrap();
         assert!(!run.persists);
         assert!(!run.directory(&root).unwrap().exists());
@@ -784,7 +784,7 @@ mod tests {
         );
         assert!(!config::vm_console_log("owner-failed").exists());
         assert!(
-            !config::vm_stream_transcript_dir("owner-failed")
+            !config::vm_protected_stream_dir("owner-failed")
                 .join("manifest.json")
                 .exists()
         );

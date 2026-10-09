@@ -933,6 +933,20 @@ pub fn vm_stream_transcript_dir(name: &str) -> std::path::PathBuf {
     vm_stream_transcript_dir_at(&vm_state_dir(name))
 }
 
+/// Protected workload-output families are durable diagnostic state, not VM
+/// runtime or instance state. Stop, remove and orphan reaping do not own this
+/// tree; only authenticated retention owns payload retirement. Legacy stream
+/// captures remain at [`vm_stream_transcript_dir`], without migration.
+///
+/// Encode the concrete name into one component so even a rejected caller name
+/// cannot escape the diagnostics root. Original tenant/VM identity remains
+/// authenticated in every generation, not inferred from this directory name.
+pub fn vm_protected_stream_dir(name: &str) -> std::path::PathBuf {
+    mvm_audit_dir()
+        .join("workload-output")
+        .join(hex::encode(name.as_bytes()))
+}
+
 /// Per-VM JSON file of `(guest var, placeholder)` pairs the
 /// substitution endpoint minted at boot. The backend writes it; the invoke
 /// path reads it to inject `HTTP_PROXY` + the placeholder env vars into the

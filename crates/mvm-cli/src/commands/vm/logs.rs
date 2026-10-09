@@ -1216,6 +1216,7 @@ mod tests {
                 vm: "vm".to_string(),
                 socket: root.join("absent.sock"),
                 transcript_dir: dir,
+                protected_transcript_dir: None,
                 console_log: root.join("absent-console.log"),
                 keys_dir,
             }
