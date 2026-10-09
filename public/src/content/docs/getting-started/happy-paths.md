@@ -32,6 +32,7 @@ microVM without writing a flake or installing host Nix.
 mvmctl doctor --workflow cli-run                 # preflight
 mvmctl bootstrap                                # prepare shared artifacts
 mvmctl image pull alpine                        # prepare this OCI image
+export MVM_RESIDENCY=warm                        # enable prepared claims
 mvmctl pool warm 1 --image alpine               # prepare its launch shape
 mvmctl run --image alpine -- uname -a            # claim, run, tear down
 mvmctl image inspect alpine                      # inspect cached provenance

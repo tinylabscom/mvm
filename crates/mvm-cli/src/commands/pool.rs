@@ -985,6 +985,24 @@ fn warm_eligible_launch(cfg: &VmStartConfig) -> bool {
     cfg.volumes.is_empty() && !mvm_vmm::host::egress_shared::effective_vsock_egress(cfg)
 }
 
+/// Excluded shapes keep their cold path even when residency holds no standbys.
+/// Eligible launches, however, must opt into a prepared claim rather than
+/// silently falling back to a cold boot.
+fn warm_claim_requested(cfg: &VmStartConfig, user_named: bool) -> Result<bool> {
+    if user_named || !warm_eligible_launch(cfg) {
+        return Ok(false);
+    }
+    if cfg.warm_pool_size == 0 {
+        anyhow::bail!(
+            "strict startup requires a prepared warm standby; set MVM_RESIDENCY=warm \
+             for the launch (and remove any explicit warm_pool_size=0 override), \
+             then prepare the image with `mvmctl pool warm --image <IMAGE>`; \
+             pool warm alone does not enable claims"
+        );
+    }
+    Ok(true)
+}
+
 /// Attempt a warm-pool claim for this launch. Returns the claimed `VmId` (the standby-id
 /// the VM now runs under) or `None` when this launch shape is not eligible. A configured
 /// warm pool on a backend without standby support is an explicit typed error; it must not
@@ -1003,16 +1021,7 @@ pub fn try_warm_claim(
     cfg: &VmStartConfig,
     user_named: bool,
 ) -> Result<Option<VmId>> {
-    if cfg.warm_pool_size == 0 {
-        anyhow::bail!(
-            "strict startup requires a prepared warm standby; warm this image with \
-             `mvmctl pool warm --image <IMAGE>` before launching"
-        );
-    }
-    if user_named {
-        return Ok(None);
-    }
-    if !warm_eligible_launch(cfg) {
+    if !warm_claim_requested(cfg, user_named)? {
         return Ok(None);
     }
     let Some(tenant) = cfg.tenant_id.clone() else {
@@ -1232,10 +1241,35 @@ mod tests {
 
     #[test]
     fn try_warm_claim_refuses_when_pool_size_is_zero() {
-        let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
         c.warm_pool_size = 0;
-        assert!(try_warm_claim(&b, &c, false).is_err());
+        let error = warm_claim_requested(&c, false).unwrap_err().to_string();
+        assert!(error.contains("MVM_RESIDENCY=warm"));
+        assert!(error.contains("warm_pool_size=0"));
+        assert!(error.contains("pool warm alone does not enable claims"));
+    }
+
+    #[test]
+    fn named_launch_bypasses_zero_pool_but_eligible_launch_requires_claim() {
+        let mut cfg = eligible_cfg();
+        assert!(warm_claim_requested(&cfg, false).unwrap());
+        cfg.warm_pool_size = 0;
+        assert!(!warm_claim_requested(&cfg, true).unwrap());
+        assert!(warm_claim_requested(&cfg, false).is_err());
+    }
+
+    #[test]
+    fn materialized_directory_mount_bypasses_zero_pool() {
+        let mut cfg = eligible_cfg();
+        cfg.warm_pool_size = 0;
+        cfg.volumes.push(mvm_core::vm_backend::VmVolume {
+            host: "/workspace".into(),
+            guest: "/workspace".into(),
+            materialized_image: Some("/cache/workspace.ext4".into()),
+            read_only: true,
+            ..Default::default()
+        });
+        assert!(!warm_claim_requested(&cfg, false).unwrap());
     }
 
     // ── Auditing a captured factory parent ───────────────────────────────
@@ -1626,6 +1660,11 @@ mod tests {
                 !warm_eligible_launch(&cfg),
                 "{why} must not be warm-eligible"
             );
+            for size in [0, 2] {
+                let mut cfg = cfg.clone();
+                cfg.warm_pool_size = size;
+                assert!(!warm_claim_requested(&cfg, false).unwrap(), "{why}");
+            }
             assert_eq!(
                 try_warm_claim(&b, &cfg, false).unwrap(),
                 None,
@@ -1659,6 +1698,10 @@ mod tests {
                 "{why} must actually allow egress, or this proves nothing"
             );
             assert!(!warm_eligible_launch(&cfg), "{why} must stay cold");
+            for size in [0, 2] {
+                cfg.warm_pool_size = size;
+                assert!(!warm_claim_requested(&cfg, false).unwrap(), "{why}");
+            }
             assert_eq!(try_warm_claim(&b, &cfg, false).unwrap(), None);
         }
     }

@@ -61,6 +61,21 @@ fn cached_live_workload_kernel(world: &mut CliWorld) {
     fs::copy(&source, &destination).unwrap_or_else(|error| {
         panic!("copy live workload kernel {source:?} to {destination:?}: {error}")
     });
+    mvm_build::kernel_fetch::record_kernel_digest(&destination)
+        .expect("record isolated workload kernel digest");
+    assert!(
+        matches!(
+            mvm_build::kernel_fetch::resolve_kernel(
+                &isolated_home(world).join("cache"),
+                std::env::consts::ARCH,
+                "workload",
+                false,
+            ),
+            mvm_build::kernel_fetch::KernelResolution::Cached(ref kernel)
+                if kernel.path() == destination
+        ),
+        "isolated workload kernel must resolve from the verified cache"
+    );
     cache_live_guest_binaries(world);
     let output = mvmctl_command()
         .args(["image", "pull", "alpine"])

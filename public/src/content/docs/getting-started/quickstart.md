@@ -19,9 +19,14 @@ Prepare the runtime, image, and matching standby explicitly, then launch:
 ```bash
 mvmctl bootstrap
 mvmctl image pull alpine
+export MVM_RESIDENCY=warm
 mvmctl pool warm 1 --image alpine
 mvmctl machine run --image alpine -- uname -a
 ```
+
+`MVM_RESIDENCY=warm` enables prepared claims in this shell. Linux otherwise
+defaults to `parked` with a zero warm target; `pool warm` alone does not change
+that policy.
 
 Preparation owns downloads and materialization. `machine run` is cache-only and
 claims the prepared standby, keeping every successful warm-eligible startup

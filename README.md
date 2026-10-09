@@ -65,6 +65,7 @@ explicit before the latency-sensitive command.
 ```bash
 mvmctl bootstrap
 mvmctl image pull python:3.12
+export MVM_RESIDENCY=warm
 mvmctl pool warm 1 --image python:3.12
 mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 ```
@@ -114,6 +115,7 @@ is registered, nothing persists. This is the default shape of `machine run`
 # Acquisition is explicit and stays off the sub-300ms launch path.
 mvmctl bootstrap
 mvmctl image pull alpine
+export MVM_RESIDENCY=warm
 mvmctl pool warm 1 --image alpine
 
 # Boot an OCI image, run a command, tear the VM down.
@@ -954,6 +956,7 @@ with isolated state. Prepare the launch inputs explicitly:
 ```sh
 bin/dev bootstrap
 bin/dev image pull alpine
+export MVM_RESIDENCY=warm
 bin/dev pool warm 1 --image alpine
 bin/dev machine run --image alpine -- uname -a
 
