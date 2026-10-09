@@ -3,7 +3,7 @@
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
 //! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
 //! `run --profile dev -- <argv>` covers its interactive case. The `Args`
-//! struct + internal request machinery stay — `run_secure` reuses them.
+//! struct + internal request machinery stay — `run_secure_started` reuses them.
 
 use super::run_validation::validate_run_profile;
 use anyhow::{Context, Result};
@@ -18,6 +18,7 @@ use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use super::super::env::builder_vm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
@@ -553,22 +554,11 @@ pub(in crate::commands) fn run_transient(
     if !args.run.dry_run {
         build_flake_slot(&mut args.run)?;
     }
-    run_secure(cli, args.run, cfg, None)
+    run_secure_started(cli, args.run, cfg, None, Instant::now())
 }
 
-/// Run a transient workload through the normal admitted path, optionally
-/// overriding the user-facing image lookup with an already-verified source.
-/// The override is used only by content-addressed restore, where following a
-/// mutable template pointer would boot the wrong revision.
-pub(in crate::commands) fn run_secure(
-    cli: &Cli,
-    args: RunArgs,
-    cfg: &MvmConfig,
-    source_override: Option<crate::exec::ImageSource>,
-) -> Result<()> {
-    run_secure_started(cli, args, cfg, source_override, std::time::Instant::now())
-}
-
+/// Run a transient workload through the admitted path from the instant launch
+/// resolution began, optionally overriding lookup with a content-pinned source.
 pub(in crate::commands) fn run_secure_started(
     cli: &Cli,
     mut args: RunArgs,
