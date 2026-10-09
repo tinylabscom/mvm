@@ -105,7 +105,7 @@ pub struct CopyOperation {
 }
 
 /// Advisory resource requests, not signed grants or admission authority.
-/// Units match Workload IR's CPU cores and memory MB; rootfs sizing is resolved
+/// Units are CPU cores and binary MiB; rootfs sizing is resolved
 /// downstream, so the broader IR Resources shape is deliberately not reused.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,6 +113,9 @@ pub struct CopyOperation {
 pub struct PackResources {
     #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 65535)))]
     pub cpu_cores: u16,
+    /// Binary MiB: one unit is exactly 1_048_576 bytes. The wire name matches
+    /// Workload IR; SDK `memory_mib` lowers here unchanged. Byte consumers must
+    /// widen to u64 before multiplying by 1_048_576, never by decimal 1_000_000.
     #[cfg_attr(feature = "schema", schemars(range(min = 1, max = 4294967295u64)))]
     pub memory_mb: u32,
 }
@@ -122,17 +125,26 @@ pub struct PackResources {
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PackIdentity {
+    /// Full namespace/name, preserved independently of any Workload IR ID.
     #[cfg_attr(
         feature = "schema",
-        schemars(length(min = 1, max = 128), regex(pattern = r"^[a-z][a-z0-9-]*$"))
+        schemars(
+            length(min = 3, max = 129),
+            regex(
+                pattern = r"^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?/[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$"
+            )
+        )
     )]
     pub name: String,
-    /// Exact three-component numeric release version (no leading zeroes).
+    /// SemVer 2.0 text, at most 128 ASCII bytes; numeric identifiers have no
+    /// machine-integer bound. Prerelease and build spelling is preserved.
     #[cfg_attr(
         feature = "schema",
         schemars(
             length(min = 5, max = 128),
-            regex(pattern = r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+            regex(
+                pattern = r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$"
+            )
         )
     )]
     pub version: String,
@@ -194,9 +206,7 @@ impl TryFrom<PackSpecWire> for PackSpec {
 /// Validation errors contain no file contents or credentials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum PackSpecError {
-    #[error(
-        "invalid pack identity: expected a lowercase name and numeric major.minor.patch version"
-    )]
+    #[error("invalid pack identity: expected namespace/name and SemVer 2.0 version")]
     Identity,
     #[error("invalid package name or version token")]
     Package,
@@ -204,7 +214,7 @@ pub enum PackSpecError {
     Path,
     #[error("entrypoint must have a nonempty executable and no NUL bytes")]
     Entrypoint,
-    #[error("CPU cores and memory MB must be positive")]
+    #[error("CPU cores and memory MiB must be positive")]
     Resources,
     #[error("could not serialize PackSpec")]
     Serialization,
@@ -213,15 +223,7 @@ pub enum PackSpecError {
 impl PackSpec {
     /// Validate both deserialized and directly constructed authored input.
     pub fn validate(&self) -> Result<(), PackSpecError> {
-        let name = &self.identity.name;
-        if name.is_empty()
-            || name.len() > 128
-            || !name.as_bytes()[0].is_ascii_lowercase()
-            || !name
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            || !release_version(&self.identity.version)
-        {
+        if !pack_name(&self.identity.name) || !release_version(&self.identity.version) {
             return Err(PackSpecError::Identity);
         }
         let PackSource::Local { path } = &self.source;
@@ -274,6 +276,28 @@ impl PackSpec {
     }
 }
 
+fn pack_name(value: &str) -> bool {
+    value
+        .split_once('/')
+        .is_some_and(|(namespace, name)| pack_component(namespace) && pack_component(name))
+}
+
+/// Registry reference component grammar, without a host/runtime dependency.
+fn pack_component(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+}
+
 fn token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -284,15 +308,41 @@ fn token(value: &str) -> bool {
 }
 
 fn release_version(value: &str) -> bool {
-    let parts: Vec<_> = value.split('.').collect();
-    value.len() <= 128
-        && parts.len() == 3
-        && parts.iter().all(|part| {
-            !part.is_empty()
-                && (part.len() == 1 || !part.starts_with('0'))
-                && part.bytes().all(|b| b.is_ascii_digit())
-                && part.parse::<u32>().is_ok()
+    if value.len() > 128 {
+        return false;
+    }
+    let (version, build) = value
+        .split_once('+')
+        .map_or((value, None), |(v, b)| (v, Some(b)));
+    if build.is_some_and(|b| !b.split('.').all(version_identifier)) {
+        return false;
+    }
+    let (core, prerelease) = version
+        .split_once('-')
+        .map_or((version, None), |(v, p)| (v, Some(p)));
+    if prerelease.is_some_and(|p| {
+        !p.split('.').all(|id| {
+            version_identifier(id)
+                && (!id.bytes().all(|b| b.is_ascii_digit()) || decimal_identifier(id))
         })
+    }) {
+        return false;
+    }
+    let mut parts = core.split('.');
+    (0..3).all(|_| parts.next().is_some_and(decimal_identifier)) && parts.next().is_none()
+}
+
+fn decimal_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && (value.len() == 1 || !value.starts_with('0'))
+        && value.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn version_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
 fn relative_path(value: &str, allow_root: bool) -> Result<(), PackSpecError> {

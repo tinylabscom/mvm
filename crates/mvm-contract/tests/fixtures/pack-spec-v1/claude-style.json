@@ -1,6 +1,6 @@
 {
   "schema": "mvm.pack-spec/v1",
-  "identity": { "name": "claude-style", "version": "0.1.0" },
+  "identity": { "name": "acme/claude-style", "version": "1.2.3-rc.1+build.7" },
   "target": "x86_64-linux",
   "source": { "kind": "local", "path": "app" },
   "packages": [],

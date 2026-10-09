@@ -1,6 +1,6 @@
 {
   "schema": "mvm.pack-spec/v1",
-  "identity": { "name": "python-app", "version": "1.2.3" },
+  "identity": { "name": "acme/csv-analysis", "version": "0.1.0" },
   "target": "aarch64-linux",
   "source": { "kind": "local", "path": "app" },
   "packages": [

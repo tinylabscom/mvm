@@ -33,7 +33,7 @@ fn canonical_bytes_are_language_neutral_and_preserve_semantic_order() {
     let spec: PackSpec = serde_json::from_str(MINIMAL).unwrap();
     assert_eq!(
         String::from_utf8(spec.canonical_json().unwrap()).unwrap(),
-        r#"{"copy":[{"destination":"/app/hello.txt","source":"hello.txt"}],"dependencies":[],"entrypoint":["cat","/app/hello.txt"],"identity":{"name":"hello","version":"1.0.0"},"packages":[{"name":"busybox","scope":"runtime"}],"resources":{"cpu_cores":1,"memory_mb":128},"schema":"mvm.pack-spec/v1","source":{"kind":"local","path":"."},"target":"aarch64-linux"}"#
+        r#"{"copy":[{"destination":"/app/hello.txt","source":"hello.txt"}],"dependencies":[],"entrypoint":["cat","/app/hello.txt"],"identity":{"name":"acme/hello","version":"1.0.0"},"packages":[{"name":"busybox","scope":"runtime"}],"resources":{"cpu_cores":1,"memory_mb":128},"schema":"mvm.pack-spec/v1","source":{"kind":"local","path":"."},"target":"aarch64-linux"}"#
     );
     let mut nullable = document();
     nullable["packages"][0]["version"] = Value::Null;
@@ -54,6 +54,56 @@ fn canonical_bytes_are_language_neutral_and_preserve_semantic_order() {
             reversed.canonical_json().unwrap(),
             "{list}"
         );
+    }
+}
+
+#[test]
+fn namespaced_identity_is_preserved_and_unsafe_coordinates_fail_closed() {
+    for name in [
+        "acme/csv-analysis",
+        "runtime/python",
+        "a.b/c_d",
+        "0/1",
+        &format!("{}/{}", "a".repeat(64), "b".repeat(64)),
+    ] {
+        let mut value = document();
+        value["identity"]["name"] = json!(name);
+        value["identity"]["version"] = json!("0.1.0");
+        let spec: PackSpec = serde_json::from_value(value).unwrap();
+        let normalized: Value = serde_json::from_slice(&spec.canonical_json().unwrap()).unwrap();
+        assert_eq!(normalized["identity"]["name"], name);
+    }
+    for name in [
+        "",
+        "bare",
+        "/name",
+        "acme/",
+        "acme//name",
+        "a/b/c",
+        "./name",
+        "../name",
+        "acme/.",
+        "acme/..",
+        "acme/../name",
+        "Acme/name",
+        "acme/name@",
+        "acme/a\\b",
+        "acme/a b",
+        "acme/é",
+        "acme/-name",
+        "acme/name.",
+        "acme/name\n",
+        &format!("acme/{}", "a".repeat(65)),
+    ] {
+        let mut value = document();
+        value["identity"]["name"] = json!(name);
+        assert!(
+            serde_json::from_value::<PackSpec>(value).is_err(),
+            "{name:?}"
+        );
+        let mut spec: PackSpec = serde_json::from_str(MINIMAL).unwrap();
+        spec.identity.name = name.into();
+        assert!(spec.canonical_json().is_err(), "{name:?}");
     }
 }
 
@@ -101,7 +151,6 @@ fn rejects_invalid_schema_target_identity_packages_argv_and_resources() {
         ("/identity/name", json!("Uppercase")),
         ("/identity/version", json!("latest")),
         ("/identity/version", json!("01.2.3")),
-        ("/identity/version", json!("4294967296.0.0")),
         ("/packages/0/name", json!("python3;echo")),
         ("/packages/0/scope", json!("global")),
         ("/entrypoint", json!([])),
@@ -130,6 +179,67 @@ fn rejects_invalid_schema_target_identity_packages_argv_and_resources() {
             "{invalid}"
         );
     }
+}
+
+#[test]
+fn semver_accepts_suffixes_without_machine_integer_limits() {
+    for version in [
+        "0.1.0",
+        "1.2.3-rc.1",
+        "1.2.3+build.7",
+        "1.2.3-0.01a.alpha-beta+001.build-7",
+        "4294967296.0.0",
+        "18446744073709551616.0.0",
+        "1.2.3-18446744073709551616",
+        "1.2.3--+--",
+        &format!("{}.0.0", "9".repeat(124)),
+    ] {
+        let mut value = document();
+        value["identity"]["version"] = json!(version);
+        let spec: PackSpec = serde_json::from_value(value).unwrap();
+        let normalized: Value = serde_json::from_slice(&spec.canonical_json().unwrap()).unwrap();
+        assert_eq!(normalized["identity"]["version"], version);
+    }
+    for version in [
+        "",
+        "latest",
+        "1",
+        "1.2",
+        "1.2.3.4",
+        "v1.2.3",
+        "01.2.3",
+        "1.02.3",
+        "1.2.03",
+        "1.2.3-01",
+        "1.2.3-rc.01",
+        "1.2.3-",
+        "1.2.3+",
+        "1.2.3-a..b",
+        "1.2.3+a..b",
+        "1.2.3-.a",
+        "1.2.3+a.",
+        "1.2.3+a+b",
+        "1.2.3-rc_1",
+        "1.2.3+é",
+        " 1.2.3",
+        "1.2.3\n",
+        "1.2.3+build\n",
+        &format!("{}.0.0", "9".repeat(125)),
+    ] {
+        let mut value = document();
+        value["identity"]["version"] = json!(version);
+        assert!(
+            serde_json::from_value::<PackSpec>(value).is_err(),
+            "{version:?}"
+        );
+        let mut spec: PackSpec = serde_json::from_str(MINIMAL).unwrap();
+        spec.identity.version = version.into();
+        assert!(spec.canonical_json().is_err(), "{version:?}");
+    }
+    // Generic package version requests are deliberately not product SemVer.
+    let mut value = document();
+    value["packages"][0]["version"] = json!("2026.01-custom");
+    assert!(serde_json::from_value::<PackSpec>(value).is_ok());
 }
 
 #[test]
@@ -210,4 +320,15 @@ fn schema_is_closed_and_requires_explicit_target_and_positive_resources() {
         schema["definitions"]["PackSpecSchema"]["enum"],
         json!(["mvm.pack-spec/v1"])
     );
+    let memory = &schema["definitions"]["PackResources"]["properties"]["memory_mb"];
+    assert_eq!(memory["maximum"], 4294967295.0);
+    assert!(
+        memory["description"]
+            .as_str()
+            .unwrap()
+            .contains("1_048_576 bytes")
+    );
+    let identity = &schema["definitions"]["PackIdentity"]["properties"];
+    assert_eq!(identity["name"]["maxLength"], 129);
+    assert_eq!(identity["version"]["maxLength"], 128);
 }
