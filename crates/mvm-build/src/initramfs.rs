@@ -846,7 +846,7 @@ fn extract_initramfs_archive(
 ) -> Result<(), InitramfsBuildError> {
     let file = std::fs::File::open(archive_path)?;
     let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = tar::Archive::new(limits.archive_reader(decoder));
     let mut seen = std::collections::BTreeSet::new();
     let mut remaining = limits.total_bytes;
 
@@ -891,7 +891,6 @@ fn extract_initramfs_archive(
                     })?;
                 set_cache_perms(&dest)?;
             }
-            tar::EntryType::Directory => {}
             other => {
                 return Err(InitramfsBuildError::InvalidArchive {
                     archive_path: archive_path.to_path_buf(),
@@ -904,6 +903,12 @@ fn extract_initramfs_archive(
         }
     }
 
+    InitramfsArchiveLimits::finish_archive(archive.into_inner()).map_err(|e| {
+        InitramfsBuildError::InvalidArchive {
+            archive_path: archive_path.to_path_buf(),
+            reason: format!("finish tar stream: {e}"),
+        }
+    })?;
     for required in [
         mvm_fs::initramfs::INITRAMFS_IMAGE_FILE,
         mvm_fs::initramfs::INITRAMFS_HASH_FILE,
@@ -1568,6 +1573,68 @@ mod tests {
                     limits,
                 )
                 .is_err()
+            );
+            assert!(!cache.exists());
+            assert!(
+                set.installed_version(
+                    &cache,
+                    ImageSetRole::Initramfs,
+                    MemberTarget::Arch(GuestArch::Aarch64)
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn initramfs_rejects_directory_and_hidden_metadata_expansion() {
+        for kind in [
+            tar::EntryType::Directory,
+            tar::EntryType::GNULongName,
+            tar::EntryType::XHeader,
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let archive = tmp.path().join("archive.tar.gz");
+            let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+            let mut tar = tar::Builder::new(gzip);
+            let bytes = if kind == tar::EntryType::Directory {
+                Vec::new()
+            } else {
+                vec![b'a'; 1024 * 1024]
+            };
+            for _ in 0..if kind == tar::EntryType::Directory {
+                1024
+            } else {
+                1
+            } {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(kind);
+                header.set_size(bytes.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                tar.append_data(&mut header, "VERSION", bytes.as_slice())
+                    .unwrap();
+            }
+            let compressed = tar.into_inner().unwrap().finish().unwrap();
+            assert!(compressed.len() < 4096);
+            std::fs::write(&archive, compressed).unwrap();
+            let set =
+                SetMemberCache::for_root(mvm_core::packs::Sha256Hex::from_bytes(b"metadata-set"));
+            let cache = tmp.path().join("cache");
+            let error = install_image_set_initramfs_archive_with_limits(
+                &archive,
+                &set,
+                GuestArch::Aarch64,
+                &cache,
+                InitramfsArchiveLimits {
+                    file_bytes: 16,
+                    total_bytes: 32,
+                },
+            )
+            .unwrap_err();
+            assert!(
+                matches!(error, InitramfsBuildError::InvalidArchive { .. }),
+                "{error}"
             );
             assert!(!cache.exists());
             assert!(

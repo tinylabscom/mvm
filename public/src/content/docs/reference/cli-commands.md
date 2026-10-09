@@ -1130,6 +1130,11 @@ architecture's runtime archives, not the full builder/base-image release set.
 Older readers refuse these packages. Existing schema 3 packages and full
 embedded image sets retain their existing semantics.
 
+Bundles carrying their own boot assets use the cold-boot path. The current
+warm-pool preparation command cannot prepare a parent from an archive's pinned
+runtime set, so a portable bundle never substitutes a host-prepared standby.
+Repeated launches still reuse the content-addressed installed archive.
+
 #### Booting a signed bundle
 
 A signed `.mvmpkg` boots through `--manifest`:

@@ -1097,6 +1097,30 @@ pub(crate) struct ExpandedArchiveLimits {
 }
 
 impl ExpandedArchiveLimits {
+    // Canonical bundles have only a handful of flat files. 64 KiB covers
+    // their headers, block padding and optional GNU/PAX metadata generously.
+    const TAR_FRAMING_BYTES: u64 = 64 * 1024;
+
+    pub(crate) fn archive_reader<R: std::io::Read>(&self, reader: R) -> std::io::Take<R> {
+        reader.take(self.total_bytes.saturating_add(Self::TAR_FRAMING_BYTES))
+    }
+
+    /// Account for bytes after tar's end marker too. `Take` bounds metadata
+    /// consumed internally by tar; probing its underlying reader distinguishes
+    /// a real EOF from a stream truncated at the expansion ceiling.
+    pub(crate) fn finish_archive<R: std::io::Read>(
+        mut reader: std::io::Take<R>,
+    ) -> std::io::Result<()> {
+        std::io::copy(&mut reader, &mut std::io::sink())?;
+        if reader.limit() == 0 && reader.get_mut().read(&mut [0u8; 1])? != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "expanded tar stream budget exceeded",
+            ));
+        }
+        Ok(())
+    }
+
     /// Copy at most the per-file and remaining aggregate budgets. The probe
     /// reads one extra byte but never writes it, including at an exact fit.
     pub(crate) fn copy_entry(
@@ -1128,7 +1152,7 @@ fn extract_release_archive_with_limits(
 ) -> Result<(), RuntimeOverlayError> {
     let file = std::fs::File::open(archive_path)?;
     let decoder = flate2::read::GzDecoder::new(file);
-    let mut archive = tar::Archive::new(decoder);
+    let mut archive = tar::Archive::new(limits.archive_reader(decoder));
     let mut seen = std::collections::BTreeSet::new();
     let mut remaining = limits.total_bytes;
 
@@ -1174,7 +1198,6 @@ fn extract_release_archive_with_limits(
                     })?;
                 set_cache_perms(&dest)?;
             }
-            tar::EntryType::Directory => {}
             other => {
                 return Err(RuntimeOverlayError::InvalidArchive {
                     archive_path: archive_path.to_path_buf(),
@@ -1187,6 +1210,12 @@ fn extract_release_archive_with_limits(
         }
     }
 
+    ExpandedArchiveLimits::finish_archive(archive.into_inner()).map_err(|e| {
+        RuntimeOverlayError::InvalidArchive {
+            archive_path: archive_path.to_path_buf(),
+            reason: format!("finish tar stream: {e}"),
+        }
+    })?;
     for required in expected {
         if !seen.contains(*required) {
             return Err(RuntimeOverlayError::InvalidArchive {
@@ -1317,6 +1346,87 @@ pub(crate) fn curl_download(url: &str, dest: &Path) -> Result<(), RuntimeOverlay
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tar_stream_budget_bounds_hidden_metadata_and_trailing_bytes() {
+        let limits = super::ExpandedArchiveLimits {
+            file_bytes: 16,
+            total_bytes: 32,
+        };
+        let cap = limits.total_bytes + super::ExpandedArchiveLimits::TAR_FRAMING_BYTES;
+        for kind in [tar::EntryType::GNULongName, tar::EntryType::XHeader] {
+            let mut builder = tar::Builder::new(Vec::new());
+            let bytes = vec![b'a'; 1024 * 1024];
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "metadata", bytes.as_slice())
+                .unwrap();
+            let mut cursor = std::io::Cursor::new(builder.into_inner().unwrap());
+            {
+                let mut archive = tar::Archive::new(limits.archive_reader(&mut cursor));
+                assert!(archive.entries().unwrap().next().unwrap().is_err());
+            }
+            assert_eq!(
+                cursor.position(),
+                cap,
+                "metadata cannot read beyond the raw cap"
+            );
+        }
+
+        let mut cursor = std::io::Cursor::new(vec![0; 1024 * 1024]);
+        let mut archive = tar::Archive::new(limits.archive_reader(&mut cursor));
+        assert!(
+            archive.entries().unwrap().next().is_none(),
+            "tar stops at its end marker"
+        );
+        let error = super::ExpandedArchiveLimits::finish_archive(archive.into_inner()).unwrap_err();
+        assert!(error.to_string().contains("stream budget"), "{error}");
+        assert_eq!(cursor.position(), cap + 1, "only one excess byte is probed");
+
+        let cursor = std::io::Cursor::new(vec![0; cap as usize]);
+        super::ExpandedArchiveLimits::finish_archive(limits.archive_reader(cursor)).unwrap();
+    }
+
+    #[test]
+    fn release_archive_rejects_redundant_directory_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("directories.tar.gz");
+        let gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut tar = tar::Builder::new(gzip);
+        for _ in 0..1024 {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_cksum();
+            tar.append_data(&mut header, "VERSION", std::io::empty())
+                .unwrap();
+        }
+        std::fs::write(&archive, tar.into_inner().unwrap().finish().unwrap()).unwrap();
+        let stage = tmp.path().join("stage");
+        std::fs::create_dir(&stage).unwrap();
+        let error = super::extract_release_archive_with_limits(
+            &archive,
+            &stage,
+            &["VERSION"],
+            super::ExpandedArchiveLimits {
+                file_bytes: 16,
+                total_bytes: 32,
+            },
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported tar entry type Directory"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_dir(stage).unwrap().count(), 0);
+    }
+
     #[test]
     fn expanded_archive_copy_accepts_exact_limits_and_bounds_actual_writes() {
         let limits = super::ExpandedArchiveLimits {
