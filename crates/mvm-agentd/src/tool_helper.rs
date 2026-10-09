@@ -533,6 +533,12 @@ fn spawn_tool(
                 AT_EMPTY_PATH_RAW,
             ) != 0
             {
+                // Capture errno before any other syscall. Formatting uses
+                // only a stack buffer: allocation/stdio locks are unsafe here
+                // because this child was forked from a threaded helper.
+                let errno = *libc::__errno_location() as u32;
+                let (message, length) = exec_failure_message(errno);
+                libc::write(2, message.as_ptr().cast(), length);
                 libc::_exit(EXIT_SPAWN);
             }
             libc::_exit(EXIT_SPAWN);
@@ -565,6 +571,29 @@ fn spawn_tool(
         pid,
         gate: write_gate,
     })
+}
+
+/// Allocation-free diagnostic for the raw-fork child. Do not include command
+/// arguments or environment values, which may contain sensitive inputs.
+#[cfg(any(target_os = "linux", test))]
+fn exec_failure_message(mut errno: u32) -> ([u8; 64], usize) {
+    let prefix = b"mvm-tool-helper: execveat failed (errno ";
+    let mut message = [0u8; 64];
+    message[..prefix.len()].copy_from_slice(prefix);
+    let mut digits = [0u8; 10];
+    let mut start = digits.len();
+    loop {
+        start -= 1;
+        digits[start] = b'0' + (errno % 10) as u8;
+        errno /= 10;
+        if errno == 0 {
+            break;
+        }
+    }
+    let end = prefix.len() + digits.len() - start;
+    message[prefix.len()..end].copy_from_slice(&digits[start..]);
+    message[end..end + 2].copy_from_slice(b")\n");
+    (message, end + 2)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -630,6 +659,17 @@ mod capability_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_failure_diagnostic_reports_errno_without_invocation_data() {
+        for errno in [0, 13, u32::MAX] {
+            let (message, length) = exec_failure_message(errno);
+            assert_eq!(
+                &message[..length],
+                format!("mvm-tool-helper: execveat failed (errno {errno})\n").as_bytes()
+            );
+        }
+    }
 
     struct NoAgent;
     impl AgentDecisions for NoAgent {

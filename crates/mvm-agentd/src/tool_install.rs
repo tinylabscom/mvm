@@ -468,7 +468,7 @@ fn chown(path: &str, uid: u32, gid: u32) -> Result<(), InstallError> {
 }
 
 #[cfg(target_os = "linux")]
-fn write_stash(stash: &str, bytes: &[u8]) -> Result<(), InstallError> {
+pub(crate) fn write_stash(stash: &str, bytes: &[u8]) -> Result<(), InstallError> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
@@ -483,7 +483,11 @@ fn write_stash(stash: &str, bytes: &[u8]) -> Result<(), InstallError> {
             path: stash.to_string(),
             reason: error.to_string(),
         })?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o640))
+    // execveat checks execute permission after the helper drops to the tool
+    // identity. Other-execute permits that descriptor-based exec, but not
+    // reading/copying via /proc/self/exe. The root:helper 0750 directory still
+    // denies workload/tool pathname traversal; nobody gets writable bits.
+    file.set_permissions(std::fs::Permissions::from_mode(0o551))
         .map_err(|error| InstallError::SubstitutionFailed {
             path: stash.to_string(),
             reason: error.to_string(),

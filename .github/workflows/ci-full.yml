@@ -305,6 +305,7 @@ jobs:
           )"
           for test in \
             tool_helper::capability_tests::helper_exec_retains_transition_caps_but_tool_exec_cannot_regain_privilege \
+            tool_helper::capability_tests::installed_stash_executes_only_through_helper_descriptor \
             tool_attribution::tests::relay_provenance_reads_the_isolated_group_and_restores_credentials; do
             "$test_binary" --list --exact "$test" | grep -Fx "$test: test"
             sudo env MVM_GUEST_PRIVILEGED_TESTS=1 "$test_binary" --exact "$test" --nocapture
