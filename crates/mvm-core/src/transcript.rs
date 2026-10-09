@@ -20,6 +20,8 @@ use crate::crypto::aead;
 
 mod retention;
 mod ring;
+#[cfg(unix)]
+pub mod secure_cleanup;
 mod segment;
 pub use retention::*;
 pub use ring::*;
@@ -154,6 +156,10 @@ pub struct TranscriptManifest {
     /// Explicit new-capture age policy. Never inferred when reading old data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_rest: Option<AtRestRetention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_budget: Option<GenerationBudget>,
+    #[serde(default, skip_serializing_if = "PayloadEncoding::is_raw")]
+    pub payload_encoding: PayloadEncoding,
     /// Terminal producer timestamp, not the time an integrity root was computed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sealed_unix_secs: Option<u64>,
@@ -300,6 +306,10 @@ struct RootMetadata<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     at_rest: Option<AtRestRetention>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    generation_budget: Option<GenerationBudget>,
+    #[serde(skip_serializing_if = "PayloadEncoding::is_raw")]
+    payload_encoding: PayloadEncoding,
+    #[serde(skip_serializing_if = "Option::is_none")]
     sealed_unix_secs: Option<u64>,
 }
 
@@ -331,6 +341,8 @@ pub fn sealed_root_hex(manifest: &TranscriptManifest) -> Result<String, Transcri
         evicted_bytes: manifest.evicted_bytes,
         adopted: manifest.adopted,
         at_rest: manifest.at_rest,
+        generation_budget: manifest.generation_budget,
+        payload_encoding: manifest.payload_encoding,
         sealed_unix_secs: manifest.sealed_unix_secs,
     };
     let mut leaves = Vec::with_capacity(manifest.chunks.len() + 1);
@@ -387,11 +399,19 @@ fn validate_format(manifest: &TranscriptManifest) -> Result<(), TranscriptError>
         });
     }
     if manifest.format_version == LEGACY_TRANSCRIPT_MANIFEST_FORMAT_VERSION
-        && (manifest.at_rest.is_some() || manifest.sealed_unix_secs.is_some())
+        && (manifest.at_rest.is_some()
+            || manifest.sealed_unix_secs.is_some()
+            || manifest.generation_budget.is_some()
+            || manifest.payload_encoding != PayloadEncoding::Raw)
     {
         return Err(TranscriptError::RetentionClock);
     }
     if manifest.at_rest.is_none() && manifest.sealed_unix_secs.is_some() {
+        return Err(TranscriptError::RetentionClock);
+    }
+    if let Some(budget) = manifest.generation_budget
+        && (manifest.at_rest.is_none() || budget.max_plaintext_bytes == 0 || budget.max_chunks == 0)
+    {
         return Err(TranscriptError::RetentionClock);
     }
     Ok(())
@@ -464,6 +484,8 @@ pub fn verify_chunks(manifest: &TranscriptManifest, dir: &Path) -> Result<(), Tr
 /// layout, and the reason retention evicts whole segments rather than chunks.
 pub struct TranscriptWriter {
     key: aead::Key,
+    #[cfg(unix)]
+    capture_lease: Option<Result<secure_cleanup::CaptureDirectory, String>>,
     store: segment::SegmentStore,
     budget: CaptureBudget,
     retention: RetentionPolicy,
@@ -482,7 +504,10 @@ pub struct TranscriptWriter {
     bounds: CaptureBounds,
     created_unix_secs: u64,
     at_rest: Option<AtRestRetention>,
+    generation_budget: Option<GenerationBudget>,
+    payload_encoding: PayloadEncoding,
     sealed_unix_secs: Option<u64>,
+    finalized: bool,
     wrapped_data_key_b64: String,
     recipient: String,
     refused_chunks: u64,
@@ -505,16 +530,46 @@ pub struct TranscriptWriterConfig {
     pub retention: RetentionPolicy,
     pub created_unix_secs: u64,
     pub at_rest: Option<AtRestRetention>,
+    pub generation_budget: Option<GenerationBudget>,
+    pub payload_encoding: PayloadEncoding,
     pub recipient: String,
     pub wrapped_data_key_b64: String,
 }
 
 impl TranscriptWriter {
+    /// Construct a writer and fail before producer startup if protection or its
+    /// exclusive directory lease cannot be established.
+    pub fn try_new(
+        dir: impl Into<PathBuf>,
+        key: aead::Key,
+        config: TranscriptWriterConfig,
+    ) -> Result<Self, TranscriptError> {
+        if let Some(policy) = config.at_rest {
+            policy.generation_deadline(config.created_unix_secs)?;
+        }
+        if config.at_rest.is_none()
+            && (config.generation_budget.is_some()
+                || config.payload_encoding != PayloadEncoding::Raw)
+        {
+            return Err(TranscriptError::RetentionClock);
+        }
+        let writer = Self::new(dir, key, config);
+        writer.check_capture_lease()?;
+        Ok(writer)
+    }
+
     /// `dir` must already exist. `key` encrypts chunks at rest.
     pub fn new(dir: impl Into<PathBuf>, key: aead::Key, config: TranscriptWriterConfig) -> Self {
+        let dir = dir.into();
+        #[cfg(unix)]
+        let capture_lease = config.at_rest.map(|_| {
+            secure_cleanup::CaptureDirectory::for_writer(&dir).map_err(|error| error.to_string())
+        });
         Self {
             key,
-            store: segment::SegmentStore::new(dir.into(), SegmentBounds::default()),
+            #[cfg(unix)]
+            capture_lease,
+            store: segment::SegmentStore::new(dir, SegmentBounds::default()),
             budget: CaptureBudget::new(config.bounds),
             retention: config.retention,
             chunks: VecDeque::new(),
@@ -525,7 +580,10 @@ impl TranscriptWriter {
             bounds: config.bounds,
             created_unix_secs: config.created_unix_secs,
             at_rest: config.at_rest,
+            generation_budget: config.generation_budget,
+            payload_encoding: config.payload_encoding,
             sealed_unix_secs: None,
+            finalized: false,
             wrapped_data_key_b64: config.wrapped_data_key_b64,
             recipient: config.recipient,
             refused_chunks: 0,
@@ -558,7 +616,7 @@ impl TranscriptWriter {
     /// counters — otherwise [`seal`](Self::seal) hands back an artifact that
     /// verifies clean while being silently incomplete.
     pub fn note_unwritten(&mut self, chunks: u64, bytes: u64) {
-        if self.sealed_unix_secs.is_some() {
+        if self.finalized {
             return;
         }
         self.refused_chunks = self.refused_chunks.saturating_add(chunks);
@@ -629,7 +687,8 @@ impl TranscriptWriter {
         dropped: bool,
         plaintext: &[u8],
     ) -> Result<(), TranscriptError> {
-        if self.sealed_unix_secs.is_some() {
+        self.check_capture_lease()?;
+        if self.finalized {
             return Err(TranscriptError::WriterFinalized);
         }
         let result = self.write_chunk(direction, dropped, plaintext);
@@ -710,12 +769,20 @@ impl TranscriptWriter {
     /// End a protected generation after its producer has joined. This freezes
     /// the writer; computing an integrity snapshot never performs this step.
     pub fn finalize_at(&mut self, now: u64) -> Result<TranscriptManifest, TranscriptError> {
+        self.check_capture_lease()?;
         let Some(policy) = self.at_rest else {
+            if now < self.created_unix_secs {
+                return Err(TranscriptError::RetentionClock);
+            }
+            self.finalized = true;
             return Ok(self.sealed_manifest());
         };
-        policy.generation_deadline(self.created_unix_secs)?;
+        let generation_end = policy.generation_deadline(self.created_unix_secs)?;
         if now < self.created_unix_secs || self.sealed_unix_secs.is_some_and(|sealed| now < sealed)
         {
+            return Err(TranscriptError::RetentionClock);
+        }
+        if !self.finalized && now > generation_end {
             return Err(TranscriptError::RetentionClock);
         }
         now.checked_add(policy.payload_after_seal_secs)
@@ -723,7 +790,26 @@ impl TranscriptWriter {
         if self.sealed_unix_secs.is_none() {
             self.sealed_unix_secs = Some(now);
         }
+        self.finalized = true;
         Ok(self.sealed_manifest())
+    }
+
+    fn check_capture_lease(&self) -> Result<(), TranscriptError> {
+        #[cfg(unix)]
+        if let Some(Err(message)) = &self.capture_lease {
+            return Err(TranscriptError::Io {
+                file: MANIFEST_FILENAME.to_string(),
+                msg: message.clone(),
+            });
+        }
+        #[cfg(not(unix))]
+        if self.at_rest.is_some() {
+            return Err(TranscriptError::Io {
+                file: MANIFEST_FILENAME.to_string(),
+                msg: "protected capture requires Unix directory leases".to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// The manifest [`seal`](Self::seal) produces, for a caller that cannot
@@ -745,6 +831,8 @@ impl TranscriptWriter {
             bounds: self.bounds,
             created_unix_secs: self.created_unix_secs,
             at_rest: self.at_rest,
+            generation_budget: self.generation_budget,
+            payload_encoding: self.payload_encoding,
             sealed_unix_secs: self.sealed_unix_secs,
             wrapped_data_key_b64: self.wrapped_data_key_b64.clone(),
             recipient: self.recipient.clone(),
@@ -908,6 +996,8 @@ mod tests {
             bounds: bounds(),
             created_unix_secs: 1,
             at_rest: None,
+            generation_budget: None,
+            payload_encoding: PayloadEncoding::Raw,
             sealed_unix_secs: None,
             wrapped_data_key_b64: String::new(),
             recipient: "host-key-1".to_string(),
@@ -1229,6 +1319,7 @@ mod tests {
     #[test]
     fn current_format_version_manifest_round_trips_through_verify_and_export() {
         let dir = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
         let mut cfg = writer_config();
         cfg.at_rest = Some(AtRestRetention::default());
         cfg.created_unix_secs = retention_now().unwrap();
@@ -1352,6 +1443,8 @@ mod tests {
             bounds: bounds(),
             retention: RetentionPolicy::FailClosed,
             at_rest: None,
+            generation_budget: None,
+            payload_encoding: PayloadEncoding::Raw,
             created_unix_secs: 1,
             recipient: "host-key-1".to_string(),
             wrapped_data_key_b64: "wrapped".to_string(),
@@ -1373,6 +1466,7 @@ mod tests {
     #[test]
     fn protected_lifetime_is_terminal_bound_and_immutable() {
         let dir = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
         let mut cfg = writer_config();
         cfg.created_unix_secs = 100;
         cfg.at_rest = Some(AtRestRetention::default());
@@ -1394,12 +1488,14 @@ mod tests {
             writer.push(Direction::Stdout, b"late"),
             Err(TranscriptError::WriterFinalized)
         );
-        for change in 0..3 {
+        for change in 0..5 {
             let mut tampered = terminal.clone();
             match change {
                 0 => tampered.at_rest.as_mut().unwrap().payload_after_seal_secs += 1,
                 1 => tampered.created_unix_secs += 1,
-                _ => tampered.sealed_unix_secs = Some(201),
+                2 => tampered.sealed_unix_secs = Some(201),
+                3 => tampered.payload_encoding = PayloadEncoding::StreamRecordV1,
+                _ => tampered.generation_budget = Some(GenerationBudget::default()),
             }
             assert_eq!(
                 verify_sealed_root(&tampered),
@@ -1410,11 +1506,17 @@ mod tests {
             export(&terminal, dir.path(), &fixed_key(1)),
             Err(TranscriptError::PayloadExpired)
         );
+        assert_eq!(
+            terminal.retained_plaintext_bytes().unwrap(),
+            b"synthetic".len() as u64
+        );
+        assert!(serde_json::from_str::<PayloadEncoding>("\"unknown\"").is_err());
     }
 
     #[test]
     fn abandoned_recovery_does_not_restart_age() {
         let dir = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
         let mut cfg = writer_config();
         cfg.created_unix_secs = 100;
         cfg.at_rest = Some(AtRestRetention::default());
@@ -1453,6 +1555,60 @@ mod tests {
         assert_eq!(
             export(&manifest, dir.path(), &fixed_key(1)).unwrap(),
             b"synthetic"
+        );
+    }
+
+    #[test]
+    fn legacy_finalization_freezes_without_changing_v6_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = writer_at(dir.path());
+        writer.push(Direction::Stdout, b"synthetic").unwrap();
+        let snapshot = writer.sealed_manifest();
+        assert_eq!(writer.finalize_at(2).unwrap(), snapshot);
+        assert_eq!(
+            writer.push(Direction::Stdout, b"late"),
+            Err(TranscriptError::WriterFinalized)
+        );
+        assert_eq!(
+            writer.push_dropped(Direction::Stdout, b"late"),
+            Err(TranscriptError::WriterFinalized)
+        );
+        writer.note_unwritten(5, 9);
+        assert_eq!(writer.finalize_at(3).unwrap(), snapshot);
+        assert_eq!(writer.sealed_manifest(), snapshot);
+        assert_eq!(snapshot.sealed_unix_secs, None);
+        assert_eq!(snapshot.format_version, 6);
+    }
+
+    #[test]
+    fn public_lifetime_helpers_reject_invalid_versions_and_injected_policy() {
+        for version in [1, 5, 6, 8] {
+            let mut invalid = manifest(Vec::new());
+            invalid.format_version = version;
+            invalid.at_rest = Some(AtRestRetention::default());
+            invalid.sealed_unix_secs = Some(200);
+            assert!(invalid.retention_deadline().is_err());
+            assert!(invalid.check_readable_at(900_000).is_err());
+        }
+    }
+
+    #[test]
+    fn late_normal_finalization_cannot_extend_generation_lifetime() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::private_fs::ensure_private_dir(dir.path()).unwrap();
+        let mut cfg = writer_config();
+        cfg.at_rest = Some(AtRestRetention::default());
+        cfg.created_unix_secs = 100;
+        let mut writer = TranscriptWriter::try_new(dir.path(), fixed_key(1), cfg).unwrap();
+        let snapshot = writer.sealed_manifest();
+        assert_eq!(
+            writer.finalize_at(3701),
+            Err(TranscriptError::RetentionClock)
+        );
+        assert_eq!(writer.sealed_manifest(), snapshot);
+        assert_eq!(
+            writer.finalize_at(3700).unwrap().sealed_unix_secs,
+            Some(3700)
         );
     }
 
