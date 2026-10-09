@@ -161,6 +161,32 @@ COMBINED="$ASSETS_DIR/checksums-sha256.txt"
 [ -f "$COMBINED" ] || fail "combined checksums manifest missing: checksums-sha256.txt"
 require_signed_manifest "$COMBINED" "combined checksums manifest"
 
+# The complete guest runtime is a CLI-train asset, not a boot image. Its
+# standalone digest is also consumed before the signature by downloaded
+# clients, so it must agree with both the archive and the combined manifest.
+runtime_archives=()
+for candidate in "$ASSETS_DIR"/mvm-guest-bins-v*.tar.gz; do
+  if [ -f "$candidate" ]; then runtime_archives+=("$candidate"); fi
+done
+if [ "${#runtime_archives[@]}" -ne 1 ]; then
+  fail "expected one complete guest-runtime archive, found ${#runtime_archives[@]}"
+else
+  runtime="${runtime_archives[0]}"
+  runtime_name="$(basename "$runtime")"
+  if [ -n "$EXPECT_VERSION" ] && [ "$runtime_name" != "mvm-guest-bins-v${EXPECT_VERSION#v}.tar.gz" ]; then
+    fail "guest-runtime archive does not match release version $EXPECT_VERSION: $runtime_name"
+  fi
+  check_signed_asset "[guest-runtime]" "$runtime"
+  if [ ! -f "$runtime.sha256" ]; then
+    fail "guest-runtime checksum missing: $runtime_name.sha256"
+  else
+    want="$(awk -v name="$runtime_name" '$2 == name || $2 == "*" name {print $1}' "$runtime.sha256")"
+    got="$(sha256_of "$runtime")"
+    [ "$want" = "$got" ] || fail "guest-runtime standalone checksum mismatch: $runtime_name"
+  fi
+  require_signed_manifest "$runtime.sha256" "guest-runtime checksum"
+fi
+
 for target in $TARGETS; do
   tarball="$ASSETS_DIR/mvmctl-${target}.tar.gz"
   bundle="$tarball.bundle"
@@ -197,6 +223,8 @@ for target in $TARGETS; do
     if tar xzf "$tarball" -C "$tmp" 2>/dev/null; then
       package_dir="$tmp/mvmctl-${target}"
       if [ -d "$package_dir" ]; then
+        [ -f "$package_dir/install.sh" ] \
+          || fail "[$target] authenticated atomic updater installer missing: install.sh"
         for bin_name in $(required_bins_for_target "$target"); do
           [ -x "$package_dir/$bin_name" ] \
             || fail "[$target] required packaged binary missing or not executable: $bin_name"
@@ -226,7 +254,7 @@ done
 [ -f "$ASSETS_DIR/sbom.cdx.json.bundle" ] || fail "SBOM signature bundle missing: sbom.cdx.json.bundle"
 
 if [ "$FAILED" = 0 ]; then
-  echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry, Linux targets one signed .deb and .rpm; SBOM signed."
+  echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry, Linux targets one signed .deb and .rpm; guest runtime and SBOM signed."
 else
   echo "release asset verification FAILED" >&2
   exit 1

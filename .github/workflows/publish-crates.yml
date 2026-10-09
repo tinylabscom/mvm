@@ -5,9 +5,9 @@ name: Publish to crates.io
 # [workspace.metadata.mvm.publish], dependencies first, minus the crates
 # declared blocked and everything above them (it says which, and why).
 #
-# release.yml dispatches this with dry_run=false on every tag push, because a
-# GITHUB_TOKEN-raised release event starts no downstream workflow. A dry run
-# needs no token: it packages and build-verifies the whole plan with
+# CLI releases do not dispatch this workflow. A manual live run refuses a
+# plan containing internal crate names before any upload. A dry run needs
+# no token: it packages and build-verifies the diagnostic plan with
 # `cargo package`, which resolves the plan's crates against each other
 # instead of against crates.io, so it works before any of them is published.
 # It runs on pull requests that change the publish machinery and nightly from
@@ -34,6 +34,9 @@ on:
   pull_request:
     paths:
       - .github/workflows/publish-crates.yml
+      - Cargo.toml
+      - Cargo.lock
+      - crates/**/Cargo.toml
       - scripts/deploy-guard.sh
       - xtask/src/publish_plan.rs
 
@@ -79,7 +82,10 @@ jobs:
       - name: Package and verify the publish plan
         run: |
           set -euo pipefail
-          mapfile -t crates < <(cargo run --quiet --package xtask -- publish-plan)
+          cargo run --quiet --package xtask -- check-publish-readiness
+          plan="$(cargo run --quiet --package xtask -- publish-plan)"
+          [ -n "${plan}" ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
+          mapfile -t crates <<< "${plan}"
           [ "${#crates[@]}" -gt 0 ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
           args=()
           for crate in "${crates[@]}"; do args+=(--package "${crate}"); done
@@ -125,17 +131,38 @@ jobs:
         run: |
           set -euo pipefail
           version="${TAG_NAME#v}"
-          mapfile -t crates < <(cargo run --quiet --package xtask -- publish-plan)
+          cargo run --quiet --package xtask -- check-publish-readiness
+          plan="$(cargo run --quiet --package xtask -- publish-plan)"
+          [ -n "${plan}" ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
+          mapfile -t crates <<< "${plan}"
           [ "${#crates[@]}" -gt 0 ] || { echo "::error::the publish plan is empty" >&2; exit 1; }
-          published() {
-            curl -fsS -A "mvm-publish-crates (https://github.com/${GITHUB_REPOSITORY})" \
-              "https://crates.io/api/v1/crates/$1/${version}" >/dev/null 2>&1
-          }
+          # A public entry point is not permission to expose its private
+          # implementation closure. Reject the whole plan before any upload.
           for crate in "${crates[@]}"; do
-            if published "${crate}"; then
-              echo "${crate} ${version} is already on crates.io; skipping"
-              continue
-            fi
+            case "${crate}" in
+              mvm-client|mvmctl) ;;
+              *)
+                echo "::error::${crate} is an internal crate; registry publication is not authorized" >&2
+                exit 1
+                ;;
+            esac
+          done
+          for crate in "${crates[@]}"; do
+            status="$(curl --silent --show-error --connect-timeout 15 --max-time 60 \
+              --output /dev/null --write-out '%{http_code}' \
+              -A "mvm-publish-crates (https://github.com/${GITHUB_REPOSITORY})" \
+              "https://crates.io/api/v1/crates/${crate}/${version}")"
+            case "${status}" in
+              200)
+                echo "${crate} ${version} is already on crates.io; skipping"
+                continue
+                ;;
+              404) ;; # Only an explicit not-found response permits a new upload.
+              *)
+                echo "::error::crates.io lookup for ${crate} ${version} returned HTTP ${status}; refusing to publish" >&2
+                exit 1
+                ;;
+            esac
             echo "::group::cargo publish ${crate} ${version}"
             cargo publish --package "${crate}"
             echo "::endgroup::"

@@ -148,14 +148,31 @@ mod macos {
 
     pub(super) fn sign_path(target: &SignTarget) -> SignReport {
         let already = entitlement_present(&target.path, target.required);
-        if !already {
+        let preserve = developer_id_signature(&target.path);
+        if !already && !preserve {
             sign_binary(&target.path.to_string_lossy(), target.required);
         }
         SignReport {
             path: target.path.clone(),
-            applied: !already,
+            applied: !already && !preserve,
             entitlements_present: entitlement_present(&target.path, target.required),
         }
+    }
+
+    /// Never replace a valid distribution signature with an ad-hoc one, even
+    /// when a release is missing an entitlement. Report the missing entitlement
+    /// instead: repairing that release requires a newly notarized binary.
+    fn developer_id_signature(path: &Path) -> bool {
+        mvm_core::env_hygiene::helper_command("codesign")
+            .args([
+                "--verify",
+                "--strict",
+                "-R",
+                "=anchor apple generic and certificate leaf[field.1.2.840.113635.100.6.1.13] exists",
+            ])
+            .arg(path)
+            .output()
+            .is_ok_and(|output| output.status.success())
     }
 
     /// Sign the binary ad-hoc with the entitlement required by its role.
@@ -210,7 +227,6 @@ mod macos {
             Ok(e) => e,
             Err(_) => return,
         };
-        let exe_str = exe.to_str().unwrap_or("");
 
         // Binaries signed before the hypervisor entitlement was added have
         // only `virtualization`; the missing `hypervisor` key forces a
@@ -218,8 +234,12 @@ mod macos {
         if entitlement_present(&exe, RequiredEntitlement::Hypervisor) {
             return;
         }
-        let _ = exe_str;
-
+        if developer_id_signature(&exe) {
+            tracing::error!(
+                "Developer ID signed binary lacks the hypervisor entitlement; refusing ad-hoc repair"
+            );
+            std::process::exit(1);
+        }
         tracing::info!("Signing binary with the Hypervisor.framework entitlement...");
         sign_binary(&exe.to_string_lossy(), RequiredEntitlement::Hypervisor);
 
@@ -236,6 +256,46 @@ mod macos {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_distribution_signature_is_never_replaced_to_repair_an_entitlement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let directory = tempfile::tempdir().unwrap();
+        let codesign = directory.path().join("codesign");
+        env.set("PATH", directory.path());
+        for (verify_status, should_sign) in [(0, false), (1, true)] {
+            std::fs::write(
+                &codesign,
+                format!(
+                    "#!/bin/sh\n\
+                     case \"$1\" in\n\
+                     --verify)\n\
+                       case \"$4\" in '=anchor apple generic and '*) exit {verify_status} ;; *) exit 2 ;; esac ;;\n\
+                     --sign) printf 'signed' > \"$0.applied\" ;;\n\
+                     -d) printf '<plist><dict/></plist>' ;;\n\
+                     *) exit 2 ;;\n\
+                     esac\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&codesign, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let report = sign_targets(&[SignTarget {
+                path: directory.path().join("mvm-hvf-supervisor"),
+                required: RequiredEntitlement::Hypervisor,
+            }]);
+            assert_eq!(report.len(), 1);
+            assert_eq!(report[0].applied, should_sign);
+            assert!(!report[0].entitlements_present);
+            assert_eq!(
+                directory.path().join("codesign.applied").exists(),
+                should_sign,
+                "a valid Developer ID signature must survive a missing entitlement"
+            );
+        }
+    }
 
     #[test]
     fn sign_report_is_serializable() {

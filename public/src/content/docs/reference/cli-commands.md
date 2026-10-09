@@ -129,11 +129,39 @@ startup.
 | `mvmctl env bootstrap`                            | Same as `mvmctl bootstrap` (the `env`-grouped form)                                                                                                                                                                                                           |
 | `mvmctl doctor`                                   | Run diagnostics + dependency checks + security posture, including per-tenant host-agent daemon state (folded in from the dropped `mvmctl security` verb)                                                                                                      |
 | `mvmctl doctor --json`                            | Output diagnostics as JSON                                                                                                                                                                                                                                    |
-| `mvmctl env update`                               | Check for and install mvmctl updates. Refuses on an `install.sh` install, which is upgraded by re-running `install.sh`                                                                                                                                        |
+| `mvmctl env update`                               | Check for and atomically install the CLI, host helpers, and signed version-matched guest runtime using the installer inside the authenticated release archive. Package-managed installations must use their package manager |
 | `mvmctl env update --check`                       | Only check for updates, don't install                                                                                                                                                                                                                         |
 | `mvmctl env update --force`                       | Force reinstall even if already up to date                                                                                                                                                                                                                    |
-| `mvmctl env update --skip-verify`                 | Skip release signature verification                                                                                                                                                                                                                           |
+| `mvmctl env update --skip-verify`                 | Legacy flag: refused when installing. Self-update must authenticate the installer and cannot skip release signatures |
 | `mvmctl env verify-release <ARCHIVE> --tag <TAG>` | Verify a downloaded release archive against its Sigstore bundle (`<ARCHIVE>.bundle`, or `--bundle`) under that release's workflow identity, offline. `install.sh` uses it when an `mvmctl` is already installed                                               |
+
+Standalone self-update verifies the host archive checksum and release signature
+before extracting or running its bundled `install.sh`. It never fetches an
+unsigned installer script. That authenticated installer receives the exact release
+tag in `MVM_VERSION`, verifies the matching guest-runtime assets, stages the whole
+release, and switches `current` atomically. The installer owns migration,
+privilege escalation, smoke tests, and rollback; the updater never replaces the
+running binary or runtime files individually. Its host-archive redownload is
+pinned to the already authenticated archive's SHA-256. Self-update clears
+inherited checksum/signing bypasses and verifier-bootstrap overrides, and skips
+automatic builder bootstrap so updating does not start a VM.
+
+The installer requires the signed guest-runtime archive starting with CLI
+`v0.23.1`, including its prereleases. A missing archive on that release train or
+any newer version is a hard failure before activation, not permission to use an
+older runtime. Installing a historical CLI through `v0.23.0` retains that CLI's
+image-set runtime contract; those releases did not publish the new archive.
+
+For a loose standalone binary, `MVM_INSTALL_DIR` is its parent directory. For an
+existing versioned install, the updater preserves the library directory and reads
+the original binary directory from `install_dir` in `.mvm-lib`. Older markers
+without that field must first be migrated by re-running the installer with the
+original installation paths. Releases without a bundled installer are refused
+without changing the old installation.
+
+`--check` remains read-only, including on package-owned installs. `--force`
+still permits reinstalling or downgrading, but never bypasses authentication.
+`--skip-verify` and `MVM_SKIP_COSIGN_VERIFY` cannot authorize a self-update.
 
 ## Building
 
@@ -477,7 +505,7 @@ admission until their transports are wired.
 
 ## Guest Binaries
 
-The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every guest artifact mvm owns, built from this repository. In a source checkout, `mvmctl machine run` builds it once and assembles the runtime overlay, initramfs, and required SDK sidecar on the host from its verified contents. A future CLI release will carry the archive as a signed asset, version-locked to the CLI; until then, installed CLIs use the published overlay, initramfs, and sidecar artifacts. The archive is not an `mvm-images` input; that repository still builds its own guest artifacts until the remaining image-boundary changes land.
+The `mvm-guest-bins` archive is mvm's guest runtime as one versioned unit: every guest artifact mvm owns, built from this repository. In a source checkout, `mvmctl machine run` builds it once and assembles the runtime overlay, initramfs, and required SDK sidecar on the host from its verified contents. Starting with the `v0.23.1` release train, installed CLIs require the complete both-architecture archive signed by their exact CLI release tag. They verify a packaged archive or fetch it from that release before assembling the overlay, initramfs, and sidecar; missing or invalid archives never fall back to image-set runtime artifacts. This is the release contract, not a claim that the release has already been published. The archive is not an `mvm-images` input; that repository still builds its own guest artifacts until the remaining image-boundary changes land.
 
 | Command | Description |
 | ------- | ----------- |

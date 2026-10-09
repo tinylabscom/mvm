@@ -10,6 +10,18 @@ on:
     secrets:
       NPM_TOKEN:
         required: false
+      APPLE_DEVELOPER_ID_P12_BASE64:
+        required: false
+      APPLE_DEVELOPER_ID_P12_PASSWORD:
+        required: false
+      APPLE_DEVELOPER_ID_IDENTITY:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
 
 jobs:
   hostlib:
@@ -45,6 +57,31 @@ jobs:
         uses: ./.github/actions/build-hostlib
         with:
           platform: ${{ matrix.platform }}
+
+      - name: Developer ID sign and notarize macOS native payload
+        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_DEVELOPER_ID_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          python3 scripts/release/sign_macos.py --payload hostlib-out \
+            --report "${RUNNER_TEMP}/npm-notarization.json"
+
+      - name: Retain macOS notarization evidence
+        if: ${{ runner.os == 'macOS' && (!inputs.dry_run || github.ref_type == 'tag') }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: npm-notarization-${{ matrix.platform }}
+          path: ${{ runner.temp }}/npm-notarization.json
+          if-no-files-found: error
+
+      - name: Mark unsigned branch rehearsal
+        if: ${{ runner.os == 'macOS' && inputs.dry_run && github.ref_type != 'tag' }}
+        run: echo "::notice::Unsigned branch build only; NOT macOS release acceptance evidence."
 
       # The artifact keeps the `<platform>/` directory, so the build job can
       # download every leg into one tree without the five same-named files
@@ -239,6 +276,8 @@ jobs:
       id-token: write
       contents: read
     steps:
+      - uses: actions/checkout@v6
+
       - uses: actions/setup-node@v6
         with:
           node-version: "22"
@@ -265,22 +304,6 @@ jobs:
       # registry is skipped, so a rerun after a partial publish finishes the
       # set instead of failing on the first package it already uploaded.
       - name: Publish to npm
-        run: |
-          set -euo pipefail
-          publish() {
-            local tarball="$1" spec
-            # shellcheck disable=SC2016
-            spec="$(tar xzf "${tarball}" -O package/package.json | node -p 'const p = JSON.parse(require("fs").readFileSync(0, "utf8")); `${p.name}@${p.version}`')"
-            if npm view "${spec}" version >/dev/null 2>&1; then
-              echo "${spec} is already published; skipping"
-              return
-            fi
-            npm publish "${tarball}" --provenance --access public
-          }
-          main="$(ls dist/runmvm-mvm-[0-9]*.tgz)"
-          for tarball in dist/*.tgz; do
-            [ "${tarball}" = "${main}" ] || publish "${tarball}"
-          done
-          publish "${main}"
+        run: node scripts/publish-npm-packages.mjs dist
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

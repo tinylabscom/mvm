@@ -18,7 +18,9 @@ repository.workspace = true
 substrate_server_category = "per-VM approval endpoint broker (host-local Unix socket)"
 
 [features]
-default = []
+# Embedders must verify signed runtime and image artifacts by default, not
+# discover a missing verifier only when they first launch a machine.
+default = ["manifest-verify"]
 # Build as the release channel: the runtime overlay defaults to the published
 # artifact instead of a source-checkout build. Forwarded from mvm-cli's
 # feature of the same name.
@@ -43,9 +45,8 @@ test-support = ["mvm-runtime/test-support"]
 # Off by default: an embedder names a profile by value and links no parser.
 clap = ["dep:clap"]
 # Forwards to `mvm-core/manifest-verify`: the in-process Sigstore verifier that
-# checks keyless instruction-file signatures. Without it a keyless signature is
-# reported as uncheckable rather than verified. The feature exists here so the
-# tests that verify a real Sigstore bundle compile only where it is on.
+# checks signed artifacts and keyless instruction-file signatures. Explicit
+# no-default-features builds report signatures as uncheckable, never verified.
 manifest-verify = ["mvm-core/manifest-verify"]
 # Derive schemas for authored policy and instruction trust policy, and build
 # their emitters. Off by default so no shipped closure carries schemars;

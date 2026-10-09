@@ -465,6 +465,7 @@ priority = "optional"
 depends = []
 assets = [
     ["target/distro-pkg/bin/*", "usr/bin/", "755"],
+    ["target/distro-pkg/guest-runtime/*", "usr/lib/mvmctl/guest-runtime/", "644"],
     ["target/distro-pkg/doc/README.md", "usr/share/doc/mvmctl/", "644"],
     ["target/distro-pkg/man/*", "usr/share/man/man1/", "644"],
     ["target/distro-pkg/package-managed/deb", "usr/share/mvmctl/package-managed", "644"],
@@ -476,6 +477,7 @@ summary = "Firecracker microVM development tool"
 release = "1"
 assets = [
     { source = "target/distro-pkg/bin/*", dest = "/usr/bin/", mode = "755" },
+    { source = "target/distro-pkg/guest-runtime/*", dest = "/usr/lib/mvmctl/guest-runtime/", mode = "644" },
     { source = "target/distro-pkg/doc/README.md", dest = "/usr/share/doc/mvmctl/README.md", mode = "644", doc = true },
     { source = "target/distro-pkg/man/*", dest = "/usr/share/man/man1/", mode = "644", doc = true },
     { source = "target/distro-pkg/package-managed/rpm", dest = "/usr/share/mvmctl/package-managed", mode = "644" },

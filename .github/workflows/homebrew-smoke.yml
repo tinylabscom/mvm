@@ -1,0 +1,91 @@
+name: Install published Homebrew release
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Promoted stable CLI release to install
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@v3
+      - name: Authenticate promoted release and render formula
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: bash nix/packaging/homebrew/prepare-formula.sh "$TAG" "$RUNNER_TEMP/formula"
+
+      - name: Set up native Homebrew
+        run: |
+          set -euo pipefail
+          if ! command -v brew >/dev/null &&
+             [[ ! -x /home/linuxbrew/.linuxbrew/bin/brew && ! -x /opt/homebrew/bin/brew ]]; then
+            curl --fail --location --proto '=https' --tlsv1.2 \
+              https://raw.githubusercontent.com/Homebrew/install/8ab1549dfa1189fd4d818a2116592d8f0ee06d8c/install.sh \
+              --output "$RUNNER_TEMP/install-homebrew.sh"
+            NONINTERACTIVE=1 /bin/bash "$RUNNER_TEMP/install-homebrew.sh"
+          fi
+          if [[ -x /home/linuxbrew/.linuxbrew/bin/brew ]]; then
+            eval "$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)"
+          elif [[ -x /opt/homebrew/bin/brew ]]; then
+            eval "$(/opt/homebrew/bin/brew shellenv)"
+          fi
+          command -v brew || { echo "::error::Native Homebrew is required on this runner"; exit 1; }
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+          brew config
+
+      - name: Audit, install and load the authenticated release
+        env:
+          TAG: ${{ inputs.tag }}
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          set -euo pipefail
+          brew tap-new --no-git tinylabscom/release-smoke
+          tap="$(brew --repository tinylabscom/release-smoke)"
+          cp "$RUNNER_TEMP/formula/mvmctl.rb" "$tap/Formula/mvmctl.rb"
+          brew style tinylabscom/release-smoke/mvmctl
+          brew audit --strict --formula tinylabscom/release-smoke/mvmctl
+          brew install --formula tinylabscom/release-smoke/mvmctl
+          brew test tinylabscom/release-smoke/mvmctl
+          prefix="$(brew --prefix mvmctl)"
+          test "$(cat "$prefix/share/mvmctl/package-managed")" = homebrew
+          python3 scripts/smoke-installed-release.py "$prefix" "${TAG#v}" --runtime-fetch
+
+      - name: Remove and verify cleanup
+        if: always()
+        run: |
+          set -euo pipefail
+          if brew list --formula mvmctl >/dev/null 2>&1; then
+            prefix="$(brew --prefix mvmctl)"
+            brew uninstall --force mvmctl
+            test ! -e "$prefix/lib/mvmctl/mvmctl"
+            test ! -e "$prefix/share/mvmctl/package-managed"
+            test ! -e "$(brew --prefix)/bin/mvmctl"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: homebrew-tested-${{ matrix.runner }}
+          path: ${{ runner.temp }}/formula/mvmctl.rb
+          if-no-files-found: error

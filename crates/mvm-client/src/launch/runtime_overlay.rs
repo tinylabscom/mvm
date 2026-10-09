@@ -112,19 +112,21 @@ pub fn acquire_runtime_overlay(
                 )
             })
         }
-        OverlayAcquisition::Download => mvm_build::runtime_overlay::download_runtime_overlay(
-            params.expected_version,
-            params.arch,
-            params.cache_root,
-        )
-        .with_context(|| {
-            format!(
-                "download runtime overlay {} for {} into {}",
+        OverlayAcquisition::Download => {
+            let runtime = mvm_build::guest_runtime::resolve_or_download_guest_runtime(
+                params.cache_root,
                 params.expected_version,
                 params.arch,
-                params.cache_root.display()
             )
-        }),
+            .context("resolve signed released guest runtime for the runtime overlay")?;
+            mvm_build::runtime_overlay::build_runtime_overlay_from_guest_runtime(
+                params.cache_root,
+                params.expected_version,
+                params.arch,
+                &runtime,
+            )
+            .context("assemble runtime overlay from the signed released guest runtime")
+        }
     }
 }
 

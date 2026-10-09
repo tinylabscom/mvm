@@ -500,8 +500,24 @@ with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 |----------|---------|--------------|
 | `ci.yml` | Push to main/feat/*, PRs | check, fmt, clippy, test (macOS + Linux), audit |
 | `release.yml` | Tags matching `v*` | Builds 3 platform binaries (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`), creates GitHub Release |
-| `publish-crates.yml` | Release published | Publishes to crates.io in dependency order |
+| `publish-crates.yml` | Manual dispatch; packaging checks on relevant PRs and Extended CI | Checks the dependency plan; refuses live plans containing internal crates |
 | `workers.yml` | Website change merged to main, release, version tag, or manual dispatch | Deploys docs to Cloudflare Workers Static Assets |
+
+### crates.io readiness
+
+`cargo run -p xtask -- check-publish-readiness` checks package metadata and
+source boundaries. `cargo run -p xtask -- publish-plan` prints the normal- and
+build-dependency closure of `mvm-client` and `mvmctl`, dependencies first.
+This is a dependency diagnostic, not authorization to publish the internal
+workspace. `mvm-client` and `mvmctl` are not yet standalone registry packages;
+their current manifests require internal dependencies, and the planner withholds
+roots above declared blockers.
+
+CLI releases do not dispatch crates.io publication. A manual live run rejects
+the entire plan before uploading anything if it contains names other than
+`mvm-client` or `mvmctl`. Publishing those names requires a deliberately
+standalone public package design; removing a blocker from the planner is not
+sufficient. Readiness and dry-run commands upload nothing.
 
 ### Website deployment
 

@@ -90,10 +90,45 @@ jobs:
           cd "${RUNNER_TEMP}/release-archive"
           sha256sum --check mvmctl-x86_64-unknown-linux-gnu.tar.gz.sha256
 
+      - name: Download the signed guest runtime from the calling run
+        if: inputs.run_id == ''
+        uses: actions/download-artifact@v8
+        with:
+          name: mvm-guest-bins
+          path: ${{ runner.temp }}/guest-runtime
+
+      - name: Download the signed guest runtime from the named run
+        if: inputs.run_id != ''
+        uses: actions/download-artifact@v8
+        with:
+          name: mvm-guest-bins
+          path: ${{ runner.temp }}/guest-runtime
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Verify the unpublished runtime under the exact release tag identity
+        env:
+          TAG_NAME: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          test -n "${TAG_NAME}"
+          cd "${RUNNER_TEMP}/guest-runtime"
+          archive="mvm-guest-bins-${TAG_NAME}.tar.gz"
+          sha256sum --check "${archive}.sha256"
+          for asset in "${archive}" "${archive}.sha256"; do
+            cosign verify-blob --bundle "${asset}.bundle" \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${TAG_NAME}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "${asset}"
+          done
+
       - name: Unpack the archive and run the first-run smoke, egress included
         env:
           TAG_NAME: ${{ inputs.tag }}
           MVM_SMOKE_ARCHIVE: ${{ runner.temp }}/release-archive/mvmctl-x86_64-unknown-linux-gnu.tar.gz
+          MVM_SMOKE_GUEST_RUNTIME_DIR: ${{ runner.temp }}/guest-runtime
           MVM_SMOKE_OUT: ${{ runner.temp }}/release-archive-smoke
         run: sh scripts/smoke-fresh-install.sh ${TAG_NAME:+"$TAG_NAME"}
 

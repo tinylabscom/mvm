@@ -44,13 +44,20 @@ build_valid_fixture() {
   for t in $TARGETS; do
     local pkg="$dir/mvmctl-$t"
     mkdir -p "$pkg"
-    for b in $(bins_for "$t"); do printf '#!/bin/sh\n' > "$pkg/$b"; chmod +x "$pkg/$b"; done
+    printf '#!/bin/sh\nexit 0\n' > "$pkg/install.sh"
+    for b in $(bins_for "$t"); do printf '#!/bin/sh\necho "mvmctl 0.0.0"\n' > "$pkg/$b"; chmod +x "$pkg/$b"; done
     ( cd "$dir" && tar czf "mvmctl-$t.tar.gz" "mvmctl-$t" && rm -rf "mvmctl-$t" )
     printf 'bundle\n' > "$dir/mvmctl-$t.tar.gz.bundle"
     echo "$(sha256_of "$dir/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$dir/checksums-sha256.txt"
   done
   add_packages "$dir" amd64 x86_64
   add_packages "$dir" arm64 aarch64
+  local runtime="mvm-guest-bins-v0.0.0.tar.gz"
+  printf 'guest runtime fixture\n' > "$dir/$runtime"
+  printf 'bundle\n' > "$dir/$runtime.bundle"
+  echo "$(sha256_of "$dir/$runtime")  $runtime" > "$dir/$runtime.sha256"
+  printf 'bundle\n' > "$dir/$runtime.sha256.bundle"
+  cat "$dir/$runtime.sha256" >> "$dir/checksums-sha256.txt"
   printf 'bundle\n' > "$dir/checksums-sha256.txt.bundle"
   printf '{"sbom":true}\n' > "$dir/sbom.cdx.json"
   printf 'bundle\n' > "$dir/sbom.cdx.json.bundle"
@@ -59,7 +66,7 @@ build_valid_fixture() {
 
 # Returns the script's exit code.
 run() {
-  bash "$SCRIPT" --assets-dir "$1" >/dev/null 2>&1
+  bash "$SCRIPT" --assets-dir "$1" --expect-version 0.0.0 >/dev/null 2>&1
 }
 
 PASS=0; FAILN=0
@@ -69,6 +76,28 @@ bad()  { FAILN=$((FAILN+1)); echo "  FAIL: $1" >&2; }
 # 1. A complete release → pass.
 d="$(build_valid_fixture)"
 if run "$d"; then ok "complete release verifies"; else bad "complete release should verify"; fi
+rm -rf "$d"
+
+for suffix in "" ".bundle" ".sha256" ".sha256.bundle"; do
+  d="$(build_valid_fixture)"
+  rm "$d/mvm-guest-bins-v0.0.0.tar.gz$suffix"
+  if run "$d"; then bad "missing guest runtime$suffix must fail"; else ok "missing guest runtime$suffix fails closed"; fi
+  rm -rf "$d"
+done
+
+d="$(build_valid_fixture)"
+printf 'tampered\n' >> "$d/mvm-guest-bins-v0.0.0.tar.gz"
+if run "$d"; then bad "tampered guest runtime must fail"; else ok "tampered guest runtime fails closed"; fi
+rm -rf "$d"
+
+d="$(build_valid_fixture)"
+mv "$d/mvm-guest-bins-v0.0.0.tar.gz" "$d/mvm-guest-bins-v0.0.1.tar.gz"
+if run "$d"; then bad "wrong-version guest runtime must fail"; else ok "wrong-version guest runtime fails closed"; fi
+rm -rf "$d"
+
+d="$(build_valid_fixture)"
+printf '%064d  mvm-guest-bins-v0.0.0.tar.gz\n' 0 > "$d/mvm-guest-bins-v0.0.0.tar.gz.sha256"
+if run "$d"; then bad "inconsistent runtime checksum must fail"; else ok "inconsistent runtime checksum fails closed"; fi
 rm -rf "$d"
 
 # 2. The combined checksum manifest without its signature bundle → fail closed.

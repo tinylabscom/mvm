@@ -446,6 +446,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
+      attestations: read
     uses: ./.github/workflows/publish-sdk.yml
     with:
       dry_run: true

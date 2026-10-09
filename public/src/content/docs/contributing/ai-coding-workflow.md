@@ -277,6 +277,23 @@ Two notes from experience:
   the required `Test` check still verifies its result for those changes.
 - `security.yml` runs on release tags, nightly schedule, and manual dispatch —
   it does not run on pull requests.
+- `release.yml` branch dispatches build host archives and the complete guest
+  runtime, but cannot prove a signed installation: the installed runtime accepts
+  only its exact version-tag signing identity. A dispatch against an existing
+  version tag rehearses signed-runtime installation and boot, then uploads a
+  disposable draft and deletes it; only a tag push publishes. Do not move a tag
+  to reuse a failed release version. Stable promotion requires verification of
+  the published signatures and provenance, fresh-install guest boots, native
+  deb/rpm installation, and installation of the generated AUR/Nix recipes.
+  CLI releases do not dispatch crates.io publication: internal workspace crates
+  are not an approved registry distribution. A build artifact or deleted
+  rehearsal draft is never publication evidence.
+- Distro-package pull requests retain eight native install/remove lanes using
+  authenticated existing host archives and a confined synthetic guest-runtime
+  fixture. Their `fixture-*` artifacts test packaging mechanics only; they
+  cannot boot the new runtime or satisfy release acceptance. Tag builds use the
+  actual signed runtime, and post-publication lanes download the published
+  packages rather than rebuilding them.
 - Website/docs changes under `public/` are built and validated on PRs by
   `website.yml` and deploy to Cloudflare Workers Static Assets only after merge.
 - The merge queue runs the required `Test` check on the synthetic merge commit.

@@ -9,6 +9,7 @@ name: Guest bins
 # Nothing here publishes or signs.
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -43,6 +44,6 @@ jobs:
       - name: Upload the artifact
         uses: actions/upload-artifact@v7
         with:
-          name: mvm-guest-bins
+          name: mvm-guest-bins-unsigned
           path: dist/
           if-no-files-found: error

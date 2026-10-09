@@ -23,6 +23,10 @@ on:
         description: Release whose tarballs `release` mode packages; empty for the newest CLI release
         type: string
         default: ""
+      published_packages:
+        description: Install the exact published packages instead of rebuilding; reuse this run's payload manifests
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       release_tag:
@@ -34,12 +38,40 @@ on:
       - .github/workflows/distro-packages.yml
       - scripts/build-distro-packages.sh
       - scripts/distro-package-smoke.sh
+      - scripts/test-distro-package-assembly.py
+      - scripts/test_distro_package_assembly.py
+      - scripts/smoke-installed-release.py
+      - scripts/test_smoke_installed_release.py
+      - scripts/release/**
+      - nix/packaging/aur/**
+      - nix/packaging/nixpkgs/**
+      - nix/packaging/release/verify-release-assets*
 
 permissions:
   contents: read
 
 jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check packaging and signing refusal paths
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s scripts -p 'test_smoke_installed_release.py' -v
+          python3 -m unittest discover -s scripts -p 'test_distro_package_assembly.py' -v
+          python3 -m unittest discover -s scripts/release -p 'test_*.py' -v
+          python3 -m unittest discover -s nix/packaging/aur -p 'test_*.py' -v
+          bash nix/packaging/release/verify-release-assets.test.sh
+
   package:
+    needs: contracts
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -47,10 +79,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Pinned in Cargo.toml's [workspace.metadata.mvm.toolchain]: the
-      # packages are signed release assets, so the tools that write them do
-      # not float.
+      # Match installer v3's SHA256-verified bootstrap and the release signer's
+      # cosign version. It verifies --new-bundle-format bundles; cosign v3
+      # binaries no longer publish the detached .sig that installer v3 needs.
+      - uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.5.2
+
+      # Packaging tools are pinned in Cargo.toml's [workspace.metadata.mvm.toolchain].
       - name: Install cargo-deb and cargo-generate-rpm
+        if: ${{ !inputs.published_packages }}
         run: |
           set -euo pipefail
           pin() {
@@ -67,18 +105,26 @@ jobs:
           cargo install --locked "cargo-deb@${deb}" "cargo-generate-rpm@${rpm}"
 
       - name: Download this run's release tarballs
-        if: ${{ inputs.tarballs == 'build' }}
+        if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
         uses: actions/download-artifact@v8
         with:
           pattern: mvmctl-*-unknown-linux-gnu
           path: tarballs
           merge-multiple: true
 
+      - name: Download this run's signed guest runtime
+        if: ${{ !inputs.published_packages && inputs.tarballs == 'build' }}
+        uses: actions/download-artifact@v8
+        with:
+          name: mvm-guest-bins
+          path: guest-runtime
+
       - name: Download a published release's tarballs
-        if: ${{ inputs.tarballs != 'build' }}
+        if: ${{ !inputs.published_packages && inputs.tarballs != 'build' }}
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
+          PR_FIXTURE: ${{ github.event_name == 'pull_request' }}
         run: |
           set -euo pipefail
           tag="${RELEASE_TAG}"
@@ -90,8 +136,44 @@ jobs:
           fi
           [ -n "${tag}" ] || { echo "::error::no published CLI release to package" >&2; exit 1; }
           gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
-            --pattern 'mvmctl-*-unknown-linux-gnu.tar.gz' --dir tarballs
+            --pattern 'mvmctl-*-unknown-linux-gnu.tar.gz*' --dir tarballs
+          if [ "${PR_FIXTURE}" != true ]; then
+            gh release download "${tag}" --repo "${GITHUB_REPOSITORY}" \
+              --pattern "mvm-guest-bins-${tag}.tar.gz*" --dir guest-runtime
+          fi
+          for archive in tarballs/*.tar.gz; do
+            cosign verify-blob --bundle "${archive}.bundle" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${tag}" \
+              "${archive}"
+          done
           echo "RELEASE_TAG=${tag}" >> "${GITHUB_ENV}"
+
+      - name: Download and authenticate the published packages
+        if: ${{ inputs.published_packages }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "${RELEASE_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][A-Za-z0-9.-]+)?$ ]]
+          gh release download "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" \
+            --pattern '*.deb' --pattern '*.rpm' --pattern '*.deb.bundle' --pattern '*.rpm.bundle' \
+            --dir distro-packages
+          for package in distro-packages/*.deb distro-packages/*.rpm; do
+            cosign verify-blob --bundle "${package}.bundle" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@refs/tags/${RELEASE_TAG}" \
+              "${package}"
+          done
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "${GITHUB_ENV}"
+
+      - name: Download the original payload manifests
+        if: ${{ inputs.published_packages }}
+        uses: actions/download-artifact@v8
+        with:
+          name: distro-package-payloads
+          path: distro-packages
 
       # A release build packages under the tree's version, which the tag
       # matches; a published release, under its own tag's. The script refuses
@@ -100,9 +182,10 @@ jobs:
         id: source
         env:
           TARBALLS: ${{ inputs.tarballs }}
+          PUBLISHED_PACKAGES: ${{ inputs.published_packages }}
         run: |
           set -euo pipefail
-          if [ "${TARBALLS}" = build ]; then
+          if [ "${TARBALLS}" = build ] && [ "${PUBLISHED_PACKAGES}" != true ]; then
             version="$(cargo metadata --no-deps --format-version 1 \
               | jq -r '.packages[] | select(.name == "mvmctl") | .version')"
           else
@@ -112,13 +195,23 @@ jobs:
           echo "packaging version ${version}"
 
       - name: Build the packages
+        if: ${{ !inputs.published_packages }}
         env:
           VERSION: ${{ steps.source.outputs.version }}
+          PR_FIXTURE: ${{ github.event_name == 'pull_request' }}
         run: |
           set -euo pipefail
           for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            bash scripts/build-distro-packages.sh \
-              "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages
+            if [ "${PR_FIXTURE}" = true ]; then
+              # Preserve PR assembly/install coverage before the first signed
+              # runtime exists. These distinctly named fixture artifacts are
+              # not release evidence and can never enter a tag run.
+              python3 scripts/test-distro-package-assembly.py \
+                "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages
+            else
+              bash scripts/build-distro-packages.sh \
+                "tarballs/mvmctl-${target}.tar.gz" "${target}" "${VERSION}" distro-packages guest-runtime
+            fi
           done
           ls -la distro-packages/
 
@@ -128,7 +221,7 @@ jobs:
       - name: Upload the packages
         uses: actions/upload-artifact@v7
         with:
-          name: distro-packages
+          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-packages' || (inputs.published_packages && 'published-distro-packages' || 'distro-packages') }}
           path: |
             distro-packages/*.deb
             distro-packages/*.rpm
@@ -137,9 +230,10 @@ jobs:
           retention-days: 7
 
       - name: Upload the payload manifests
+        if: ${{ !inputs.published_packages }}
         uses: actions/upload-artifact@v7
         with:
-          name: distro-package-payloads
+          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-package-payloads' || 'distro-package-payloads' }}
           path: distro-packages/*.sha256sums
           retention-days: 7
 
@@ -166,9 +260,14 @@ jobs:
       - name: Download the packages
         uses: actions/download-artifact@v8
         with:
-          pattern: distro-*
+          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-packages' || (inputs.published_packages && 'published-distro-packages' || 'distro-packages') }}
           path: distro-packages
-          merge-multiple: true
+
+      - name: Download the payload manifests
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ github.event_name == 'pull_request' && 'fixture-distro-package-payloads' || 'distro-package-payloads' }}
+          path: distro-packages
 
       - name: Install, run, and remove the package
         env:
