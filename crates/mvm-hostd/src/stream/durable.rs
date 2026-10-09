@@ -49,7 +49,7 @@ pub(in crate::stream) const DURABLE_QUEUE_DEPTH: usize = 256;
 enum PersistJob {
     /// Append this record's payload to the transcript. The record is shared
     /// rather than copied — the fan-out already holds it behind an `Arc`.
-    Chunk(Arc<StreamRecord>),
+    Chunk(PersistChunk),
     /// Answer once every earlier job has been taken. A test asserting on what
     /// landed needs a point at which "queued" and "written" are the same
     /// thing; nothing in production waits on the store.
@@ -57,11 +57,22 @@ enum PersistJob {
     Drained(SyncSender<()>),
 }
 
+struct PersistChunk {
+    record: Arc<StreamRecord>,
+    encoded: Option<Vec<u8>>,
+}
+
+impl PersistChunk {
+    fn payload(&self) -> &[u8] {
+        self.encoded.as_deref().unwrap_or(&self.record.payload)
+    }
+}
+
 impl PersistJob {
     /// The record this job wants appended, if it carries one. Answering a
     /// drain request is the other thing a job can be, and it is done here so
     /// the writer loop has one shape whatever the queue is carrying.
-    fn record(self) -> Option<Arc<StreamRecord>> {
+    fn record(self) -> Option<PersistChunk> {
         match self {
             Self::Chunk(record) => Some(record),
             #[cfg(test)]
@@ -157,7 +168,6 @@ impl DurableSink {
                 writer: Arc::clone(&writer),
                 counters: Arc::clone(&counters),
                 journal,
-                encoding: seed.payload_encoding,
             },
             inbox,
         );
@@ -199,16 +209,35 @@ impl DurableSink {
     /// whole module exists to remove, reached through the one door that
     /// used to bypass it.
     pub fn push(&self, record: &Arc<StreamRecord>) {
-        saturating_add(&self.counters.total, 1);
-        saturating_add(&self.counters.total_bytes, record.payload.len() as u64);
-        let Some(jobs) = self.jobs.as_ref() else {
-            return note_shed(&self.vm, &self.counters, record);
+        let encoded = match self.seed.payload_encoding {
+            mvm_core::transcript::PayloadEncoding::Raw => None,
+            mvm_core::transcript::PayloadEncoding::StreamRecordV1 => {
+                match serde_json::to_vec(record.as_ref()) {
+                    Ok(encoded) => Some(encoded),
+                    Err(_) => {
+                        self.note_unwritten(1, record.payload.len() as u64);
+                        return;
+                    }
+                }
+            }
         };
-        match jobs.try_send(PersistJob::Chunk(Arc::clone(record))) {
+        let chunk = PersistChunk {
+            record: Arc::clone(record),
+            encoded,
+        };
+        let bytes = chunk.payload().len() as u64;
+        saturating_add(&self.counters.total, 1);
+        saturating_add(&self.counters.total_bytes, bytes);
+        let Some(jobs) = self.jobs.as_ref() else {
+            return note_shed(&self.vm, &self.counters, record, bytes);
+        };
+        match jobs.try_send(PersistJob::Chunk(chunk)) {
             Ok(()) => note_handed_over(&self.vm, &self.counters),
-            Err(TrySendError::Full(_)) => note_shed(&self.vm, &self.counters, record),
+            Err(TrySendError::Full(_)) => note_shed(&self.vm, &self.counters, record, bytes),
             // The writer thread is gone; the shed path applies here too.
-            Err(TrySendError::Disconnected(_)) => note_shed(&self.vm, &self.counters, record),
+            Err(TrySendError::Disconnected(_)) => {
+                note_shed(&self.vm, &self.counters, record, bytes)
+            }
         }
     }
 
@@ -424,9 +453,9 @@ fn wait_for_writer(worker: WriterHandle, timeout: Duration) -> bool {
 /// fan-out already refuses to have. The count is what keeps the drop from
 /// being a lie: [`DurableSink::seal`] folds it into the manifest's refusal
 /// totals, so the artifact declares its own hole.
-fn note_shed(vm: &str, counters: &PersistCounters, record: &StreamRecord) {
+fn note_shed(vm: &str, counters: &PersistCounters, record: &StreamRecord, bytes: u64) {
     saturating_add(&counters.shed_chunks, 1);
-    saturating_add(&counters.shed_bytes, record.payload.len() as u64);
+    saturating_add(&counters.shed_bytes, bytes);
     if !counters.shedding.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             vm = %vm,
@@ -456,7 +485,6 @@ fn note_handed_over(vm: &str, counters: &PersistCounters) {
 /// Everything one capture's writer thread owns: the transcript it appends to,
 /// the counters it keeps, and the journal it mirrors each landed chunk into.
 struct WriterThread {
-    encoding: mvm_core::transcript::PayloadEncoding,
     writer: Arc<Mutex<TranscriptWriter>>,
     counters: Arc<PersistCounters>,
     journal: CaptureJournal,
@@ -494,8 +522,8 @@ fn spawn_writer(
 fn run_writer(vm: &str, state: &mut WriterThread, inbox: &Receiver<PersistJob>) {
     let mut degraded = false;
     while let Ok(job) = inbox.recv() {
-        if let Some(record) = job.record() {
-            degraded = append(vm, state, &record, degraded);
+        if let Some(chunk) = job.record() {
+            degraded = append(vm, state, &chunk.record, chunk.payload(), degraded);
         }
     }
 }
@@ -513,19 +541,15 @@ fn run_writer(vm: &str, state: &mut WriterThread, inbox: &Receiver<PersistJob>) 
 /// writer's own totals rather than recomputing them: a journal line that
 /// disagreed with the writer about what had landed would rebuild into a
 /// manifest that does not describe the segments beside it.
-fn append(vm: &str, state: &mut WriterThread, record: &StreamRecord, degraded: bool) -> bool {
+fn append(
+    vm: &str,
+    state: &mut WriterThread,
+    record: &StreamRecord,
+    payload: &[u8],
+    degraded: bool,
+) -> bool {
     let mut writer = lock_writer(&state.writer);
-    let outcome = match state.encoding {
-        mvm_core::transcript::PayloadEncoding::Raw => {
-            writer.push(direction_for(record.kind), &record.payload)
-        }
-        mvm_core::transcript::PayloadEncoding::StreamRecordV1 => serde_json::to_vec(record)
-            .map_err(|_| mvm_core::transcript::TranscriptError::Io {
-                file: "stream-record".into(),
-                msg: "encoding failed".into(),
-            })
-            .and_then(|encoded| writer.push(direction_for(record.kind), &encoded)),
-    };
+    let outcome = writer.push(direction_for(record.kind), payload);
     if outcome.is_ok() {
         let shortfall = JournalShortfall {
             // The hand-off's own drops belong in the same total the writer's

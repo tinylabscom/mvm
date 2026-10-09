@@ -338,15 +338,30 @@ impl StreamBroker {
 
     /// Keep a bounded RAM-only window for late supervisor-owned live readers.
     pub(super) fn with_replay(mut self) -> Self {
-        self.replay = Some(ReaderHandle::new(
-            ReaderStart {
-                id: 0,
-                from_seq: self.next_seq,
-                anchor: self.prev_hash,
-            },
-            DEFAULT_READER_BOUNDS,
-        ));
+        self.replay = Some(
+            ReaderHandle::new(
+                ReaderStart {
+                    id: 0,
+                    from_seq: self.next_seq,
+                    anchor: self.prev_hash,
+                },
+                DEFAULT_READER_BOUNDS,
+            )
+            .with_max_age(mvm_core::transcript::AtRestRetention::default().payload_after_seal_secs),
+        );
         self
+    }
+
+    /// Retired generations must not remain readable through RAM queues. Purge
+    /// conservatively, including any newer live records, with a live-window gap.
+    pub(super) fn purge_replay(&self) {
+        for queue in self.readers.iter().filter_map(Weak::upgrade).chain(
+            self.replay
+                .as_ref()
+                .and_then(|reader| reader.weak_queue().upgrade()),
+        ) {
+            lock_queue(&queue).discard_all();
+        }
     }
 
     /// Attach a follower. It receives every record ingested from now on;

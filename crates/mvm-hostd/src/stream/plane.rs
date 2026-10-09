@@ -533,7 +533,13 @@ fn build_broker(
 /// key wrapped under the host KEK, and the ring-retention policy every stream
 /// capture runs under.
 fn build_writer(vm: &str, transcript_dir: &Path) -> Result<TranscriptWriter> {
-    build_writer_with_policy(vm, transcript_dir, None, DEFAULT_TENANT)
+    build_writer_with_policy(
+        vm,
+        transcript_dir,
+        None,
+        DEFAULT_TENANT,
+        &config::mvm_keys_dir(),
+    )
 }
 
 pub(super) fn build_writer_with_policy(
@@ -541,9 +547,9 @@ pub(super) fn build_writer_with_policy(
     transcript_dir: &Path,
     at_rest: Option<transcript::AtRestRetention>,
     tenant: &str,
+    keys_dir: &Path,
 ) -> Result<TranscriptWriter> {
-    let keys_dir = config::mvm_keys_dir();
-    let kek = transcript::load_or_init_kek(&keys_dir)
+    let kek = transcript::load_or_init_kek(keys_dir)
         .with_context(|| format!("open the transcript key in {}", keys_dir.display()))?;
     let data_key = aead::Key::random();
     let wrapped_data_key_b64 = transcript::wrap_data_key(&kek, &data_key);

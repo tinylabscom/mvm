@@ -24,6 +24,7 @@ use crate::audit::{emitter::AuditEmitter, host_keypair};
 
 /// Shutdown is bounded even if the storage worker cannot leave a host syscall.
 const OWNER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Concrete instance identity comes from the authenticated launch/handoff,
 /// independently of the logical workload named by an admitted plan.
@@ -62,8 +63,9 @@ impl CaptureOwner {
             CaptureAuthority::OperationalLiveOnly => (None, StreamRetention::Ephemeral),
         };
         mvm_core::naming::validate_vm_name(vm)?;
+        let keys = config::mvm_keys_dir();
+        let state_dir = config::vm_state_dir(vm);
         let emitter = if retention.persists() {
-            let keys = config::mvm_keys_dir();
             let (signing, _) = mvm_core::crypto::ed25519_keypair::load_existing(
                 &keys.join(host_keypair::SECRET_FILENAME),
                 &keys.join(host_keypair::PUBLIC_FILENAME),
@@ -98,8 +100,13 @@ impl CaptureOwner {
                 .context("durable capture needs admitted authority")?
                 .tenant
                 .0;
-            let writer =
-                build_writer_with_policy(vm, &active, Some(AtRestRetention::default()), tenant)?;
+            let writer = build_writer_with_policy(
+                vm,
+                &active,
+                Some(AtRestRetention::default()),
+                tenant,
+                &keys,
+            )?;
             let mut broker = broker
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -116,6 +123,8 @@ impl CaptureOwner {
         let (exit, exited) = mpsc::channel();
         let state = Worker {
             vm: vm.to_string(),
+            state_dir,
+            keys,
             run_dir,
             active,
             generation: 0,
@@ -175,6 +184,8 @@ impl Drop for CaptureOwner {
 
 struct Worker {
     vm: String,
+    state_dir: PathBuf,
+    keys: PathBuf,
     run_dir: PathBuf,
     active: PathBuf,
     generation: u64,
@@ -192,12 +203,13 @@ struct Worker {
 impl Worker {
     fn run(mut self) {
         let mut deadline = Instant::now() + self.period;
+        let mut maintenance = Instant::now() + MAINTENANCE_INTERVAL;
         loop {
-            match self
-                .consumer
-                .receiver
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            {
+            match self.consumer.receiver.recv_timeout(
+                deadline
+                    .min(maintenance)
+                    .saturating_duration_since(Instant::now()),
+            ) {
                 Ok(chunk) => {
                     self.broker
                         .lock()
@@ -207,10 +219,23 @@ impl Worker {
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {}
             }
+            if Instant::now() >= maintenance {
+                self.account_loss();
+                let failures = self
+                    .broker
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .counters()
+                    .persist_failures;
+                if failures != 0 {
+                    self.mark_failed();
+                }
+                maintenance = Instant::now() + MAINTENANCE_INTERVAL;
+            }
             if Instant::now() >= deadline {
                 self.account_loss();
                 if self.rotate().is_err() {
-                    self.failed.store(true, Ordering::Relaxed);
+                    self.mark_failed();
                     // Never retry with plaintext. End this generation and keep
                     // live output; the explicit failure persists at shutdown.
                     self.seal_active();
@@ -229,13 +254,20 @@ impl Worker {
         let chunks = counts.dropped_chunks.saturating_sub(self.last_loss.0);
         let bytes = counts.dropped_bytes.saturating_sub(self.last_loss.1);
         if chunks != 0 || counts.is_saturated() {
-            self.failed.store(true, Ordering::Relaxed);
+            self.mark_failed();
         }
         self.broker
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .note_unwritten(chunks.max(u64::from(counts.is_saturated())), bytes);
         self.last_loss = (counts.dropped_chunks, counts.dropped_bytes);
+    }
+
+    fn mark_failed(&self) {
+        if !self.failed.swap(true, Ordering::Relaxed) {
+            let _ = mvm_vmm::host::hvf_supervisor::ProtectedSupervisorStatus::CaptureFailed
+                .publish(&self.state_dir);
+        }
     }
 
     fn rotate(&mut self) -> Result<()> {
@@ -253,8 +285,13 @@ impl Worker {
             .context("durable capture needs admitted authority")?
             .tenant
             .0;
-        let writer =
-            build_writer_with_policy(&self.vm, &dir, Some(AtRestRetention::default()), tenant)?;
+        let writer = build_writer_with_policy(
+            &self.vm,
+            &dir,
+            Some(AtRestRetention::default()),
+            tenant,
+            &self.keys,
+        )?;
         let sealed = self
             .broker
             .lock()
@@ -277,11 +314,20 @@ impl Worker {
 
     fn publish(&self, manifest: Option<TranscriptManifest>) {
         let Some(manifest) = manifest else { return };
+        if mvm_core::transcript::retention_now()
+            .and_then(|now| manifest.check_readable_at(now))
+            .is_err()
+        {
+            self.broker
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .purge_replay();
+        }
         if manifest.is_truncated() || manifest.sealed_unix_secs.is_none() {
-            self.failed.store(true, Ordering::Relaxed);
+            self.mark_failed();
         }
         if write_manifest(&self.active, &manifest).is_err() {
-            self.failed.store(true, Ordering::Relaxed);
+            self.mark_failed();
             return;
         }
         if let (Some(plan), Some(emitter)) = (&self.plan, &self.emitter) {
@@ -296,10 +342,10 @@ impl Worker {
                 )
                 .is_err()
             {
-                self.failed.store(true, Ordering::Relaxed);
+                self.mark_failed();
             }
         } else {
-            self.failed.store(true, Ordering::Relaxed);
+            self.mark_failed();
         }
     }
 }

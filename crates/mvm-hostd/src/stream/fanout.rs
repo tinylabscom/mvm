@@ -49,6 +49,8 @@ pub(in crate::stream) struct ReaderQueue {
     ring: RingState,
     gap: Option<GapMarker>,
     resume_anchor: Option<[u8; 32]>,
+    max_age_secs: Option<u64>,
+    opened_unix_secs: Option<u64>,
 }
 
 impl ReaderQueue {
@@ -58,6 +60,8 @@ impl ReaderQueue {
             ring: RingState::new(bounds),
             gap: None,
             resume_anchor: None,
+            max_age_secs: None,
+            opened_unix_secs: None,
         }
     }
 
@@ -65,10 +69,34 @@ impl ReaderQueue {
     /// fits. Never refuses — the newest write always wins, which is what
     /// keeps a stalled follower from stalling the producer.
     pub(in crate::stream) fn push(&mut self, record: Arc<StreamRecord>) {
+        if self.records.is_empty() {
+            self.opened_unix_secs = Some(record.host_unix_nanos / 1_000_000_000);
+        }
         let size = record.payload.len() as u64;
         let evicted = self.ring.admit_counted(size);
         self.evict_oldest(usize::try_from(evicted.chunks).unwrap_or(usize::MAX));
         self.records.push_back(record);
+    }
+
+    pub(in crate::stream) fn discard_all(&mut self) {
+        let count = self.records.len();
+        for _ in 0..count {
+            self.ring.release_oldest();
+        }
+        self.evict_oldest(count);
+        self.opened_unix_secs = None;
+    }
+
+    fn expire_at(&mut self, now: Option<u64>) {
+        let (Some(max_age), Some(opened)) = (self.max_age_secs, self.opened_unix_secs) else {
+            return;
+        };
+        let valid = now
+            .zip(opened.checked_add(max_age))
+            .is_some_and(|(now, deadline)| now >= opened && now < deadline);
+        if !valid {
+            self.discard_all();
+        }
     }
 
     /// Drop the `count` oldest records the ring just evicted, fold them into
@@ -196,10 +224,17 @@ impl ReaderHandle {
         }
     }
 
+    pub(in crate::stream) fn with_max_age(self, seconds: u64) -> Self {
+        lock_queue(&self.queue).max_age_secs = Some(seconds);
+        self
+    }
+
     /// Copy a bounded live window into an independent follower queue. The
     /// payloads remain shared Arcs; the follower cannot drain the replay source.
     pub(in crate::stream) fn replay(&self, mut start: ReaderStart, bounds: CaptureBounds) -> Self {
-        let source = lock_queue(&self.queue);
+        let mut source = lock_queue(&self.queue);
+        let now = mvm_core::transcript::retention_now().ok();
+        source.expire_at(now);
         if let Some(first) = source.records.front() {
             start.from_seq = first.seq;
             start.anchor = first.prev_hash;
@@ -208,9 +243,12 @@ impl ReaderHandle {
         {
             let mut target = lock_queue(&handle.queue);
             target.gap = source.gap;
+            target.max_age_secs = source.max_age_secs;
             for record in &source.records {
                 target.push(Arc::clone(record));
             }
+            target.opened_unix_secs = source.opened_unix_secs;
+            target.expire_at(now);
         }
         handle
     }
@@ -258,7 +296,11 @@ impl ReaderHandle {
 
     /// Take the next record, or `None` when this reader is caught up.
     pub fn recv(&mut self) -> Option<StreamRecord> {
-        let record = lock_queue(&self.queue).pop()?;
+        let record = {
+            let mut queue = lock_queue(&self.queue);
+            queue.expire_at(mvm_core::transcript::retention_now().ok());
+            queue.pop()?
+        };
         // The last holder gets the record outright; earlier readers copy.
         Some(Arc::try_unwrap(record).unwrap_or_else(|shared| (*shared).clone()))
     }
@@ -279,6 +321,7 @@ impl ReaderHandle {
     /// verified, rather than trusting this side to repeat it.
     pub fn drain_verified(&mut self) -> DrainedWindow {
         let mut queue = lock_queue(&self.queue);
+        queue.expire_at(mvm_core::transcript::retention_now().ok());
         let anchor = queue.resume_anchor.unwrap_or(self.start.anchor);
         let gap = queue.gap;
         let mut records = Vec::with_capacity(queue.records.len());
@@ -362,6 +405,41 @@ mod tests {
             prev_hash: [0u8; 32],
             payload: payload.to_vec(),
         })
+    }
+
+    #[test]
+    fn protected_live_window_expires_at_deadline_and_refuses_bad_clocks() {
+        for (clock, remains) in [
+            (Some(106), true),
+            (Some(107), false),
+            (Some(99), false),
+            (None, false),
+        ] {
+            let mut queue = ReaderQueue::new(bounds(100, 10));
+            queue.max_age_secs = Some(7);
+            let mut value = (*record(0, b"private")).clone();
+            value.host_unix_nanos = 100 * 1_000_000_000;
+            queue.push(Arc::new(value));
+            queue.expire_at(clock);
+            assert_eq!(!queue.records.is_empty(), remains);
+            if !remains {
+                assert_eq!(queue.gap.unwrap().dropped_chunks, 1);
+                assert_eq!(queue.gap.unwrap().dropped_bytes, 7);
+            }
+        }
+    }
+
+    #[test]
+    fn an_idle_expired_replay_cannot_be_copied_to_a_new_reader() {
+        let now = mvm_core::transcript::retention_now().unwrap();
+        let source = ReaderHandle::new(start_at(0), bounds(100, 10)).with_max_age(7 * 86400);
+        let mut old = (*record(0, b"expired-private-marker")).clone();
+        old.host_unix_nanos = (now - 8 * 86400) * 1_000_000_000;
+        lock_queue(&source.queue).push(Arc::new(old));
+        let mut reader = source.replay(start_at(1), bounds(100, 10));
+        assert!(reader.drain_verified().records.is_empty());
+        assert_eq!(reader.dropped_count(), 1);
+        assert_eq!(source.pending(), 0);
     }
 
     #[test]
