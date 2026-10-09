@@ -42,6 +42,18 @@ fn write_line(stream: &mut (impl io::Read + Write), reply: &DecisionReply) -> io
 /// authorization and dispatch rules are testable on a plain stream pair.
 fn answer(stream: &mut (impl io::Read + Write)) -> io::Result<()> {
     match read_line(stream)? {
+        DecisionRequest::Executable { pid } => {
+            #[cfg(not(target_os = "linux"))]
+            let _ = pid;
+            #[cfg(target_os = "linux")]
+            let reply = match crate::tool_map::process_executable(pid) {
+                Ok(path) => DecisionReply::Executable { path },
+                Err(_) => DecisionReply::Unavailable,
+            };
+            #[cfg(not(target_os = "linux"))]
+            let reply = DecisionReply::Unavailable;
+            write_line(stream, &reply)
+        }
         DecisionRequest::Decided { pid } => {
             let reply = match crate::tool_attribution::consume_decided(pid) {
                 Some(binding) => DecisionReply::Decided { binding },
@@ -186,6 +198,21 @@ mod tests {
         assert_eq!(
             exchange(&DecisionRequest::Decided { pid: 1 }),
             DecisionReply::NotDecided
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_provenance_is_read_by_the_agent_side() {
+        let pid = std::process::id();
+        let expected = crate::tool_map::process_executable(pid).expect("own executable");
+        assert_eq!(
+            exchange(&DecisionRequest::Executable { pid }),
+            DecisionReply::Executable { path: expected }
+        );
+        assert_eq!(
+            exchange(&DecisionRequest::Executable { pid: u32::MAX }),
+            DecisionReply::Unavailable
         );
     }
 

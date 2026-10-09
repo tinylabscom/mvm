@@ -349,6 +349,13 @@ pub struct ToolSocketAnswer {
 #[serde(deny_unknown_fields)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum DecisionRequest {
+    /// Ask the agent to read the kernel-reported executable for a shim peer.
+    /// The agent shares the workload uid, so procfs permits this check without
+    /// granting the helper a process-inspection capability.
+    Executable {
+        /// The shim's pid, from `SO_PEERCRED` of the helper's shim socket.
+        pid: u32,
+    },
     /// Consume the host decision the agent recorded when it spawned this
     /// MediatedExec relay. Keyed by the shim's kernel-authenticated pid; the
     /// agent re-validates liveness and start time, so a recycled pid cannot
@@ -375,6 +382,11 @@ pub enum DecisionRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum DecisionReply {
+    /// Kernel-reported executable for the live shim peer.
+    Executable {
+        /// `/proc/<pid>/exe`, normalized by [`process_executable`].
+        path: String,
+    },
     /// The pid carried a recorded host decision, consumed by this answer.
     Decided {
         /// The binding from the host decision, if the tool scopes the

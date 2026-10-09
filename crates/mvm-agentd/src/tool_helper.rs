@@ -90,6 +90,14 @@ pub enum HelperError {
 
 /// How the helper learns prior decisions and records sessions.
 pub trait AgentDecisions {
+    /// Read the kernel-reported executable for the shim peer. Production
+    /// delegates this to the guest agent, which shares the workload uid and
+    /// can therefore inspect procfs without a privileged identity transition.
+    fn executable(&self, _pid: u32) -> Result<String, HelperError> {
+        Err(HelperError::Unavailable(
+            "shim executable provenance is unavailable".into(),
+        ))
+    }
     /// Consume the host decision recorded for a `MediatedExec` relay pid.
     /// `Ok(Some(binding))` is a decided relay (`None` binding when the tool
     /// scopes nothing); `Ok(None)` is an undecided caller.
@@ -1406,9 +1414,7 @@ fn connection_outcome(
 ) -> io::Result<HelperReply> {
     let (request, stdio) = recv_request(&stream)?;
     let (peer_pid, peer_uid, peer_gid) = peer_process(&stream)?;
-    let actual_executable = with_filesystem_ids(peer_uid, peer_gid, || {
-        crate::tool_map::process_executable(peer_pid)
-    })??;
+    let actual_executable = agent().executable(peer_pid).map_err(io::Error::other)?;
     if !crate::tool_map::provenance_matches(&request.exe, &actual_executable) {
         return Ok(HelperReply::Denied {
             reason: "the executable path does not match the connecting process".into(),
@@ -1484,15 +1490,29 @@ impl SocketAgent {
 
 #[cfg(target_os = "linux")]
 impl AgentDecisions for SocketAgent {
+    fn executable(&self, pid: u32) -> Result<String, HelperError> {
+        match Self::call(&crate::tool_map::DecisionRequest::Executable { pid })? {
+            crate::tool_map::DecisionReply::Executable { path } => Ok(path),
+            crate::tool_map::DecisionReply::Unavailable => Err(HelperError::Unavailable(
+                "the guest agent could not inspect the shim executable".into(),
+            )),
+            crate::tool_map::DecisionReply::Decided { .. }
+            | crate::tool_map::DecisionReply::NotDecided
+            | crate::tool_map::DecisionReply::Ok => Err(HelperError::Unavailable(
+                "unexpected reply to an executable provenance question".into(),
+            )),
+        }
+    }
+
     fn decided(&self, pid: u32) -> Result<Option<Option<ToolInvocationBinding>>, HelperError> {
         match Self::call(&crate::tool_map::DecisionRequest::Decided { pid })? {
             crate::tool_map::DecisionReply::Decided { binding } => Ok(Some(binding)),
             crate::tool_map::DecisionReply::NotDecided => Ok(None),
-            crate::tool_map::DecisionReply::Ok | crate::tool_map::DecisionReply::Unavailable => {
-                Err(HelperError::Unavailable(
-                    "unexpected reply to a decided-tool question".into(),
-                ))
-            }
+            crate::tool_map::DecisionReply::Executable { .. }
+            | crate::tool_map::DecisionReply::Ok
+            | crate::tool_map::DecisionReply::Unavailable => Err(HelperError::Unavailable(
+                "unexpected reply to a decided-tool question".into(),
+            )),
         }
     }
 
@@ -1505,7 +1525,8 @@ impl AgentDecisions for SocketAgent {
             crate::tool_map::DecisionReply::Unavailable => Err(HelperError::Unavailable(
                 "the guest agent could not attribute the tool session".into(),
             )),
-            crate::tool_map::DecisionReply::Decided { .. }
+            crate::tool_map::DecisionReply::Executable { .. }
+            | crate::tool_map::DecisionReply::Decided { .. }
             | crate::tool_map::DecisionReply::NotDecided => Err(HelperError::Unavailable(
                 "unexpected reply to an attribution request".into(),
             )),
