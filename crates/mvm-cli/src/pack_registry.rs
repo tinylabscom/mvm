@@ -525,13 +525,9 @@ fn pull_one(
         })?
     };
     check_registry_pack_revocations_if_configured(&verified)?;
-    if matches!(
-        verified.manifest().image.as_ref(),
-        Some(RegistryPackImage::Built(_))
-    ) {
-        mvm_core::registry_pack::ensure_built_image_verifier_available()?;
-    }
-    download_payload(config, &verified, fetched.staged_path())?;
+    with_built_image_verifier_preflight(verified.manifest().image.as_ref(), || {
+        download_payload(config, &verified, fetched.staged_path())
+    })?;
 
     let installed = if pinned {
         // The pin already exists; install reuses or repairs the cache entry.
@@ -561,6 +557,16 @@ fn pull_one(
         },
         dependencies,
     ))
+}
+
+fn with_built_image_verifier_preflight<T>(
+    image: Option<&RegistryPackImage>,
+    download_payload: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if matches!(image, Some(RegistryPackImage::Built(_))) {
+        mvm_core::registry_pack::ensure_built_image_verifier_available()?;
+    }
+    download_payload()
 }
 
 fn runtime() -> Result<tokio::runtime::Runtime> {
@@ -724,6 +730,63 @@ mod tests {
         let fetched = download_pack(&config, &"runtime/python@1.0.0".parse().unwrap()).unwrap();
         assert_eq!(fetched.manifest_bytes, manifest);
         assert_eq!(std::fs::read_dir(fetched.staged_path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn built_image_verifier_refusal_precedes_payload_download() {
+        use mvm_core::image_set::{ArtifactName, ReleaseTag, RepositorySlug};
+        use mvm_core::packs::Sha256Hex;
+        use mvm_core::registry_pack_image::{
+            BuiltImageAsset, BuiltImageAssets, BuiltImageBaseSet, BuiltImagePlatform,
+            BuiltImageRelease, BuiltPackImageDescriptor,
+        };
+
+        let digest = Sha256Hex::from_bytes(b"test");
+        let asset = |name: &str| BuiltImageAsset {
+            name: ArtifactName::new(name).unwrap(),
+            sha256: digest.clone(),
+            size: 1,
+        };
+        let image = RegistryPackImage::Built(Box::new(BuiltPackImageDescriptor {
+            schema_version: 2,
+            platform: BuiltImagePlatform::LinuxX86_64,
+            base_set: BuiltImageBaseSet {
+                repository: RepositorySlug::new("tinylabscom/mvm-images").unwrap(),
+                release_tag: ReleaseTag::new("image-set/v0.2.4").unwrap(),
+                manifest_sha256: digest.clone(),
+            },
+            release: BuiltImageRelease {
+                repository: RepositorySlug::new("tinylabscom/mvm-packs").unwrap(),
+                tag: "pack-runtime-python-v1.0.0".to_string(),
+            },
+            assets: BuiltImageAssets {
+                rootfs: asset("rootfs.ext4"),
+                verity: asset("rootfs.verity"),
+                roothash: asset("rootfs.roothash"),
+                mvm_meta: asset("mvm-meta.json"),
+                rootfs_signature_bundle: asset("rootfs.signature.json"),
+                provenance_statement: asset("provenance.json"),
+                provenance_signature_bundle: asset("provenance.signature.json"),
+            },
+        }));
+        let mut payload_downloaded = false;
+
+        let error = with_built_image_verifier_preflight(Some(&image), || {
+            payload_downloaded = true;
+            Ok(())
+        })
+        .expect_err("missing compatible verifier must refuse the pull");
+
+        assert!(
+            error
+                .to_string()
+                .contains("no trusted released image verifier compatible"),
+            "expected the verifier-unavailable error, got {error:#}"
+        );
+        assert!(
+            !payload_downloaded,
+            "payload fetch must not run after refusal"
+        );
     }
 
     #[test]

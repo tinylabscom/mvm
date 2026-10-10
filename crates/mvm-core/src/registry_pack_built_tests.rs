@@ -56,17 +56,18 @@ fn built_image_verification_stays_fail_closed_without_a_compatible_release() {
         "pin only a published verifier compatible with the current image-set lock"
     );
     assert!(
-        ensure_built_image_verifier_available().is_err(),
+        matches!(
+            ensure_built_image_verifier_available(),
+            Err(RegistryPackVerificationError::BuiltImageVerifierUnavailable)
+        ),
         "clients without a compatible release must refuse built-image installation"
     );
     let claimed = Sha256Hex::from_bytes(b"any claimed verifier");
     let error = verify_trusted_image_verifier(&claimed).unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("no released image verifier compatible"),
-        "the missing compatible release must fail with an actionable error: {error}"
-    );
+    assert!(matches!(
+        error,
+        RegistryPackVerificationError::BuiltImageVerifierUnavailable
+    ));
 }
 
 fn structural_only(

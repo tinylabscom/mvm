@@ -784,6 +784,10 @@ pub enum RegistryPackVerificationError {
     UnsafeFilePath { path: String },
     #[error("registry-pack image declaration is invalid: {reason}")]
     InvalidImageDeclaration { reason: String },
+    #[error(
+        "no trusted released image verifier compatible with the current image-set lock is available"
+    )]
+    BuiltImageVerifierUnavailable,
     #[error("registry-pack image mvm.toml is invalid: {reason}")]
     InvalidImageManifest { reason: String },
     #[error("registry-pack payload path {path:?} could not be read: {reason}")]

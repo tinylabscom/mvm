@@ -111,13 +111,8 @@ pub fn ensure_built_image_verifier_available() -> Result<(), RegistryPackVerific
 }
 
 fn trusted_image_verifier_sha256() -> Result<&'static str, RegistryPackVerificationError> {
-    TRUSTED_IMAGE_VERIFIER_SHA256.ok_or_else(|| {
-        RegistryPackVerificationError::InvalidImageDeclaration {
-            reason:
-                "no released image verifier compatible with the current image-set lock is trusted"
-                    .to_string(),
-        }
-    })
+    TRUSTED_IMAGE_VERIFIER_SHA256
+        .ok_or(RegistryPackVerificationError::BuiltImageVerifierUnavailable)
 }
 
 #[cfg(test)]
