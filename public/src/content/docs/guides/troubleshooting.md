@@ -583,7 +583,7 @@ Emergency rotation when Sigstore TUF/Rekor is unavailable: `MVM_SKIP_COSIGN_VERI
 
 The manifest pins `manifest.version` to `mvmctl --version` exactly. Either:
 
-- Upgrade `mvmctl` to match (`brew upgrade mvmctl` / `cargo install mvmctl`); or
+- Upgrade `mvmctl` to match (`brew upgrade mvmctl`, or re-run `install.sh`); or
 - Use a manifest from the matching release (re-export from the v0.14.0 release page).
 
 ### "Integrity check failed for rootfs.ext4"
