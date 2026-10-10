@@ -22,6 +22,9 @@ use zeroize::Zeroizing;
 use crate::host::helper_exit::{HelperExit, await_child_exit, peek_child_exit};
 use mvm_core::atomic_io::write_private;
 
+mod owned;
+use owned::endpoint_command;
+pub use owned::{OwnedEndpoint, OwnedEndpointSpawnError, spawn_network_endpoint_owned};
 mod stderr_log;
 use stderr_log::{endpoint_stderr_log_path, open_endpoint_stderr_log};
 
@@ -1215,11 +1218,7 @@ pub fn spawn_network_endpoint(mut params: SubstitutionSpawnParams<'_>) -> Result
     let stderr_log = endpoint_stderr_log_path(state_dir);
     let log_file = open_endpoint_stderr_log(state_dir)?;
 
-    let mut cmd = mvm_core::env_hygiene::helper_command(&bin);
-    select_lifetime(&mut cmd, lifetime, state_dir);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(log_file);
+    let mut cmd = endpoint_command(&bin, lifetime, state_dir, log_file);
     // Detach into its own session so it survives this `mvmctl` process.
     unsafe {
         use std::os::unix::process::CommandExt;
