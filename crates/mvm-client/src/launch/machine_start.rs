@@ -183,13 +183,14 @@ fn resolve_boot_source(spec: &mp::MachineSpec, host: &dyn StartHost) -> Result<B
         });
     }
     if let Some(slot_hash) = &spec.manifest {
-        let (_, _vmlinux, _initrd, rootfs, rev) =
+        let (_, vmlinux, _initrd, rootfs, rev) =
             mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
                 .with_context(|| {
                     format!("loading manifest slot {slot_hash:?} for machine start")
                 })?;
         return Ok(BootSource {
-            kernel: None,
+            kernel: super::bundle_runtime::installed_archive_for_rootfs(Path::new(&rootfs))?
+                .map(|_| vmlinux),
             label: format!("manifest:{slot_hash}"),
             rootfs: PathBuf::from(rootfs),
             digest: rev,

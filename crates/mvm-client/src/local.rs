@@ -14,8 +14,10 @@
 //! it to `mvm_hostd::run::admit_and_boot_local`. A workload never boots on a
 //! path that skipped admission.
 
+pub(crate) mod oci;
 mod state;
 
+use oci::pull_image_to_dir;
 pub(crate) use state::map_status;
 use state::to_state;
 
@@ -27,10 +29,7 @@ use async_trait::async_trait;
 use flate2::read::GzDecoder;
 use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_core::rootfs_source::RootfsSource;
-use mvm_fs::oci::{
-    ImageReference, LayerDescriptor, LayerFetchOptions, OciLayerFetcher, OciManifestFetcher,
-    UnpackOptions, UnpackReport, current_linux_platform, unpack_layer,
-};
+use mvm_fs::oci::{ImageReference, LayerDescriptor, UnpackOptions, UnpackReport, unpack_layer};
 use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
@@ -937,8 +936,19 @@ pub(crate) async fn resolve_local_rootfs(image: &RootfsSource, name: &str) -> Re
         RootfsPlan::UnpackedDir(dir) => materialize_from_dir(&dir, name, UnpackedLayers::default()),
         RootfsPlan::Pull(image_ref) => {
             let staging = tempfile::tempdir().map_err(backend_err)?;
-            let layers = pull_image_to_dir(&image_ref, staging.path()).await?;
-            materialize_from_dir(staging.path(), name, layers)
+            let pulled = pull_image_to_dir(&image_ref, staging.path()).await?;
+            let output = run_rootfs_output(name);
+            materialize_tree(
+                staging.path(),
+                &output,
+                name,
+                pulled.layers,
+                TreeMaterializeOptions {
+                    config: Some(&pulled.config),
+                    ..TreeMaterializeOptions::default()
+                },
+            )?;
+            Ok(output)
         }
     }
 }
@@ -967,52 +977,47 @@ struct UnpackedLayers {
 /// run-rootfs cache, reusing the CLI's shared `run_image` orchestration.
 fn materialize_from_dir(dir: &Path, name: &str, layers: UnpackedLayers) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
+    materialize_tree(
+        dir,
+        &output,
+        name,
+        layers,
+        TreeMaterializeOptions::default(),
+    )?;
+    Ok(output)
+}
+
+#[derive(Default)]
+struct TreeMaterializeOptions<'a> {
+    config: Option<&'a mvm_build::oci_runtime_inject::ImageRuntimeConfig>,
+    sealed: bool,
+    runtime_binaries: Option<&'a mvm_build::oci_runtime_inject::MvmRuntimeBinaries>,
+    policy: mvm_build::run_image::RootfsMaterializationPolicy,
+}
+
+fn materialize_tree(
+    dir: &Path,
+    output: &Path,
+    name: &str,
+    layers: UnpackedLayers,
+    options: TreeMaterializeOptions<'_>,
+) -> Result<()> {
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     // The library carries no guest binaries; remaining legacy injection needs
     // a source checkout or a complete compatibility cache.
     mvm_build::run_image::inject_and_materialize(
-        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
-            .sealed(false)
+        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, output, name)
+            .sealed(options.sealed)
+            .entrypoint(options.config)
+            .runtime_binaries(options.runtime_binaries)
+            .materialization_policy(options.policy)
+            .reuse_published(false)
             .deferred_nodes(layers.deferred_nodes)
             .owners(layers.owners)
             .build(),
     )
     .map_err(|e| backend_err(format!("{e:#}")))?;
-    Ok(output)
-}
-
-/// Pull a public OCI registry reference and unpack every layer into `dest`,
-/// reusing mvm-oci's fetch + hardened unpacker (gzip is decoded here, at the
-/// crate boundary, keeping mvm-oci decompressor-free by design).
-async fn pull_image_to_dir(image_ref: &ImageReference, dest: &Path) -> Result<UnpackedLayers> {
-    let reference = image_ref.canonical();
-    let manifest_fetcher = OciManifestFetcher::new();
-    let manifest = manifest_fetcher
-        .fetch_linux_platform_manifest(image_ref, &current_linux_platform())
-        .await
-        .map_err(|e| backend_err(format!("fetch manifest for {reference}: {e}")))?;
-    let layers = manifest
-        .layers()
-        .map_err(|e| backend_err(format!("parse layers for {reference}: {e}")))?;
-    if layers.is_empty() {
-        return Err(backend_err(format!("OCI image {reference} has no layers")));
-    }
-    let layer_fetcher =
-        OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
-    let mut prior_layer_paths = std::collections::HashSet::new();
-    let mut unpacked = UnpackedLayers::default();
-    for layer in &layers {
-        let mut bytes = Vec::new();
-        layer_fetcher
-            .fetch_layer(image_ref, layer, &mut bytes)
-            .await
-            .map_err(|e| backend_err(format!("fetch layer {}: {e}", layer.digest)))?;
-        let report = unpack_one_layer(layer, &bytes, dest, &prior_layer_paths)?;
-        unpacked.owners.absorb(&report.ownership);
-        prior_layer_paths.extend(report.paths_written);
-        unpacked.deferred_nodes.extend(report.deferred_nodes);
-    }
-    Ok(unpacked)
+    Ok(())
 }
 
 /// Unpack one layer's bytes into `dest`, decompressing gzip layers first.

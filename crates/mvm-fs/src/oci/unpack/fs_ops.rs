@@ -61,7 +61,7 @@ impl<'a> Rooted<'a> {
         rel: &Path,
         create: bool,
     ) -> Result<(std::os::fd::OwnedFd, std::ffi::OsString), rustix::io::Errno> {
-        use rustix::fs::{Mode, OFlags, ResolveFlags, mkdirat, openat2};
+        use rustix::fs::{Mode, OFlags, ResolveFlags, openat2};
         use rustix::io::Errno;
         use std::os::fd::AsFd;
 
@@ -82,11 +82,7 @@ impl<'a> Rooted<'a> {
         for name in names {
             let dir = cur.as_ref().map_or(self.root_fd.as_fd(), |f| f.as_fd());
             if create {
-                if let Err(e) = mkdirat(dir, name, Mode::from_raw_mode(0o755)) {
-                    if e != Errno::EXIST {
-                        return Err(e);
-                    }
-                }
+                create_directory_at(dir, name)?;
             }
             cur = Some(openat2(dir, name, dir_oflags, Mode::empty(), resolve)?);
         }
@@ -110,7 +106,7 @@ impl<'a> Rooted<'a> {
         rel: &Path,
         prior_layer_paths: &HashSet<PathBuf>,
     ) -> Result<bool, RefusalReason> {
-        use rustix::fs::{AtFlags, Mode, mkdirat, unlinkat};
+        use rustix::fs::{AtFlags, unlinkat};
         use rustix::io::Errno;
         use std::os::fd::AsFd;
 
@@ -126,11 +122,7 @@ impl<'a> Rooted<'a> {
                 }
             }
         }
-        match mkdirat(parent.as_fd(), &leaf, Mode::from_raw_mode(0o755)) {
-            Ok(()) => Ok(true),
-            Err(e) if e == Errno::EXIST => Ok(false),
-            Err(e) => Err(map_resolve_errno(e)),
-        }
+        create_directory_at(parent.as_fd(), &leaf).map_err(map_resolve_errno)
     }
 
     pub(super) fn write_symlink(
@@ -263,6 +255,35 @@ impl<'a> Rooted<'a> {
             Mode::empty(),
             resolve,
         )
+    }
+}
+
+/// Normalize only newly created directories, never a coalesced prior-layer
+/// directory. Like regular files, mkdir's requested mode is filtered by umask;
+/// reassert the guest mode through a no-symlink directory handle.
+#[cfg(target_os = "linux")]
+fn create_directory_at(
+    parent: std::os::fd::BorrowedFd<'_>,
+    name: &OsStr,
+) -> Result<bool, rustix::io::Errno> {
+    use rustix::fs::{Mode, OFlags, ResolveFlags, fchmod, mkdirat, openat2};
+    use rustix::io::Errno;
+
+    let mode = Mode::from_raw_mode(0o755);
+    match mkdirat(parent, name, mode) {
+        Ok(()) => {
+            let dir = openat2(
+                parent,
+                name,
+                OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+                ResolveFlags::IN_ROOT | ResolveFlags::NO_SYMLINKS,
+            )?;
+            fchmod(&dir, mode)?;
+            Ok(true)
+        }
+        Err(Errno::EXIST) => Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -507,17 +528,29 @@ pub(super) enum HardlinkAction {
 /// Non-Linux fallback only — on Linux this routes through
 /// [`Rooted::create_directory`] (openat2-resolved).
 #[cfg(not(target_os = "linux"))]
-fn create_directory(target: &Path) -> Result<bool, RefusalReason> {
-    match std::fs::create_dir(target) {
-        Ok(()) => Ok(true),
+pub(super) fn create_directory(target: &Path) -> Result<bool, RefusalReason> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+
+    // Parent symlinks below the trusted root are refused by the entry scan.
+    // Keep existing occupants untouched, including a caller-supplied symlink
+    // to the root itself, which is permitted by the unpack API.
+    match std::fs::DirBuilder::new().mode(0o755).create(target) {
+        Ok(()) => {
+            let dir = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+                .open(target)
+                .map_err(|_| RefusalReason::MalformedHeader)?;
+            dir.set_permissions(std::fs::Permissions::from_mode(0o755))
+                .map_err(|_| RefusalReason::MalformedHeader)?;
+            Ok(true)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Parent doesn't exist — create the chain.
-            if std::fs::create_dir_all(target).is_ok() {
-                Ok(true)
-            } else {
-                Err(RefusalReason::MalformedHeader)
-            }
+            // Unlike create_dir_all, normalize each newly created parent too.
+            let parent = target.parent().ok_or(RefusalReason::MalformedHeader)?;
+            create_directory(parent)?;
+            create_directory(target)
         }
         Err(_) => Err(RefusalReason::MalformedHeader),
     }
@@ -543,9 +576,7 @@ fn write_symlink(link_target_bytes: Option<&[u8]>, target: &Path) -> Result<(), 
     };
 
     if let Some(parent) = target.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return Err(RefusalReason::MalformedHeader);
-        }
+        create_directory(parent)?;
     }
 
     let link_os = OsStr::from_bytes(link_target);
@@ -597,9 +628,7 @@ fn materialize_hardlink(
     }
 
     if let Some(parent) = target.parent() {
-        if std::fs::create_dir_all(parent).is_err() {
-            return Err(RefusalReason::MalformedHeader);
-        }
+        create_directory(parent)?;
     }
 
     if prior_layer_paths.contains(&target_rel) {
@@ -648,6 +677,155 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use tempfile::TempDir;
+
+    #[test]
+    fn directory_modes_ignore_umask() {
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD: &str = "MVM_UNPACK_DIRECTORY_UMASK_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // Set umask before starting a fresh, single-test process. Never
+            // mutate the process-wide mask of the concurrent test runner.
+            let status = std::process::Command::new("sh")
+                .args(["-c", "umask 077; exec \"$@\"", "unpack-umask"])
+                .arg(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "oci::unpack::fs_ops::tests::directory_modes_ignore_umask",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+
+        let root = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        std::fs::create_dir(root.path().join("existing")).unwrap();
+        assert_eq!(mode(&root.path().join("existing")), 0o700, "child umask");
+        std::os::unix::fs::symlink(outside.path(), root.path().join("trap")).unwrap();
+        let tar_bytes = build_tar(|b| {
+            add_dir(b, "etc");
+            add_file(b, "etc/mvm/runtime.json", b"guest config");
+            add_file(b, "implicit/deep/file", b"payload");
+            add_symlink(b, "links/deep/link", "../../implicit/deep/file");
+            add_hardlink(b, "hardlinks/deep/alias", "implicit/deep/file");
+            // Header permissions remain ignored for directories: normalized
+            // 0755 is the existing contract, not an OCI mode-policy change.
+            let mut header = tar::Header::new_gnu();
+            header.set_path("explicit/deep").unwrap();
+            header.set_size(0);
+            header.set_mode(0o700);
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_cksum();
+            b.append(&header, std::io::empty()).unwrap();
+            add_dir(b, "existing");
+            add_file(b, "existing/new/file", b"retained");
+            add_dir(b, "trap");
+            add_dir(b, "trap/escape");
+            add_file(b, "trap/file", b"refused");
+        });
+        let prior = HashSet::from([PathBuf::from("existing")]);
+        let report = super::super::unpack_layer(
+            Cursor::new(tar_bytes),
+            root.path(),
+            &UnpackOptions::default(),
+            Some(&prior),
+        )
+        .unwrap();
+        assert_eq!(report.refused.len(), 2, "{:?}", report.refused);
+        assert!(
+            report
+                .refused
+                .iter()
+                .all(|r| r.reason == RefusalReason::SymlinkInParent)
+        );
+        assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+        assert_eq!(mode(outside.path()), 0o700);
+        assert_eq!(mode(root.path()), 0o700, "caller root is not normalized");
+        assert_eq!(
+            mode(&root.path().join("existing")),
+            0o700,
+            "prior layer retained"
+        );
+
+        let dirs = [
+            "etc",
+            "etc/mvm",
+            "implicit",
+            "implicit/deep",
+            "links",
+            "links/deep",
+            "hardlinks",
+            "hardlinks/deep",
+            "explicit",
+            "explicit/deep",
+            "existing/new",
+        ];
+        for dir in dirs {
+            assert_eq!(mode(&root.path().join(dir)), 0o755, "{dir}");
+        }
+
+        // Check actual guest inode permissions without mounting or booting:
+        // uid 901 needs other-execute on the root-owned parent chain and
+        // other-read on runtime.json.
+        let output = TempDir::new().unwrap();
+        let image_path = output.path().join("rootfs.ext4");
+        crate::rootfs::materialize_ext4_pure(
+            root.path(),
+            &image_path,
+            &crate::rootfs::MaterializeOptions::default(),
+        )
+        .unwrap();
+        let image = ext4_view::Ext4::load_from_path(image_path).unwrap();
+        for dir in dirs {
+            let guest_path = format!("/{dir}");
+            assert_eq!(
+                image.symlink_metadata(guest_path.as_str()).unwrap().mode() & 0o7777,
+                0o755
+            );
+        }
+        assert_eq!(
+            image
+                .symlink_metadata("/etc/mvm/runtime.json")
+                .unwrap()
+                .mode()
+                & 0o7777,
+            0o644
+        );
+        assert_eq!(
+            image.read("/etc/mvm/runtime.json").unwrap(),
+            b"guest config"
+        );
+    }
+
+    #[test]
+    fn caller_supplied_symlink_root_remains_supported() {
+        let root = TempDir::new().unwrap();
+        let aliases = TempDir::new().unwrap();
+        let alias = aliases.path().join("root");
+        std::os::unix::fs::symlink(root.path(), &alias).unwrap();
+        let tar_bytes = build_tar(|b| {
+            add_dir(b, "etc");
+            add_file(b, "implicit/deep/file", b"payload");
+        });
+        let report = super::super::unpack_layer(
+            Cursor::new(tar_bytes),
+            &alias,
+            &UnpackOptions::default(),
+            None,
+        )
+        .unwrap();
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        assert_eq!(
+            std::fs::read(root.path().join("implicit/deep/file")).unwrap(),
+            b"payload"
+        );
+    }
 
     #[test]
     fn hardlink_to_same_layer_target_materializes_as_hardlink() {

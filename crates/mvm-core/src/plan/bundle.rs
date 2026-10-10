@@ -769,6 +769,60 @@ pub struct VerifiedBundle {
     /// Embedded image sets that passed the same structural, completeness, and
     /// per-artifact validation as a standalone image set.
     pub embedded_image_sets: Vec<VerifiedEmbeddedImageSet>,
+    pub boot_assets: Option<VerifiedBootAssets>,
+}
+
+/// Architecture-bound runtime selection authenticated by the bundle publisher.
+/// This is not a complete image set and must never enter the full-set cache.
+#[derive(Debug, Clone)]
+pub struct VerifiedBootAssets {
+    pub arch: GuestArch,
+    pub image_set: VerifiedEmbeddedImageSet,
+}
+
+/// Select the two portable Linux runtime archives from an original full manifest.
+/// Actual launch still checks the target backend and host protocol support.
+pub fn select_boot_asset_members(
+    manifest: &ImageSetManifest,
+    arch: GuestArch,
+) -> Result<[&crate::image_set::ImageSetMember; 2], ImageSetError> {
+    validate_structure(manifest)?;
+    require_complete(manifest, &ImageSetRequirement::current_train())?;
+    let mut support = BackendImageSupport::for_backend(crate::vm_backend::BackendKind::Qemu)
+        .expect("Qemu declares portable Linux image support");
+    support.artifact_formats = vec![crate::image_set::ArtifactFormat::TarGz];
+    let selected = [
+        select_member(manifest, ImageSetRole::RuntimeOverlay, arch, &support)?,
+        select_member(manifest, ImageSetRole::Initramfs, arch, &support)?,
+    ];
+    for artifact in selected.iter().flat_map(|member| &member.artifacts) {
+        if manifest
+            .members
+            .iter()
+            .flat_map(|member| &member.artifacts)
+            .filter(|candidate| candidate.name == artifact.name)
+            .count()
+            != 1
+        {
+            return Err(ImageSetError::DuplicateSelectedArtifact {
+                name: artifact.name.clone(),
+            });
+        }
+    }
+    Ok(selected)
+}
+
+/// Check only the packaged runtime roles, not the unshipped workload image.
+pub fn check_boot_assets_for_backend(
+    boot: &VerifiedBootAssets,
+    backend: &BackendImageSupport,
+    host_protocols: &HostProtocolSupport,
+) -> Result<(), ImageSetError> {
+    check_protocol_compatibility(&boot.image_set.manifest, host_protocols)?;
+    for role in [ImageSetRole::RuntimeOverlay, ImageSetRole::Initramfs] {
+        select_member(&boot.image_set.manifest, role, boot.arch, backend)?;
+    }
+    Ok(())
 }
 
 /// One embedded image set whose manifest is bound to verified bundle bytes.
@@ -872,12 +926,14 @@ pub fn read_and_verify_bundle(
 
     let embedded_image_sets =
         verify_embedded_image_sets(&manifest, &stream::InMemoryArtifacts(&artifacts_out))?;
+    let boot_assets = verify_boot_assets(&manifest, &stream::InMemoryArtifacts(&artifacts_out))?;
 
     Ok(VerifiedBundle {
         manifest,
         artifacts: artifacts_out,
         key_id: declared_key_id,
         embedded_image_sets,
+        boot_assets,
     })
 }
 
@@ -991,17 +1047,47 @@ fn verify_embedded_image_sets(
         .filter_map(|member| match member {
             BundleMember::EmbeddedImageSet { manifest_artifact } => Some(manifest_artifact),
             BundleMember::KernelCmdline { .. }
+            | BundleMember::EmbeddedBootAssets { .. }
             | BundleMember::SecurityPosture(_)
             | BundleMember::BuildProvenance(_) => None,
         })
-        .map(|manifest_artifact| verify_embedded_image_set(bundle, artifacts, manifest_artifact))
+        .map(|manifest_artifact| {
+            verify_embedded_image_set(bundle, artifacts, manifest_artifact, None)
+        })
         .collect()
+}
+
+fn verify_boot_assets(
+    bundle: &BundleManifest,
+    artifacts: &dyn stream::ArtifactSource,
+) -> Result<Option<VerifiedBootAssets>, BundleVerifyError> {
+    let Some(manifest_artifact) = bundle.members.iter().find_map(|member| match member {
+        BundleMember::EmbeddedBootAssets { manifest_artifact } => Some(manifest_artifact),
+        BundleMember::EmbeddedImageSet { .. }
+        | BundleMember::KernelCmdline { .. }
+        | BundleMember::SecurityPosture(_)
+        | BundleMember::BuildProvenance(_) => None,
+    }) else {
+        return Ok(None);
+    };
+    let arch = match bundle.arch.as_str() {
+        "x86_64" => GuestArch::X86_64,
+        "aarch64" => GuestArch::Aarch64,
+        other => {
+            return Err(BundleVerifyError::ManifestParse(format!(
+                "unknown boot-assets architecture {other}"
+            )));
+        }
+    };
+    let image_set = verify_embedded_image_set(bundle, artifacts, manifest_artifact, Some(arch))?;
+    Ok(Some(VerifiedBootAssets { arch, image_set }))
 }
 
 fn verify_embedded_image_set(
     bundle: &BundleManifest,
     artifacts: &dyn stream::ArtifactSource,
     manifest_artifact: &str,
+    boot_arch: Option<GuestArch>,
 ) -> Result<VerifiedEmbeddedImageSet, BundleVerifyError> {
     let declaration = bundle
         .artifacts
@@ -1033,10 +1119,19 @@ fn verify_embedded_image_set(
         }
     })?;
 
+    let members = if let Some(arch) = boot_arch {
+        select_boot_asset_members(&manifest, arch)
+            .map_err(|reason| BundleVerifyError::ImageSetRefused {
+                name: manifest_artifact.to_string(),
+                reason,
+            })?
+            .to_vec()
+    } else {
+        manifest.members.iter().collect()
+    };
     let mut artifact_paths = BTreeMap::new();
-    for image_artifact in manifest
-        .members
-        .iter()
+    for image_artifact in members
+        .into_iter()
         .flat_map(|member| member.artifacts.iter())
     {
         let name = image_artifact.name.as_str();
@@ -1393,6 +1488,198 @@ mod tests {
         assert!(matches!(
             read_and_verify_bundle(&archive, &trust(&sk)),
             Err(BundleVerifyError::MembersRequireSchemaV3 { found: 2 })
+        ));
+    }
+
+    fn boot_bundle(
+        sk: &SigningKey,
+        image_set: &ImageSetManifest,
+        arch: &str,
+        image_bytes: &[(String, Vec<u8>)],
+    ) -> Vec<u8> {
+        let image_manifest = serde_json::to_vec(image_set).unwrap();
+        let mut artifacts = vec![art(
+            "image-set.json",
+            ArtifactRole::Other,
+            "artifacts/image-set.json",
+            &image_manifest,
+        )];
+        let mut payload = vec![("artifacts/image-set.json".to_string(), image_manifest)];
+        for (name, bytes) in image_bytes {
+            let path = format!("artifacts/{name}");
+            artifacts.push(art(name, ArtifactRole::Other, &path, bytes));
+            payload.push((path, bytes.clone()));
+        }
+        let mut manifest = make_manifest(key_id_from_pubkey(&sk.verifying_key()), artifacts);
+        manifest.arch = arch.to_string();
+        manifest.members.push(BundleMember::EmbeddedBootAssets {
+            manifest_artifact: "image-set.json".into(),
+        });
+        write_bundle(&manifest, sk, payload).unwrap()
+    }
+
+    fn boot_payload(
+        image_set: &ImageSetManifest,
+        arch: GuestArch,
+        bytes: &[(String, Vec<u8>)],
+    ) -> Vec<(String, Vec<u8>)> {
+        let names: BTreeSet<_> = select_boot_asset_members(image_set, arch)
+            .unwrap()
+            .into_iter()
+            .flat_map(|member| {
+                member
+                    .artifacts
+                    .iter()
+                    .map(|artifact| artifact.name.as_str())
+            })
+            .collect();
+        bytes
+            .iter()
+            .filter(|(name, _)| names.contains(name.as_str()))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn boot_subsets_preserve_original_root_without_poisoning_full_cache() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let home = tempfile::tempdir().unwrap();
+        let registry = BundleRegistry::new(home.path().join("bundles"));
+        for (arch, label) in [
+            (GuestArch::X86_64, "x86_64"),
+            (GuestArch::Aarch64, "aarch64"),
+        ] {
+            let payload = boot_payload(&image_set, arch, &bytes);
+            let archive = boot_bundle(&sk, &image_set, label, &payload);
+            let verified = read_and_verify_bundle(&archive, &trust(&sk)).unwrap();
+            assert!(verified.embedded_image_sets.is_empty());
+            let boot = verified.boot_assets.unwrap();
+            assert_eq!(boot.arch, arch);
+            assert_eq!(
+                boot.image_set.manifest_sha256,
+                Sha256Hex::from_bytes(&serde_json::to_vec(&image_set).unwrap())
+            );
+            assert_eq!(boot.image_set.artifact_paths.len(), 2);
+            registry.install(&archive, &trust(&sk), false).unwrap();
+            assert!(
+                !registry
+                    .embedded_image_set_cache_root()
+                    .join(boot.image_set.manifest_sha256.as_str())
+                    .exists()
+            );
+            let path = registry.archive_path(&bundle_sha256(&archive));
+            assert_eq!(
+                verify_bundle_file(&path, &trust(&sk))
+                    .unwrap()
+                    .boot_assets
+                    .unwrap()
+                    .arch,
+                arch
+            );
+        }
+        let archive = embedded_bundle_with_schema(&sk, &image_set, &bytes, 3);
+        registry.install(&archive, &trust(&sk), false).unwrap();
+        let full = read_and_verify_bundle(&archive, &trust(&sk)).unwrap();
+        assert!(full.boot_assets.is_none());
+        assert!(
+            registry
+                .embedded_image_set_cache_root()
+                .join(full.embedded_image_sets[0].manifest_sha256.as_str())
+                .exists()
+        );
+    }
+
+    #[test]
+    fn boot_selection_refuses_ambiguous_names_and_non_archive_formats() {
+        let (mut image_set, _) = complete_image_set();
+        let name = select_boot_asset_members(&image_set, GuestArch::Aarch64).unwrap()[0].artifacts
+            [0]
+        .name
+        .clone();
+        let initramfs = image_set
+            .members
+            .iter_mut()
+            .find(|member| {
+                member.role == ImageSetRole::Initramfs && member.target.admits(GuestArch::Aarch64)
+            })
+            .unwrap();
+        initramfs.artifacts[0].name = name;
+        assert!(matches!(
+            select_boot_asset_members(&image_set, GuestArch::Aarch64),
+            Err(ImageSetError::DuplicateSelectedArtifact { .. })
+        ));
+        let (mut image_set, _) = complete_image_set();
+        let overlay = image_set
+            .members
+            .iter_mut()
+            .find(|member| {
+                member.role == ImageSetRole::RuntimeOverlay
+                    && member.target.admits(GuestArch::Aarch64)
+            })
+            .unwrap();
+        overlay.artifacts[0].format = ArtifactFormat::Text;
+        assert!(matches!(
+            select_boot_asset_members(&image_set, GuestArch::Aarch64),
+            Err(ImageSetError::UnsupportedArtifactFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn boot_assets_refuse_missing_wrong_arch_digest_and_size() {
+        let sk = fresh_key();
+        let (image_set, bytes) = complete_image_set();
+        let payload = boot_payload(&image_set, GuestArch::Aarch64, &bytes);
+        for arch in ["x86_64", "unknown"] {
+            assert!(
+                read_and_verify_bundle(&boot_bundle(&sk, &image_set, arch, &payload), &trust(&sk))
+                    .is_err()
+            );
+        }
+        assert!(matches!(
+            read_and_verify_bundle(
+                &boot_bundle(&sk, &image_set, "aarch64", &payload[..1]),
+                &trust(&sk)
+            ),
+            Err(BundleVerifyError::ImageSetArtifactMissing { .. })
+        ));
+        let mut tampered = payload.clone();
+        tampered[0].1[0] ^= 1;
+        assert!(matches!(
+            read_and_verify_bundle(
+                &boot_bundle(&sk, &image_set, "aarch64", &tampered),
+                &trust(&sk)
+            ),
+            Err(BundleVerifyError::ImageSetArtifactDigestMismatch { .. })
+        ));
+        let mut bad_set = image_set.clone();
+        let selected_name = &payload[0].0;
+        for artifact in bad_set
+            .members
+            .iter_mut()
+            .flat_map(|member| &mut member.artifacts)
+        {
+            if artifact.name.as_str() == selected_name {
+                artifact.size += 1;
+            }
+        }
+        assert!(matches!(
+            read_and_verify_bundle(
+                &boot_bundle(&sk, &bad_set, "aarch64", &payload),
+                &trust(&sk)
+            ),
+            Err(BundleVerifyError::ImageSetArtifactSizeMismatch { .. })
+        ));
+        let mut missing = image_set.clone();
+        missing
+            .members
+            .retain(|member| member.role != ImageSetRole::Initramfs);
+        assert!(matches!(
+            read_and_verify_bundle(
+                &boot_bundle(&sk, &missing, "aarch64", &payload),
+                &trust(&sk)
+            ),
+            Err(BundleVerifyError::ImageSetRefused { .. })
         ));
     }
 

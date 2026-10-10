@@ -58,6 +58,29 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
         budget.admit(&artifact.path, artifact.size_bytes)?;
     }
     refuse_repeated_declarations(&manifest.members)?;
+    if manifest
+        .members
+        .iter()
+        .any(|member| matches!(member, BundleMember::EmbeddedBootAssets { .. }))
+        && manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::EmbeddedImageSet { .. }))
+    {
+        return Err(BundleVerifyError::ManifestParse(
+            "boot assets and full image-set declarations cannot be combined".into(),
+        ));
+    }
+    if manifest.schema_version < 4
+        && manifest
+            .members
+            .iter()
+            .any(|member| matches!(member, BundleMember::EmbeddedBootAssets { .. }))
+    {
+        return Err(BundleVerifyError::ManifestParse(
+            "boot assets require bundle schema 4".into(),
+        ));
+    }
     if let Some(cmdline) = manifest.kernel_cmdline() {
         validate_cmdline(cmdline)?;
     }
@@ -73,6 +96,7 @@ pub(super) fn validate_declarations(manifest: &BundleManifest) -> Result<(), Bun
 fn declaration_class(member: &BundleMember) -> Option<&'static str> {
     match member {
         BundleMember::EmbeddedImageSet { .. } => None,
+        BundleMember::EmbeddedBootAssets { .. } => Some("embedded_boot_assets"),
         BundleMember::KernelCmdline { .. } => Some("kernel_cmdline"),
         BundleMember::SecurityPosture(_) => Some("security_posture"),
         BundleMember::BuildProvenance(_) => Some("build_provenance"),
@@ -270,6 +294,30 @@ mod tests {
             validate_declarations(&m),
             Err(BundleVerifyError::EntryTooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn boot_declaration_requires_v4_and_is_unambiguous() {
+        let boot = BundleMember::EmbeddedBootAssets {
+            manifest_artifact: "image-set.json".into(),
+        };
+        let mut m = manifest(Vec::new(), vec![boot.clone()]);
+        validate_declarations(&m).unwrap();
+        m.schema_version = 3;
+        assert!(validate_declarations(&m).is_err());
+        m.schema_version = 4;
+        m.members.push(boot);
+        assert!(matches!(
+            validate_declarations(&m),
+            Err(BundleVerifyError::DuplicateMember {
+                class: "embedded_boot_assets"
+            })
+        ));
+        m.members.pop();
+        m.members.push(BundleMember::EmbeddedImageSet {
+            manifest_artifact: "image-set.json".into(),
+        });
+        assert!(validate_declarations(&m).is_err());
     }
 
     #[test]
