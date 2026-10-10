@@ -13,11 +13,14 @@ unsafe extern "C" {
 fn keychain() -> Result<SecKeychain> {
     let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)
         .map_err(|_| IdentityError::Unavailable)?;
+    let raw = keychain.as_concrete_TypeRef();
+    if raw.is_null() {
+        return Err(IdentityError::Unavailable);
+    }
     let mut status = 0u32;
-    // SAFETY: the retained SecKeychain is live for the call, and status points
-    // to initialized writable storage. This only queries status, never unlocks.
-    let result =
-        unsafe { SecKeychainGetStatus(keychain.as_concrete_TypeRef().cast(), &mut status) };
+    // SAFETY: the retained, non-null SecKeychain is live for the call, and
+    // status points to initialized writable storage. No unlock/settings changes.
+    let result = unsafe { SecKeychainGetStatus(raw.cast(), &mut status) };
     // kSecUnlockStateStatus is bit zero. A subsequent relock can still block a
     // native call; the worker deadline controls result delivery, not the syscall.
     if result != 0 || status & 1 == 0 {
