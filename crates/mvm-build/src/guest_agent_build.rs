@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::oci_runtime_inject::MvmRuntimeBinaries;
+use crate::process_memo::ProcessMemo;
 
 #[derive(Debug, Error)]
 pub enum GuestAgentBuildError {
@@ -455,13 +456,38 @@ pub fn guest_binary_source() -> Result<GuestBinarySource, GuestAgentBuildError> 
 }
 
 /// Fingerprints already computed in this process, by workspace root.
+static GUEST_SOURCE_FINGERPRINTS: ProcessMemo<PathBuf, String> = ProcessMemo::new();
+/// [`sdk_cdylib_source_fingerprint`] answers, by workspace root.
+static SDK_CDYLIB_SOURCE_FINGERPRINTS: ProcessMemo<PathBuf, String> = ProcessMemo::new();
+
+/// Whether a source fingerprint may be answered from this process's memo, or
+/// must walk its inputs again.
 ///
-/// Only successes are stored. An error can be transient — a file being written
-/// as the walk passes it — and caching one would make a single unlucky moment
-/// permanent for the rest of the run.
-static SOURCE_FINGERPRINTS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
-> = std::sync::OnceLock::new();
+/// Lookups use the memo. A check that exists to notice the tree changing — a
+/// build comparing the fingerprint it started from with the one it finished
+/// against — must walk again, or it compares the memo with itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    Memoized,
+    Rewalk,
+}
+
+/// Answer `compute(workspace_root)` from `memo` unless `freshness` asks for a
+/// new walk. A new walk does not replace the memoized answer: the memo is what
+/// every other call site of this command has already acted on.
+pub(crate) fn memoized_fingerprint<E>(
+    memo: &ProcessMemo<PathBuf, String>,
+    workspace_root: &Path,
+    freshness: Freshness,
+    compute: impl FnOnce(&Path) -> Result<String, E>,
+) -> Result<String, E> {
+    match freshness {
+        Freshness::Memoized => {
+            memo.get_or_try_insert(workspace_root.to_path_buf(), || compute(workspace_root))
+        }
+        Freshness::Rewalk => compute(workspace_root),
+    }
+}
 
 /// A stable content fingerprint over every workspace input that can change the
 /// OCI guest binaries: dependency lock, workspace manifest, shared core code,
@@ -481,17 +507,20 @@ static SOURCE_FINGERPRINTS: std::sync::OnceLock<
 /// cheap. Anything long-running that later wants change detection needs a
 /// watcher, not a repeated full-tree hash.
 pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
-    let memo = SOURCE_FINGERPRINTS.get_or_init(Default::default);
-    if let Ok(cache) = memo.lock()
-        && let Some(hit) = cache.get(workspace_root)
-    {
-        return Ok(hit.clone());
-    }
-    let digest = compute_guest_source_fingerprint(workspace_root)?;
-    if let Ok(mut cache) = memo.lock() {
-        cache.insert(workspace_root.to_path_buf(), digest.clone());
-    }
-    Ok(digest)
+    guest_source_fingerprint_with(workspace_root, Freshness::Memoized)
+}
+
+/// [`guest_source_fingerprint`], or a new walk when `freshness` asks for one.
+pub fn guest_source_fingerprint_with(
+    workspace_root: &Path,
+    freshness: Freshness,
+) -> Result<String, GuestAgentBuildError> {
+    memoized_fingerprint(
+        &GUEST_SOURCE_FINGERPRINTS,
+        workspace_root,
+        freshness,
+        compute_guest_source_fingerprint,
+    )
 }
 
 /// A content fingerprint over the inputs to `libmvm_host_services.so` — the
@@ -507,7 +536,30 @@ pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAg
 /// The sidecar's other members — the glibc loader, `libc.so.6`, `libgcc_s.so.1`
 /// — come from nixpkgs and cannot change without the version changing, so they
 /// are deliberately not inputs here.
+///
+/// Memoized for the lifetime of the process, for the reasons
+/// [`guest_source_fingerprint`] gives.
 pub fn sdk_cdylib_source_fingerprint(
+    workspace_root: &Path,
+) -> Result<String, GuestAgentBuildError> {
+    sdk_cdylib_source_fingerprint_with(workspace_root, Freshness::Memoized)
+}
+
+/// [`sdk_cdylib_source_fingerprint`], or a new walk when `freshness` asks for
+/// one.
+pub fn sdk_cdylib_source_fingerprint_with(
+    workspace_root: &Path,
+    freshness: Freshness,
+) -> Result<String, GuestAgentBuildError> {
+    memoized_fingerprint(
+        &SDK_CDYLIB_SOURCE_FINGERPRINTS,
+        workspace_root,
+        freshness,
+        compute_sdk_cdylib_source_fingerprint,
+    )
+}
+
+fn compute_sdk_cdylib_source_fingerprint(
     workspace_root: &Path,
 ) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
@@ -533,6 +585,18 @@ pub fn sdk_cdylib_source_fingerprint(
     Ok(hex::encode(hasher.finalize()))
 }
 
+#[cfg(test)]
+thread_local! {
+    static SOURCE_INPUT_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many times this thread has walked a set of fingerprint inputs. Thread
+/// scoped so concurrently running tests cannot disturb each other's count.
+#[cfg(test)]
+pub(crate) fn source_input_walks_on_this_thread() -> usize {
+    SOURCE_INPUT_WALKS.with(std::cell::Cell::get)
+}
+
 /// Fold each declared input into `hasher`, failing closed on one that is
 /// missing. A fingerprint that quietly skipped an absent input would collide
 /// with the tree that still has it.
@@ -541,6 +605,8 @@ pub(crate) fn hash_inputs(
     workspace_root: &Path,
     inputs: &[&str],
 ) -> Result<(), GuestAgentBuildError> {
+    #[cfg(test)]
+    SOURCE_INPUT_WALKS.with(|walks| walks.set(walks.get() + 1));
     for rel in inputs {
         let path = workspace_root.join(rel);
         if path.is_dir() {
@@ -559,28 +625,23 @@ pub(crate) fn hash_inputs(
 fn compute_guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
     let mut hasher = Sha256::new();
     hasher.update(b"mvm-oci-guest-build-input-v1\0");
-    for rel in [
-        "Cargo.lock",
-        "Cargo.toml",
-        "crates/mvm-contract/Cargo.toml",
-        "crates/mvm-contract/src",
-        "crates/mvm-core/Cargo.toml",
-        "crates/mvm-core/src",
-        "crates/mvm-agentd/Cargo.toml",
-        "crates/mvm-agentd/src",
-        "crates/mvm-setpriv/Cargo.toml",
-        "crates/mvm-setpriv/src",
-        "crates/mvm-build/src/guest_agent_build.rs",
-    ] {
-        let path = workspace_root.join(rel);
-        if path.is_dir() {
-            hash_dir_recursive(&mut hasher, rel, &path)?;
-        } else if path.is_file() {
-            hash_file(&mut hasher, rel, &path)?;
-        } else {
-            return Err(GuestAgentBuildError::OutputMissing(path));
-        }
-    }
+    hash_inputs(
+        &mut hasher,
+        workspace_root,
+        &[
+            "Cargo.lock",
+            "Cargo.toml",
+            "crates/mvm-contract/Cargo.toml",
+            "crates/mvm-contract/src",
+            "crates/mvm-core/Cargo.toml",
+            "crates/mvm-core/src",
+            "crates/mvm-agentd/Cargo.toml",
+            "crates/mvm-agentd/src",
+            "crates/mvm-setpriv/Cargo.toml",
+            "crates/mvm-setpriv/src",
+            "crates/mvm-build/src/guest_agent_build.rs",
+        ],
+    )?;
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -2014,7 +2075,7 @@ rust = "1.91.1"
         .expect("write host-services src");
 
         let guest_before = compute_guest_source_fingerprint(root).expect("guest before");
-        let cdylib_before = sdk_cdylib_source_fingerprint(root).expect("cdylib before");
+        let cdylib_before = compute_sdk_cdylib_source_fingerprint(root).expect("cdylib before");
         std::fs::write(
             root.join("crates/mvm-setpriv/src/lib.rs"),
             "pub fn drop_privileges() { /* narrower */ }\n",
@@ -2027,7 +2088,7 @@ rust = "1.91.1"
         );
         assert_ne!(
             cdylib_before,
-            sdk_cdylib_source_fingerprint(root).expect("cdylib after")
+            compute_sdk_cdylib_source_fingerprint(root).expect("cdylib after")
         );
     }
 

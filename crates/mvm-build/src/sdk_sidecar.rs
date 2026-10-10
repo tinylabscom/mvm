@@ -906,8 +906,12 @@ pub(crate) mod tests {
         );
 
         // The edit that motivated all of this: a new verb in the FFI dispatch.
+        // Made in a second checkout, as the next `mvmctl` invocation would
+        // see it: one process answers a tree's fingerprint once and keeps it.
+        let edited = tempfile::tempdir().unwrap();
+        fake_checkout(edited.path(), "// v1\n");
         std::fs::write(
-            checkout.path().join("crates/mvm-host-services/src/lib.rs"),
+            edited.path().join("crates/mvm-host-services/src/lib.rs"),
             "// v2 — adds host.kv.get\n",
         )
         .unwrap();
@@ -918,7 +922,7 @@ pub(crate) mod tests {
                 FIXTURE_VERSION,
                 GuestArch::host(),
                 GuestLibc::Musl,
-                checkout.path(),
+                edited.path(),
             )
             .unwrap(),
             SidecarProvenance::StaleSource,
