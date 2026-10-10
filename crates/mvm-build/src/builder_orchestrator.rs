@@ -202,10 +202,7 @@ fn existing(path: PathBuf) -> Option<PathBuf> {
 }
 
 fn output_contract(detail: String) -> anyhow::Error {
-    anyhow::Error::new(BuilderVmError::JobFailed {
-        category: FailureCategory::OutputContract,
-        detail,
-    })
+    anyhow::Error::new(crate::builder_output::output_contract(detail))
 }
 
 fn sidecar_beside(rootfs: &Path) -> Result<PathBuf> {
@@ -215,15 +212,14 @@ fn sidecar_beside(rootfs: &Path) -> Result<PathBuf> {
             rootfs.display()
         ))
     })?;
-    let sidecar = dir.join(SIDECAR_FILENAME);
-    if !sidecar.is_file() {
-        return Err(output_contract(format!(
+    let sidecar = crate::builder_output::regular_member_if_present(&dir.join(SIDECAR_FILENAME))?;
+    sidecar.ok_or_else(|| {
+        output_contract(format!(
             "the build wrote {} without {SIDECAR_FILENAME} beside it; the runtime refuses to boot \
              a rootfs with no sidecar, so this flake's output cannot be used as built",
             rootfs.display(),
-        )));
-    }
-    Ok(sidecar)
+        ))
+    })
 }
 
 #[cfg(test)]
