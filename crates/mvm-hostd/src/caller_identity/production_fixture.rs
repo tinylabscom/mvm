@@ -15,6 +15,12 @@ use serde::{Deserialize, Serialize};
 
 use super::{EnrolledIdentity, IdentityClient, IdentityError, SERVICE, account, macos};
 
+mod environment;
+mod record_lock;
+mod review_tests;
+use environment::Snapshot;
+use record_lock::RecordLock;
+
 pub(super) const INSTALLATION: &str = "d3676c8c-8f2e-4d2b-b70b-d23ccb8c4018";
 const PIN_ENV: &str = "MVM_CALLER_WITNESS_PIN_JSON";
 const PROBE: &str = "caller_identity::production_fixture::production_fixture_missing";
@@ -24,26 +30,6 @@ const CHILD_CLEANUP: &str = "native_caller_registration_cleanup";
 const STORE_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_TIMEOUT: Duration = Duration::from_secs(300);
 const STOP_TIMEOUT: Duration = Duration::from_secs(10);
-const SAFE_ENV: &[&str] = &[
-    "HOME",
-    "PATH",
-    "TMPDIR",
-    "MVM_HOME",
-    "CARGO_HOME",
-    "CARGO_TARGET_DIR",
-    "RUSTUP_HOME",
-    "MVM_CALLER_WITNESS_ROOT",
-    "MVM_CALLER_WITNESS_SOURCE",
-    "MVM_CALLER_WITNESS_KERNEL",
-    "MVM_HVF_SUPERVISOR_PATH",
-    "MVM_RESIDENCY",
-    "MVM_HOST_AGENT_PATH",
-    "MVM_SIGNER_HELPER_PATH",
-    "MVM_SUBSTITUTION_ENDPOINT_PATH",
-    "MVM_KERNEL_SOURCE",
-    "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE",
-    "MVM_NO_LEGACY_BANNER",
-];
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,8 +52,10 @@ struct Record {
 struct Fixture {
     path: PathBuf,
     record: Record,
+    environment: Snapshot,
     child: Option<Child>,
     cleanup_attempted: bool,
+    _lock: RecordLock,
 }
 
 fn enabled() -> Result<()> {
@@ -76,35 +64,6 @@ fn enabled() -> Result<()> {
         "explicit approval for the reserved native fixture is required"
     );
     Ok(())
-}
-
-fn safe_command(program: impl AsRef<std::ffi::OsStr>) -> Result<Command> {
-    let mut command = Command::new(program);
-    command.env_clear().stdin(Stdio::null());
-    for name in SAFE_ENV {
-        if let Some(value) = std::env::var_os(name) {
-            command.env(name, value);
-        }
-    }
-    for name in [
-        "HOME",
-        "TMPDIR",
-        "MVM_HOME",
-        "CARGO_HOME",
-        "CARGO_TARGET_DIR",
-    ] {
-        ensure!(
-            std::env::var_os(name).is_some(),
-            "isolated runtime paths must be explicit"
-        );
-    }
-    let mvm_home = std::env::var_os("MVM_HOME").context("MVM_HOME missing")?;
-    let user_mvm = PathBuf::from(std::env::var_os("HOME").context("HOME missing")?).join(".mvm");
-    ensure!(
-        std::path::Path::new(&mvm_home) != user_mvm.as_path(),
-        "fixture refuses the user's ordinary MVM_HOME"
-    );
-    Ok(command)
 }
 
 fn wait_child(child: &mut Child, timeout: Duration) -> Result<ExitStatus> {
@@ -155,8 +114,18 @@ fn preflight_test_names(command: &mut Command) -> Result<()> {
     Ok(())
 }
 
+fn release_gate(child: &mut Child) -> Result<()> {
+    child
+        .stdin
+        .take()
+        .context("recorded child start gate missing")?
+        .write_all(b"1")
+        .context("release durably recorded child")
+}
+
 impl Fixture {
     fn persist(&self) -> Result<()> {
+        self.environment.revalidate()?;
         atomic_io::atomic_write_durable(&self.path, &serde_json::to_vec_pretty(&self.record)?)
     }
 
@@ -170,15 +139,7 @@ impl Fixture {
     }
 
     fn clean_owned_vms(&mut self) -> Result<()> {
-        let mut command = Command::new(&self.record.witness_program);
-        command.env_clear();
-        for (name, value) in &self.record.witness_environment {
-            ensure!(
-                SAFE_ENV.contains(&name.as_str()),
-                "cleanup record contains an unapproved environment name"
-            );
-            command.env(name, value);
-        }
+        let mut command = self.environment.command(self.environment.program())?;
         command.args([
             "--ignored",
             "--exact",
@@ -186,14 +147,7 @@ impl Fixture {
             "--nocapture",
             "--test-threads=1",
         ]);
-        self.child = Some(
-            command
-                .spawn()
-                .context("spawn exact owned-VM cleanup companion")?,
-        );
-        self.record.child_pid = self.child.as_ref().map(Child::id);
-        self.record.state = "owned-vm-cleanup-running".into();
-        self.persist()?;
+        self.spawn_recorded(command, "owned-vm-cleanup-running")?;
         let status = wait_child(
             self.child.as_mut().context("cleanup companion missing")?,
             CHILD_TIMEOUT,
@@ -207,6 +161,24 @@ impl Fixture {
         Ok(())
     }
 
+    /// Both launching and cleanup children remain blocked until ownership is durable.
+    fn spawn_gated(&mut self, mut command: Command) -> Result<()> {
+        self.environment.revalidate()?;
+        command
+            .env("MVM_CALLER_WITNESS_START_GATE", "stdin-v1")
+            .stdin(Stdio::piped());
+        self.child = Some(command.spawn().context("spawn gated owned child")?);
+        Ok(())
+    }
+
+    fn spawn_recorded(&mut self, command: Command, state: &str) -> Result<()> {
+        self.spawn_gated(command)?;
+        self.record.child_pid = self.child.as_ref().map(Child::id);
+        self.record.state = state.into();
+        self.persist()?;
+        release_gate(self.child.as_mut().context("gated child missing")?)
+    }
+
     fn finish(&mut self) -> Result<()> {
         self.cleanup_attempted = true;
         self.stop_child()?;
@@ -217,16 +189,13 @@ impl Fixture {
             pin.installation.to_string() == INSTALLATION,
             "cleanup pin is not the reserved fixture"
         );
-        let original_home = self
-            .record
-            .witness_environment
-            .iter()
-            .find_map(|(name, value)| (name == "HOME").then_some(value));
-        ensure!(
-            original_home.is_some() && std::env::var("HOME").ok().as_ref() == original_home,
-            "native cleanup requires the recorded real HOME; refuse another custody context"
-        );
+        self.environment.validate_record(
+            &self.record.witness_program,
+            &self.record.witness_environment,
+        )?;
+        self.environment.check_native_home()?;
         self.clean_owned_vms()?;
+        self.environment.check_native_home()?;
         match IdentityClient::native()?
             .load(&pin, Instant::now() + STORE_TIMEOUT)?
             .wait()
@@ -243,7 +212,7 @@ impl Fixture {
         result
             .recv_timeout(STORE_TIMEOUT)
             .context("native fixture deletion deadline")??;
-        let mut probe = safe_command(std::env::current_exe()?)?;
+        let mut probe = self.environment.command(&std::env::current_exe()?)?;
         probe
             .args([
                 "--ignored",
@@ -301,53 +270,33 @@ impl Drop for Fixture {
     }
 }
 
+fn require_native_lifecycle_ready() -> Result<()> {
+    // The current companion cannot prove lifetime-safe HVF teardown (#4276).
+    // Test-name discovery or an environment override must not release this hold.
+    anyhow::bail!(
+        "NativeLifecycleUnsupported: lifetime-safe HVF teardown is not available; fixture enrollment is held"
+    )
+}
+
 #[test]
-#[ignore = "requires explicit approval and a fully prepared real cold witness binary"]
+fn unsupported_lifecycle_refuses_before_environment_store_or_child_access() {
+    assert!(
+        production_fixture_brackets_cold_witness()
+            .unwrap_err()
+            .to_string()
+            .starts_with("NativeLifecycleUnsupported:")
+    );
+}
+
+#[test]
+#[ignore = "held: NativeLifecycleUnsupported until lifetime-safe HVF teardown is reviewed"]
 fn production_fixture_brackets_cold_witness() -> Result<()> {
+    require_native_lifecycle_ready()?;
     enabled()?;
-    for name in [
-        "MVM_SKIP_HASH_VERIFY",
-        "MVM_SKIP_COSIGN_VERIFY",
-        "MVM_HVF_BOOTARGS",
-        "MVM_IMAGES_DIR",
-        "MVM_ALLOW_LOCAL_BUILDER_BUILD",
-    ] {
-        ensure!(
-            std::env::var_os(name).is_none(),
-            "verification bypass environment is forbidden"
-        );
-    }
-    for name in [
-        "MVM_CALLER_WITNESS_ROOT",
-        "MVM_CALLER_WITNESS_SOURCE",
-        "MVM_CALLER_WITNESS_KERNEL",
-        "MVM_HVF_SUPERVISOR_PATH",
-    ] {
-        let path = PathBuf::from(std::env::var_os(name).context("prepared witness path missing")?);
-        ensure!(
-            path.is_absolute() && path.exists(),
-            "witness artifacts must already be prepared"
-        );
-    }
-    ensure!(
-        std::env::var("MVM_RESIDENCY").as_deref() == Ok("cold"),
-        "fixture requires explicit cold residency"
-    );
-    for name in ["MVM_KERNEL_SOURCE", "MVM_RUNTIME_OVERLAY_ACQUIRE_MODE"] {
-        ensure!(
-            std::env::var(name).as_deref() == Ok("download"),
-            "fixture must not enable source builds"
-        );
-    }
-    let binary = PathBuf::from(
-        std::env::var_os("MVM_CALLER_WITNESS_BIN").context("ready witness binary missing")?,
-    );
-    ensure!(
-        binary.is_absolute() && binary.is_file(),
-        "witness binary must already exist"
-    );
-    preflight_test_names(&mut safe_command(&binary)?)?;
-    let mut child = safe_command(&binary)?;
+    let environment = Snapshot::from_process()?;
+    let lock = RecordLock::acquire(&environment)?;
+    preflight_test_names(&mut environment.command(environment.program())?)?;
+    let mut child = environment.command(environment.program())?;
     child
         .args([
             "--ignored",
@@ -360,18 +309,14 @@ fn production_fixture_brackets_cold_witness() -> Result<()> {
         .stdin(Stdio::piped());
     let installation = INSTALLATION.parse()?;
     let account = account(installation)?;
+    environment.check_native_home()?;
     match macos::read_at(SERVICE, &account) {
         Err(IdentityError::Missing) => {}
         Ok(_) => bail!("reserved fixture already exists; refuse adoption/overwrite/deletion"),
         Err(error) => return Err(error.into()),
     }
-    let path = PathBuf::from(
-        std::env::var_os("MVM_CALLER_FIXTURE_RECORD")
-            .context("durable cleanup record path missing")?,
-    );
-    ensure!(path.is_absolute(), "cleanup record path must be absolute");
+    let path = environment.record().to_path_buf();
     let parent = path.parent().context("cleanup record parent missing")?;
-    mvm_core::config::create_private_dir(parent)?;
     let record = Record {
         installation: INSTALLATION.into(),
         service: SERVICE.into(),
@@ -380,18 +325,15 @@ fn production_fixture_brackets_cold_witness() -> Result<()> {
         public_pin: None,
         controller_pid: std::process::id(),
         child_pid: None,
-        witness_program: binary,
-        witness_environment: SAFE_ENV.iter().filter_map(|name| {
-            std::env::var(name).ok().map(|value| ((*name).to_string(), value))
-        }).collect(),
+        witness_program: environment.program().to_path_buf(),
+        witness_environment: environment.values().to_vec(),
         cleanup_program: std::env::current_exe()?,
         cleanup_arguments: ["--ignored", "--exact", RECOVER, "--nocapture", "--test-threads=1"]
             .into_iter().map(String::from).collect(),
-        cleanup_environment: SAFE_ENV.iter().filter_map(|name| {
-            std::env::var(name).ok().map(|value| ((*name).to_string(), value))
-        }).chain([
+        cleanup_environment: environment.values().iter().cloned().chain([
             ("MVM_CALLER_FIXTURE_ENABLE".into(), INSTALLATION.into()),
-            ("MVM_CALLER_FIXTURE_RECORD".into(), path.to_string_lossy().into_owned()),
+            ("MVM_CALLER_FIXTURE_RECORD".into(), path.to_str().context("record encoding")?.to_owned()),
+            ("MVM_CALLER_WITNESS_BIN".into(), environment.program().to_str().context("program encoding")?.to_owned()),
         ]).collect(),
         interruption_guidance: "Retain real HOME only for native custody, with isolated MVM_HOME/cache/TMPDIR. Stop the recorded child before cleanup. If public_pin is absent or differs, refuse automatic adoption/deletion and report the exact reserved item for operator recovery.".into(),
     };
@@ -400,9 +342,12 @@ fn production_fixture_brackets_cold_witness() -> Result<()> {
     let mut fixture = Fixture {
         path,
         record,
+        environment,
         child: None,
         cleanup_attempted: false,
+        _lock: lock,
     };
+    fixture.environment.check_native_home()?;
     let credential = IdentityClient::native()?
         .enroll(installation, Instant::now() + STORE_TIMEOUT)?
         .wait()?;
@@ -416,16 +361,7 @@ fn production_fixture_brackets_cold_witness() -> Result<()> {
         serde_json::to_string(&pin)?
     );
     child.env(PIN_ENV, serde_json::to_string(&pin)?);
-    fixture.child = Some(child.spawn().context("spawn prepared cold witness")?);
-    fixture.record.child_pid = fixture.child.as_ref().map(Child::id);
-    fixture.record.state = "witness-running".into();
-    fixture.persist()?;
-    fixture
-        .child
-        .as_mut()
-        .and_then(|child| child.stdin.take())
-        .context("witness start gate missing")?
-        .write_all(b"1")?;
+    fixture.spawn_recorded(child, "witness-running")?;
     let result = wait_child(
         fixture.child.as_mut().context("witness missing")?,
         CHILD_TIMEOUT,
@@ -448,6 +384,8 @@ fn production_fixture_brackets_cold_witness() -> Result<()> {
 #[ignore = "read-only subprocess of the approved production fixture controller"]
 fn production_fixture_missing() -> Result<()> {
     enabled()?;
+    let environment = Snapshot::from_process()?;
+    environment.check_native_home()?;
     let pin: EnrolledIdentity = serde_json::from_str(&std::env::var(PIN_ENV)?)?;
     ensure!(
         pin.installation.to_string() == INSTALLATION,
@@ -467,10 +405,11 @@ fn production_fixture_missing() -> Result<()> {
 #[ignore = "explicit exact-pinned cleanup after an interrupted approved fixture"]
 fn recover_production_fixture() -> Result<()> {
     enabled()?;
-    let path = PathBuf::from(
-        std::env::var_os("MVM_CALLER_FIXTURE_RECORD").context("cleanup record missing")?,
-    );
-    let record: Record = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let environment = Snapshot::from_process()?;
+    let lock = RecordLock::acquire(&environment)?;
+    let path = environment.record().to_path_buf();
+    let record = lock.read(&path)?;
+    environment.validate_record(&record.witness_program, &record.witness_environment)?;
     ensure!(
         record.installation == INSTALLATION
             && record.service == SERVICE
@@ -493,8 +432,10 @@ fn recover_production_fixture() -> Result<()> {
     let mut fixture = Fixture {
         path,
         record,
+        environment,
         child: None,
         cleanup_attempted: false,
+        _lock: lock,
     };
     fixture.record.controller_pid = std::process::id();
     fixture.record.state = "recovery-running".into();
@@ -523,28 +464,11 @@ fn production_cleanup_refuses_any_other_installation_without_store_access() {
 
 #[test]
 fn fixture_timeout_reaps_owned_child_before_refusing_unpinned_cleanup() {
+    let inputs = review_tests::Inputs::new();
     let child = Command::new("/bin/sleep").arg("60").spawn().unwrap();
     let pid = i32::try_from(child.id()).unwrap();
-    let mut fixture = Fixture {
-        path: PathBuf::from("no-record-written-in-this-test"),
-        record: Record {
-            installation: INSTALLATION.into(),
-            service: SERVICE.into(),
-            account: account(INSTALLATION.parse().unwrap()).unwrap(),
-            state: "test-only-no-enrollment".into(),
-            public_pin: None,
-            controller_pid: std::process::id(),
-            child_pid: Some(child.id()),
-            witness_program: PathBuf::new(),
-            witness_environment: Vec::new(),
-            cleanup_program: PathBuf::new(),
-            cleanup_arguments: Vec::new(),
-            cleanup_environment: Vec::new(),
-            interruption_guidance: String::new(),
-        },
-        child: Some(child),
-        cleanup_attempted: false,
-    };
+    let mut fixture = inputs.fixture();
+    fixture.child = Some(child);
     assert!(wait_child(fixture.child.as_mut().unwrap(), Duration::ZERO).is_err());
     let error = fixture.finish().unwrap_err();
     assert!(error.to_string().contains("no recorded public pin"));
