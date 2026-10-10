@@ -54,6 +54,7 @@ pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> 
         installed.manifest == verified.manifest,
         "installed bundle manifest changed"
     );
+    attach_workload_verity(config, &installed)?;
     let Some(boot) = &verified.boot_assets else {
         return Ok(false);
     };
@@ -69,23 +70,6 @@ pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> 
         &support,
         &mvm_build::stage0_kernel::current_image_set_protocol_support(),
     )?;
-    let rootfs = verified
-        .manifest
-        .find_by_role(&ArtifactRole::Rootfs)
-        .context("bundle rootfs missing")?;
-    ensure!(
-        Path::new(&config.rootfs_path) == installed.root.join(&rootfs.path),
-        "boot rootfs differs from bundle"
-    );
-    let kernel = verified
-        .manifest
-        .find_by_role(&ArtifactRole::Kernel)
-        .context("bundle kernel missing")?;
-    ensure!(
-        config.kernel_path.as_deref().map(Path::new)
-            == Some(installed.root.join(&kernel.path).as_path()),
-        "boot kernel differs from bundle"
-    );
     let initrd = verified
         .manifest
         .find_by_role(&ArtifactRole::Initrd)
@@ -142,6 +126,76 @@ pub fn attach_if_installed_bundle(config: &mut VmStartConfig, backend: &str) -> 
         initrd_sha256: mvm_core::packs::Sha256Hex::new(initrd_sha256)?,
     });
     Ok(true)
+}
+
+fn attach_workload_verity(
+    config: &mut VmStartConfig,
+    installed: &mvm_core::plan::bundle::InstalledBundle,
+) -> Result<()> {
+    let rootfs = installed
+        .manifest
+        .find_by_role(&ArtifactRole::Rootfs)
+        .context("bundle rootfs missing")?;
+    ensure!(
+        Path::new(&config.rootfs_path) == installed.root.join(&rootfs.path),
+        "boot rootfs differs from bundle"
+    );
+    let kernel = installed
+        .manifest
+        .find_by_role(&ArtifactRole::Kernel)
+        .context("bundle kernel missing")?;
+    ensure!(
+        config.kernel_path.as_deref().map(Path::new)
+            == Some(installed.root.join(&kernel.path).as_path()),
+        "boot kernel differs from bundle"
+    );
+    for artifact in [rootfs, kernel] {
+        verify_installed_artifact(&installed.root, artifact)?;
+    }
+    let binding = installed
+        .manifest
+        .verity
+        .as_ref()
+        .map(|verity| {
+            let artifact = installed
+                .manifest
+                .find_by_name(&verity.sidecar_artifact)
+                .context("bundle verity artifact missing")?;
+            ensure!(
+                artifact.role == ArtifactRole::VerityHashSidecar,
+                "bundle verity artifact has the wrong role"
+            );
+            let path = verify_installed_artifact(&installed.root, artifact)?;
+            Ok::<_, anyhow::Error>((path.display().to_string(), verity.roothash.clone()))
+        })
+        .transpose()?;
+    // An authenticated bundle declaration supersedes any ambient sibling pair.
+    (config.verity_path, config.roothash) = match binding {
+        Some((path, hash)) => (Some(path), Some(hash)),
+        None => (None, None),
+    };
+    Ok(())
+}
+
+fn verify_installed_artifact(
+    root: &Path,
+    artifact: &mvm_core::plan::bundle::BundleArtifact,
+) -> Result<PathBuf> {
+    let path = root.join(&artifact.path);
+    let size = std::fs::metadata(&path)
+        .with_context(|| format!("reading installed bundle artifact {}", artifact.path))?
+        .len();
+    ensure!(
+        size == artifact.size_bytes,
+        "installed bundle artifact size changed: {}",
+        artifact.path
+    );
+    ensure!(
+        mvm_core::crypto::image_verify::sha256_file(&path)? == artifact.sha256,
+        "installed bundle artifact digest changed: {}",
+        artifact.path
+    );
+    Ok(path)
 }
 
 fn authenticated_copy(
@@ -267,13 +321,15 @@ mod tests {
         std::fs::write(producer.path().join("mvm-meta.json"), b"{}").unwrap();
         let publisher = Publisher(SigningKey::from_bytes(&rand::random()));
         let arch_label = arch.to_string();
+        let workload_hash = "b".repeat(64);
         let mut inputs = BundleExportInputs::new(
             kernel.to_str().unwrap(),
             rootfs.to_str().unwrap(),
             &arch_label,
             &archive,
         )
-        .initrd(initrd.to_str().unwrap());
+        .initrd(initrd.to_str().unwrap())
+        .verity(b"workload merkle tree", &workload_hash);
         inputs.boot_assets = Some(BootAssetsInputs {
             manifest_bytes: &manifest_bytes,
             manifest_sha256: &root,
@@ -323,6 +379,61 @@ mod tests {
         assert!(!Path::new(&mvm_core::config::mvm_cache_dir()).exists());
         let mut attached = config.clone();
         assert!(attach_if_installed_bundle(&mut attached, "qemu").unwrap());
+        assert_eq!(attached.roothash.as_deref(), Some(workload_hash.as_str()));
+        let verity_path = PathBuf::from(attached.verity_path.as_ref().unwrap());
+        assert!(!verity_path.with_extension("roothash").exists());
+        assert_eq!(
+            verity_path,
+            installed.root.join(
+                &installed
+                    .manifest
+                    .find_by_role(&ArtifactRole::VerityHashSidecar)
+                    .unwrap()
+                    .path
+            )
+        );
+        let mut ambient = config.clone();
+        ambient.verity_path = Some("/untrusted/tree".into());
+        ambient.roothash = Some("c".repeat(64));
+        assert!(attach_if_installed_bundle(&mut ambient, "qemu").unwrap());
+        assert_eq!(ambient.verity_path, attached.verity_path);
+        assert_eq!(ambient.roothash, attached.roothash);
+        let mut wrong_kernel = config.clone();
+        wrong_kernel.kernel_path = Some("/untrusted/kernel".into());
+        assert!(
+            attach_if_installed_bundle(&mut wrong_kernel, "qemu")
+                .unwrap_err()
+                .to_string()
+                .contains("boot kernel differs")
+        );
+        let mut wrong_rootfs = config.clone();
+        wrong_rootfs.rootfs_path = installed.root.join("other.ext4").display().to_string();
+        assert!(
+            attach_if_installed_bundle(&mut wrong_rootfs, "qemu")
+                .unwrap_err()
+                .to_string()
+                .contains("boot rootfs differs")
+        );
+        for artifact in [
+            ArtifactRole::Rootfs,
+            ArtifactRole::Kernel,
+            ArtifactRole::VerityHashSidecar,
+        ] {
+            let path = installed
+                .root
+                .join(&installed.manifest.find_by_role(&artifact).unwrap().path);
+            let original = std::fs::read(&path).unwrap();
+            for corruption in [None, Some(vec![0; original.len()]), Some(vec![0])] {
+                if let Some(bytes) = corruption {
+                    std::fs::write(&path, bytes).unwrap();
+                } else {
+                    std::fs::remove_file(&path).unwrap();
+                }
+                let error = attach_if_installed_bundle(&mut config.clone(), "qemu").unwrap_err();
+                assert!(format!("{error:#}").contains("installed bundle artifact"));
+                std::fs::write(&path, &original).unwrap();
+            }
+        }
         let pin = attached.bundle_boot_assets.as_ref().unwrap();
         assert_eq!(pin.manifest_sha256, root);
         assert_eq!(pin.initrd_sha256, Sha256Hex::from_bytes(&initrd_bytes));
@@ -396,12 +507,82 @@ mod tests {
                 )
                 .display()
                 .to_string(),
+            kernel_path: Some(
+                legacy
+                    .root
+                    .join(
+                        &legacy
+                            .manifest
+                            .find_by_role(&ArtifactRole::Kernel)
+                            .unwrap()
+                            .path,
+                    )
+                    .display()
+                    .to_string(),
+            ),
             ..Default::default()
         };
         assert!(!attach_if_installed_bundle(&mut legacy_config, "qemu").unwrap());
+        assert_eq!(
+            legacy_config.roothash.as_deref(),
+            Some(workload_hash.as_str())
+        );
         assert!(legacy_config.runtime_overlay_path.is_none());
         assert!(legacy_config.initrd_path.is_none());
         assert!(legacy_config.bundle_boot_assets.is_none());
+
+        inputs.verity_bytes = None;
+        inputs.roothash = None;
+        export_bundle_with_signer(&inputs, &publisher).unwrap();
+        let unsealed = registry.install_file(&archive, &trust, false).unwrap();
+        let rootfs = unsealed.root.join(
+            &unsealed
+                .manifest
+                .find_by_role(&ArtifactRole::Rootfs)
+                .unwrap()
+                .path,
+        );
+        let stray_tree = rootfs.with_extension("verity");
+        std::fs::write(&stray_tree, b"ambient tree").unwrap();
+        std::fs::write(rootfs.with_extension("roothash"), &workload_hash).unwrap();
+        let mut unsealed_config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            kernel_path: Some(
+                unsealed
+                    .root
+                    .join(
+                        &unsealed
+                            .manifest
+                            .find_by_role(&ArtifactRole::Kernel)
+                            .unwrap()
+                            .path,
+                    )
+                    .display()
+                    .to_string(),
+            ),
+            verity_path: Some(stray_tree.display().to_string()),
+            roothash: Some(workload_hash),
+            ..Default::default()
+        };
+        assert!(!attach_if_installed_bundle(&mut unsealed_config, "qemu").unwrap());
+        assert!(unsealed_config.verity_path.is_none());
+        assert!(unsealed_config.roothash.is_none());
+    }
+
+    #[test]
+    fn ordinary_sources_keep_their_verity_binding() {
+        let home = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.isolate_mvm_home(home.path());
+        let mut config = VmStartConfig {
+            rootfs_path: home.path().join("rootfs.ext4").display().to_string(),
+            verity_path: Some("/source/rootfs.verity".into()),
+            roothash: Some("a".repeat(64)),
+            ..Default::default()
+        };
+        assert!(!attach_if_installed_bundle(&mut config, "qemu").unwrap());
+        assert_eq!(config.verity_path.as_deref(), Some("/source/rootfs.verity"));
+        assert_eq!(config.roothash, Some("a".repeat(64)));
     }
 
     #[test]
